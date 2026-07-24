@@ -448,7 +448,7 @@ class StageToolChecks:
         results = [
             trending,
             self._successful_tool_call(
-                "instagram_discovery_search_reels", {"query": "Kern", "limit": "1"}
+                "instagram_discovery_search_reels", {"query": "music", "limit": "1"}
             ),
             self._successful_tool_call(
                 "instagram_discovery_search_hashtag", {"hashtag": "ai", "limit": "1"}
