@@ -1,6 +1,10 @@
-// Backend access: the one fetch wrapper every module calls, and the admin
-// password cookie it authenticates with. app.js registers what happens on a
-// 401 (show the login screen) so this module stays dependency-free.
+// Backend access: the one fetch wrapper every module calls. Authentication is
+// an HttpOnly session cookie the browser sends automatically after /v1/login;
+// this code never reads or holds the admin password. Every request carries the
+// CSRF header so the server accepts the cookie (a cross-site page cannot set
+// it). app.js registers what happens on a 401 (show the login screen).
+
+const CSRF_HEADER = "X-TrustyClaw-Csrf";
 
 let unauthorizedHandler = () => {};
 
@@ -8,16 +12,35 @@ export function setUnauthorizedHandler(handler) {
   unauthorizedHandler = handler;
 }
 
-export function getPassword() {
-  const match = document.cookie.match(/(?:^|; )trustyclaw_admin=([^;]*)/);
-  return match ? decodeURIComponent(match[1]) : null;
+// POST the password to mint a session cookie. Returns the raw Response so the
+// caller can distinguish a wrong password (401) from a throttled attempt (429).
+export function login(password) {
+  return fetch("/v1/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+    credentials: "same-origin",
+  });
+}
+
+export async function logout() {
+  await fetch("/v1/logout", {
+    method: "POST",
+    headers: { [CSRF_HEADER]: "1" },
+    credentials: "same-origin",
+  });
 }
 
 export async function api(method, path, body, extraHeaders) {
-  const headers = { "Authorization": "Bearer " + getPassword() };
+  const headers = { [CSRF_HEADER]: "1" };
   for (const [name, value] of Object.entries(extraHeaders || {})) headers[name] = value;
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const response = await fetch(path, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    credentials: "same-origin",
+  });
   const data = await response.json();
   if (response.status === 401) { unauthorizedHandler(); throw new Error("unauthorized"); }
   if (!response.ok) throw new Error(data.error ? data.error.message : response.statusText);
@@ -27,7 +50,8 @@ export async function api(method, path, body, extraHeaders) {
 export async function apiBlob(path) {
   const response = await fetch(path, {
     method: "GET",
-    headers: { "Authorization": "Bearer " + getPassword() },
+    headers: { [CSRF_HEADER]: "1" },
+    credentials: "same-origin",
   });
   if (response.status === 401) { unauthorizedHandler(); throw new Error("unauthorized"); }
   if (!response.ok) {
@@ -44,8 +68,9 @@ export async function apiBlob(path) {
 export async function apiUpload(file) {
   const response = await fetch(`/v1/agent-files/upload?filename=${encodeURIComponent(file.name)}`, {
     method: "POST",
-    headers: { "Authorization": "Bearer " + getPassword() },
+    headers: { [CSRF_HEADER]: "1" },
     body: file,
+    credentials: "same-origin",
   });
   let data = null;
   try {

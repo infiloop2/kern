@@ -462,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         "--cloudflare",
         choices=("yes", "no"),
         required=True,
-        help="whether a cloudflare_access operator connection was configured",
+        help="whether a cloudflare_tunnel operator connection was configured",
     )
     args = parser.parse_args(argv)
     failures = run_all_checks(cloudflare_enabled=args.cloudflare == "yes")

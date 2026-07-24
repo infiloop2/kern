@@ -275,7 +275,7 @@ from the `trustyclaw-admin` uid (the browser bridge) and the
 `agent.api`; see [Agent App API](agent-app-api.md)) and are dropped for every
 other local uid before the broad loopback allow rule. If app code binds a different port, the host will
 not route app UI traffic to it, it is not exposed through SSH forwarding,
-Cloudflare Access, or any non-loopback interface, and the app service uid still
+the Cloudflare Tunnel, or any non-loopback interface, and the app service uid still
 cannot initiate arbitrary loopback connections. Stronger kernel-level prevention
 of arbitrary binds would require socket activation or per-service socket-bind
 filtering on hosts that support it; the current security boundary is the
@@ -286,7 +286,7 @@ connections.
 The app service uid has no direct external egress. An app can ask the host to
 run an agent task through its allowlisted socket routes, and that agent work is
 still subject to the host network controls.
-Operator access endpoints such as SSH forwarding and Cloudflare Access expose
+Operator access endpoints such as SSH forwarding and the Cloudflare Tunnel expose
 only the host admin API; app backend ports are not separately exposed.
 App service users also have loopback restrictions: they may answer established
 host reverse-proxy connections, but they may not open arbitrary TCP loopback

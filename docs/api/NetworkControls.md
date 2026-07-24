@@ -11,13 +11,13 @@ system traffic. The dedicated `trustyclaw-proxy` uid has outbound access only so
 it can make policy-approved upstream connections on behalf of the agent. The
 separate `trustyclaw-tools` uid has DNS and HTTPS access for bundled tool
 packages; tool calls follow each action's data policy and approval contract,
-not the agent's domain policy. When
-Cloudflare Access operator access is configured, the dedicated `cloudflared` uid
+not the agent's domain policy. When a
+Cloudflare Tunnel operator endpoint is configured, the dedicated `cloudflared` uid
 has outbound access only for DNS, TCP `443`, and TCP/UDP `7844`. The host does
 not install or configure the AWS SSM agent, and snapd is stopped and masked
 during bootstrap. Root, proxy, tools, and optional `cloudflared` egress are still
 bounded by the EC2 security group, which keeps TCP/UDP `7844` open only when a
-`cloudflare_access` operator endpoint is configured. That `7844` rule is
+`cloudflare_tunnel` operator endpoint is configured. That `7844` rule is
 outbound-only and nftables allows it only for the `cloudflared` uid, not for the
 agent, admin API, or proxy users; it does not expose an inbound EC2 port. The
 agent runs as a non-root user with no sudo, so it reaches root's broader path

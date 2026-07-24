@@ -54,9 +54,9 @@ class RuntimeOperatorConnection:
                 "mode": "ssh",
                 "ssh_public_key": self.ssh_public_key,
             }
-        if self.mode == "cloudflare_access":
+        if self.mode == "cloudflare_tunnel":
             return {
-                "mode": "cloudflare_access",
+                "mode": "cloudflare_tunnel",
                 "hostname": self.hostname,
                 "tunnel_token": self.tunnel_token,
             }
@@ -111,7 +111,7 @@ def build_operator_connections(
             )
         connections.append(
             RuntimeOperatorConnection(
-                mode="cloudflare_access",
+                mode="cloudflare_tunnel",
                 hostname=hostname,
                 tunnel_token=tunnel_token,
             )
@@ -130,8 +130,8 @@ def public_operator_connections(connections: list[dict[str, Any]] | tuple[dict[s
         mode = connection.get("mode")
         if mode == "ssh":
             public.append({"mode": "ssh"})
-        elif mode == "cloudflare_access":
-            public.append({"mode": "cloudflare_access", "hostname": connection.get("hostname")})
+        elif mode == "cloudflare_tunnel":
+            public.append({"mode": "cloudflare_tunnel", "hostname": connection.get("hostname")})
     return public
 
 

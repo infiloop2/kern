@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <!-- TrustyClaw admin UI: a thin page over the admin API (docs/api/AdminAPI.md).
-     Served unauthenticated at "/"; every API call sends the admin password,
-     which is kept in a cookie for convenience. -->
+     Served unauthenticated at "/"; the operator logs in at /v1/login and the
+     browser then authenticates with an HttpOnly session cookie the page never
+     reads (the admin password is never held in a browser-readable store). -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -48,6 +49,7 @@
     <h1>Welcome back</h1>
     <p class="muted">Your trusted agent host is standing by</p>
     <input id="password" type="password" placeholder="Admin password" autocomplete="current-password">
+    <p id="login-error" class="login-error" role="alert" hidden></p>
     <button class="primary block" data-action="login">Log in</button>
   </div>
 </section>

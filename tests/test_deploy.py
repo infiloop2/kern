@@ -101,11 +101,11 @@ class DeployUnitTests(unittest.TestCase):
         self.assertEqual(connections[0].mode, "ssh")
         self.assertEqual(connections[0].ssh_public_key, SAMPLE_SSH_PUBLIC_KEY)
         connections = build_operator_connections(None, "Agent.Example.com", "token-value")
-        self.assertEqual(connections[0].mode, "cloudflare_access")
+        self.assertEqual(connections[0].mode, "cloudflare_tunnel")
         self.assertEqual(connections[0].hostname, "agent.example.com")
         self.assertEqual(connections[0].tunnel_token, "token-value")
         both = build_operator_connections(SAMPLE_SSH_PUBLIC_KEY, "agent.example.com", "token-value")
-        self.assertEqual([connection.mode for connection in both], ["ssh", "cloudflare_access"])
+        self.assertEqual([connection.mode for connection in both], ["ssh", "cloudflare_tunnel"])
         with self.assertRaisesRegex(ConfigError, "at least one operator endpoint"):
             build_operator_connections(None, None, None)
         with self.assertRaisesRegex(ConfigError, "OpenSSH public key"):
@@ -201,7 +201,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn('"FromPort": 22', ingress[0][-1])
         # Egress is pinned to HTTP, HTTPS, NTP, and a temporary Cloudflare
         # Tunnel allowance — never all-protocol. The lifecycle CLI revokes 7844
-        # after bootstrap when no cloudflare_access endpoint is configured.
+        # after bootstrap when no cloudflare_tunnel endpoint is configured.
         egress_ports = sorted(
             (json.loads(call[-1])[0]["IpProtocol"], json.loads(call[-1])[0]["FromPort"])
             for call in egress
@@ -1765,7 +1765,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("chmod 640 /etc/trustyclaw/cloudflared.token", bootstrap)
         self.assertNotIn("--token ${TUNNEL_TOKEN}", bootstrap)
         self.assertNotIn("EnvironmentFile=/etc/trustyclaw/cloudflared.env", bootstrap)
-        self.assertIn("Cloudflare Access probe", bootstrap)
+        self.assertIn("Cloudflare tunnel probe", bootstrap)
         self.assertNotIn("curl -k", bootstrap)
         self.assertIn('meta skuid "cloudflared" udp dport 7844 accept', bootstrap)
         # Network policy and provider pins live in the database: no policy

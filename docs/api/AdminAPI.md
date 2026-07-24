@@ -8,18 +8,23 @@ Base URL after port forwarding:
 http://127.0.0.1:7443
 ```
 
-Every API request must include:
+Every API request authenticates with a session cookie. `POST /v1/login` with
+`{"password": "<admin-password>"}` returns an `HttpOnly`, `SameSite=Strict`
+`tc_admin_session` cookie; subsequent requests send that cookie automatically and
+must also include the CSRF header `X-TrustyClaw-Csrf: 1`. `POST /v1/logout`
+revokes the session and clears the cookie. The password is presented only at
+`/v1/login` and never replayed on later requests; there is no bearer-token path.
 
-```text
-Authorization: Bearer <admin-password>
-```
+Requests must arrive over HTTPS through the tunnel (the origin redirects or
+refuses cleartext). Repeated failed logins are throttled and return `429`; see
+[admin login sessions](../architecture/admin-api.md#admin-login-sessions).
 
 API responses are JSON. Static UI assets are the exception: `GET /`,
 `GET /oauth/callback`, the admin CSS/JavaScript/favicon paths, and installed app
-UI assets under `/v1/apps/{app_id}/ui/` are served without the bearer password.
+UI assets under `/v1/apps/{app_id}/ui/` are served without authentication.
 They return only static files and perform no state change. Every API route,
-including `GET /v1/apps` and every app backend proxy request, requires the
-bearer admin password.
+including `GET /v1/apps` and every app backend proxy request, requires an
+authenticated caller.
 
 ## Errors
 
@@ -44,13 +49,31 @@ Error status codes:
 | HTTP status | Meaning |
 | --- | --- |
 | `400` | Request JSON, query string, or field value is invalid. |
-| `401` | Missing or invalid admin password. |
-| `403` | An authenticated app bridge attempted to target a different app or an app backend attempted a disallowed host route. |
+| `401` | Missing or invalid admin password or session. |
+| `403` | A cookie-authenticated request is missing the `X-TrustyClaw-Csrf` header, an authenticated app bridge attempted to target a different app, or an app backend attempted a disallowed host route. |
 | `404` | Requested resource or route does not exist. |
 | `409` | Request conflicts with current runtime, task, approval, or credential state. |
 | `413` | Request body exceeds the 1 MiB admin API limit. |
+| `429` | Too many failed admin logins from this source; retry after the lockout window. |
 | `502` | An installed app backend or delegated tools service is unavailable or returned an invalid response. |
 | `500` | Host-side error. |
+
+## Session
+
+```text
+POST /v1/login
+POST /v1/logout
+```
+
+`POST /v1/login` takes `{"password": "<admin-password>"}` and is the one route
+reachable without authentication. A correct password returns `{"ok": true}` and
+a `Set-Cookie: tc_admin_session=...; HttpOnly; SameSite=Strict` header (with
+`Secure` when the request arrived over HTTPS); a wrong password returns `401` and
+sets no cookie. Repeated failures are throttled with `429`.
+
+`POST /v1/logout` revokes the current session and clears the cookie, returning
+`{"ok": true}`. Like every non-login route it requires an authenticated caller;
+a cookie-authenticated call must include the `X-TrustyClaw-Csrf` header.
 
 ## Health
 
@@ -1212,15 +1235,15 @@ host-derived resources assigned to each one:
 | `apps[].ui.iframe_src` | Static entry point mounted by the admin API. |
 | `apps[].ui.sandbox` | iframe permissions the admin shell applies. `allow-same-origin` is deliberately absent, so the app frame has an opaque origin. |
 
-App UI assets under `/v1/apps/{app_id}/ui/` are static and do not require the
-admin bearer. They carry a restrictive CSP and no-store cache headers, expose
+App UI assets under `/v1/apps/{app_id}/ui/` are static and do not require
+authentication. They carry a restrictive CSP and no-store cache headers, expose
 no state by themselves, and cannot make browser network connections directly.
 The admin shell loads the entry point in a sandboxed iframe.
 
-App backend routes require the normal admin bearer. The admin API forwards the
-JSON request and query string to the app's host-assigned loopback port with an
-`X-TrustyClaw-App-Proxy` marker, strips the operator bearer, and accepts a JSON
-response of at most 1 MiB. The browser app bridge pins a request to its own `app_id`;
+App backend routes require the normal admin session. The admin API consumes that
+session itself and forwards no operator credential onward: it sends the JSON
+request and query string to the app's host-assigned loopback port with an
+`X-TrustyClaw-App-Proxy` marker and accepts a JSON response of at most 1 MiB. The browser app bridge pins a request to its own `app_id`;
 attempting to bridge to another app returns `403`. App backend failures are
 returned through the standard error envelope. App-backend-to-host calls use a
 separate peer-authenticated Unix socket and narrow task/thread allowlist,
@@ -1257,7 +1280,7 @@ Tool endpoints:
 | `PUT` | `/v1/tools/{tool_id}/config` | `{"key", "value"}` | `{"tool_id", "key", "set"}` | Sets one config value declared by that tool's manifest. Config is scoped per tool (a repeated key name holds an independent value per tool) and every value is a secret: write-only, stored encrypted at rest (secretbox); an empty `value` clears the key. `400` when `key` is not declared by `{tool_id}`. |
 | `POST` | `/v1/tools/{tool_id}/enable` | none | `{"tool_id", "enabled"}` | Enables the tool for agent calls. Not gated on config: a tool can be enabled with partial or no config set (per-key config status is reported by `GET /v1/tools`); an action that needs an unset key fails when the tool reads it. |
 | `POST` | `/v1/tools/{tool_id}/disable` | none | `{"tool_id", "enabled"}` | Disables the tool. Stored connections and credentials are kept; use disconnect to remove them. |
-| `POST` | `/v1/tools/{tool_id}/oauth_connect/start` | `{"redirect_uri"}` | `{"authorization_url", "state"}` | Starts the tool's OAuth connect flow (OAuth tools only, `409` otherwise or when disabled). The UI uses `<admin origin>/oauth/callback` as the redirect URI; register that URL with the OAuth provider. Reached over SSH-forwarded localhost it is a loopback URL such as `http://localhost:7443/oauth/callback` (providers accept loopback without HTTPS); reached over a Cloudflare Access hostname it is that HTTPS origin's `/oauth/callback`. Building the URL needs no egress and runs in the admin service; the later code exchange (`oauth_connect/complete`) runs in the dedicated tools service. |
+| `POST` | `/v1/tools/{tool_id}/oauth_connect/start` | `{"redirect_uri"}` | `{"authorization_url", "state"}` | Starts the tool's OAuth connect flow (OAuth tools only, `409` otherwise or when disabled). The UI uses `<admin origin>/oauth/callback` as the redirect URI; register that URL with the OAuth provider. Reached over SSH-forwarded localhost it is a loopback URL such as `http://localhost:7443/oauth/callback` (providers accept loopback without HTTPS); reached over a Cloudflare Tunnel hostname it is that HTTPS origin's `/oauth/callback`. Building the URL needs no egress and runs in the admin service; the later code exchange (`oauth_connect/complete`) runs in the dedicated tools service. |
 | `POST` | `/v1/tools/{tool_id}/oauth_connect/complete` | `{"code", "state", "redirect_uri"}` | `{"account": {...}}` | Completes the OAuth flow with the provider callback values and stores tokens in the tool credential store. Returns the connected `account` (see `ConnectionAccount` below); `400` for an invalid or expired `state`. |
 | `POST` | `/v1/tools/{tool_id}/oauth_connect/disconnect` | none | `{"tool_id", "connected": false}` | Revokes third-party tokens where possible and deletes the stored credential. |
 | `GET` | `/v1/tools/{tool_id}/approvals` | none | Approval list response | Lists `{tool_id}`'s action approvals as a bounded working set: pending first (so open decisions surface at the top), then newest decided ones as bounded history. Approvals are addressed under their tool so the operator UI shows each tool's approvals in its own row. Payload is omitted from the list; fetch it per approval. The paginated audit trail is `/v1/tools/events`. |

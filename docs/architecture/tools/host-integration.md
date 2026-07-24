@@ -305,7 +305,7 @@ trust properties.
 **`GET /oauth/callback` is not admin-authenticated, by design.** After the
 operator authorizes at the provider, the provider redirects the operator's
 *browser* to `/oauth/callback?code=...&state=...` on the admin origin. A browser
-redirect cannot carry the admin bearer token, so this path is served like every
+redirect cannot carry the SameSite=Strict session cookie, so this path is served like every
 other admin-UI asset — it returns the same static SPA shell (`admin_ui.html`)
 that `/` returns, with no secrets in the response and no side effect. It does
 not perform the token exchange; it only lets the already-loaded SPA read the
@@ -316,8 +316,8 @@ it only needs to be reachable by the operator's browser.
 
 **`POST /v1/tools/<tool_id>/oauth_connect/complete` is the only path that
 performs the exchange, and it is fully authenticated.** The SPA reads the
-returned `code`/`state` and calls this API with the operator's admin bearer
-token, exactly like every other `/v1/...` request. The handler additionally
+returned `code`/`state` and calls this API with the operator's session cookie,
+exactly like every other `/v1/...` request. The handler additionally
 re-verifies the `state` the tool minted at connect start: an HMAC keyed on the
 deployment's OAuth client secret over `{tool_id, nonce, issued_at}`, checked for
 a matching `tool_id` and a 15-minute expiry. So a forged, replayed, or
@@ -327,7 +327,7 @@ service holds no egress: it forwards the exchange to the tools service, which
 calls the provider's token endpoint over its own egress, so the flow is
 identical whether the operator reached the UI over SSH-forwarded loopback
 (`http://localhost:7443/oauth/callback`, which providers accept without HTTPS)
-or over a Cloudflare Access hostname.
+or over a Cloudflare Tunnel hostname.
 
 **No API path is served without the admin password.** The unauthenticated GETs
 are the static UI assets — the SPA shell (served at both `/` and
@@ -339,28 +339,28 @@ and every `/v1/apps/<app_id>/api/...` call, passes through admin authentication
 before it runs. The unauthenticated set carries no
 secrets and performs no state change.
 
-**Abuse and DDoS.** The origin does not rate-limit its own HTTP; it is never
-anonymously reachable, so a volumetric flood has no unauthenticated path to a
-meaningful endpoint. In the two supported access modes the request is gated
-before it reaches the origin: SSH-forwarded loopback requires a host account,
-and Cloudflare Access requires passing the Access identity policy (and gets
-Cloudflare's edge DDoS mitigation for free). The one unauthenticated origin
-path, the callback GET, serves a cached static file with no database, crypto, or
-egress work, so it is cheap to absorb; the expensive path (`complete`) is behind
-admin auth. Adding app-level rate limiting at the origin would be redundant
-given it is never openly exposed, so we rely on the access boundary instead.
+**Abuse and DDoS.** The admin login is the authentication boundary, reachable
+over the public Cloudflare Tunnel, so the origin throttles the one credential
+path that a flood could target: login attempts are blocked past a per-source
+budget (there is deliberately no global ceiling, which would be an
+attacker-triggerable lockout of every operator) and fail closed (see
+[admin login sessions](../admin-api.md#admin-login-sessions)). The Cloudflare
+edge in front of the tunnel absorbs volumetric attacks and provides DDoS
+mitigation; the SSH-forwarded loopback path additionally requires a host account.
+The only unauthenticated origin paths, the static UI assets and the callback GET,
+serve cached files with no database, crypto, or egress work, so they are cheap to
+absorb; every state-changing path (including `complete`) is behind admin auth.
 
-**Under Cloudflare Access.** The redirect URI registered with the provider is
-the Cloudflare Access hostname. The operator has already passed Access to load
-the admin UI, so their browser holds the `CF_Authorization` cookie for that
-hostname; when the provider redirects the browser back to
-`https://<hostname>/oauth/callback`, the browser sends that cookie automatically
-and Access lets the request through without re-prompting (the OAuth round trip
-takes seconds, well inside the Access session lifetime). The subsequent
-`complete` POST carries both the Access cookie and the origin's admin bearer, so
-under Access the exchange sits behind two independent identity checks. Because
-the provider only redirects the browser and never calls the origin itself,
-Access gating inbound requests never breaks the flow.
+**The provider redirect.** The redirect URI registered with the provider is the
+operator endpoint hostname (or loopback under an SSH forward). The provider only
+redirects the browser and never calls the origin itself, so no inbound gate has
+to admit the provider. When the provider redirects the browser back to
+`/oauth/callback`, that top-level navigation is cross-site, so the
+`SameSite=Strict` session cookie is withheld from the navigation itself; this is
+harmless because the callback shell is an unauthenticated static asset. Once the
+shell has loaded on the origin, its own same-origin `fetch` calls carry the
+session cookie normally, so the `complete` POST that finishes the exchange runs
+behind admin auth as usual.
 
 ## Testing
 
