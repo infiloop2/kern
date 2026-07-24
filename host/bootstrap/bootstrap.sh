@@ -631,7 +631,7 @@ configure_cloudflared() {
 cloudflare_connection_count="$(python3 - <<'PY'
 import json, pathlib
 config = json.loads(pathlib.Path('/tmp/trustyclaw_effective_config.json').read_text())
-print(sum(1 for connection in config['operator_connections'] if connection.get('mode') == 'cloudflare_access'))
+print(sum(1 for connection in config['operator_connections'] if connection.get('mode') == 'cloudflare_tunnel'))
 PY
 )"
 if [ "$cloudflare_connection_count" -gt 0 ]; then
@@ -656,10 +656,10 @@ config = json.loads(pathlib.Path('/tmp/trustyclaw_effective_config.json').read_t
 connections = [
     connection
     for connection in config['operator_connections']
-    if connection.get('mode') == 'cloudflare_access'
+    if connection.get('mode') == 'cloudflare_tunnel'
 ]
 if len(connections) != 1:
-    raise SystemExit(f'expected exactly one cloudflare_access connection, found {len(connections)}')
+    raise SystemExit(f'expected exactly one cloudflare_tunnel connection, found {len(connections)}')
 connection = connections[0]
 pathlib.Path('/etc/trustyclaw/cloudflared.token').write_text(connection['tunnel_token'].strip() + '\n')
 pathlib.Path('/etc/trustyclaw/cloudflare_hostname').write_text(connection['hostname'] + '\n')
@@ -913,7 +913,7 @@ import json, pathlib
 config = json.loads(pathlib.Path('/tmp/trustyclaw_effective_config.json').read_text())
 ssh_enabled = any(connection.get('mode') == 'ssh' for connection in config['operator_connections'])
 pathlib.Path('/tmp/trustyclaw_ssh_rule').write_text('    tcp dport 22 accept\n' if ssh_enabled else '')
-cloudflare_enabled = any(connection.get('mode') == 'cloudflare_access' for connection in config['operator_connections'])
+cloudflare_enabled = any(connection.get('mode') == 'cloudflare_tunnel' for connection in config['operator_connections'])
 pathlib.Path('/tmp/trustyclaw_cloudflare_rules').write_text(
     '    meta skuid "cloudflared" udp dport 53 accept\n'
     '    meta skuid "cloudflared" tcp dport 53 accept\n'
@@ -1178,28 +1178,51 @@ if [ "$cloudflare_connection_count" -gt 0 ]; then
     echo "cloudflared service did not become active" >&2
     exit 1
   fi
+  # The admin login is the authentication boundary; the tunnel is transport and
+  # Cloudflare edge protection only. A healthy tunnel reaches the admin API,
+  # which denies the unauthenticated probe with 401. A 200 would mean the origin
+  # answered with no login required and fails the deploy. A legacy deployment
+  # may still sit behind a Cloudflare Access policy that answers 302/403 before
+  # the origin; the origin still enforces the login, so that also passes.
   cloudflare_hostname="$(cat /etc/trustyclaw/cloudflare_hostname)"
+  # HTTPS must reach an authentication gate: the admin API denies the
+  # unauthenticated probe with 401, and a legacy host still behind a Cloudflare
+  # Access policy answers 302/403 before the origin. Only a 200 (or no gate at
+  # all) fails, meaning the origin answered with no login required.
   cloudflare_status=""
   for attempt in $(seq 1 30); do
-    cloudflare_status="$(curl -sS -o /tmp/trustyclaw_cloudflare_probe -w '%{http_code}' --max-time 10 "https://${cloudflare_hostname}/v1/health" || true)"
+    cloudflare_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://${cloudflare_hostname}/v1/health" || true)"
     case "$cloudflare_status" in
-      302|403)
+      401|302|403)
         break
         ;;
     esac
     sleep 5
   done
   case "$cloudflare_status" in
-    302|403)
-      echo "Cloudflare Access probe for ${cloudflare_hostname} returned ${cloudflare_status}"
-      ;;
     401)
-      echo "Cloudflare hostname ${cloudflare_hostname} reached the admin API without Cloudflare Access protection" >&2
-      exit 1
+      echo "Cloudflare tunnel probe for ${cloudflare_hostname} reached the admin API login gate (401)"
+      ;;
+    302|403)
+      echo "Cloudflare tunnel probe for ${cloudflare_hostname} returned ${cloudflare_status} (legacy Cloudflare Access gate present)"
       ;;
     *)
-      echo "Cloudflare hostname ${cloudflare_hostname} did not return an Access login/deny response; last status: ${cloudflare_status:-none}" >&2
-      echo "Check that the tunnel public hostname points to http://localhost:@ADMIN_PORT@ and has a Cloudflare Access policy." >&2
+      echo "Cloudflare hostname ${cloudflare_hostname} did not return an authentication gate over HTTPS; last status: ${cloudflare_status:-none}" >&2
+      echo "Check that the tunnel public hostname points to http://localhost:@ADMIN_PORT@ and that the admin API is running." >&2
+      exit 1
+      ;;
+  esac
+  # Cleartext HTTP must be redirected to HTTPS, never served: the admin login and
+  # its session cookie must never cross the wire in the clear. The edge ("Always
+  # Use HTTPS") or the origin itself answers a non-HTTPS request with a redirect.
+  http_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "http://${cloudflare_hostname}/v1/health" || true)"
+  case "$http_status" in
+    301|302|307|308)
+      echo "Cloudflare hostname ${cloudflare_hostname} redirects HTTP to HTTPS (${http_status})"
+      ;;
+    *)
+      echo "Cloudflare hostname ${cloudflare_hostname} did not redirect HTTP to HTTPS; last status: ${http_status:-none}" >&2
+      echo "Enable 'Always Use HTTPS' for the zone so cleartext requests never reach the admin login." >&2
       exit 1
       ;;
   esac

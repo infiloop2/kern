@@ -59,7 +59,7 @@ Important source areas and the context that runs them:
 | `host/runtime/admin_api/errors.py` | Admin route modules | Holds the shared `ApiError` class so the `__main__` service and imported route modules map status codes consistently. |
 | `host/runtime/core/app_platform.py` | Operator/bootstrap and admin API | Validates installed app manifests and derives host-owned users, roles, schemas, routes, services, and ports. |
 | `host/runtime/deploy/app_migrate.py` | App role for SQL; admin role for records | Applies replay-safe app SQL under the app schema and records versions in host-owned state. |
-| `host/runtime/admin_api/app_api_proxy.py` | `trustyclaw-admin` | Proxies authenticated browser app requests to uid-firewalled loopback app ports without forwarding the raw admin bearer. |
+| `host/runtime/admin_api/app_api_proxy.py` | `trustyclaw-admin` | Proxies authenticated browser app requests to uid-firewalled loopback app ports without forwarding the operator's session cookie. |
 | `host/runtime/admin_api/app_backend_api.py` | `trustyclaw-admin` | Serves the peer-authenticated app-backend Unix socket and scopes allowlisted task/thread routes to the calling app. |
 | `host/runtime/admin_api/orchestrator.py` | `trustyclaw-admin` | Runs the nine task workers, runtime status/account pollers, credential convergence, and task lifecycle coordination. |
 | `host/runtime/admin_api/codex_app_server.py` | Admin adapter controlling an agent child | Implements the Codex stdio JSON-RPC protocol and runtime lifecycle. |

@@ -148,7 +148,7 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
             "--operator-cloudflare-hostname",
             metavar="HOSTNAME",
             help=(
-                "Operator Cloudflare Access endpoint: the exact protected hostname. The tunnel "
+                "Operator Cloudflare Tunnel endpoint: the exact public hostname. The tunnel "
                 f"token is read from {OPERATOR_TUNNEL_TOKEN_ENV_NAME}. At least one operator "
                 "endpoint is required."
             ),
@@ -375,7 +375,7 @@ def _launch_access_state(
     if replacement_operator_connections is not None:
         return (
             any(connection.mode == "ssh" for connection in replacement_operator_connections),
-            any(connection.mode == "cloudflare_access" for connection in replacement_operator_connections),
+            any(connection.mode == "cloudflare_tunnel" for connection in replacement_operator_connections),
         )
     captured = _security_group_access_state(config, env, vpc_id)
     if captured is not None:

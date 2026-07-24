@@ -30,7 +30,7 @@ directory below. Those writable locations are not trusted code or policy inputs.
 | `/etc/sudoers.d/trustyclaw-host` | root-owned, `440`, not service-writable | Exact helper allowlist for `trustyclaw-admin`. |
 | `/etc/systemd/system/trustyclaw*` | root-owned system config, not service-writable | Postgres, admin API, network proxy, tools, installed app, optional Cloudflare Tunnel service units, and the agent/app slice definitions. |
 | `/etc/trustyclaw/cloudflared.token` | root-owned, `0640`, group `cloudflared` | Cloudflare Tunnel token for the optional `cloudflared` service. Directly readable only by root and `cloudflared`; the SSH operator can deliberately cross that boundary with unrestricted sudo. |
-| `/etc/trustyclaw/cloudflare_hostname` | root-owned, `644` | Configured Cloudflare Access hostname used for bootstrap verification and operator diagnostics. |
+| `/etc/trustyclaw/cloudflare_hostname` | root-owned, `644` | Configured Cloudflare Tunnel hostname used for bootstrap verification and operator diagnostics. |
 | `/etc/nftables.conf` | root-owned system config, not service-writable | Host firewall rules. |
 | `/etc/codex/requirements.toml`, `/etc/codex/managed_config.toml` | root-owned, `644`, not service-writable | Managed Codex policy restricting web search and connector surfaces, plus the bundled-tools MCP server definition. |
 | `/usr/local/share/ca-certificates/trustyclaw-network-proxy.crt` | root-owned, `644`, public certificate | Public proxy CA certificate installed in the system trust store for agent runtimes. |

@@ -29,8 +29,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 import app_mocks
+import secrets
 from host.config import ConfigError, parse_network_controls
 from host.constants import LOOPBACK
+from host.runtime.admin_api import admin_auth
 from host.session_options import session_config_error
 from host.runtime.core import app_platform
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
@@ -81,6 +83,8 @@ SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
 }
 PASSWORD = "dev"
+# Session tokens minted by the mock /v1/login, mirroring the real cookie flow.
+MOCK_SESSIONS: set[str] = set()
 FAILED_UPLOADS_ONCE: set[str] = set()
 TASK_RE = re.compile(r"^/v1/tasks/([^/]+)(?:/(steer|cancel|kill|events))?$")
 THREAD_TASKS_RE = re.compile(r"^/v1/threads/([^/]+)/tasks$")
@@ -711,7 +715,13 @@ mockUpgradeNotice.addEventListener("click", async () => {
                     app, asset, content_type = app_asset
                     self._send_app_asset(app, HTTPStatus.OK, asset.read_bytes(), content_type)
                     return
+            if method == "POST" and parsed.path == "/v1/login":
+                self._handle_login()
+                return
             self._authenticate()
+            if method == "POST" and parsed.path == "/v1/logout":
+                self._handle_logout()
+                return
             if method == "GET" and parsed.path == "/v1/agent-files/content":
                 self._send(HTTPStatus.OK, b"\x00\x00\x00\x18ftypmp42mock-video", "video/mp4")
                 return
@@ -740,8 +750,27 @@ mockUpgradeNotice.addEventListener("click", async () => {
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"message": str(exc)}})
 
     def _authenticate(self) -> None:
-        if self.headers.get("Authorization") != f"Bearer {PASSWORD}":
-            raise ApiError(HTTPStatus.UNAUTHORIZED, "missing or invalid admin password")
+        # The session cookie minted by /v1/login is the only accepted credential,
+        # and cookie-authenticated requests must carry the CSRF header.
+        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""))
+        if token in MOCK_SESSIONS and self.headers.get(admin_auth.CSRF_HEADER_NAME):
+            return
+        raise ApiError(HTTPStatus.UNAUTHORIZED, "missing or invalid admin session")
+
+    def _handle_login(self) -> None:
+        body = self._read_body()
+        password = body.get("password") if isinstance(body, dict) else None
+        if password != PASSWORD:
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": {"message": "missing or invalid admin password"}})
+            return
+        token = secrets.token_urlsafe(32)
+        MOCK_SESSIONS.add(token)
+        self._send_json(HTTPStatus.OK, {"ok": True}, set_cookie=admin_auth.session_cookie(token, secure=False))
+
+    def _handle_logout(self) -> None:
+        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""))
+        MOCK_SESSIONS.discard(token or "")
+        self._send_json(HTTPStatus.OK, {"ok": True}, set_cookie=admin_auth.clear_session_cookie(secure=False))
 
     def _read_body(self) -> Any:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -749,13 +778,15 @@ mockUpgradeNotice.addEventListener("click", async () => {
             return None
         return json.loads(self.rfile.read(length))
 
-    def _send_json(self, status: HTTPStatus, data: dict[str, Any]) -> None:
-        self._send(status, json.dumps(data).encode(), "application/json")
+    def _send_json(self, status: HTTPStatus, data: dict[str, Any], set_cookie: str | None = None) -> None:
+        self._send(status, json.dumps(data).encode(), "application/json", set_cookie=set_cookie)
 
-    def _send(self, status: HTTPStatus, data: bytes, content_type: str) -> None:
+    def _send(self, status: HTTPStatus, data: bytes, content_type: str, set_cookie: str | None = None) -> None:
         self.send_response(status.value)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
         if content_type.startswith(("text/html", "text/css", "application/javascript")):
             self.send_header("Cache-Control", "no-store, max-age=0")
             self.send_header("Pragma", "no-cache")

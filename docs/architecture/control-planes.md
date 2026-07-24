@@ -22,8 +22,10 @@ root-owned host code if that code is broken.
 
 ## Admin plane
 
-The admin plane is the admin API/UI reached through SSH forwarding or
-Cloudflare Access and authenticated with the admin bearer password. It is lower authority than the
+The admin plane is the admin API/UI reached through SSH forwarding or a
+Cloudflare Tunnel and authenticated with the admin login: the password is posted
+to `/v1/login`, which returns an `HttpOnly` session cookie used for every later
+request. It is lower authority than the
 operator plane and is meant for normal host operation after deploy. It can
 create, steer, cancel, and inspect agent tasks; inspect agent files and
 processes; read agent, network, and tool audit events; manage runtime network

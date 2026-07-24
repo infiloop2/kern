@@ -22,7 +22,7 @@ return this shape:
   "version": "x.y.z",
   "operator_connections": [
     {"mode": "ssh"},
-    {"mode": "cloudflare_access", "hostname": "trustyclaw.example.com"}
+    {"mode": "cloudflare_tunnel", "hostname": "trustyclaw.example.com"}
   ]
 }
 ```
@@ -75,7 +75,6 @@ Power results never contain `version`, `operator_connections`, or
 ## Secret handling
 
 Only deploy and reconfigure result files contain `admin_password`; keep them
-private. With SSH access, the matching private SSH key is also required. With
-Cloudflare Access, the operator must pass the Access identity policy and then
-enter the TrustyClaw admin password. Lifecycle result files are created mode
-`0600`.
+private. With SSH access, the matching private SSH key is also required. With a
+Cloudflare Tunnel, the operator enters the TrustyClaw admin password. Lifecycle
+result files are created mode `0600`.

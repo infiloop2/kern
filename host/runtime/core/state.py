@@ -177,6 +177,17 @@ def load_config() -> dict[str, Any]:
     return config
 
 
+def load_admin_password_hash() -> str:
+    """Just the admin password hash from the config row, with no operator
+    connections loaded and no tunnel-token decryption. The admin API caches this
+    at startup so the login path does no per-request database work (reconfigure
+    restarts the service, which reloads it)."""
+    with db.transaction() as cur:
+        cur.execute("SELECT admin_password_sha256 FROM config")
+        row = cur.fetchone()
+    return row[0] if row and row[0] is not None else ""
+
+
 def save_config(config: dict[str, Any]) -> None:
     """Replace the whole host config, the way deploy refreshes it. The table
     constraints validate field formats and per-mode shapes; write_config

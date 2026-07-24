@@ -3,7 +3,7 @@
 // data-action buttons to feature handlers. Feature code lives in the sibling
 // modules; this file is the only place that wires them together.
 
-import { api, apiUpload, getPassword, setUnauthorizedHandler } from "./api.js";
+import { api, apiUpload, login as apiLogin, logout as apiLogout, setUnauthorizedHandler } from "./api.js";
 import { $, notice } from "./helpers.js";
 import {
   collapseRuntimeOverview, completeClaudeLogin, refreshHealth, refreshProviderAccounts,
@@ -49,20 +49,50 @@ const APP_UPLOAD_SELECTION_LIMIT = 10;
 const pendingAppUploads = new Map();
 let betaAppsExpanded = false;
 
-function adminCookieAttributes(maxAge) {
-  return `; path=/; max-age=${maxAge}; samesite=strict${location.protocol === "https:" ? "; secure" : ""}`;
+function showLoginError(message) {
+  const element = $("login-error");
+  element.textContent = message;
+  element.hidden = false;
 }
 
-function login() {
+function clearLegacyPasswordCookie() {
+  // Pre-0.44 UIs stored the cleartext admin password in this JavaScript-readable
+  // cookie. Expire it on every load so an upgraded browser never keeps the
+  // password readable or keeps sending it to the origin until it ages out.
+  document.cookie = "trustyclaw_admin=; path=/; max-age=0; samesite=strict";
+}
+
+async function login() {
   const value = $("password").value.trim();
   if (!value) return;
-  document.cookie = "trustyclaw_admin=" + encodeURIComponent(value) + adminCookieAttributes(2592000);
-  $("password").value = "";
-  start();
+  $("login-error").hidden = true;
+  let response;
+  try {
+    response = await apiLogin(value);
+  } catch (_) {
+    showLoginError("Could not reach the host. Try again.");
+    return;
+  }
+  if (response.ok) {
+    $("password").value = "";
+    $("login-error").hidden = true;
+    showApp();
+    return;
+  }
+  if (response.status === 429) {
+    showLoginError("Too many attempts. Wait a few minutes and try again.");
+  } else {
+    showLoginError("Incorrect password.");
+  }
 }
 
-function logout() {
-  document.cookie = "trustyclaw_admin=" + adminCookieAttributes(0);
+async function logout() {
+  try {
+    await apiLogout();
+  } catch (_) {
+    // The session cookie is HttpOnly, so a reload cannot clear it on its own;
+    // still reload to return to the login screen even if the call failed.
+  }
   location.reload();
 }
 
@@ -172,8 +202,22 @@ async function refreshOrSkip(work) {
   }
 }
 
-function start() {
-  if (!getPassword()) { showLogin(); return; }
+let appStarted = false;
+
+// The session cookie is HttpOnly, so login state cannot be read in JS; probe an
+// authenticated endpoint instead. A 401 lands on the login screen.
+async function start() {
+  clearLegacyPasswordCookie();
+  try {
+    await api("GET", "/v1/health");
+  } catch (_) {
+    showLogin();
+    return;
+  }
+  showApp();
+}
+
+function showApp() {
   $("login").hidden = true;
   $("app").hidden = false;
   $("logout-button").hidden = false;
@@ -189,6 +233,10 @@ function start() {
     showTab("network");
     completeToolConnect().catch(error => notice(error.message, "error"));
   }
+  // Guard the recurring tick so a re-login within the same page load (the login
+  // screen never reloads on success) cannot stack a second interval.
+  if (appStarted) return;
+  appStarted = true;
   tick();
   setInterval(tick, 5000);
 }

@@ -9,7 +9,7 @@
 | `trustyclaw-agent-network.service` | `trustyclaw-agent-network` | Serves read-only network integration and denial introspection on `/run/trustyclaw-agent-network/agent-network.sock`. No egress; its Postgres role has SELECT-only policy and network-event grants. |
 | `trustyclaw-agent-app.service` | `trustyclaw-agent-app` | Serves the agent-facing app API socket `/run/trustyclaw-agent-app/agent-app.sock` (peer-credential authenticated, agent uid only) and proxies thread-scope-attributed `app_api` calls to app backend ports. No database access or egress. See [agent-app-api.md](apps/agent-app-api.md). |
 | `trustyclaw-app-<app_id>.service` | per-app account | Installed app backend on its host-assigned loopback app port, reachable only from the admin API and agent-app service uids. |
-| `trustyclaw-cloudflared.service` | `cloudflared` | Optional Cloudflare Tunnel connector for Cloudflare Access operator endpoints. Installed only when `operator_connections` contains `cloudflare_access`. |
+| `trustyclaw-cloudflared.service` | `cloudflared` | Optional Cloudflare Tunnel connector for Cloudflare Tunnel operator endpoints. Installed only when `operator_connections` contains `cloudflare_tunnel`. |
 | `trustyclaw_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; `MemoryHigh=70%`/`MemoryMax=80%`/`MemorySwapMax=5G` contain a runaway agent's RAM and swap to its own cgroup; `TasksMax=4096` stops a fork bomb from exhausting kernel PIDs. |
 | `trustyclaw_app.slice` | — | Top-level cgroup slice holding installed app services. `CPUWeight=50` gives host services priority under contention while allowing apps to use idle CPU; the current app slice does not impose memory, swap, or task-count caps. |
 
@@ -26,7 +26,7 @@
 | `trustyclaw-agent-network.service` | `trustyclaw-agent-network` | systemd | Serves the peer-authenticated network-introspection socket from SELECT-only policy and event state, without egress. |
 | `trustyclaw-agent-app.service` | `trustyclaw-agent-app` | systemd | Attributes agent `app_api` calls to their app-prefixed thread by cgroup and proxies them to the owning app backend; owns the peer-authenticated agent-app socket. |
 | `trustyclaw-app-<app_id>.service` | per-app account | systemd | Serves an installed app API on a loopback app port selected by the host. The admin API and agent-app service are the only uids allowed to open new TCP connections to that listener. |
-| `trustyclaw-cloudflared.service` | `cloudflared` | systemd | Optional Cloudflare Tunnel connector. Reads `/etc/trustyclaw/cloudflared.token` and exposes the admin API through the configured Cloudflare Access hostname. |
+| `trustyclaw-cloudflared.service` | `cloudflared` | systemd | Optional Cloudflare Tunnel connector. Reads `/etc/trustyclaw/cloudflared.token` and exposes the admin API through the configured Cloudflare Tunnel hostname. |
 | `run-codex-app-server` helper | starts as root, then `trustyclaw-agent` | admin API via sudo | Starts one Codex stdio app-server process. |
 | `codex app-server` | `trustyclaw-agent` | launch helper | Executes one Codex turn, resuming its provider thread by id, then exits. |
 | `run-claude-code` helper | starts as root, then `trustyclaw-agent` | admin API via sudo | Starts one Claude Code CLI process. |

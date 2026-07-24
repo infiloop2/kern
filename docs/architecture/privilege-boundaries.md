@@ -160,7 +160,7 @@ if it succeeds. The proxy parses agent traffic, so it has its own service uid
 instead of root. It is still intentionally small, dependency-free Python and
 shells out only with argument lists (no shell) to absolute paths.
 
-When Cloudflare Access operator access is configured, `cloudflared` is a
+When a Cloudflare Tunnel operator endpoint is configured, `cloudflared` is a
 separate unprivileged service user with no sudo and no access to admin, proxy,
 or agent durable state. Its only TrustyClaw secret is the root-volume tunnel
 token file `/etc/trustyclaw/cloudflared.token`, owned `root:cloudflared` and

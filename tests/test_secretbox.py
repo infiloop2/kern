@@ -86,7 +86,7 @@ class SecretBoxTests(unittest.TestCase):
                 "agent_name": "trustyclaw-test",
                 "admin_password_sha256": "a" * 64,
                 "operator_connections": [
-                    {"mode": "cloudflare_access", "hostname": "trustyclaw.example.com", "tunnel_token": "tok-value"}
+                    {"mode": "cloudflare_tunnel", "hostname": "trustyclaw.example.com", "tunnel_token": "tok-value"}
                 ],
             }
         )

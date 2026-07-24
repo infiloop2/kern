@@ -35,7 +35,7 @@ definition.
   uids can `connect(2)`; access control is the server's peer-uid check, not
   filesystem permissions.
 - **Sockets are not TCP.** They carry no port, are unreachable over SSH
-  forwarding or Cloudflare Access, and are not affected by the agent's nftables
+  forwarding or the Cloudflare Tunnel, and are not affected by the agent's nftables
   loopback drop rules. TCP loopback listeners (the admin API on `127.0.0.1:7443`,
   app backend ports) are separately firewalled by uid; see
   [`network-controls.md`](network-controls.md) and

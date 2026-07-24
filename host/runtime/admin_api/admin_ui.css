@@ -473,6 +473,7 @@ button.mobile-nav-toggle.icon-button, .sidebar-mobile-head, .nav-backdrop { disp
 .login-card p { margin: 0 0 1.3rem; }
 
 .login-card input { margin-bottom: 0.8rem; text-align: center; }
+.login-error { color: var(--danger); font-size: 0.85rem; margin: -0.2rem 0 0.8rem; }
 
 .login-footnote {
   font-size: 0.75rem;

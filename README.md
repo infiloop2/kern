@@ -7,10 +7,11 @@ behind an explicit, auditable network policy. Learn more at
 
 ## Deploy Your First Host
 
-TrustyClaw uses Cloudflare Access to give the admin UI a stable HTTPS address
-protected by your Cloudflare identity. The steps below use this setup. It takes
-a few extra steps if you are new to Cloudflare, but once configured you can
-open TrustyClaw securely from any browser, including mobile.
+TrustyClaw uses a Cloudflare Tunnel to give the admin UI a stable HTTPS address,
+protected by your admin password login and Cloudflare's edge (DDoS) protection.
+The steps below use this setup. It takes a few extra steps if you are new to
+Cloudflare, but once configured you can open TrustyClaw securely from any
+browser, including mobile.
 
 Alternatively, you can deploy without HTTPS UI access and connect using SSH
 port forwarding. That setup is simpler, but the UI is available only from a
@@ -32,7 +33,7 @@ You need:
 ### Cost
 
 TrustyClaw deploys one `t3.small` EC2 instance, one public IPv4 address, and
-40 GiB of gp3 disk, plus a Cloudflare Tunnel and Access configuration. A newly
+40 GiB of gp3 disk, plus a Cloudflare Tunnel. A newly
 created [AWS Free Tier](https://aws.amazon.com/free/) account usually costs
 `$0` while its included credits remain; outside those credits, expect about
 `$22/month` in `us-east-1`.
@@ -83,18 +84,19 @@ same commands while signed in as that identity.
 If `aws login` is unavailable, update AWS CLI v2. Existing access keys also
 work: export `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
 
-### 3. Set Up Cloudflare Access
+### 3. Set Up a Cloudflare Tunnel
 
-Cloudflare Access is recommended because it gives TrustyClaw a persistent HTTPS
-address and an admin UI you can open securely from anywhere. To deploy without
-Cloudflare, skip this step and pass `--operator-ssh-public-key` at
-[Deploy](#4-deploy) instead of a Cloudflare hostname.
+A Cloudflare Tunnel is recommended because it gives TrustyClaw a persistent
+HTTPS address and an admin UI you can open securely from anywhere. The tunnel is
+transport and Cloudflare edge (DDoS) protection only; your admin password login
+is what protects the admin UI, so no Cloudflare Access application is needed. To
+deploy without Cloudflare, skip this step and pass `--operator-ssh-public-key`
+at [Deploy](#4-deploy) instead of a Cloudflare hostname.
 
-You will create an active domain, a Zero Trust organization, an Access
-application, a tunnel, and a published hostname. Cloudflare moves dashboard
-menus occasionally; if a label differs, look for the same concept in its
-current [tunnel setup](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/)
-and [self-hosted application](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/)
+You will create an active domain, a Zero Trust organization, a tunnel, and a
+published hostname. Cloudflare moves dashboard menus occasionally; if a label
+differs, look for the same concept in its current
+[tunnel setup](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/)
 instructions.
 
 #### 3.1. Add an Active Domain
@@ -114,26 +116,9 @@ instructions.
 - Pick a unique team name and select the **Free** plan. Cloudflare requires a
   payment method even for this `$0` plan, but does not charge for the plan.
 
-#### 3.3. Protect Your TrustyClaw Hostname
+#### 3.3. Create a Tunnel and Copy Its Token
 
-Choose the final hostname now, for example `trustyclaw.example.com`. Create the
-Access application before publishing the tunnel route so the hostname is
-deny-by-default throughout setup.
-
-- Go to **Zero Trust > Access controls > Applications > Create new
-  application**, choose **Self-hosted and private**, then select **Add public
-  hostname**.
-- Name the application and enter the final hostname exactly, with no path.
-- Under **Access policies**, create or attach an **Allow** policy that matches
-  only you. The simplest rule is **Emails** with your own email address.
-- Select the default Cloudflare identity provider. New Zero Trust
-  organizations let account members sign in with their Cloudflare account.
-  One-time PIN is optional and can be added under **Zero Trust > Integrations >
-  Identity providers**.
-- Accept the remaining defaults and create the application. Users who do not
-  match an Allow policy are denied.
-
-#### 3.4. Create a Tunnel and Copy Its Token
+Choose the final hostname now, for example `trustyclaw.example.com`.
 
 - Go to **Networking > Tunnels > Create a tunnel** and name it, for example
   `trustyclaw`.
@@ -143,16 +128,16 @@ deny-by-default throughout setup.
 - The tunnel remains **Inactive** or **Down** until deploy connects it. This is
   expected.
 
-#### 3.5. Publish the Hostname
+#### 3.4. Publish the Hostname
 
 - Open the tunnel, then select **Routes > Add route > Published application**.
-- Enter the exact hostname protected by the Access application.
+- Enter the final hostname you chose, exactly and with no path.
 - Set **Service URL** to `http://localhost:7443`. This hop stays on the host's
   loopback interface; browsers still reach the hostname over HTTPS.
 - Save the route. Cloudflare creates its DNS record automatically, so do not
   create another one.
 
-#### 3.6. Export the Tunnel Token
+#### 3.5. Export the Tunnel Token
 
 ```bash
 export TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN='eyJ...'
@@ -181,7 +166,7 @@ python3 -m host.cli.deploy \
   --admin-password-sha256 <sha256-from-above>
 ```
 
-To reach the host over SSH instead of Cloudflare Access — a simpler setup
+To reach the host over SSH instead of a Cloudflare Tunnel — a simpler setup
 that skips step 3, with the admin UI available only while you run an SSH
 tunnel — pass `--operator-ssh-public-key` with your OpenSSH public key in
 place of (or alongside) `--operator-cloudflare-hostname`. See
@@ -203,8 +188,7 @@ aws logout
 Have the admin password you chose in step 4 ready.
 
 If you used Cloudflare, the tunnel now shows **Healthy**. Open the hostname from
-step 3, complete Cloudflare Access authentication, then sign in with the admin
-password.
+step 3 and sign in with the admin password.
 
 If you deployed without Cloudflare, use the `public_dns` value from the same
 deploy result to start the SSH tunnel. Leave this terminal open:
@@ -265,7 +249,7 @@ Arguments:
 | --- | --- |
 | `--agent-name` | Stable host name. Lifecycle commands use it to find the same host and data volumes. |
 | `--operator-ssh-public-key` | For SSH operator access: the public key content to install, for example the output of `cat ~/.ssh/id_ed25519.pub`. |
-| `--operator-cloudflare-hostname` | For Cloudflare Access: the fixed hostname that routes to the admin UI/API. |
+| `--operator-cloudflare-hostname` | For a Cloudflare Tunnel: the fixed hostname that routes to the admin UI/API. |
 | `--admin-password-sha256` | SHA-256 hex digest of the chosen admin password. |
 
 Deploy and reconfigure require at least one operator endpoint; use one or
@@ -338,10 +322,10 @@ When an SSH endpoint is configured, TrustyClaw keeps EC2 security-group ingress
 for TCP 22 and installs the key for `trustyclaw-operator`. If SSH is omitted,
 the final host closes EC2 SSH ingress after bootstrap.
 
-### Cloudflare Access Operator Access
+### Cloudflare Tunnel Operator Access
 
 The recommended walkthrough above covers Cloudflare setup from a new account.
-Pass the protected hostname to deploy or reconfigure and export the tunnel
+Pass the published hostname to deploy or reconfigure and export the tunnel
 token:
 
 ```bash
@@ -350,9 +334,10 @@ export TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN='eyJ...'
 ```
 
 TrustyClaw installs `cloudflared` as a systemd service, enables it across
-reboots, and verifies during bootstrap that the configured hostname returns a
-Cloudflare Access login or deny response. The admin password is still required
-after Cloudflare Access succeeds.
+reboots, and verifies during bootstrap that the configured hostname reaches the
+admin API's login gate (never an unauthenticated `200`). The tunnel is transport
+and Cloudflare edge protection only; the admin password login is the
+authentication boundary.
 
 See [`docs/api/CLI.md`](docs/api/CLI.md) for the full argument and
 environment reference.
@@ -381,7 +366,7 @@ Shared flags:
 | --- | --- | --- |
 | `--agent-name <name>` | all | Required. Stable host name: 1-50 characters of letters, numbers, hyphen, underscore. |
 | `--operator-ssh-public-key <key>` | `deploy`, `reconfigure` | Installs this OpenSSH public key as the SSH operator endpoint. At least one operator endpoint is required. |
-| `--operator-cloudflare-hostname <host>` | `deploy`, `reconfigure` | Configures a Cloudflare Access operator endpoint at this exact hostname; the tunnel token is read from `TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN`. At least one operator endpoint is required. |
+| `--operator-cloudflare-hostname <host>` | `deploy`, `reconfigure` | Configures a Cloudflare Tunnel operator endpoint at this exact hostname; the tunnel token is read from `TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN`. At least one operator endpoint is required. |
 | `--admin-password-sha256 <hex>` | `deploy`, `reconfigure` | Required. SHA-256 hex digest of the chosen admin password, for example `printf %s 'your-password' | sha256sum`. The CLI and the host only ever see this hash. |
 | `--bootstrap-from-github [commit-sha]` | `deploy`, `upgrade`, `recover`, `reconfigure` | Provisions the instance from a pinned `infiloop2/trustyclaw` commit via EC2 user data instead of pushing the local checkout over SSH; without a value, the latest `main` commit is pinned. The CLI first reads the commit's `VERSION` from GitHub — that version is the operation's target — and asks for confirmation. The command returns once the instance is launched with its volumes attached; bootstrap completes on the host, and a bootstrap failure terminates the instance. |
 | `--allow-upgrade` | `recover` | Allows no-instance recovery to advance preserved admin state from an older version to the target `VERSION`. |
@@ -419,11 +404,15 @@ result file schema.
 
 ## Admin API and File Uploads
 
-With the SSH tunnel from [step 5](#5-open-trustyclaw) active, call the admin API
-directly:
+With the SSH tunnel from [step 5](#5-open-trustyclaw) active, log in once to get a
+session cookie, then reuse it (with the CSRF header) for API calls:
 
 ```bash
-curl -H "Authorization: Bearer <admin-password>" \
+curl -c cookies.txt -H "Content-Type: application/json" \
+  -d '{"password": "<admin-password>"}' \
+  http://127.0.0.1:7443/v1/login
+
+curl -b cookies.txt -H "X-TrustyClaw-Csrf: 1" \
   http://127.0.0.1:7443/v1/health
 ```
 
@@ -435,7 +424,7 @@ durable agent workspace with a sortable UTC timestamp prefix and returns the
 relative path to reference in a task:
 
 ```bash
-curl -H "Authorization: Bearer <admin-password>" \
+curl -b cookies.txt -H "X-TrustyClaw-Csrf: 1" \
   --data-binary @./reference.png \
   'http://127.0.0.1:7443/v1/agent-files/upload?filename=reference.png'
 ```

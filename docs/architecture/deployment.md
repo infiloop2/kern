@@ -132,30 +132,35 @@ additionally opens SSH at launch for the single-use deploy key and closes it
 after bootstrap when the derived state says so.
 
 On the SSH delivery, SSH port 22 is open while provisioning and remains open
-only when the final stored endpoint list contains an `ssh` endpoint. If only
-Cloudflare Access is configured, bootstrap removes persistent SSH keys and the
-lifecycle CLI revokes EC2 security-group SSH ingress before returning success.
+only when the final stored endpoint list contains an `ssh` endpoint. If only a
+Cloudflare Tunnel endpoint is configured, bootstrap removes persistent SSH keys
+and the lifecycle CLI revokes EC2 security-group SSH ingress before returning
+success.
 On the GitHub delivery, port 22 opens at launch only when the operator
 endpoints include an `ssh` endpoint, and bootstrap installs that endpoint's
 key; there is never a provisioning-only SSH window.
 
 Operator endpoints expose the admin API/UI only. App backend services bind
-host-assigned loopback ports and are not forwarded directly over SSH,
-Cloudflare Access, or the EC2 security group; operator app requests go through
+host-assigned loopback ports and are not forwarded directly over SSH, the
+Cloudflare Tunnel, or the EC2 security group; operator app requests go through
 the authenticated admin API app proxy.
 
-For Cloudflare Access, bootstrap installs a pinned `cloudflared` binary and a
-`trustyclaw-cloudflared.service` systemd unit with `Restart=always` and
-`WantedBy=multi-user.target`, so the tunnel reconnects after service crashes and
-host reboots. Bootstrap fails if the service does not become active or if the
-configured hostname does not return a Cloudflare Access login/deny response.
-The admin password is still required behind Cloudflare Access.
+For a Cloudflare Tunnel endpoint, bootstrap installs a pinned `cloudflared`
+binary and a `trustyclaw-cloudflared.service` systemd unit with `Restart=always`
+and `WantedBy=multi-user.target`, so the tunnel reconnects after service crashes
+and host reboots. The tunnel carries transport and Cloudflare edge protection
+only; the admin login is the authentication boundary, with no Cloudflare Access
+gate in front. Bootstrap fails if the service does not become active, if
+`https://<hostname>/v1/health` does not return the admin API's `401` login gate
+(a `200` would mean the origin answered with no login required), or if
+`http://<hostname>` is not redirected to HTTPS so credentials never cross the
+wire in the clear.
 
 Egress in the security group is pinned to TCP 80, TCP 443, UDP 123 (NTP), and
 optionally TCP/UDP 7844 for Cloudflare Tunnel. The 7844 connector allowance
 is decided at launch on both deliveries, from the same derived operator
 access state, and opened only when the endpoints include a
-`cloudflare_access` endpoint. Bootstrap downloads and
+`cloudflare_tunnel` endpoint. Bootstrap downloads and
 proxied agent traffic use 80/443, timesync uses UDP 123, and DNS to the VPC
 resolver bypasses security groups. This 7844 rule is outbound egress only; it
 does not open inbound access to the EC2 instance and does not create a listener

@@ -20,23 +20,24 @@ code or act with the operator's credentials.
   website open in the same browser, which can issue cross-origin requests
   toward the tunneled/forwarded admin endpoint; (c) a network observer,
   where relevant to cookie transport.
-- **Assets:** the admin password held by the browser (cookie, sent as bearer
-  header), the operator's authenticated session, and the integrity of what
-  the operator sees before approving settings.
-- **Trust boundaries:** the browser origin of the admin UI; the cookie/bearer
-  scheme; the loopback/SSH-forward or Cloudflare Access transport in front
-  of `127.0.0.1:7443`.
+- **Assets:** the operator's authenticated session (an `HttpOnly`
+  `tc_admin_session` cookie the page never reads), the admin password behind the
+  login, and the integrity of what the operator sees before approving settings.
+- **Trust boundaries:** the browser origin of the admin UI; the session-cookie
+  auth scheme with its CSRF defense, HTTPS enforcement, and failed-login throttle;
+  the loopback/SSH-forward or Cloudflare Tunnel transport in front of
+  `127.0.0.1:7443`, now the sole gate with no Cloudflare Access in front.
 - **In scope:** `host/runtime/admin_ui.html`, `admin_ui/*.js`, `admin_ui.css`
   and how `admin_api.py` serves them — every sink where dynamic data enters
   the DOM (`innerHTML` vs text nodes), external references of any kind
-  (scripts, styles, fonts, images, prefetch, `fetch` targets), cookie
-  attributes and lifetime, CSRF exposure of state-changing endpoints given
-  the bearer-header design, response headers (CSP, `X-Content-Type-Options`,
+  (scripts, styles, fonts, images, prefetch, `fetch` targets), session cookie
+  attributes and lifetime, CSRF exposure now that a cookie is an accepted
+  credential (the required `X-TrustyClaw-Csrf` header plus `SameSite=Strict`),
+  the failed-login throttle, response headers (CSP, `X-Content-Type-Options`,
   frame ancestors), MIME handling of agent file previews, and anything
   cacheable that contains secrets.
 - **Out of scope:** browser zero-days; compromise of the operator's machine;
-  Cloudflare Access itself (its configuration hand-off is in scope for
-  axis 04 if it can mislead).
+  the Cloudflare Tunnel transport itself.
 
 ## Scope checklist
 
@@ -49,10 +50,11 @@ below names it.
    construction in `admin_ui/*.js`, and every URL the page can request.
 2. XSS via each agent-controlled string: task output, thread names, file
    names and contents, network event fields, provider metadata JSON.
-3. Cookie: flags (`Secure`, `HttpOnly` feasibility, `SameSite`), scope, what
-   happens on the plain-HTTP loopback transport.
-4. CSRF: confirm no state-changing endpoint accepts cookie-only
-   authentication; preflight behavior; any CORS headers emitted.
+3. Session cookie: flags (`HttpOnly`, `SameSite=Strict`, `Secure` over HTTPS),
+   scope, lifetime, and what happens on the plain-HTTP loopback transport.
+4. CSRF: confirm cookie-authenticated requests require the `X-TrustyClaw-Csrf`
+   header a cross-site page cannot set; preflight behavior; any CORS headers
+   emitted. Confirm failed logins are throttled and fail closed.
 5. Clickjacking/framing and drag-drop of the UI.
 6. The `GET /` page and static assets: verify byte-level absence of external
    origins, not just intent.
@@ -63,6 +65,7 @@ below names it.
 - `host/runtime/admin_ui.html`, `host/runtime/admin_ui/*.js`,
   `host/runtime/admin_ui.css`
 - `host/runtime/admin_api/service.py` (static serving, auth, headers)
+- `host/runtime/admin_api/admin_auth.py` (login sessions, CSRF header, throttle)
 
 ## Audit entries
 

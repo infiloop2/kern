@@ -25,7 +25,7 @@ STORED_HASH = "b" * 64
 KEEP_HASH = "c" * 64
 SSH_CONNECTION = {"mode": "ssh", "ssh_public_key": "ssh-ed25519 AAAATEST operator@example"}
 CLOUDFLARE_CONNECTION = {
-    "mode": "cloudflare_access",
+    "mode": "cloudflare_tunnel",
     "hostname": "admin.example.com",
     "tunnel_token": "token-value",
 }
@@ -96,9 +96,9 @@ class WriteConfigTests(unittest.TestCase):
         cases = [
             ([], "missing operator_connections"),
             ([{"mode": "ssh", "ssh_public_key": "not-a-key"}], "valid ssh_public_key"),
-            ([{"mode": "cloudflare_access", "hostname": "", "tunnel_token": "t"}], "missing hostname"),
+            ([{"mode": "cloudflare_tunnel", "hostname": "", "tunnel_token": "t"}], "missing hostname"),
             (
-                [{"mode": "cloudflare_access", "hostname": "h", "tunnel_token": "two words"}],
+                [{"mode": "cloudflare_tunnel", "hostname": "h", "tunnel_token": "two words"}],
                 "single-line tunnel_token",
             ),
             ([{"mode": "carrier-pigeon"}], "unsupported operator connection mode"),

@@ -13,7 +13,7 @@ flowchart LR
         direction TB
         operator["Human operator"]
         ssh["trustyclaw-operator<br/>host SSH user<br/>passwordless sudo"]
-        cfedge["Cloudflare Access"]
+        cfedge["Cloudflare Tunnel"]
     end
 
     subgraph outside["outside internet"]
@@ -48,10 +48,10 @@ flowchart LR
 
     operator -->|"SSH, when configured"| ssh
     ssh -->|"sudo is root-equivalent"| root
-    ssh -->|"port forward + admin bearer"| admin
-    operator -->|"Access identity policy"| cfedge
+    ssh -->|"port forward + admin login"| admin
+    operator -->|"admin login"| cfedge
     tunnel -->|"outbound connector"| cfedge
-    cfedge -->|"operator request + admin bearer"| tunnel
+    cfedge -->|"operator request + admin login"| tunnel
     tunnel -->|"forwards to 127.0.0.1:7443"| admin
 
     admin -->|"fifteen exact sudo helpers"| root

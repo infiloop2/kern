@@ -1307,30 +1307,31 @@ class AwsSmoke:
 
     def check_admin_auth(self) -> None:
         self._step("admin API authentication")
-        status, _ = self._api_status("GET", "/v1/agent-runtime/status", bearer=None)
+        status, _ = self._api_status("GET", "/v1/agent-runtime/status", cookie=None)
         if status != 401:
             raise AssertionError(f"request without credentials returned {status}, expected 401")
-        status, _ = self._api_status("GET", "/v1/agent-runtime/status", bearer="wrong-password")
+        status, _ = self._api_status("GET", "/v1/agent-runtime/status", cookie="wrong-session-token")
         if status != 401:
-            raise AssertionError(f"request with a wrong password returned {status}, expected 401")
+            raise AssertionError(f"request with a wrong session returned {status}, expected 401")
         # The UI page is the one unauthenticated route.
         request = urllib.request.Request(f"http://127.0.0.1:{ADMIN_PORT}/")
         with urllib.request.urlopen(request, timeout=30) as response:
             page = response.read()
         if b"<html" not in page.lower():
             raise AssertionError("GET / did not serve the admin UI page")
+        auth = f"Cookie: tc_admin_session={self._admin_cookie()}\r\nX-TrustyClaw-Csrf: 1\r\n".encode()
         malformed = self._raw_local_http(
             ADMIN_PORT,
             b"POST /v1/tasks HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
-            + f"Authorization: Bearer {self.result['admin_password']}\r\n".encode()
+            + auth
             + b"Content-Length: nope\r\n\r\n",
         )
         huge = self._raw_local_http(
             ADMIN_PORT,
             b"POST /v1/tasks HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
-            + f"Authorization: Bearer {self.result['admin_password']}\r\n".encode()
+            + auth
             + b"Content-Length: 1048577\r\n\r\n",
         )
         if b"400" not in malformed or b"malformed Content-Length" not in malformed:
@@ -3245,6 +3246,11 @@ class AwsSmoke:
         if status != 200 or body.get("status") != "accepted":
             raise AssertionError(f"reboot returned {status}: {body}")
         print("  reboot accepted; waiting for the host to go down and come back", flush=True)
+        # Admin sessions live in the admin API process, so the reboot clears them.
+        # Drop the cached cookie so the first post-reboot call re-logs in over the
+        # loopback instead of retrying a now-dead session and reading every 401 as
+        # "still booting" until the wait loop times out.
+        self._session_cookie = None
         time.sleep(20)  # let the host actually drop before reconnecting
 
         deadline = time.time() + 420
@@ -3418,12 +3424,35 @@ class AwsSmoke:
                 chunks.append(chunk)
             return b"".join(chunks)
 
+    def _admin_cookie(self) -> str:
+        """Log in once over the SSH-forwarded loopback and cache the session
+        cookie, the credential every admin API call carries (the admin password
+        is only ever presented at /v1/login)."""
+        cookie = getattr(self, "_session_cookie", None)
+        if cookie:
+            return cookie
+        data = json.dumps({"password": self.result["admin_password"]}).encode()
+        request = urllib.request.Request(f"http://127.0.0.1:{ADMIN_PORT}/v1/login", data=data, method="POST")
+        request.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read()
+            for value in response.headers.get_all("Set-Cookie") or []:
+                name, _, token = value.split(";", 1)[0].strip().partition("=")
+                if name == "tc_admin_session" and token:
+                    self._session_cookie = token
+                    return token
+        raise AssertionError("admin login did not return a session cookie")
+
+    def _auth_headers(self) -> dict:
+        return {"Cookie": f"tc_admin_session={self._admin_cookie()}", "X-TrustyClaw-Csrf": "1"}
+
     def _api(self, method: str, path: str, body: dict | None = None) -> dict:
         data = json.dumps(body).encode() if body is not None else None
 
         def attempt() -> dict:
             request = urllib.request.Request(f"http://127.0.0.1:{ADMIN_PORT}{path}", data=data, method=method)
-            request.add_header("Authorization", f"Bearer {self.result['admin_password']}")
+            for name, value in self._auth_headers().items():
+                request.add_header(name, value)
             if body is not None:
                 request.add_header("Content-Type", "application/json")
             with urllib.request.urlopen(request, timeout=30) as response:
@@ -3455,7 +3484,8 @@ class AwsSmoke:
         request = urllib.request.Request(
             f"http://127.0.0.1:{ADMIN_PORT}{path}", data=data, method=method
         )
-        request.add_header("Authorization", f"Bearer {self.result['admin_password']}")
+        for name, value in self._auth_headers().items():
+            request.add_header(name, value)
         request.add_header("X-TrustyClaw-App-Bridge", "mission_pursuit")
         if body is not None:
             request.add_header("Content-Type", "application/json")
@@ -3464,18 +3494,19 @@ class AwsSmoke:
 
     def _api_status(
         self, method: str, path: str, body: dict | None = None, *,
-        bearer: str | None = "__default__",
+        cookie: str | None = "__default__",
     ) -> tuple[int, dict]:
         """One-shot request returning (status, body) instead of raising on HTTP
         errors, for checks that assert specific 4xx behavior or run from
-        threads (no tunnel-reopen side effects). ``bearer=None`` sends no
-        Authorization header."""
-        if bearer == "__default__":
-            bearer = self.result["admin_password"]
+        threads (no tunnel-reopen side effects). ``cookie=None`` sends no session
+        cookie; a wrong cookie value exercises rejected sessions."""
+        if cookie == "__default__":
+            cookie = self._admin_cookie()
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(f"http://127.0.0.1:{ADMIN_PORT}{path}", data=data, method=method)
-        if bearer is not None:
-            request.add_header("Authorization", f"Bearer {bearer}")
+        if cookie is not None:
+            request.add_header("Cookie", f"tc_admin_session={cookie}")
+            request.add_header("X-TrustyClaw-Csrf", "1")
         if body is not None:
             request.add_header("Content-Type", "application/json")
         try:

@@ -155,7 +155,7 @@ def stale_password_smoke(page, url: str) -> None:
     from playwright.sync_api import expect
 
     page.context.add_cookies(
-        [{"name": "trustyclaw_admin", "value": "stale", "url": url}]
+        [{"name": "tc_admin_session", "value": "stale", "url": url}]
     )
     page.goto(url)
     expect(page.locator("#login")).to_be_visible()
@@ -790,7 +790,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(hermes_box.locator(".runtime-running-badge")).to_have_count(0)
     counter_task_response = page.request.post(
         f"{url.rstrip('/')}/v1/tasks",
-        headers={"Authorization": f"Bearer {PASSWORD}"},
+        headers={"X-TrustyClaw-Csrf": "1"},
         data={
             "agent_runtime": "hermes",
             "model": "deepseek.v3.2",
@@ -808,7 +808,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(hermes_box).to_contain_text("1 running", timeout=8000)
     killed = page.request.post(
         f"{url.rstrip('/')}/v1/tasks/{counter_task['task_id']}/kill",
-        headers={"Authorization": f"Bearer {PASSWORD}"},
+        headers={"X-TrustyClaw-Csrf": "1"},
     )
     if not killed.ok:
         raise AssertionError(f"could not stop Hermes toolbar counter task: {killed.status} {killed.text()}")

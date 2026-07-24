@@ -69,6 +69,16 @@ def save_attested_claude_account(account_id: str, **extra: Any) -> None:
     )
 
 
+def _session_headers(token: str) -> dict[str, str]:
+    """Cookie + CSRF headers for a request authenticated by an admin session."""
+    return {"Cookie": f"tc_admin_session={token}", "X-TrustyClaw-Csrf": "1"}
+
+
+def _add_session_auth(request: "urllib.request.Request", token: str) -> None:
+    for name, value in _session_headers(token).items():
+        request.add_header(name, value)
+
+
 class AdminUiStaticTests(unittest.TestCase):
     def test_database_free_admin_ui_contract(self) -> None:
         # The database-backed integration-test class is skipped when local PostgreSQL is
@@ -598,6 +608,9 @@ class AgentFileUploadHttpTests(unittest.TestCase):
         )
         self.config_patch.start()
         self.addCleanup(self.config_patch.stop)
+        admin_api.admin_auth._sessions.clear()
+        self.session_token = admin_api.admin_auth.create_session()
+        self.addCleanup(admin_api.admin_auth._sessions.clear)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), admin_api.Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -640,7 +653,7 @@ class AgentFileUploadHttpTests(unittest.TestCase):
             f"{self.base_url}/v1/agent-files/upload?filename={quote('reference image.png')}",
             data=payload,
             method="POST",
-            headers={"Authorization": "Bearer admin-secret"},
+            headers=_session_headers(self.session_token),
         )
         with (
             patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process) as popen,
@@ -677,14 +690,14 @@ class AgentFileUploadHttpTests(unittest.TestCase):
                         f"{self.base_url}{path}",
                         data=payload,
                         method="POST",
-                        headers={"Authorization": "Bearer admin-secret"},
+                        headers=_session_headers(self.session_token),
                     )
                     urllib.request.urlopen(request, timeout=5)
                 self.assertEqual(error.exception.code, 400)
             popen.assert_not_called()
 
     def test_upload_cap_and_app_bridge_scope_are_enforced_before_body_read(self) -> None:
-        auth = "Authorization: Bearer admin-secret\r\n"
+        auth = f"Cookie: tc_admin_session={self.session_token}\r\nX-TrustyClaw-Csrf: 1\r\n"
         oversized = self.raw_request(
             b"POST /v1/agent-files/upload?filename=photo.png HTTP/1.1\r\n"
             b"Host: localhost\r\n"
@@ -699,7 +712,7 @@ class AgentFileUploadHttpTests(unittest.TestCase):
             data=b"bytes",
             method="POST",
             headers={
-                "Authorization": "Bearer admin-secret",
+                **_session_headers(self.session_token),
                 "X-TrustyClaw-App-Bridge": "agent_chat",
             },
         )
@@ -720,8 +733,8 @@ class AgentFileUploadHttpTests(unittest.TestCase):
             response = self.raw_request(
                 b"POST /v1/agent-files/upload?filename=photo.png HTTP/1.1\r\n"
                 b"Host: localhost\r\n"
-                b"Authorization: Bearer admin-secret\r\n"
-                b"Content-Length: 20\r\n\r\n"
+                + f"Cookie: tc_admin_session={self.session_token}\r\nX-TrustyClaw-Csrf: 1\r\n".encode()
+                + b"Content-Length: 20\r\n\r\n"
                 b"short"
             )
 
@@ -743,7 +756,7 @@ class AgentFileUploadHttpTests(unittest.TestCase):
             f"{self.base_url}/v1/agent-files/upload?filename=photo.png",
             data=b"bytes",
             method="POST",
-            headers={"Authorization": "Bearer admin-secret"},
+            headers=_session_headers(self.session_token),
         )
         with (
             patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process),
@@ -774,7 +787,7 @@ class AgentFileUploadHttpTests(unittest.TestCase):
             f"{self.base_url}/v1/agent-files/upload?filename=photo.png",
             data=b"bytes",
             method="POST",
-            headers={"Authorization": "Bearer admin-secret"},
+            headers=_session_headers(self.session_token),
         )
         with (
             patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process),
@@ -830,6 +843,14 @@ class AgentProcessSnapshotTests(unittest.TestCase):
 class AdminApiIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
+        # Login sessions and the failed-login throttle are process-global; reset
+        # them so a throttle test never leaks a lockout into another test.
+        admin_api.admin_auth._sessions.clear()
+        admin_api.admin_auth._client_failures.clear()
+        admin_api._ADMIN_PASSWORD_HASH = None  # reload from this test's config
+        self.session_token = admin_api.admin_auth.create_session()
+        self.addCleanup(admin_api.admin_auth._sessions.clear)
+        self.addCleanup(admin_api.admin_auth._client_failures.clear)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.proxy_temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -877,7 +898,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(f"{self.base_url}{path}", data=data, method=method)
         if auth:
-            request.add_header("Authorization", "Bearer admin-secret")
+            _add_session_auth(request, self.session_token)
         if body is not None:
             request.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(request, timeout=5) as response:
@@ -966,6 +987,173 @@ class AdminApiIntegrationTests(unittest.TestCase):
             urllib.request.urlopen(request, timeout=5)
 
         self.assertEqual(error.exception.code, 401)
+
+    def login(self, password: str = "admin-secret"):
+        data = json.dumps({"password": password}).encode()
+        request = urllib.request.Request(f"{self.base_url}/v1/login", data=data, method="POST")
+        request.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, response.headers, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, error.headers, json.loads(error.read())
+
+    def session_token_from_headers(self, headers) -> str | None:
+        for value in headers.get_all("Set-Cookie") or []:
+            token = admin_api.admin_auth.parse_session_token(value)
+            if token:
+                return token
+        return None
+
+    def cookie_request(self, method: str, path: str, token: str, *, csrf: bool = True):
+        request = urllib.request.Request(f"{self.base_url}{path}", method=method)
+        request.add_header("Cookie", f"{admin_api.admin_auth.SESSION_COOKIE_NAME}={token}")
+        if csrf:
+            request.add_header(admin_api.admin_auth.CSRF_HEADER_NAME, "1")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+
+    def test_login_issues_session_cookie_that_authenticates(self) -> None:
+        status, headers, body = self.login()
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        cookie = (headers.get_all("Set-Cookie") or [""])[0]
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=Strict", cookie)
+        token = self.session_token_from_headers(headers)
+        self.assertIsNotNone(token)
+        assert token is not None
+
+        status, apps = self.cookie_request("GET", "/v1/apps", token)
+        self.assertEqual(status, 200)
+        self.assertTrue(any(app["id"] == "agent_chat" for app in apps["apps"]))
+
+    def test_session_cookie_without_csrf_header_is_forbidden(self) -> None:
+        _, headers, _ = self.login()
+        token = self.session_token_from_headers(headers)
+        assert token is not None
+        status, body = self.cookie_request("GET", "/v1/apps", token, csrf=False)
+        self.assertEqual(status, 403)
+
+    def test_login_rejects_a_wrong_password_without_a_cookie(self) -> None:
+        status, headers, body = self.login("not-the-password")
+        self.assertEqual(status, 401)
+        self.assertIsNone(self.session_token_from_headers(headers))
+
+    def test_logout_revokes_the_session(self) -> None:
+        _, headers, _ = self.login()
+        token = self.session_token_from_headers(headers)
+        assert token is not None
+        status, _ = self.cookie_request("POST", "/v1/logout", token)
+        self.assertEqual(status, 200)
+        status, _ = self.cookie_request("GET", "/v1/apps", token)
+        self.assertEqual(status, 401)
+
+    def test_a_source_is_blocked_past_the_limit_even_with_the_correct_password(self) -> None:
+        # Once a source uses its per-window attempt budget it is fully blocked:
+        # further attempts return 429 before the password is compared, so even
+        # the correct password is refused until the window clears.
+        for _ in range(admin_api.admin_auth.MAX_FAILURES_PER_CLIENT):
+            status, _, _ = self.login("wrong")
+            self.assertEqual(status, 401)
+        status, headers, body = self.login("admin-secret")
+        self.assertEqual(status, 429)
+        self.assertIsNone(self.session_token_from_headers(headers))
+
+    def test_a_correct_login_within_the_budget_succeeds_and_clears_the_streak(self) -> None:
+        # Wrong attempts short of the limit, then the correct password (still
+        # within budget) succeeds and resets the source's streak.
+        for _ in range(admin_api.admin_auth.MAX_FAILURES_PER_CLIENT - 1):
+            status, _, _ = self.login("wrong")
+            self.assertEqual(status, 401)
+        status, headers, body = self.login("admin-secret")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        self.assertIsNotNone(self.session_token_from_headers(headers))
+        # Streak cleared: a fresh wrong attempt is a 401, not an immediate 429.
+        status, _, _ = self.login("wrong")
+        self.assertEqual(status, 401)
+
+    def test_tunnel_login_requires_a_valid_cf_connecting_ip(self) -> None:
+        # A tunnel request (X-Forwarded-Proto set) must carry exactly one
+        # Cf-Connecting-Ip; a missing/stripped header fails closed so it cannot
+        # collapse every internet visitor into one throttle bucket.
+        data = json.dumps({"password": "admin-secret"}).encode()
+
+        def login(headers: dict[str, str]):
+            request = urllib.request.Request(f"{self.base_url}/v1/login", data=data, method="POST")
+            request.add_header("Content-Type", "application/json")
+            for name, value in headers.items():
+                request.add_header(name, value)
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    return response.status
+            except urllib.error.HTTPError as error:
+                return error.code
+
+        base = {"X-Forwarded-Proto": "https"}
+        self.assertEqual(login(base), 403)  # missing
+        self.assertEqual(login({**base, "Cf-Connecting-Ip": "not-an-ip"}), 403)  # invalid
+        self.assertEqual(login({**base, "Cf-Connecting-Ip": "203.0.113.7"}), 200)  # IPv4
+        self.assertEqual(login({**base, "Cf-Connecting-Ip": "2001:db8::1"}), 200)  # IPv6
+        # Pseudo IPv4: the generated IPv4 is in Cf-Connecting-Ip, the real client
+        # in Cf-Connecting-IPv6; the latter is used, so the login proceeds.
+        self.assertEqual(
+            login({**base, "Cf-Connecting-Ip": "192.0.2.1", "Cf-Connecting-Ipv6": "2001:db8::5"}), 200
+        )
+        # Duplicate Cf-Connecting-Ip headers fail closed.
+        duplicate = self.raw_request(
+            b"POST /v1/login HTTP/1.1\r\nHost: h\r\nX-Forwarded-Proto: https\r\n"
+            b"Cf-Connecting-Ip: 203.0.113.7\r\nCf-Connecting-Ip: 198.51.100.9\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(data)}\r\n\r\n".encode()
+            + data
+        )
+        self.assertIn(b" 403 ", duplicate)
+
+    def test_login_rejects_oversized_and_malformed_bodies(self) -> None:
+        oversized = urllib.request.Request(
+            f"{self.base_url}/v1/login", data=b'{"password":"' + b"x" * 5000 + b'"}', method="POST"
+        )
+        oversized.add_header("Content-Type", "application/json")
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(oversized, timeout=5)
+        self.assertEqual(error.exception.code, 413)
+        # A well-formed but wrong-shape body is a failed attempt, not a 200.
+        status, headers, _ = self.login("admin-secret")  # correct baseline works
+        self.assertEqual(status, 200)
+        extra = urllib.request.Request(
+            f"{self.base_url}/v1/login",
+            data=json.dumps({"password": "admin-secret", "extra": 1}).encode(),
+            method="POST",
+        )
+        extra.add_header("Content-Type", "application/json")
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(extra, timeout=5)
+        self.assertEqual(error.exception.code, 401)
+
+    def test_cleartext_tunnel_request_never_accepts_credentials(self) -> None:
+        # X-Forwarded-Proto: http means the edge forwarded the request in the
+        # clear. A credential POST is refused, and a GET is upgraded to https.
+        data = json.dumps({"password": "admin-secret"}).encode()
+        request = urllib.request.Request(f"{self.base_url}/v1/login", data=data, method="POST")
+        request.add_header("Content-Type", "application/json")
+        request.add_header("X-Forwarded-Proto", "http")
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(error.exception.code, 403)
+
+        response = self.raw_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: trustyclaw.example.com\r\n"
+            b"X-Forwarded-Proto: http\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        self.assertIn(b" 301 ", response)
+        self.assertIn(b"Location: https://trustyclaw.example.com/", response)
 
     def test_app_backend_task_threads_are_internally_app_prefixed(self) -> None:
         task = self.app_backend_request(
@@ -1211,14 +1399,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
         invalid = self.raw_request(
             b"POST /v1/tasks HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
-            b"Authorization: Bearer admin-secret\r\n"
-            b"Content-Length: nope\r\n\r\n"
+            + f"Cookie: tc_admin_session={self.session_token}\r\nX-TrustyClaw-Csrf: 1\r\n".encode()
+            + b"Content-Length: nope\r\n\r\n"
         )
         huge = self.raw_request(
             b"POST /v1/tasks HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
-            b"Authorization: Bearer admin-secret\r\n"
-            b"Content-Length: 1048577\r\n\r\n"
+            + f"Cookie: tc_admin_session={self.session_token}\r\nX-TrustyClaw-Csrf: 1\r\n".encode()
+            + b"Content-Length: 1048577\r\n\r\n"
         )
 
         self.assertIn(b"400", invalid)
@@ -1330,7 +1518,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.assertIn(expected, body)
 
         request = urllib.request.Request(f"{self.base_url}/v1/health")
-        request.add_header("Authorization", "Bearer admin-secret")
+        _add_session_auth(request, self.session_token)
         with (
             patch("host.runtime.admin_api.service.host_metrics", return_value={"cpu": {}, "memory": {}, "filesystem": {}, "swap": {}}),
             patch("host.runtime.admin_api.service.proxy_alive", return_value=True),
@@ -1407,7 +1595,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         request = urllib.request.Request(
             f"{self.base_url}/v1/agent-files/content?path=%2Fworkspace%2Freel.mp4"
         )
-        request.add_header("Authorization", "Bearer admin-secret")
+        _add_session_auth(request, self.session_token)
         with (
             patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process) as popen,
             urllib.request.urlopen(request, timeout=5) as response,
@@ -1853,9 +2041,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("EVENT_PAGER_WINDOW", ui)
         self.assertIn("formatNetworkReason", ui)
         self.assertIn("async function refreshOrSkip(work)", ui)
-        self.assertIn('location.protocol === "https:" ? "; secure" : ""', ui)
-        self.assertIn("adminCookieAttributes(2592000)", ui)
-        self.assertIn("adminCookieAttributes(0)", ui)
+        # The browser authenticates with an HttpOnly session cookie minted by
+        # /v1/login and never stores the admin password itself.
+        self.assertIn("/v1/login", ui)
+        self.assertIn("/v1/logout", ui)
+        self.assertIn('"X-TrustyClaw-Csrf"', ui)
+        # The legacy password cookie is only ever expired, never stored or read.
+        self.assertIn("trustyclaw_admin=; path=/; max-age=0", ui)
+        self.assertNotIn("getPassword", ui)
         self.assertIn("Memory", ui)
         self.assertIn("Admin volume", ui)
         self.assertIn("Agent volume", ui)
@@ -4192,7 +4385,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # never runs migrations (that is bootstrap's job), so a stray start
         # also cannot move the schema under the live instance.
         with patch(
-            "host.runtime.admin_api.service.ThreadingHTTPServer",
+            "host.runtime.admin_api.service.BoundedThreadingHTTPServer",
             side_effect=OSError("address already in use"),
         ):
             with self.assertRaises(OSError):
@@ -4212,6 +4405,9 @@ class ToolRoutesTests(unittest.TestCase):
                 "admin_password_sha256": hashlib.sha256(b"admin-secret").hexdigest(),
             }
         )
+        admin_api.admin_auth._sessions.clear()
+        self.session_token = admin_api.admin_auth.create_session()
+        self.addCleanup(admin_api.admin_auth._sessions.clear)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), admin_api.Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -4238,7 +4434,7 @@ class ToolRoutesTests(unittest.TestCase):
         data = json.dumps(body).encode() if body is not None else b"{}" if method != "GET" else None
         request = urllib.request.Request(f"{self.base_url}{path}", data=data, method=method)
         if auth:
-            request.add_header("Authorization", "Bearer admin-secret")
+            _add_session_auth(request, self.session_token)
         if method != "GET":
             request.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(request, timeout=10) as response:

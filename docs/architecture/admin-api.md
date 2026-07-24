@@ -3,17 +3,63 @@
 The admin API binds `127.0.0.1:7443` and is reached through an SSH port forward,
 the optional Cloudflare Tunnel, or both. nftables drops other inbound traffic
 and drops `trustyclaw-agent` loopback traffic to the admin port; the agent can
-reach only the proxy port. Every API request needs the bearer admin password,
-which is hashed and compared in constant time against the stored hash. Static
-admin/app UI assets and the side-effect-free OAuth callback shell are the only
-unauthenticated HTTP routes. The browser keeps the password in a cookie and
-adds it as the bearer header for API calls.
+reach only the proxy port. The admin login is the authentication boundary: the
+tunnel carries transport and Cloudflare's edge (DDoS) protection only, with no
+Cloudflare Access gate in front, so the login is hardened to stand alone (see
+[admin login sessions](#admin-login-sessions)). Static admin/app UI assets and
+the side-effect-free OAuth callback shell are the only unauthenticated HTTP
+routes.
+
+## Admin login sessions
+
+The password is presented only once, at `POST /v1/login`, where it is compared in
+constant time against the SHA-256 hash of `admin_password_sha256` from the config
+table (the cleartext is never persisted). A correct password mints an opaque,
+server-held session token returned as a `tc_admin_session` cookie that is
+`HttpOnly` (JavaScript never reads it), `SameSite=Strict`, and `Secure` whenever
+the request arrived over HTTPS. Every other request authenticates with that
+cookie alone; the password is never replayed on later requests, and there is no
+bearer-token path. The admin UI page never holds the password. Sessions live in
+admin-process memory and expire after 12 hours idle or 7 days absolute, whichever
+comes first; `POST /v1/logout` revokes the current one, and a host restart clears
+all sessions (the operator simply logs in again). Because the cookie is the
+credential, every cookie-authenticated request must also carry the
+`X-TrustyClaw-Csrf` header, which same-origin UI code always sends and a
+cross-site page cannot; combined with `SameSite=Strict` this closes CSRF.
+
+**HTTPS is mandatory over the tunnel.** The edge sets `X-Forwarded-Proto`, so a
+non-`https` value means the request reached the origin in the clear. The admin
+API never accepts credentials or serves secrets over cleartext: it upgrades a GET
+with a redirect to `https` (so a form loads securely before it is shown) and
+refuses every other method, and it sends HSTS on responses. Bootstrap verifies
+that `http` redirects and `https /v1/health` returns 401.
+
+Login handling throttles per source. Each attempt is counted under a lock before
+the password is compared, so a concurrent burst can never win more than the
+allowed number of guesses; past ten attempts within fifteen minutes from one
+source, that source is fully blocked with `429` (even a correct password is
+refused) until the window self-clears. A correct login clears the source's
+streak. The block is per-source only — there is deliberately no global ceiling,
+which would be an attacker-triggerable lockout of every operator at once —
+and a blocked operator recovers by waiting out the window, using the loopback
+SSH forward (a separate, exempt bucket), or a different IP; blocking the real
+operator requires flooding their exact egress IP, and a strong generated
+password already defeats brute force regardless. The source key is the tunnel's
+`Cf-Connecting-Ip` (or
+`Cf-Connecting-IPv6` when Cloudflare Pseudo IPv4 is overwriting the address),
+which the edge sets and a browser cannot spoof — required as exactly one valid
+address (IPv4 bucketed per address, IPv6 per `/64`) and failed closed if missing
+or malformed so a stripped header cannot collapse every visitor into one bucket;
+the loopback SSH forward uses the socket peer. The login body is capped at 4 KiB
+and validated as exactly `{"password": <string ≤256 bytes>}`. The server also
+caps concurrent worker threads and sets a per-connection read timeout so a
+connection flood or slow client cannot exhaust host threads.
 
 App backends are reached only through the admin API reverse proxy. Each app
 service binds a host-assigned `127.0.0.1` port, and nftables accepts new
 connections to that port only from the `trustyclaw-admin` uid before dropping
 the same port for every other local uid. The app receives a host proxy marker,
-not the operator's raw admin bearer. Agent runtimes, app service users, and
+not the operator's session credential. Agent runtimes, app service users, and
 ordinary local users cannot call app backend TCP listeners directly.
 
 The agent, network, and tool event logs each keep the newest 1,000,000 entries.

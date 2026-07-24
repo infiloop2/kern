@@ -42,13 +42,13 @@ def validate_operator_connections(connections: Any) -> str | None:
                 ssh_key.startswith("ssh-ed25519 ") or ssh_key.startswith("ssh-rsa ")
             ):
                 return "ssh operator connection is missing a valid ssh_public_key"
-        elif mode == "cloudflare_access":
+        elif mode == "cloudflare_tunnel":
             hostname = connection.get("hostname")
             token = connection.get("tunnel_token")
             if not isinstance(hostname, str) or not hostname:
-                return "cloudflare_access operator connection is missing hostname"
+                return "cloudflare_tunnel operator connection is missing hostname"
             if not isinstance(token, str) or not token or any(character.isspace() for character in token):
-                return "cloudflare_access operator connection is missing a single-line tunnel_token"
+                return "cloudflare_tunnel operator connection is missing a single-line tunnel_token"
         else:
             return f"unsupported operator connection mode: {mode!r}"
     if len(modes) != len(set(modes)):

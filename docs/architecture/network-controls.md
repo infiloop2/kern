@@ -114,7 +114,7 @@ to DNS and TCP 80/443, and only after a request has passed policy. Tools-service
 egress is limited to DNS and TCP 443 for the bundled packages' third-party
 calls. Cloudflare Tunnel egress is limited to DNS, TCP 443, and TCP/UDP 7844,
 and the EC2 security group keeps TCP/UDP 7844 open only when a
-`cloudflare_access` operator endpoint
+`cloudflare_tunnel` operator endpoint
 is configured. That 7844 allowance is outbound-only and paired with nftables uid
 checks: it is usable by the `cloudflared` connector, not by the agent, admin
 API, or proxy users. It does not expose an inbound EC2 port.
