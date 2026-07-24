@@ -300,11 +300,11 @@ class ChangeDetectionTests(unittest.TestCase):
             return b""
 
         with patch.object(gate, "_run_git", side_effect=fake_run):
-            gate.ensure_mirror("infiversehq", "trustyclaw", "ghs_secret", root=self.root)
+            gate.ensure_mirror("infiversehq", "kern", "ghs_secret", root=self.root)
 
         fetch_args, fetch_env = calls[-1]
         self.assertEqual(fetch_args[0], "fetch")
-        self.assertIn("https://github.com/infiversehq/trustyclaw.git", fetch_args)
+        self.assertIn("https://github.com/infiversehq/kern.git", fetch_args)
         self.assertIn("+refs/tags/*:refs/tags/*", fetch_args)
         self.assertNotIn("ghs_secret", " ".join(fetch_args))
         self.assertIsNotNone(fetch_env)
@@ -313,7 +313,7 @@ class ChangeDetectionTests(unittest.TestCase):
 
     def test_approve_replays_deletions_and_keeps_token_out_of_argv(self) -> None:
         root = self.root / "quarantine"
-        mirror = root / "infiversehq" / "trustyclaw.git"
+        mirror = root / "infiversehq" / "kern.git"
         _git(self.root, "clone", "--bare", "--quiet", str(self.mirror), str(mirror))
         gate.quarantine_pending(
             mirror,
@@ -326,7 +326,7 @@ class ChangeDetectionTests(unittest.TestCase):
         payload = {
             "action": "approve",
             "owner": "infiversehq",
-            "repo": "trustyclaw",
+            "repo": "kern",
             "push_id": "abc123",
             "token": "ghs_secret",
             "ref_updates": [
@@ -371,13 +371,13 @@ class ChangeDetectionTests(unittest.TestCase):
         # Cleanup lists the pending refs from the mirror itself, so the
         # payload carries no ref_updates at all.
         root = self.root / "quarantine"
-        mirror = root / "infiversehq" / "trustyclaw.git"
+        mirror = root / "infiversehq" / "kern.git"
         _git(self.root, "clone", "--bare", "--quiet", str(self.mirror), str(mirror))
         gate.quarantine_pending(mirror, [(gate.ZERO_OID, self.old, "refs/heads/main")], "abc123")
         payload = {
             "action": "cleanup",
             "owner": "infiversehq",
-            "repo": "trustyclaw",
+            "repo": "kern",
             "push_id": "abc123",
         }
 
@@ -400,7 +400,7 @@ class ChangeDetectionTests(unittest.TestCase):
         # delete must not fail a cleanup (reject) or an approval whose push
         # already landed. The leftover ref is inert.
         root = self.root / "quarantine"
-        mirror = root / "infiversehq" / "trustyclaw.git"
+        mirror = root / "infiversehq" / "kern.git"
         _git(self.root, "clone", "--bare", "--quiet", str(self.mirror), str(mirror))
         original_run = approve_github_push._run
 
@@ -413,7 +413,7 @@ class ChangeDetectionTests(unittest.TestCase):
 
         base_payload = {
             "owner": "infiversehq",
-            "repo": "trustyclaw",
+            "repo": "kern",
             "push_id": "abc123",
             "ref_updates": [{"old": gate.ZERO_OID, "new": self.old, "ref": "refs/heads/main"}],
         }
@@ -438,12 +438,12 @@ class ChangeDetectionTests(unittest.TestCase):
         # cleanup): the approval fails plainly instead of reconciling against
         # the remote; the agent re-pushes to start a fresh gate round.
         root = self.root / "quarantine"
-        mirror = root / "infiversehq" / "trustyclaw.git"
+        mirror = root / "infiversehq" / "kern.git"
         _git(self.root, "clone", "--bare", "--quiet", str(self.mirror), str(mirror))
         payload = {
             "action": "approve",
             "owner": "infiversehq",
-            "repo": "trustyclaw",
+            "repo": "kern",
             "push_id": "abc123",
             "token": "ghs_secret",
             "ref_updates": [{"old": gate.ZERO_OID, "new": self.old, "ref": "refs/heads/main"}],
@@ -462,13 +462,13 @@ class ChangeDetectionTests(unittest.TestCase):
 
     def test_approve_fails_plainly_when_push_is_rejected(self) -> None:
         root = self.root / "quarantine"
-        mirror = root / "infiversehq" / "trustyclaw.git"
+        mirror = root / "infiversehq" / "kern.git"
         _git(self.root, "clone", "--bare", "--quiet", str(self.mirror), str(mirror))
         gate.quarantine_pending(mirror, [(gate.ZERO_OID, self.old, "refs/heads/main")], "abc123")
         payload = {
             "action": "approve",
             "owner": "infiversehq",
-            "repo": "trustyclaw",
+            "repo": "kern",
             "push_id": "abc123",
             "token": "ghs_secret",
             "ref_updates": [{"old": gate.ZERO_OID, "new": self.old, "ref": "refs/heads/main"}],

@@ -3,13 +3,13 @@
 Admin state lives in Postgres, so state/admin-API/orchestrator tests need a
 real database. This harness starts one throwaway cluster per test process —
 Unix socket only, in a temp directory, no network — applies the repo's schema
-migrations once, and exports the ``TRUSTYCLAW_DB_*`` environment so the
+migrations once, and exports the ``KERN_DB_*`` environment so the
 runtime code under test connects to it. ``reset_database()`` truncates all
 tables between tests, which is much faster than a cluster or database per
 test.
 
 The server binaries come from PATH, from the newest ``/usr/lib/postgresql/*``
-install, or from ``TRUSTYCLAW_TEST_PG_BIN``. If the binaries are unavailable
+install, or from ``KERN_TEST_PG_BIN``. If the binaries are unavailable
 the calling test is skipped with instructions; CI installs PostgreSQL in the
 sandbox image, so the suite never silently loses this coverage there. No
 Python driver is needed anywhere: the runtime brings its own protocol client
@@ -58,7 +58,7 @@ def _subprocess_env(work_dir: Path) -> dict[str, str]:
 
 
 def _find_pg_bin() -> Path | None:
-    override = os.environ.get("TRUSTYCLAW_TEST_PG_BIN")
+    override = os.environ.get("KERN_TEST_PG_BIN")
     if override:
         return Path(override)
     initdb = shutil.which("initdb")
@@ -76,7 +76,7 @@ def _find_pg_bin() -> Path | None:
 
 
 def ensure_database() -> None:
-    """Start the scratch cluster once per process and point TRUSTYCLAW_DB_* at
+    """Start the scratch cluster once per process and point KERN_DB_* at
     it. Raises unittest.SkipTest when PostgreSQL is unavailable."""
     global _STARTED, _SKIP_REASON
     if _SKIP_REASON is not None:
@@ -87,11 +87,11 @@ def ensure_database() -> None:
     if pg_bin is None or not (pg_bin / "initdb").exists():
         _SKIP_REASON = (
             "PostgreSQL server binaries not found "
-            "(apt install postgresql, or set TRUSTYCLAW_TEST_PG_BIN to a bin directory)"
+            "(apt install postgresql, or set KERN_TEST_PG_BIN to a bin directory)"
         )
         raise unittest.SkipTest(_SKIP_REASON)
 
-    data_dir = Path(tempfile.mkdtemp(prefix="trustyclaw-pg-data.")) / "data"
+    data_dir = Path(tempfile.mkdtemp(prefix="kern-pg-data.")) / "data"
     # A separate short socket path: Unix socket paths are limited to ~107
     # bytes and temp dirs under deep workspaces can exceed that.
     socket_dir = Path(tempfile.mkdtemp(prefix="tcpg.", dir="/tmp"))
@@ -137,13 +137,13 @@ def ensure_database() -> None:
         check=True,
         env=env,
     )
-    os.environ["TRUSTYCLAW_DB_SOCKET_DIR"] = str(socket_dir)
-    os.environ["TRUSTYCLAW_DB_NAME"] = "trustyclaw_test"
-    os.environ["TRUSTYCLAW_DB_USER"] = "postgres"
+    os.environ["KERN_DB_SOCKET_DIR"] = str(socket_dir)
+    os.environ["KERN_DB_NAME"] = "kern_test"
+    os.environ["KERN_DB_USER"] = "postgres"
 
     # The scoped service roles must exist before migrations run (the schema
     # GRANTs them their tables). Tests connect as postgres either way.
-    for role in ("trustyclaw-proxy", "trustyclaw-tools", "trustyclaw-agent-network"):
+    for role in ("kern-proxy", "kern-tools", "kern-agent-network"):
         subprocess.run(
             [str(pg_bin / "createuser"), "-h", str(socket_dir), "-U", "postgres", role],
             stdout=subprocess.DEVNULL,
@@ -152,7 +152,7 @@ def ensure_database() -> None:
             env=env,
         )
     subprocess.run(
-        [str(pg_bin / "createdb"), "-h", str(socket_dir), "-U", "postgres", "trustyclaw_test"],
+        [str(pg_bin / "createdb"), "-h", str(socket_dir), "-U", "postgres", "kern_test"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         check=True,
@@ -204,7 +204,7 @@ def create_database(name: str) -> None:
     db.close_pool()
     pg_bin = _find_pg_bin()
     assert pg_bin is not None  # ensure_database already found it
-    socket_dir = os.environ["TRUSTYCLAW_DB_SOCKET_DIR"]
+    socket_dir = os.environ["KERN_DB_SOCKET_DIR"]
     subprocess.run(
         [str(pg_bin / "dropdb"), "--if-exists", "-h", socket_dir, "-U", "postgres", name],
         stdout=subprocess.DEVNULL,

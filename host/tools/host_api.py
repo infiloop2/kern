@@ -10,7 +10,7 @@ is provided by the host behind these interfaces. Tool code receives a
 - no tool-owned approval bookkeeping (use ``approvals``).
 
 Every ``HostAPI`` instance is already scoped to one tool on one local
-TrustyClaw host. Credentials and approval records are implicitly partitioned by
+Kern host. Credentials and approval records are implicitly partitioned by
 tool; a tool can never see another tool's data.
 
 See docs/architecture/tools/tool-contract.md for the full specification and the

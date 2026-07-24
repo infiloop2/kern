@@ -29,9 +29,9 @@ from host.runtime.core import app_platform, state
 
 
 APP_BACKEND_ADMIN_SOCKET = Path(
-    os.environ.get("TRUSTYCLAW_APP_BACKEND_ADMIN_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH)
+    os.environ.get("KERN_APP_BACKEND_ADMIN_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH)
 )
-APP_BACKEND_AUTH_HEADER = "X-TrustyClaw-App-Backend"
+APP_BACKEND_AUTH_HEADER = "X-Kern-App-Backend"
 APP_BACKEND_ALLOWED_ADMIN_ROUTES = (
     ("GET", "/v1/tools"),
     ("GET", "/v1/network/policy"),
@@ -51,7 +51,7 @@ class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStre
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TrustyClawAppBackend/0.1"
+    server_version = "KernAppBackend/0.1"
 
     def do_GET(self) -> None:
         self._handle("GET")

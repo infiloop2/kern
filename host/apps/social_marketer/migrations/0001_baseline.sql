@@ -1,13 +1,20 @@
--- Workspace app base tables: the single evolving workspace, its conversation feed,
--- host-task run tracking, agent-created schedules, artifacts, memories, and tools.
--- Every workspace_kit app copies this file byte-for-byte as its own
--- migrations/0001_workspace_base.sql; domain tables go in each app's 0002_*.sql.
+-- Social Marketer app schema. Kern 1.0.0 is a fresh start, so this is the
+-- app's single genesis migration: the workspace_kit base schema (byte-for-byte
+-- the shared base, with the host-supported runtime constraint) plus the Social
+-- Marketer domain tables.
+--
+-- The posts table is the single source of truth shared by the agent
+-- (upsert_post / set_post_status actions) and the operator composer
+-- (GET/POST /api/posts). Body length is capped by encoded bytes per platform
+-- in the backend before any write; the enum CHECKs here are a second
+-- structural guard. Campaign plans and performance summaries stay as free-form
+-- workspace artifacts.
 
 -- migrate:up
 
 CREATE TABLE IF NOT EXISTS workspace (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-    agent_runtime TEXT CHECK (agent_runtime IN ('codex', 'claude_code')),
+    agent_runtime TEXT CHECK (agent_runtime IN ('codex', 'claude_code', 'hermes')),
     model TEXT,
     effort TEXT,
     thread_seq INTEGER NOT NULL DEFAULT 1,
@@ -85,8 +92,23 @@ CREATE TABLE IF NOT EXISTS tools (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS posts (
+    id TEXT PRIMARY KEY,
+    platform TEXT NOT NULL CHECK (platform IN ('x', 'linkedin')),
+    body TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'posted')),
+    scheduled_for TEXT,
+    external_ref TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_posts_scheduled_for ON posts(scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status);
+
 -- migrate:down
 
+DROP TABLE IF EXISTS posts;
 DROP TABLE IF EXISTS tools;
 DROP TABLE IF EXISTS memories;
 DROP TABLE IF EXISTS artifacts;

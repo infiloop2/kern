@@ -1,7 +1,7 @@
 """Stdio JSON-RPC client for the Codex app-server.
 
 App-servers are spawned through the root-owned ``run-codex-app-server`` sudo
-helper, which drops to the ``trustyclaw-agent`` user and points all traffic at
+helper, which drops to the ``kern-agent`` user and points all traffic at
 the network policy proxy. Codex persists its login and threads under the agent
 home, so separate processes share state: status checks and logins use
 short-lived servers, and each task turn runs on a fresh server that resumes
@@ -27,8 +27,8 @@ agent-writable auth file is consulted only in the narrow window right after the
 CLI writes it, never re-trusted on a later retry (see
 ``read_completed_device_login_account_id``).
 
-The Codex app-server initialize request includes a fixed TrustyClaw client
-version. Keep this stable unless TrustyClaw intentionally changes the client
+The Codex app-server initialize request includes a fixed Kern client
+version. Keep this stable unless Kern intentionally changes the client
 contract it expects Codex to see during app-server initialization.
 """
 
@@ -46,9 +46,9 @@ from typing import Any, Callable
 from host.runtime.admin_api import thread_scope
 from host.runtime.core.state import read_proxy_openai_account_id
 
-DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/run-codex-app-server"]
-DEFAULT_ACCOUNT_ID_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/read-codex-account-id"]
-AGENT_CWD = "/mnt/trustyclaw-agent/agent-home"
+DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-codex-app-server"]
+DEFAULT_ACCOUNT_ID_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/read-codex-account-id"]
+AGENT_CWD = "/mnt/kern-agent/agent-home"
 ACCOUNT_ID_HELPER_TIMEOUT_SECONDS = 10
 CLIENT_VERSION = "v1.0"
 # Under the orchestrator's five-minute active recheck, so a scheduled recheck
@@ -281,7 +281,7 @@ class CodexAppServer:
 
 
 def _client_info() -> dict[str, dict[str, str]]:
-    return {"clientInfo": {"name": "trustyclaw-host", "version": CLIENT_VERSION}}
+    return {"clientInfo": {"name": "kern-host", "version": CLIENT_VERSION}}
 
 
 def account_status(*, force_provider_probe: bool = False) -> tuple[str, str | None, dict[str, Any] | None]:
@@ -757,7 +757,7 @@ def _start_thread(server: CodexAppServer, model: str) -> dict[str, Any]:
 def _developer_instructions(server: CodexAppServer) -> str:
     """Current host and app contract, refreshed on start and every resume."""
     developer_instructions = (
-        "You are running inside TrustyClaw. Complete the operator task and "
+        "You are running inside Kern. Complete the operator task and "
         "return a concise final result."
     )
     if server.app_instructions:

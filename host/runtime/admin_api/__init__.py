@@ -1,4 +1,4 @@
-"""The trustyclaw-admin service process.
+"""The kern-admin service process.
 
 Owns two message surfaces and nothing else touches them:
 - the operator TCP API on 127.0.0.1:ADMIN_API_PORT (service.py), and

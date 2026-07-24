@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exec /usr/sbin/runuser -u trustyclaw-agent -- env HOME=/mnt/trustyclaw-agent/agent-home /usr/bin/python3 - <<'PY'
+exec /usr/sbin/runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home /usr/bin/python3 - <<'PY'
 import base64
 import json
 from pathlib import Path

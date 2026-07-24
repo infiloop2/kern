@@ -1,13 +1,18 @@
--- Workspace app base tables: the single evolving workspace, its conversation feed,
--- host-task run tracking, agent-created schedules, artifacts, memories, and tools.
--- Every workspace_kit app copies this file byte-for-byte as its own
--- migrations/0001_workspace_base.sql; domain tables go in each app's 0002_*.sql.
+-- Workspace app base schema: the single evolving workspace, its conversation
+-- feed, host-task run tracking, agent-created schedules, artifacts, memories,
+-- and tools. Kern 1.0.0 is a fresh start, so this is the app's single genesis
+-- migration; it provisions the final base schema directly, including the
+-- runtime constraint the host's session-options matrix supports (codex,
+-- claude_code, hermes). Every base-only workspace_kit app copies this file
+-- byte-for-byte as its own migrations/0001_baseline.sql; the apps that add
+-- domain tables (social_marketer, virality_machine) inline this same base and
+-- append their tables.
 
 -- migrate:up
 
 CREATE TABLE IF NOT EXISTS workspace (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-    agent_runtime TEXT CHECK (agent_runtime IN ('codex', 'claude_code')),
+    agent_runtime TEXT CHECK (agent_runtime IN ('codex', 'claude_code', 'hermes')),
     model TEXT,
     effort TEXT,
     thread_seq INTEGER NOT NULL DEFAULT 1,

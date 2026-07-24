@@ -158,15 +158,15 @@ OAUTH_LOGIN_LOCK_TIMEOUT_SECONDS = 5
 OAUTH_LOGIN_STATUSES = ("awaiting_login", "error")
 REBOOT_HELPER_TIMEOUT_SECONDS = 10
 AGENT_FILE_HELPER_TIMEOUT_SECONDS = 10
-AGENT_FILE_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/read-agent-file"]
-AGENT_FILE_UPLOAD_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/upload-agent-file"]
+AGENT_FILE_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/read-agent-file"]
+AGENT_FILE_UPLOAD_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/upload-agent-file"]
 AGENT_FILE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 AGENT_FILE_UPLOAD_FILENAME_MAX_BYTES = 200
 AGENT_FILE_STREAM_MAX_BYTES = 200_000_000
 AGENT_FILE_STREAM_MEDIA_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime"}
 AGENT_AUTH_CLEAR_HELPER_TIMEOUT_SECONDS = 10
-AGENT_AUTH_CLEAR_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/clear-agent-auth"]
-AGENT_CGROUP_ROOT = Path("/sys/fs/cgroup/trustyclaw_agent.slice")
+AGENT_AUTH_CLEAR_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/clear-agent-auth"]
+AGENT_CGROUP_ROOT = Path("/sys/fs/cgroup/kern_agent.slice")
 PROC_ROOT = Path("/proc")
 AGENT_PROCESS_LIMIT = 1000
 APP_SCOPED_ID_SEPARATOR = app_platform.APP_SCOPED_ID_SEPARATOR
@@ -217,7 +217,7 @@ from host.runtime.admin_api.errors import ApiError
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TrustyClaw/0.1"
+    server_version = "Kern/0.1"
     # Bound how long a single connection may take to send its request line,
     # headers, and body so a slow client cannot pin a worker thread indefinitely.
     timeout = REQUEST_TIMEOUT_SECONDS
@@ -273,7 +273,7 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and path.path == "/v1/logout":
                 self._handle_logout()
                 return
-            bridge_app_id = self.headers.get("X-TrustyClaw-App-Bridge", "") or None
+            bridge_app_id = self.headers.get("X-Kern-App-Bridge", "") or None
             if method == "GET" and path.path == "/v1/agent-files/content":
                 self._send_agent_file(_agent_file_path(parse_qs(path.query)))
                 return
@@ -899,7 +899,7 @@ def reboot_host() -> dict[str, str]:
     moments after the response is sent."""
     try:
         proc = _run_root_helper(
-            ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/reboot-host"],
+            ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/reboot-host"],
             REBOOT_HELPER_TIMEOUT_SECONDS,
         )
     except HelperTimedOut:
@@ -1861,8 +1861,8 @@ def filesystem_metrics() -> dict[str, Any]:
     root = _filesystem_usage("/") or {"used_bytes": 0, "total_bytes": 0}
     mounts = {"root": root}
     for name, path in (
-        ("admin", "/mnt/trustyclaw-admin"),
-        ("agent", "/mnt/trustyclaw-agent"),
+        ("admin", "/mnt/kern-admin"),
+        ("agent", "/mnt/kern-agent"),
     ):
         usage = _filesystem_usage(path)
         if usage is not None:
@@ -2217,7 +2217,7 @@ def main() -> int:
     # database (reconfigure restarts this service, which reloads it).
     admin_password_hash()
     # The agent-facing tools socket and tool execution run in the dedicated
-    # trustyclaw-tools service (its own user, egress, and scoped DB role); the
+    # kern-tools service (its own user, egress, and scoped DB role); the
     # admin service only forwards operator operations to it.
     orchestrator.start_workers()
     threading.Thread(target=maintenance_loop, daemon=True).start()

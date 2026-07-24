@@ -202,7 +202,7 @@ export async function connectTool(toolId) {
     toolsMessage(toolId, "");
     const response = await api("POST", `/v1/tools/${encodeURIComponent(toolId)}/oauth_connect/start`,
       { redirect_uri: oauthRedirectUri() });
-    sessionStorage.setItem("trustyclaw_tool_connect", toolId);
+    sessionStorage.setItem("kern_tool_connect", toolId);
     location.assign(response.authorization_url);
   } catch (error) { toolsMessage(toolId, error.message, true); }
 }
@@ -222,8 +222,8 @@ export async function disconnectTool(toolId) {
 // The caller (app.js start) has already switched to the network tab.
 export async function completeToolConnect() {
   const params = new URLSearchParams(location.search);
-  const toolId = sessionStorage.getItem("trustyclaw_tool_connect");
-  sessionStorage.removeItem("trustyclaw_tool_connect");
+  const toolId = sessionStorage.getItem("kern_tool_connect");
+  sessionStorage.removeItem("kern_tool_connect");
   history.replaceState(null, "", "/");
   if (!toolId) { notice("Tool connect callback had no pending tool."); return; }
   if (!params.get("code")) {

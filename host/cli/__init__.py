@@ -1,1 +1,1 @@
-"""Operator-side TrustyClaw lifecycle CLI package."""
+"""Operator-side Kern lifecycle CLI package."""

@@ -212,8 +212,8 @@ def desktop_smoke(page, url: str) -> None:
     page.evaluate(
         "() => import('/admin_ui/helpers.js').then(({ notice }) => notice('', ''))"
     )
-    expect(page.locator("body")).to_contain_text("trustyclaw-mock")
-    expect(page.locator("#agent-name")).to_have_text("Host: trustyclaw-mock")
+    expect(page.locator("body")).to_contain_text("kern-mock")
+    expect(page.locator("#agent-name")).to_have_text("Host: kern-mock")
     expect(page.locator("#mobile-nav-toggle")).to_be_hidden()
     expect(page.locator("#upgrade-notice")).to_be_visible()
     expect(page.locator("#upgrade-notice")).to_have_attribute(
@@ -227,14 +227,14 @@ def desktop_smoke(page, url: str) -> None:
 
     page.locator("#upgrade-notice").click()
     expect(page.locator("#upgrade-notice")).to_have_attribute(
-        "aria-label", "Your TrustyClaw is at the latest version."
+        "aria-label", "Your Kern is at the latest version."
     )
     expect(page.locator("#upgrade-notice")).to_be_visible()
     expect(page.locator("#upgrade-notice")).to_have_class(re.compile(r"upgrade-current"))
     expect(page.locator("#upgrade-notice .upgrade-check")).to_be_visible()
     expect(page.locator("#upgrade-notice .upgrade-arrow")).to_be_hidden()
     page.locator("#upgrade-notice").hover()
-    expect(page.locator("#upgrade-popover")).to_have_text("Your TrustyClaw is at the latest version.")
+    expect(page.locator("#upgrade-popover")).to_have_text("Your Kern is at the latest version.")
     page.locator("#upgrade-notice").click()
     expect(page.locator("#upgrade-notice")).to_have_attribute(
         "aria-label", "Upgrade available: version 99.0.0. Use your operator plane to upgrade."
@@ -770,7 +770,7 @@ def desktop_smoke(page, url: str) -> None:
         "Hermes (AWS Bedrock) enabled"
     )
     expect(bedrock_row).to_contain_text("enabled")
-    expect(bedrock_row).to_contain_text("arn:aws:iam::123456789012:user/trustyclaw-bedrock")
+    expect(bedrock_row).to_contain_text("arn:aws:iam::123456789012:user/kern-bedrock")
     # One live month-to-date estimate is metered from Hermes's Bedrock responses.
     expect(bedrock_row.locator(".bedrock-usage-box")).to_have_count(1)
     expect(bedrock_row.locator(".bedrock-usage-box")).to_contain_text("MTD est. $12.75")
@@ -790,7 +790,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(hermes_box.locator(".runtime-running-badge")).to_have_count(0)
     counter_task_response = page.request.post(
         f"{url.rstrip('/')}/v1/tasks",
-        headers={"X-TrustyClaw-Csrf": "1"},
+        headers={"X-Kern-Csrf": "1"},
         data={
             "agent_runtime": "hermes",
             "model": "deepseek.v3.2",
@@ -808,7 +808,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(hermes_box).to_contain_text("1 running", timeout=8000)
     killed = page.request.post(
         f"{url.rstrip('/')}/v1/tasks/{counter_task['task_id']}/kill",
-        headers={"X-TrustyClaw-Csrf": "1"},
+        headers={"X-Kern-Csrf": "1"},
     )
     if not killed.ok:
         raise AssertionError(f"could not stop Hermes toolbar counter task: {killed.status} {killed.text()}")
@@ -832,7 +832,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("[data-integration-message='bedrock']")).to_contain_text(
         "AWS credential accepted."
     )
-    expect(bedrock_row).to_contain_text("arn:aws:iam::123456789012:user/trustyclaw-bedrock")
+    expect(bedrock_row).to_contain_text("arn:aws:iam::123456789012:user/kern-bedrock")
     github_row.get_by_role("button", name="Enable", exact=True).click()
     github_message = github_row.locator("[data-integration-message='github']")
     expect(github_message).to_contain_text("GitHub enabled")
@@ -846,15 +846,15 @@ def desktop_smoke(page, url: str) -> None:
     # Enabling expands the row with the repository controls.
     expect(page.locator("#github-expansion")).to_be_visible()
     expect(page.locator("#github-repos")).to_contain_text("No write repositories configured")
-    page.locator("#github-repo").fill("infiloop2/trustyclaw")
+    page.locator("#github-repo").fill("infiloop2/kern")
     page.get_by_role("button", name="Add write repository", exact=True).click()
-    expect(github_message).to_contain_text("Write repository infiloop2/trustyclaw saved")
-    repo_entry = page.locator(".repo-entry", has_text="infiloop2/trustyclaw")
-    expect(repo_entry).to_contain_text("infiloop2/trustyclaw")
+    expect(github_message).to_contain_text("Write repository infiloop2/kern saved")
+    repo_entry = page.locator(".repo-entry", has_text="infiloop2/kern")
+    expect(repo_entry).to_contain_text("infiloop2/kern")
     expect(repo_entry).not_to_contain_text("read-write")
     expect(repo_entry).to_contain_text("1 warning")
     expect(repo_entry).not_to_contain_text("Repository audit could not verify this write target")
-    repo_entry.get_by_label("Toggle repository audit details for infiloop2/trustyclaw").click()
+    repo_entry.get_by_label("Toggle repository audit details for infiloop2/kern").click()
     expect(repo_entry).to_contain_text("Repository audit could not verify this write target")
     expect(repo_entry).to_contain_text("no credential token to audit with")
     # The chevron on the GitHub card collapses and re-expands the details.
@@ -872,7 +872,7 @@ def desktop_smoke(page, url: str) -> None:
     # simulates the agent pushing after its first write repository is added.
     expect(page.locator("#github-require-approval-status")).to_contain_text("held for approval")
     pending_push = page.locator("#github-pending-pushes .pending-push")
-    expect(pending_push).to_contain_text("infiloop2/trustyclaw")
+    expect(pending_push).to_contain_text("infiloop2/kern")
     expect(pending_push).to_contain_text(".github/workflows/deploy.yml")
     expect(pending_push).to_contain_text("pending")
     page.once("dialog", lambda dialog: dialog.accept())
@@ -930,7 +930,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#github-credential-status")).to_contain_text("validation: not_checked")
     # Per-repository audits render next to each repository once a credential
     # is stored, and the re-check action refreshes them.
-    expect(page.locator("#github-repos")).to_contain_text("infiloop2/trustyclaw")
+    expect(page.locator("#github-repos")).to_contain_text("infiloop2/kern")
     expect(page.locator("#github-repos")).to_contain_text("GitHub Actions workflows")
     page.get_by_role("button", name="Re-check repository audits").click()
     expect(github_message).to_contain_text("Repository audits refreshed")
@@ -1167,7 +1167,7 @@ def tools_smoke(page) -> None:
         "local images and videos are uploaded to Runway only when used as inputs"
     )
     expect(page.locator("#preset-info-popover")).to_contain_text(
-        "TrustyClaw does not publish the media"
+        "Kern does not publish the media"
     )
     expect(page.locator("#preset-info-popover")).to_contain_text(
         "saved from Runway's authoritative temporary URL into the agent workspace"
@@ -1319,7 +1319,7 @@ def tools_smoke(page) -> None:
         "numeric audio ids"
     )
     expect(discovery_guide.locator(".guide-data-summary")).to_contain_text(
-        "All data in a discovery request that passes TrustyClaw's validation is sent"
+        "All data in a discovery request that passes Kern's validation is sent"
     )
     expect(discovery_guide.locator(".guide-data-summary")).to_contain_text(
         "retained request metadata and error logs"
@@ -1366,7 +1366,7 @@ def tools_smoke(page) -> None:
     expect(linkedin_guide).to_contain_text("name a LinkedIn Page as its publisher")
     expect(linkedin_guide).to_contain_text("does not add the Page to your profile's Experience section")
     expect(linkedin_guide).to_contain_text(
-        "TrustyClaw connects your personal profile and never reads from or posts to the Page"
+        "Kern connects your personal profile and never reads from or posts to the Page"
     )
     expect(linkedin_guide).to_contain_text("For Business > Create a Company Page > Company")
     expect(linkedin_guide).to_contain_text("Myself Only")
@@ -1382,7 +1382,7 @@ def tools_smoke(page) -> None:
     ).click()
     twitter_guide = page.locator("[data-guide-section='tool:twitter']")
     expect(twitter_guide).to_contain_text("You do not need a separate website")
-    expect(twitter_guide).to_contain_text("public TrustyClaw base URL")
+    expect(twitter_guide).to_contain_text("public Kern base URL")
     expect(twitter_guide.locator(".guide-data-summary")).to_contain_text(
         "Posts, replies, and quote posts"
     )
@@ -1487,7 +1487,7 @@ def mobile_smoke(page, url: str) -> None:
     expect(page.locator("#panel-home")).to_be_visible()
     expect(page.locator("#health")).to_contain_text("ok")
     expect(page.locator("#agent-name")).to_be_visible()
-    expect(page.locator("#agent-name")).to_have_text("Host: trustyclaw-mock")
+    expect(page.locator("#agent-name")).to_have_text("Host: kern-mock")
     expect(page.locator("#mobile-nav-toggle")).to_be_visible()
     expect(page.locator("#mobile-nav-toggle")).to_have_attribute("aria-expanded", "false")
     expect(page.locator("#upgrade-notice")).to_be_visible()

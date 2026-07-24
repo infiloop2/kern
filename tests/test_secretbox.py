@@ -83,10 +83,10 @@ class SecretBoxTests(unittest.TestCase):
         # to migrate a pre-secretbox plaintext row.
         state.save_config(
             {
-                "agent_name": "trustyclaw-test",
+                "agent_name": "kern-test",
                 "admin_password_sha256": "a" * 64,
                 "operator_connections": [
-                    {"mode": "cloudflare_tunnel", "hostname": "trustyclaw.example.com", "tunnel_token": "tok-value"}
+                    {"mode": "cloudflare_tunnel", "hostname": "kern.example.com", "tunnel_token": "tok-value"}
                 ],
             }
         )

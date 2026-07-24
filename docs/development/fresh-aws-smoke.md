@@ -3,7 +3,7 @@
 The fresh smoke deploys a real host from scratch, validates the parts unit tests
 cannot, then tears the host down. Before calling
 `python3 -m host.cli.deploy`, it destroys any stale tagged
-`trustyclaw-smoke` EC2 instance, security group, and durable data volumes so the
+`kern-smoke` EC2 instance, security group, and durable data volumes so the
 strict first-install command starts from empty AWS state. It supplies no Codex,
 Claude, or Hermes credential; credential-dependent runtime checks live in
 the persistent stage test.
@@ -37,7 +37,7 @@ Assumptions (checked, with clear failures):
    [`tests/smoke/iam_policy_smoke.json`](../../tests/smoke/iam_policy_smoke.json) are exported
    as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
 
-The smoke owns its deploy config: it deploys an agent named `trustyclaw-smoke`
+The smoke owns its deploy config: it deploys an agent named `kern-smoke`
 into the region pinned in `tests/smoke/smoke_aws.py` (`SMOKE_REGION`, which matches
 the IAM policy), and generates an ephemeral operator SSH key it discards at
 teardown. So you write no config and create no key.
@@ -60,23 +60,23 @@ python3 tests/smoke/smoke_aws.py
 
 Run this once, ideally in a throwaway or low-blast-radius AWS account, to create
 the least-privilege IAM user. The policy grants only the EC2/SSM actions
-`deploy` uses, requires TrustyClaw tags on created resources, and limits EC2
-updates and cleanup to resources tagged `trustyclaw-host=true`, i.e. only what
+`deploy` uses, requires Kern tags on created resources, and limits EC2
+updates and cleanup to resources tagged `kern-host=true`, i.e. only what
 this tool created. It has no region condition; the deploy config selects the AWS
 region.
 Review [`tests/smoke/iam_policy_smoke.json`](../../tests/smoke/iam_policy_smoke.json), then:
 
 ```bash
 aws iam create-policy \
-  --policy-name trustyclaw-host-smoke \
+  --policy-name kern-host-smoke \
   --policy-document file://tests/smoke/iam_policy_smoke.json
 
-aws iam create-user --user-name trustyclaw-host-smoke
+aws iam create-user --user-name kern-host-smoke
 aws iam attach-user-policy \
-  --user-name trustyclaw-host-smoke \
-  --policy-arn arn:aws:iam::<account-id>:policy/trustyclaw-host-smoke
+  --user-name kern-host-smoke \
+  --policy-arn arn:aws:iam::<account-id>:policy/kern-host-smoke
 
-aws iam create-access-key --user-name trustyclaw-host-smoke
+aws iam create-access-key --user-name kern-host-smoke
 ```
 
 Export the returned access key id and secret as `AWS_ACCESS_KEY_ID` /
@@ -88,13 +88,13 @@ region (the AWS default) — `deploy` errors clearly if it cannot find one.
 
 ## Fresh smoke workflow
 
-`.github/workflows/trustyclaw-smoke.yml` runs the same fresh smoke from GitHub
+`.github/workflows/kern-smoke.yml` runs the same fresh smoke from GitHub
 Actions. Add these repository secrets:
 
 | Secret | Value |
 | --- | --- |
-| `TRUSTYCLAW_SMOKE_AWS_ACCESS_KEY_ID` | Access key id for the smoke IAM user. |
-| `TRUSTYCLAW_SMOKE_AWS_SECRET_ACCESS_KEY` | Secret access key for the smoke IAM user. |
+| `KERN_SMOKE_AWS_ACCESS_KEY_ID` | Access key id for the smoke IAM user. |
+| `KERN_SMOKE_AWS_SECRET_ACCESS_KEY` | Secret access key for the smoke IAM user. |
 
 A repository admin can run it manually with `workflow_dispatch` by selecting a
 branch or tag in the GitHub Run workflow UI. Anyone can request a pull request
@@ -108,13 +108,13 @@ The workflow first runs an `authorize` job that checks out trusted workflow
 actions from `main`. Manual dispatches verify the triggering actor is a
 repository admin. Comment-triggered runs do not require admin permission, but
 they still reject fork PR heads before exposing AWS secrets. The authorize job
-also rejects the request immediately if another `trustyclaw-smoke` run is
-already queued or in progress, with a failing `trustyclaw-smoke` status telling
+also rejects the request immediately if another `kern-smoke` run is
+already queued or in progress, with a failing `kern-smoke` status telling
 the requester to wait for the previous smoke to complete. The shared live AWS
 rate limit rejects the eleventh authorized run started within a rolling
 one-hour window. The smoke job also has a same-group concurrency guard as a
 race-condition backstop so two fresh smoke jobs cannot run at the same time.
 Comment-triggered runs execute from the default-branch workflow, so the workflow
-also writes a `trustyclaw-smoke` commit status on the resolved pull request head
+also writes a `kern-smoke` commit status on the resolved pull request head
 SHA. That status is what makes the smoke result visible in the pull request
 checks area.

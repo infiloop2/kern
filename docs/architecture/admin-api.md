@@ -2,7 +2,7 @@
 
 The admin API binds `127.0.0.1:7443` and is reached through an SSH port forward,
 the optional Cloudflare Tunnel, or both. nftables drops other inbound traffic
-and drops `trustyclaw-agent` loopback traffic to the admin port; the agent can
+and drops `kern-agent` loopback traffic to the admin port; the agent can
 reach only the proxy port. The admin login is the authentication boundary: the
 tunnel carries transport and Cloudflare's edge (DDoS) protection only, with no
 Cloudflare Access gate in front, so the login is hardened to stand alone (see
@@ -24,7 +24,7 @@ admin-process memory and expire after 12 hours idle or 7 days absolute, whicheve
 comes first; `POST /v1/logout` revokes the current one, and a host restart clears
 all sessions (the operator simply logs in again). Because the cookie is the
 credential, every cookie-authenticated request must also carry the
-`X-TrustyClaw-Csrf` header, which same-origin UI code always sends and a
+`X-Kern-Csrf` header, which same-origin UI code always sends and a
 cross-site page cannot; combined with `SameSite=Strict` this closes CSRF.
 
 **HTTPS is mandatory over the tunnel.** The edge sets `X-Forwarded-Proto`, so a
@@ -57,7 +57,7 @@ connection flood or slow client cannot exhaust host threads.
 
 App backends are reached only through the admin API reverse proxy. Each app
 service binds a host-assigned `127.0.0.1` port, and nftables accepts new
-connections to that port only from the `trustyclaw-admin` uid before dropping
+connections to that port only from the `kern-admin` uid before dropping
 the same port for every other local uid. The app receives a host proxy marker,
 not the operator's session credential. Agent runtimes, app service users, and
 ordinary local users cannot call app backend TCP listeners directly.
@@ -79,7 +79,7 @@ timestamp. Claude's check performs a live authenticated usage probe for the
 pinned token, or provider profile attestation for a new or rotated token,
 before it publishes `active`. This lets Claude Code refresh its token and
 prevents a cached-but-rejected credential from staying connected. Codex's
-usage read is also live; if it fails for a pinned account, TrustyClaw asks
+usage read is also live; if it fails for a pinned account, Kern asks
 Codex to force one credential refresh before deciding whether the account is
 still active. A locally cached provider account is therefore insufficient for
 either runtime.
@@ -103,14 +103,14 @@ admin state (the local Postgres database — see
 [Admin state storage](admin-state-storage.md)), and delegate to the
 orchestrator, the selected runtime client, or the fixed sudo helpers. Agent
 file list/read routes cross into the private agent home through
-`read-agent-file`, which demotes to `trustyclaw-agent`, confines paths to
+`read-agent-file`, which demotes to `kern-agent`, confines paths to
 `agent-home`, rejects symlinks, caps listing scan work and responses at 1,000
 entries, opens files nonblocking, and caps reads at 1 MiB.
 
 The raw upload route uses a separate fixed `upload-agent-file` helper. The
 admin service requires an exact `Content-Length`, caps it at 25 MiB, and
 streams the body through stdin without buffering it in memory. The helper
-demotes to `trustyclaw-agent`, rejects unsafe or oversized basenames, opens the
+demotes to `kern-agent`, rejects unsafe or oversized basenames, opens the
 real `user-files/` directory without following symlinks, writes a hidden
 temporary file, and publishes it with a no-overwrite hard link only after all
 declared bytes are durable. This gives upload and runtime access the same
@@ -120,7 +120,7 @@ The orchestrator runs nine worker threads, with a claim cap of three tasks per
 agent runtime.
 
 `GET /v1/agent-processes` is a read-only diagnostic endpoint. It walks
-descendant `cgroup.procs` files under `trustyclaw_agent.slice`, then reads
+descendant `cgroup.procs` files under `kern_agent.slice`, then reads
 basic process metadata from `/proc/<pid>` without sudo or shelling out to `ps`.
 The result is intentionally not task state: turn processes exit shortly after
 their task finishes, and child processes normally inherit the runtime cgroup
@@ -177,10 +177,10 @@ at most 1,000 queued tasks and 20 undelivered steers per task (both 409 past
 the cap). A delivered steer is dropped from state once it is handed to the
 turn — its content is already preserved as a `task.message` event.
 
-A separate process-local poller checks for a newer public TrustyClaw version
+A separate process-local poller checks for a newer public Kern version
 when the admin service starts and every four hours afterward. Because the admin
 user has no egress, it invokes the fixed `check-for-upgrade` root helper, which
-can only read `infiloop2/trustyclaw`'s main-branch `VERSION` file over HTTPS.
+can only read `infiloop2/kern`'s main-branch `VERSION` file over HTTPS.
 The admin service validates and compares the result, then exposes it through
 `/v1/health`. A failed check preserves the last successful advisory result,
 does not degrade host health, and is retried from scratch on the next poll.

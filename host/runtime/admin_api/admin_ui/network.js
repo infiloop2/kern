@@ -526,12 +526,12 @@ function repoAuditSummary(audit) {
 }
 
 function repoAuditDetailsHtml(audit) {
-  if (!audit) return `<div class="audit-banner warning">Repository audit status is unavailable; TrustyClaw has not verified this write target yet.</div>`;
+  if (!audit) return `<div class="audit-banner warning">Repository audit status is unavailable; Kern has not verified this write target yet.</div>`;
   const warnings = Array.isArray(audit.warnings) ? audit.warnings : [];
   if (warnings.length) return warnings.map(warning => `
     <div class="audit-banner ${warning.severity === "critical" ? "critical" : "warning"}">${esc(warning.message)}</div>`).join("");
   if (audit.error) return `<div class="audit-banner warning">audit failed — ${esc(audit.error)}</div>`;
-  if (!audit.audited_at) return `<div class="audit-banner warning">Repository audit has not run yet; TrustyClaw has not verified this write target.</div>`;
+  if (!audit.audited_at) return `<div class="audit-banner warning">Repository audit has not run yet; Kern has not verified this write target.</div>`;
   return `<div class="audit-banner ok">no warnings</div>`;
 }
 

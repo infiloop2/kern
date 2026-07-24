@@ -13,7 +13,7 @@ exfiltrate data?
 
 ## Threat model
 
-- **Adversary:** malicious agent code as `trustyclaw-agent` that can emit
+- **Adversary:** malicious agent code as `kern-agent` that can emit
   arbitrary bytes at the proxy port — malformed HTTP, protocol smuggling,
   odd encodings, WebSocket tricks — and can also drive well-formed traffic
   through the provider SDKs. Assume the agent knows the policy and the proxy
@@ -22,7 +22,7 @@ exfiltrate data?
   operator-approved rule; the non-resolution of denied host names; the
   unreachability of loopback/link-local/private addresses; the OpenAI and
   Anthropic account pins.
-- **Trust boundaries:** the proxy process (`trustyclaw-proxy`) between the
+- **Trust boundaries:** the proxy process (`kern-proxy`) between the
   agent and the internet; nftables as the independent backstop; the
   read-only database role the proxy uses for policy and pins.
 - **In scope:** the whole request lifecycle in `host/runtime/network_proxy/service.py`
@@ -109,7 +109,7 @@ No live proxy run or PoC traffic.
 
 | ID | Status | Severity | Location | Summary |
 | --- | --- | --- | --- | --- |
-| NET-1 | Fixed | High | `host/runtime/admin_api/orchestrator.py:217`, `host/runtime/core/network_policy.py:140` | The managed-provider account pin is sourced from **agent-writable** state, so a malicious agent can redirect it to an attacker-controlled provider account and exfiltrate through the allowed provider domain. For OpenAI, `_seed_runtime_proxy_pin_for_status_check`/`account_status()` derive the account id by running `read-codex-account-id.sh` as `trustyclaw-agent` against `agent-home/.codex/auth.json` and write it into `proxy_provider_pins`; `openai_request_denied` then only checks the request's `ChatGPT-Account-Id` header against that DB pin (and never pins the OpenAI bearer token). There is no operator-controlled anchor for the expected account. A malicious agent overwrites its `auth.json` with valid credentials for an attacker-owned ChatGPT account B, waits for the background poller (`runtime_status_loop`, ≤300s) to re-derive the pin to B, then POSTs arbitrary data to the allowed `api.openai.com`/`chatgpt.com` with `ChatGPT-Account-Id: B` + B's token — the guard passes and the data lands in account B, retrievable by the attacker. The Anthropic guard shares the structure (`read-claude-account.sh` → `access_token_sha256` pin from agent-home credentials), so the same account-redirection exfil applies to Claude. Anchor the pin to operator-approved account state captured at login rather than re-deriving it from agent-home on every refresh, or treat provider domains as untrusted egress under the malicious-agent model. |
+| NET-1 | Fixed | High | `host/runtime/admin_api/orchestrator.py:217`, `host/runtime/core/network_policy.py:140` | The managed-provider account pin is sourced from **agent-writable** state, so a malicious agent can redirect it to an attacker-controlled provider account and exfiltrate through the allowed provider domain. For OpenAI, `_seed_runtime_proxy_pin_for_status_check`/`account_status()` derive the account id by running `read-codex-account-id.sh` as `kern-agent` against `agent-home/.codex/auth.json` and write it into `proxy_provider_pins`; `openai_request_denied` then only checks the request's `ChatGPT-Account-Id` header against that DB pin (and never pins the OpenAI bearer token). There is no operator-controlled anchor for the expected account. A malicious agent overwrites its `auth.json` with valid credentials for an attacker-owned ChatGPT account B, waits for the background poller (`runtime_status_loop`, ≤300s) to re-derive the pin to B, then POSTs arbitrary data to the allowed `api.openai.com`/`chatgpt.com` with `ChatGPT-Account-Id: B` + B's token — the guard passes and the data lands in account B, retrievable by the attacker. The Anthropic guard shares the structure (`read-claude-account.sh` → `access_token_sha256` pin from agent-home credentials), so the same account-redirection exfil applies to Claude. Anchor the pin to operator-approved account state captured at login rather than re-deriving it from agent-home on every refresh, or treat provider domains as untrusted egress under the malicious-agent model. |
 
 I did not find any other policy-bypass path: domain/method/port/scheme/path-guard
 matching and the SSRF vet all hold, and no request reaches an upstream the active

@@ -21,8 +21,8 @@ import sys
 
 from host.bootstrap.render import _render_bootstrap, _write_runtime_code_archive
 
-BOOTSTRAP_PATH = Path("/tmp/trustyclaw_bootstrap.sh")
-CODE_ARCHIVE_PATH = Path("/tmp/trustyclaw-host-code.tar.gz")
+BOOTSTRAP_PATH = Path("/tmp/kern_bootstrap.sh")
+CODE_ARCHIVE_PATH = Path("/tmp/kern-host-code.tar.gz")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     # The checkout holds no secrets, but a stray full source tree on the root
     # volume serves nothing after the runtime install; remove it on success.
     shutil.rmtree(checkout, ignore_errors=True)
-    print("TrustyClaw self-provision complete")
+    print("Kern self-provision complete")
     return 0
 
 

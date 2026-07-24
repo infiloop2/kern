@@ -2,7 +2,7 @@
 
 Agent runtimes call bundled tools through an MCP shim
 (``host.runtime.agent_shim.mcp_shim``) that forwards to this service (the
-dedicated ``trustyclaw-tools`` process; see ``tools_service``). Unix peer
+dedicated ``kern-tools`` process; see ``tools_service``). Unix peer
 credentials give a kernel-verified caller identity, and every route is
 scoped to exactly one peer: the agent uid gets the MCP surface
 (``GET /tools``, ``POST /call``) and the admin uid gets the operator
@@ -51,14 +51,14 @@ from host.runtime.tools import assets as tool_assets, tools_host
 from host.tools import OpenedStreamingAsset, StreamingAssetError
 
 DEFAULT_SOCKET_PATH = TOOLS_SOCKET_PATH
-SOCKET_PATH = os.environ.get("TRUSTYCLAW_TOOLS_SOCKET", DEFAULT_SOCKET_PATH)
+SOCKET_PATH = os.environ.get("KERN_TOOLS_SOCKET", DEFAULT_SOCKET_PATH)
 # Peers are scoped strictly by path: the agent gets exactly the MCP surface
 # (GET /tools, POST /call), and the admin service gets exactly the operator
 # delegation routes (POST /operator/...) that need this service's egress
 # (OAuth code exchange, token revoke) or run tool code that touches
 # third-party data. Neither peer can call the other's routes.
-AGENT_PEER_USER = "trustyclaw-agent"
-ADMIN_PEER_USER = "trustyclaw-admin"
+AGENT_PEER_USER = "kern-agent"
+ADMIN_PEER_USER = "kern-admin"
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 MAX_VIDEO_BODY_BYTES = tool_assets.MAX_VIDEO_BYTES
 MAX_IMAGE_BODY_BYTES = tool_assets.MAX_IMAGE_BYTES
@@ -90,7 +90,7 @@ CHECK_APPROVAL_TOOL = {
     "description": (
         "Check the status of a tool action approval. Approval-gated actions "
         "return an approval_id and wait for the operator to decide in the "
-        "TrustyClaw admin UI; poll this with that id to learn the outcome "
+        "Kern admin UI; poll this with that id to learn the outcome "
         "(pending, approved, denied, expired, executed, or failed)."
     ),
     "input_schema": {
@@ -110,7 +110,7 @@ CHECK_APPROVAL_TOOL = {
 LIST_BUNDLED_TOOLS_TOOL = {
     "name": "list_bundled_tools",
     "description": (
-        "List every tool bundled with this TrustyClaw host and whether it is "
+        "List every tool bundled with this Kern host and whether it is "
         "currently enabled. A tool listed here but not enabled exists on the "
         "host but its actions stay hidden until the operator enables it (and, "
         "for OAuth tools, connects it) in the admin UI's Tools tab — ask the "
@@ -438,8 +438,8 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
                 self.send_response(HTTPStatus.OK.value)
                 self.send_header("Content-Type", media_type)
                 self.send_header("Content-Length", str(size_bytes))
-                self.send_header("X-TrustyClaw-Result", STREAMING_RESULT_HEADER)
-                self.send_header("X-TrustyClaw-Filename", quote(filename, safe=""))
+                self.send_header("X-Kern-Result", STREAMING_RESULT_HEADER)
+                self.send_header("X-Kern-Filename", quote(filename, safe=""))
                 self.send_header("Cache-Control", "private, no-store, max-age=0")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
@@ -581,7 +581,7 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            tool_id = self.headers.get("X-TrustyClaw-Tool") or ""
+            tool_id = self.headers.get("X-Kern-Tool") or ""
             allowed_tools = {"runway", "instagram"} if kind == "video" else {"runway"}
             if tool_id not in allowed_tools:
                 self._send_json(
@@ -598,7 +598,7 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
                     {"error": "The destination tool is not enabled."},
                 )
                 return
-            encoded_filename = self.headers.get("X-TrustyClaw-Filename") or ""
+            encoded_filename = self.headers.get("X-Kern-Filename") or ""
             if len(encoded_filename) > 1024:
                 self._send_json(
                     HTTPStatus.BAD_REQUEST, {"error": f"{kind.title()} filename is too long."}
@@ -688,7 +688,7 @@ class ToolsServer(ThreadingHTTPServer):
 
 def serve_forever(socket_path: str = SOCKET_PATH) -> None:
     """Bind the tools socket and serve it in the foreground (the dedicated
-    trustyclaw-tools service entry point)."""
+    kern-tools service entry point)."""
     ToolsServer(
         socket_path,
         agent_peer_uids(),

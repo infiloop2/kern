@@ -1,4 +1,4 @@
-# Managed by TrustyClaw bootstrap; rewritten on every deploy.
+# Managed by Kern bootstrap; rewritten on every deploy.
 model:
   provider: bedrock
 security:
@@ -10,13 +10,13 @@ skills:
   creation_nudge_interval: 0
 curator:
   enabled: false
-# The bundled tools surface: Hermes spawns the MCP shim as trustyclaw-agent;
+# The bundled tools surface: Hermes spawns the MCP shim as kern-agent;
 # the shim forwards to the host tool sockets, which authenticate the caller by
 # kernel peer credentials. Mirrors the managed Codex and Claude Code MCP
-# wiring; the adapter enables the matching `trustyclaw` toolset per query.
+# wiring; the adapter enables the matching `kern` toolset per query.
 mcp_servers:
-  trustyclaw:
+  kern:
     command: /usr/bin/python3
     args: ["-m", "host.runtime.agent_shim.mcp_shim"]
     env:
-      PYTHONPATH: /opt/trustyclaw-host
+      PYTHONPATH: /opt/kern-host

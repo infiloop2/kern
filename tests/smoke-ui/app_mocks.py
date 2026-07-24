@@ -53,7 +53,7 @@ def _load_app_smoke(app_id: str) -> ModuleType | None:
     if smoke_path is None or not smoke_path.is_file():
         _SMOKE_MODULES[app_id] = None
         return None
-    module_name = f"trustyclaw_smoke_{app_id}"
+    module_name = f"kern_smoke_{app_id}"
     spec = importlib.util.spec_from_file_location(module_name, smoke_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load app smoke module: {smoke_path}")

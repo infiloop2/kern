@@ -4,7 +4,7 @@ Agent harnesses cannot call the tool services directly — they speak MCP.
 This shim is the bridge: Claude Code (``--mcp-config``), Codex
 (``mcp_servers`` in ``/etc/codex/managed_config.toml``), Hermes
 (``mcp_servers`` in the managed ``~/.hermes/config.yaml``) spawn it as
-``trustyclaw-agent`` for each session. It serves the MCP handshake plus
+``kern-agent`` for each session. It serves the MCP handshake plus
 ``tools/list`` and ``tools/call`` over stdio (newline-delimited JSON-RPC),
 and forwards both over Unix sockets whose services authenticate the calling
 user by kernel peer credentials:
@@ -41,12 +41,12 @@ import urllib.parse
 
 from host import constants
 
-SOCKET_PATH = os.environ.get("TRUSTYCLAW_TOOLS_SOCKET", constants.TOOLS_SOCKET_PATH)
+SOCKET_PATH = os.environ.get("KERN_TOOLS_SOCKET", constants.TOOLS_SOCKET_PATH)
 AGENT_APP_SOCKET_PATH = os.environ.get(
-    "TRUSTYCLAW_AGENT_APP_SOCKET", constants.AGENT_APP_SOCKET_PATH
+    "KERN_AGENT_APP_SOCKET", constants.AGENT_APP_SOCKET_PATH
 )
 AGENT_NETWORK_SOCKET_PATH = os.environ.get(
-    "TRUSTYCLAW_AGENT_NETWORK_SOCKET",
+    "KERN_AGENT_NETWORK_SOCKET",
     constants.AGENT_NETWORK_SOCKET_PATH,
 )
 APP_API_TOOL_NAME = "app_api"
@@ -54,7 +54,7 @@ NETWORK_TOOL_NAMES = frozenset({"list_network_integrations", "recent_network_den
 REQUEST_TIMEOUT_SECONDS = 120
 PENDING_APPROVAL_HINT = (
     "This action needs operator approval. Tell the user to approve or deny it "
-    "in the TrustyClaw admin UI (Tools tab), then check the outcome with the "
+    "in the Kern admin UI (Tools tab), then check the outcome with the "
     "check_tool_approval tool."
 )
 MAX_VIDEO_BYTES = 200_000_000
@@ -68,7 +68,7 @@ STREAMING_MEDIA_TYPE_RE = re.compile(
 STAGE_VIDEO_TOOL = {
     "name": "stage_video",
     "description": (
-        "Stream an agent-workspace MP4 or MOV into the private TrustyClaw tools service "
+        "Stream an agent-workspace MP4 or MOV into the private Kern tools service "
         "for Runway editing or an approval-gated Instagram Reel. Returns a short-lived, "
         "tool-scoped video_asset_id; pass it directly to the consuming tool and never "
         "store it as durable app state."
@@ -93,7 +93,7 @@ STAGE_VIDEO_TOOL = {
 STAGE_IMAGE_TOOL = {
     "name": "stage_image",
     "description": (
-        "Stream an agent-workspace JPEG, PNG, or WebP into the private TrustyClaw tools "
+        "Stream an agent-workspace JPEG, PNG, or WebP into the private Kern tools "
         "service for Runway. Returns a short-lived image_asset_id to pass directly to "
         "runway_generate_video; never store it as durable app state."
     ),
@@ -162,7 +162,7 @@ def _materialize_stream(response: http.client.HTTPResponse) -> dict[str, Any]:
     media_type = response.getheader("Content-Type", "").strip().lower()
     if not STREAMING_MEDIA_TYPE_RE.fullmatch(media_type):
         raise RuntimeError("Tool asset stream returned an unsupported media type.")
-    encoded_filename = response.getheader("X-TrustyClaw-Filename", "")
+    encoded_filename = response.getheader("X-Kern-Filename", "")
     if not 1 <= len(encoded_filename) <= 1024:
         raise RuntimeError("Tool asset stream returned an invalid filename.")
     try:
@@ -179,7 +179,7 @@ def _materialize_stream(response: http.client.HTTPResponse) -> dict[str, Any]:
         raise RuntimeError("Tool asset stream returned an invalid filename.")
 
     agent_home = os.path.realpath(
-        os.environ.get("HOME") or "/mnt/trustyclaw-agent/agent-home"
+        os.environ.get("HOME") or "/mnt/kern-agent/agent-home"
     )
     asset_directory = os.path.join(agent_home, "tool_assets")
     try:
@@ -260,7 +260,7 @@ def _tools_action_request(
         response = connection.getresponse()
         if (
             response.status == 200
-            and response.getheader("X-TrustyClaw-Result") == STREAMING_RESULT_HEADER
+            and response.getheader("X-Kern-Result") == STREAMING_RESULT_HEADER
         ):
             return {"status": "executed", "result": _materialize_stream(response)}
         raw = response.read()
@@ -351,8 +351,8 @@ def _stage_asset(arguments: dict[str, Any], *, kind: str) -> dict[str, Any]:
             headers = {
                 "Content-Type": media_type,
                 "Content-Length": str(info.st_size),
-                "X-TrustyClaw-Tool": str(for_tool),
-                "X-TrustyClaw-Filename": urllib.parse.quote(filename, safe=""),
+                "X-Kern-Tool": str(for_tool),
+                "X-Kern-Filename": urllib.parse.quote(filename, safe=""),
             }
             with os.fdopen(descriptor, "rb", closefd=False) as source:
                 try:
@@ -399,7 +399,7 @@ def _workspace_local_path(path: Any) -> tuple[str, str]:
         raise RuntimeError("workspace path must not contain dot segments.")
     public_path = "/" + "/".join(parts)
     agent_home = os.path.realpath(
-        os.environ.get("HOME") or "/mnt/trustyclaw-agent/agent-home"
+        os.environ.get("HOME") or "/mnt/kern-agent/agent-home"
     )
     local_path = os.path.join(agent_home, *parts)
     if os.path.commonpath((agent_home, os.path.realpath(local_path))) != agent_home:
@@ -495,7 +495,7 @@ def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
         return {
             "protocolVersion": params.get("protocolVersion") or "2025-06-18",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "trustyclaw-tools", "version": "1.0.0"},
+            "serverInfo": {"name": "kern-tools", "version": "1.0.0"},
         }
     if method == "tools/list":
         return {"tools": _list_tools()}

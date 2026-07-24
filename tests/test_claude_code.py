@@ -720,10 +720,10 @@ class ToolsMcpConfigTests(unittest.TestCase):
         import json
 
         config = json.loads(claude_code.TOOLS_MCP_CONFIG)
-        shim = config["mcpServers"]["trustyclaw"]
+        shim = config["mcpServers"]["kern"]
         self.assertEqual(shim["command"], "/usr/bin/python3")
         self.assertEqual(shim["args"], ["-m", "host.runtime.agent_shim.mcp_shim"])
-        self.assertEqual(shim["env"], {"PYTHONPATH": "/opt/trustyclaw-host"})
+        self.assertEqual(shim["env"], {"PYTHONPATH": "/opt/kern-host"})
 
         # Echo the CLI argv back through the turn result to pin the flags the
         # runtime actually passes.

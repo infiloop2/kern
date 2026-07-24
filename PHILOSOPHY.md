@@ -1,6 +1,6 @@
 # Philosophy
 
-I made TrustyClaw because of a set of beliefs and hypotheses about running
+I made Kern because of a set of beliefs and hypotheses about running
 AI agents. They also guide its design and evolution.
 
 - **Rigor at the boundary, freedom inside.** The host, its tools, and the

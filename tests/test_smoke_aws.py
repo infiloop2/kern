@@ -75,9 +75,9 @@ class AwsSmokeTeardownTests(unittest.TestCase):
             smoke.check_precredential_bedrock_harness_launchers()
 
         joined = "\n".join(commands)
-        self.assertIn("sudo -u trustyclaw-admin", joined)
+        self.assertIn("sudo -u kern-admin", joined)
         self.assertEqual(joined.count("--model qwen.qwen3-coder-next"), 1)
-        self.assertIn("/usr/local/lib/trustyclaw-host/run-hermes", joined)
+        self.assertIn("/usr/local/lib/kern-host/run-hermes", joined)
         self.assertIn("--model qwen.qwen3-coder-next", joined)
         self.assertEqual(smoke.passed, 1)
 
@@ -93,7 +93,7 @@ class AwsSmokeTeardownTests(unittest.TestCase):
             class _Proc:
                 stdout = json.dumps(
                     {
-                        "agent_name": "trustyclaw-smoke",
+                        "agent_name": "kern-smoke",
                         "instance_id": "i-smoke",
                         "region": "us-east-1",
                         "public_dns": "smoke.example.com",
@@ -116,7 +116,7 @@ class AwsSmokeTeardownTests(unittest.TestCase):
 
         self.assertEqual(calls[0][1:3], ["-m", "host.cli.deploy"])
         self.assertIn("--agent-name", calls[0])
-        self.assertEqual(calls[0][calls[0].index("--agent-name") + 1], "trustyclaw-smoke")
+        self.assertEqual(calls[0][calls[0].index("--agent-name") + 1], "kern-smoke")
         self.assertIn("--operator-ssh-public-key", calls[0])
         self.assertIn("--admin-password-sha256", calls[0])
         self.assertNotIn("--config", calls[0])
@@ -185,7 +185,7 @@ class StageAwsSmokeTests(unittest.TestCase):
             result_path.write_text(
                 json.dumps(
                     {
-                        "agent_name": "trustyclaw-smoke",
+                        "agent_name": "kern-smoke",
                         "region": "us-east-1",
                         "public_dns": "smoke.example.com",
                         "admin_password": "stable-admin",
@@ -195,17 +195,17 @@ class StageAwsSmokeTests(unittest.TestCase):
             ssh_key = tmp_path / "stage_operator"
             ssh_key.write_text("private key")
 
-            with self.assertRaisesRegex(AssertionError, "expected 'trustyclaw-stage'"):
+            with self.assertRaisesRegex(AssertionError, "expected 'kern-stage'"):
                 StageAwsSmoke(result_path, ssh_key)
 
     def test_stage_upgrade_result_requires_admin_password_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            result_path = tmp_path / "trustyclaw-stage.json"
+            result_path = tmp_path / "kern-stage.json"
             result_path.write_text(
                 json.dumps(
                     {
-                        "agent_name": "trustyclaw-stage",
+                        "agent_name": "kern-stage",
                         "region": "us-east-1",
                         "public_dns": "stage.example.com",
                     }
@@ -223,11 +223,11 @@ class StageAwsSmokeTests(unittest.TestCase):
     def test_stage_uses_admin_password_env_when_upgrade_result_omits_password(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            result_path = tmp_path / "trustyclaw-stage.json"
+            result_path = tmp_path / "kern-stage.json"
             result_path.write_text(
                 json.dumps(
                     {
-                        "agent_name": "trustyclaw-stage",
+                        "agent_name": "kern-stage",
                         "region": "us-east-1",
                         "public_dns": "stage.example.com",
                     }
@@ -243,11 +243,11 @@ class StageAwsSmokeTests(unittest.TestCase):
     def test_stage_accepts_start_result_with_admin_password_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            result_path = tmp_path / "trustyclaw-stage.json"
+            result_path = tmp_path / "kern-stage.json"
             result_path.write_text(
                 json.dumps(
                     {
-                        "agent_name": "trustyclaw-stage",
+                        "agent_name": "kern-stage",
                         "operation": "start",
                         "state": "running",
                         "region": "us-east-1",
@@ -316,9 +316,9 @@ class StageAwsSmokeTests(unittest.TestCase):
 
         smoke._api = fake_api  # type: ignore[method-assign]
         environment = {
-            "TRUSTYCLAW_STAGE_BRAVE_SEARCH_API_KEY": "brave-key",
-            "TRUSTYCLAW_STAGE_GOOGLE_OAUTH_CLIENT_ID": "must-not-be-read",
-            "TRUSTYCLAW_STAGE_GOOGLE_OAUTH_CLIENT_SECRET": "must-not-be-read",
+            "KERN_STAGE_BRAVE_SEARCH_API_KEY": "brave-key",
+            "KERN_STAGE_GOOGLE_OAUTH_CLIENT_ID": "must-not-be-read",
+            "KERN_STAGE_GOOGLE_OAUTH_CLIENT_SECRET": "must-not-be-read",
         }
         with patch.dict("os.environ", environment, clear=False):
             smoke.autoconfigure_tools(("brave_search", "gmail"))
@@ -350,7 +350,7 @@ class StageAwsSmokeTests(unittest.TestCase):
         self.assertIn("stage admin UI", failures[0])
         self.assertIn("connect its stage account once", failures[0])
         self.assertIn("enable the tool", failures[0])
-        self.assertNotIn("TRUSTYCLAW_STAGE_GOOGLE", failures[0])
+        self.assertNotIn("KERN_STAGE_GOOGLE", failures[0])
 
     def test_fresh_smoke_has_valid_input_for_every_bundled_action(self) -> None:
         covered = {
@@ -424,9 +424,9 @@ class StageAwsSmokeTests(unittest.TestCase):
 
     def test_stage_enforcement_policy_lists_stage_repo_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            result_path = Path(tmp) / "trustyclaw-stage.json"
+            result_path = Path(tmp) / "kern-stage.json"
             result_path.write_text(
-                json.dumps({"agent_name": "trustyclaw-stage", "region": "us-east-1", "public_dns": "stage.example.com"})
+                json.dumps({"agent_name": "kern-stage", "region": "us-east-1", "public_dns": "stage.example.com"})
             )
             ssh_key = Path(tmp) / "stage_operator"
             ssh_key.write_text("private key")
@@ -434,14 +434,14 @@ class StageAwsSmokeTests(unittest.TestCase):
         smoke.stage_github_repositories = [{"owner": "sandbox-owner", "repo": "sandbox"}]
         repos = smoke.enforcement_policy()["network_integrations"]["github"]["write_repositories"]
         self.assertEqual(repos[0], {"owner": "sandbox-owner", "repo": "sandbox"})
-        self.assertIn({"owner": "infiloop2", "repo": "trustyclaw"}, repos)
+        self.assertIn({"owner": "infiloop2", "repo": "kern"}, repos)
 
 
 class WorkflowSmokeTests(unittest.TestCase):
     def test_stage_workflows_use_first_class_power_cli(self) -> None:
-        stage = Path(".github/workflows/trustyclaw-stage.yml").read_text()
-        stage_start = Path(".github/workflows/trustyclaw-stage-start.yml").read_text()
-        stage_stop = Path(".github/workflows/trustyclaw-stage-stop.yml").read_text()
+        stage = Path(".github/workflows/kern-stage.yml").read_text()
+        stage_start = Path(".github/workflows/kern-stage-start.yml").read_text()
+        stage_stop = Path(".github/workflows/kern-stage-stop.yml").read_text()
 
         self.assertIn("python3 -m host.cli.start", stage)
         self.assertIn("python3 -m host.cli.stop", stage)
@@ -458,17 +458,17 @@ class WorkflowSmokeTests(unittest.TestCase):
         for workflow in (stage, stage_start, stage_stop):
             self.assertNotIn("--config", workflow)
             self.assertNotIn("config.json", workflow)
-        self.assertIn("--agent-name trustyclaw-stage", stage_start)
-        self.assertIn("--agent-name trustyclaw-stage", stage_stop)
+        self.assertIn("--agent-name kern-stage", stage_start)
+        self.assertIn("--agent-name kern-stage", stage_stop)
         self.assertIn("--operator-ssh-public-key", stage)
-        self.assertIn("> trustyclaw-stage.json", stage)
+        self.assertIn("> kern-stage.json", stage)
         removed_action = "start-stage" + "-instance"
         self.assertNotIn(removed_action, stage)
         self.assertNotIn(removed_action, stage_start)
         self.assertNotIn(removed_action, stage_stop)
 
     def test_stage_workflow_exposes_only_enable_only_tool_secrets(self) -> None:
-        stage = Path(".github/workflows/trustyclaw-stage.yml").read_text()
+        stage = Path(".github/workflows/kern-stage.yml").read_text()
         for option in ("all", *TOOL_SUITES, "claude", "codex", "github"):
             self.assertIn(f"- {option}", stage)
         self.assertIn("--suite", stage)
@@ -484,13 +484,13 @@ class WorkflowSmokeTests(unittest.TestCase):
         for env_name in (
             "STAGE_BEDROCK_AWS_ACCESS_KEY_ID",
             "STAGE_BEDROCK_AWS_SECRET_ACCESS_KEY",
-            "TRUSTYCLAW_STAGE_BEDROCK_AWS_ACCESS_KEY_ID",
-            "TRUSTYCLAW_STAGE_BEDROCK_AWS_SECRET_ACCESS_KEY",
+            "KERN_STAGE_BEDROCK_AWS_ACCESS_KEY_ID",
+            "KERN_STAGE_BEDROCK_AWS_SECRET_ACCESS_KEY",
         ):
             self.assertIn(env_name, stage)
         for tool_id in TOOL_SUITES:
             for requirement in BUNDLED_TOOLS[tool_id].manifest.config:
-                env_name = f"TRUSTYCLAW_STAGE_{requirement.key}"
+                env_name = f"KERN_STAGE_{requirement.key}"
                 mapping = f"{env_name}: ${{{{ secrets.{env_name} }}}}"
                 if BUNDLED_TOOLS[tool_id].manifest.connection == "oauth":
                     self.assertNotIn(mapping, stage)
@@ -498,14 +498,14 @@ class WorkflowSmokeTests(unittest.TestCase):
                     self.assertIn(mapping, stage)
 
     def test_fresh_smoke_workflow_uses_fresh_smoke_script(self) -> None:
-        smoke = Path(".github/workflows/trustyclaw-smoke.yml").read_text()
+        smoke = Path(".github/workflows/kern-smoke.yml").read_text()
 
         self.assertIn("playwright==1.60.0", smoke)
         self.assertIn("playwright==1.60.0", Path("tests/requirements.txt").read_text())
-        self.assertIn('"${RUNNER_TEMP}/trustyclaw-smoke-venv/bin/python" tests/smoke/smoke_aws.py', smoke)
+        self.assertIn('"${RUNNER_TEMP}/kern-smoke-venv/bin/python" tests/smoke/smoke_aws.py', smoke)
         self.assertLess(smoke.index("playwright==1.60.0"), smoke.index("AWS_ACCESS_KEY_ID"))
-        self.assertIn("context trustyclaw-smoke", smoke)
+        self.assertIn("context kern-smoke", smoke)
         self.assertIn("github.event_name == 'workflow_dispatch'", smoke)
         self.assertIn("Fresh AWS smoke is already running; wait for the previous smoke to complete.", smoke)
         self.assertIn("for status in queued in_progress", smoke)
-        self.assertIn("group: trustyclaw-smoke", smoke)
+        self.assertIn("group: kern-smoke", smoke)

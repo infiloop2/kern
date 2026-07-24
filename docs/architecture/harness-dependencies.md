@@ -1,6 +1,6 @@
 # Runtime Harness Dependencies
 
-TrustyClaw treats Codex, Claude Code, and Hermes as external runtime
+Kern treats Codex, Claude Code, and Hermes as external runtime
 harnesses. The host owns process supervision, task state, network policy, and privilege
 boundaries, but it depends on specific CLI protocols, auth files, and network
 request shapes from those harnesses. This document lists the expectations that
@@ -24,21 +24,21 @@ review, not a package-only change.
 
 Every harness must keep these properties:
 
-- They can run non-interactively as `trustyclaw-agent` with `HOME` set to
-  `/mnt/trustyclaw-agent/agent-home`.
+- They can run non-interactively as `kern-agent` with `HOME` set to
+  `/mnt/kern-agent/agent-home`.
 - They store durable harness state under the agent home so redeploys and service
   restarts preserve login and conversation continuity. Most conversation and
-  session state is opaque to TrustyClaw: the harness only needs to keep it
+  session state is opaque to Kern: the harness only needs to keep it
   compatible with its own future versions.
 - They respect `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`,
   `NODE_EXTRA_CA_CERTS`, and the local proxy CA enough for all data-plane and
-  auth traffic to traverse the TrustyClaw proxy.
+  auth traffic to traverse the Kern proxy.
 - They can be launched through a root-owned sudo helper that immediately
-  demotes to `trustyclaw-agent`.
+  demotes to `kern-agent`.
 - A running task can be stopped by closing stdin and, if needed, terminating the
   child process.
 - Their account state can be checked without interactive prompts and without
-  giving `trustyclaw-admin` direct read access to the agent home. Unlike
+  giving `kern-admin` direct read access to the agent home. Unlike
   conversation/session state, the account helpers do parse specific auth file
   locations and fields listed below.
 
@@ -49,31 +49,31 @@ network guards, or privilege boundary can fail.
 
 ### Process interface
 
-TrustyClaw starts Codex through:
+Kern starts Codex through:
 
 ```text
 codex app-server --listen stdio://
 ```
 
 The app-server is expected to speak newline-delimited JSON-RPC over stdio.
-TrustyClaw sends `initialize` followed by the `initialized` notification before
+Kern sends `initialize` followed by the `initialized` notification before
 any account or task calls.
 
 Expected methods:
 
 | Method | Expected behavior |
 | --- | --- |
-| `account/read` | Accepts a `refreshToken` boolean and returns a JSON object with an `account` field. Normal status reads pass `false`; if the live usage probe fails for a pinned account, TrustyClaw retries with `true` so Codex validates or refreshes its credential before the UI reports connected. A ChatGPT account contains `email` and `planType`; any provider-specific account type is intentionally ignored. A falsey account means login is still required. |
-| `account/rateLimits/read` | Returns Codex usage-limit snapshots. TrustyClaw exposes only the default `rateLimits` snapshot in admin API responses; per-limit `rateLimitsByLimitId` entries and duplicated snapshot identity fields are intentionally not returned. Rate-limit windows contain `usedPercent`, `windowDurationMins`, and `resetsAt`; the default snapshot may contain `credits`. |
+| `account/read` | Accepts a `refreshToken` boolean and returns a JSON object with an `account` field. Normal status reads pass `false`; if the live usage probe fails for a pinned account, Kern retries with `true` so Codex validates or refreshes its credential before the UI reports connected. A ChatGPT account contains `email` and `planType`; any provider-specific account type is intentionally ignored. A falsey account means login is still required. |
+| `account/rateLimits/read` | Returns Codex usage-limit snapshots. Kern exposes only the default `rateLimits` snapshot in admin API responses; per-limit `rateLimitsByLimitId` entries and duplicated snapshot identity fields are intentionally not returned. Rate-limit windows contain `usedPercent`, `windowDurationMins`, and `resetsAt`; the default snapshot may contain `credits`. |
 | `account/login/start` | Accepts `{"type": "chatgptDeviceCode"}` and returns `type`, `loginId`, `verificationUrl`, and `userCode`. |
-| `thread/start` | Accepts `cwd`, `approvalPolicy`, `sandbox`, developer instructions, and the selected `model`. TrustyClaw appends the validated app manifest instructions for app-scoped threads. Returns `thread.id`. |
+| `thread/start` | Accepts `cwd`, `approvalPolicy`, `sandbox`, developer instructions, and the selected `model`. Kern appends the validated app manifest instructions for app-scoped threads. Returns `thread.id`. |
 | `thread/resume` | Accepts `threadId`, `cwd`, the selected `model`, and refreshed developer instructions. Returns a resumed `thread.id`, or fails when the thread cannot be resumed. |
 | `turn/start` | Accepts `threadId`, text input, and the selected `model` and `effort`. Returns `turn.id`. It may emit notifications before the response. |
 | `turn/steer` | Accepts `threadId`, `expectedTurnId`, and text input. A `no active turn` error is treated as transient during startup. |
 
 The pinned Codex catalog must advertise `gpt-5.6-terra` and `gpt-5.6-sol`
 with `high`, `max`, and `ultra`, plus `gpt-5.6-luna` with `high` and `max`.
-TrustyClaw intentionally exposes only that small subset; the API rejects
+Kern intentionally exposes only that small subset; the API rejects
 unsupported pairs before a task is queued.
 
 Expected notifications:
@@ -91,7 +91,7 @@ client must be able to keep it for the task event stream.
 ### Auth and account identity
 
 Codex device-code login must continue polling while the app-server process that
-started login stays alive. TrustyClaw therefore keeps that app-server alive
+started login stays alive. Kern therefore keeps that app-server alive
 until its completed login is captured as the trusted account, a new login
 starts, or an operator resets the linked account.
 Linked-account reset also clears local Codex auth files and closes live Codex
@@ -102,7 +102,7 @@ successful `account/login/completed` notification with the matching `loginId`.
 That notification (like `account/read`) carries only `loginId`, `success`, and
 `error`; it does not include a ChatGPT account id. So the completion only
 attests that the operator's device login for that `loginId` succeeded on the
-app-server TrustyClaw started; the account id itself is read from the login
+app-server Kern started; the account id itself is read from the login
 tokens through `read-codex-account-id` (the provider-signed `chatgpt_account_id`
 claim) promptly after completion. An active `account/read` result by itself is
 not operator approval for the stored device-code flow. The residual window
@@ -112,7 +112,7 @@ The resulting OpenAI provider account row is tagged with
 `operator_approval: "codex_device_login"`; rows without that marker are
 legacy/unapproved state and never publish a proxy pin.
 
-`account/read` is not assumed to expose the ChatGPT account id. TrustyClaw reads
+`account/read` is not assumed to expose the ChatGPT account id. Kern reads
 the account id through `read-codex-account-id`, which parses a small part of
 Codex auth state at:
 
@@ -132,11 +132,11 @@ Supported account-id sources, in order:
 
 For steady-state status refresh, an active Codex account without one of those
 account-id sources is treated as a runtime error, because the proxy cannot pin
-OpenAI data-plane traffic to the logged-in account. TrustyClaw stores only the
+OpenAI data-plane traffic to the logged-in account. Kern stores only the
 operator-approved account id in admin and proxy state, not the tokens needed to
 recreate Codex auth files.
 
-TrustyClaw keeps the observed `account/read` identity fields (`email`, and
+Kern keeps the observed `account/read` identity fields (`email`, and
 `planType` stored as the common `plan_type` field) in admin state; the Admin
 API exposes stored account metadata as is, so sanitization happens once, at
 capture. It reads Codex usage limits from
@@ -194,14 +194,14 @@ to cached (`allowed_web_search_modes = ["cached"]`, which excludes `live` and
 `indexed`) and disable Codex app/plugin/browse feature surfaces (`apps`,
 `plugins`, `tool_search`, `tool_suggest`, `computer_use`, `remote_plugin`,
 `plugin_sharing`) so the agent does not attempt a proxy-denied tool, plus
-`/mnt/trustyclaw-agent/agent-home/.codex/config.toml` from
+`/mnt/kern-agent/agent-home/.codex/config.toml` from
 `host/bootstrap/agent-home/.codex/config.toml`. That file must set
 `approval_policy = "never"`, `sandbox_mode = "danger-full-access"`, and trust
-`/mnt/trustyclaw-agent/agent-home`. Bootstrap installs it root-owned, readable,
+`/mnt/kern-agent/agent-home`. Bootstrap installs it root-owned, readable,
 and immutable so the agent cannot edit or delete the active policy file. The
 proxy guard is still required as the web-search enforcement layer. The root-owned
 managed config layer `/etc/codex/managed_config.toml` also registers the bundled
-tools MCP server (`mcp_servers.trustyclaw` spawning `host.runtime.agent_shim.mcp_shim`),
+tools MCP server (`mcp_servers.kern` spawning `host.runtime.agent_shim.mcp_shim`),
 so Codex must keep reading both root-owned `/etc/codex` layers and spawning
 configured stdio MCP servers as the runtime user.
 
@@ -209,7 +209,7 @@ configured stdio MCP servers as the runtime user.
 
 ### Process interface
 
-TrustyClaw starts one Claude Code process per task turn through:
+Kern starts one Claude Code process per task turn through:
 
 ```text
 claude -p --input-format stream-json --output-format stream-json --verbose \
@@ -219,13 +219,13 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
   [--append-system-prompt <validated app instructions>]
 ```
 
-TrustyClaw passes the session selection on every new and resumed process.
+Kern passes the session selection on every new and resumed process.
 Claude Code `2.1.206` accepts the exposed model aliases `opus`, `fable`, and
 `sonnet`; it also accepts `high`, `max`, and the session-only `ultracode`
 effort. `ultracode` combines xhigh effort with dynamic workflow orchestration,
 so an older CLI that silently ignores that value is not compatible.
 
-Bootstrap installs `/mnt/trustyclaw-agent/agent-home/.claude/settings.json`
+Bootstrap installs `/mnt/kern-agent/agent-home/.claude/settings.json`
 from `host/bootstrap/agent-home/.claude/settings.json` (root-owned, readable,
 immutable). It sets `permissions.defaultMode = "bypassPermissions"` and
 `skipDangerousModePermissionPrompt = true`; `--setting-sources user` keeps stale
@@ -265,7 +265,7 @@ settings layer were bypassed, web search stays off unless the operator enabled
 it.
 
 `--strict-mcp-config` plus the inline `--mcp-config` make the bundled tools
-shim (`host.runtime.agent_shim.mcp_shim`, spawned as `trustyclaw-agent`) the only
+shim (`host.runtime.agent_shim.mcp_shim`, spawned as `kern-agent`) the only
 MCP server; with no tools enabled it lists nothing. The invocation
 deliberately does not pass `--safe-mode`: the pinned CLI drops every non-SDK
 MCP server in safe mode, which would disable the bundled tools entirely. The
@@ -274,14 +274,14 @@ policy proxy), not from harness flags, and `--strict-mcp-config` already
 ignores any MCP configuration outside the host-supplied one.
 
 Bootstrap installs the same `host/bootstrap/agent-home/agents_claude.md`
-contents to `/mnt/trustyclaw-agent/agent-home/AGENTS.md` and
-`/mnt/trustyclaw-agent/agent-home/CLAUDE.md`. That source file must tell agents
-they are running on a TrustyClaw host with full local shell/file permissions,
-must not prompt for local approvals, and must use TrustyClaw network-policy
+contents to `/mnt/kern-agent/agent-home/AGENTS.md` and
+`/mnt/kern-agent/agent-home/CLAUDE.md`. That source file must tell agents
+they are running on a Kern host with full local shell/file permissions,
+must not prompt for local approvals, and must use Kern network-policy
 failures as operator allowlist requests. The installed host files are also
 root-owned, readable, and immutable.
 
-When resuming a thread, TrustyClaw appends:
+When resuming a thread, Kern appends:
 
 ```text
 --resume <session_id>
@@ -299,7 +299,7 @@ Expected stdout messages:
 | --- | --- |
 | `type == "assistant"` | Assistant text is read from `message.content[]` blocks where `type == "text"`. |
 | `type == "result"` | Ends one submitted user message when `subtype == "success"` and `is_error` is not true. |
-| `session_id` | May appear on assistant or result messages; the final turn must provide a session id so TrustyClaw can resume future tasks. |
+| `session_id` | May appear on assistant or result messages; the final turn must provide a session id so Kern can resume future tasks. |
 
 Steering is implemented by writing more user messages to the same stream while
 the process is running. The adapter waits for one successful `result` per user
@@ -307,7 +307,7 @@ message submitted to that process, including steers.
 
 ### Auth and account identity
 
-TrustyClaw requires Claude Code to use Claude.ai OAuth, not another auth method.
+Kern requires Claude Code to use Claude.ai OAuth, not another auth method.
 Account status is checked through:
 
 ```text
@@ -332,7 +332,7 @@ claude -p /usage --output-format json
 ```
 
 This live probe makes Claude Code authenticate and gives the CLI ownership of
-refreshing an expired access token. TrustyClaw reads the credential hash again
+refreshing an expired access token. Kern reads the credential hash again
 after the probe. If refresh rotated it, the old proxy pin can safely deny that
 probe's first retry; the orchestrator notices the new hash, attests it through
 the profile endpoint below, and atomically replaces the pin. First capture and
@@ -367,24 +367,24 @@ The login command must print a line matching:
 If the browser didn't open, visit: <https-url>
 ```
 
-TrustyClaw returns that URL to the admin UI, then later writes the browser code
+Kern returns that URL to the admin UI, then later writes the browser code
 to the same process stdin.
 
 The proxy guard pins Anthropic data-plane traffic on the OAuth bearer token
 hash. `read-claude-account` parses a small part of Claude Code auth state from
 one of these locations. In production, both the Claude launcher and account
-helper set `CLAUDE_CONFIG_DIR=/mnt/trustyclaw-agent/agent-home/.claude`.
+helper set `CLAUDE_CONFIG_DIR=/mnt/kern-agent/agent-home/.claude`.
 
 | Data | Expected locations |
 | --- | --- |
-| OAuth account metadata | `/mnt/trustyclaw-agent/agent-home/.claude/.claude.json`, `/mnt/trustyclaw-agent/agent-home/.claude.json`, or `~/.claude.json` |
-| OAuth tokens | `/mnt/trustyclaw-agent/agent-home/.claude/.credentials.json` or `~/.claude/.credentials.json` |
+| OAuth account metadata | `/mnt/kern-agent/agent-home/.claude/.claude.json`, `/mnt/kern-agent/agent-home/.claude.json`, or `~/.claude.json` |
+| OAuth tokens | `/mnt/kern-agent/agent-home/.claude/.credentials.json` or `~/.claude/.credentials.json` |
 
 The credentials file must contain `claudeAiOauth.accessToken`. The helper stores
 only `sha256(accessToken)` plus optional `account_id`, `organization_id`, and
 `email`; it never copies the bearer token into admin or proxy state.
 
-When the operator submits the browser code, TrustyClaw reads that hash once
+When the operator submits the browser code, Kern reads that hash once
 right after the login command finishes and records it on the completed OAuth
 row. First account capture only accepts an attestation of that exact token: the
 admin API passes the approved hash to `read-claude-account --attest`, and the
@@ -433,7 +433,7 @@ in the message) until this integration is updated; unchanged tokens keep
 working. Treat the endpoint like the other harness interfaces in this document
 during upgrade reviews.
 
-TrustyClaw also extracts the observed `subscriptionType` value from
+Kern also extracts the observed `subscriptionType` value from
 `claude auth status --json` into the common Admin API `plan_type` field.
 Claude usage is read with:
 
@@ -450,19 +450,19 @@ Current week (all models): 0% used · resets Jul 3, 3:59pm (UTC)
 Current week (Fable): 0% used · resets Jul 3, 3:59pm (UTC)
 ```
 
-TrustyClaw parses each window line independently: `Current session` into
+Kern parses each window line independently: `Current session` into
 `claude_usage.current_session_*`, `Current week (all models)` into
 `claude_usage.weekly_*`, and `Current week (Fable)` into
 `claude_usage.fable_weekly_*`; other model-specific week lines are ignored.
 Each window carries `used_percent` and,
 when its reset time parses, `resets_at`. Reset times are Unix timestamps;
-TrustyClaw converts the provider's UTC text while capturing the snapshot; a
+Kern converts the provider's UTC text while capturing the snapshot; a
 reset in any other timezone label drops only that window's `resets_at`. A line
 that does not match contributes nothing, and the snapshot keeps whatever did
-parse. When no usage window parses, `claude_usage` is absent; TrustyClaw never
+parse. When no usage window parses, `claude_usage` is absent; Kern never
 presents percentages from an older provider read as the current snapshot.
 
-TrustyClaw therefore cannot recreate Claude Code auth files from admin state.
+Kern therefore cannot recreate Claude Code auth files from admin state.
 Doing that would require storing refresh/access tokens or equivalent provider
 secrets, tracking the harness's private auth file format, and taking
 responsibility for token refresh.
@@ -502,7 +502,7 @@ installed because Hermes exposes only Bedrock here.
 
 ### Process interface
 
-TrustyClaw runs one Hermes headless chat process per prompt through the
+Kern runs one Hermes headless chat process per prompt through the
 ``run-hermes`` launcher and its small stdin adapter:
 
 ```text
@@ -514,13 +514,13 @@ Bootstrap installs a root-owned immutable ``~/.hermes/config.yaml`` alongside
 the managed Codex and Claude configs. It pins provider ``bedrock``, disables
 ``tirith``, disables Hermes memory, user-profile, post-turn skill review, and
 curator features, and registers the bundled tools MCP server
-(``mcp_servers.trustyclaw`` spawning ``host.runtime.agent_shim.mcp_shim`` as
+(``mcp_servers.kern`` spawning ``host.runtime.agent_shim.mcp_shim`` as
 the runtime user, the same shim wiring as the managed Codex and Claude Code
 configs). Bootstrap also owns an immutable empty ``~/.hermes/.env``
 so Hermes cannot replace the launcher's task-scoped region from agent-written
 dotenv state. The launcher's required first argument is
 ``region=<aws-region>``; it passes that task-specific value as ``AWS_REGION``.
-The fixed toolsets ``terminal,file,trustyclaw`` limit tools to the terminal,
+The fixed toolsets ``terminal,file,kern`` limit tools to the terminal,
 files, and the shim's bundled tools (no web, browser, skills, or messaging
 surfaces); ``--yolo`` disables Hermes's approval prompts (the OS/proxy
 boundary is the enforcement); ``-Q`` is quiet mode. The adapter calls the
@@ -537,12 +537,12 @@ The launcher injects the Bedrock dummy credential as
 operator credential.
 
 The pinned Hermes package loads ``AGENTS.md`` from its working directory as a
-context file. TrustyClaw runs Hermes from
-``/mnt/trustyclaw-agent/agent-home`` and installs that file root-owned and
+context file. Kern runs Hermes from
+``/mnt/kern-agent/agent-home`` and installs that file root-owned and
 immutable there. A separate Hermes-specific instruction file is unnecessary.
 
 Hermes's built-in memory is global to its active profile, not scoped to a
-TrustyClaw task or thread. It stores bounded entries in ``MEMORY.md`` (agent
+Kern task or thread. It stores bounded entries in ``MEMORY.md`` (agent
 notes) and ``USER.md`` (facts and preferences about the user), then adds a
 frozen snapshot to later system prompts. With the memory tool loaded, Hermes
 normally starts an in-process daemon thread every ten user turns. That thread
@@ -551,17 +551,17 @@ model and memory-tool calls. Skill self-improvement is a parallel trigger based
 on tool iterations. It can rewrite agent-created skills through the same
 background-review agent.
 
-TrustyClaw disables both stores, omits the memory and skills toolsets, and sets
+Kern disables both stores, omits the memory and skills toolsets, and sets
 both the skill-review cadence and the separate curator scheduler off. The
 curator is an interactive-CLI startup hook that periodically marks or archives
 unused skills and can optionally run a separate LLM consolidation pass. It is
 not a child OS process: both review mechanisms use daemon threads and extra
-``AIAgent`` objects inside the current Hermes process. TrustyClaw runs the
+``AIAgent`` objects inside the current Hermes process. Kern runs the
 single-query API, whose process exits after returning the answer and does not
 wait for those daemon reviews. Enabling the feature therefore requires a
 host-owned completion lifecycle and an explicit cross-thread memory product
 contract; changing the YAML alone would make the extra calls unreliable and
-invisible to TrustyClaw task status.
+invisible to Kern task status.
 
 Expected behavior:
 
@@ -595,8 +595,8 @@ Bedrock provider row. The admin service stores them together in the
 ``bedrock_credentials`` table, and
 ``sts:GetCallerIdentity`` attests the account. Only long-term keys are accepted;
 temporary session credentials are denied. The agent side signs with fixed
-dummy values using routing key id ``AKIATRUSTYCLAWHERMES`` and secret
-``trustyclaw-bedrock-dummy-secret``. The proxy re-signs accepted requests, so
+dummy values using routing key id ``AKIAKERNHERMES`` and secret
+``kern-bedrock-dummy-secret``. The proxy re-signs accepted requests, so
 Hermes never holds the operator's key. The dummy values carry no AWS
 capability. The proxy meters each response's reported token usage by model.
 
@@ -610,7 +610,7 @@ Before changing a harness version:
 3. Verify login status and login start flows on a real host for every changed
    harness.
 4. Verify the account helper still reads the account id or bearer-token hash
-   without broadening `trustyclaw-admin` filesystem access, and that
+   without broadening `kern-admin` filesystem access, and that
    `read-claude-account --attest --expected-token-sha256 <hash>` rejects a
    mismatched local token before egress and still resolves the expected token to
    the expected `account.uuid` through the profile endpoint.

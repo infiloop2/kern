@@ -1,13 +1,13 @@
 """The host side of the bundled tool framework.
 
-This module is TrustyClaw's implementation of the host API contract in
+This module is Kern's implementation of the host API contract in
 docs/architecture/tools/tool-contract.md: it owns the registry of bundled tool
 packages, builds the scoped ``HostAPI`` handed to every tool call (credentials
 and approvals backed by admin state, config from the operator-supplied per-tool
 config), validates action input against the manifest schemas, runs the
 single-use approval lifecycle, and records every call as an audit event.
 
-Each TrustyClaw host is single-operator, so credential and approval state only
+Each Kern host is single-operator, so credential and approval state only
 need per-tool partitions.
 """
 

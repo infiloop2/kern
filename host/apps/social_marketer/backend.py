@@ -379,12 +379,12 @@ def _domain_agent_routes(
 
 CONFIG = WorkspaceAppConfig(
     app_id=APP_ID,
-    db_schema=os.environ.get("TRUSTYCLAW_APP_DB_SCHEMA", "app_social_marketer"),
-    port=int(os.environ.get("TRUSTYCLAW_APP_PORT", "7453")),
+    db_schema=os.environ.get("KERN_APP_DB_SCHEMA", "app_social_marketer"),
+    port=int(os.environ.get("KERN_APP_PORT", "7453")),
     title="Social Marketer",
-    host=os.environ.get("TRUSTYCLAW_APP_HOST", LOOPBACK),
+    host=os.environ.get("KERN_APP_HOST", LOOPBACK),
     admin_api_socket=os.environ.get(
-        "TRUSTYCLAW_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH
+        "KERN_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH
     ),
     setup_brief=SETUP_BRIEF,
     seed=seed,

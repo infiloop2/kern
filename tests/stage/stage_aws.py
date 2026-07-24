@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persistent staging test for an already deployed TrustyClaw host.
+"""Persistent staging test for an already deployed Kern host.
 
 Unlike the smoke test, this does not deploy or tear down the host. It assumes a
 stage host was upgraded/recovered with stable admin and agent data volumes.
@@ -324,7 +324,7 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
                     str(self.control_socket),
                     "-O",
                     "exit",
-                    f"trustyclaw-operator@{self.result['public_dns']}",
+                    f"kern-operator@{self.result['public_dns']}",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -410,7 +410,7 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
         html_file_content = '<script>window.__stageFileContentXss=1</script>\n'
         create_script = "\n".join([
             "from pathlib import Path",
-            "home = Path('/mnt/trustyclaw-agent/agent-home')",
+            "home = Path('/mnt/kern-agent/agent-home')",
             f"directory = home / {directory_name!r}",
             "directory.mkdir(mode=0o700, exist_ok=True)",
             f"(directory / {file_name!r}).write_text({file_content!r})",
@@ -420,14 +420,14 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
             f"(directory / {dir_symlink_name!r}).symlink_to('/tmp', target_is_directory=True)",
         ])
         cleanup = (
-            "sudo -u trustyclaw-agent python3 - <<'PY'\n"
+            "sudo -u kern-agent python3 - <<'PY'\n"
             "import shutil\n"
             "from pathlib import Path\n"
-            f"shutil.rmtree(Path('/mnt/trustyclaw-agent/agent-home') / {directory_name!r}, ignore_errors=True)\n"
+            f"shutil.rmtree(Path('/mnt/kern-agent/agent-home') / {directory_name!r}, ignore_errors=True)\n"
             "PY"
         )
         try:
-            self._ssh_code(f"sudo -u trustyclaw-agent python3 - <<'PY'\n{create_script}\nPY")
+            self._ssh_code(f"sudo -u kern-agent python3 - <<'PY'\n{create_script}\nPY")
             root = self._api("GET", "/v1/agent-files?path=/")
             if not isinstance(root.get("truncated"), bool) or "max_entries" in root:
                 raise AssertionError(f"agent file list did not report expected listing metadata: {root}")

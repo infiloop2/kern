@@ -23,7 +23,7 @@ class AgentChatBackendTests(unittest.TestCase):
     def test_session_options_endpoint_exposes_the_creation_matrix(self) -> None:
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.server.server_address[1]}/session-options",
-            headers={"X-TrustyClaw-App-Proxy": "agent_chat"},
+            headers={"X-Kern-App-Proxy": "agent_chat"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             self.assertEqual(response.status, 200)

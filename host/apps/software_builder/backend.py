@@ -87,12 +87,12 @@ def github_connection() -> list[dict[str, Any]]:
 
 CONFIG = WorkspaceAppConfig(
     app_id=APP_ID,
-    db_schema=os.environ.get("TRUSTYCLAW_APP_DB_SCHEMA", "app_software_builder"),
-    port=int(os.environ.get("TRUSTYCLAW_APP_PORT", "7455")),
+    db_schema=os.environ.get("KERN_APP_DB_SCHEMA", "app_software_builder"),
+    port=int(os.environ.get("KERN_APP_PORT", "7455")),
     title="Software Builder",
-    host=os.environ.get("TRUSTYCLAW_APP_HOST", LOOPBACK),
+    host=os.environ.get("KERN_APP_HOST", LOOPBACK),
     admin_api_socket=os.environ.get(
-        "TRUSTYCLAW_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH
+        "KERN_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH
     ),
     setup_brief=SETUP_BRIEF,
     seed=seed,

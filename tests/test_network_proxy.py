@@ -68,7 +68,7 @@ class NetworkProxyTests(unittest.TestCase):
         pg_harness.reset_database()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_PROXY_STATE_DIR": self.temp_dir.name})
+        self.env_patch = patch.dict("os.environ", {"KERN_PROXY_STATE_DIR": self.temp_dir.name})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
 
@@ -190,7 +190,7 @@ class NetworkProxyTests(unittest.TestCase):
             [
                 "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
                 "-keyout", str(ca_key), "-out", str(ca_cert), "-days", "1",
-                "-subj", "/CN=TrustyClaw Test Proxy",
+                "-subj", "/CN=Kern Test Proxy",
             ],
             check=True,
             stdout=subprocess.DEVNULL,
@@ -722,7 +722,7 @@ class WebSocketGuardTests(unittest.TestCase):
         pg_harness.reset_database()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_PROXY_STATE_DIR": self.temp_dir.name})
+        self.env_patch = patch.dict("os.environ", {"KERN_PROXY_STATE_DIR": self.temp_dir.name})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
 

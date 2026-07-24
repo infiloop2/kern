@@ -24,8 +24,8 @@ from typing import Any, Callable
 
 from host.runtime.admin_api import bedrock_credentials, thread_scope
 
-DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/run-hermes"]
-AGENT_CWD = "/mnt/trustyclaw-agent/agent-home"
+DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-hermes"]
+AGENT_CWD = "/mnt/kern-agent/agent-home"
 # Bounded by Hermes's own agent.max_turns; the wait is generous because one
 # prompt can run many tool-using turns.
 TURN_TIMEOUT_SECONDS = 45 * 60
@@ -202,5 +202,5 @@ def _answer_text(stdout: str | None) -> str:
 def _subprocess_cwd(command: list[str]) -> str | None:
     # In production, the admin API cannot traverse the agent user's private
     # 0700 home. The sudo helper starts as root, cds there, and then drops to
-    # trustyclaw-agent. Custom test commands still run from AGENT_CWD.
+    # kern-agent. Custom test commands still run from AGENT_CWD.
     return None if command == DEFAULT_COMMAND else AGENT_CWD

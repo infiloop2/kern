@@ -159,7 +159,7 @@ MANIFEST = ToolManifest(
     setup_steps=(
         SetupStep(
             title="Create or select a Google Cloud project",
-            description="Open Google Cloud Console, choose the project picker, and create a dedicated project if you do not already have one for TrustyClaw. You can reuse the project and OAuth client configured for Gmail.",
+            description="Open Google Cloud Console, choose the project picker, and create a dedicated project if you do not already have one for Kern. You can reuse the project and OAuth client configured for Gmail.",
             link_url="https://console.cloud.google.com/projectcreate",
             link_label="Open Google Cloud project creation",
         ),
@@ -171,7 +171,7 @@ MANIFEST = ToolManifest(
         ),
         SetupStep(
             title="Configure the OAuth consent screen",
-            description="Open Google Auth Platform > Branding and choose Get Started. Enter an app name such as TrustyClaw, a support email, External audience unless you use a Workspace-internal app, and your contact email. Then publish the app to Production; an app left in Testing needs your Google account under Audience > Test users and must be reconnected every week.",
+            description="Open Google Auth Platform > Branding and choose Get Started. Enter an app name such as Kern, a support email, External audience unless you use a Workspace-internal app, and your contact email. Then publish the app to Production; an app left in Testing needs your Google account under Audience > Test users and must be reconnected every week.",
             link_url="https://developers.google.com/workspace/guides/configure-oauth-consent",
             link_label="View Google's consent-screen guide",
             image_path="/guide-assets/google-auth-app-information.png",
@@ -195,7 +195,7 @@ MANIFEST = ToolManifest(
             show_callback=True,
         ),
         SetupStep(
-            title="Configure TrustyClaw and connect",
+            title="Configure Kern and connect",
             description="Expand Google Calendar in Internet Access and Tools and save the client ID and client secret you copied from the Web application client in the previous step under the two configuration keys below. Enable Calendar, then choose Connect and approve the requested Google permissions. Confirm that the row shows the expected connected email. A read can run immediately; an event change should appear under Approvals before Google receives it.",
             show_config=True,
         ),

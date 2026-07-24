@@ -32,7 +32,7 @@ code or act with the operator's credentials.
   the DOM (`innerHTML` vs text nodes), external references of any kind
   (scripts, styles, fonts, images, prefetch, `fetch` targets), session cookie
   attributes and lifetime, CSRF exposure now that a cookie is an accepted
-  credential (the required `X-TrustyClaw-Csrf` header plus `SameSite=Strict`),
+  credential (the required `X-Kern-Csrf` header plus `SameSite=Strict`),
   the failed-login throttle, response headers (CSP, `X-Content-Type-Options`,
   frame ancestors), MIME handling of agent file previews, and anything
   cacheable that contains secrets.
@@ -52,7 +52,7 @@ below names it.
    names and contents, network event fields, provider metadata JSON.
 3. Session cookie: flags (`HttpOnly`, `SameSite=Strict`, `Secure` over HTTPS),
    scope, lifetime, and what happens on the plain-HTTP loopback transport.
-4. CSRF: confirm cookie-authenticated requests require the `X-TrustyClaw-Csrf`
+4. CSRF: confirm cookie-authenticated requests require the `X-Kern-Csrf`
    header a cross-site page cannot set; preflight behavior; any CORS headers
    emitted. Confirm failed logins are throttled and fail closed.
 5. Clickjacking/framing and drag-drop of the UI.

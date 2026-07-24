@@ -56,7 +56,7 @@ all resources tagged for the smoke agent (instances, volumes, and security
 groups), even if deploy failed before writing its result file.
 
 The smoke owns its own deploy config: it deploys an agent named
-``trustyclaw-smoke`` into ``SMOKE_REGION`` (below), which is pinned to the
+``kern-smoke`` into ``SMOKE_REGION`` (below), which is pinned to the
 region scoped in ``tests/smoke/iam_policy_smoke.json`` so the two cannot drift. It
 also generates an ephemeral SSH keypair for operator access and discards it at
 teardown. So there is nothing to write by hand — no config file and no SSH key.
@@ -110,7 +110,7 @@ from host.runtime.tools.tools_host import BUNDLED_TOOLS
 # Region the smoke deploys into. Keep in sync with the region scoped in
 # tests/smoke/iam_policy_smoke.json — change both together.
 SMOKE_REGION = "us-east-1"
-SMOKE_AGENT_NAME = "trustyclaw-smoke"
+SMOKE_AGENT_NAME = "kern-smoke"
 ACCESS_KEY_ENV = "AWS_ACCESS_KEY_ID"
 SECRET_KEY_ENV = "AWS_SECRET_ACCESS_KEY"
 
@@ -130,7 +130,7 @@ SMOKE_BEDROCK_MODELS = (
     "qwen.qwen3-coder-next",
     "moonshotai.kimi-k2.5",
 )
-SMOKE_GITHUB_INTEGRATION = {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "trustyclaw"}]}
+SMOKE_GITHUB_INTEGRATION = {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "kern"}]}
 SMOKE_MANAGED_DOMAINS = (
     "api.openai.com",
     "auth.openai.com",
@@ -150,7 +150,7 @@ SMOKE_MANAGED_DOMAINS = (
     "bedrock-runtime.us-west-2.amazonaws.com",
 )
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
-    "brave_search": (("search_web", {"query": "TrustyClaw"}),),
+    "brave_search": (("search_web", {"query": "Kern"}),),
     "gmail": (
         ("search_messages", {}),
         ("read_message", {"message_id": "smoke-message"}),
@@ -161,18 +161,18 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
             "send_email",
             {
                 "to": "stage@example.com",
-                "subject": "TrustyClaw smoke",
+                "subject": "Kern smoke",
                 "blocks": [{"type": "paragraph", "text": "Smoke test; never sent."}],
             },
         ),
         ("message_action", {"action": "mark_read", "message_ids": ["smoke-message"]}),
-        ("label_action", {"action": "create", "name": "trustyclaw-smoke"}),
+        ("label_action", {"action": "create", "name": "kern-smoke"}),
         (
             "draft_action",
             {
                 "action": "create",
                 "to": "stage@example.com",
-                "subject": "TrustyClaw smoke draft",
+                "subject": "Kern smoke draft",
                 "blocks": [{"type": "paragraph", "text": "Smoke test draft."}],
             },
         ),
@@ -183,7 +183,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
             "event_change",
             {
                 "operation": "create",
-                "summary": "TrustyClaw smoke",
+                "summary": "Kern smoke",
                 "start_time": "2099-01-01T00:00:00+00:00",
                 "end_time": "2099-01-01T01:00:00+00:00",
             },
@@ -202,7 +202,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("post_reel", {"video_asset_id": "$INSTAGRAM_VIDEO"}),
     ),
     "instagram_discovery": (
-        ("search_reels", {"query": "TrustyClaw", "limit": "1"}),
+        ("search_reels", {"query": "Kern", "limit": "1"}),
         ("get_trending_reels", {"limit": "1"}),
         ("search_hashtag", {"hashtag": "ai", "limit": "1"}),
         ("get_reels_by_audio", {"audio_id": "1", "limit": "1"}),
@@ -210,10 +210,10 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
     ),
     "linkedin": (
         ("get_profile", {}),
-        ("create_post", {"text": "TrustyClaw smoke; never published."}),
+        ("create_post", {"text": "Kern smoke; never published."}),
     ),
     "linkedin_discovery": (
-        ("search_posts", {"query": "TrustyClaw", "limit": "1"}),
+        ("search_posts", {"query": "Kern", "limit": "1"}),
     ),
     # The remaining Polymarket actions need a live market/token from this
     # run's listing. check_tools_surface derives those after these three calls.
@@ -223,20 +223,20 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("search", {"query": "bitcoin", "limit_per_type": "1"}),
     ),
     "runway": (
-        ("generate_video", {"prompt": "TrustyClaw smoke", "image_asset_id": "$RUNWAY_IMAGE"}),
-        ("edit_video", {"prompt": "TrustyClaw smoke", "video_asset_id": "$RUNWAY_VIDEO"}),
-        ("generate_image", {"prompt": "TrustyClaw smoke"}),
-        ("generate_speech", {"text": "TrustyClaw smoke"}),
-        ("get_task", {"task_id": "trustyclaw-smoke-missing"}),
-        ("save_video", {"task_id": "trustyclaw-smoke-missing"}),
+        ("generate_video", {"prompt": "Kern smoke", "image_asset_id": "$RUNWAY_IMAGE"}),
+        ("edit_video", {"prompt": "Kern smoke", "video_asset_id": "$RUNWAY_VIDEO"}),
+        ("generate_image", {"prompt": "Kern smoke"}),
+        ("generate_speech", {"text": "Kern smoke"}),
+        ("get_task", {"task_id": "kern-smoke-missing"}),
+        ("save_video", {"task_id": "kern-smoke-missing"}),
     ),
     "twitter": (
-        ("search_tweets", {"query": "TrustyClaw", "max_results": "10"}),
+        ("search_tweets", {"query": "Kern", "max_results": "10"}),
         ("read_tweet", {"tweet_id": "1"}),
-        ("user_tweets", {"username": "trustyclaw", "max_results": "5"}),
+        ("user_tweets", {"username": "kern", "max_results": "5"}),
         ("get_trends", {"max_trends": "1"}),
         ("get_personalized_trends", {}),
-        ("post_tweet", {"text": "TrustyClaw smoke; never published."}),
+        ("post_tweet", {"text": "Kern smoke; never published."}),
     ),
 }
 
@@ -378,7 +378,7 @@ class AwsSmoke:
         IAM policy's, so the caller provides neither arguments nor a key."""
         self.ssh_key = str(self.workdir / "operator_key")
         subprocess.run(
-            ["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-C", "trustyclaw-smoke", "-f", self.ssh_key],
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-C", "kern-smoke", "-f", self.ssh_key],
             check=True,
         )
         self.public_key = Path(f"{self.ssh_key}.pub").read_text().strip()
@@ -422,7 +422,7 @@ class AwsSmoke:
         self._ok("tunnel established")
 
     def _start_tunnel(self) -> None:
-        target = f"trustyclaw-operator@{self.result['public_dns']}"
+        target = f"kern-operator@{self.result['public_dns']}"
         subprocess.run(
             [
                 "ssh", "-fN", "-M", "-S", str(self.control_socket),
@@ -448,7 +448,7 @@ class AwsSmoke:
         """Tear down a dead control master and start a fresh tunnel."""
         subprocess.run(
             ["ssh", "-S", str(self.control_socket), "-O", "exit",
-             f"trustyclaw-operator@{self.result['public_dns']}"],
+             f"kern-operator@{self.result['public_dns']}"],
             capture_output=True,
         )
         self.tunnel_open = False
@@ -457,7 +457,7 @@ class AwsSmoke:
     def teardown(self) -> None:
         if self.tunnel_open and self.result:
             subprocess.run(
-                ["ssh", "-S", str(self.control_socket), "-O", "exit", f"trustyclaw-operator@{self.result['public_dns']}"],
+                ["ssh", "-S", str(self.control_socket), "-O", "exit", f"kern-operator@{self.result['public_dns']}"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
             )
         try:
@@ -512,8 +512,8 @@ class AwsSmoke:
 
     def _smoke_tag_filters(self) -> list[str]:
         return [
-            f"Name=tag:trustyclaw-host-agent-name,Values={SMOKE_AGENT_NAME}",
-            "Name=tag:trustyclaw-host,Values=true",
+            f"Name=tag:kern-host-agent-name,Values={SMOKE_AGENT_NAME}",
+            "Name=tag:kern-host,Values=true",
         ]
 
     def _tagged_instance_ids(
@@ -602,7 +602,7 @@ class AwsSmoke:
     def check_host_config_schema(self) -> None:
         self._step("deployed host config schema")
         config = json.loads(self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c \""
+            "sudo -u postgres psql -tA -d kern_admin -c \""
             "SELECT json_build_object("
             "'agent_name', c.agent_name,"
             " 'admin_password_sha256', c.admin_password_sha256,"
@@ -623,7 +623,7 @@ class AwsSmoke:
         # The config schema is typed columns now; deployment-only inputs
         # cannot exist as stray keys, pinned by the exact column set.
         config_columns = set(self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             "\"SELECT column_name FROM information_schema.columns WHERE table_name = 'config'\""
         ).split())
         if config_columns != {"singleton", "agent_name", "admin_password_sha256"}:
@@ -631,7 +631,7 @@ class AwsSmoke:
         # Proxy account pins live in the proxy_provider_pins table now
         # (missing rows are the no-pin default until a login lands).
         pin_rows = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin "
+            "sudo -u postgres psql -tA -d kern_admin "
             "-c \"SELECT provider FROM proxy_provider_pins WHERE provider NOT IN ('openai', 'claude')\""
         ).strip()
         if pin_rows:
@@ -639,7 +639,7 @@ class AwsSmoke:
         # Admin-side provider account records live in the database, in the
         # provider_accounts table (empty or explicit-null records until login).
         admin_accounts = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin "
+            "sudo -u postgres psql -tA -d kern_admin "
             "-c \"SELECT provider FROM provider_accounts WHERE provider NOT IN ('openai', 'claude', 'bedrock')\""
         ).strip()
         if admin_accounts:
@@ -648,12 +648,12 @@ class AwsSmoke:
             "sudo python3 - <<'PY'\n"
             "import grp, json, os, pwd\n"
             "paths = [\n"
-            "    '/mnt/trustyclaw-admin',\n"
-            "    '/mnt/trustyclaw-admin/postgres',\n"
-            "    '/mnt/trustyclaw-admin/postgres/14/main',\n"
-            "    '/mnt/trustyclaw-admin/proxy-state',\n"
-            "    '/mnt/trustyclaw-admin/proxy-state/network_proxy_ca.key',\n"
-            "    '/mnt/trustyclaw-admin/proxy-state/network_proxy_ca.crt',\n"
+            "    '/mnt/kern-admin',\n"
+            "    '/mnt/kern-admin/postgres',\n"
+            "    '/mnt/kern-admin/postgres/14/main',\n"
+            "    '/mnt/kern-admin/proxy-state',\n"
+            "    '/mnt/kern-admin/proxy-state/network_proxy_ca.key',\n"
+            "    '/mnt/kern-admin/proxy-state/network_proxy_ca.crt',\n"
             "]\n"
             "result = {}\n"
             "for path in paths:\n"
@@ -668,29 +668,29 @@ class AwsSmoke:
         service_ids = json.loads(self._ssh_code(
             "sudo python3 - <<'PY'\n"
             "import grp, json, pwd\n"
-            "names = ['trustyclaw-admin', 'trustyclaw-proxy', 'trustyclaw-agent', 'cloudflared', 'postgres']\n"
+            "names = ['kern-admin', 'kern-proxy', 'kern-agent', 'cloudflared', 'postgres']\n"
             "print(json.dumps({name: {'uid': pwd.getpwnam(name).pw_uid, 'gid': grp.getgrnam(name).gr_gid} for name in names}))\n"
             "PY"
         ))
         expected_service_ids = {
-            "trustyclaw-admin": {"uid": 47741, "gid": 47741},
-            "trustyclaw-proxy": {"uid": 47742, "gid": 47742},
-            "trustyclaw-agent": {"uid": 47743, "gid": 47743},
+            "kern-admin": {"uid": 47741, "gid": 47741},
+            "kern-proxy": {"uid": 47742, "gid": 47742},
+            "kern-agent": {"uid": 47743, "gid": 47743},
             "cloudflared": {"uid": 47744, "gid": 47744},
             "postgres": {"uid": 47745, "gid": 47745},
         }
         if service_ids != expected_service_ids:
             raise AssertionError(f"service IDs are not stable: {service_ids}")
         agent_ca_access = self._ssh_code(
-            "sudo -u trustyclaw-agent bash -c "
-            "'test -r /usr/local/share/ca-certificates/trustyclaw-network-proxy.crt && "
-            "! test -r /mnt/trustyclaw-admin/proxy-state/network_proxy_ca.crt && echo ok'"
+            "sudo -u kern-agent bash -c "
+            "'test -r /usr/local/share/ca-certificates/kern-network-proxy.crt && "
+            "! test -r /mnt/kern-admin/proxy-state/network_proxy_ca.crt && echo ok'"
         ).strip()
         if agent_ca_access != "ok":
             raise AssertionError("agent must read only the installed proxy CA copy, not proxy-state directly")
         partition_access = self._ssh_code(
-            "sudo -u trustyclaw-admin bash -c '! test -r /mnt/trustyclaw-admin/proxy-state/network_proxy_ca.key' && "
-            "sudo -u trustyclaw-proxy bash -c '! test -r /mnt/trustyclaw-admin/postgres/14/main/pg_hba.conf' && "
+            "sudo -u kern-admin bash -c '! test -r /mnt/kern-admin/proxy-state/network_proxy_ca.key' && "
+            "sudo -u kern-proxy bash -c '! test -r /mnt/kern-admin/postgres/14/main/pg_hba.conf' && "
             "echo ok"
         ).strip()
         if partition_access != "ok":
@@ -699,12 +699,12 @@ class AwsSmoke:
         # Bedrock row but cannot mutate it or create objects; the agent has no
         # database role at all.
         database_access = self._ssh_code(
-            "sudo -u trustyclaw-admin psql -tA -d trustyclaw_admin -c 'SELECT 1' && "
-            "sudo -u trustyclaw-proxy psql -tA -d trustyclaw_admin -c 'SELECT 2' && "
-            "sudo -u trustyclaw-proxy psql -tA -d trustyclaw_admin -c 'SELECT count(*) FROM bedrock_credentials' && "
-            "sudo -u trustyclaw-proxy bash -c '! psql -tA -d trustyclaw_admin -c \"UPDATE bedrock_credentials SET access_key_id = access_key_id\" 2>/dev/null' && "
-            "sudo -u trustyclaw-proxy bash -c '! psql -tA -d trustyclaw_admin -c \"CREATE TABLE smoke_illegal (n INT)\" 2>/dev/null' && "
-            "sudo -u trustyclaw-agent bash -c '! psql -tA -d trustyclaw_admin -c \"SELECT 1\" 2>/dev/null' && "
+            "sudo -u kern-admin psql -tA -d kern_admin -c 'SELECT 1' && "
+            "sudo -u kern-proxy psql -tA -d kern_admin -c 'SELECT 2' && "
+            "sudo -u kern-proxy psql -tA -d kern_admin -c 'SELECT count(*) FROM bedrock_credentials' && "
+            "sudo -u kern-proxy bash -c '! psql -tA -d kern_admin -c \"UPDATE bedrock_credentials SET access_key_id = access_key_id\" 2>/dev/null' && "
+            "sudo -u kern-proxy bash -c '! psql -tA -d kern_admin -c \"CREATE TABLE smoke_illegal (n INT)\" 2>/dev/null' && "
+            "sudo -u kern-agent bash -c '! psql -tA -d kern_admin -c \"SELECT 1\" 2>/dev/null' && "
             "echo ok"
         ).strip().splitlines()
         if database_access != ["1", "2", "0", "ok"]:
@@ -712,12 +712,12 @@ class AwsSmoke:
                 f"database access must be admin-full, proxy-narrow, agent-none: {database_access}"
             )
         expected_layout = {
-            "/mnt/trustyclaw-admin": ("root", "root", "0o711", False),
-            "/mnt/trustyclaw-admin/postgres": ("root", "root", "0o711", False),
-            "/mnt/trustyclaw-admin/postgres/14/main": ("postgres", "postgres", "0o700", False),
-            "/mnt/trustyclaw-admin/proxy-state": ("trustyclaw-proxy", "trustyclaw-proxy", "0o700", False),
-            "/mnt/trustyclaw-admin/proxy-state/network_proxy_ca.key": ("trustyclaw-proxy", "trustyclaw-proxy", "0o600", False),
-            "/mnt/trustyclaw-admin/proxy-state/network_proxy_ca.crt": ("trustyclaw-proxy", "trustyclaw-proxy", "0o644", False),
+            "/mnt/kern-admin": ("root", "root", "0o711", False),
+            "/mnt/kern-admin/postgres": ("root", "root", "0o711", False),
+            "/mnt/kern-admin/postgres/14/main": ("postgres", "postgres", "0o700", False),
+            "/mnt/kern-admin/proxy-state": ("kern-proxy", "kern-proxy", "0o700", False),
+            "/mnt/kern-admin/proxy-state/network_proxy_ca.key": ("kern-proxy", "kern-proxy", "0o600", False),
+            "/mnt/kern-admin/proxy-state/network_proxy_ca.crt": ("kern-proxy", "kern-proxy", "0o644", False),
         }
         for path, expected_values in expected_layout.items():
             entry = storage_layout.get(path, {})
@@ -744,7 +744,7 @@ class AwsSmoke:
                 raise AssertionError(f"managed provider rule {host} leaked into API policy response: {rules}")
         # The stored policy is typed rows now; check them directly.
         stored_integrations = set(self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c 'SELECT integration FROM managed_integrations'"
+            "sudo -u postgres psql -tA -d kern_admin -c 'SELECT integration FROM managed_integrations'"
         ).split())
         expected_enabled = {
             name for name, config in expected_integrations.items()
@@ -755,7 +755,7 @@ class AwsSmoke:
                 f"stored policy did not preserve enabled integrations: {sorted(stored_integrations)}"
             )
         stored_repos = set(self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             "\"SELECT owner || '/' || repo FROM github_repositories\""
         ).split())
         expected_repos = {
@@ -764,7 +764,7 @@ class AwsSmoke:
         if stored_repos != expected_repos:
             raise AssertionError(f"stored GitHub write-repository list mismatch: {sorted(stored_repos)}")
         stored_domains = set(self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c 'SELECT domain FROM allowed_domains'"
+            "sudo -u postgres psql -tA -d kern_admin -c 'SELECT domain FROM allowed_domains'"
         ).split())
         if "example.com" not in stored_domains:
             raise AssertionError(f"replaced policy not reflected in stored rows: {sorted(stored_domains)}")
@@ -786,11 +786,11 @@ class AwsSmoke:
         # ciphertext — encrypted at rest like every other stored secret, and
         # never on disk anywhere.
         published = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c 'SELECT token FROM proxy_github_token'"
+            "sudo -u postgres psql -tA -d kern_admin -c 'SELECT token FROM proxy_github_token'"
         ).strip()
         if not published.startswith("enc:v1:") or smoke_token in published:
             raise AssertionError("the published proxy_github_token row must hold ciphertext, not the token")
-        no_file = self._ssh_code("sudo bash -c '! test -e /etc/trustyclaw-github && echo absent'").strip()
+        no_file = self._ssh_code("sudo bash -c '! test -e /etc/kern-github && echo absent'").strip()
         if no_file != "absent":
             raise AssertionError("the agent token-file directory should not exist in the injection era")
         # The proxy injects the stored (fake) PAT into agent GitHub requests:
@@ -800,15 +800,15 @@ class AwsSmoke:
         # GitHub. gh's own "not logged in" refusal would mean a broken shim.
         proxy = f"http://127.0.0.1:{PROXY_PORT}"
         gh_injected = self._ssh_code(
-            f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} https_proxy={proxy} "
-            "gh api repos/infiloop2/trustyclaw 2>&1 || true"
+            f"sudo -u kern-agent env HTTPS_PROXY={proxy} https_proxy={proxy} "
+            "gh api repos/infiloop2/kern 2>&1 || true"
         )
         if "401" not in gh_injected or "gh auth login" in gh_injected:
             raise AssertionError(f"proxy did not inject the stored token upstream: {gh_injected!r}")
         # GraphQL is denied at the proxy regardless of credentials, so gh's
         # GraphQL-backed path fails with the proxy's 403, not a GitHub 401.
         gh_graphql = self._ssh_code(
-            f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} https_proxy={proxy} "
+            f"sudo -u kern-agent env HTTPS_PROXY={proxy} https_proxy={proxy} "
             "gh api graphql -f query='query{viewer{login}}' 2>&1 || true"
         )
         if "403" not in gh_graphql:
@@ -817,7 +817,7 @@ class AwsSmoke:
         if deleted.get("configured") is not False:
             raise AssertionError(f"GitHub credential DELETE should clear metadata: {deleted}")
         rows = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c 'SELECT count(*) FROM proxy_github_token'"
+            "sudo -u postgres psql -tA -d kern_admin -c 'SELECT count(*) FROM proxy_github_token'"
         ).strip()
         if rows != "0":
             raise AssertionError("proxy_github_token should be cleared after DELETE")
@@ -826,8 +826,8 @@ class AwsSmoke:
         # succeeds unauthenticated — revocation is instant, and agent-supplied
         # credentials demonstrably never pass through.
         gh_uninjected = self._ssh_code(
-            f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} https_proxy={proxy} "
-            "gh api repos/infiloop2/trustyclaw 2>&1 || true"
+            f"sudo -u kern-agent env HTTPS_PROXY={proxy} https_proxy={proxy} "
+            "gh api repos/infiloop2/kern 2>&1 || true"
         )
         if '"full_name"' not in gh_uninjected or "401" in gh_uninjected:
             raise AssertionError(f"unauthenticated public read should succeed after DELETE: {gh_uninjected!r}")
@@ -836,7 +836,7 @@ class AwsSmoke:
         self._step("initial deploy with managed providers disabled")
         expected_empty_policy = {"network_integrations": {}}
         stored_rows = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c 'SELECT count(*) FROM network_policy'"
+            "sudo -u postgres psql -tA -d kern_admin -c 'SELECT count(*) FROM network_policy'"
         ).strip()
         if stored_rows != "0":
             raise AssertionError(
@@ -851,7 +851,7 @@ class AwsSmoke:
         if policy.get("network_integrations", {}) != {}:
             raise AssertionError(f"initial policy should be empty: {policy}")
         bedrock_rows = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             "'SELECT count(*) FROM bedrock_credentials'"
         ).strip()
         if bedrock_rows != "0":
@@ -892,7 +892,7 @@ class AwsSmoke:
             page = response.read().decode()
         if "text/html" not in content_type:
             raise AssertionError(f"UI page content type is {content_type!r}")
-        if "TrustyClaw" not in page:
+        if "Kern" not in page:
             raise AssertionError("UI page does not look like the admin UI")
         for path, expected_type in (
             ("/admin_ui.css", "text/css"),
@@ -1319,7 +1319,7 @@ class AwsSmoke:
             page = response.read()
         if b"<html" not in page.lower():
             raise AssertionError("GET / did not serve the admin UI page")
-        auth = f"Cookie: tc_admin_session={self._admin_cookie()}\r\nX-TrustyClaw-Csrf: 1\r\n".encode()
+        auth = f"Cookie: tc_admin_session={self._admin_cookie()}\r\nX-Kern-Csrf: 1\r\n".encode()
         malformed = self._raw_local_http(
             ADMIN_PORT,
             b"POST /v1/tasks HTTP/1.1\r\n"
@@ -1842,7 +1842,7 @@ class AwsSmoke:
     def check_enforcement(self) -> None:
         self._step("network enforcement (proxy + nftables, as the agent user)")
         proxy = f"http://127.0.0.1:{PROXY_PORT}"
-        agent = "sudo -u trustyclaw-agent env"
+        agent = "sudo -u kern-agent env"
         allowed = self._ssh_code(f"{agent} HTTPS_PROXY={proxy} curl -s -o /dev/null -w '%{{http_code}}' --max-time 20 https://example.com/")
         denied = self._ssh_code(f"{agent} HTTPS_PROXY={proxy} curl -s -o /dev/null -w '%{{http_code}}' --max-time 20 https://example.com/denied")
         direct = self._ssh_code(f"{agent} curl -s -o /dev/null -w '%{{http_code}}' --max-time 12 https://example.com/ || true")
@@ -1865,7 +1865,7 @@ class AwsSmoke:
         # (which can mutate and cannot be parsed) fails closed at the proxy.
         gh_allowed = self._ssh_code(
             f"{agent} HTTPS_PROXY={proxy} curl -s -o /dev/null -w '%{{http_code}}' --max-time 20 "
-            f"https://github.com/infiloop2/trustyclaw"
+            f"https://github.com/infiloop2/kern"
         )
         gh_foreign = self._ssh_code(
             f"{agent} HTTPS_PROXY={proxy} curl -s -o /dev/null -w '%{{http_code}}' --max-time 20 "
@@ -1887,11 +1887,11 @@ class AwsSmoke:
         tool_versions = self._ssh_code("git --version && gh --version | head -1")
         if "git version" not in tool_versions or "gh version" not in tool_versions:
             raise AssertionError(f"git/gh missing on the host: {tool_versions!r}")
-        self._ssh_code("sudo rm -rf /tmp/trustyclaw-smoke-clone /tmp/trustyclaw-smoke-foreign")
+        self._ssh_code("sudo rm -rf /tmp/kern-smoke-clone /tmp/kern-smoke-foreign")
         clone_ok = self._ssh_code(
             f"{agent} HTTPS_PROXY={proxy} https_proxy={proxy} "
-            "git clone --depth 1 https://github.com/infiloop2/trustyclaw /tmp/trustyclaw-smoke-clone "
-            ">/dev/null 2>&1 && echo cloned; sudo rm -rf /tmp/trustyclaw-smoke-clone"
+            "git clone --depth 1 https://github.com/infiloop2/kern /tmp/kern-smoke-clone "
+            ">/dev/null 2>&1 && echo cloned; sudo rm -rf /tmp/kern-smoke-clone"
         ).strip()
         if clone_ok != "cloned":
             raise AssertionError("git clone of the configured repository through the proxy failed")
@@ -1900,8 +1900,8 @@ class AwsSmoke:
         # GraphQL and write denials above.
         foreign_clone = self._ssh_code(
             f"{agent} HTTPS_PROXY={proxy} https_proxy={proxy} "
-            "git clone --depth 1 https://github.com/octocat/Hello-World /tmp/trustyclaw-smoke-foreign "
-            ">/dev/null 2>&1 && echo cloned || echo denied; sudo rm -rf /tmp/trustyclaw-smoke-foreign"
+            "git clone --depth 1 https://github.com/octocat/Hello-World /tmp/kern-smoke-foreign "
+            ">/dev/null 2>&1 && echo cloned || echo denied; sudo rm -rf /tmp/kern-smoke-foreign"
         ).strip()
         if foreign_clone != "cloned":
             raise AssertionError("git clone of a foreign public repository should be allowed (reads are universal)")
@@ -1920,7 +1920,7 @@ class AwsSmoke:
         without a credential, so this covers the whole surface without one. When
         GitHub is enabled reads are universal, so foreign repos and non-repo
         paths (search) are forwarded and answer with GitHub's own status; writes
-        are gated on the write repo (infiloop2/trustyclaw), so a write to an
+        are gated on the write repo (infiloop2/kern), so a write to an
         unlisted repo is denied by the proxy while a write to the listed repo
         reaches upstream and returns GitHub's 401 (no credential installed).
         Repository administration is denied even on the write repo, at the guard
@@ -1932,7 +1932,7 @@ class AwsSmoke:
         self._step("github guard matrix (universal reads, scoped writes)")
         proxy = f"http://127.0.0.1:{PROXY_PORT}"
         curl = (
-            f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} "
+            f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
             "curl -s -o /dev/null -w '%{http_code}' --max-time 20"
         )
         # These unauthenticated API reads can be forwarded correctly while
@@ -1943,23 +1943,23 @@ class AwsSmoke:
         checks = [
             # Reads are universal: the listed repo, a foreign public repo, and
             # non-repo paths (search) are all forwarded to GitHub.
-            ("api listed repo read", f"{curl} https://api.github.com/repos/infiloop2/trustyclaw", read_ok),
+            ("api listed repo read", f"{curl} https://api.github.com/repos/infiloop2/kern", read_ok),
             ("api foreign repo read", f"{curl} https://api.github.com/repos/torvalds/linux", read_ok),
-            ("api search read", f"{curl} 'https://api.github.com/search/repositories?q=trustyclaw'", read_ok),
+            ("api search read", f"{curl} 'https://api.github.com/search/repositories?q=kern'", read_ok),
             ("api rate_limit read", f"{curl} https://api.github.com/rate_limit", read_ok),
             # /user needs auth; the proxy forwards it and GitHub's own 401 (no
             # credential installed) comes back — a proxy denial would be 403.
             ("api /user reaches upstream", f"{curl} https://api.github.com/user || true", unauthenticated_read_ok),
-            ("raw listed file", f"{curl} https://raw.githubusercontent.com/infiloop2/trustyclaw/HEAD/README.md", read_ok),
+            ("raw listed file", f"{curl} https://raw.githubusercontent.com/infiloop2/kern/HEAD/README.md", read_ok),
             ("raw foreign file", f"{curl} https://raw.githubusercontent.com/torvalds/linux/HEAD/README", read_ok),
-            ("codeload listed tarball", f"{curl} https://codeload.github.com/infiloop2/trustyclaw/tar.gz/HEAD", read_ok),
+            ("codeload listed tarball", f"{curl} https://codeload.github.com/infiloop2/kern/tar.gz/HEAD", read_ok),
             ("codeload foreign tarball", f"{curl} https://codeload.github.com/torvalds/linux/tar.gz/HEAD", read_ok),
             ("github.com web read", f"{curl} https://github.com/torvalds/linux", read_ok),
             # The API tarball endpoint 302s to codeload; following the
             # redirect exercises both domains in one read chain.
             (
                 "api tarball redirect to codeload",
-                f"{curl} -L https://api.github.com/repos/infiloop2/trustyclaw/tarball/HEAD",
+                f"{curl} -L https://api.github.com/repos/infiloop2/kern/tarball/HEAD",
                 read_ok,
             ),
             # Writes to an unlisted repo are denied by the proxy before any
@@ -1978,7 +1978,7 @@ class AwsSmoke:
             # which answers 401 without a credential (a proxy denial is 403).
             (
                 "api write to listed reaches upstream",
-                f"{curl} -X POST -d '{{}}' https://api.github.com/repos/infiloop2/trustyclaw/issues || true",
+                f"{curl} -X POST -d '{{}}' https://api.github.com/repos/infiloop2/kern/issues || true",
                 "401",
             ),
             # GraphQL is denied outright (can mutate, cannot be parsed).
@@ -2003,14 +2003,14 @@ class AwsSmoke:
             # onto an unlisted repo, which the canonicalizing guard must deny.
             (
                 "encoded traversal write denied",
-                f"{curl} -X POST -d '{{}}' 'https://api.github.com/repos/infiloop2/trustyclaw/%2e%2e/%2e%2e/%2e%2e/repos/torvalds/linux/issues' || true",
+                f"{curl} -X POST -d '{{}}' 'https://api.github.com/repos/infiloop2/kern/%2e%2e/%2e%2e/%2e%2e/repos/torvalds/linux/issues' || true",
                 "403",
             ),
             # github.com web mutations are denied everywhere: the API is the
             # only mutation surface.
             (
                 "github.com web mutation denied",
-                f"{curl} -X POST https://github.com/infiloop2/trustyclaw/issues || true",
+                f"{curl} -X POST https://github.com/infiloop2/kern/issues || true",
                 "403",
             ),
             (
@@ -2024,12 +2024,12 @@ class AwsSmoke:
                 "lfs upload denied",
                 f"{curl} -X POST -H 'Content-Type: application/json' "
                 f"-d '{{\"operation\":\"upload\",\"objects\":[]}}' "
-                f"https://github.com/infiloop2/trustyclaw.git/info/lfs/objects/batch || true",
+                f"https://github.com/infiloop2/kern.git/info/lfs/objects/batch || true",
                 "403",
             ),
             (
                 "lfs garbage body fails closed",
-                f"{curl} -X POST -d 'not-json' https://github.com/infiloop2/trustyclaw.git/info/lfs/objects/batch || true",
+                f"{curl} -X POST -d 'not-json' https://github.com/infiloop2/kern.git/info/lfs/objects/batch || true",
                 "403",
             ),
         ]
@@ -2076,24 +2076,24 @@ class AwsSmoke:
         for method, sub in admin_writes:
             suffix = f"/{sub}" if sub else ""
             code = self._ssh_code(
-                f"{curl} -X {method} -d '{{}}' https://api.github.com/repos/infiloop2/trustyclaw{suffix} || true"
+                f"{curl} -X {method} -d '{{}}' https://api.github.com/repos/infiloop2/kern{suffix} || true"
             ).strip()
             if code != "403":
                 raise AssertionError(f"admin write {method} {sub or '<repo>'}: expected proxy 403, got {code!r}")
         # Real git: ls-remote of any repo rides the (now universal) read leg,
         # while a push to an unlisted repo must be denied by the proxy at the
         # receive-pack discovery leg.
-        agentenv = f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} https_proxy={proxy}"
+        agentenv = f"sudo -u kern-agent env HTTPS_PROXY={proxy} https_proxy={proxy}"
         ls_remote = self._ssh_code(
             f"{agentenv} git ls-remote https://github.com/torvalds/linux HEAD "
             ">/dev/null 2>&1 && echo ok || echo failed"
         ).strip()
         if ls_remote != "ok":
             raise AssertionError("git ls-remote of a public repo failed through the proxy")
-        workdir = "/tmp/trustyclaw-smoke-push-denial"
+        workdir = "/tmp/kern-smoke-push-denial"
         self._ssh_code(f"sudo rm -rf {workdir}")
         push_denied = self._ssh_code(
-            f"{agentenv} git clone --depth 1 https://github.com/infiloop2/trustyclaw {workdir} >/dev/null 2>&1 && "
+            f"{agentenv} git clone --depth 1 https://github.com/infiloop2/kern {workdir} >/dev/null 2>&1 && "
             f"{agentenv} git -C {workdir} push https://github.com/torvalds/linux HEAD:refs/heads/smoke-denied >/dev/null 2>&1 "
             "&& echo pushed || echo denied"
         ).strip()
@@ -2109,7 +2109,7 @@ class AwsSmoke:
         self._step("proxy protocol edge cases (ports, hosts, encodings, wildcards)")
         baseline = max((event["seq"] for event in self._network_events()), default=0)
         proxy = f"http://127.0.0.1:{PROXY_PORT}"
-        agent = "sudo -u trustyclaw-agent env"
+        agent = "sudo -u kern-agent env"
 
         # CONNECT to a non-443 port and to an unlisted host: both denied before
         # any DNS or dial; curl reports a proxy CONNECT failure (not an HTTP code).
@@ -2193,7 +2193,7 @@ class AwsSmoke:
             + [f"{curl} https://example.com/denied-{index} &" for index in range(6)]
             + ["wait"]
         )
-        codes = self._ssh_code(f'sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} bash -c "{script}"')
+        codes = self._ssh_code(f'sudo -u kern-agent env HTTPS_PROXY={proxy} bash -c "{script}"')
         lines = [line.strip() for line in codes.splitlines() if line.strip()]
         if len(lines) != 12:
             raise AssertionError(f"expected 12 parallel responses, got {len(lines)}: {lines}")
@@ -2226,7 +2226,7 @@ class AwsSmoke:
         openai_payload = '{"input":"hello"}'
         print(f"  POST {openai_url} before account id is known", flush=True)
         openai_response = self._ssh_code(
-            f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} "
+            f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
             f"curl -s --max-time 20 -X POST -H 'Content-Type: application/json' "
             f"--data {shlex.quote(openai_payload)} {shlex.quote(openai_url)}"
         )
@@ -2235,7 +2235,7 @@ class AwsSmoke:
             raise AssertionError(f"OpenAI data-plane request did not fail closed; proxy returned {openai_response!r}")
 
         claude_hello = self._ssh_code(
-            f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} "
+            f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
             "curl -s -o /dev/null -w '%{http_code}' --max-time 20 "
             "https://api.anthropic.com/api/hello"
         )
@@ -2246,7 +2246,7 @@ class AwsSmoke:
         claude_payload = '{"model":"claude-sonnet-4-5","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}'
         print(f"  POST {claude_url} before Claude account token hash is known", flush=True)
         claude_response = self._ssh_code(
-            f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} "
+            f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
             f"curl -s --max-time 20 -X POST -H 'Content-Type: application/json' "
             f"--data {shlex.quote(claude_payload)} {shlex.quote(claude_url)}"
         )
@@ -2273,7 +2273,7 @@ class AwsSmoke:
             )
             token_header = " -H 'X-Amz-Security-Token: smuggled-session-token'" if session_token else ""
             return self._ssh_code(
-                f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} "
+                f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
                 "curl -s --max-time 20 -X POST -H 'Content-Type: application/json' "
                 "-H 'X-Amz-Date: 20260718T000000Z' "
                 f"-H {shlex.quote(f'Authorization: {authorization}')}"
@@ -2386,7 +2386,7 @@ class AwsSmoke:
             network_policy(SMOKE_MANAGED_PROVIDERS),
         )
         credential_rows = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             + shlex.quote("SELECT count(*) FROM bedrock_credentials")
         ).strip()
         if credential_rows != "0":
@@ -2401,8 +2401,8 @@ class AwsSmoke:
                 "smoke-hermes-launch",
                 "qwen.qwen3-coder-next",
                 f"printf %s {shlex.quote('Reply with exactly OK.')} | "
-                "sudo -u trustyclaw-admin -- timeout 90 sudo -n "
-                "/usr/local/lib/trustyclaw-host/run-hermes "
+                "sudo -u kern-admin -- timeout 90 sudo -n "
+                "/usr/local/lib/kern-host/run-hermes "
                 f"region={SMOKE_BEDROCK_REGION} --thread-scope smoke-hermes-launch "
                 "--model qwen.qwen3-coder-next 2>&1 | tail -c 4000",
             ),
@@ -2433,7 +2433,7 @@ class AwsSmoke:
             # A timeout or client retry must not leave a named harness scope
             # behind. Stopping an already collected scope is a harmless no-op.
             self._ssh_code(
-                f"sudo systemctl stop trustyclaw-agent-thread-{thread_scope}.scope "
+                f"sudo systemctl stop kern-agent-thread-{thread_scope}.scope "
                 ">/dev/null 2>&1 || true"
             )
             if not reached_missing_credential_boundary(events):
@@ -2443,7 +2443,7 @@ class AwsSmoke:
                 )
 
         final_rows = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             + shlex.quote("SELECT count(*) FROM bedrock_credentials")
         ).strip()
         if final_rows != "0":
@@ -2477,9 +2477,9 @@ class AwsSmoke:
             raise AssertionError(f"brave_search enable without config should succeed: {enabled}")
 
         # The agent-facing path end to end: the MCP shim runs as
-        # trustyclaw-agent and reaches the tools socket by peer credentials.
+        # kern-agent and reaches the tools socket by peer credentials.
         shim_command = (
-            "sudo -u trustyclaw-agent env PYTHONPATH=/opt/trustyclaw-host "
+            "sudo -u kern-agent env PYTHONPATH=/opt/kern-host "
             "python3 -m host.runtime.agent_shim.mcp_shim"
         )
         next_request_id = 10
@@ -2564,19 +2564,19 @@ class AwsSmoke:
         # the admin service holds none. nftables drops the admin uid's outbound
         # TCP while the tools uid reaches 443 (to a raw IP, so no DNS is needed).
         admin_egress = self._ssh_code(
-            "sudo -u trustyclaw-admin timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>&1 "
+            "sudo -u kern-admin timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>&1 "
             "&& echo TC_OPEN || echo TC_BLOCKED"
         )
         if "TC_BLOCKED" not in admin_egress:
             raise AssertionError(f"admin uid must have no internet egress: {admin_egress!r}")
         tools_egress = self._ssh_code(
-            "sudo -u trustyclaw-tools timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>&1 "
+            "sudo -u kern-tools timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>&1 "
             "&& echo TC_OPEN || echo TC_BLOCKED"
         )
         if "TC_OPEN" not in tools_egress:
             raise AssertionError(f"tools uid must reach the internet for tool APIs: {tools_egress!r}")
         network_egress = self._ssh_code(
-            "sudo -u trustyclaw-agent-network timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>&1 "
+            "sudo -u kern-agent-network timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>&1 "
             "&& echo TC_OPEN || echo TC_BLOCKED"
         )
         if "TC_BLOCKED" not in network_egress:
@@ -2584,7 +2584,7 @@ class AwsSmoke:
                 f"agent-network uid must have no internet egress: {network_egress!r}"
             )
         network_proxy_loopback = self._ssh_code(
-            f"sudo -u trustyclaw-agent-network timeout 6 bash -c "
+            f"sudo -u kern-agent-network timeout 6 bash -c "
             f"'exec 3<>/dev/tcp/127.0.0.1/{PROXY_PORT}' 2>&1 "
             "&& echo TC_OPEN || echo TC_BLOCKED"
         )
@@ -2595,25 +2595,25 @@ class AwsSmoke:
             )
 
         # The agent-facing tools socket is owned by the dedicated tools service.
-        service_active = self._ssh_code("systemctl is-active trustyclaw-tools.service 2>&1 || true")
+        service_active = self._ssh_code("systemctl is-active kern-tools.service 2>&1 || true")
         if service_active.strip() != "active":
-            raise AssertionError(f"trustyclaw-tools.service must be active: {service_active!r}")
-        socket_owner = self._ssh_code("stat -c '%U' /run/trustyclaw-tools/tools.sock 2>&1 || true")
-        if "trustyclaw-tools" not in socket_owner:
-            raise AssertionError(f"tools socket must be owned by trustyclaw-tools: {socket_owner!r}")
+            raise AssertionError(f"kern-tools.service must be active: {service_active!r}")
+        socket_owner = self._ssh_code("stat -c '%U' /run/kern-tools/tools.sock 2>&1 || true")
+        if "kern-tools" not in socket_owner:
+            raise AssertionError(f"tools socket must be owned by kern-tools: {socket_owner!r}")
         network_service = self._ssh_code(
-            "systemctl is-active trustyclaw-agent-network.service 2>&1 || true"
+            "systemctl is-active kern-agent-network.service 2>&1 || true"
         )
         if network_service.strip() != "active":
             raise AssertionError(
-                f"trustyclaw-agent-network.service must be active: {network_service!r}"
+                f"kern-agent-network.service must be active: {network_service!r}"
             )
         network_socket_owner = self._ssh_code(
-            "stat -c '%U' /run/trustyclaw-agent-network/agent-network.sock 2>&1 || true"
+            "stat -c '%U' /run/kern-agent-network/agent-network.sock 2>&1 || true"
         )
-        if "trustyclaw-agent-network" not in network_socket_owner:
+        if "kern-agent-network" not in network_socket_owner:
             raise AssertionError(
-                f"network socket must be owned by trustyclaw-agent-network: {network_socket_owner!r}"
+                f"network socket must be owned by kern-agent-network: {network_socket_owner!r}"
             )
 
         # Peers are scoped strictly by path: other service users are rejected
@@ -2621,12 +2621,12 @@ class AwsSmoke:
         # (it holds only the /operator/... delegation routes).
         probe_script = (
             "from host.runtime.agent_shim.mcp_shim import UnixHTTPConnection; "
-            "c = UnixHTTPConnection('/run/trustyclaw-tools/tools.sock'); "
+            "c = UnixHTTPConnection('/run/kern-tools/tools.sock'); "
             "c.request('GET', '/tools'); print(c.getresponse().status)"
         )
-        for probe_user in ("trustyclaw-proxy", "trustyclaw-admin"):
+        for probe_user in ("kern-proxy", "kern-admin"):
             peer_probe = self._ssh_code(
-                f"sudo -u {probe_user} env PYTHONPATH=/opt/trustyclaw-host "
+                f"sudo -u {probe_user} env PYTHONPATH=/opt/kern-host "
                 f"python3 -c {shlex.quote(probe_script)}"
             )
             if peer_probe.strip() != "403":
@@ -2636,12 +2636,12 @@ class AwsSmoke:
 
         network_probe_script = (
             "from host.runtime.agent_shim.mcp_shim import UnixHTTPConnection; "
-            "c = UnixHTTPConnection('/run/trustyclaw-agent-network/agent-network.sock'); "
+            "c = UnixHTTPConnection('/run/kern-agent-network/agent-network.sock'); "
             "c.request('GET', '/tools'); print(c.getresponse().status)"
         )
-        for probe_user in ("trustyclaw-tools", "trustyclaw-proxy", "trustyclaw-admin"):
+        for probe_user in ("kern-tools", "kern-proxy", "kern-admin"):
             peer_probe = self._ssh_code(
-                f"sudo -u {probe_user} env PYTHONPATH=/opt/trustyclaw-host "
+                f"sudo -u {probe_user} env PYTHONPATH=/opt/kern-host "
                 f"python3 -c {shlex.quote(network_probe_script)}"
             )
             if peer_probe.strip() != "403":
@@ -2650,14 +2650,14 @@ class AwsSmoke:
                 )
 
         network_roles = self._ssh_code(
-            "sudo -u trustyclaw-agent-network psql -tA -d trustyclaw_admin "
+            "sudo -u kern-agent-network psql -tA -d kern_admin "
             "-c 'SELECT count(*) >= 0 FROM network_events' && "
-            "sudo -u trustyclaw-agent-network bash -c "
-            "'! psql -tA -d trustyclaw_admin -c \"DELETE FROM network_events\" 2>/dev/null' && "
-            "sudo -u trustyclaw-agent-network bash -c "
-            "'! psql -tA -d trustyclaw_admin -c \"SELECT count(*) FROM tool_events\" 2>/dev/null' && "
-            "sudo -u trustyclaw-tools bash -c "
-            "'! psql -tA -d trustyclaw_admin -c \"SELECT count(*) FROM network_events\" 2>/dev/null' && "
+            "sudo -u kern-agent-network bash -c "
+            "'! psql -tA -d kern_admin -c \"DELETE FROM network_events\" 2>/dev/null' && "
+            "sudo -u kern-agent-network bash -c "
+            "'! psql -tA -d kern_admin -c \"SELECT count(*) FROM tool_events\" 2>/dev/null' && "
+            "sudo -u kern-tools bash -c "
+            "'! psql -tA -d kern_admin -c \"SELECT count(*) FROM network_events\" 2>/dev/null' && "
             "echo ok"
         ).strip().splitlines()
         if network_roles != ["t", "ok"]:
@@ -2716,9 +2716,9 @@ class AwsSmoke:
         # Exercise both local media uploads without provider config. The files
         # live in the agent workspace, are opened by the agent-side shim, and
         # are removed immediately after the private tool-scoped copies exist.
-        media_root = "/mnt/trustyclaw-agent/agent-home"
-        image_path = "/trustyclaw-smoke.png"
-        video_path = "/trustyclaw-smoke.mp4"
+        media_root = "/mnt/kern-agent/agent-home"
+        image_path = "/kern-smoke.png"
+        video_path = "/kern-smoke.mp4"
         image_local = f"{media_root}{image_path}"
         video_local = f"{media_root}{video_path}"
         create_media = (
@@ -2726,7 +2726,7 @@ class AwsSmoke:
             f"dd if=/dev/zero of={shlex.quote(image_local)} bs=512 count=1 status=none; "
             f"dd if=/dev/zero of={shlex.quote(video_local)} bs=512 count=1 status=none"
         )
-        self._ssh_code(f"sudo -u trustyclaw-agent sh -c {shlex.quote(create_media)}")
+        self._ssh_code(f"sudo -u kern-agent sh -c {shlex.quote(create_media)}")
         try:
             _, image_stage = shim_tool_call(
                 "stage_image", {"path": image_path, "for_tool": "runway"}
@@ -2739,7 +2739,7 @@ class AwsSmoke:
             )
         finally:
             self._ssh_code(
-                "sudo -u trustyclaw-agent rm -f "
+                "sudo -u kern-agent rm -f "
                 f"{shlex.quote(image_local)} {shlex.quote(video_local)}"
             )
         if (
@@ -2756,9 +2756,9 @@ class AwsSmoke:
         if not all(isinstance(value, str) and value for value in asset_ids.values()):
             raise AssertionError(f"local media staging returned missing asset ids: {asset_ids}")
 
-        spool = "/mnt/trustyclaw-admin/tools-state/assets"
+        spool = "/mnt/kern-admin/tools-state/assets"
         spool_mode = self._ssh_code(f"sudo stat -c '%U:%G:%a' {spool}")
-        if spool_mode.strip() != "trustyclaw-tools:trustyclaw-tools:700":
+        if spool_mode.strip() != "kern-tools:kern-tools:700":
             raise AssertionError(f"tool asset spool has unsafe ownership or mode: {spool_mode!r}")
 
         for label, asset_id in asset_ids.items():
@@ -2767,7 +2767,7 @@ class AwsSmoke:
             asset_stat = self._ssh_code(
                 f"sudo stat -c '%U:%G:%a:%s' {shlex.quote(f'{spool}/{asset_id}')}"
             )
-            if asset_stat.strip() != "trustyclaw-tools:trustyclaw-tools:600:512":
+            if asset_stat.strip() != "kern-tools:kern-tools:600:512":
                 raise AssertionError(
                     f"staged media is not private on the admin volume: {asset_stat!r}"
                 )
@@ -2856,7 +2856,7 @@ class AwsSmoke:
             raise AssertionError("tool audit log did not mark every action's arguments as expandable")
         brave_event = action_events["brave_search_search_web"]
         brave_detail = self._api("GET", f"/v1/tools/events/{brave_event['seq']}")["event"]
-        if brave_detail.get("arguments") != {"query": "TrustyClaw"}:
+        if brave_detail.get("arguments") != {"query": "Kern"}:
             raise AssertionError(f"tool audit detail lost exact arguments: {brave_detail}")
 
         for tool_id in BUNDLED_TOOLS:
@@ -2885,7 +2885,7 @@ class AwsSmoke:
                 raise AssertionError(f"{runtime} account should be active before mixed tasks: {account}")
             self._assert_provider_metadata(runtime, account)
         bedrock_keys = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             "\"SELECT count(*) || ':' || count(DISTINCT access_key_id) FROM bedrock_credentials\""
         ).strip()
         if bedrock_keys != "1:1":
@@ -2927,7 +2927,7 @@ class AwsSmoke:
                 raise AssertionError(f"{runtime} did not deactivate after provider disable: {status}")
         self._assert_provider_account_anchors(live_pins=False)
         bedrock_rows = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             "'SELECT count(*) FROM bedrock_credentials'"
         ).strip()
         if bedrock_rows != "1":
@@ -2949,7 +2949,7 @@ class AwsSmoke:
                 raise AssertionError(f"{runtime} did not recover to active after provider re-enable: {status}")
         self._assert_provider_account_anchors(live_pins=True)
         bedrock_rows = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             "'SELECT count(*) FROM bedrock_credentials'"
         ).strip()
         if bedrock_rows != "1":
@@ -3164,13 +3164,13 @@ class AwsSmoke:
         print(f"  kill settled in {time.time() - start:.1f}s", flush=True)
 
         # The kill must also free the thread's transient scope on the host:
-        # close() stops trustyclaw-agent-thread-<id>.scope through the root
+        # close() stops kern-agent-thread-<id>.scope through the root
         # stop-agent-thread helper (SIGKILLing any process the runtime left in
         # the cgroup, such as the sleep above) and reset-failed clears any
         # failed remnant, so systemd forgets the unit entirely. The task is
         # marked cancelled before that close completes, so poll briefly. This
         # pins the mechanism the follow-up task below depends on.
-        scope_unit = f"trustyclaw-agent-thread-{self.thread_prefix}smoke-kill-{self.agent_runtime}.scope"
+        scope_unit = f"kern-agent-thread-{self.thread_prefix}smoke-kill-{self.agent_runtime}.scope"
         deadline = time.time() + 30
         while True:
             load_state = self._ssh_code(
@@ -3321,7 +3321,7 @@ class AwsSmoke:
         else."""
         self._step("network event storm under concurrent reads (two database roles)")
         baseline_row = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c 'SELECT COALESCE(max(seq), 0) FROM network_events'"
+            "sudo -u postgres psql -tA -d kern_admin -c 'SELECT COALESCE(max(seq), 0) FROM network_events'"
         ).strip()
         baseline = int(baseline_row or 0)
         needed = 2 * PRUNE_EVERY + 50  # cross at least two amortized-prune boundaries
@@ -3349,7 +3349,7 @@ class AwsSmoke:
         reader_thread = threading.Thread(target=reader, daemon=True)
         reader_thread.start()
         generator = (
-            "sudo -u trustyclaw-agent python3 - <<'PY'\n"
+            "sudo -u kern-agent python3 - <<'PY'\n"
             "import socket, threading\n"
             f"count, workers = {needed}, 8\n"
             "def worker(n):\n"
@@ -3381,7 +3381,7 @@ class AwsSmoke:
             raise AssertionError(f"reader only completed {reader_reads['count']} reads; the storm outpaced it entirely")
 
         verdict = json.loads(self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             "\"SELECT json_build_object('rows', count(*), 'max_seq', COALESCE(max(seq), 0),"
             " 'unique', count(*) = count(DISTINCT seq))::text FROM network_events WHERE seq > "
             f"{baseline}\""
@@ -3393,11 +3393,11 @@ class AwsSmoke:
         # Role isolation: the proxy can append audit events and read the one
         # Bedrock credential, but cannot mutate credentials or read admin state.
         isolation = self._ssh_code(
-            "sudo -u trustyclaw-proxy psql -tA -d trustyclaw_admin -c 'SELECT count(*) >= 0 FROM network_events' && "
-            "sudo -u trustyclaw-proxy psql -tA -d trustyclaw_admin -c 'SELECT count(*) >= 0 FROM bedrock_credentials' && "
-            "sudo -u trustyclaw-proxy bash -c '! psql -tA -d trustyclaw_admin -c \"UPDATE bedrock_credentials SET access_key_id = access_key_id\" 2>/dev/null' && "
-            "sudo -u trustyclaw-proxy bash -c '! psql -tA -d trustyclaw_admin -c \"SELECT count(*) FROM tasks\" 2>/dev/null' && "
-            "sudo -u trustyclaw-proxy bash -c '! psql -tA -d trustyclaw_admin -c \"SELECT agent_name FROM config\" 2>/dev/null' && "
+            "sudo -u kern-proxy psql -tA -d kern_admin -c 'SELECT count(*) >= 0 FROM network_events' && "
+            "sudo -u kern-proxy psql -tA -d kern_admin -c 'SELECT count(*) >= 0 FROM bedrock_credentials' && "
+            "sudo -u kern-proxy bash -c '! psql -tA -d kern_admin -c \"UPDATE bedrock_credentials SET access_key_id = access_key_id\" 2>/dev/null' && "
+            "sudo -u kern-proxy bash -c '! psql -tA -d kern_admin -c \"SELECT count(*) FROM tasks\" 2>/dev/null' && "
+            "sudo -u kern-proxy bash -c '! psql -tA -d kern_admin -c \"SELECT agent_name FROM config\" 2>/dev/null' && "
             "echo ok"
         ).strip().splitlines()
         if isolation != ["t", "t", "ok"]:
@@ -3444,7 +3444,7 @@ class AwsSmoke:
         raise AssertionError("admin login did not return a session cookie")
 
     def _auth_headers(self) -> dict:
-        return {"Cookie": f"tc_admin_session={self._admin_cookie()}", "X-TrustyClaw-Csrf": "1"}
+        return {"Cookie": f"tc_admin_session={self._admin_cookie()}", "X-Kern-Csrf": "1"}
 
     def _api(self, method: str, path: str, body: dict | None = None) -> dict:
         data = json.dumps(body).encode() if body is not None else None
@@ -3486,7 +3486,7 @@ class AwsSmoke:
         )
         for name, value in self._auth_headers().items():
             request.add_header(name, value)
-        request.add_header("X-TrustyClaw-App-Bridge", "mission_pursuit")
+        request.add_header("X-Kern-App-Bridge", "mission_pursuit")
         if body is not None:
             request.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -3506,7 +3506,7 @@ class AwsSmoke:
         request = urllib.request.Request(f"http://127.0.0.1:{ADMIN_PORT}{path}", data=data, method=method)
         if cookie is not None:
             request.add_header("Cookie", f"tc_admin_session={cookie}")
-            request.add_header("X-TrustyClaw-Csrf", "1")
+            request.add_header("X-Kern-Csrf", "1")
         if body is not None:
             request.add_header("Content-Type", "application/json")
         try:
@@ -3662,7 +3662,7 @@ LEFT JOIN provider_accounts USING (provider)
 LEFT JOIN proxy_provider_pins USING (provider)
 """
         output = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             + shlex.quote(query)
         )
         return json.loads(output) if output else {}
@@ -3778,7 +3778,7 @@ LEFT JOIN proxy_provider_pins USING (provider)
             [
                 "ssh", "-S", str(self.control_socket),
                 "-o", f"UserKnownHostsFile={self.workdir / 'known_hosts'}",
-                f"trustyclaw-operator@{self.result['public_dns']}", remote_command,
+                f"kern-operator@{self.result['public_dns']}", remote_command,
             ],
             capture_output=True, text=True,
         )

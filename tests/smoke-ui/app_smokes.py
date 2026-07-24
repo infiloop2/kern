@@ -53,7 +53,7 @@ def _load_app_smoke(app: app_platform.AppManifest) -> ModuleType:
     smoke_path = APP_SMOKE_ROOT / app.id / "smoke.py"
     if not smoke_path.is_file():
         raise AssertionError(f"{app.id} is missing app smoke module {smoke_path}")
-    module_name = f"trustyclaw_smoke_{app.id}"
+    module_name = f"kern_smoke_{app.id}"
     spec = importlib.util.spec_from_file_location(module_name, smoke_path)
     if spec is None or spec.loader is None:
         raise AssertionError(f"cannot load app smoke module: {smoke_path}")

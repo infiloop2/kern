@@ -1,10 +1,10 @@
-"""Localhost network policy proxy (127.0.0.1:7445), runs as trustyclaw-proxy.
+"""Localhost network policy proxy (127.0.0.1:7445), runs as kern-proxy.
 
 All agent traffic is forced here: nftables drops direct outbound traffic for
 non-root users, and the agent runs with HTTP(S)_PROXY pointing at this proxy.
 
 The proxy is HTTPS/WSS-only: traffic arrives as CONNECT and is inspected by
-terminating client TLS with a certificate signed by the TrustyClaw proxy CA,
+terminating client TLS with a certificate signed by the Kern proxy CA,
 then opening a separate TLS connection upstream. Plain HTTP is denied with a
 logged 403 — no allowed destination speaks it, and the GitHub credential must
 never travel an unencrypted socket.

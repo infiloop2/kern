@@ -1,6 +1,6 @@
 # Development
 
-This folder contains contributor and maintainer workflows for TrustyClaw. For
+This folder contains contributor and maintainer workflows for Kern. For
 runtime design and trust boundaries, start with
 [Architecture](../architecture/index.md).
 

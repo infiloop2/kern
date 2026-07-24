@@ -282,7 +282,7 @@ MANIFEST = ToolManifest(
     config=(ConfigRequirement(key="RUNWAY_API_SECRET", description="Runway Developer API key (org-scoped) from the dev.runwayml.com dashboard."),),
     protections=(
         "Your Runway key stays in write-only tool config. Inputs are bounded, and local images and videos are uploaded to Runway only when used as inputs.",
-        "Generation is billed to your Runway organization. TrustyClaw does not publish the media. A completed video can be saved from Runway's authoritative temporary URL into the agent workspace for durable operator review and later approval-gated publishing.",
+        "Generation is billed to your Runway organization. Kern does not publish the media. A completed video can be saved from Runway's authoritative temporary URL into the agent workspace for durable operator review and later approval-gated publishing.",
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(PARAM_GUARD_TECHNICAL_DETAIL,),
@@ -295,7 +295,7 @@ MANIFEST = ToolManifest(
         ),
         SetupStep(
             title="Fund the API organization and create a key",
-            description="In the developer portal, add API credits to the selected organization, open its API Keys area, create a clearly named organization-scoped secret, and copy it immediately to a password manager or TrustyClaw. Generation, editing, GPT Image, and ElevenLabs speech actions spend the same Runway organization balance; web-app credits do not cover these calls.",
+            description="In the developer portal, add API credits to the selected organization, open its API Keys area, create a clearly named organization-scoped secret, and copy it immediately to a password manager or Kern. Generation, editing, GPT Image, and ElevenLabs speech actions spend the same Runway organization balance; web-app credits do not cover these calls.",
             link_url="https://docs.dev.runwayml.com/guides/using-the-api/",
             link_label="View Runway's API guide",
         ),
@@ -318,7 +318,7 @@ MANIFEST = ToolManifest(
                 title="Where it can go",
                 points=(
                     DataSummaryPoint(label="Runway models", text="Every request first goes to Runway. Gen-4.5, Gen-4 Turbo, and Aleph 2 generations use Runway's own models."),
-                    DataSummaryPoint(label="Third-party video models", text="When the agent explicitly selects Google Veo 3.1 or ByteDance Seedance 2, Runway sends that provider the prompt, output ratio and duration, optional seed, and any first-frame image. TrustyClaw does not let Runway silently choose one of these models."),
+                    DataSummaryPoint(label="Third-party video models", text="When the agent explicitly selects Google Veo 3.1 or ByteDance Seedance 2, Runway sends that provider the prompt, output ratio and duration, optional seed, and any first-frame image. Kern does not let Runway silently choose one of these models."),
                     DataSummaryPoint(label="Image and speech models", text="For image generation, Runway sends the prompt, ratio, and quality to OpenAI's GPT Image 2. For speech generation, Runway sends the speech text and selected voice to ElevenLabs Multilingual v2."),
                 ),
             ),
@@ -590,7 +590,7 @@ def _upload_staged_asset(
         raise RuntimeError(f"Runway {kind} upload initialization returned no runway URI.")
     if not isinstance(fields, dict):
         raise RuntimeError(f"Runway {kind} upload initialization returned invalid form fields.")
-    boundary = f"trustyclaw-{secrets.token_hex(16)}"
+    boundary = f"kern-{secrets.token_hex(16)}"
     prefix, suffix = _multipart_parts(
         cast(JSONObject, fields),
         filename=metadata.filename,

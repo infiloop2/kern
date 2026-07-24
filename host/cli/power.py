@@ -1,4 +1,4 @@
-"""Power operations for existing TrustyClaw EC2 instances."""
+"""Power operations for existing Kern EC2 instances."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def main_for_power_mode(mode: str, argv: list[str] | None = None) -> int:
         raise ValueError(f"unsupported power mode: {mode}")
     parser = argparse.ArgumentParser(
         prog=f"python3 -m host.cli.{mode}",
-        description=f"{mode.capitalize()} an existing TrustyClaw EC2 instance.",
+        description=f"{mode.capitalize()} an existing Kern EC2 instance.",
     )
     parser.add_argument(
         "--agent-name",
@@ -64,7 +64,7 @@ def _single_existing_instance(config: InputConfig, env: dict[str, str]) -> str:
     instances = _find_existing_instances(config, env)
     if len(instances) != 1:
         found = ", ".join(instances) or "none"
-        raise ConfigError(f"power operation requires exactly one existing TrustyClaw instance; found {found}")
+        raise ConfigError(f"power operation requires exactly one existing Kern instance; found {found}")
     return instances[0]
 
 
@@ -88,7 +88,7 @@ def _describe_instance(env: dict[str, str], instance_id: str) -> dict[str, Any]:
 def _state(instance: dict[str, Any]) -> str:
     state = instance.get("State", {}).get("Name")
     if not isinstance(state, str) or not state:
-        raise ConfigError("TrustyClaw instance response is missing state")
+        raise ConfigError("Kern instance response is missing state")
     return state
 
 
@@ -102,11 +102,11 @@ def _start_instance(env: dict[str, str], instance_id: str, state: str) -> dict[s
         _aws(env, "ec2", "wait", "instance-running", "--instance-ids", instance_id)
         instance = _describe_instance(env, instance_id)
         if _state(instance) != "running":
-            raise ConfigError(f"TrustyClaw instance {instance_id} did not reach running state")
+            raise ConfigError(f"Kern instance {instance_id} did not reach running state")
         if not instance.get("PublicDnsName"):
-            raise ConfigError(f"TrustyClaw instance {instance_id} has no public DNS after start")
+            raise ConfigError(f"Kern instance {instance_id} has no public DNS after start")
         return instance
-    raise ConfigError(f"cannot start TrustyClaw instance {instance_id} from state {state}")
+    raise ConfigError(f"cannot start Kern instance {instance_id} from state {state}")
 
 
 def _stop_instance(env: dict[str, str], instance_id: str, state: str) -> dict[str, Any]:
@@ -119,9 +119,9 @@ def _stop_instance(env: dict[str, str], instance_id: str, state: str) -> dict[st
         _aws(env, "ec2", "wait", "instance-stopped", "--instance-ids", instance_id)
         instance = _describe_instance(env, instance_id)
         if _state(instance) != "stopped":
-            raise ConfigError(f"TrustyClaw instance {instance_id} did not reach stopped state")
+            raise ConfigError(f"Kern instance {instance_id} did not reach stopped state")
         return instance
-    raise ConfigError(f"cannot stop TrustyClaw instance {instance_id} from state {state}")
+    raise ConfigError(f"cannot stop Kern instance {instance_id} from state {state}")
 
 
 def _result(

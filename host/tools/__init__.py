@@ -1,4 +1,4 @@
-"""Open tool framework for TrustyClaw.
+"""Open tool framework for Kern.
 
 UI-free tool packages implement the ``Tool`` contract against the
 host-provided ``HostAPI``. Hosts import this package, provide the host API,

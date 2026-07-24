@@ -111,7 +111,7 @@ MANIFEST = ToolManifest(
         ),
         SetupStep(
             title="Copy the API key",
-            description="Open the Serper dashboard and copy the private API key. TrustyClaw sends synchronous Google Search requests; Serper states that it queries Google in real time and does not cache results.",
+            description="Open the Serper dashboard and copy the private API key. Kern sends synchronous Google Search requests; Serper states that it queries Google in real time and does not cache results.",
             link_url="https://serper.dev/dashboard",
             link_label="Open the Serper dashboard",
         ),

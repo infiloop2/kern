@@ -13,7 +13,7 @@ export const MANAGED_INTEGRATIONS = {
     setupSteps: [
       { title: "Enable OpenAI", description: "In Internet Access and Tools, choose Enable on the OpenAI row, then expand it." },
       { title: "Start the Codex login", description: "In Account, choose Start Codex login. In the OpenAI browser sign-in, use the subscription you want this host to use and enter the displayed device code to complete sign-in." },
-      { title: "Verify the linked account", description: "Return to TrustyClaw and wait for the row to show connected with the expected email or account id. That identity is now the operator-approved account anchor." },
+      { title: "Verify the linked account", description: "Return to Kern and wait for the row to show connected with the expected email or account id. That identity is now the operator-approved account anchor." },
     ],
     dataSummary: {
       items: [
@@ -58,7 +58,7 @@ export const MANAGED_INTEGRATIONS = {
     },
     capabilities: [
       { name: "Codex model access", description: "Runs Codex tasks through the models and usage limits available to the linked OpenAI subscription." },
-      { name: "Cached web search", description: "Lets Codex search OpenAI's existing index or cache. TrustyClaw denies request forms that would let OpenAI fetch live external pages for the request." },
+      { name: "Cached web search", description: "Lets Codex search OpenAI's existing index or cache. Kern denies request forms that would let OpenAI fetch live external pages for the request." },
     ],
     controls: [
       "The proxy fails closed when the account pin or request body cannot be checked.",
@@ -74,12 +74,12 @@ export const MANAGED_INTEGRATIONS = {
     summary: "Connect your Anthropic subscription and let your agent use Claude Code for tasks. Web search is optional and off by default.",
     protections: [
       "The linked Anthropic account and OAuth token are pinned. Credentials for another account are denied until you explicitly disconnect and log in again.",
-      "Web search is off by default. When you enable it, the query and surrounding context reach Anthropic's server-side search, which may use search partners and retrieve source pages outside TrustyClaw's boundary. Server-side web fetch, code execution, and remote tool servers stay blocked at the proxy regardless; the agent's own web fetch runs on this host and can reach only TrustyClaw's allowed domains.",
+      "Web search is off by default. When you enable it, the query and surrounding context reach Anthropic's server-side search, which may use search partners and retrieve source pages outside Kern's boundary. Server-side web fetch, code execution, and remote tool servers stay blocked at the proxy regardless; the agent's own web fetch runs on this host and can reach only Kern's allowed domains.",
     ],
     setupSteps: [
       { title: "Enable Claude", description: "In Internet Access and Tools, choose Enable on the Claude row, then expand it." },
       { title: "Start the Claude Code login", description: "In Account, choose Start Claude Code login. Follow the displayed Anthropic OAuth flow and paste the authorization result when prompted." },
-      { title: "Verify the linked account", description: "Wait for the row to show connected with the expected Anthropic identity. TrustyClaw validates the token live before reporting the runtime active." },
+      { title: "Verify the linked account", description: "Wait for the row to show connected with the expected Anthropic identity. Kern validates the token live before reporting the runtime active." },
     ],
     dataSummary: {
       items: [
@@ -92,7 +92,7 @@ export const MANAGED_INTEGRATIONS = {
           title: "Where it can go",
           points: [
             { label: "Anthropic", text: "Everything the agent sends goes to Anthropic's services under the linked account, with service providers used to operate Claude." },
-            { label: "Search partners (only if web search is enabled)", text: "With web search enabled, the query may go to Anthropic's search partners and Anthropic may retrieve source pages, outside TrustyClaw's network boundary. Anthropic does not name which third-party search providers it uses. With web search off (the default), nothing leaves for search." },
+            { label: "Search partners (only if web search is enabled)", text: "With web search enabled, the query may go to Anthropic's search partners and Anthropic may retrieve source pages, outside Kern's network boundary. Anthropic does not name which third-party search providers it uses. With web search off (the default), nothing leaves for search." },
           ],
           links: [],
         },
@@ -151,7 +151,7 @@ export const MANAGED_INTEGRATIONS = {
     setupSteps: [
       {
         title: "Create a dedicated IAM user",
-        description: "In AWS IAM, create one user for TrustyClaw's Hermes Bedrock connection. Attach this policy, then create a long-term access key. Temporary session credentials are not supported.",
+        description: "In AWS IAM, create one user for Kern's Hermes Bedrock connection. Attach this policy, then create a long-term access key. Temporary session credentials are not supported.",
         code: `{
   "Version": "2012-10-17",
   "Statement": [{
@@ -238,10 +238,10 @@ export const MANAGED_INTEGRATIONS = {
     setupSteps: [
       { title: "Choose a credential mode", description: "Use a fine-grained personal access token for the simplest personal setup. Use a GitHub App when you want repository installation scope and short-lived minted tokens." },
       { title: "Create a fine-grained token", description: "In GitHub Settings > Developer settings > Personal access tokens > Fine-grained tokens, choose Generate new token. Select the resource owner and only the repositories this host should reach. Grant Contents read/write for Git pushes, Metadata read, and only the additional repository permissions required by the REST actions you intend to use.", linkUrl: "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens", linkLabel: "View GitHub's fine-grained token guide" },
-      { title: "Or create and install a GitHub App", description: "In GitHub Settings > Developer settings > GitHub Apps, create an app with only the repository permissions your workflow needs. Install it on the selected repositories, note the App ID and installation ID, then generate and download a private key. TrustyClaw uses those values to mint short-lived installation tokens.", linkUrl: "https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app", linkLabel: "View GitHub's app registration guide" },
+      { title: "Or create and install a GitHub App", description: "In GitHub Settings > Developer settings > GitHub Apps, create an app with only the repository permissions your workflow needs. Install it on the selected repositories, note the App ID and installation ID, then generate and download a private key. Kern uses those values to mint short-lived installation tokens.", linkUrl: "https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app", linkLabel: "View GitHub's app registration guide" },
       { title: "Store the credential", description: "Enable GitHub, expand the row, select the credential type, enter its values, and choose Set credential. Stored secret values are never read back into the UI." },
       { title: "Add write repositories", description: "Under Write repositories, add each owner/repository that may receive a push or mutating REST API call. Repositories not listed remain read-only." },
-      { title: "Keep .github push approval enabled", description: "TrustyClaw enables Require approval for .github pushes when GitHub is first turned on. Keep it enabled so workflow and other .github path changes are held for an operator decision; GitHub Actions workflows can execute arbitrary code with network access and repository credentials." },
+      { title: "Keep .github push approval enabled", description: "Kern enables Require approval for .github pushes when GitHub is first turned on. Keep it enabled so workflow and other .github path changes are held for an operator decision; GitHub Actions workflows can execute arbitrary code with network access and repository credentials." },
     ],
     capabilities: [
       { name: "Git and REST reads", description: "Clone, fetch, inspect releases and raw files, and use read-only GitHub REST endpoints wherever the credential has access." },
@@ -259,7 +259,7 @@ export const MANAGED_INTEGRATIONS = {
           points: [
             { label: "Write repositories", text: "Apart from public repositories and GitHub Actions (below), data can go only to the repositories on your write list; in a private repository it is visible only to that repository's collaborators." },
             { label: "Public repositories", text: "Everything pushed to a public write repository is exposed to the entire internet." },
-            { label: "GitHub Actions", text: "A push changing a .github path can start workflow runs, which execute code with network access and can send repository data anywhere. TrustyClaw holds .github pushes for your approval by default." },
+            { label: "GitHub Actions", text: "A push changing a .github path can start workflow runs, which execute code with network access and can send repository data anywhere. Kern holds .github pushes for your approval by default." },
           ],
           links: [],
         },
@@ -438,17 +438,17 @@ export const CUSTOM_DOMAIN_GUIDE = {
       },
       {
         title: "Where it can go",
-        description: "Directly to the configured domain, and from there wherever that service's own terms allow. TrustyClaw applies no redaction and holds no contract limiting onward sharing.",
+        description: "Directly to the configured domain, and from there wherever that service's own terms allow. Kern applies no redaction and holds no contract limiting onward sharing.",
         links: [],
       },
       {
         title: "What the third party can do with it",
-        description: "TrustyClaw adds only the configured network boundary. It provides no provider contract, field redaction, OAuth isolation, or data-use promise; the service's own current terms control what it does with the data.",
+        description: "Kern adds only the configured network boundary. It provides no provider contract, field redaction, OAuth isolation, or data-use promise; the service's own current terms control what it does with the data.",
         links: [],
       },
       {
         title: "How long the third party retains it",
-        description: "TrustyClaw does not know the configured service's retention or deletion practices. Check that service's current policy before sending personal, confidential, regulated, or credential-bearing data.",
+        description: "Kern does not know the configured service's retention or deletion practices. Check that service's current policy before sending personal, confidential, regulated, or credential-bearing data.",
         links: [],
       },
     ],

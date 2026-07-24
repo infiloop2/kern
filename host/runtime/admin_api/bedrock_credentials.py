@@ -32,12 +32,12 @@ from typing import Any
 
 from host.runtime.core import state
 
-DEFAULT_ACCOUNT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/read-aws-account"]
+DEFAULT_ACCOUNT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/read-aws-account"]
 # Named to match the env_keep entry in the sudoers file. Only the
 # read-aws-account root helper consumes these: both launchers inject fixed
 # dummy values instead, and the proxy re-signs with the real key.
-ACCESS_KEY_ID_ENV = "TRUSTYCLAW_BEDROCK_AWS_ACCESS_KEY_ID"
-SECRET_ACCESS_KEY_ENV = "TRUSTYCLAW_BEDROCK_AWS_SECRET_ACCESS_KEY"
+ACCESS_KEY_ID_ENV = "KERN_BEDROCK_AWS_ACCESS_KEY_ID"
+SECRET_ACCESS_KEY_ENV = "KERN_BEDROCK_AWS_SECRET_ACCESS_KEY"
 # The attest helper makes one signed HTTPS round trip (15s inside the helper).
 AWS_HELPER_TIMEOUT_SECONDS = 30
 # The helper exits 3 when AWS itself rejected the credential or permission —

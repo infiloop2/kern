@@ -4,7 +4,7 @@
 // CSRF header so the server accepts the cookie (a cross-site page cannot set
 // it). app.js registers what happens on a 401 (show the login screen).
 
-const CSRF_HEADER = "X-TrustyClaw-Csrf";
+const CSRF_HEADER = "X-Kern-Csrf";
 
 let unauthorizedHandler = () => {};
 

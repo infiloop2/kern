@@ -71,7 +71,7 @@ def save_attested_claude_account(account_id: str, **extra: Any) -> None:
 
 def _session_headers(token: str) -> dict[str, str]:
     """Cookie + CSRF headers for a request authenticated by an admin session."""
-    return {"Cookie": f"tc_admin_session={token}", "X-TrustyClaw-Csrf": "1"}
+    return {"Cookie": f"tc_admin_session={token}", "X-Kern-Csrf": "1"}
 
 
 def _add_session_auth(request: "urllib.request.Request", token: str) -> None:
@@ -104,7 +104,7 @@ class AdminUiStaticTests(unittest.TestCase):
             Path(__file__).parents[1] / "host/apps/agent_chat/ui/agent_chat.js"
         ).read_text()
         css = (runtime.parent / "admin_ui.css").read_text()
-        self.assertIn('message.type === "trustyclaw-app-upload-file"', app)
+        self.assertIn('message.type === "kern-app-upload-file"', app)
         self.assertIn('input.type = "file"', app)
         self.assertIn("input.multiple = true", app)
         self.assertIn('input.className = "host-file-picker"', app)
@@ -195,10 +195,10 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("bedrock:InvokeModel", catalog)
         self.assertIn("bedrock:InvokeModelWithResponseStream", catalog)
         self.assertIn("guide-step-code", combined)
-        self.assertNotIn("TrustyClaw rechecks the connected key", catalog)
+        self.assertNotIn("Kern rechecks the connected key", catalog)
         self.assertNotIn("The first task is the live check", catalog)
-        self.assertNotIn("TrustyClaw immediately verifies", catalog)
-        self.assertNotIn("TrustyClaw verifies the credential", catalog)
+        self.assertNotIn("Kern immediately verifies", catalog)
+        self.assertNotIn("Kern verifies the credential", catalog)
 
     def test_connection_guide_screenshots_are_local_png_assets(self) -> None:
         repo = Path(__file__).parents[1]
@@ -283,9 +283,9 @@ class AdminUiStaticTests(unittest.TestCase):
 
         self.assertIn('id="upgrade-notice"', html)
         self.assertIn('id="upgrade-popover"', html)
-        self.assertNotIn('href="https://github.com/infiloop2/trustyclaw', html)
+        self.assertNotIn('href="https://github.com/infiloop2/kern', html)
         self.assertIn("renderUpgradeNotice(health.upgrade)", health_js)
-        self.assertIn('"Your TrustyClaw is at the latest version."', health_js)
+        self.assertIn('"Your Kern is at the latest version."', health_js)
         self.assertIn('"Use your operator plane to upgrade."', health_js)
         self.assertIn('notice.setAttribute("aria-label", label)', health_js)
         self.assertIn(".upgrade-notice {", css)
@@ -324,9 +324,9 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('data-action="toggle-beta-apps"', html)
         self.assertIn("under development and may not function properly", html)
         app_js = (runtime / "admin_ui" / "app.js").read_text()
-        self.assertIn("trustyclaw-app-api", app_js)
-        self.assertIn("trustyclaw-app-open-file", app_js)
-        self.assertIn('"X-TrustyClaw-App-Bridge": app.id', app_js)
+        self.assertIn("kern-app-api", app_js)
+        self.assertIn("kern-app-open-file", app_js)
+        self.assertIn('"X-Kern-App-Bridge": app.id', app_js)
         # The bridge scope is enforced server-side (route() 403s any
         # bridge-tagged request outside the app's own API); the shell keeps
         # only a friendly prefix pre-check.
@@ -356,7 +356,7 @@ class AdminUiStaticTests(unittest.TestCase):
             pass
 
         class Handler:
-            headers = {"X-TrustyClaw-App-Backend": "agent_chat"}
+            headers = {"X-Kern-App-Backend": "agent_chat"}
             request = Request()
 
         with (
@@ -697,7 +697,7 @@ class AgentFileUploadHttpTests(unittest.TestCase):
             popen.assert_not_called()
 
     def test_upload_cap_and_app_bridge_scope_are_enforced_before_body_read(self) -> None:
-        auth = f"Cookie: tc_admin_session={self.session_token}\r\nX-TrustyClaw-Csrf: 1\r\n"
+        auth = f"Cookie: tc_admin_session={self.session_token}\r\nX-Kern-Csrf: 1\r\n"
         oversized = self.raw_request(
             b"POST /v1/agent-files/upload?filename=photo.png HTTP/1.1\r\n"
             b"Host: localhost\r\n"
@@ -713,7 +713,7 @@ class AgentFileUploadHttpTests(unittest.TestCase):
             method="POST",
             headers={
                 **_session_headers(self.session_token),
-                "X-TrustyClaw-App-Bridge": "agent_chat",
+                "X-Kern-App-Bridge": "agent_chat",
             },
         )
         with self.assertRaises(urllib.error.HTTPError) as error:
@@ -733,7 +733,7 @@ class AgentFileUploadHttpTests(unittest.TestCase):
             response = self.raw_request(
                 b"POST /v1/agent-files/upload?filename=photo.png HTTP/1.1\r\n"
                 b"Host: localhost\r\n"
-                + f"Cookie: tc_admin_session={self.session_token}\r\nX-TrustyClaw-Csrf: 1\r\n".encode()
+                + f"Cookie: tc_admin_session={self.session_token}\r\nX-Kern-Csrf: 1\r\n".encode()
                 + b"Content-Length: 20\r\n\r\n"
                 b"short"
             )
@@ -857,13 +857,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.addCleanup(self.proxy_temp_dir.cleanup)
         self.env_patch = patch.dict(
             "os.environ",
-            {"TRUSTYCLAW_STATE_DIR": self.temp_dir.name, "TRUSTYCLAW_PROXY_STATE_DIR": self.proxy_temp_dir.name},
+            {"KERN_STATE_DIR": self.temp_dir.name, "KERN_PROXY_STATE_DIR": self.proxy_temp_dir.name},
         )
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         save_config(
             {
-                "agent_name": "trustyclaw-test",
+                "agent_name": "kern-test",
                 "admin_password_sha256": hashlib.sha256(b"admin-secret").hexdigest(),
             }
         )
@@ -954,7 +954,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         status, body = self.health()
 
         self.assertEqual(status, 200)
-        self.assertEqual(body["agent_name"], "trustyclaw-test")
+        self.assertEqual(body["agent_name"], "kern-test")
         self.assertEqual(self.runtime(body)["status"], "active")
         self.assertEqual(self.runtime(body, "claude_code")["status"], "deactivated")
         self.assertEqual(body["network_controls"]["status"], "active")
@@ -981,7 +981,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def test_app_backend_header_does_not_authenticate_tcp_admin_api(self) -> None:
         request = urllib.request.Request(f"{self.base_url}/v1/threads", method="GET")
-        request.add_header("X-TrustyClaw-App-Backend", "agent_chat")
+        request.add_header("X-Kern-App-Backend", "agent_chat")
 
         with self.assertRaises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(request, timeout=5)
@@ -1148,12 +1148,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         response = self.raw_request(
             b"GET / HTTP/1.1\r\n"
-            b"Host: trustyclaw.example.com\r\n"
+            b"Host: kern.example.com\r\n"
             b"X-Forwarded-Proto: http\r\n"
             b"Connection: close\r\n\r\n"
         )
         self.assertIn(b" 301 ", response)
-        self.assertIn(b"Location: https://trustyclaw.example.com/", response)
+        self.assertIn(b"Location: https://kern.example.com/", response)
 
     def test_app_backend_task_threads_are_internally_app_prefixed(self) -> None:
         task = self.app_backend_request(
@@ -1307,7 +1307,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         for asset_name, content_type, expected in (
             ("agent_chat.css", "text/css", ".chat-app"),
-            ("agent_chat.js", "application/javascript", "trustyclaw-app-api"),
+            ("agent_chat.js", "application/javascript", "kern-app-api"),
         ):
             request = urllib.request.Request(f"{self.base_url}/v1/apps/agent_chat/ui/{asset_name}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -1369,7 +1369,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(body, {"status": "ok"})
         self.assertEqual(captured["connect"][1], 7450)
         headers = captured["request"][3]
-        self.assertEqual(headers["X-TrustyClaw-App-Proxy"], "agent_chat")
+        self.assertEqual(headers["X-Kern-App-Proxy"], "agent_chat")
         self.assertNotIn("Authorization", headers)
 
     def test_filesystem_metrics_reports_root_and_data_mounts(self) -> None:
@@ -1381,8 +1381,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         def fake_disk_usage(path: str) -> Usage:
             values = {
                 "/": Usage(1, 10),
-                "/mnt/trustyclaw-admin": Usage(2, 20),
-                "/mnt/trustyclaw-agent": Usage(3, 30),
+                "/mnt/kern-admin": Usage(2, 20),
+                "/mnt/kern-agent": Usage(3, 30),
             }
             return values[path]
 
@@ -1399,13 +1399,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         invalid = self.raw_request(
             b"POST /v1/tasks HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
-            + f"Cookie: tc_admin_session={self.session_token}\r\nX-TrustyClaw-Csrf: 1\r\n".encode()
+            + f"Cookie: tc_admin_session={self.session_token}\r\nX-Kern-Csrf: 1\r\n".encode()
             + b"Content-Length: nope\r\n\r\n"
         )
         huge = self.raw_request(
             b"POST /v1/tasks HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
-            + f"Cookie: tc_admin_session={self.session_token}\r\nX-TrustyClaw-Csrf: 1\r\n".encode()
+            + f"Cookie: tc_admin_session={self.session_token}\r\nX-Kern-Csrf: 1\r\n".encode()
             + b"Content-Length: 1048577\r\n\r\n"
         )
 
@@ -1496,7 +1496,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.assertIn("text/html", response.headers["Content-Type"])
             self.assert_security_headers(response.headers)
             page = response.read().decode()
-        self.assertIn("TrustyClaw", page)
+        self.assertIn("Kern", page)
         self.assertIn('/admin_ui.css', page)
         self.assertIn('/admin_ui/app.js', page)
 
@@ -1572,7 +1572,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(calls[0], [
             "/usr/bin/sudo",
             "-n",
-            "/usr/local/lib/trustyclaw-host/read-agent-file",
+            "/usr/local/lib/kern-host/read-agent-file",
             "list",
             "/",
         ])
@@ -2045,9 +2045,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # /v1/login and never stores the admin password itself.
         self.assertIn("/v1/login", ui)
         self.assertIn("/v1/logout", ui)
-        self.assertIn('"X-TrustyClaw-Csrf"', ui)
+        self.assertIn('"X-Kern-Csrf"', ui)
         # The legacy password cookie is only ever expired, never stored or read.
-        self.assertIn("trustyclaw_admin=; path=/; max-age=0", ui)
+        self.assertIn("kern_admin=; path=/; max-age=0", ui)
         self.assertNotIn("getPassword", ui)
         self.assertIn("Memory", ui)
         self.assertIn("Admin volume", ui)
@@ -2276,7 +2276,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         save_policy(
             {
                 "network_integrations": {
-                    "github": {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "trustyclaw"}]}
+                    "github": {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "kern"}]}
                 },
             },
             "2026-06-08T00:00:01Z",
@@ -2285,11 +2285,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
     def test_github_pending_push_approve_and_reject(self) -> None:
         state.save_proxy_github_token("ghs_working")
         state.enqueue_pending_push(
-            "aa11bb22", "infiloop2", "trustyclaw",
+            "aa11bb22", "infiloop2", "kern",
             [{"old": "0" * 40, "new": "1" * 40, "ref": "refs/heads/main"}], [".github/workflows/ci.yml"],
         )
         state.enqueue_pending_push(
-            "cc33dd44", "infiloop2", "trustyclaw",
+            "cc33dd44", "infiloop2", "kern",
             [{"old": "0" * 40, "new": "2" * 40, "ref": "refs/heads/feat"}], [".github/dependabot.yml"],
         )
         status, listing = self.request("GET", "/v1/network-tools/github-pending-pushes")
@@ -2329,7 +2329,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(timeouts[1], github_pending_push.APPROVE_HELPER_TIMEOUT_SECONDS)
 
         state.enqueue_pending_push(
-            "dd55ee66", "infiloop2", "trustyclaw",
+            "dd55ee66", "infiloop2", "kern",
             [{"old": "0" * 40, "new": "3" * 40, "ref": "refs/heads/rejected"}], [".github/workflows/fail.yml"],
         )
         failure_calls: list[dict] = []
@@ -2354,7 +2354,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         state.save_proxy_github_token(None)
         state.enqueue_pending_push(
-            "0badcafe", "infiloop2", "trustyclaw",
+            "0badcafe", "infiloop2", "kern",
             [{"old": "0" * 40, "new": "8" * 40, "ref": "refs/heads/no-token"}],
             [".github/workflows/no-token.yml"],
         )
@@ -2375,7 +2375,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         state.save_proxy_github_token("ghs_working")
 
         state.enqueue_pending_push(
-            "ff99aa00", "infiloop2", "trustyclaw",
+            "ff99aa00", "infiloop2", "kern",
             [{"old": "0" * 40, "new": "5" * 40, "ref": "refs/heads/cleanup-lock"}],
             [".github/workflows/cleanup.yml"],
         )
@@ -2404,7 +2404,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(resolved.exception.code, 409)
 
         state.enqueue_pending_push(
-            "ee77ff88", "infiloop2", "trustyclaw",
+            "ee77ff88", "infiloop2", "kern",
             [{"old": "0" * 40, "new": "4" * 40, "ref": "refs/heads/racing"}], [".github/workflows/race.yml"],
         )
         # A resolution racing another one gets a crisp conflict: resolutions
@@ -2423,7 +2423,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, empty = self.request("GET", "/v1/network-tools/github-credential")
         self.assertFalse(empty["configured"])
         self.assertEqual(empty["repository_audits"][0]["owner"], "infiloop2")
-        self.assertEqual(empty["repository_audits"][0]["repo"], "trustyclaw")
+        self.assertEqual(empty["repository_audits"][0]["repo"], "kern")
         self.assertEqual(empty["repository_audits"][0]["warnings"][0]["code"], "repository_audit_incomplete")
         self.assertIn("repository audit has not run yet", empty["repository_audits"][0]["warnings"][0]["message"])
 
@@ -2452,7 +2452,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "/v1/network/policy",
             {
                 "network_integrations": {
-                    "github": {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "trustyclaw"}]}
+                    "github": {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "kern"}]}
                 },
             },
         )
@@ -2506,7 +2506,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         "github": {
                             "enabled": True,
                             "write_repositories": [
-                                {"owner": "infiloop2", "repo": "trustyclaw"},
+                                {"owner": "infiloop2", "repo": "kern"},
                                 {"owner": "infiloop2", "repo": "infibot"},
                             ],
                         }
@@ -2670,7 +2670,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                             "enabled": True,
                             "write_repositories": [
                                 {"owner": "infiloop2", "repo": "just-granted"},
-                                {"owner": "infiloop2", "repo": "trustyclaw"},
+                                {"owner": "infiloop2", "repo": "kern"},
                             ],
                         },
                     },
@@ -2906,7 +2906,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "/v1/network/policy",
             {
                 "network_integrations": {
-                    "github": {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "trustyclaw"}]}
+                    "github": {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "kern"}]}
                 },
             },
         )
@@ -3712,7 +3712,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
     def test_bedrock_account_metadata_has_one_provider_row(self) -> None:
         account = {
             "account_id": "123456789012",
-            "arn": "arn:aws:iam::123456789012:user/trustyclaw-bedrock",
+            "arn": "arn:aws:iam::123456789012:user/kern-bedrock",
             "access_key_id": "AKIAOPERATORKEY00001",
         }
         state.save_bedrock_credential("AKIAOPERATORKEY00001", "S" * 40, "us-east-1")
@@ -4236,7 +4236,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             _, body = self.request("POST", "/v1/host-runtime/reboot")
         self.assertEqual(body["status"], "accepted")
         run.assert_called_with(
-            ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/reboot-host"],
+            ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/reboot-host"],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -4401,7 +4401,7 @@ class ToolRoutesTests(unittest.TestCase):
         pg_harness.reset_database()
         save_config(
             {
-                "agent_name": "trustyclaw-test",
+                "agent_name": "kern-test",
                 "admin_password_sha256": hashlib.sha256(b"admin-secret").hexdigest(),
             }
         )
@@ -4415,7 +4415,7 @@ class ToolRoutesTests(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
         # The operator delegation routes (connect complete/disconnect, approval
-        # decide) forward to the trustyclaw-tools service socket, so stand one up
+        # decide) forward to the kern-tools service socket, so stand one up
         # in-process (same DB and BUNDLED_TOOLS) and point the admin API at it.
         socket_dir = tempfile.TemporaryDirectory()
         self.addCleanup(socket_dir.cleanup)
@@ -4710,7 +4710,7 @@ class ToolRoutesTests(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=10) as response:
             self.assertEqual(response.status, 200)
             self.assertIn("text/html", response.headers["Content-Type"])
-            self.assertIn(b"TrustyClaw", response.read())
+            self.assertIn(b"Kern", response.read())
 
 
 if __name__ == "__main__":

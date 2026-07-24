@@ -28,9 +28,9 @@ inherit systemd's controlled environment, where none of these are set, so the
 defaults below are the production configuration and a stray shell variable
 cannot repoint a service):
 
-- ``TRUSTYCLAW_DB_SOCKET_DIR``: Unix socket directory.
-- ``TRUSTYCLAW_DB_NAME``: database name (default ``trustyclaw_admin``).
-- ``TRUSTYCLAW_DB_USER``: role name (default: the OS user, for peer auth).
+- ``KERN_DB_SOCKET_DIR``: Unix socket directory.
+- ``KERN_DB_NAME``: database name (default ``kern_admin``).
+- ``KERN_DB_USER``: role name (default: the OS user, for peer auth).
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from typing import Any, Iterator
 
 from host.runtime.core import pgclient
 
-DEFAULT_DB_NAME = "trustyclaw_admin"
+DEFAULT_DB_NAME = "kern_admin"
 # Idle pooled connections kept per process. The admin API serves one operator
 # over loopback; a couple of warm connections cover the request handler plus
 # the worker threads without holding dozens of server slots.
@@ -70,13 +70,13 @@ def jsonb(value: Any) -> pgclient.Jsonb:
 
 
 def connect_kwargs(*, user: str | None = None) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"dbname": os.environ.get("TRUSTYCLAW_DB_NAME", DEFAULT_DB_NAME)}
-    if os.environ.get("TRUSTYCLAW_DB_SOCKET_DIR"):
-        kwargs["socket_dir"] = os.environ["TRUSTYCLAW_DB_SOCKET_DIR"]
+    kwargs: dict[str, Any] = {"dbname": os.environ.get("KERN_DB_NAME", DEFAULT_DB_NAME)}
+    if os.environ.get("KERN_DB_SOCKET_DIR"):
+        kwargs["socket_dir"] = os.environ["KERN_DB_SOCKET_DIR"]
     if user is not None:
         kwargs["user"] = user
-    elif os.environ.get("TRUSTYCLAW_DB_USER"):
-        kwargs["user"] = os.environ["TRUSTYCLAW_DB_USER"]
+    elif os.environ.get("KERN_DB_USER"):
+        kwargs["user"] = os.environ["KERN_DB_USER"]
     return kwargs
 
 

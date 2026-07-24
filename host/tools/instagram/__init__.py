@@ -168,10 +168,10 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Copy the Instagram credentials and register the callback",
             show_callback=True,
-            description="Stay inside the same Meta app and open Instagram > API setup with Instagram login in the left sidebar. Copy the Instagram App ID and Instagram App Secret shown on that page; these are the values TrustyClaw uses. On the same page, find Set up Instagram business login and open Business login settings. Paste the exact callback URI displayed in this guide into Valid OAuth Redirect URIs, then save changes. If Client OAuth Login and Web OAuth Login switches are shown, leave both enabled. A different scheme, host, port, path, or trailing slash causes Meta to reject Connect. TrustyClaw requests only instagram_business_basic and instagram_business_content_publish.",
+            description="Stay inside the same Meta app and open Instagram > API setup with Instagram login in the left sidebar. Copy the Instagram App ID and Instagram App Secret shown on that page; these are the values Kern uses. On the same page, find Set up Instagram business login and open Business login settings. Paste the exact callback URI displayed in this guide into Valid OAuth Redirect URIs, then save changes. If Client OAuth Login and Web OAuth Login switches are shown, leave both enabled. A different scheme, host, port, path, or trailing slash causes Meta to reject Connect. Kern requests only instagram_business_basic and instagram_business_content_publish.",
         ),
         SetupStep(
-            title="Configure and connect TrustyClaw",
+            title="Configure and connect Kern",
             show_config=True,
             description="Expand Instagram in Internet Access and Tools. Save the Instagram App ID as INSTAGRAM_APP_ID and Instagram App Secret as INSTAGRAM_APP_SECRET, enable the tool, choose Connect, sign in to the intended professional account, and approve the displayed scopes. The row shows the connected username automatically; confirm it matches the username recorded above.",
         ),

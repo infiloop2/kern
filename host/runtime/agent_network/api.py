@@ -1,7 +1,7 @@
 """Agent network introspection over a peer-authenticated Unix socket.
 
 This service exposes only the two read-only network tools. It runs as the
-non-egress ``trustyclaw-agent-network`` user and reads only the policy and
+non-egress ``kern-agent-network`` user and reads only the policy and
 network-event tables granted to that database role. The MCP shim aggregates
 this socket with the independent tools and app sockets.
 """
@@ -24,8 +24,8 @@ from host.network_integrations import registry
 from host.runtime.core import network_policy, state
 
 DEFAULT_SOCKET_PATH = AGENT_NETWORK_SOCKET_PATH
-SOCKET_PATH = os.environ.get("TRUSTYCLAW_AGENT_NETWORK_SOCKET", DEFAULT_SOCKET_PATH)
-AGENT_PEER_USER = "trustyclaw-agent"
+SOCKET_PATH = os.environ.get("KERN_AGENT_NETWORK_SOCKET", DEFAULT_SOCKET_PATH)
+AGENT_PEER_USER = "kern-agent"
 MAX_REQUEST_BODY_BYTES = 16 * 1024
 MAX_CONCURRENT_CALLS = 8
 REQUEST_READ_TIMEOUT_SECONDS = 30

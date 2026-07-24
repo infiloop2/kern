@@ -1,32 +1,32 @@
 # Persistent AWS Stage
 
 Stage is the long-lived environment for login-dependent checks. The workflow
-upgrades or recreates one fixed host, `trustyclaw-stage` in `us-east-1`, using a
+upgrades or recreates one fixed host, `kern-stage` in `us-east-1`, using a
 stable admin password and a persistent operator SSH endpoint. The admin and
 agent data volumes are preserved, so Codex and Claude OAuth sessions and the
 validated AWS Bedrock credential survive across upgrades.
 
 The stage workflow uses the lifecycle commands in this order:
 
-1. `python3 -m host.cli.upgrade --agent-name trustyclaw-stage > trustyclaw-stage.json`
+1. `python3 -m host.cli.upgrade --agent-name kern-stage > kern-stage.json`
 2. If upgrade fails only because the preserved state is already at the repo
    `VERSION`, the workflow starts the tagged EC2 instance with
-   `python3 -m host.cli.start --agent-name trustyclaw-stage > trustyclaw-stage.json`,
+   `python3 -m host.cli.start --agent-name kern-stage > kern-stage.json`,
    without changing password or operator access.
 3. If the instance is missing but preserved volumes exist,
-   `python3 -m host.cli.recover --agent-name trustyclaw-stage --allow-upgrade > trustyclaw-stage.json`
+   `python3 -m host.cli.recover --agent-name kern-stage --allow-upgrade > kern-stage.json`
 4. If this is the first-ever stage run and no preserved volumes exist,
-   `python3 -m host.cli.deploy --agent-name trustyclaw-stage --operator-ssh-public-key "$TRUSTYCLAW_STAGE_SSH_PUBLIC_KEY" --admin-password-sha256 "$(printf %s "$TRUSTYCLAW_STAGE_ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)" > trustyclaw-stage.json`
+   `python3 -m host.cli.deploy --agent-name kern-stage --operator-ssh-public-key "$KERN_STAGE_SSH_PUBLIC_KEY" --admin-password-sha256 "$(printf %s "$KERN_STAGE_ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)" > kern-stage.json`
 
 Normal release runs should take the upgrade path, which preserves the existing
 admin password and operator endpoints from admin state. Same-version reruns
 start the existing instance and test it as-is. First deploy installs the
 configured stage SSH endpoint. Upgrade, recovery, and power commands
 intentionally take no operator endpoints and the CLI only ever sees the
-password hash. The stage test receives `TRUSTYCLAW_STAGE_ADMIN_PASSWORD`
+password hash. The stage test receives `KERN_STAGE_ADMIN_PASSWORD`
 through its own `--admin-password-env` flag for admin API auth, and the
 workflow passes the generated stage SSH key path through `--ssh-key-env
-TRUSTYCLAW_STAGE_SSH_KEY`.
+KERN_STAGE_SSH_KEY`.
 
 The stage test takes a `--suite` argument selecting which checks run: `claude`,
 `codex`, `hermes`, or `github` run that integration's checks plus the shared preamble, every
@@ -123,7 +123,7 @@ that state for every tool, skips unavailable tools, and runs the complete live
 matrix for the rest.
 
 Enable-only tool config secrets follow one rule: a manifest config key `KEY` is
-supplied as the repository secret `TRUSTYCLAW_STAGE_KEY`. The workflow maps the
+supplied as the repository secret `KERN_STAGE_KEY`. The workflow maps the
 current enable-only manifest keys into the test environment, and the test writes
 present values through the admin API before preflight. Values already stored on
 the persistent host remain usable when the matching repository secret is absent.
@@ -145,9 +145,9 @@ and Runway authenticates with a missing-task probe so stage spends no generation
 credits.
 
 The deterministic checks send MCP `tools/call` requests through the real agent
-shim as the `trustyclaw-agent` OS user. They therefore use the same tool host,
+shim as the `kern-agent` OS user. They therefore use the same tool host,
 credential store, approval system, audit log, and provider adapters as an agent;
-they do not bypass TrustyClaw with direct provider HTTP requests. Individual
+they do not bypass Kern with direct provider HTTP requests. Individual
 tool suites use only this deterministic path. Agent-to-MCP wiring is tested
 once per available provider by the catalog check instead of spending another
 model turn for every tool.
@@ -207,15 +207,15 @@ Create a separate IAM user for stage, with the stage-scoped policy:
 
 ```bash
 aws iam create-policy \
-  --policy-name trustyclaw-host-stage \
+  --policy-name kern-host-stage \
   --policy-document file://tests/stage/iam_policy_stage.json
 
-aws iam create-user --user-name trustyclaw-host-stage
+aws iam create-user --user-name kern-host-stage
 aws iam attach-user-policy \
-  --user-name trustyclaw-host-stage \
-  --policy-arn arn:aws:iam::<account-id>:policy/trustyclaw-host-stage
+  --user-name kern-host-stage \
+  --policy-arn arn:aws:iam::<account-id>:policy/kern-host-stage
 
-aws iam create-access-key --user-name trustyclaw-host-stage
+aws iam create-access-key --user-name kern-host-stage
 ```
 
 Create a separate IAM user for the Hermes Bedrock connection. The
@@ -223,27 +223,27 @@ host-stage IAM user above manages EC2 and is not exposed to inference:
 
 ```bash
 aws iam create-policy \
-  --policy-name trustyclaw-bedrock-stage \
+  --policy-name kern-bedrock-stage \
   --policy-document file://tests/stage/iam_policy_bedrock.json
 
-aws iam create-user --user-name trustyclaw-stage-bedrock
+aws iam create-user --user-name kern-stage-bedrock
 aws iam attach-user-policy \
-  --user-name trustyclaw-stage-bedrock \
-  --policy-arn arn:aws:iam::<account-id>:policy/trustyclaw-bedrock-stage
-aws iam create-access-key --user-name trustyclaw-stage-bedrock
+  --user-name kern-stage-bedrock \
+  --policy-arn arn:aws:iam::<account-id>:policy/kern-bedrock-stage
+aws iam create-access-key --user-name kern-stage-bedrock
 ```
 
 The Bedrock policy permits model invocation only. Invocation
 uses `Resource: "*"` because cross-region inference profiles can route to
 foundation-model resources in multiple US regions. The agent processes receive
-only TrustyClaw's fixed dummy SDK credential; the proxy injects this operator
+only Kern's fixed dummy SDK credential; the proxy injects this operator
 credential after enforcing the Bedrock route and signature.
 
 Generate the persistent operator SSH key locally:
 
 ```bash
-install -m 0700 -d ~/.ssh/trustyclaw
-ssh-keygen -t ed25519 -f ~/.ssh/trustyclaw/stage_operator -C trustyclaw-stage -N ''
+install -m 0700 -d ~/.ssh/kern
+ssh-keygen -t ed25519 -f ~/.ssh/kern/stage_operator -C kern-stage -N ''
 ```
 
 Generate a stable admin password and keep it in your password manager:
@@ -256,24 +256,24 @@ Add these repository secrets and variables:
 
 | Name | Value |
 | --- | --- |
-| `TRUSTYCLAW_STAGE_AWS_ACCESS_KEY_ID` | Access key id for the stage IAM user. |
-| `TRUSTYCLAW_STAGE_AWS_SECRET_ACCESS_KEY` | Secret access key for the stage IAM user. |
-| `TRUSTYCLAW_STAGE_SSH_PRIVATE_KEY` | Full contents of `~/.ssh/trustyclaw/stage_operator`. |
-| `TRUSTYCLAW_STAGE_ADMIN_PASSWORD` | Stable password generated above. |
-| `TRUSTYCLAW_STAGE_BEDROCK_AWS_ACCESS_KEY_ID` | Access key id for one dedicated Bedrock IAM user. |
-| `TRUSTYCLAW_STAGE_BEDROCK_AWS_SECRET_ACCESS_KEY` | Secret access key paired with the Bedrock access key id. |
-| `TRUSTYCLAW_STAGE_GITHUB_WRITE_REPO` | Sandbox write repo as `owner/repo` (branches are pushed and deleted there, so use a dedicated sandbox, never a real repo). |
-| `TRUSTYCLAW_STAGE_GITHUB_APP_ID` | Numeric GitHub App id whose installation can push to the sandbox repo. |
-| `TRUSTYCLAW_STAGE_GITHUB_APP_INSTALLATION_ID` | Numeric installation id of that App on the sandbox repo. |
-| `TRUSTYCLAW_STAGE_GITHUB_APP_PRIVATE_KEY` | The GitHub App PEM private key. |
-| `TRUSTYCLAW_STAGE_<CONFIG_KEY>` | Enable-only tool config value, where `<CONFIG_KEY>` is exactly a key declared by that bundled tool manifest. OAuth tool config is intentionally absent from repository secrets and is stored once through the stage UI. |
+| `KERN_STAGE_AWS_ACCESS_KEY_ID` | Access key id for the stage IAM user. |
+| `KERN_STAGE_AWS_SECRET_ACCESS_KEY` | Secret access key for the stage IAM user. |
+| `KERN_STAGE_SSH_PRIVATE_KEY` | Full contents of `~/.ssh/kern/stage_operator`. |
+| `KERN_STAGE_ADMIN_PASSWORD` | Stable password generated above. |
+| `KERN_STAGE_BEDROCK_AWS_ACCESS_KEY_ID` | Access key id for one dedicated Bedrock IAM user. |
+| `KERN_STAGE_BEDROCK_AWS_SECRET_ACCESS_KEY` | Secret access key paired with the Bedrock access key id. |
+| `KERN_STAGE_GITHUB_WRITE_REPO` | Sandbox write repo as `owner/repo` (branches are pushed and deleted there, so use a dedicated sandbox, never a real repo). |
+| `KERN_STAGE_GITHUB_APP_ID` | Numeric GitHub App id whose installation can push to the sandbox repo. |
+| `KERN_STAGE_GITHUB_APP_INSTALLATION_ID` | Numeric installation id of that App on the sandbox repo. |
+| `KERN_STAGE_GITHUB_APP_PRIVATE_KEY` | The GitHub App PEM private key. |
+| `KERN_STAGE_<CONFIG_KEY>` | Enable-only tool config value, where `<CONFIG_KEY>` is exactly a key declared by that bundled tool manifest. OAuth tool config is intentionally absent from repository secrets and is stored once through the stage UI. |
 
-The four `TRUSTYCLAW_STAGE_GITHUB_*` secrets are optional: set all four to have a
+The four `KERN_STAGE_GITHUB_*` secrets are optional: set all four to have a
 `github` or `all` run auto-configure GitHub, or none to configure a credential
 and write repo manually through the admin UI. A partial secret set makes GitHub
 unavailable: `all` reports and skips it, while a focused `github` run fails.
 
-The two `TRUSTYCLAW_STAGE_BEDROCK_AWS_*` secrets are also optional as a pair.
+The two `KERN_STAGE_BEDROCK_AWS_*` secrets are also optional as a pair.
 When set, each `hermes` or `all` run validates and installs them before
 preflight. When absent, the run uses the credential already stored on the
 host. A partial pair makes Hermes unavailable; `all` skips it, while a focused
@@ -284,7 +284,7 @@ The stage account also needs a default VPC with a public default subnet in
 
 ## Running stage
 
-`.github/workflows/trustyclaw-stage.yml` can only be started manually with
+`.github/workflows/kern-stage.yml` can only be started manually with
 `workflow_dispatch` from the `main` branch. Do not run stage from pull request
 comments, pull request branches, or temporary feature branches: stage is a
 persistent environment, so upgrades must use the stable mainline version and
@@ -316,11 +316,11 @@ stage operation.
 On the first run, or after an OAuth provider session expires, `all` reports and skips
 that provider. A focused `codex` or `claude` run fails. To restore OAuth coverage,
 open a local SSH tunnel to the stage admin UI, log in with
-`TRUSTYCLAW_STAGE_ADMIN_PASSWORD`, complete the provider OAuth flow, then rerun
+`KERN_STAGE_ADMIN_PASSWORD`, complete the provider OAuth flow, then rerun
 the workflow. If the stage workflow has already stopped the instance, run
-`.github/workflows/trustyclaw-stage-start.yml` from `main` first so the tunnel
+`.github/workflows/kern-stage-start.yml` from `main` first so the tunnel
 target exists. That workflow can only be dispatched by a repository admin from
-`main`; it starts the existing tagged `trustyclaw-stage` EC2 instance and
+`main`; it starts the existing tagged `kern-stage` EC2 instance and
 prints the SSH tunnel command.
 
 If the Bedrock credential is missing or no longer passes STS validation,
@@ -330,7 +330,7 @@ Bedrock row in the admin UI.
 
 Every focused `github` run, and each `all` run where GitHub is available,
 exercises the GitHub write paths end to end. This depends on GitHub being
-configured from the `TRUSTYCLAW_STAGE_GITHUB_*` secrets (auto-installed before
+configured from the `KERN_STAGE_GITHUB_*` secrets (auto-installed before
 the preflight) or, absent those, from a manually configured credential and
 write repo. The preflight reports exactly what is absent. Manual setup requires
 both of these through the admin UI (Internet Access and Tools): a
@@ -346,9 +346,9 @@ unauthenticated GitHub guard branch automatically; stage covers what only a
 real credential can.
 
 To stop stage manually after inspection, run
-`.github/workflows/trustyclaw-stage-stop.yml` from `main`. It is also
+`.github/workflows/kern-stage-stop.yml` from `main`. It is also
 admin-only, shares the same stage concurrency group, and stops the existing
-tagged `trustyclaw-stage` EC2 instance without deleting the preserved EBS
+tagged `kern-stage` EC2 instance without deleting the preserved EBS
 volumes.
 
 Use this helper to discover the current public DNS and forward the admin UI/API
@@ -359,19 +359,19 @@ public_dns="$(
   aws ec2 describe-instances \
     --region us-east-1 \
     --filters \
-      'Name=tag:trustyclaw-host-agent-name,Values=trustyclaw-stage' \
-      'Name=tag:trustyclaw-host,Values=true' \
+      'Name=tag:kern-host-agent-name,Values=kern-stage' \
+      'Name=tag:kern-host,Values=true' \
       'Name=instance-state-name,Values=running' \
     --query 'Reservations[0].Instances[0].PublicDnsName' \
     --output text
 )"
 
-ssh -i ~/.ssh/trustyclaw/stage_operator \
+ssh -i ~/.ssh/kern/stage_operator \
   -o ExitOnForwardFailure=yes \
   -N \
   -L 7443:127.0.0.1:7443 \
   -L 7445:127.0.0.1:7445 \
-  "trustyclaw-operator@${public_dns}"
+  "kern-operator@${public_dns}"
 ```
 
 Then open `http://127.0.0.1:7443/`.

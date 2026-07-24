@@ -1,7 +1,7 @@
 # Admin State Storage and Migrations
 
 Admin, network, app, and tool state live in a local PostgreSQL database,
-`trustyclaw_admin`, served by `trustyclaw-postgres.service`. TrustyClaw
+`kern_admin`, served by `kern-postgres.service`. Kern
 services use the in-repo standard-library wire-protocol client
 (`host/runtime/core/pgclient.py`), which implements only Unix sockets, peer auth,
 and text-format values. PostgreSQL has no TCP listener
@@ -69,7 +69,7 @@ Ephemeral values — cached agent runtime statuses
 (`orchestrator._RUNTIME_STATUSES`) — live in service memory and reset with the
 process.
 
-The data directory is `/mnt/trustyclaw-admin/postgres/<major>/main` on the
+The data directory is `/mnt/kern-admin/postgres/<major>/main` on the
 durable admin volume, so state survives root-volume replacement on
 upgrade. The path is versioned by PostgreSQL major
 (currently 14, pinned in bootstrap); a future base-image bump that changes the
@@ -114,24 +114,24 @@ non-owner roles with table or schema grants:
 
 - Connections are Unix-socket only with `peer` authentication: the client's
   OS user must match its database role, and no passwords exist anywhere.
-- `trustyclaw-admin` owns the database and the schema; the admin service (and
+- `kern-admin` owns the database and the schema; the admin service (and
   the bootstrap's migration/config steps) connect as it.
-- `trustyclaw-proxy` reads network policy, provider pins, GitHub settings and
+- `kern-proxy` reads network policy, provider pins, GitHub settings and
   the encrypted working token plus the key needed to decrypt it; it
   inserts/prunes network events and enqueues
   held pushes. It cannot read the stored GitHub credential or other admin
   state.
-- `trustyclaw-tools` reads enablement/config and the shared secret key, and
+- `kern-tools` reads enablement/config and the shared secret key, and
   reads/writes tool credentials, approvals, and events. It cannot enable a
   tool, rewrite config, or reach non-tool state.
-- `trustyclaw-agent-network` reads only network policy and `network_events` for
+- `kern-agent-network` reads only network policy and `network_events` for
   the agent-facing introspection tools. It cannot mutate those tables, read
   credentials, or reach tool state.
 - Every app role owns only its derived `app_<app_id>` schema. The host-owned
   `app_schema_migrations` table records what bootstrap applied.
 - The `postgres` superuser is reachable only by the `postgres` OS user, i.e.
-  by operators through sudo: `sudo -u postgres psql trustyclaw_admin`.
-- Everyone else, most importantly `trustyclaw-agent`, has no role, and
+  by operators through sudo: `sudo -u postgres psql kern_admin`.
+- Everyone else, most importantly `kern-agent`, has no role, and
   `pg_hba.conf` ends with an explicit reject rule, so even a process that can
   reach the socket cannot authenticate.
 
@@ -163,7 +163,7 @@ inside the runtime code archive; the file format deliberately matches that
 family of tools.
 
 Migrations are deploy-plane work, applied in exactly one place: bootstrap
-runs `migrate up` (as `trustyclaw-admin`) after the database is up and before
+runs `migrate up` (as `kern-admin`) after the database is up and before
 services start. This is the upgrade path — redeploy replaces the root volume
 and code, preserves the admin volume, and `migrate up` brings the preserved
 database to the new code's schema. The admin service itself never migrates:
@@ -173,7 +173,7 @@ schema/code mismatch (unsupported) fails loudly instead of being papered
 over.
 
 `migrate down` is a manual operator action only
-(`sudo -u trustyclaw-admin env PYTHONPATH=/opt/trustyclaw-host python3 -m host.runtime.deploy.migrate down`).
+(`sudo -u kern-admin env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.migrate down`).
 
 Rules for changing persisted state shape from now on:
 

@@ -2,7 +2,7 @@
 
 The admin API owns the operator surface for bundled tools (list, config,
 enable/disable, the OAuth connect flow, and approval decisions) but tool code and
-third-party egress live in the dedicated ``trustyclaw-tools`` service. So the
+third-party egress live in the dedicated ``kern-tools`` service. So the
 routes here that need that service's egress or run tool code over third-party data
 -- the whole OAuth connect flow and approval decisions -- are reverse-proxied to
 the tools socket (peer-gated to the admin uid), the same way ``app_api_proxy``
@@ -29,11 +29,11 @@ from host.runtime.core import state
 from host.runtime.tools import tools_host
 from host.runtime.admin_api.errors import ApiError
 
-# Tool code and third-party egress live in the dedicated trustyclaw-tools
+# Tool code and third-party egress live in the dedicated kern-tools
 # service; the admin service forwards the operator operations that need that
 # service's egress (OAuth code exchange, token revoke, approved-action
 # execution) to its socket and holds no internet egress itself.
-TOOLS_SOCKET_PATH = os.environ.get("TRUSTYCLAW_TOOLS_SOCKET", DEFAULT_TOOLS_SOCKET_PATH)
+TOOLS_SOCKET_PATH = os.environ.get("KERN_TOOLS_SOCKET", DEFAULT_TOOLS_SOCKET_PATH)
 # Approving an action runs execute_approved synchronously in the tools service,
 # which can make several sequential bounded third-party calls (identity refresh,
 # precondition re-verification, then the write), each up to a 30s provider
@@ -55,7 +55,7 @@ class _ToolsSocketConnection(http.client.HTTPConnection):
 
 
 def _tools_operator_request(path: str, body: Any = None) -> Any:
-    """Forward one operator operation to the trustyclaw-tools service and return
+    """Forward one operator operation to the kern-tools service and return
     its JSON, re-raising its HTTP status as an ApiError so the operator sees the
     same errors as before the split."""
     connection = _ToolsSocketConnection(TOOLS_SOCKET_PATH)

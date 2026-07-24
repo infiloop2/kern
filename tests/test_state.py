@@ -68,7 +68,7 @@ class StateStorageTests(unittest.TestCase):
         pg_harness.reset_database()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_STATE_DIR": self.temp_dir.name})
+        self.env_patch = patch.dict("os.environ", {"KERN_STATE_DIR": self.temp_dir.name})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
 
@@ -348,7 +348,7 @@ class StateStorageTests(unittest.TestCase):
         # and openssl consume paths, and the CA key stays out of the database.
         with tempfile.TemporaryDirectory() as proxy_tmp, patch.dict(
             "os.environ",
-            {"TRUSTYCLAW_STATE_DIR": self.temp_dir.name, "TRUSTYCLAW_PROXY_STATE_DIR": proxy_tmp},
+            {"KERN_STATE_DIR": self.temp_dir.name, "KERN_PROXY_STATE_DIR": proxy_tmp},
         ):
             cert_files = network_proxy_cert_files("example.com")
             self.assertEqual(cert_files.ca_cert, Path(proxy_tmp) / "network_proxy_ca.crt")
@@ -423,7 +423,7 @@ class StateStorageTests(unittest.TestCase):
     def test_agent_network_role_cannot_read_bedrock_connection(self) -> None:
         with db.transaction() as cur:
             cur.execute(
-                "SELECT has_table_privilege('trustyclaw-agent-network', "
+                "SELECT has_table_privilege('kern-agent-network', "
                 "'bedrock_credentials', 'SELECT')"
             )
             self.assertEqual(cur.fetchone(), (False,))
@@ -435,7 +435,7 @@ class StateStorageTests(unittest.TestCase):
                 "github": {
                     "enabled": True,
                     "write_repositories": [
-                        {"owner": "infiloop2", "repo": "trustyclaw"},
+                        {"owner": "infiloop2", "repo": "kern"},
                         {"owner": "infiloop2", "repo": "infibot"},
                     ],
                 },
@@ -450,7 +450,7 @@ class StateStorageTests(unittest.TestCase):
         # Narrowing the repository list round-trips too.
         narrowed = {
             "network_integrations": {
-                "github": {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "trustyclaw"}]},
+                "github": {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "kern"}]},
             },
         }
         state.save_network_policy(narrowed, "2026-06-08T00:00:01Z")
@@ -473,7 +473,7 @@ class StateStorageTests(unittest.TestCase):
             "network_integrations": {
                 "github": {
                     "enabled": True,
-                    "write_repositories": [{"owner": "infiloop2", "repo": "trustyclaw"}],
+                    "write_repositories": [{"owner": "infiloop2", "repo": "kern"}],
                     "require_dot_github_approval": True,
                 }
             },
@@ -487,7 +487,7 @@ class StateStorageTests(unittest.TestCase):
         state.enqueue_pending_push(
             "abc123",
             "infiloop2",
-            "trustyclaw",
+            "kern",
             [{"old": "0" * 40, "new": "1" * 40, "ref": "refs/heads/main"}],
             [".github/workflows/ci.yml"],
         )
@@ -654,27 +654,27 @@ class StateStorageTests(unittest.TestCase):
         self.assertEqual(state.read_github_repo_audits(), {})
         state.save_github_repo_audit(
             "infiloop2",
-            "trustyclaw",
+            "kern",
             {"visibility": "public", "pages_public": False},
             None,
         )
         state.save_github_repo_audit("infiloop2", "infibot", {}, "audit fetch failed: 403")
         audits = state.read_github_repo_audits()
         self.assertEqual(
-            audits[("infiloop2", "trustyclaw")]["facts"],
+            audits[("infiloop2", "kern")]["facts"],
             {"visibility": "public", "pages_public": False},
         )
-        self.assertNotIn("error", audits[("infiloop2", "trustyclaw")])
+        self.assertNotIn("error", audits[("infiloop2", "kern")])
         self.assertEqual(audits[("infiloop2", "infibot")]["error"], "audit fetch failed: 403")
         # Re-auditing replaces the stored facts for that repo.
         state.save_github_repo_audit(
             "infiloop2",
-            "trustyclaw",
+            "kern",
             {"visibility": "private", "pages_public": None},
             None,
         )
         self.assertEqual(
-            state.read_github_repo_audits()[("infiloop2", "trustyclaw")]["facts"],
+            state.read_github_repo_audits()[("infiloop2", "kern")]["facts"],
             {"visibility": "private", "pages_public": None},
         )
         # An errored row is never fresh: the poller retries it on the next
@@ -683,10 +683,10 @@ class StateStorageTests(unittest.TestCase):
 
         audits = state.read_github_repo_audits()
         self.assertTrue(github_repo_audit._stale(audits[("infiloop2", "infibot")]))
-        self.assertFalse(github_repo_audit._stale(audits[("infiloop2", "trustyclaw")]))
+        self.assertFalse(github_repo_audit._stale(audits[("infiloop2", "kern")]))
         # Pruning drops repositories no longer in the policy.
-        state.prune_github_repo_audits({("infiloop2", "trustyclaw")})
-        self.assertEqual(list(state.read_github_repo_audits()), [("infiloop2", "trustyclaw")])
+        state.prune_github_repo_audits({("infiloop2", "kern")})
+        self.assertEqual(list(state.read_github_repo_audits()), [("infiloop2", "kern")])
 
     def test_admin_provider_accounts_live_in_the_database(self) -> None:
         save_openai_account({"account_id": "acct_rich", "planType": "pro"})

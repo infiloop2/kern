@@ -1,4 +1,4 @@
-name: trustyclaw-stage-start
+name: kern-stage-start
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: trustyclaw-stage
+  group: kern-stage
   cancel-in-progress: false
 
 jobs:
@@ -50,17 +50,17 @@ jobs:
       - name: Start stage EC2 instance
         shell: bash
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.TRUSTYCLAW_STAGE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.TRUSTYCLAW_STAGE_AWS_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.KERN_STAGE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.KERN_STAGE_AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
         run: |
           set -euo pipefail
-          if python3 -m host.cli.start --agent-name trustyclaw-stage > trustyclaw-stage.json; then
+          if python3 -m host.cli.start --agent-name kern-stage > kern-stage.json; then
             result="running"
           else
             result="failed"
             {
-              echo "## TrustyClaw stage start"
+              echo "## Kern stage start"
               echo
               echo "| Field | Value |"
               echo "| --- | --- |"
@@ -68,13 +68,13 @@ jobs:
             } >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
-          instance_id="$(jq -r '.instance_id // "n/a"' trustyclaw-stage.json)"
-          initial_state="$(jq -r '.initial_state // "n/a"' trustyclaw-stage.json)"
-          final_state="$(jq -r '.state // "n/a"' trustyclaw-stage.json)"
-          public_dns="$(jq -r '.public_dns // "n/a"' trustyclaw-stage.json)"
-          public_ip="$(jq -r '.public_ip // "n/a"' trustyclaw-stage.json)"
+          instance_id="$(jq -r '.instance_id // "n/a"' kern-stage.json)"
+          initial_state="$(jq -r '.initial_state // "n/a"' kern-stage.json)"
+          final_state="$(jq -r '.state // "n/a"' kern-stage.json)"
+          public_dns="$(jq -r '.public_dns // "n/a"' kern-stage.json)"
+          public_ip="$(jq -r '.public_ip // "n/a"' kern-stage.json)"
           {
-            echo "## TrustyClaw stage start"
+            echo "## Kern stage start"
             echo
             echo "| Field | Value |"
             echo "| --- | --- |"
@@ -88,7 +88,7 @@ jobs:
             echo "### SSH tunnel"
             echo
             echo '```bash'
-            echo "ssh -i ~/.ssh/trustyclaw/stage_operator -o ExitOnForwardFailure=yes -N -L 7443:127.0.0.1:7443 -L 7445:127.0.0.1:7445 trustyclaw-operator@${public_dns}"
+            echo "ssh -i ~/.ssh/kern/stage_operator -o ExitOnForwardFailure=yes -N -L 7443:127.0.0.1:7443 -L 7445:127.0.0.1:7445 kern-operator@${public_dns}"
             echo '```'
             echo
             echo "Admin UI: http://127.0.0.1:7443"

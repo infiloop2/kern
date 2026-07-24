@@ -1,6 +1,6 @@
 # Architecture
 
-TrustyClaw runs Codex, Claude Code, and Hermes runtimes on an AWS EC2 instance behind
+Kern runs Codex, Claude Code, and Hermes runtimes on an AWS EC2 instance behind
 fail-closed network controls. The architecture docs are split by responsibility
 so operators and contributors can jump to the trust boundary they need.
 
@@ -35,14 +35,14 @@ so operators and contributors can jump to the trust boundary they need.
 
 ## Overview
 
-TrustyClaw runs Codex, Claude Code, and Hermes runtimes on an AWS EC2 instance behind
+Kern runs Codex, Claude Code, and Hermes runtimes on an AWS EC2 instance behind
 fail-closed network controls. Each task chooses its runtime harness, such as
 Codex or Claude Code. The host is long-lived in normal operation; the EC2
 instance and its root EBS volume carry the
-`trustyclaw-host-agent-name=<agent_name>` tag so that deploy can find,
+`kern-host-agent-name=<agent_name>` tag so that deploy can find,
 terminate, and recreate them when the operator upgrades or recovers the host.
 
-TrustyClaw's Python runtime uses only the Python 3 standard library. Admin,
+Kern's Python runtime uses only the Python 3 standard library. Admin,
 network, app, and tool state live in a local Postgres database on the durable
 admin volume, spoken to by an in-repo wire-protocol client
 (`host/runtime/core/pgclient.py`). The proxy keeps only file-oriented TLS and Git

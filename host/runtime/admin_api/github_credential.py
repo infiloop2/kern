@@ -53,7 +53,7 @@ from typing import Any
 from host.runtime.core import state
 from host.runtime.core.network_policy import managed_integration
 
-MINT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/mint-github-app-token"]
+MINT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/mint-github-app-token"]
 HELPER_TIMEOUT_SECONDS = 60
 # Re-mint when the current app token has less than this left; installation
 # tokens live one hour, so this refreshes roughly every 45 minutes.

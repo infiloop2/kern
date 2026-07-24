@@ -149,7 +149,7 @@ class ConfigTests(unittest.TestCase):
             parse_network_controls(
                 {
                     "network_integrations": {
-                        "github": {"enabled": False, "write_repositories": [{"owner": "infiloop2", "repo": "trustyclaw"}]}
+                        "github": {"enabled": False, "write_repositories": [{"owner": "infiloop2", "repo": "kern"}]}
                     },
                 }
             )
@@ -233,8 +233,8 @@ class ConfigTests(unittest.TestCase):
                     "github": {
                         "enabled": True,
                         "write_repositories": [
-                            {"owner": "InfiverseHQ", "repo": "TrustyClaw"},
-                            {"owner": "infiversehq", "repo": "trustyclaw-tools"},
+                            {"owner": "InfiverseHQ", "repo": "Kern"},
+                            {"owner": "infiversehq", "repo": "kern-tools"},
                         ],
                     },
                     "python_packages": {"enabled": True},
@@ -246,8 +246,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(
             controls.to_json()["network_integrations"]["github"]["write_repositories"],
             [
-                {"owner": "infiversehq", "repo": "trustyclaw"},
-                {"owner": "infiversehq", "repo": "trustyclaw-tools"},
+                {"owner": "infiversehq", "repo": "kern"},
+                {"owner": "infiversehq", "repo": "kern-tools"},
             ],
         )
         self.assertTrue(network_integrations.host_allowed(controls, "api.github.com"))
@@ -283,8 +283,8 @@ class ConfigTests(unittest.TestCase):
                         "github": {
                             "enabled": True,
                             "write_repositories": [
-                                {"owner": "infiversehq", "repo": "trustyclaw"},
-                                {"owner": "InfiverseHQ", "repo": "TrustyClaw"},
+                                {"owner": "infiversehq", "repo": "kern"},
+                                {"owner": "InfiverseHQ", "repo": "Kern"},
                             ],
                         }
                     },
@@ -330,20 +330,20 @@ class ConfigTests(unittest.TestCase):
                 "network_integrations": {
                     "github": {
                         "enabled": True,
-                        "write_repositories": [{"owner": "infiloop2", "repo": "TrustyClaw.git"}],
+                        "write_repositories": [{"owner": "infiloop2", "repo": "Kern.git"}],
                     }
                 },
             }
         )
         self.assertEqual(
             controls.to_json()["network_integrations"]["github"]["write_repositories"],
-            [{"owner": "infiloop2", "repo": "trustyclaw"}],
+            [{"owner": "infiloop2", "repo": "kern"}],
         )
         policy = (controls)
         # The write repo matches a push whose repo segment is .git-stripped.
         self.assertIsNone(
             github_request_denied(
-                policy, "POST", "github.com", "/infiloop2/trustyclaw.git/git-receive-pack", "", b""
+                policy, "POST", "github.com", "/infiloop2/kern.git/git-receive-pack", "", b""
             )
         )
 
@@ -354,8 +354,8 @@ class ConfigTests(unittest.TestCase):
                         "github": {
                             "enabled": True,
                             "write_repositories": [
-                                {"owner": "infiloop2", "repo": "trustyclaw"},
-                                {"owner": "infiloop2", "repo": "trustyclaw.git"},
+                                {"owner": "infiloop2", "repo": "kern"},
+                                {"owner": "infiloop2", "repo": "kern.git"},
                             ],
                         }
                     },
@@ -494,7 +494,7 @@ class PolicyTests(unittest.TestCase):
                         "github": {
                             "enabled": True,
                             "write_repositories": [
-                                {"owner": "infiversehq", "repo": "trustyclaw-tools"},
+                                {"owner": "infiversehq", "repo": "kern-tools"},
                             ],
                         }
                     },
@@ -506,7 +506,7 @@ class PolicyTests(unittest.TestCase):
         # web pages, git fetch, raw blobs, archives, and any API GET/HEAD,
         # including unlisted repos and non-repo endpoints like search.
         for host, path in (
-            ("github.com", "/infiversehq/trustyclaw-tools"),
+            ("github.com", "/infiversehq/kern-tools"),
             ("github.com", "/other/private-repo"),
             ("api.github.com", "/repos/other/private-repo"),
             ("api.github.com", "/repos/other/private-repo/contents/secret.env"),
@@ -534,7 +534,7 @@ class PolicyTests(unittest.TestCase):
         # Push (git-receive-pack) is gated on a configured write repository.
         self.assertIsNone(
             github_request_denied(
-                policy, "POST", "github.com", "/infiversehq/trustyclaw-tools.git/git-receive-pack", "", b""
+                policy, "POST", "github.com", "/infiversehq/kern-tools.git/git-receive-pack", "", b""
             )
         )
         self.assertEqual(
@@ -551,7 +551,7 @@ class PolicyTests(unittest.TestCase):
         # API writes: a repo-scoped mutation on a write repo passes; the same on
         # an unlisted repo needs a write repo.
         self.assertIsNone(
-            github_request_denied(policy, "PATCH", "api.github.com", "/repos/infiversehq/trustyclaw-tools/issues/1", "", b"")
+            github_request_denied(policy, "PATCH", "api.github.com", "/repos/infiversehq/kern-tools/issues/1", "", b"")
         )
         self.assertEqual(
             github_request_denied(policy, "PATCH", "api.github.com", "/repos/other/repo/issues/1", "", b""),
@@ -560,7 +560,7 @@ class PolicyTests(unittest.TestCase):
         # Release-asset uploads are repo-scoped writes.
         self.assertIsNone(
             github_request_denied(
-                policy, "POST", "uploads.github.com", "/repos/infiversehq/trustyclaw-tools/releases/1/assets", "", b""
+                policy, "POST", "uploads.github.com", "/repos/infiversehq/kern-tools/releases/1/assets", "", b""
             )
         )
         self.assertEqual(
@@ -585,7 +585,7 @@ class PolicyTests(unittest.TestCase):
         for admin_method in ("PATCH", "DELETE", "PUT"):
             self.assertEqual(
                 github_request_denied(
-                    policy, admin_method, "api.github.com", "/repos/infiversehq/trustyclaw-tools", "", b""
+                    policy, admin_method, "api.github.com", "/repos/infiversehq/kern-tools", "", b""
                 ),
                 "github_repo_admin_write_denied",
             )
@@ -647,7 +647,7 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(path=admin_path):
                 self.assertEqual(
                     github_request_denied(
-                        policy, "PUT", "api.github.com", f"/repos/infiversehq/trustyclaw-tools/{admin_path}", "", b""
+                        policy, "PUT", "api.github.com", f"/repos/infiversehq/kern-tools/{admin_path}", "", b""
                     ),
                     "github_repo_admin_write_denied",
                 )
@@ -656,7 +656,7 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(read=read_path):
                 self.assertIsNone(
                     github_request_denied(
-                        policy, "GET", "api.github.com", f"/repos/infiversehq/trustyclaw-tools/{read_path}", "", b""
+                        policy, "GET", "api.github.com", f"/repos/infiversehq/kern-tools/{read_path}", "", b""
                     )
                 )
         # Deleting a run or its logs erases the automation record.
@@ -664,7 +664,7 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(path=delete_path):
                 self.assertEqual(
                     github_request_denied(
-                        policy, "DELETE", "api.github.com", f"/repos/infiversehq/trustyclaw-tools/{delete_path}", "", b""
+                        policy, "DELETE", "api.github.com", f"/repos/infiversehq/kern-tools/{delete_path}", "", b""
                     ),
                     "github_repo_admin_write_denied",
                 )
@@ -679,7 +679,7 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(path=write_path):
                 self.assertIsNone(
                     github_request_denied(
-                        policy, "POST", "api.github.com", f"/repos/infiversehq/trustyclaw-tools/{write_path}", "", b""
+                        policy, "POST", "api.github.com", f"/repos/infiversehq/kern-tools/{write_path}", "", b""
                     )
                 )
 
@@ -690,7 +690,7 @@ class PolicyTests(unittest.TestCase):
                     "github": {
                         "enabled": True,
                         "require_dot_github_approval": True,
-                        "write_repositories": [{"owner": "infiversehq", "repo": "trustyclaw-tools"}],
+                        "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
                     }
                 },
             }
@@ -707,11 +707,11 @@ class PolicyTests(unittest.TestCase):
             patch("host.network_integrations.github.guard.push_gate.inspect", return_value=clean) as inspect_fn,
         ):
             response, reason = github_push_gate_response(
-                policy, "POST", "github.com", "/infiversehq/trustyclaw-tools.git/git-receive-pack", b"body"
+                policy, "POST", "github.com", "/infiversehq/kern-tools.git/git-receive-pack", b"body"
             )
             self.assertEqual((response, reason), (None, None))
             inspect_fn.assert_called_once()
-            self.assertEqual(inspect_fn.call_args.args[:2], ("infiversehq", "trustyclaw-tools"))
+            self.assertEqual(inspect_fn.call_args.args[:2], ("infiversehq", "kern-tools"))
         # The inspected owner/repo come from the same normalized path the
         # trigger (and the write guard before it) matched: dot segments and
         # percent-encoding cannot smuggle a different identity into the gate.
@@ -720,15 +720,15 @@ class PolicyTests(unittest.TestCase):
             patch("host.network_integrations.github.guard.push_gate.inspect", return_value=clean) as inspect_fn,
         ):
             response, reason = github_push_gate_response(
-                policy, "POST", "github.com", "/x/../infiversehq/trustyclaw-tools.git/git-receive-pack", b"body"
+                policy, "POST", "github.com", "/x/../infiversehq/kern-tools.git/git-receive-pack", b"body"
             )
             self.assertEqual((response, reason), (None, None))
             inspect_fn.assert_called_once()
-            self.assertEqual(inspect_fn.call_args.args[:2], ("infiversehq", "trustyclaw-tools"))
+            self.assertEqual(inspect_fn.call_args.args[:2], ("infiversehq", "kern-tools"))
         with patch("host.network_integrations.github.guard.push_gate.inspect") as inspect_fn:
             self.assertEqual(
                 github_push_gate_response(
-                    policy, "GET", "github.com", "/infiversehq/trustyclaw-tools.git/info/refs", b""
+                    policy, "GET", "github.com", "/infiversehq/kern-tools.git/info/refs", b""
                 ),
                 (None, None),
             )
@@ -738,7 +738,7 @@ class PolicyTests(unittest.TestCase):
             parse_network_controls(
                 {
                     "network_integrations": {
-                        "github": {"enabled": True, "write_repositories": [{"owner": "infiversehq", "repo": "trustyclaw-tools"}]}
+                        "github": {"enabled": True, "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}]}
                     },
                 }
             )
@@ -747,7 +747,7 @@ class PolicyTests(unittest.TestCase):
         with patch("host.network_integrations.github.guard.push_gate.inspect") as inspect_fn:
             self.assertEqual(
                 github_push_gate_response(
-                    off, "POST", "github.com", "/infiversehq/trustyclaw-tools.git/git-receive-pack", b"body"
+                    off, "POST", "github.com", "/infiversehq/kern-tools.git/git-receive-pack", b"body"
                 ),
                 (None, None),
             )
@@ -756,13 +756,13 @@ class PolicyTests(unittest.TestCase):
         # Approval mode also closes REST content-write bypasses that can create
         # .github-changing commits without entering git-receive-pack.
         for blocked in (
-            "/repos/infiversehq/trustyclaw-tools/contents/.github/workflows/ci.yml",
-            "/repos/infiversehq/trustyclaw-tools/git/refs/heads/main",
-            "/repos/infiversehq/trustyclaw-tools/git/trees",
-            "/repos/infiversehq/trustyclaw-tools/git/commits",
-            "/repos/infiversehq/trustyclaw-tools/merges",
-            "/repos/infiversehq/trustyclaw-tools/merge-upstream",
-            "/repos/infiversehq/trustyclaw-tools/pulls/12/merge",
+            "/repos/infiversehq/kern-tools/contents/.github/workflows/ci.yml",
+            "/repos/infiversehq/kern-tools/git/refs/heads/main",
+            "/repos/infiversehq/kern-tools/git/trees",
+            "/repos/infiversehq/kern-tools/git/commits",
+            "/repos/infiversehq/kern-tools/merges",
+            "/repos/infiversehq/kern-tools/merge-upstream",
+            "/repos/infiversehq/kern-tools/pulls/12/merge",
         ):
             with self.subTest(blocked=blocked):
                 self.assertEqual(
@@ -772,7 +772,7 @@ class PolicyTests(unittest.TestCase):
         self.assertIsNone(
             github_request_denied(
                 policy, "PUT", "api.github.com",
-                "/repos/infiversehq/trustyclaw-tools/contents/docs/README.md", "", b"",
+                "/repos/infiversehq/kern-tools/contents/docs/README.md", "", b"",
             )
         )
 
@@ -797,7 +797,7 @@ class PolicyTests(unittest.TestCase):
                 "github": {
                     "enabled": True,
                     "require_dot_github_approval": True,
-                    "write_repositories": [{"owner": "infiversehq", "repo": "trustyclaw-tools"}],
+                    "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
                 }
             },
         })
@@ -808,7 +808,7 @@ class PolicyTests(unittest.TestCase):
             patch("host.network_integrations.github.guard.enqueue_pending_push", side_effect=RuntimeError("db down")),
         ):
             response, reason = github_push_gate_response(
-                policy, "POST", "github.com", "/infiversehq/trustyclaw-tools.git/git-receive-pack", b"body"
+                policy, "POST", "github.com", "/infiversehq/kern-tools.git/git-receive-pack", b"body"
             )
 
         self.assertIsNone(response)
@@ -836,7 +836,7 @@ class PolicyTests(unittest.TestCase):
                 "github": {
                     "enabled": True,
                     "require_dot_github_approval": True,
-                    "write_repositories": [{"owner": "infiversehq", "repo": "trustyclaw-tools"}],
+                    "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
                 }
             },
         })
@@ -846,7 +846,7 @@ class PolicyTests(unittest.TestCase):
             patch("host.network_integrations.github.guard.push_gate.new_push_id", return_value="abc123"),
         ):
             response, reason = github_push_gate_response(
-                policy, "POST", "github.com", "/infiversehq/trustyclaw-tools.git/git-receive-pack", b"body"
+                policy, "POST", "github.com", "/infiversehq/kern-tools.git/git-receive-pack", b"body"
             )
 
         self.assertIsNone(response)
@@ -898,7 +898,7 @@ class PolicyTests(unittest.TestCase):
                     "network_integrations": {
                         "github": {
                             "enabled": True,
-                            "write_repositories": [{"owner": "infiversehq", "repo": "trustyclaw"}],
+                            "write_repositories": [{"owner": "infiversehq", "repo": "kern"}],
                         }
                     },
                 }
@@ -912,7 +912,7 @@ class PolicyTests(unittest.TestCase):
         scoped_query = json.dumps(
             {
                 "query": "query($owner:String!, $name:String!) { repository(owner:$owner, name:$name) { id } }",
-                "variables": {"owner": "infiversehq", "name": "trustyclaw"},
+                "variables": {"owner": "infiversehq", "name": "kern"},
             }
         ).encode()
         mutation = b'{"query":"mutation { createIssue(input:{}) { clientMutationId } }"}'
@@ -934,7 +934,7 @@ class PolicyTests(unittest.TestCase):
         # isolate the web-search logic from the account pin.
         json_header = [("Content-Type", "application/json"), ("ChatGPT-Account-Id", "acct_good")]
 
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TRUSTYCLAW_STATE_DIR": tmp}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KERN_STATE_DIR": tmp}):
             # Without a stored account id, OpenAI data-plane requests fail
             # closed even if the presented header would otherwise match.
             self.assertIsNotNone(openai_request_denied(policy, host, [("ChatGPT-Account-Id", "acct_good")], b"{}"))
@@ -1086,7 +1086,7 @@ class PolicyTests(unittest.TestCase):
         })
         with (
             tempfile.TemporaryDirectory() as tmp,
-            patch.dict(os.environ, {"TRUSTYCLAW_STATE_DIR": tmp}),
+            patch.dict(os.environ, {"KERN_STATE_DIR": tmp}),
             patch.object(network_policy, "MAX_DECODED_BODY_BYTES", 32),
         ):
             save_proxy_openai_account_id("acct_good")
@@ -1110,7 +1110,7 @@ class PolicyTests(unittest.TestCase):
         policy = parse_network_controls({
             "network_integrations": {"openai": {"enabled": True}},
         })
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TRUSTYCLAW_STATE_DIR": tmp}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KERN_STATE_DIR": tmp}):
             save_proxy_openai_account_id("acct_good")
             for encoding in ("zstd", "br"):
                 with self.subTest(encoding=encoding):
@@ -1128,7 +1128,7 @@ class PolicyTests(unittest.TestCase):
         policy = parse_network_controls({
             "network_integrations": {"openai": {"enabled": True}},
         })
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TRUSTYCLAW_STATE_DIR": tmp}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KERN_STATE_DIR": tmp}):
             save_proxy_openai_account_id("acct_good")
             headers = [
                 ("Content-Type", "application/json"),
@@ -1143,7 +1143,7 @@ class PolicyTests(unittest.TestCase):
             "network_integrations": {"claude": {"enabled": True}},
         })
         headers = [("Authorization", "Bearer token-good")]
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TRUSTYCLAW_STATE_DIR": tmp}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KERN_STATE_DIR": tmp}):
             self.assertEqual(
                 anthropic_request_denied(policy, "POST", "api.anthropic.com", "/v1/messages", headers),
                 "anthropic_token_unavailable",

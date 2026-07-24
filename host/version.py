@@ -9,14 +9,14 @@ from typing import Any
 
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 REPO_VERSION_PATH = Path(__file__).resolve().parents[1] / "VERSION"
-ROOT_VERSION_PATH = Path(os.environ.get("TRUSTYCLAW_ROOT_VERSION_PATH", "/opt/trustyclaw-host/VERSION"))
+ROOT_VERSION_PATH = Path(os.environ.get("KERN_ROOT_VERSION_PATH", "/opt/kern-host/VERSION"))
 STATE_VERSION_FILENAME = "version.json"
 
 
 def parse_version(version: str) -> tuple[int, int, int]:
     match = VERSION_RE.fullmatch(version.strip())
     if not match:
-        raise ValueError(f"invalid TrustyClaw version {version!r}; expected MAJOR.MINOR.PATCH")
+        raise ValueError(f"invalid Kern version {version!r}; expected MAJOR.MINOR.PATCH")
     return int(match.group(1)), int(match.group(2)), int(match.group(3))
 
 
@@ -32,7 +32,7 @@ def repo_version(path: Path = REPO_VERSION_PATH) -> str:
 
 def state_version_path(state_dir: Path | None = None) -> Path:
     if state_dir is None:
-        state_dir = Path(os.environ.get("TRUSTYCLAW_STATE_DIR", "/mnt/trustyclaw-admin/admin-state"))
+        state_dir = Path(os.environ.get("KERN_STATE_DIR", "/mnt/kern-admin/admin-state"))
     return state_dir / STATE_VERSION_FILENAME
 
 

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- TrustyClaw admin UI: a thin page over the admin API (docs/api/AdminAPI.md).
+<!-- Kern admin UI: a thin page over the admin API (docs/api/AdminAPI.md).
      Served unauthenticated at "/"; the operator logs in at /v1/login and the
      browser then authenticates with an HttpOnly session cookie the page never
      reads (the admin password is never held in a browser-readable store). -->
@@ -8,7 +8,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0a0d13">
-<title>TrustyClaw</title>
+<title>Kern</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="alternate icon" href="/favicon.ico">
 <link rel="stylesheet" href="/admin_ui.css">
@@ -22,7 +22,7 @@
       <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
     </button>
     <img class="brand-mark" width="30" height="30" src="/favicon.svg" alt="">
-    <span class="brand-name">TrustyClaw</span>
+    <span class="brand-name">Kern</span>
     <span id="agent-name" class="agent-chip" hidden></span>
   </div>
   <div id="runtime-overview" class="runtime-overview" aria-label="Agent runtime status and usage" hidden></div>
@@ -61,7 +61,7 @@
       <div class="sidebar-mobile-head">
         <span class="sidebar-mobile-brand">
           <img width="30" height="30" src="/favicon.svg" alt="">
-          <span><strong>TrustyClaw</strong><small>Navigation</small></span>
+          <span><strong>Kern</strong><small>Navigation</small></span>
         </span>
         <button class="ghost icon-button" id="mobile-nav-close" data-action="close-mobile-nav" aria-label="Close navigation">
           <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>

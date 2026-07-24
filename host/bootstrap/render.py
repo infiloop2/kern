@@ -158,15 +158,15 @@ def _render_app_bootstrap(template: str) -> str:
         backend_entrypoint = app.backend_entrypoint.relative_to(app.package_dir)
         port = port_name(app.id)
         uid_lines.extend([
-            f"TRUSTYCLAW_APP_{env}_UID={allocation.uid}",
-            f"TRUSTYCLAW_APP_{env}_GID={allocation.gid}",
+            f"KERN_APP_{env}_UID={allocation.uid}",
+            f"KERN_APP_{env}_GID={allocation.gid}",
         ])
         port_lines.append(f"{port}={app.port}")
-        ensure_group_lines.append(f"ensure_group {app.linux_user} \"$TRUSTYCLAW_APP_{env}_GID\"")
+        ensure_group_lines.append(f"ensure_group {app.linux_user} \"$KERN_APP_{env}_GID\"")
         ensure_user_lines.append(
-            f"ensure_user {app.linux_user} \"$TRUSTYCLAW_APP_{env}_UID\" {app.linux_user} /nonexistent"
+            f"ensure_user {app.linux_user} \"$KERN_APP_{env}_UID\" {app.linux_user} /nonexistent"
         )
-        pg_hba_lines.append(f"local  trustyclaw_admin  {app.linux_user}  peer")
+        pg_hba_lines.append(f"local  kern_admin  {app.linux_user}  peer")
         role_lines.extend([
             f"  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{app.linux_user}') THEN",
             f"    CREATE ROLE \"{app.linux_user}\" LOGIN;",
@@ -176,15 +176,15 @@ def _render_app_bootstrap(template: str) -> str:
             f"  -c \"CREATE SCHEMA IF NOT EXISTS {app.db_schema} AUTHORIZATION \\\"{app.db_role}\\\";\" \\"
         )
         connect_grant_lines.append(
-            f"  -c \"GRANT CONNECT ON DATABASE trustyclaw_admin TO \\\"{app.db_role}\\\";\""
+            f"  -c \"GRANT CONNECT ON DATABASE kern_admin TO \\\"{app.db_role}\\\";\""
         )
         pending_var = f"app_{app.id}_pending"
         migration_lines.extend([
-            f"{pending_var}=\"$(runuser -u trustyclaw-admin -- env PYTHONPATH=/opt/trustyclaw-host python3 -m host.runtime.deploy.app_migrate pending {app.id})\"",
+            f"{pending_var}=\"$(runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.app_migrate pending {app.id})\"",
             "while IFS= read -r app_migration_version; do",
             "  [ -n \"$app_migration_version\" ] || continue",
-            f"  runuser -u {app.linux_user} -- env PYTHONPATH=/opt/trustyclaw-host python3 -m host.runtime.deploy.app_migrate apply-sql {app.id} \"$app_migration_version\"",
-            f"  runuser -u trustyclaw-admin -- env PYTHONPATH=/opt/trustyclaw-host python3 -m host.runtime.deploy.app_migrate record {app.id} \"$app_migration_version\"",
+            f"  runuser -u {app.linux_user} -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.app_migrate apply-sql {app.id} \"$app_migration_version\"",
+            f"  runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.app_migrate record {app.id} \"$app_migration_version\"",
             f"done <<< \"${pending_var}\"",
         ])
         # New connections to an app port are allowed from exactly two uids:
@@ -194,30 +194,30 @@ def _render_app_bootstrap(template: str) -> str:
         nftables_lines.extend([
             f"    oif lo ct state established,related meta skuid \"{app.linux_user}\" accept",
             f"    oif lo meta skuid \"{app.linux_user}\" drop",
-            f"    oif lo tcp dport ${port} meta skuid \"trustyclaw-admin\" accept",
-            f"    oif lo tcp dport ${port} meta skuid \"trustyclaw-agent-app\" accept",
+            f"    oif lo tcp dport ${port} meta skuid \"kern-admin\" accept",
+            f"    oif lo tcp dport ${port} meta skuid \"kern-agent-app\" accept",
             f"    oif lo tcp dport ${port} drop",
         ])
         unit_blocks.append(
             "\n".join([
                 f"cat > /etc/systemd/system/{app.service_name} <<'UNIT'",
                 "[Unit]",
-                f"Description=TrustyClaw App: {app.title}",
-                "After=network-online.target trustyclaw-admin-api.service trustyclaw-postgres.service",
-                "Wants=network-online.target trustyclaw-admin-api.service trustyclaw-postgres.service",
+                f"Description=Kern App: {app.title}",
+                "After=network-online.target kern-admin-api.service kern-postgres.service",
+                "Wants=network-online.target kern-admin-api.service kern-postgres.service",
                 "StartLimitIntervalSec=0",
                 "",
                 "[Service]",
                 f"User={app.linux_user}",
-                "Slice=trustyclaw_app.slice",
+                "Slice=kern_app.slice",
                 "UMask=0077",
-                "Environment=PYTHONPATH=/opt/trustyclaw-host",
-                "Environment=TRUSTYCLAW_APP_HOST=127.0.0.1",
-                f"Environment=TRUSTYCLAW_APP_PORT={app.port}",
-                f"Environment=TRUSTYCLAW_APP_DB_SCHEMA={app.db_schema}",
-                f"Environment=TRUSTYCLAW_APP_ADMIN_API_SOCKET={APP_BACKEND_ADMIN_SOCKET_PATH}",
-                f"WorkingDirectory=/opt/trustyclaw-host/host/apps/{app.id}",
-                f"ExecStart=/usr/bin/python3 /opt/trustyclaw-host/host/apps/{app.id}/{backend_entrypoint}",
+                "Environment=PYTHONPATH=/opt/kern-host",
+                "Environment=KERN_APP_HOST=127.0.0.1",
+                f"Environment=KERN_APP_PORT={app.port}",
+                f"Environment=KERN_APP_DB_SCHEMA={app.db_schema}",
+                f"Environment=KERN_APP_ADMIN_API_SOCKET={APP_BACKEND_ADMIN_SOCKET_PATH}",
+                f"WorkingDirectory=/opt/kern-host/host/apps/{app.id}",
+                f"ExecStart=/usr/bin/python3 /opt/kern-host/host/apps/{app.id}/{backend_entrypoint}",
                 "Restart=always",
                 "RestartSec=3",
                 "",

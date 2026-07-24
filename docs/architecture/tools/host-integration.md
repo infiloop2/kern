@@ -1,13 +1,13 @@
-# TrustyClaw Host Integration
+# Kern Host Integration
 
 How this host implements the tool contract in
 [`tool-contract.md`](tool-contract.md): which user and service run tool code and
 how they reach the internet, how the agent calls tools, how the operator installs
 and configures them, and how approvals resolve. The framework and bundled
-packages themselves are host-neutral; everything here is TrustyClaw-specific and
+packages themselves are host-neutral; everything here is Kern-specific and
 lives in `host/`.
 
-Each TrustyClaw host is for one operator. Tool credentials, config, and approvals
+Each Kern host is for one operator. Tool credentials, config, and approvals
 are partitioned by `tool_id`.
 
 ## Where tool code runs, and its internet access
@@ -17,20 +17,20 @@ LinkedIn, Serper, Meta/Instagram, ScrapeCreators, Polymarket, Interactive
 Brokers, and Runway) and
 parse their responses, so unlike other host code they need direct egress and are
 the host code most exposed to attacker-influenced data. They run in a **dedicated
-`trustyclaw-tools` service** — its own Linux user, running
+`kern-tools` service** — its own Linux user, running
 `host.runtime.tools.service` — kept out of the admin service. nftables grants the
-`trustyclaw-tools` uid DNS and outbound HTTPS (port 443) and **nothing to the
-`trustyclaw-admin` uid**, so the admin service holds no internet egress at all: a
+`kern-tools` uid DNS and outbound HTTPS (port 443) and **nothing to the
+`kern-admin` uid**, so the admin service holds no internet egress at all: a
 compromised tool package cannot exfiltrate admin state or reach an arbitrary host.
 The agent never holds tool secrets and never talks to tool third parties; its own
 path through the policy proxy is unchanged, and tool traffic never rides the agent
 proxy (which would have opened those domains to the agent as an exfiltration path).
 
 The tool tables (`enabled_tools`, `tool_config`, `tool_credentials`,
-`tool_approvals`, `tool_events`) are **owned by `trustyclaw-admin`**: the database
+`tool_approvals`, `tool_events`) are **owned by `kern-admin`**: the database
 is created owned by that role and the migrations run as it, so — as the table
 owner — the admin service has full read/write on them implicitly, no `GRANT`
-needed. The **`trustyclaw-tools` role** the tools service connects as is layered
+needed. The **`kern-tools` role** the tools service connects as is layered
 on top with an *additional, scoped* grant: read-only on `enabled_tools`/
 `tool_config`, read/write on `tool_credentials`/`tool_approvals`/`tool_events`, and
 nothing else in the admin database. Those grants live in the schema migration
@@ -57,12 +57,12 @@ for the service/user map.
 Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
 
 - All three harnesses spawn `python3 -m host.runtime.agent_shim.mcp_shim` as
-  `trustyclaw-agent`: Claude Code through `--mcp-config` (with
+  `kern-agent`: Claude Code through `--mcp-config` (with
   `--strict-mcp-config` making it the only server), Codex through `mcp_servers`
   in the root-owned managed config `/etc/codex/managed_config.toml`, and Hermes
   through its root-owned managed config and headless adapter.
 - The shim is a dumb stdio-to-socket pipe: `tools/list` and `tools/call` forward
-  to the tools socket `/run/trustyclaw-tools/tools.sock`. It holds no state and
+  to the tools socket `/run/kern-tools/tools.sock`. It holds no state and
   no secrets. A **`tools/call`** failure — including the tools service being
   unavailable — is forwarded to the agent as a normal MCP result with
   `isError: true` and a sanitized message, so the agent sees the error and can
@@ -73,7 +73,7 @@ Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
   back up once the service is up.
 - The same shim always serves the **`app_api`** tool,
   forwarded to the separate agent-app socket
-  (`/run/trustyclaw-agent-app/agent-app.sock`) rather than the tools socket.
+  (`/run/kern-agent-app/agent-app.sock`) rather than the tools socket.
   Listing it grants no authority. On every call the service attributes the
   session to a running app task with an agent API; there is nothing to
   configure and no secret involved because attribution comes from the
@@ -81,9 +81,9 @@ Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
   [`../apps/agent-app-api.md`](../apps/agent-app-api.md).
 - The socket service authenticates by kernel peer credentials (`SO_PEERCRED`),
   the same OS-identity pattern as Postgres peer auth, and scopes each peer
-  strictly by path: only the `trustyclaw-agent` uid reaches the MCP routes
+  strictly by path: only the `kern-agent` uid reaches the MCP routes
   (`GET /tools`, `POST /call`, `POST /assets/video`, `POST /assets/image`) and only the
-  `trustyclaw-admin` uid reaches the
+  `kern-admin` uid reaches the
   `/operator/...` delegation routes — neither can call the other's routes. No
   admin password is involved, so the agent gains exactly this tool surface and
   nothing else. Unix sockets are
@@ -102,8 +102,8 @@ The listed actions are the enabled tools' manifest actions, named
   request), instead of inferring from an empty list.
 - **`list_network_integrations`** and **`recent_network_denials`** are the
   agent's read-only view of the host's network controls. A separate non-egress
-  `trustyclaw-agent-network` service serves them from
-  `/run/trustyclaw-agent-network/agent-network.sock`; the MCP shim aggregates
+  `kern-agent-network` service serves them from
+  `/run/kern-agent-network/agent-network.sock`; the MCP shim aggregates
   that listing with the tools socket. The first describes each integration and
   its typed policy options, and the second returns the newest denied requests
   from the proxy's decision log with each denial's code and guidance. They
@@ -125,20 +125,20 @@ The listed actions are the enabled tools' manifest actions, named
   returns a random, tool-scoped asset id. The agent passes that id directly to
   the consuming Runway or Instagram action and does not persist it as app state.
   The shim stores no copy. It streams the opened descriptor over
-  `/run/trustyclaw-tools/tools.sock`; the socket's kernel peer credentials
-  authenticate the `trustyclaw-agent` UID, then the separate
-  `trustyclaw-tools` process writes the bytes as its own UID under
-  `/mnt/trustyclaw-admin/tools-state/assets`.
+  `/run/kern-tools/tools.sock`; the socket's kernel peer credentials
+  authenticate the `kern-agent` UID, then the separate
+  `kern-tools` process writes the bytes as its own UID under
+  `/mnt/kern-admin/tools-state/assets`.
   The tools service separately reads and writes its scoped Postgres tool
   tables, whose database files live on the persistent admin volume at
-  `/mnt/trustyclaw-admin`; staged media bytes never enter those tables. The
+  `/mnt/kern-admin`; staged media bytes never enter those tables. The
   service code itself is installed on the instance root volume.
   The shim opens the file with `O_NOFOLLOW`, then checks the opened descriptor
   with `fstat`; this rejects a symlink at the final path component plus
   directories, devices, sockets, and FIFOs. Streaming continues from that
   descriptor, so replacing the pathname after open cannot switch the source.
   Parent directories follow normal OS path resolution and cannot grant access
-  beyond the `trustyclaw-agent` user's permissions. The tools service never
+  beyond the `kern-agent` user's permissions. The tools service never
   uses the supplied filename as a path: it writes the bytes to a random,
   exclusive-create, mode-0600 file in its mode-0700 asset directory.
   The tools service accepts only the authenticated agent peer, receives
@@ -189,7 +189,7 @@ The listed actions are the enabled tools' manifest actions, named
   closed before sending bytes to a provider.
 
   Staging is a separate public action because bundled tool packages execute as
-  `trustyclaw-tools`, without access to the agent filesystem. Giving package
+  `kern-tools`, without access to the agent filesystem. Giving package
   code a local path would either be unusable or give internet-facing tool code
   read access to agent files. It would also force large media through JSON tool
   arguments and the audit log. The explicit two-call flow keeps package schemas
@@ -246,7 +246,7 @@ pull request check before it can reach a host.
   `APPROVAL_HISTORY_LIMIT = 10,000`, and an approval caught mid-execution by a
   service restart is marked failed at startup (an unknown outcome spends it).
 - **Assets.** Ephemeral files under
-  `/mnt/trustyclaw-admin/tools-state/assets`, indexed only in the tools service
+  `/mnt/kern-admin/tools-state/assets`, indexed only in the tools service
   process and exposed to packages as tool-scoped metadata/open-stream/delete
   operations. They never enter Postgres. The service clears the directory on
   every start and sweeps expired files hourly; it does not rewrite approval

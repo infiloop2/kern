@@ -1,4 +1,4 @@
-name: trustyclaw-smoke
+name: kern-smoke
 
 on:
   workflow_dispatch:
@@ -79,7 +79,7 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               --data-urlencode "per_page=100" \
               --data-urlencode "status=${status}" \
-              "${{ github.api_url }}/repos/${REPO}/actions/workflows/trustyclaw-smoke.yml/runs")"
+              "${{ github.api_url }}/repos/${REPO}/actions/workflows/kern-smoke.yml/runs")"
             jq -s '{workflow_runs: (.[0].workflow_runs + .[1].workflow_runs)}' "${active_json}" <(printf '%s' "${page}") > "${active_json}.next"
             mv "${active_json}.next" "${active_json}"
           done
@@ -99,7 +99,7 @@ jobs:
             echo "Active smoke run: ${active_url}" >&2
             payload="$(jq -n \
               --arg state failure \
-              --arg context trustyclaw-smoke \
+              --arg context kern-smoke \
               --arg description "${description}" \
               --arg target_url "${TARGET_URL}" \
               '{state: $state, context: $context, description: $description, target_url: $target_url}')"
@@ -110,7 +110,7 @@ jobs:
               "${{ github.api_url }}/repos/${REPO}/statuses/${REF}" \
               -d "${payload}" >/dev/null
             {
-              echo "## TrustyClaw smoke rejected"
+              echo "## Kern smoke rejected"
               echo
               echo "Fresh AWS smoke is already running. Wait for the previous smoke to complete, then comment \`/smoke\` again."
               echo
@@ -119,12 +119,12 @@ jobs:
             } >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
-          echo "No active trustyclaw-smoke run is currently queued or in progress."
+          echo "No active kern-smoke run is currently queued or in progress."
 
       - name: Rate limit live AWS runs
         uses: ./.github/actions/rate-limit-live-aws-runs
         with:
-          workflow-file: trustyclaw-smoke.yml
+          workflow-file: kern-smoke.yml
           authorized-job-name: Authorize AWS smoke
 
   smoke:
@@ -133,7 +133,7 @@ jobs:
     if: ${{ needs.authorize.result == 'success' }}
     runs-on: ubuntu-latest
     concurrency:
-      group: trustyclaw-smoke
+      group: kern-smoke
       cancel-in-progress: false
     timeout-minutes: 90
     steps:
@@ -148,7 +148,7 @@ jobs:
           set -euo pipefail
           payload="$(jq -n \
             --arg state pending \
-            --arg context trustyclaw-smoke \
+            --arg context kern-smoke \
             --arg description "Fresh AWS smoke is running." \
             --arg target_url "${TARGET_URL}" \
             '{state: $state, context: $context, description: $description, target_url: $target_url}')"
@@ -159,7 +159,7 @@ jobs:
             "${{ github.api_url }}/repos/${REPO}/statuses/${REF}" \
             -d "${payload}" >/dev/null
           {
-            echo "## TrustyClaw smoke"
+            echo "## Kern smoke"
             echo
             echo "Testing resolved ref: \`${REF}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -171,8 +171,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m venv "${RUNNER_TEMP}/trustyclaw-smoke-venv"
-          "${RUNNER_TEMP}/trustyclaw-smoke-venv/bin/python" -m pip install \
+          python3 -m venv "${RUNNER_TEMP}/kern-smoke-venv"
+          "${RUNNER_TEMP}/kern-smoke-venv/bin/python" -m pip install \
             --disable-pip-version-check \
             --no-cache-dir \
             'playwright==1.60.0'
@@ -186,12 +186,12 @@ jobs:
       - name: Run fresh smoke
         shell: bash
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.TRUSTYCLAW_SMOKE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.TRUSTYCLAW_SMOKE_AWS_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.KERN_SMOKE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.KERN_SMOKE_AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
         run: |
           set -euo pipefail
-          "${RUNNER_TEMP}/trustyclaw-smoke-venv/bin/python" tests/smoke/smoke_aws.py
+          "${RUNNER_TEMP}/kern-smoke-venv/bin/python" tests/smoke/smoke_aws.py
 
       - name: Mark smoke result
         if: ${{ always() }}
@@ -220,7 +220,7 @@ jobs:
           esac
           payload="$(jq -n \
             --arg state "${state}" \
-            --arg context trustyclaw-smoke \
+            --arg context kern-smoke \
             --arg description "${description}" \
             --arg target_url "${TARGET_URL}" \
             '{state: $state, context: $context, description: $description, target_url: $target_url}')"

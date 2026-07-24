@@ -1,4 +1,4 @@
-# CI sandbox for trustyclaw-host tests. The image is built with network
+# CI sandbox for kern-host tests. The image is built with network
 # access, but tests always run in it with --network none (run-in-sandbox.sh),
 # so code arriving through a pull request has no outbound network path.
 FROM ubuntu:22.04
@@ -29,12 +29,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY tests/requirements.txt /tmp/test-requirements.txt
 
-RUN python3.11 -m venv /opt/trustyclaw-ci-venv \
-  && /opt/trustyclaw-ci-venv/bin/python -m pip install --upgrade pip \
-  && /opt/trustyclaw-ci-venv/bin/python -m pip install -r /tmp/test-requirements.txt \
-  && /opt/trustyclaw-ci-venv/bin/python -m mypy --version \
-  && /opt/trustyclaw-ci-venv/bin/python -m pyright --version \
-  && /opt/trustyclaw-ci-venv/bin/python -m playwright install --with-deps chromium \
+RUN python3.11 -m venv /opt/kern-ci-venv \
+  && /opt/kern-ci-venv/bin/python -m pip install --upgrade pip \
+  && /opt/kern-ci-venv/bin/python -m pip install -r /tmp/test-requirements.txt \
+  && /opt/kern-ci-venv/bin/python -m mypy --version \
+  && /opt/kern-ci-venv/bin/python -m pyright --version \
+  && /opt/kern-ci-venv/bin/python -m playwright install --with-deps chromium \
   && rm -f /tmp/test-requirements.txt
 
-ENV PATH="/opt/trustyclaw-ci-venv/bin:${PATH}"
+ENV PATH="/opt/kern-ci-venv/bin:${PATH}"

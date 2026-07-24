@@ -22,9 +22,9 @@ from typing import Any, Callable
 
 from host.runtime.admin_api import thread_scope
 
-DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/run-claude-code"]
-DEFAULT_ACCOUNT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/read-claude-account"]
-AGENT_CWD = "/mnt/trustyclaw-agent/agent-home"
+DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-claude-code"]
+DEFAULT_ACCOUNT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/read-claude-account"]
+AGENT_CWD = "/mnt/kern-agent/agent-home"
 # The bundled tools surface: Claude Code spawns the MCP shim as the agent
 # user; the shim forwards to the host tools socket (see
 # docs/architecture/tools/host-integration.md). --strict-mcp-config (below)
@@ -33,10 +33,10 @@ AGENT_CWD = "/mnt/trustyclaw-agent/agent-home"
 TOOLS_MCP_CONFIG = json.dumps(
     {
         "mcpServers": {
-            "trustyclaw": {
+            "kern": {
                 "command": "/usr/bin/python3",
                 "args": ["-m", "host.runtime.agent_shim.mcp_shim"],
-                "env": {"PYTHONPATH": "/opt/trustyclaw-host"},
+                "env": {"PYTHONPATH": "/opt/kern-host"},
             }
         }
     }
@@ -677,7 +677,7 @@ def run_turn(
 def _subprocess_cwd(command: list[str]) -> str | None:
     # In production, the admin API cannot traverse the agent user's private
     # 0700 home. The sudo helper starts as root, cds there, and then drops to
-    # trustyclaw-agent. Custom test commands still run from AGENT_CWD.
+    # kern-agent. Custom test commands still run from AGENT_CWD.
     return None if command == DEFAULT_COMMAND else AGENT_CWD
 
 

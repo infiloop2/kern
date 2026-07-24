@@ -1,7 +1,7 @@
 """Normalized host-state accessors and proxy file-path helpers.
 
 Host, network, app-migration, and tool state lives in the local
-``trustyclaw_admin`` Postgres database (see ``host/migrations/`` for the schema
+``kern_admin`` Postgres database (see ``host/migrations/`` for the schema
 and ``host.runtime.core.db``/``host.runtime.core.pgclient`` for the Unix-socket client).
 This module exposes per-operation queries rather than materializing the full
 state. Reads use MVCC snapshots; process-local check-then-act writes use
@@ -34,7 +34,7 @@ from typing import Any, Iterator
 from host.runtime.core import db, secretbox
 
 
-DEFAULT_PROXY_STATE_DIR = Path("/mnt/trustyclaw-admin/proxy-state")
+DEFAULT_PROXY_STATE_DIR = Path("/mnt/kern-admin/proxy-state")
 # Serializes every admin-state write cycle. Private on purpose: writes go only
 # through mutation() below, so the locking contract is enforced by structure.
 # Three things to know:
@@ -83,7 +83,7 @@ TERMINAL_STATUSES_SQL = "('completed', 'failed', 'cancelled')"
 
 
 def _proxy_state_dir() -> Path:
-    return Path(os.environ.get("TRUSTYCLAW_PROXY_STATE_DIR", str(DEFAULT_PROXY_STATE_DIR)))
+    return Path(os.environ.get("KERN_PROXY_STATE_DIR", str(DEFAULT_PROXY_STATE_DIR)))
 
 
 @dataclass(frozen=True)

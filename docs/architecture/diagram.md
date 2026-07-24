@@ -12,7 +12,7 @@ flowchart LR
     subgraph operatorplane["operator plane"]
         direction TB
         operator["Human operator"]
-        ssh["trustyclaw-operator<br/>host SSH user<br/>passwordless sudo"]
+        ssh["kern-operator<br/>host SSH user<br/>passwordless sudo"]
         cfedge["Cloudflare Tunnel"]
     end
 
@@ -27,14 +27,14 @@ flowchart LR
         subgraph services["users"]
             direction TB
             root["root<br/>owns root filesystem + host code<br/>executes fifteen fixed helpers only"]
-            admin["trustyclaw-admin<br/>Admin API/UI + orchestrator<br/>127.0.0.1:7443<br/>no internet egress"]
-            proxy["trustyclaw-proxy<br/>Network proxy<br/>127.0.0.1:7445<br/>DNS + TCP 80/443 only"]
-            tools["trustyclaw-tools<br/>Tool packages + tools.sock<br/>DNS + TCP 443 only"]
-            agentnetwork["trustyclaw-agent-network<br/>Network introspection socket<br/>no egress"]
-            agentapp["trustyclaw-agent-app<br/>app_api proxy + agent-app.sock<br/>loopback to app ports only"]
-            apps["trustyclaw-app-*<br/>App backends<br/>host-slot uid, port, schema<br/>no egress"]
-            agent["trustyclaw-agent<br/>Codex + Claude Code + Hermes<br/>no sudo, DB role, or direct egress"]
-            db["postgres<br/>trustyclaw_admin<br/>Unix socket only, peer auth"]
+            admin["kern-admin<br/>Admin API/UI + orchestrator<br/>127.0.0.1:7443<br/>no internet egress"]
+            proxy["kern-proxy<br/>Network proxy<br/>127.0.0.1:7445<br/>DNS + TCP 80/443 only"]
+            tools["kern-tools<br/>Tool packages + tools.sock<br/>DNS + TCP 443 only"]
+            agentnetwork["kern-agent-network<br/>Network introspection socket<br/>no egress"]
+            agentapp["kern-agent-app<br/>app_api proxy + agent-app.sock<br/>loopback to app ports only"]
+            apps["kern-app-*<br/>App backends<br/>host-slot uid, port, schema<br/>no egress"]
+            agent["kern-agent<br/>Codex + Claude Code + Hermes<br/>no sudo, DB role, or direct egress"]
+            db["postgres<br/>kern_admin<br/>Unix socket only, peer auth"]
             tunnel["cloudflared<br/>Tunnel connector<br/>DNS, TCP 443/7844, UDP 7844"]
         end
 

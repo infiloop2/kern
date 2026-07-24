@@ -58,8 +58,8 @@ const relativeTime = value => {
 window.addEventListener("message", event => {
   const message = event.data;
   if (!message || ![
-    "trustyclaw-app-api-result",
-    "trustyclaw-app-upload-file-result",
+    "kern-app-api-result",
+    "kern-app-upload-file-result",
   ].includes(message.type)) return;
   const callbacks = pending.get(message.request_id);
   if (!callbacks) return;
@@ -71,7 +71,7 @@ window.addEventListener("message", event => {
 function api(method, path, body) {
   if (!path.startsWith("/")) throw new Error("app API path must be absolute");
   const requestId = String(nextRequestId++);
-  parent.postMessage({ type: "trustyclaw-app-api", request_id: requestId, method, path: "/v1/apps/agent_chat/api" + path, body }, "*");
+  parent.postMessage({ type: "kern-app-api", request_id: requestId, method, path: "/v1/apps/agent_chat/api" + path, body }, "*");
   return new Promise((resolve, reject) => {
     pending.set(requestId, { resolve, reject });
     setTimeout(() => {
@@ -85,7 +85,7 @@ function api(method, path, body) {
 function requestFileUpload(action, selectionId, maximumFiles) {
   const requestId = String(nextRequestId++);
   parent.postMessage({
-    type: "trustyclaw-app-upload-file",
+    type: "kern-app-upload-file",
     request_id: requestId,
     action,
     ...(selectionId ? { selection_id: selectionId } : {}),

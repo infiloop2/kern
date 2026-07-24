@@ -47,7 +47,7 @@ class AlphaManifestTests(unittest.TestCase):
         assert app is not None
         self.assertEqual(app.id, "alpha_seeker")
         self.assertEqual(app.db_schema, "app_alpha_seeker")
-        self.assertEqual(app.linux_user, "trustyclaw-app-alpha_seeker")
+        self.assertEqual(app.linux_user, "kern-app-2")
         self.assertEqual(app.allocation.port_offset, 2)
         self.assertEqual(app.allocation.uid, app_platform.APP_UID_BASE + 2)
         self.assertEqual(app.allocation.gid, app_platform.APP_UID_BASE + 2)
@@ -104,7 +104,7 @@ class AlphaConfigTests(unittest.TestCase):
 
 
 class AlphaSeedDbTests(unittest.TestCase):
-    DB_NAME = "trustyclaw_alpha_test"
+    DB_NAME = "kern_alpha_test"
     _initialized = False
 
     def setUp(self) -> None:
@@ -112,7 +112,7 @@ class AlphaSeedDbTests(unittest.TestCase):
         pg_harness.ensure_database()
         if not AlphaSeedDbTests._initialized:
             pg_harness.create_database(self.DB_NAME)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_DB_NAME": self.DB_NAME})
+        self.env_patch = patch.dict("os.environ", {"KERN_DB_NAME": self.DB_NAME})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         self.addCleanup(db.close_pool)
@@ -123,14 +123,14 @@ class AlphaSeedDbTests(unittest.TestCase):
                     """
                     DO $$
                     BEGIN
-                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trustyclaw-app-alpha_seeker') THEN
-                        CREATE ROLE "trustyclaw-app-alpha_seeker" LOGIN;
+                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-app-2') THEN
+                        CREATE ROLE "kern-app-2" LOGIN;
                       END IF;
                     END
                     $$;
                     """
                 )
-                cur.execute('CREATE SCHEMA IF NOT EXISTS app_alpha_seeker AUTHORIZATION "trustyclaw-app-alpha_seeker"')
+                cur.execute('CREATE SCHEMA IF NOT EXISTS app_alpha_seeker AUTHORIZATION "kern-app-2"')
             app = app_platform.app_by_id("alpha_seeker")
             assert app is not None
             for version in app_migrate.pending(app.id):

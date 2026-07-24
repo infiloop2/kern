@@ -178,7 +178,7 @@ DB_SCHEMA = ""
 HOST = LOOPBACK
 PORT = 0
 ADMIN_API_SOCKET = os.environ.get(
-    "TRUSTYCLAW_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH
+    "KERN_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH
 )
 SETUP_BRIEF = GENERIC_SETUP_BRIEF
 _SEED: Any = None
@@ -2309,8 +2309,8 @@ def _host_tools_snapshot() -> dict[str, bool] | None:
 def call_admin_api(method: str, path: str, body: Any = None) -> dict[str, Any]:
     encoded_body = None if body is None else json.dumps(body, sort_keys=True).encode()
     headers = {
-        "Host": "trustyclaw-admin-api",
-        "X-TrustyClaw-App-Backend": APP_ID,
+        "Host": "kern-admin-api",
+        "X-Kern-App-Backend": APP_ID,
     }
     if encoded_body is not None:
         headers["Content-Type"] = "application/json"

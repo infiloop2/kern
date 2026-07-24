@@ -614,14 +614,14 @@ class PersonalWebAppBuilderMockTests(unittest.TestCase):
 
 
 class PersonalWebAppBuilderDbTests(unittest.TestCase):
-    DB_NAME = "trustyclaw_personal_builder_test"
+    DB_NAME = "kern_personal_builder_test"
     _initialized = False
 
     def setUp(self) -> None:
         pg_harness.ensure_database()
         if not self._initialized:
             pg_harness.create_database(self.DB_NAME)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_DB_NAME": self.DB_NAME})
+        self.env_patch = patch.dict("os.environ", {"KERN_DB_NAME": self.DB_NAME})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         self.addCleanup(db.close_pool)
@@ -634,9 +634,9 @@ class PersonalWebAppBuilderDbTests(unittest.TestCase):
                     BEGIN
                       IF NOT EXISTS (
                         SELECT FROM pg_roles
-                        WHERE rolname = 'trustyclaw-app-6'
+                        WHERE rolname = 'kern-app-6'
                       ) THEN
-                        CREATE ROLE "trustyclaw-app-6" LOGIN;
+                        CREATE ROLE "kern-app-6" LOGIN;
                       END IF;
                     END
                     $$;
@@ -644,7 +644,7 @@ class PersonalWebAppBuilderDbTests(unittest.TestCase):
                 )
                 cur.execute(
                     'CREATE SCHEMA IF NOT EXISTS app_personal_web_app_builder '
-                    'AUTHORIZATION "trustyclaw-app-6"'
+                    'AUTHORIZATION "kern-app-6"'
                 )
             app = app_platform.app_by_id(backend.APP_ID)
             assert app is not None
@@ -695,8 +695,8 @@ class RouteBoundaryTests(unittest.TestCase):
     def test_agent_proxy_is_pinned_to_the_builder_thread(self) -> None:
         handler = object.__new__(backend.Handler)
         handler.headers = Message()
-        handler.headers["X-TrustyClaw-Agent-App-Proxy"] = backend.APP_ID
-        handler.headers["X-TrustyClaw-Agent-Thread"] = "other"
+        handler.headers["X-Kern-Agent-App-Proxy"] = backend.APP_ID
+        handler.headers["X-Kern-Agent-Thread"] = "other"
         with self.assertRaises(backend.AppError) as error:
             handler._require_agent_proxy()
         self.assertEqual(error.exception.status, HTTPStatus.UNAUTHORIZED)

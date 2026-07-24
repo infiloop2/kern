@@ -48,7 +48,7 @@ def proxy_app_api(
     body: Any,
 ) -> Any:
     encoded_body = None if body is None else json.dumps(body, sort_keys=True).encode()
-    headers = {"X-TrustyClaw-App-Proxy": app.id}
+    headers = {"X-Kern-App-Proxy": app.id}
     if encoded_body is not None:
         headers["Content-Type"] = "application/json"
         headers["Content-Length"] = str(len(encoded_body))

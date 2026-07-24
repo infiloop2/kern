@@ -147,7 +147,7 @@ class ToolManifest:
     # Implementation details shown only in Integration Guides. Keep summary
     # popovers operator-facing; put protocol and payload mechanics here.
     technical_details: tuple[str, ...] = ()
-    # Ordered provider-side and TrustyClaw setup. Empty when enablement is the
+    # Ordered provider-side and Kern setup. Empty when enablement is the
     # only step.
     setup_steps: tuple[SetupStep, ...] = ()
 

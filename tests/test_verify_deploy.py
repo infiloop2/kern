@@ -47,17 +47,17 @@ class ExpectedAccountsTests(unittest.TestCase):
 
     def test_wrong_uid_and_missing_account_are_reported(self) -> None:
         failures = verify_deploy.check_service_accounts(
-            {"root": 4242, "trustyclaw-no-such-user": 1}
+            {"root": 4242, "kern-no-such-user": 1}
         )
         self.assertTrue(any("root has uid 0, expected 4242" in failure for failure in failures))
         self.assertTrue(
-            any("trustyclaw-no-such-user does not exist" in failure for failure in failures)
+            any("kern-no-such-user does not exist" in failure for failure in failures)
         )
 
 
 class PathFactTests(unittest.TestCase):
     def test_matching_facts_pass(self) -> None:
-        facts = [("/mnt/x", "trustyclaw-admin", "trustyclaw-admin", 0o700, True)]
+        facts = [("/mnt/x", "kern-admin", "kern-admin", 0o700, True)]
         lstat = lambda path: fake_stat(stat_module.S_IFDIR | 0o700, 47741, 47741)
         self.assertEqual(
             verify_deploy.check_path_facts(facts, lstat, resolve_uid, resolve_uid), []
@@ -65,10 +65,10 @@ class PathFactTests(unittest.TestCase):
 
     def test_wrong_mode_owner_type_and_missing_are_reported(self) -> None:
         facts = [
-            ("/mnt/wrong-mode", "trustyclaw-admin", "trustyclaw-admin", 0o700, True),
-            ("/mnt/wrong-owner", "trustyclaw-admin", "trustyclaw-admin", 0o700, True),
-            ("/mnt/not-a-dir", "trustyclaw-admin", "trustyclaw-admin", 0o700, True),
-            ("/mnt/missing", "trustyclaw-admin", "trustyclaw-admin", 0o700, True),
+            ("/mnt/wrong-mode", "kern-admin", "kern-admin", 0o700, True),
+            ("/mnt/wrong-owner", "kern-admin", "kern-admin", 0o700, True),
+            ("/mnt/not-a-dir", "kern-admin", "kern-admin", 0o700, True),
+            ("/mnt/missing", "kern-admin", "kern-admin", 0o700, True),
             ("/mnt/symlinked-file", "root", "root", 0o644, False),
         ]
 
@@ -87,7 +87,7 @@ class PathFactTests(unittest.TestCase):
         self.assertEqual(len(failures), 5)
         self.assertIn("path: /mnt/wrong-mode has mode 755, expected 700", failures)
         self.assertIn(
-            "path: /mnt/wrong-owner owned by uid 0, expected trustyclaw-admin (47741)", failures
+            "path: /mnt/wrong-owner owned by uid 0, expected kern-admin (47741)", failures
         )
         self.assertIn("path: /mnt/not-a-dir is not a directory", failures)
         self.assertIn("path: /mnt/missing is missing", failures)
@@ -102,7 +102,7 @@ class PathFactTests(unittest.TestCase):
 
 class SocketTests(unittest.TestCase):
     def test_socket_facts(self) -> None:
-        owners = {"/run/a.sock": "trustyclaw-tools", "/run/b.sock": "trustyclaw-tools", "/run/c.sock": "trustyclaw-tools"}
+        owners = {"/run/a.sock": "kern-tools", "/run/b.sock": "kern-tools", "/run/c.sock": "kern-tools"}
 
         def lstat(path: str) -> os.stat_result:
             if path == "/run/a.sock":
@@ -120,10 +120,10 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(
             set(verify_deploy.SOCKET_OWNERS.values()),
             {
-                "trustyclaw-tools",
-                "trustyclaw-agent-app",
-                "trustyclaw-agent-network",
-                "trustyclaw-admin",
+                "kern-tools",
+                "kern-agent-app",
+                "kern-agent-network",
+                "kern-admin",
                 "postgres",
             },
         )
@@ -168,7 +168,7 @@ class RunnerBackedCheckTests(unittest.TestCase):
 
     def test_firewall_ruleset_markers(self) -> None:
         good = (
-            "table inet trustyclaw {\n"
+            "table inet kern {\n"
             "  chain input {\n    type filter hook input priority filter; policy drop;\n  }\n"
             "  chain output {\n    type filter hook output priority filter; policy drop;\n  }\n}\n"
         )
@@ -188,8 +188,8 @@ class RunnerBackedCheckTests(unittest.TestCase):
 
     def test_reachability_expectations(self) -> None:
         probes: list[verify_deploy.Probe] = [
-            ("trustyclaw-agent", "127.0.0.1", PROXY_PORT, "reachable", "agent to proxy"),
-            ("trustyclaw-agent", "1.1.1.1", 443, "blocked", "agent egress"),
+            ("kern-agent", "127.0.0.1", PROXY_PORT, "reachable", "agent to proxy"),
+            ("kern-agent", "1.1.1.1", 443, "blocked", "agent egress"),
         ]
 
         def runner_for(codes: dict[int, int]):
@@ -242,7 +242,7 @@ class RunnerBackedCheckTests(unittest.TestCase):
 
     def test_database_access(self) -> None:
         def run(argv: list[str]) -> "subprocess.CompletedProcess[str]":
-            if "trustyclaw-admin" in argv:
+            if "kern-admin" in argv:
                 return completed(0, stdout="1\n")
             return completed(2, stderr="psql: FATAL: pg_hba.conf rejects connection")
 
@@ -253,7 +253,7 @@ class RunnerBackedCheckTests(unittest.TestCase):
 
         failures = verify_deploy.check_database_access(agent_admitted)
         self.assertEqual(len(failures), 1)
-        self.assertIn("trustyclaw-agent was admitted", failures[0])
+        self.assertIn("kern-agent was admitted", failures[0])
 
     def test_retry_until_clean_retries_until_pass_or_deadline(self) -> None:
         clock = {"now": 0.0}

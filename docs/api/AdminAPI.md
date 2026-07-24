@@ -1,6 +1,6 @@
 # Admin API
 
-The TrustyClaw admin API is served by the localhost admin service.
+The Kern admin API is served by the localhost admin service.
 
 Base URL after port forwarding:
 
@@ -11,7 +11,7 @@ http://127.0.0.1:7443
 Every API request authenticates with a session cookie. `POST /v1/login` with
 `{"password": "<admin-password>"}` returns an `HttpOnly`, `SameSite=Strict`
 `tc_admin_session` cookie; subsequent requests send that cookie automatically and
-must also include the CSRF header `X-TrustyClaw-Csrf: 1`. `POST /v1/logout`
+must also include the CSRF header `X-Kern-Csrf: 1`. `POST /v1/logout`
 revokes the session and clears the cookie. The password is presented only at
 `/v1/login` and never replayed on later requests; there is no bearer-token path.
 
@@ -50,7 +50,7 @@ Error status codes:
 | --- | --- |
 | `400` | Request JSON, query string, or field value is invalid. |
 | `401` | Missing or invalid admin password or session. |
-| `403` | A cookie-authenticated request is missing the `X-TrustyClaw-Csrf` header, an authenticated app bridge attempted to target a different app, or an app backend attempted a disallowed host route. |
+| `403` | A cookie-authenticated request is missing the `X-Kern-Csrf` header, an authenticated app bridge attempted to target a different app, or an app backend attempted a disallowed host route. |
 | `404` | Requested resource or route does not exist. |
 | `409` | Request conflicts with current runtime, task, approval, or credential state. |
 | `413` | Request body exceeds the 1 MiB admin API limit. |
@@ -73,7 +73,7 @@ sets no cookie. Repeated failures are throttled with `429`.
 
 `POST /v1/logout` revokes the current session and clears the cookie, returning
 `{"ok": true}`. Like every non-login route it requires an authenticated caller;
-a cookie-authenticated call must include the `X-TrustyClaw-Csrf` header.
+a cookie-authenticated call must include the `X-Kern-Csrf` header.
 
 ## Health
 
@@ -86,7 +86,7 @@ Response:
 ```json
 {
   "status": "ok",
-  "agent_name": "trustyclaw-dev-agent",
+  "agent_name": "kern-dev-agent",
   "agent_runtime": {
     "runtimes": [
       {
@@ -157,19 +157,19 @@ Response fields:
 | `agent_runtime.runtimes[].active_task_ids` | string array |  | Currently running task ids for this runtime. |
 | `network_controls.status` | enum | `active`, `error` | Derived network policy enforcement state. |
 | `version.status` | enum | `ok`, `mismatch`, `error` | Version health for the running root volume and preserved admin state. |
-| `version.runtime` | string or null |  | TrustyClaw version from `/opt/trustyclaw-host/VERSION`. |
-| `version.state` | string or null |  | TrustyClaw preserved-state version from admin disk `version.json`. |
-| `upgrade.available` | boolean |  | Whether the public `infiloop2/trustyclaw` main-branch version is newer than the running version. This advisory check does not affect overall health. |
+| `version.runtime` | string or null |  | Kern version from `/opt/kern-host/VERSION`. |
+| `version.state` | string or null |  | Kern preserved-state version from admin disk `version.json`. |
+| `upgrade.available` | boolean |  | Whether the public `infiloop2/kern` main-branch version is newer than the running version. This advisory check does not affect overall health. |
 | `upgrade.latest` | string or null |  | Latest valid version returned by a successful public-repository check, or `null` until the first check succeeds after service start. A failed later check preserves the last successful value. |
 | `host_runtime.cpu.usage_percent` | number | 0-100 | Current host CPU usage percentage. |
 | `host_runtime.memory.used_bytes` | integer |  | Current host memory used, in bytes. |
 | `host_runtime.memory.total_bytes` | integer |  | Total host memory, in bytes. |
 | `host_runtime.filesystem.mounts.root.used_bytes` | integer |  | Current root filesystem used space, in bytes. |
 | `host_runtime.filesystem.mounts.root.total_bytes` | integer |  | Total root filesystem capacity, in bytes. |
-| `host_runtime.filesystem.mounts.admin.used_bytes` | integer | optional | Current admin data volume (`/mnt/trustyclaw-admin`) used space, in bytes. |
-| `host_runtime.filesystem.mounts.admin.total_bytes` | integer | optional | Total admin data volume (`/mnt/trustyclaw-admin`) capacity, in bytes. |
-| `host_runtime.filesystem.mounts.agent.used_bytes` | integer | optional | Current agent data volume (`/mnt/trustyclaw-agent`) used space, in bytes. |
-| `host_runtime.filesystem.mounts.agent.total_bytes` | integer | optional | Total agent data volume (`/mnt/trustyclaw-agent`) capacity, in bytes. |
+| `host_runtime.filesystem.mounts.admin.used_bytes` | integer | optional | Current admin data volume (`/mnt/kern-admin`) used space, in bytes. |
+| `host_runtime.filesystem.mounts.admin.total_bytes` | integer | optional | Total admin data volume (`/mnt/kern-admin`) capacity, in bytes. |
+| `host_runtime.filesystem.mounts.agent.used_bytes` | integer | optional | Current agent data volume (`/mnt/kern-agent`) used space, in bytes. |
+| `host_runtime.filesystem.mounts.agent.total_bytes` | integer | optional | Total agent data volume (`/mnt/kern-agent`) capacity, in bytes. |
 | `host_runtime.swap.allocated_bytes` | integer |  | Filesystem-backed RAM swap allocated to the host, in bytes. |
 | `host_runtime.swap.used_bytes` | integer |  | Current filesystem-backed RAM swap used, in bytes. |
 
@@ -323,7 +323,7 @@ Agent account response:
       "agent_runtimes": ["hermes"],
       "status": "active",
       "account_id": "123456789012",
-      "arn": "arn:aws:iam::123456789012:user/trustyclaw-bedrock",
+      "arn": "arn:aws:iam::123456789012:user/kern-bedrock",
       "bedrock_usage": {
         "month_to_date": 0.3102,
         "currency": "USD",
@@ -352,7 +352,7 @@ Agent account response fields:
 | `accounts[].arn` | string | optional | The STS-attested IAM identity of the connected AWS credential. Present only on the Bedrock provider record while its account is linked. |
 | `accounts[].plan_type` | string | optional | Common plan name for the provider account. Present only while the runtime is active. |
 | `accounts[].codex_usage` | object | optional | Codex-specific usage metadata. Present only for the Codex runtime when Codex reports rate limits. |
-| `accounts[].codex_usage.last_checked_at` | string | optional | UTC timestamp when TrustyClaw last refreshed the cached Codex usage snapshot. Active runtimes are rechecked every 300 seconds. |
+| `accounts[].codex_usage.last_checked_at` | string | optional | UTC timestamp when Kern last refreshed the cached Codex usage snapshot. Active runtimes are rechecked every 300 seconds. |
 | `accounts[].codex_usage.rate_limits` | object | optional | Codex rate-limit snapshot. |
 | `accounts[].codex_usage.rate_limits.primary` | object | optional | Codex 300-minute rate-limit window. |
 | `accounts[].codex_usage.rate_limits.secondary` | object | optional | Codex 10080-minute rate-limit window. |
@@ -847,7 +847,7 @@ Agent file endpoints:
 | `GET` | `/v1/agent-files/read?path=<path>` | `path` query parameter is optional; default `/` | Agent file read response | Reads one regular file under the agent home as a UTF-8 text preview. |
 | `POST` | `/v1/agent-files/upload?filename=<name>` | Raw file bytes; `Content-Length` is required | `{"file": {...}}` | Uploads one file into the agent home's `user-files/` directory. The body is capped at 25 MiB. |
 
-The API treats `/` as `/mnt/trustyclaw-agent/agent-home`. Paths that resolve
+The API treats `/` as `/mnt/kern-agent/agent-home`. Paths that resolve
 outside that home are rejected. Symlinks are not supported: directory listings
 omit symlink entries, and direct requests for symlink paths return a validation
 error.
@@ -907,7 +907,7 @@ never overwrites an existing file. Incomplete uploads are removed.
 }
 ```
 
-`path` is relative to `/mnt/trustyclaw-agent/agent-home`, which is also the
+`path` is relative to `/mnt/kern-agent/agent-home`, which is also the
 agent runtime's working directory. Uploads are durable workspace data and are
 not pruned automatically.
 
@@ -984,7 +984,7 @@ Network policy request:
     "github": {
       "enabled": true,
       "write_repositories": [
-        {"owner": "infiloop2", "repo": "trustyclaw"}
+        {"owner": "infiloop2", "repo": "kern"}
       ]
     },
     "custom": {
@@ -1021,7 +1021,7 @@ secrets are never included.
       "github": {
         "enabled": true,
         "write_repositories": [
-          {"owner": "infiloop2", "repo": "trustyclaw"}
+          {"owner": "infiloop2", "repo": "kern"}
         ]
       },
       "custom": {
@@ -1102,7 +1102,7 @@ GitHub credential metadata response — returned by all three
   "repository_audits": [
     {
       "owner": "infiloop2",
-      "repo": "trustyclaw",
+      "repo": "kern",
       "audited_at": "2026-06-08T00:00:00Z",
       "warnings": [
         {
@@ -1136,7 +1136,7 @@ GitHub credential metadata response fields:
 | `owner` | string | Always | The write repository's owner. |
 | `repo` | string | Always | The write repository's name. |
 | `audited_at` | string | Once an audit attempt has been stored; absent while the first attempt is still pending | RFC 3339 time of the last audit attempt (success or failure). |
-| `warnings` | array | Always | Operator warnings, each `{"code", "severity", "message"}` with `severity` `critical` or `warning` — for example a public write repository, an unprotected default branch the token can push, workflows whose triggers expose secrets to PR-influenced code, or an incomplete audit when TrustyClaw lacks enough information. Empty means a clean audit. |
+| `warnings` | array | Always | Operator warnings, each `{"code", "severity", "message"}` with `severity` `critical` or `warning` — for example a public write repository, an unprotected default branch the token can push, workflows whose triggers expose secrets to PR-influenced code, or an incomplete audit when Kern lacks enough information. Empty means a clean audit. |
 | `error` | string | When the last audit attempt failed | Raw failure detail for diagnostics; the same condition also appears as a warning and the next poller pass retries it. |
 
 Network event response:
@@ -1163,7 +1163,7 @@ discarded and can no longer be listed.
       "method": "GET",
       "host": "api.github.com",
       "port": 443,
-      "path": "/repos/infiversehq/trustyclaw-host",
+      "path": "/repos/infiversehq/kern-host",
       "query": "per_page=5",
       "decision": "allowed"
     }
@@ -1243,7 +1243,7 @@ The admin shell loads the entry point in a sandboxed iframe.
 App backend routes require the normal admin session. The admin API consumes that
 session itself and forwards no operator credential onward: it sends the JSON
 request and query string to the app's host-assigned loopback port with an
-`X-TrustyClaw-App-Proxy` marker and accepts a JSON response of at most 1 MiB. The browser app bridge pins a request to its own `app_id`;
+`X-Kern-App-Proxy` marker and accepts a JSON response of at most 1 MiB. The browser app bridge pins a request to its own `app_id`;
 attempting to bridge to another app returns `403`. App backend failures are
 returned through the standard error envelope. App-backend-to-host calls use a
 separate peer-authenticated Unix socket and narrow task/thread allowlist,
@@ -1330,7 +1330,7 @@ Tool list response:
       "setup_steps": [
         {
           "title": "Create an OAuth client",
-          "description": "Create a Web application client and register the exact TrustyClaw callback URI.",
+          "description": "Create a Web application client and register the exact Kern callback URI.",
           "link_url": "https://provider.example/oauth-guide",
           "link_label": "View provider instructions",
           "image_path": "/guide-assets/provider-oauth-client.png",
@@ -1385,7 +1385,7 @@ tool. Each tool object has:
 | `actions[]` | Each action's stable `id`, `description`, per-action `data_policy`, `approval` (`direct` or `operator`), `input_schema`, and `output_schema` (empty `{}` for approval-gated actions, which return a user-visible message rather than a JSON result). |
 | `config[]` | This tool's declared config keys with `description` and `set`. All config is secret and scoped per tool; values are never returned (see `PUT /v1/tools/{tool_id}/config`). |
 | `protections[]` | Short operator-facing safeguards rendered in the tool's info popover and full Integration Guides entry. |
-| `setup_steps[]` | Ordered provider-side and TrustyClaw setup steps. A step may include a provider documentation link and a local audited screenshot with alt text; `show_callback`/`show_config` render this host's OAuth callback URI or the tool's config keys inside that step. |
+| `setup_steps[]` | Ordered provider-side and Kern setup steps. A step may include a provider documentation link and a local audited screenshot with alt text; `show_callback`/`show_config` render this host's OAuth callback URI or the tool's config keys inside that step. |
 | `data_summary` | The operator-facing data story as exactly four `cards`, in order: what leaves this host, where it can go, what the third party can do with it, and how long it retains it. Each card has a `description` and/or labeled `points`, plus authoritative policy `links`. |
 | `connection_status` | OAuth tools only: `{"connected": bool, "account"?: ConnectionAccount}`; never contains tokens or client secrets. |
 

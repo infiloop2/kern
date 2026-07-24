@@ -112,7 +112,7 @@ MANIFEST = ToolManifest(
             ),
             data_policy=(
                 "Sends only the deployment API key to ScrapeCreators's trending-Reels endpoint. ScrapeCreators reads "
-                "Instagram's public Reels page and returns public Reel metadata; TrustyClaw deduplicates and bounds "
+                "Instagram's public Reels page and returns public Reel metadata; Kern deduplicates and bounds "
                 "the normalized result before it enters active model context. This read-only action runs directly "
                 "with no approval."
             ),
@@ -189,7 +189,7 @@ MANIFEST = ToolManifest(
             ),
             data_policy=(
                 "Sends the public Instagram Reel URL, trim=true, download_media=false, and the deployment API key to "
-                "ScrapeCreators. ScrapeCreators retrieves the public page and returns metadata; TrustyClaw requests "
+                "ScrapeCreators. ScrapeCreators retrieves the public page and returns metadata; Kern requests "
                 "no permanent media copy and returns a bounded normalized record to active model context. No "
                 "Instagram account or cookie is supplied. This read-only action runs directly with no approval."
             ),
@@ -217,7 +217,7 @@ MANIFEST = ToolManifest(
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(
-        "TrustyClaw accepts only valid hashtags, numeric audio ids, and instagram.com Reel URLs. It asks ScrapeCreators not to download media, removes duplicate Reels, and maps vendor responses to fixed fields before returning them.",
+        "Kern accepts only valid hashtags, numeric audio ids, and instagram.com Reel URLs. It asks ScrapeCreators not to download media, removes duplicate Reels, and maps vendor responses to fixed fields before returning them.",
         PARAM_GUARD_TECHNICAL_DETAIL,
     ),
     setup_steps=(
@@ -244,9 +244,9 @@ MANIFEST = ToolManifest(
             DataSummaryCard(
                 title="What leaves this host",
                 description=(
-                    "All data in a discovery request that passes TrustyClaw's validation is sent to ScrapeCreators: keyword text, "
+                    "All data in a discovery request that passes Kern's validation is sent to ScrapeCreators: keyword text, "
                     "a hashtag, date, page, or cursor values, an audio id, or a validated public Instagram Reel URL, plus the "
-                    "ScrapeCreators API key. Requests rejected by TrustyClaw do not leave the host. Requests rejected by "
+                    "ScrapeCreators API key. Requests rejected by Kern do not leave the host. Requests rejected by "
                     "ScrapeCreators have already left the host and may be represented in its retained request metadata and error "
                     "logs. No Instagram account or credential is sent. The free-text request values (keyword, hashtag, Reel URL) "
                     "first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before anything is sent."
@@ -256,7 +256,7 @@ MANIFEST = ToolManifest(
                 title="Where it can go",
                 points=(
                     DataSummaryPoint(label="ScrapeCreators", text="Requests go to ScrapeCreators, an unofficial scraping vendor with no Meta or Instagram service commitment."),
-                    DataSummaryPoint(label="Instagram public pages", text="ScrapeCreators makes its own upstream requests to public Instagram pages and Google-indexed lookups. TrustyClaw cannot see or constrain those upstream requests."),
+                    DataSummaryPoint(label="Instagram public pages", text="ScrapeCreators makes its own upstream requests to public Instagram pages and Google-indexed lookups. Kern cannot see or constrain those upstream requests."),
                 ),
             ),
             DataSummaryCard(

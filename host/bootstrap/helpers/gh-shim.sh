@@ -4,4 +4,4 @@
 # credential is injected by the network proxy on GitHub domains (any
 # agent-supplied Authorization is stripped there), so the placeholder never
 # reaches GitHub and the agent never holds the real token.
-GH_TOKEN="trustyclaw-proxy-injected" exec /usr/bin/gh "$@"
+GH_TOKEN="kern-proxy-injected" exec /usr/bin/gh "$@"

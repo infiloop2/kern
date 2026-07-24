@@ -16,7 +16,7 @@
       "Resource": "*"
     },
     {
-      "Sid": "CreateTaggedTrustyClawResources",
+      "Sid": "CreateTaggedKernResources",
       "Effect": "Allow",
       "Action": [
         "ec2:RunInstances",
@@ -26,7 +26,7 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestTag/trustyclaw-host": "true"
+          "aws:RequestTag/kern-host": "true"
         }
       }
     },
@@ -45,24 +45,24 @@
       ]
     },
     {
-      "Sid": "RunInstancesWithTrustyClawSecurityGroups",
+      "Sid": "RunInstancesWithKernSecurityGroups",
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
       "Resource": "arn:aws:ec2:*:*:security-group/*",
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/trustyclaw-host": "true"
+          "aws:ResourceTag/kern-host": "true"
         }
       }
     },
     {
-      "Sid": "TagOnlyDuringTrustyClawResourceCreation",
+      "Sid": "TagOnlyDuringKernResourceCreation",
       "Effect": "Allow",
       "Action": "ec2:CreateTags",
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestTag/trustyclaw-host": "true",
+          "aws:RequestTag/kern-host": "true",
           "ec2:CreateAction": [
             "RunInstances",
             "CreateVolume",
@@ -72,7 +72,7 @@
       }
     },
     {
-      "Sid": "ManageOnlyTrustyClawResources",
+      "Sid": "ManageOnlyKernResources",
       "Effect": "Allow",
       "Action": [
         "ec2:GetConsoleOutput",
@@ -91,7 +91,7 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/trustyclaw-host": "true"
+          "aws:ResourceTag/kern-host": "true"
         }
       }
     },

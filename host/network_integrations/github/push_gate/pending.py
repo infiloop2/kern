@@ -28,7 +28,7 @@ from typing import Any
 from host.runtime.core import state
 from host.runtime.admin_api.github_credential import HelperError, _run_helper_json
 
-APPROVE_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/approve-github-push"]
+APPROVE_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/approve-github-push"]
 APPROVE_HELPER_TIMEOUT_SECONDS = 150
 # Serializes resolutions across admin threads. Bounded wait: a second
 # operator action during a slow helper run gets a crisp conflict error

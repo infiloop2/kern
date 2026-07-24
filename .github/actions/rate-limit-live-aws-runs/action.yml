@@ -3,7 +3,7 @@ description: Reject live AWS workflow runs when too many started recently.
 
 inputs:
   workflow-file:
-    description: Workflow file name, for example trustyclaw-smoke.yml.
+    description: Workflow file name, for example kern-smoke.yml.
     required: true
   authorized-job-name:
     description: Authorize job display name that must have completed successfully for a run to count.

@@ -379,18 +379,21 @@ class ConnectionStatusTests(unittest.TestCase):
 
 
 class WorkspaceKitMigrationCopiesAreEquivalent(unittest.TestCase):
-    """Every kit app's first migration creates the same base schema. There is
-    deliberately no canonical schema file in the kit: the apps' migrations are
-    applied history, so the suite asserts them against each other and against
-    the tables the engine needs.
+    """Every kit app's single baseline migration creates the same base schema.
+    There is deliberately no canonical schema file in the kit: each app ships
+    its own ``0001_baseline.sql``, so the suite asserts them against each other
+    and against the tables the engine needs.
 
-    Mission Pursuit predates the kit extraction: its shipped first migration is
-    ``0001_mission_pursuit.sql`` (applied history on live hosts, immutable), and
-    it matches the other apps' ``0001_workspace_base.sql`` in everything but its
-    header comments.
+    Kern 1.0.0 collapsed each app's migration history into that single genesis
+    file. Base-only apps (no domain tables) copy an identical workspace base
+    byte-for-byte; apps that add domain tables (social_marketer,
+    virality_machine) inline the same base and append their own tables, so they
+    still create every base table but are not byte-identical.
     """
 
     BASE_TABLES = ("workspace", "messages", "runs", "schedules", "artifacts", "memories", "tools")
+    # Kit apps whose baseline is only the workspace base, with no domain tables.
+    BASE_ONLY_APPS = ("alpha_seeker", "mission_pursuit", "software_builder")
 
     def _kit_app_dirs(self) -> list[Path]:
         apps: list[Path] = []
@@ -424,34 +427,32 @@ class WorkspaceKitMigrationCopiesAreEquivalent(unittest.TestCase):
         ]
         return "\n".join(lines)
 
-    def test_first_migrations_share_identical_executable_sql(self) -> None:
-        apps = self._kit_app_dirs()
-        reference_dir = apps[0]
-        reference = self._executable_sql(self._first_migration(reference_dir))
-        for app_dir in apps[1:]:
-            with self.subTest(app=app_dir.name):
+    def test_base_only_apps_share_byte_identical_baseline(self) -> None:
+        # The base-only kit apps carry the workspace base verbatim, so their
+        # single baseline files are byte-for-byte identical to each other.
+        by_name = {app_dir.name: app_dir for app_dir in self._kit_app_dirs()}
+        reference_name = self.BASE_ONLY_APPS[0]
+        reference = self._first_migration(by_name[reference_name]).read_bytes()
+        for name in self.BASE_ONLY_APPS[1:]:
+            with self.subTest(app=name):
                 self.assertEqual(
-                    self._executable_sql(self._first_migration(app_dir)),
+                    self._first_migration(by_name[name]).read_bytes(),
                     reference,
-                    f"{app_dir.name}'s first migration must create the same base schema"
-                    f" as {reference_dir.name}'s (comments aside)",
+                    f"{name}'s baseline must be byte-identical to {reference_name}'s",
                 )
 
-    def test_first_migration_names_are_the_expected_applied_history(self) -> None:
+    def test_every_kit_app_baseline_creates_every_base_table(self) -> None:
         for app_dir in self._kit_app_dirs():
-            expected = (
-                "0001_mission_pursuit.sql"
-                if app_dir.name == "mission_pursuit"
-                else "0001_workspace_base.sql"
-            )
-            with self.subTest(app=app_dir.name):
-                self.assertEqual(self._first_migration(app_dir).name, expected)
+            sql = self._executable_sql(self._first_migration(app_dir))
+            for table in self.BASE_TABLES:
+                with self.subTest(app=app_dir.name, table=table):
+                    self.assertIn(f"CREATE TABLE IF NOT EXISTS {table} (", sql)
 
-    def test_first_migration_creates_every_base_table(self) -> None:
-        sql = self._executable_sql(self._first_migration(self._kit_app_dirs()[0]))
-        for table in self.BASE_TABLES:
-            with self.subTest(table=table):
-                self.assertIn(f"CREATE TABLE IF NOT EXISTS {table} (", sql)
+    def test_each_kit_app_ships_a_single_baseline_migration(self) -> None:
+        for app_dir in self._kit_app_dirs():
+            with self.subTest(app=app_dir.name):
+                migrations = sorted(p.name for p in (app_dir / "migrations").glob("*.sql"))
+                self.assertEqual(migrations, ["0001_baseline.sql"])
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """Receive one bounded operator upload on stdin and publish it atomically.
 
-The fixed ``upload-agent-file`` sudo helper demotes to ``trustyclaw-agent``
+The fixed ``upload-agent-file`` sudo helper demotes to ``kern-agent``
 before invoking this module. The upload therefore has no filesystem authority
 beyond the agent itself. Files land under ``user-files`` in the durable agent
 home, with a UTC timestamp prefix that makes a lexical name sort chronological.
@@ -19,7 +19,7 @@ import uuid
 from typing import NoReturn
 
 
-AGENT_HOME = Path("/mnt/trustyclaw-agent/agent-home")
+AGENT_HOME = Path("/mnt/kern-agent/agent-home")
 UPLOAD_DIRECTORY = "user-files"
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_FILENAME_BYTES = 200

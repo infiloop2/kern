@@ -45,7 +45,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-agent_home = Path("/mnt/trustyclaw-agent/agent-home")
+agent_home = Path("/mnt/kern-agent/agent-home")
 
 
 def load_first(paths):
@@ -107,7 +107,7 @@ print(json.dumps(result, sort_keys=True))
 PY
 fi
 
-exec /usr/sbin/runuser -u trustyclaw-agent -- env HOME=/mnt/trustyclaw-agent/agent-home CLAUDE_CONFIG_DIR=/mnt/trustyclaw-agent/agent-home/.claude /usr/bin/python3 - <<'PY'
+exec /usr/sbin/runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home CLAUDE_CONFIG_DIR=/mnt/kern-agent/agent-home/.claude /usr/bin/python3 - <<'PY'
 import hashlib
 import json
 import os

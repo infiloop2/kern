@@ -287,7 +287,7 @@ class StageIntegrationChecks(AwsSmoke):
         def post_openai(payload: str, account_header: str | None = account_id) -> str:
             header = "" if account_header is None else f" -H {shlex.quote(f'ChatGPT-Account-Id: {account_header}')}"
             return self._ssh_code(
-                f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} "
+                f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
                 f"curl -s --max-time 20 -X POST -H 'Content-Type: application/json' "
                 f"{header} --data {shlex.quote(payload)} {shlex.quote(url)}"
             )
@@ -369,12 +369,12 @@ class StageIntegrationChecks(AwsSmoke):
         url = "https://api.anthropic.com/v1/messages"
         payload = '{"model":"claude-sonnet-4-5","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}'
         missing = self._ssh_code(
-            f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} "
+            f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
             f"curl -s --max-time 20 -X POST -H 'Content-Type: application/json' "
             f"--data {shlex.quote(payload)} {shlex.quote(url)}"
         )
         wrong = self._ssh_code(
-            f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} "
+            f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
             f"curl -s --max-time 20 -X POST -H 'Content-Type: application/json' "
             f"-H 'Authorization: Bearer stage-wrong-token' "
             f"--data {shlex.quote(payload)} {shlex.quote(url)}"
@@ -479,9 +479,9 @@ class StageIntegrationChecks(AwsSmoke):
         # exercising the authenticated paths.
         self._api("PUT", "/v1/network/policy", self.enforcement_policy())
         proxy = f"http://127.0.0.1:{PROXY_PORT}"
-        env = f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} https_proxy={proxy}"
+        env = f"sudo -u kern-agent env HTTPS_PROXY={proxy} https_proxy={proxy}"
         branch = f"stage-e2e-{time.time_ns()}"
-        workdir = f"/tmp/trustyclaw-stage-github-{time.time_ns()}"
+        workdir = f"/tmp/kern-stage-github-{time.time_ns()}"
         baseline_seq = max((event["seq"] for event in self._network_events()), default=0)
         try:
             cloned = self._ssh_code(
@@ -492,8 +492,8 @@ class StageIntegrationChecks(AwsSmoke):
                 raise AssertionError(f"authenticated clone of {write_repo} through the proxy failed")
             print(f"    [github clone] repo={write_repo} result=success", flush=True)
             pushed = self._ssh_code(
-                f"{env} sh -c 'cd {workdir} && git config user.email stage@trustyclaw.invalid && "
-                f"git config user.name trustyclaw-stage && echo {branch} > STAGE_E2E.txt && "
+                f"{env} sh -c 'cd {workdir} && git config user.email stage@kern.invalid && "
+                f"git config user.name kern-stage && echo {branch} > STAGE_E2E.txt && "
                 f"git add STAGE_E2E.txt && git commit -q -m stage-e2e && "
                 f"git push -q origin HEAD:refs/heads/{branch} && echo pushed' 2>/dev/null"
             ).strip()
@@ -559,7 +559,7 @@ class StageIntegrationChecks(AwsSmoke):
         owner, repo = write_repo.split("/", 1)
         branch = f"stage-dotgithub-{time.time_ns()}"
         ref = f"refs/heads/{branch}"
-        workdir = f"/tmp/trustyclaw-stage-dotgithub-{time.time_ns()}"
+        workdir = f"/tmp/kern-stage-dotgithub-{time.time_ns()}"
         self._api("PUT", "/v1/network/policy", self.enforcement_policy())
         branch_landed = False
         pending_id = None
@@ -568,8 +568,8 @@ class StageIntegrationChecks(AwsSmoke):
 rm -rf {shlex.quote(workdir)}
 git clone --depth 1 https://github.com/{shlex.quote(write_repo)} {shlex.quote(workdir)} >/dev/null 2>&1 || {{ echo CLONE_FAILED; exit 0; }}
 cd {shlex.quote(workdir)} || {{ echo CD_FAILED; exit 0; }}
-git config user.email stage@trustyclaw.invalid
-git config user.name trustyclaw-stage
+git config user.email stage@kern.invalid
+git config user.name kern-stage
 git checkout -q -b {shlex.quote(branch)}
 echo {shlex.quote(branch)} > STAGE_DOTGITHUB_BASE.txt
 git add STAGE_DOTGITHUB_BASE.txt
@@ -600,12 +600,12 @@ git push -q origin HEAD:{shlex.quote(ref)} >/dev/null 2>&1 && echo SEED_PUSHED |
             script = f"""
 cd {shlex.quote(workdir)} || {{ echo CD_FAILED; exit 0; }}
 mkdir -p .github
-printf 'stage * @trustyclaw-stage\\n' > .github/CODEOWNERS
+printf 'stage * @kern-stage\\n' > .github/CODEOWNERS
 git add .github/CODEOWNERS
 git commit -q -m stage-dotgithub-approval
-git push origin HEAD:{shlex.quote(ref)} > /tmp/trustyclaw-stage-dotgithub-push.out 2>&1
+git push origin HEAD:{shlex.quote(ref)} > /tmp/kern-stage-dotgithub-push.out 2>&1
 status=$?
-cat /tmp/trustyclaw-stage-dotgithub-push.out
+cat /tmp/kern-stage-dotgithub-push.out
 echo PUSH_STATUS:$status
 """
             push_output = self._ssh_code(f"{env} sh -c {shlex.quote(script)}")
@@ -692,7 +692,7 @@ echo PUSH_STATUS:$status
                 self._ssh_code(
                     f"{env} gh api -X DELETE repos/{write_repo}/git/refs/heads/{branch} >/dev/null 2>&1 || true"
                 )
-            self._ssh_code(f"sudo rm -rf {workdir} /tmp/trustyclaw-stage-dotgithub-push.out")
+            self._ssh_code(f"sudo rm -rf {workdir} /tmp/kern-stage-dotgithub-push.out")
 
     def _print_denied_github_events(self, since: int) -> None:
         """Dump denied GitHub network events since ``since`` with their reason

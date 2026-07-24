@@ -1,6 +1,6 @@
 # Control Planes
 
-TrustyClaw has two operator-facing control planes with different authority.
+Kern has two operator-facing control planes with different authority.
 
 ## Operator plane
 
