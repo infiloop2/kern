@@ -1,7 +1,7 @@
 """Compute and store the effective host config during bootstrap.
 
 Reads ``{"mode": <operation mode>, "runtime_config": <deploy payload config>}``
-from stdin, runs as ``trustyclaw-admin`` after ``migrate up``. For ``deploy``
+from stdin, runs as ``kern-admin`` after ``migrate up``. For ``deploy``
 and ``reconfigure`` the admin password hash and operator connections come from
 the payload; for ``upgrade`` and ``recover`` they are carried over from the
 existing config table, so those operations never need (or accept) new

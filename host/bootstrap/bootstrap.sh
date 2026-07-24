@@ -29,11 +29,11 @@ PROXY_PORT=@PROXY_PORT@
 # Persistent volume layout. The admin volume is durable across redeploys, so
 # the admin-state Postgres data directory and proxy-owned mutable state live
 # in separate directories with separate Unix owners.
-ADMIN_MOUNT=/mnt/trustyclaw-admin
-PGDATA_DIR="/mnt/trustyclaw-admin/postgres/${PG_MAJOR}/main"
-PROXY_STATE_DIR=/mnt/trustyclaw-admin/proxy-state
-AGENT_MOUNT=/mnt/trustyclaw-agent
-AGENT_HOME_PATH=/mnt/trustyclaw-agent/agent-home
+ADMIN_MOUNT=/mnt/kern-admin
+PGDATA_DIR="/mnt/kern-admin/postgres/${PG_MAJOR}/main"
+PROXY_STATE_DIR=/mnt/kern-admin/proxy-state
+AGENT_MOUNT=/mnt/kern-agent
+AGENT_HOME_PATH=/mnt/kern-agent/agent-home
 
 # Read one value out of the JSON payload staged by the deploy command.
 payload_value() {
@@ -43,7 +43,7 @@ import json
 import pathlib
 import sys
 
-payload = json.loads(pathlib.Path('/tmp/trustyclaw_payload.json').read_text())
+payload = json.loads(pathlib.Path('/tmp/kern_payload.json').read_text())
 value = payload
 for part in sys.argv[1].split("."):
     value = value[part]
@@ -99,8 +99,8 @@ prepare_volume() {
 mount_durable_volumes() {
 admin_volume_id="$(payload_value storage_volumes.admin)"
 agent_volume_id="$(payload_value storage_volumes.agent)"
-prepare_volume "$admin_volume_id" "$ADMIN_MOUNT" TRUSTYCLAW_ADMIN
-prepare_volume "$agent_volume_id" "$AGENT_MOUNT" TRUSTYCLAW_AGENT
+prepare_volume "$admin_volume_id" "$ADMIN_MOUNT" KERN_ADMIN
+prepare_volume "$agent_volume_id" "$AGENT_MOUNT" KERN_AGENT
 }
 
 # Stable IDs keep durable EBS file owners meaningful across root-volume
@@ -149,31 +149,31 @@ ensure_user() {
 }
 
 provision_service_accounts() {
-ensure_group trustyclaw-admin "$TRUSTYCLAW_ADMIN_GID"
-ensure_group trustyclaw-proxy "$TRUSTYCLAW_PROXY_GID"
-ensure_group trustyclaw-agent "$TRUSTYCLAW_AGENT_GID"
+ensure_group kern-admin "$KERN_ADMIN_GID"
+ensure_group kern-proxy "$KERN_PROXY_GID"
+ensure_group kern-agent "$KERN_AGENT_GID"
 ensure_group cloudflared "$CLOUDFLARED_GID"
-ensure_group trustyclaw-tools "$TRUSTYCLAW_TOOLS_GID"
-ensure_group trustyclaw-agent-app "$TRUSTYCLAW_AGENT_APP_GID"
-ensure_group trustyclaw-agent-network "$TRUSTYCLAW_AGENT_NETWORK_GID"
+ensure_group kern-tools "$KERN_TOOLS_GID"
+ensure_group kern-agent-app "$KERN_AGENT_APP_GID"
+ensure_group kern-agent-network "$KERN_AGENT_NETWORK_GID"
 @APP_ENSURE_GROUPS@
-ensure_user trustyclaw-admin "$TRUSTYCLAW_ADMIN_UID" trustyclaw-admin /mnt/trustyclaw-admin/admin-home
-ensure_user trustyclaw-proxy "$TRUSTYCLAW_PROXY_UID" trustyclaw-proxy /mnt/trustyclaw-admin/proxy-state
-ensure_user trustyclaw-agent "$TRUSTYCLAW_AGENT_UID" trustyclaw-agent /mnt/trustyclaw-agent/agent-home
+ensure_user kern-admin "$KERN_ADMIN_UID" kern-admin /mnt/kern-admin/admin-home
+ensure_user kern-proxy "$KERN_PROXY_UID" kern-proxy /mnt/kern-admin/proxy-state
+ensure_user kern-agent "$KERN_AGENT_UID" kern-agent /mnt/kern-agent/agent-home
 ensure_user cloudflared "$CLOUDFLARED_UID" cloudflared /nonexistent
 # The tools service holds no durable state of its own (its state lives in the
 # tool tables, reached with a scoped Postgres role), so it needs no home.
-ensure_user trustyclaw-tools "$TRUSTYCLAW_TOOLS_UID" trustyclaw-tools /nonexistent
+ensure_user kern-tools "$KERN_TOOLS_UID" kern-tools /nonexistent
 # The agent-app service derives authority from kernel-owned thread scopes and
 # keeps no durable state of its own, so it also needs no home.
-ensure_user trustyclaw-agent-app "$TRUSTYCLAW_AGENT_APP_UID" trustyclaw-agent-app /nonexistent
+ensure_user kern-agent-app "$KERN_AGENT_APP_UID" kern-agent-app /nonexistent
 # The agent-network service serves read-only policy introspection with no
 # filesystem state or egress.
-ensure_user trustyclaw-agent-network "$TRUSTYCLAW_AGENT_NETWORK_UID" trustyclaw-agent-network /nonexistent
+ensure_user kern-agent-network "$KERN_AGENT_NETWORK_UID" kern-agent-network /nonexistent
 @APP_ENSURE_USERS@
 # The postgres account is created here, before the postgresql packages would
 # create it with a dynamic system uid: the preserved cluster files on the
-# admin volume are 0600/0700 postgres-owned, so like the trustyclaw-* users
+# admin volume are 0600/0700 postgres-owned, so like the kern-* users
 # the uid must stay stable across root-volume replacement. The Debian
 # packaging reuses an existing postgres user as-is.
 ensure_group postgres "$POSTGRES_GID"
@@ -231,11 +231,11 @@ def recreate_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-admin_mount = Path("/mnt/trustyclaw-admin")
+admin_mount = Path("/mnt/kern-admin")
 admin_state = admin_mount / "admin-state"
 proxy_state = admin_mount / "proxy-state"
 tools_state = admin_mount / "tools-state"
-agent_home = Path("/mnt/trustyclaw-agent/agent-home")
+agent_home = Path("/mnt/kern-agent/agent-home")
 pgdata = admin_mount / "postgres" / os.environ["PG_MAJOR"] / "main"
 for directory in (
     # admin-state holds only the deploy-plane version.json; runtime admin
@@ -298,7 +298,7 @@ def fail(message: str) -> None:
 
 def parse_version(value: str) -> tuple[int, int, int]:
     if not VERSION_RE.fullmatch(value):
-        fail(f"invalid TrustyClaw version {value!r}; expected MAJOR.MINOR.PATCH")
+        fail(f"invalid Kern version {value!r}; expected MAJOR.MINOR.PATCH")
     return tuple(int(part) for part in value.split("."))
 
 
@@ -308,14 +308,14 @@ def compare_versions(left: str, right: str) -> int:
     return (left_tuple > right_tuple) - (left_tuple < right_tuple)
 
 
-payload = json.loads(pathlib.Path("/tmp/trustyclaw_payload.json").read_text())
+payload = json.loads(pathlib.Path("/tmp/kern_payload.json").read_text())
 operation = payload["operation"]
 mode = operation["mode"]
 target_version = operation["target_version"]
 allow_upgrade = bool(operation.get("allow_upgrade"))
 parse_version(target_version)
 
-admin_state = pathlib.Path("/mnt/trustyclaw-admin/admin-state")
+admin_state = pathlib.Path("/mnt/kern-admin/admin-state")
 version_path = admin_state / "version.json"
 config_path = admin_state / "config.json"
 state_version = None
@@ -372,14 +372,14 @@ PY
 # Install the Python runtime package copied by deploy. Runtime code is root
 # owned but readable by service users.
 install_runtime_code() {
-mkdir -p /opt/trustyclaw-host
-tar -xzf /tmp/trustyclaw-host-code.tar.gz -C /opt/trustyclaw-host
-payload_value operation.target_version > /opt/trustyclaw-host/VERSION
+mkdir -p /opt/kern-host
+tar -xzf /tmp/kern-host-code.tar.gz -C /opt/kern-host
+payload_value operation.target_version > /opt/kern-host/VERSION
 # The script runs with umask 077; the runtime code must stay root-owned but
 # readable by the service users that import it.
-chown -R root:root /opt/trustyclaw-host
-chmod -R a+rX /opt/trustyclaw-host
-chmod 644 /opt/trustyclaw-host/VERSION
+chown -R root:root /opt/kern-host
+chmod -R a+rX /opt/kern-host
+chmod 644 /opt/kern-host/VERSION
 }
 
 # Base OS packages and security updates.
@@ -398,7 +398,7 @@ apt-get install -y -qq postgresql-common
 sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf
 apt-get install -y -qq "postgresql-${PG_MAJOR}"
 # The packaged umbrella unit only manages clusters registered with the Debian
-# tooling; the TrustyClaw cluster runs under its own unit below.
+# tooling; the Kern cluster runs under its own unit below.
 systemctl disable --now postgresql.service >/dev/null 2>&1 || true
 
 # Apply pending security updates now to close the window before the
@@ -412,8 +412,8 @@ setup_postgres() {
 echo "== setting up admin-state PostgreSQL =="
 PG_BIN="/usr/lib/postgresql/${PG_MAJOR}/bin"
 install -d -o postgres -g postgres -m 700 "$(dirname "$PGDATA_DIR")" "$PGDATA_DIR"
-chown root:root /mnt/trustyclaw-admin/postgres
-chmod 711 /mnt/trustyclaw-admin/postgres
+chown root:root /mnt/kern-admin/postgres
+chmod 711 /mnt/kern-admin/postgres
 if [ ! -f "$PGDATA_DIR/PG_VERSION" ]; then
   runuser -u postgres -- "$PG_BIN/initdb" -D "$PGDATA_DIR" --auth-local=peer --auth-host=reject -E UTF8
 fi
@@ -421,12 +421,12 @@ fi
 # Managed database config, rewritten on every deploy like the rest of the
 # root-of-trust config. Unix-socket only: there is no TCP listener at all, and
 # peer auth maps OS users to database roles, so access control is the host's
-# user model. trustyclaw-admin (owner of the admin database), the scoped
-# trustyclaw-proxy, trustyclaw-tools, and trustyclaw-agent-network roles, and the postgres superuser
+# user model. kern-admin (owner of the admin database), the scoped
+# kern-proxy, kern-tools, and kern-agent-network roles, and the postgres superuser
 # (operators, via sudo) can connect; every other user —
 # including the agent user — matches only the final reject rule.
 cat > "$PGDATA_DIR/postgresql.conf" <<PGCONF
-# Managed by TrustyClaw bootstrap; rewritten on every deploy.
+# Managed by Kern bootstrap; rewritten on every deploy.
 listen_addresses = ''
 unix_socket_directories = '/var/run/postgresql'
 # Each service process bounds its own active sessions client-side
@@ -441,14 +441,14 @@ max_connections = 300
 log_destination = 'stderr'
 PGCONF
 cat > "$PGDATA_DIR/pg_hba.conf" <<'PGHBA'
-# Managed by TrustyClaw bootstrap; rewritten on every deploy.
+# Managed by Kern bootstrap; rewritten on every deploy.
 # Unix-socket connections only; identity is the OS user (peer auth). Schema
 # migrations give proxy, tools, and app roles only their required tables or
 # schema. The agent user has no role and no rule that admits it.
-local  trustyclaw_admin  trustyclaw-admin  peer
-local  trustyclaw_admin  trustyclaw-proxy  peer
-local  trustyclaw_admin  trustyclaw-tools  peer
-local  trustyclaw_admin  trustyclaw-agent-network  peer
+local  kern_admin  kern-admin  peer
+local  kern_admin  kern-proxy  peer
+local  kern_admin  kern-tools  peer
+local  kern_admin  kern-agent-network  peer
 @APP_PG_HBA_LINES@
 local  all               postgres          peer
 local  all               all               reject
@@ -456,9 +456,9 @@ PGHBA
 chown postgres:postgres "$PGDATA_DIR/postgresql.conf" "$PGDATA_DIR/pg_hba.conf"
 chmod 600 "$PGDATA_DIR/postgresql.conf" "$PGDATA_DIR/pg_hba.conf"
 
-cat > /etc/systemd/system/trustyclaw-postgres.service <<UNIT
+cat > /etc/systemd/system/kern-postgres.service <<UNIT
 [Unit]
-Description=TrustyClaw Admin State PostgreSQL
+Description=Kern Admin State PostgreSQL
 After=local-fs.target
 # Admin state is unreachable without it, and it is local-only, so a crash
 # loop must keep retrying rather than hit the default start-limit.
@@ -478,7 +478,7 @@ RuntimeDirectoryPreserve=yes
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now trustyclaw-postgres.service
+systemctl enable --now kern-postgres.service
 for attempt in $(seq 1 60); do
   if runuser -u postgres -- "$PG_BIN/pg_isready" -q; then
     break
@@ -495,33 +495,33 @@ done
 runuser -u postgres -- psql -v ON_ERROR_STOP=1 --quiet <<'SQL'
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trustyclaw-admin') THEN
-    CREATE ROLE "trustyclaw-admin" LOGIN;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-admin') THEN
+    CREATE ROLE "kern-admin" LOGIN;
   END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trustyclaw-proxy') THEN
-    CREATE ROLE "trustyclaw-proxy" LOGIN;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-proxy') THEN
+    CREATE ROLE "kern-proxy" LOGIN;
   END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trustyclaw-tools') THEN
-    CREATE ROLE "trustyclaw-tools" LOGIN;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-tools') THEN
+    CREATE ROLE "kern-tools" LOGIN;
   END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trustyclaw-agent-network') THEN
-    CREATE ROLE "trustyclaw-agent-network" LOGIN;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-agent-network') THEN
+    CREATE ROLE "kern-agent-network" LOGIN;
   END IF;
 @APP_ROLE_SQL@
 END
 $$;
 SQL
-if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'trustyclaw_admin'" | grep -q 1; then
-  runuser -u postgres -- createdb --owner=trustyclaw-admin trustyclaw_admin
+if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'kern_admin'" | grep -q 1; then
+  runuser -u postgres -- createdb --owner=kern-admin kern_admin
 fi
-runuser -u postgres -- psql -d trustyclaw_admin -v ON_ERROR_STOP=1 --quiet \
-  -c "REVOKE ALL ON DATABASE trustyclaw_admin FROM PUBLIC;" \
+runuser -u postgres -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet \
+  -c "REVOKE ALL ON DATABASE kern_admin FROM PUBLIC;" \
   -c "REVOKE CREATE ON SCHEMA public FROM PUBLIC;" \
-  -c "GRANT CREATE ON SCHEMA public TO \"trustyclaw-admin\";" \
+  -c "GRANT CREATE ON SCHEMA public TO \"kern-admin\";" \
 @APP_POSTGRES_SCHEMA_GRANTS@
-  -c "GRANT CONNECT ON DATABASE trustyclaw_admin TO \"trustyclaw-proxy\";" \
-  -c "GRANT CONNECT ON DATABASE trustyclaw_admin TO \"trustyclaw-tools\";" \
-  -c "GRANT CONNECT ON DATABASE trustyclaw_admin TO \"trustyclaw-agent-network\";" \
+  -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-proxy\";" \
+  -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-tools\";" \
+  -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-agent-network\";" \
 @APP_POSTGRES_CONNECT_GRANTS@
 # The PUBLIC revoke also stripped the proxy, tools, and agent-network roles'
 # inherited CONNECT, so it is granted back explicitly; without it the proxy
@@ -530,12 +530,12 @@ runuser -u postgres -- psql -d trustyclaw_admin -v ON_ERROR_STOP=1 --quiet \
 # creatable by every connecting role, so CREATE is revoked there too and
 # granted back to exactly the schema-owning admin role: a compromised proxy,
 # tools, or agent-network service can use only its granted tables, not mint new
-# objects. The owning trustyclaw-admin role keeps its database privileges
+# objects. The owning kern-admin role keeps its database privileges
 # implicitly.
 }
 
 # Apply schema migrations, then compute and store the effective host config.
-# Both run as trustyclaw-admin: migrations are owned by the same role the
+# Both run as kern-admin: migrations are owned by the same role the
 # service uses, so the service never needs DDL rights it does not already
 # have, and on upgrade/recover write_config carries the stored password and
 # operator connections over from the existing config table. write_config echoes
@@ -543,19 +543,19 @@ runuser -u postgres -- psql -d trustyclaw_admin -v ON_ERROR_STOP=1 --quiet \
 # (SSH keys, cloudflared) that need it without database access.
 migrate_admin_state_and_write_config() {
 echo "== migrating admin state schema =="
-# The trustyclaw-tools role's table grants live in the schema migration
-# (0007_tool_state.sql), the same pattern as the trustyclaw-proxy grants;
+# The kern-tools role's table grants live in the baseline schema migration
+# (0001_baseline.sql), the same pattern as the kern-proxy grants;
 # bootstrap only provisions the role, its pg_hba line, and database CONNECT
 # above, before migrations run.
-runuser -u trustyclaw-admin -- env PYTHONPATH=/opt/trustyclaw-host python3 -m host.runtime.deploy.migrate up
+runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.migrate up
 echo "== migrating app schemas =="
 @APP_MIGRATION_COMMANDS@
-python3 - <<'PY' | runuser -u trustyclaw-admin -- env PYTHONPATH=/opt/trustyclaw-host python3 -m host.runtime.deploy.write_config > /tmp/trustyclaw_effective_config.json
+python3 - <<'PY' | runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.write_config > /tmp/kern_effective_config.json
 import json, pathlib
-payload = json.loads(pathlib.Path('/tmp/trustyclaw_payload.json').read_text())
+payload = json.loads(pathlib.Path('/tmp/kern_payload.json').read_text())
 print(json.dumps({'mode': payload['operation']['mode'], 'runtime_config': payload['runtime_config']}))
 PY
-chmod 600 /tmp/trustyclaw_effective_config.json
+chmod 600 /tmp/kern_effective_config.json
 }
 
 # Apply or remove persistent SSH operator access from the effective config.
@@ -565,13 +565,13 @@ configure_operator_ssh() {
 python3 - <<'PY'
 import json, pathlib
 
-config = json.loads(pathlib.Path('/tmp/trustyclaw_effective_config.json').read_text())
+config = json.loads(pathlib.Path('/tmp/kern_effective_config.json').read_text())
 ssh_keys = [
     connection['ssh_public_key']
     for connection in config['operator_connections']
     if connection.get('mode') == 'ssh'
 ]
-ssh_dir = pathlib.Path('/home/trustyclaw-operator/.ssh')
+ssh_dir = pathlib.Path('/home/kern-operator/.ssh')
 ssh_dir.mkdir(parents=True, exist_ok=True)
 authorized_keys = ssh_dir / 'authorized_keys'
 if ssh_keys:
@@ -579,10 +579,10 @@ if ssh_keys:
 else:
     authorized_keys.unlink(missing_ok=True)
 PY
-chown -R trustyclaw-operator:trustyclaw-operator /home/trustyclaw-operator/.ssh
-chmod 700 /home/trustyclaw-operator/.ssh
-if [ -f /home/trustyclaw-operator/.ssh/authorized_keys ]; then
-  chmod 600 /home/trustyclaw-operator/.ssh/authorized_keys
+chown -R kern-operator:kern-operator /home/kern-operator/.ssh
+chmod 700 /home/kern-operator/.ssh
+if [ -f /home/kern-operator/.ssh/authorized_keys ]; then
+  chmod 600 /home/kern-operator/.ssh/authorized_keys
 fi
 }
 
@@ -618,7 +618,7 @@ uv python install "${HERMES_PYTHON_VERSION}"
 uv venv --python "${HERMES_PYTHON_VERSION}" /usr/local/lib/hermes-venv
 # The bedrock extra brings the boto3 Converse transport; the mcp extra brings
 # the MCP client SDK, which the managed ~/.hermes/config.yaml needs to spawn
-# the bundled-tools MCP shim (mcp_servers.trustyclaw).
+# the bundled-tools MCP shim (mcp_servers.kern).
 uv pip install --python /usr/local/lib/hermes-venv/bin/python \
   "hermes-agent[bedrock,mcp]==${HERMES_AGENT_VERSION}"
 chmod -R a+rX /usr/local/lib/hermes-python /usr/local/lib/hermes-venv
@@ -630,7 +630,7 @@ chmod -R a+rX /usr/local/lib/node_modules
 configure_cloudflared() {
 cloudflare_connection_count="$(python3 - <<'PY'
 import json, pathlib
-config = json.loads(pathlib.Path('/tmp/trustyclaw_effective_config.json').read_text())
+config = json.loads(pathlib.Path('/tmp/kern_effective_config.json').read_text())
 print(sum(1 for connection in config['operator_connections'] if connection.get('mode') == 'cloudflare_tunnel'))
 PY
 )"
@@ -649,10 +649,10 @@ if [ "$cloudflare_connection_count" -gt 0 ]; then
     *"${CLOUDFLARED_VERSION}"*) ;;
     *) echo "unexpected cloudflared version: ${cloudflared_version}" >&2; exit 1 ;;
   esac
-  install -m 0750 -o root -g cloudflared -d /etc/trustyclaw
+  install -m 0750 -o root -g cloudflared -d /etc/kern
   python3 - <<'PY'
 import json, pathlib
-config = json.loads(pathlib.Path('/tmp/trustyclaw_effective_config.json').read_text())
+config = json.loads(pathlib.Path('/tmp/kern_effective_config.json').read_text())
 connections = [
     connection
     for connection in config['operator_connections']
@@ -661,15 +661,15 @@ connections = [
 if len(connections) != 1:
     raise SystemExit(f'expected exactly one cloudflare_tunnel connection, found {len(connections)}')
 connection = connections[0]
-pathlib.Path('/etc/trustyclaw/cloudflared.token').write_text(connection['tunnel_token'].strip() + '\n')
-pathlib.Path('/etc/trustyclaw/cloudflare_hostname').write_text(connection['hostname'] + '\n')
+pathlib.Path('/etc/kern/cloudflared.token').write_text(connection['tunnel_token'].strip() + '\n')
+pathlib.Path('/etc/kern/cloudflare_hostname').write_text(connection['hostname'] + '\n')
 PY
-  chown root:cloudflared /etc/trustyclaw/cloudflared.token
-  chown root:root /etc/trustyclaw/cloudflare_hostname
-  chmod 640 /etc/trustyclaw/cloudflared.token
-  chmod 644 /etc/trustyclaw/cloudflare_hostname
+  chown root:cloudflared /etc/kern/cloudflared.token
+  chown root:root /etc/kern/cloudflare_hostname
+  chmod 640 /etc/kern/cloudflared.token
+  chmod 644 /etc/kern/cloudflare_hostname
 else
-  rm -f /etc/systemd/system/trustyclaw-cloudflared.service /etc/trustyclaw/cloudflared.token /etc/trustyclaw/cloudflare_hostname
+  rm -f /etc/systemd/system/kern-cloudflared.service /etc/kern/cloudflared.token /etc/kern/cloudflare_hostname
 fi
 }
 
@@ -699,15 +699,15 @@ EOF
 chmod 644 /etc/codex/requirements.toml
 
 # Managed Codex config layer: the bundled tools surface. Codex spawns the
-# MCP shim as trustyclaw-agent; the shim forwards to the tools service's
+# MCP shim as kern-agent; the shim forwards to the tools service's
 # socket, which authenticates the caller by kernel peer credentials.
 # managed_config.toml is the documented root-owned system layer Codex loads
 # alongside the agent-home config.
 cat > /etc/codex/managed_config.toml <<'EOF'
-[mcp_servers.trustyclaw]
+[mcp_servers.kern]
 command = "/usr/bin/python3"
 args = ["-m", "host.runtime.agent_shim.mcp_shim"]
-env = { PYTHONPATH = "/opt/trustyclaw-host" }
+env = { PYTHONPATH = "/opt/kern-host" }
 EOF
 chmod 644 /etc/codex/managed_config.toml
 }
@@ -736,20 +736,20 @@ if [ ! -f "$PROXY_STATE_DIR/network_proxy_ca.key" ] || [ ! -f "$PROXY_STATE_DIR/
   openssl req -x509 -newkey rsa:4096 -nodes \
     -keyout "$PROXY_STATE_DIR/network_proxy_ca.key" \
     -out "$PROXY_STATE_DIR/network_proxy_ca.crt" \
-    -days 3650 -subj "/CN=TrustyClaw Network Proxy"
+    -days 3650 -subj "/CN=Kern Network Proxy"
 fi
-cp "$PROXY_STATE_DIR/network_proxy_ca.crt" /usr/local/share/ca-certificates/trustyclaw-network-proxy.crt
-chmod 644 /usr/local/share/ca-certificates/trustyclaw-network-proxy.crt
+cp "$PROXY_STATE_DIR/network_proxy_ca.crt" /usr/local/share/ca-certificates/kern-network-proxy.crt
+chmod 644 /usr/local/share/ca-certificates/kern-network-proxy.crt
 update-ca-certificates
 }
 
 # Narrow root-owned helper scripts. Admin may invoke these exact paths through
 # sudo, and helpers demote to agent/proxy users for runtime work.
 install_sudo_helpers() {
-mkdir -p /usr/local/lib/trustyclaw-host "$PROXY_STATE_DIR/generated-certs"
-chmod 755 /usr/local/lib/trustyclaw-host
-HELPER_SOURCE_DIR=/opt/trustyclaw-host/host/bootstrap/helpers
-AGENT_HOME_SOURCE_DIR=/opt/trustyclaw-host/host/bootstrap/agent-home
+mkdir -p /usr/local/lib/kern-host "$PROXY_STATE_DIR/generated-certs"
+chmod 755 /usr/local/lib/kern-host
+HELPER_SOURCE_DIR=/opt/kern-host/host/bootstrap/helpers
+AGENT_HOME_SOURCE_DIR=/opt/kern-host/host/bootstrap/agent-home
 HELPER_NAMES=(
   run-codex-app-server
   read-codex-account-id
@@ -770,11 +770,11 @@ HELPER_NAMES=(
 for helper_name in "${HELPER_NAMES[@]}"; do
   sed "s/@""PROXY_PORT@/${PROXY_PORT}/g" \
     "$HELPER_SOURCE_DIR/${helper_name}.sh" \
-    > "/usr/local/lib/trustyclaw-host/${helper_name}"
+    > "/usr/local/lib/kern-host/${helper_name}"
 done
-install -m 0755 "$HELPER_SOURCE_DIR/hermes-stdin.py" /usr/local/lib/trustyclaw-host/hermes-stdin.py
-chown root:root /usr/local/lib/trustyclaw-host/*
-chmod 755 /usr/local/lib/trustyclaw-host/*
+install -m 0755 "$HELPER_SOURCE_DIR/hermes-stdin.py" /usr/local/lib/kern-host/hermes-stdin.py
+chown root:root /usr/local/lib/kern-host/*
+chmod 755 /usr/local/lib/kern-host/*
 
 # GitHub credentials are injected by the network proxy (the agent never
 # holds the token), so the only client wiring is the gh shim: gh refuses to
@@ -793,17 +793,17 @@ chmod 755 /usr/local/bin/gh
 # host.bootstrap.verify_deploy independently re-checks these facts after the
 # services start.
 DURABLE_PATH_OWNERSHIP="
-/mnt/trustyclaw-admin root:root 711
-/mnt/trustyclaw-agent root:root 711
-/mnt/trustyclaw-admin/admin-state trustyclaw-admin:trustyclaw-admin 700
-/mnt/trustyclaw-admin/admin-home trustyclaw-admin:trustyclaw-admin 700
-/mnt/trustyclaw-agent/agent-home trustyclaw-agent:trustyclaw-agent 700
-/mnt/trustyclaw-admin/proxy-state trustyclaw-proxy:trustyclaw-proxy 700
-/mnt/trustyclaw-admin/proxy-state/generated-certs trustyclaw-proxy:trustyclaw-proxy 700
-/mnt/trustyclaw-admin/proxy-state/network_proxy_ca.key trustyclaw-proxy:trustyclaw-proxy 600
-/mnt/trustyclaw-admin/proxy-state/network_proxy_ca.crt trustyclaw-proxy:trustyclaw-proxy 644
-/mnt/trustyclaw-admin/tools-state trustyclaw-tools:trustyclaw-tools 700
-/mnt/trustyclaw-admin/tools-state/assets trustyclaw-tools:trustyclaw-tools 700
+/mnt/kern-admin root:root 711
+/mnt/kern-agent root:root 711
+/mnt/kern-admin/admin-state kern-admin:kern-admin 700
+/mnt/kern-admin/admin-home kern-admin:kern-admin 700
+/mnt/kern-agent/agent-home kern-agent:kern-agent 700
+/mnt/kern-admin/proxy-state kern-proxy:kern-proxy 700
+/mnt/kern-admin/proxy-state/generated-certs kern-proxy:kern-proxy 700
+/mnt/kern-admin/proxy-state/network_proxy_ca.key kern-proxy:kern-proxy 600
+/mnt/kern-admin/proxy-state/network_proxy_ca.crt kern-proxy:kern-proxy 644
+/mnt/kern-admin/tools-state kern-tools:kern-tools 700
+/mnt/kern-admin/tools-state/assets kern-tools:kern-tools 700
 "
 
 apply_durable_ownership() {
@@ -813,7 +813,7 @@ apply_durable_ownership() {
     chown "$row_owner" "$row_path"
     chmod "$row_mode" "$row_path"
   done <<< "$DURABLE_PATH_OWNERSHIP"
-  install -d -m 700 -o trustyclaw-agent -g trustyclaw-agent \
+  install -d -m 700 -o kern-agent -g kern-agent \
     "$AGENT_HOME_PATH/.codex" \
     "$AGENT_HOME_PATH/.claude" \
     "$AGENT_HOME_PATH/.hermes"
@@ -852,32 +852,32 @@ chattr +i \
 }
 
 write_sudoers_policy() {
-cat > /etc/sudoers.d/trustyclaw-host <<'SUDOERS'
+cat > /etc/sudoers.d/kern-host <<'SUDOERS'
 # The admin service decrypts the connected AWS key pair and passes it to the
 # read-aws-account helper (STS attestation) through these environment
 # variables; the per-command env_keep preserves them across sudo's env reset
 # for exactly that helper and no other rule, so the Hermes launcher
 # structurally never receives them. Hermes signs with a fixed routing identity
 # and the proxy re-signs.
-Defaults!/usr/local/lib/trustyclaw-host/read-aws-account env_keep += "TRUSTYCLAW_BEDROCK_AWS_ACCESS_KEY_ID TRUSTYCLAW_BEDROCK_AWS_SECRET_ACCESS_KEY"
-trustyclaw-admin ALL=(root) NOPASSWD: /usr/local/lib/trustyclaw-host/reboot-host, /usr/local/lib/trustyclaw-host/run-codex-app-server, /usr/local/lib/trustyclaw-host/read-codex-account-id, /usr/local/lib/trustyclaw-host/run-claude-code, /usr/local/lib/trustyclaw-host/read-claude-account, /usr/local/lib/trustyclaw-host/run-hermes, /usr/local/lib/trustyclaw-host/stop-agent-thread, /usr/local/lib/trustyclaw-host/read-aws-account, /usr/local/lib/trustyclaw-host/clear-agent-auth, /usr/local/lib/trustyclaw-host/read-agent-file, /usr/local/lib/trustyclaw-host/upload-agent-file, /usr/local/lib/trustyclaw-host/check-for-upgrade, /usr/local/lib/trustyclaw-host/mint-github-app-token, /usr/local/lib/trustyclaw-host/audit-github-repo, /usr/local/lib/trustyclaw-host/approve-github-push
+Defaults!/usr/local/lib/kern-host/read-aws-account env_keep += "KERN_BEDROCK_AWS_ACCESS_KEY_ID KERN_BEDROCK_AWS_SECRET_ACCESS_KEY"
+kern-admin ALL=(root) NOPASSWD: /usr/local/lib/kern-host/reboot-host, /usr/local/lib/kern-host/run-codex-app-server, /usr/local/lib/kern-host/read-codex-account-id, /usr/local/lib/kern-host/run-claude-code, /usr/local/lib/kern-host/read-claude-account, /usr/local/lib/kern-host/run-hermes, /usr/local/lib/kern-host/stop-agent-thread, /usr/local/lib/kern-host/read-aws-account, /usr/local/lib/kern-host/clear-agent-auth, /usr/local/lib/kern-host/read-agent-file, /usr/local/lib/kern-host/upload-agent-file, /usr/local/lib/kern-host/check-for-upgrade, /usr/local/lib/kern-host/mint-github-app-token, /usr/local/lib/kern-host/audit-github-repo, /usr/local/lib/kern-host/approve-github-push
 SUDOERS
-chmod 440 /etc/sudoers.d/trustyclaw-host
+chmod 440 /etc/sudoers.d/kern-host
   # A malformed sudoers drop-in would otherwise surface only when the admin
   # service first invokes a helper; validate it now.
-  visudo -c -q -f /etc/sudoers.d/trustyclaw-host
+  visudo -c -q -f /etc/sudoers.d/kern-host
 }
 
 # Fail deploy now, not at first login, if the pinned CLIs are not executable by
 # the agent user from its home directory.
 assert_agent_clis() {
-codex_cli_version="$(runuser -u trustyclaw-agent -- env HOME=/mnt/trustyclaw-agent/agent-home \
+codex_cli_version="$(runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home \
   /usr/local/bin/codex --version)"
 if [ "$codex_cli_version" != "codex-cli ${CODEX_CLI_VERSION}" ]; then
   echo "unexpected Codex CLI version: ${codex_cli_version}" >&2
   exit 1
 fi
-claude_code_version="$(runuser -u trustyclaw-agent -- env HOME=/mnt/trustyclaw-agent/agent-home CLAUDE_CONFIG_DIR=/mnt/trustyclaw-agent/agent-home/.claude \
+claude_code_version="$(runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home CLAUDE_CONFIG_DIR=/mnt/kern-agent/agent-home/.claude \
   /usr/local/bin/claude --version)"
 if [ "$claude_code_version" != "${CLAUDE_CODE_VERSION} (Claude Code)" ]; then
   echo "unexpected Claude Code version: ${claude_code_version}" >&2
@@ -885,7 +885,7 @@ if [ "$claude_code_version" != "${CLAUDE_CODE_VERSION} (Claude Code)" ]; then
 fi
 # importlib.metadata is deterministic and network-free, unlike `hermes
 # --version` (which phones home for an update check).
-hermes_version="$(runuser -u trustyclaw-agent -- /usr/local/lib/hermes-venv/bin/python \
+hermes_version="$(runuser -u kern-agent -- /usr/local/lib/hermes-venv/bin/python \
   -c 'import importlib.metadata; print(importlib.metadata.version("hermes-agent"))')"
 if [ "$hermes_version" != "${HERMES_AGENT_VERSION}" ]; then
   echo "unexpected Hermes agent version: ${hermes_version}" >&2
@@ -897,24 +897,24 @@ fi
 # connector can reach their narrow external dependencies; the agent can only
 # reach the loopback proxy. DNS is denied for every other non-root user because
 # DNS lookups are an exfiltration channel; the proxy may resolve and connect
-# only after policy allows a host. The trustyclaw-tools service gets DNS and
+# only after policy allows a host. The kern-tools service gets DNS and
 # HTTPS because the bundled tool packages run inside it and call their
 # third-party APIs directly; the admin service holds no internet egress at all,
 # so a compromised tool package cannot exfiltrate admin state, and the agent's
-# fail-closed proxy path is unaffected. The trustyclaw-agent-app service gets
+# fail-closed proxy path is unaffected. The kern-agent-app service gets
 # no egress rule at all: its only network reach is the per-app loopback port
 # accepts generated below, so it can proxy agent calls to app backends and
-# nothing else. The trustyclaw-agent-network service communicates only over
+# nothing else. The kern-agent-network service communicates only over
 # Unix sockets; its explicit loopback drop prevents the local policy proxy
 # from becoming an indirect egress path before the broad loopback accept.
 write_firewall() {
 python3 - <<'PY'
 import json, pathlib
-config = json.loads(pathlib.Path('/tmp/trustyclaw_effective_config.json').read_text())
+config = json.loads(pathlib.Path('/tmp/kern_effective_config.json').read_text())
 ssh_enabled = any(connection.get('mode') == 'ssh' for connection in config['operator_connections'])
-pathlib.Path('/tmp/trustyclaw_ssh_rule').write_text('    tcp dport 22 accept\n' if ssh_enabled else '')
+pathlib.Path('/tmp/kern_ssh_rule').write_text('    tcp dport 22 accept\n' if ssh_enabled else '')
 cloudflare_enabled = any(connection.get('mode') == 'cloudflare_tunnel' for connection in config['operator_connections'])
-pathlib.Path('/tmp/trustyclaw_cloudflare_rules').write_text(
+pathlib.Path('/tmp/kern_cloudflare_rules').write_text(
     '    meta skuid "cloudflared" udp dport 53 accept\n'
     '    meta skuid "cloudflared" tcp dport 53 accept\n'
     '    meta skuid "cloudflared" tcp dport { 443, 7844 } accept\n'
@@ -924,39 +924,39 @@ pathlib.Path('/tmp/trustyclaw_cloudflare_rules').write_text(
 PY
 cat > /etc/nftables.conf <<NFT
 flush ruleset
-table inet trustyclaw {
+table inet kern {
   chain input {
     type filter hook input priority 0; policy drop;
     iif lo accept
     ct state established,related accept
-$(cat /tmp/trustyclaw_ssh_rule)
+$(cat /tmp/kern_ssh_rule)
   }
   chain output {
     type filter hook output priority 0; policy drop;
     meta skuid "systemd-resolve" udp dport 53 accept
     meta skuid "systemd-resolve" tcp dport 53 accept
     meta skuid "systemd-timesync" udp dport 123 accept
-$(cat /tmp/trustyclaw_cloudflare_rules)
-    meta skuid "trustyclaw-proxy" udp dport 53 accept
-    meta skuid "trustyclaw-proxy" tcp dport 53 accept
-    meta skuid "trustyclaw-proxy" tcp dport { 80, 443 } accept
-    meta skuid "trustyclaw-tools" udp dport 53 accept
-    meta skuid "trustyclaw-tools" tcp dport 53 accept
-    meta skuid "trustyclaw-tools" tcp dport 443 accept
+$(cat /tmp/kern_cloudflare_rules)
+    meta skuid "kern-proxy" udp dport 53 accept
+    meta skuid "kern-proxy" tcp dport 53 accept
+    meta skuid "kern-proxy" tcp dport { 80, 443 } accept
+    meta skuid "kern-tools" udp dport 53 accept
+    meta skuid "kern-tools" tcp dport 53 accept
+    meta skuid "kern-tools" tcp dport 443 accept
     udp dport 53 meta skuid != 0 drop
     tcp dport 53 meta skuid != 0 drop
-    oif lo tcp dport @PROXY_PORT@ meta skuid "trustyclaw-agent" accept
-    oif lo meta skuid "trustyclaw-agent" drop
+    oif lo tcp dport @PROXY_PORT@ meta skuid "kern-agent" accept
+    oif lo meta skuid "kern-agent" drop
 @APP_NFTABLES_RULES@
-    oif lo meta skuid "trustyclaw-agent-app" drop
-    oif lo meta skuid "trustyclaw-agent-network" drop
+    oif lo meta skuid "kern-agent-app" drop
+    oif lo meta skuid "kern-agent-network" drop
     oif lo accept
     ct state established,related accept
     meta skuid 0 accept
   }
 }
 NFT
-rm -f /tmp/trustyclaw_ssh_rule /tmp/trustyclaw_cloudflare_rules
+rm -f /tmp/kern_ssh_rule /tmp/kern_cloudflare_rules
 systemctl enable --now nftables
 }
 
@@ -984,9 +984,9 @@ install_service_units() {
 # - TasksMax bounds agent threads+processes so a fork bomb cannot exhaust
 #   kernel PIDs, which would stop the admin API from spawning the sudo
 #   helpers (or any process) at all.
-cat > /etc/systemd/system/trustyclaw_agent.slice <<'UNIT'
+cat > /etc/systemd/system/kern_agent.slice <<'UNIT'
 [Unit]
-Description=TrustyClaw Agent Runtimes
+Description=Kern Agent Runtimes
 
 [Slice]
 CPUWeight=50
@@ -1001,28 +1001,28 @@ UNIT
 # dash-encoded slice. CPUWeight is intentionally soft: apps may use idle cores,
 # but under contention host services such as the admin API, proxy, and Postgres
 # keep priority over app backend CPU loops.
-cat > /etc/systemd/system/trustyclaw_app.slice <<'UNIT'
+cat > /etc/systemd/system/kern_app.slice <<'UNIT'
 [Unit]
-Description=TrustyClaw App Backends
+Description=Kern App Backends
 
 [Slice]
 CPUWeight=50
 UNIT
 
-cat > /etc/systemd/system/trustyclaw-network-proxy.service <<'UNIT'
+cat > /etc/systemd/system/kern-network-proxy.service <<'UNIT'
 [Unit]
-Description=TrustyClaw Network Policy Proxy
-After=network-online.target trustyclaw-postgres.service
-Wants=network-online.target trustyclaw-postgres.service
+Description=Kern Network Policy Proxy
+After=network-online.target kern-postgres.service
+Wants=network-online.target kern-postgres.service
 # Never give up restarting: the proxy is the agent's only egress path and is
 # fail-closed, so a crash loop must keep retrying rather than hit the default
 # start-limit and stay dead.
 StartLimitIntervalSec=0
 
 [Service]
-User=trustyclaw-proxy
+User=kern-proxy
 UMask=0077
-Environment=PYTHONPATH=/opt/trustyclaw-host
+Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.network_proxy.service
 Restart=always
 RestartSec=3
@@ -1033,22 +1033,22 @@ UNIT
 
 # The dedicated tools service runs tool code and holds internet egress out of
 # the admin service. It owns the agent-facing tools socket and connects to
-# Postgres as the scoped trustyclaw-tools role. RuntimeDirectory stays
+# Postgres as the scoped kern-tools role. RuntimeDirectory stays
 # world-traversable (0755) so the agent (and admin, for delegated operator
 # operations) can connect; the socket peer-credential check is the authentication.
-cat > /etc/systemd/system/trustyclaw-tools.service <<'UNIT'
+cat > /etc/systemd/system/kern-tools.service <<'UNIT'
 [Unit]
-Description=TrustyClaw Tools Service
-After=network-online.target trustyclaw-postgres.service
-Wants=network-online.target trustyclaw-postgres.service
+Description=Kern Tools Service
+After=network-online.target kern-postgres.service
+Wants=network-online.target kern-postgres.service
 StartLimitIntervalSec=0
 
 [Service]
-User=trustyclaw-tools
+User=kern-tools
 UMask=0077
-RuntimeDirectory=trustyclaw-tools
+RuntimeDirectory=kern-tools
 RuntimeDirectoryMode=0755
-Environment=PYTHONPATH=/opt/trustyclaw-host
+Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.tools.service
 Restart=always
 RestartSec=3
@@ -1060,19 +1060,19 @@ UNIT
 # Read-only agent network introspection is isolated from both the egress-capable
 # tools service and the privileged proxy. Its database role can read only the
 # policy and network-event tables; nftables grants this uid no egress.
-cat > /etc/systemd/system/trustyclaw-agent-network.service <<'UNIT'
+cat > /etc/systemd/system/kern-agent-network.service <<'UNIT'
 [Unit]
-Description=TrustyClaw Agent Network Introspection
-After=trustyclaw-postgres.service
-Wants=trustyclaw-postgres.service
+Description=Kern Agent Network Introspection
+After=kern-postgres.service
+Wants=kern-postgres.service
 StartLimitIntervalSec=0
 
 [Service]
-User=trustyclaw-agent-network
+User=kern-agent-network
 UMask=0077
-RuntimeDirectory=trustyclaw-agent-network
+RuntimeDirectory=kern-agent-network
 RuntimeDirectoryMode=0755
-Environment=PYTHONPATH=/opt/trustyclaw-host
+Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.agent_network.service
 Restart=always
 RestartSec=3
@@ -1082,25 +1082,25 @@ WantedBy=multi-user.target
 UNIT
 
 # The dedicated agent-app service proxies agent app_api calls to app backend
-# ports (the one uid besides trustyclaw-admin that nftables allows to open new
+# ports (the one uid besides kern-admin that nftables allows to open new
 # connections to them). It derives app ownership from the caller's trusted
 # thread scope and needs no database access.
 # RuntimeDirectory stays world-traversable (0755) so the agent can connect;
 # the socket peer-credential check plus cgroup thread attribution are the
 # authentication.
-cat > /etc/systemd/system/trustyclaw-agent-app.service <<'UNIT'
+cat > /etc/systemd/system/kern-agent-app.service <<'UNIT'
 [Unit]
-Description=TrustyClaw Agent App Service
+Description=Kern Agent App Service
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
-User=trustyclaw-agent-app
+User=kern-agent-app
 UMask=0077
-RuntimeDirectory=trustyclaw-agent-app
+RuntimeDirectory=kern-agent-app
 RuntimeDirectoryMode=0755
-Environment=PYTHONPATH=/opt/trustyclaw-host
+Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.agent_app.service
 Restart=always
 RestartSec=3
@@ -1109,25 +1109,25 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 
-cat > /etc/systemd/system/trustyclaw-admin-api.service <<'UNIT'
+cat > /etc/systemd/system/kern-admin-api.service <<'UNIT'
 [Unit]
-Description=TrustyClaw Admin API
-After=network-online.target trustyclaw-network-proxy.service trustyclaw-postgres.service trustyclaw-tools.service trustyclaw-agent-network.service trustyclaw-agent-app.service
-Wants=network-online.target trustyclaw-network-proxy.service trustyclaw-postgres.service trustyclaw-tools.service trustyclaw-agent-network.service trustyclaw-agent-app.service
+Description=Kern Admin API
+After=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-agent-app.service
+Wants=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-agent-app.service
 StartLimitIntervalSec=0
 
 [Service]
-User=trustyclaw-admin
+User=kern-admin
 UMask=0077
-# trustyclaw-admin-api holds the app-backend admin socket; the agent-facing
-# tools socket is owned by trustyclaw-tools.service. The directory stays
+# kern-admin-api holds the app-backend admin socket; the agent-facing
+# tools socket is owned by kern-tools.service. The directory stays
 # world-traversable so the app users can connect, and the socket peer
 # credentials authenticate the caller.
-RuntimeDirectory=trustyclaw-admin-api
+RuntimeDirectory=kern-admin-api
 RuntimeDirectoryMode=0755
-Environment=PYTHONPATH=/opt/trustyclaw-host
-Environment=HOME=/mnt/trustyclaw-admin/admin-home
-WorkingDirectory=/mnt/trustyclaw-admin/admin-home
+Environment=PYTHONPATH=/opt/kern-host
+Environment=HOME=/mnt/kern-admin/admin-home
+WorkingDirectory=/mnt/kern-admin/admin-home
 ExecStart=/usr/bin/python3 -m host.runtime.admin_api.service
 Restart=always
 RestartSec=3
@@ -1139,16 +1139,16 @@ UNIT
 @APP_SYSTEMD_UNITS@
 
 if [ "$cloudflare_connection_count" -gt 0 ]; then
-  cat > /etc/systemd/system/trustyclaw-cloudflared.service <<'UNIT'
+  cat > /etc/systemd/system/kern-cloudflared.service <<'UNIT'
 [Unit]
-Description=TrustyClaw Cloudflare Tunnel
-After=network-online.target trustyclaw-admin-api.service
-Wants=network-online.target trustyclaw-admin-api.service
+Description=Kern Cloudflare Tunnel
+After=network-online.target kern-admin-api.service
+Wants=network-online.target kern-admin-api.service
 StartLimitIntervalSec=0
 
 [Service]
 User=cloudflared
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run --token-file /etc/trustyclaw/cloudflared.token
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run --token-file /etc/kern/cloudflared.token
 Restart=always
 RestartSec=5
 
@@ -1160,21 +1160,21 @@ fi
 
 start_services() {
 systemctl daemon-reload
-systemctl enable --now trustyclaw-network-proxy.service
-systemctl enable --now trustyclaw-tools.service
-systemctl enable --now trustyclaw-agent-network.service
-systemctl enable --now trustyclaw-agent-app.service
-systemctl enable --now trustyclaw-admin-api.service
+systemctl enable --now kern-network-proxy.service
+systemctl enable --now kern-tools.service
+systemctl enable --now kern-agent-network.service
+systemctl enable --now kern-agent-app.service
+systemctl enable --now kern-admin-api.service
 if [ "$cloudflare_connection_count" -gt 0 ]; then
-  systemctl enable --now trustyclaw-cloudflared.service
+  systemctl enable --now kern-cloudflared.service
   for attempt in $(seq 1 30); do
-    if systemctl is-active --quiet trustyclaw-cloudflared.service; then
+    if systemctl is-active --quiet kern-cloudflared.service; then
       break
     fi
     sleep 2
   done
-  if ! systemctl is-active --quiet trustyclaw-cloudflared.service; then
-    journalctl -u trustyclaw-cloudflared.service --no-pager -n 80 >&2 || true
+  if ! systemctl is-active --quiet kern-cloudflared.service; then
+    journalctl -u kern-cloudflared.service --no-pager -n 80 >&2 || true
     echo "cloudflared service did not become active" >&2
     exit 1
   fi
@@ -1184,7 +1184,7 @@ if [ "$cloudflare_connection_count" -gt 0 ]; then
   # answered with no login required and fails the deploy. A legacy deployment
   # may still sit behind a Cloudflare Access policy that answers 302/403 before
   # the origin; the origin still enforces the login, so that also passes.
-  cloudflare_hostname="$(cat /etc/trustyclaw/cloudflare_hostname)"
+  cloudflare_hostname="$(cat /etc/kern/cloudflare_hostname)"
   # HTTPS must reach an authentication gate: the admin API denies the
   # unauthenticated probe with 401, and a legacy host still behind a Cloudflare
   # Access policy answers 302/403 before the origin. Only a 200 (or no gate at
@@ -1240,7 +1240,7 @@ verify_deployment() {
   if [ "$cloudflare_connection_count" -gt 0 ]; then
     cloudflare_flag=yes
   fi
-  env PYTHONPATH=/opt/trustyclaw-host python3 -m host.bootstrap.verify_deploy --cloudflare "$cloudflare_flag"
+  env PYTHONPATH=/opt/kern-host python3 -m host.bootstrap.verify_deploy --cloudflare "$cloudflare_flag"
 }
 
 # Provisioning is almost done: capture the non-secret target version, then
@@ -1248,23 +1248,23 @@ verify_deployment() {
 # app service code.
 finalize_deploy() {
 target_version="$(payload_value operation.target_version)"
-rm -f /home/trustyclaw-operator/.ssh/authorized_keys2
-rm -f /tmp/trustyclaw_payload.json /tmp/trustyclaw_effective_config.json /tmp/trustyclaw-host-code.tar.gz /tmp/trustyclaw_bootstrap.sh
+rm -f /home/kern-operator/.ssh/authorized_keys2
+rm -f /tmp/kern_payload.json /tmp/kern_effective_config.json /tmp/kern-host-code.tar.gz /tmp/kern_bootstrap.sh
 @APP_ENABLE_START_COMMANDS@
 
 # The admin disk version is authoritative for preserved state. Advance it only
 # after the root-volume install and service setup have succeeded.
-TRUSTYCLAW_TARGET_VERSION="$target_version" python3 - <<'PY'
+KERN_TARGET_VERSION="$target_version" python3 - <<'PY'
 import json, os, pathlib, time
 
-version_path = pathlib.Path('/mnt/trustyclaw-admin/admin-state/version.json')
+version_path = pathlib.Path('/mnt/kern-admin/admin-state/version.json')
 version_path.write_text(json.dumps({
-    'version': os.environ['TRUSTYCLAW_TARGET_VERSION'],
+    'version': os.environ['KERN_TARGET_VERSION'],
     'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
 }, indent=2, sort_keys=True) + '\n')
 PY
-chown trustyclaw-admin:trustyclaw-admin /mnt/trustyclaw-admin/admin-state/version.json
-chmod 600 /mnt/trustyclaw-admin/admin-state/version.json
+chown kern-admin:kern-admin /mnt/kern-admin/admin-state/version.json
+chmod 600 /mnt/kern-admin/admin-state/version.json
 }
 
 main() {

@@ -98,16 +98,16 @@ def build_operator_connections(
         hostname = cloudflare_hostname.strip().lower()
         if not EXACT_DOMAIN_RE.fullmatch(hostname):
             raise ConfigError(
-                "the operator Cloudflare hostname must be an exact domain like 'trustyclaw.example.com'"
+                "the operator Cloudflare hostname must be an exact domain like 'kern.example.com'"
             )
         if not tunnel_token:
             raise ConfigError(
                 "a Cloudflare operator endpoint needs the tunnel token; set the "
-                "TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN environment variable"
+                "KERN_CLOUDFLARE_TUNNEL_TOKEN environment variable"
             )
         if any(character.isspace() for character in tunnel_token):
             raise ConfigError(
-                "TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN must contain a single Cloudflare tunnel token"
+                "KERN_CLOUDFLARE_TUNNEL_TOKEN must contain a single Cloudflare tunnel token"
             )
         connections.append(
             RuntimeOperatorConnection(

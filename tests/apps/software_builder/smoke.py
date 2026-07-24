@@ -31,25 +31,25 @@ WORKSPACE: dict[str, Any] = {
     "created_at": "2026-06-28T10:58:00Z",
 }
 MESSAGES: list[dict[str, Any]] = [
-    {"id": 1, "role": "user", "content": "Fix the parser regression in infiloop2/trustyclaw and open a PR.", "meta": None, "created_at": "2026-06-28T11:00:00Z"},
+    {"id": 1, "role": "user", "content": "Fix the parser regression in infiloop2/kern and open a PR.", "meta": None, "created_at": "2026-06-28T11:00:00Z"},
     {"id": 2, "role": "agent", "content": "Reproduced the **parser regression**, implemented the focused fix, and opened PR #142.", "meta": None, "created_at": "2026-06-28T11:04:00Z"},
-    {"id": 3, "role": "event", "content": 'Created artifact "trustyclaw#142 parser regression"', "meta": {"action": "create_artifact", "artifact_id": "trustyclaw_pr_142"}, "created_at": "2026-06-28T11:04:00Z"},
+    {"id": 3, "role": "event", "content": 'Created artifact "kern#142 parser regression"', "meta": {"action": "create_artifact", "artifact_id": "kern_pr_142"}, "created_at": "2026-06-28T11:04:00Z"},
     {"id": 4, "role": "event", "content": "Recorded Brave Search in the tools inventory for research (enable it to use it)", "meta": {"action": "upsert_tool", "tool_id": "brave_search"}, "created_at": "2026-06-28T11:05:00Z"},
     {"id": 5, "role": "agent", "content": "Local unit and type checks pass. GitHub CI is green; one review thread remains.", "meta": None, "created_at": "2026-07-01T10:00:00Z"},
-    {"id": 6, "role": "event", "content": 'Updated artifact "trustyclaw#142 parser regression"', "meta": {"action": "update_artifact", "artifact_id": "trustyclaw_pr_142"}, "created_at": "2026-07-01T10:00:00Z"},
+    {"id": 6, "role": "event", "content": 'Updated artifact "kern#142 parser regression"', "meta": {"action": "update_artifact", "artifact_id": "kern_pr_142"}, "created_at": "2026-07-01T10:00:00Z"},
     {"id": 7, "role": "user", "content": "Address the review and make sure nothing is stale.", "meta": None, "created_at": "2026-07-04T15:00:00Z"},
     {"id": 8, "role": "agent", "content": "Pushed the review fix, replied inline, and completed a clean full-diff sweep. PR #142 is ready for your merge decision.", "meta": None, "created_at": "2026-07-16T10:00:00Z"},
 ]
 SCHEDULES: list[dict[str, Any]] = []
 ARTIFACTS: dict[str, dict[str, Any]] = {
-    "trustyclaw_pr_142": {
-        "artifact_id": "trustyclaw_pr_142",
-        "title": "trustyclaw#142 parser regression",
-        "data": {"repository": "infiloop2/trustyclaw", "pr": 142, "state": "ready"},
+    "kern_pr_142": {
+        "artifact_id": "kern_pr_142",
+        "title": "kern#142 parser regression",
+        "data": {"repository": "infiloop2/kern", "pr": 142, "state": "ready"},
         "view": [
             {"type": "heading", "text": "PR #142 · parser regression", "level": 1},
             {"type": "details", "items": [
-                {"label": "Repository", "value": "infiloop2/trustyclaw"},
+                {"label": "Repository", "value": "infiloop2/kern"},
                 {"label": "Branch", "value": "software-builder/parser-regression"},
                 {"label": "Pull request", "value": "#142"},
                 {"label": "Checks", "value": "Green"},
@@ -70,7 +70,7 @@ ARTIFACTS: dict[str, dict[str, Any]] = {
 MEMORIES: list[dict[str, Any]] = [
     {
         "memory_id": "repository_rules",
-        "content": "infiloop2/trustyclaw requires focused branches, local unit checks, and replies to every review comment.",
+        "content": "infiloop2/kern requires focused branches, local unit checks, and replies to every review comment.",
         "updated_at": "2026-07-04T15:02:00Z",
     },
     {
@@ -297,7 +297,7 @@ def desktop_smoke(page: Any) -> None:
     # The feed renders every role, including the seeded Brave Search event.
     expect(frame.locator("#feed")).to_contain_text("Fix the parser regression")
     expect(frame.locator("#feed .msg.agent strong", has_text="parser regression")).to_contain_text("parser regression")
-    expect(frame.locator("#feed .event-chip").first).to_contain_text('Created artifact "trustyclaw#142 parser regression"')
+    expect(frame.locator("#feed .event-chip").first).to_contain_text('Created artifact "kern#142 parser regression"')
     expect(frame.locator("#tools")).to_contain_text("Brave Search")
     expect(frame.locator("#tools")).to_contain_text("good to have")
     expect(frame.locator("#memories")).to_contain_text("repository_rules")
@@ -305,10 +305,10 @@ def desktop_smoke(page: Any) -> None:
     # Software Builder is interactive: no schedules are seeded.
     expect(frame.locator("#schedules")).to_contain_text("No follow-ups scheduled")
 
-    frame.locator("#artifacts .rail-item", has_text="trustyclaw#142").click()
+    frame.locator("#artifacts .rail-item", has_text="kern#142").click()
     overlay = frame.locator("#artifact-overlay")
     expect(overlay).to_be_visible()
-    expect(overlay.locator(".b-details")).to_contain_text("infiloop2/trustyclaw")
+    expect(overlay.locator(".b-details")).to_contain_text("infiloop2/kern")
     expect(overlay.locator(".b-checklist li.done").first).to_contain_text("Focused implementation")
     expect(overlay.locator(".b-checklist li:not(.done)").first).to_contain_text("merge decision")
     overlay.get_by_role("button", name="Close", exact=True).click()
@@ -348,7 +348,7 @@ def mobile_smoke(page: Any) -> None:
     frame = app_frame.content_frame
     expect(frame.locator("#feed")).to_contain_text("Fix the parser regression")
     expect(frame.locator("#pr-workflow")).to_contain_text("checks and comments resolved")
-    frame.locator("#artifacts .rail-item", has_text="trustyclaw#142").click()
+    frame.locator("#artifacts .rail-item", has_text="kern#142").click()
     expect(frame.locator("#artifact-overlay")).to_contain_text("GitHub checks are green")
     frame.get_by_role("button", name="Close").click()
     _assert_frame_no_horizontal_overflow(frame, "Software Builder app")

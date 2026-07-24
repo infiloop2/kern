@@ -1,6 +1,6 @@
 """Minimal PostgreSQL wire-protocol client, Python standard library only.
 
-TrustyClaw keeps host runtime code free of third-party dependencies, so the
+Kern keeps host runtime code free of third-party dependencies, so the
 admin service speaks the frontend/backend protocol (v3) itself instead of
 using a driver. The scope is deliberately tiny — exactly what the admin-state
 database needs and nothing more:

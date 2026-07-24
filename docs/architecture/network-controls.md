@@ -4,9 +4,9 @@ Defense in depth, fail closed at each layer:
 
 1. **nftables**: inbound is dropped except loopback, established traffic, and
    SSH port 22 when SSH operator access is configured. Outbound is dropped for
-   everyone except root, `trustyclaw-proxy`, `trustyclaw-tools` (DNS and
+   everyone except root, `kern-proxy`, `kern-tools` (DNS and
    HTTPS only, for the bundled tool packages' third-party APIs — see
-   [tools host integration](tools/host-integration.md); `trustyclaw-admin` has
+   [tools host integration](tools/host-integration.md); `kern-admin` has
    no egress at all), optional `cloudflared`, `systemd-resolved`, and
    `systemd-timesyncd`, with narrow
    loopback exceptions: the agent may reach only the proxy port, the admin API
@@ -22,7 +22,7 @@ Defense in depth, fail closed at each layer:
 2. **Proxy environment**: agent processes run with `HTTP_PROXY`/`HTTPS_PROXY`/
    `ALL_PROXY` pointing at the local proxy and trust its CA via the system
    store and `NODE_EXTRA_CA_CERTS`. Tool-package traffic is separate: it runs
-   as `trustyclaw-tools` and uses that service's direct DNS/HTTPS allowance,
+   as `kern-tools` and uses that service's direct DNS/HTTPS allowance,
    never the agent policy proxy.
 3. **Policy proxy**: every request is checked against `network_controls` before
    any upstream DNS resolution or connection happens, so a denied host name is
@@ -105,7 +105,7 @@ bodies are decoded and re-sent with an explicit `Content-Length` — and bodies 
 128 MiB are rejected so the policy always sees the complete body.
 
 The host firewall accepts outbound traffic from root, the dedicated
-`trustyclaw-proxy` and `trustyclaw-tools` uids, and the optional `cloudflared`
+`kern-proxy` and `kern-tools` uids, and the optional `cloudflared`
 uid. Root egress covers bootstrap/package installation, security updates, and
 ordinary root-owned system traffic. The host does not install or configure the
 AWS SSM agent, and
@@ -121,7 +121,7 @@ API, or proxy users. It does not expose an inbound EC2 port.
 
 Loopback is also uid-scoped. The agent can open new loopback TCP connections
 only to the network proxy port. App backend ports are opened only to the
-`trustyclaw-admin` uid, and a port-specific drop blocks all other local users
+`kern-admin` uid, and a port-specific drop blocks all other local users
 before the general loopback accept. App service users may send established
 loopback responses for admin-proxied requests, but may not initiate loopback
 connections to the proxy, the browser-facing admin API, other app backends, or
@@ -221,7 +221,7 @@ the same catalog treatment. The admin UI events page renders the code; the
 guidance is the human explanation wherever one is needed.
 
 The agent reads this through two always-listed tools on the dedicated
-`/run/trustyclaw-agent-network/agent-network.sock` socket. The MCP shim combines
+`/run/kern-agent-network/agent-network.sock` socket. The MCP shim combines
 them with bundled tools and `app_api` into one stable server (see
 [tools host integration](tools/host-integration.md)):
 
@@ -237,9 +237,9 @@ them with bundled tools and `app_api` into one stable server (see
   for. Probing by real request is safe by construction — a denied request is
   refused before DNS resolution or any upstream connection, and logged.
 
-The `trustyclaw-agent-network` service has no internet egress. Its Postgres role
+The `kern-agent-network` service has no internet egress. Its Postgres role
 has SELECT-only access to the normalized policy and `network_events`; the
-egress-capable `trustyclaw-tools` role has no access to those tables. Policy and
+egress-capable `kern-tools` role has no access to those tables. Policy and
 decision logs carry no secret material.
 
 ### Path canonicalization
@@ -254,7 +254,7 @@ server serves is a bypass:
 
 - **Percent-decoding** defeats encoding differentials. GitHub decodes
   `%XX` escapes before routing, so `/repos/infiloop2/%74rustyclaw` reaches
-  the same resource as `/repos/infiloop2/trustyclaw`; a raw-string
+  the same resource as `/repos/infiloop2/kern`; a raw-string
   comparison would let an encoded spelling dodge (or dress up) the repo
   match.
 - **Dot-segment collapse** defeats traversal. A naive prefix check on

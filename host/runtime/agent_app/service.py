@@ -1,7 +1,7 @@
 """Dedicated agent-app service.
 
 Serves the agent-facing app API socket (``POST /call`` for the MCP shim) as
-the dedicated ``trustyclaw-agent-app`` user: the one uid
+the dedicated ``kern-agent-app`` user: the one uid
 besides the admin service that nftables allows to open new connections to app
 backend ports. It has no database access or internet egress. Keeping this out
 of the admin service means the agent-facing socket surface adds nothing to the

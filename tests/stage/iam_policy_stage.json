@@ -16,7 +16,7 @@
       "Resource": "*"
     },
     {
-      "Sid": "CreateTaggedTrustyClawResources",
+      "Sid": "CreateTaggedKernResources",
       "Effect": "Allow",
       "Action": [
         "ec2:RunInstances",
@@ -26,8 +26,8 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestTag/trustyclaw-host": "true",
-          "aws:RequestTag/trustyclaw-host-agent-name": "trustyclaw-stage"
+          "aws:RequestTag/kern-host": "true",
+          "aws:RequestTag/kern-host-agent-name": "kern-stage"
         }
       }
     },
@@ -46,26 +46,26 @@
       ]
     },
     {
-      "Sid": "RunInstancesWithTrustyClawSecurityGroups",
+      "Sid": "RunInstancesWithKernSecurityGroups",
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
       "Resource": "arn:aws:ec2:*:*:security-group/*",
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/trustyclaw-host": "true",
-          "aws:ResourceTag/trustyclaw-host-agent-name": "trustyclaw-stage"
+          "aws:ResourceTag/kern-host": "true",
+          "aws:ResourceTag/kern-host-agent-name": "kern-stage"
         }
       }
     },
     {
-      "Sid": "TagOnlyDuringTrustyClawResourceCreation",
+      "Sid": "TagOnlyDuringKernResourceCreation",
       "Effect": "Allow",
       "Action": "ec2:CreateTags",
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestTag/trustyclaw-host": "true",
-          "aws:RequestTag/trustyclaw-host-agent-name": "trustyclaw-stage",
+          "aws:RequestTag/kern-host": "true",
+          "aws:RequestTag/kern-host-agent-name": "kern-stage",
           "ec2:CreateAction": [
             "RunInstances",
             "CreateVolume",
@@ -75,7 +75,7 @@
       }
     },
     {
-      "Sid": "ManageOnlyTrustyClawResources",
+      "Sid": "ManageOnlyKernResources",
       "Effect": "Allow",
       "Action": [
         "ec2:GetConsoleOutput",
@@ -94,8 +94,8 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/trustyclaw-host": "true",
-          "aws:ResourceTag/trustyclaw-host-agent-name": "trustyclaw-stage"
+          "aws:ResourceTag/kern-host": "true",
+          "aws:ResourceTag/kern-host-agent-name": "kern-stage"
         }
       }
     },

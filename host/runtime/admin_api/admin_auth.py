@@ -31,7 +31,7 @@ import time
 # The session cookie the browser holds after login. Opaque and server-held: it
 # never carries the password or any decodable claim. Over HTTPS the cookie uses
 # the ``__Host-`` prefix, which the browser only accepts when it is Secure,
-# Path=/, and has no Domain; a sibling agent origin on the shared ``trustyclaw.me``
+# Path=/, and has no Domain; a sibling agent origin on the shared ``kern.me``
 # parent domain therefore cannot set or shadow it (cookie-tossing defense). The
 # plain name is used only over the plain-HTTP SSH-forward loopback, where
 # ``__Host-`` cannot apply (it requires Secure) and localhost has no siblings.
@@ -41,7 +41,7 @@ SESSION_COOKIE_NAME = "tc_admin_session"
 # UI JavaScript sets it on every request; a cross-site page cannot (adding it to
 # a cross-origin request forces a CORS preflight the admin API never answers),
 # so the ``SameSite=Strict`` cookie and this required header together close CSRF.
-CSRF_HEADER_NAME = "X-TrustyClaw-Csrf"
+CSRF_HEADER_NAME = "X-Kern-Csrf"
 
 # A session is dropped after this much idle time, or this much total age,
 # whichever comes first. The absolute cap bounds a stolen token's usefulness

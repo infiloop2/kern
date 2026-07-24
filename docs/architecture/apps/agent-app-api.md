@@ -15,7 +15,7 @@ The pieces:
   backend as serving agent-callable routes under `/agent/`,
 - a stable **`app_api` MCP tool** served by the existing tools MCP shim,
   whose presence grants no authority,
-- a dedicated **`trustyclaw-agent-app` service** that authenticates the
+- a dedicated **`kern-agent-app` service** that authenticates the
   caller, derives its app-scoped host thread, and reverse-proxies the
   call to the owning app backend's loopback port,
 - **kernel-verified thread attribution**: every task turn runs in a systemd
@@ -38,7 +38,7 @@ that surface a full turn later. Moving to a call surface raises one question:
 when something connects and says "I belong to app A", how does the host know?
 
 - **A claimed app or thread id proves nothing.** Every agent process runs as
-  `trustyclaw-agent`, so socket peer credentials distinguish "an agent" but
+  `kern-agent`, so socket peer credentials distinguish "an agent" but
   not which app owns the process. Any prompt-injected agent could name another
   app's task.
 - **A secret token barely helps here.** Everything that can reach
@@ -49,15 +49,15 @@ when something connects and says "I belong to app A", how does the host know?
 - **The cgroup is kernel state.** The `run-claude-code` /
   `run-codex-app-server` root helpers already start every runtime in a
   transient systemd scope; naming that scope after the host thread id
-  (`trustyclaw-agent-thread-<thread_id>.scope`) puts the thread identity
+  (`kern-agent-thread-<thread_id>.scope`) puts the thread identity
   somewhere only the kernel writes. A process cannot move itself into another
   cgroup (the cgroupfs is root-owned, delegation off), cannot mint a fake scope in
-  `trustyclaw_agent.slice` (systemd requires privileges; user-manager scopes
+  `kern_agent.slice` (systemd requires privileges; user-manager scopes
   land under `user.slice` and are rejected by the parser), and cannot ptrace
   a non-child same-uid process into cooperating (Yama `ptrace_scope`).
 
 So attribution is: `SO_PEERCRED` → peer pid → `/proc/<pid>/cgroup` →
-`trustyclaw-agent-thread-<thread_id>.scope` under `trustyclaw_agent.slice`.
+`kern-agent-thread-<thread_id>.scope` under `kern_agent.slice`.
 The pid is pinned with a pidfd before the /proc read and its liveness re-checked after
 (polling the pidfd for exit readiness requires no cross-user signal
 permission), so a pid that exited and was recycled mid-check fails closed
@@ -78,15 +78,15 @@ thread, as Mission Pursuit does in its own database.
 
 ## The dedicated service
 
-`trustyclaw-agent-app` follows the tools-service pattern: its own Linux user
+`kern-agent-app` follows the tools-service pattern: its own Linux user
 and a world-connectable Unix socket
-(`/run/trustyclaw-agent-app/agent-app.sock`) authenticated by peer
-credentials, accepting only the `trustyclaw-agent` uid. It is deliberately
+(`/run/kern-agent-app/agent-app.sock`) authenticated by peer
+credentials, accepting only the `kern-agent` uid. It is deliberately
 its own process rather than new admin-service surface: the admin plane gains
 no agent-facing socket, and the tools service (the only uid with internet
 egress) gains no app traffic. The service's entire network reach is the
 per-app loopback port accepts nftables grants it — it is the one uid besides
-`trustyclaw-admin` that may open new connections to app backend ports, and it
+`kern-admin` that may open new connections to app backend ports, and it
 has no DNS, no HTTPS, no other loopback reach.
 
 One route, JSON over the socket:
@@ -97,11 +97,11 @@ One route, JSON over the socket:
   this proxy by construction), caps the request at 256 KB and the response at
   1 MB, bounds the call at 30 s and 8 concurrent slots across the host, then
   proxies to the owning app's port with the trusted markers
-  `X-TrustyClaw-Agent-App-Proxy: <app_id>`,
-  `X-TrustyClaw-Agent-Thread: <app-visible thread id>`. Those headers arrive
+  `X-Kern-Agent-App-Proxy: <app_id>`,
+  `X-Kern-Agent-Thread: <app-visible thread id>`. Those headers arrive
   only over the app port, which nftables restricts to the two proxy uids, so
   the app backend can trust them the same way it trusts the admin bridge's
-  `X-TrustyClaw-App-Proxy` marker — and can tell the two callers apart.
+  `X-Kern-App-Proxy` marker — and can tell the two callers apart.
 
 The app's HTTP status and JSON body are returned to the agent verbatim as
 `{"status": ..., "body": ...}`: an app validation error is information the

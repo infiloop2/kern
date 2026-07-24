@@ -14,7 +14,7 @@ import traceback
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
 
 
-STAGE_AGENT_NAME = "trustyclaw-stage"
+STAGE_AGENT_NAME = "kern-stage"
 CHEAP_MODELS = {
     "codex": "gpt-5.6-luna",
     "claude_code": "sonnet",

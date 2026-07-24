@@ -1,4 +1,4 @@
-"""SSH delivery for TrustyClaw host provisioning.
+"""SSH delivery for Kern host provisioning.
 
 The artifacts themselves (payload, bootstrap script, runtime code archive)
 are rendered by ``host.bootstrap.render``, shared with the GitHub delivery;
@@ -23,7 +23,7 @@ from host.cli.lifecycle_logging import _log
 def _generate_deploy_key(workdir: Path) -> Path:
     key_path = workdir / "deploy_key"
     subprocess.run(
-        ["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-C", "trustyclaw-deploy", "-f", str(key_path)],
+        ["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-C", "kern-deploy", "-f", str(key_path)],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -40,7 +40,7 @@ def _provision_over_ssh(
     host.bootstrap.self_provision there, exactly like the GitHub delivery
     after its fetch. The provisioning payload was already staged by user
     data; only code delivery differs between the deliveries."""
-    code_path = workdir / "trustyclaw-host-code.tar.gz"
+    code_path = workdir / "kern-host-code.tar.gz"
     _write_runtime_code_archive(code_path)
 
     ssh = [
@@ -77,10 +77,10 @@ def _provision_over_ssh(
 # bootstraps from; fixed paths only, nothing user-controlled is interpolated.
 _REMOTE_SELF_PROVISION = (
     "sudo bash -c '"
-    "rm -rf /tmp/trustyclaw-checkout && mkdir -p /tmp/trustyclaw-checkout && "
-    "tar -xzf /tmp/trustyclaw-host-code.tar.gz -C /tmp/trustyclaw-checkout && "
-    "PYTHONPATH=/tmp/trustyclaw-checkout python3 -m host.bootstrap.self_provision "
-    "--payload /tmp/trustyclaw_payload.json --checkout /tmp/trustyclaw-checkout"
+    "rm -rf /tmp/kern-checkout && mkdir -p /tmp/kern-checkout && "
+    "tar -xzf /tmp/kern-host-code.tar.gz -C /tmp/kern-checkout && "
+    "PYTHONPATH=/tmp/kern-checkout python3 -m host.bootstrap.self_provision "
+    "--payload /tmp/kern_payload.json --checkout /tmp/kern-checkout"
     "'"
 )
 

@@ -110,7 +110,7 @@ class StageToolChecks:
                     f"(missing: {', '.join(missing_config)})"
                 )
             else:
-                env_names = [f"TRUSTYCLAW_STAGE_{key}" for key in missing_config]
+                env_names = [f"KERN_STAGE_{key}" for key in missing_config]
                 problems.append(f"set config via {', '.join(env_names)} or the admin UI")
         if manifest.connection == "oauth" and not connected:
             problems.append("connect its stage account once in the admin UI")
@@ -125,7 +125,7 @@ class StageToolChecks:
             if manifest.connection == "oauth":
                 continue
             for requirement in manifest.config:
-                value = os.environ.get(f"TRUSTYCLAW_STAGE_{requirement.key}", "")
+                value = os.environ.get(f"KERN_STAGE_{requirement.key}", "")
                 if value:
                     self._api(
                         "PUT",
@@ -148,7 +148,7 @@ class StageToolChecks:
         line = json.dumps(request)
         output = self._ssh_code(
             f"printf '%s\\n' {shlex.quote(line)} | "
-            "sudo -u trustyclaw-agent env PYTHONPATH=/opt/trustyclaw-host "
+            "sudo -u kern-agent env PYTHONPATH=/opt/kern-host "
             "python3 -m host.runtime.agent_shim.mcp_shim"
         )
         try:
@@ -312,7 +312,7 @@ class StageToolChecks:
                 ),
                 "linkedin": (("get_profile", {}),),
                 "linkedin_discovery": (
-                    ("search_posts", {"query": "TrustyClaw", "limit": "1"}),
+                    ("search_posts", {"query": "Kern", "limit": "1"}),
                 ),
             }[tool_id]
         for action_id, arguments in calls:
@@ -321,7 +321,7 @@ class StageToolChecks:
             self._queue_and_deny(
                 "linkedin",
                 "linkedin_create_post",
-                {"text": f"TrustyClaw stage proposal {os.urandom(3).hex()}"},
+                {"text": f"Kern stage proposal {os.urandom(3).hex()}"},
             )
         suffix = "; publish proposal denied" if tool_id == "linkedin" else ""
         read_count = len(calls) + (1 if tool_id == "ibkr" else 0)
@@ -329,7 +329,7 @@ class StageToolChecks:
 
     def _check_brave_live(self) -> str:
         name = "brave_search_search_web"
-        arguments = {"query": "TrustyClaw agent host"}
+        arguments = {"query": "Kern agent host"}
         for attempt in range(2):
             try:
                 self._successful_tool_call(name, arguments)
@@ -341,7 +341,7 @@ class StageToolChecks:
         raise AssertionError("unreachable")
 
     def _check_gmail_live(self) -> str:
-        unique_title = f"TrustyClaw stage check {os.urandom(4).hex()}"
+        unique_title = f"Kern stage check {os.urandom(4).hex()}"
         messages = self._successful_tool_call("gmail_search_messages", {"query": "in:anywhere"})
         labels = self._successful_tool_call("gmail_list_labels", {})
         self._successful_tool_call("gmail_list_drafts", {})
@@ -370,7 +370,7 @@ class StageToolChecks:
         self._queue_and_deny(
             "gmail",
             "gmail_label_action",
-            {"action": "create", "name": f"trustyclaw-stage-{os.urandom(3).hex()}"},
+            {"action": "create", "name": f"kern-stage-{os.urandom(3).hex()}"},
         )
         pending = self._shim_tool_result(
             "gmail_draft_action",
@@ -408,7 +408,7 @@ class StageToolChecks:
 
     def _check_calendar_live(self) -> str:
         self._successful_tool_call("google_calendar_read_events", {})
-        unique_title = f"TrustyClaw stage check {os.urandom(4).hex()}"
+        unique_title = f"Kern stage check {os.urandom(4).hex()}"
         start = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() + 86400))
         end = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() + 90000))
         pending = self._shim_tool_result(
@@ -448,7 +448,7 @@ class StageToolChecks:
         results = [
             trending,
             self._successful_tool_call(
-                "instagram_discovery_search_reels", {"query": "TrustyClaw", "limit": "1"}
+                "instagram_discovery_search_reels", {"query": "Kern", "limit": "1"}
             ),
             self._successful_tool_call(
                 "instagram_discovery_search_hashtag", {"hashtag": "ai", "limit": "1"}
@@ -523,7 +523,7 @@ class StageToolChecks:
 
     def _check_twitter_live(self) -> str:
         search = self._successful_tool_call(
-            "twitter_search_tweets", {"query": "TrustyClaw", "max_results": "10"}
+            "twitter_search_tweets", {"query": "Kern", "max_results": "10"}
         )
         self._successful_tool_call("twitter_get_trends", {"max_trends": "1"})
         self._successful_tool_call("twitter_get_personalized_trends", {})
@@ -544,7 +544,7 @@ class StageToolChecks:
         self._queue_and_deny(
             "twitter",
             "twitter_post_tweet",
-            {"text": f"TrustyClaw stage proposal {os.urandom(3).hex()}"},
+            {"text": f"Kern stage proposal {os.urandom(3).hex()}"},
         )
         return (
             f"search, global/personal trends, {derived} result-derived read(s), "

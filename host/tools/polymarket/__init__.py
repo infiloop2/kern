@@ -18,7 +18,7 @@ POLYMARKET_REQUEST_HEADERS = {
     "accept": "*/*",
     # Polymarket's official API client supplies an explicit client identity.
     # Do the same rather than relying on urllib's commonly blocked default.
-    "user-agent": "trustyclaw",
+    "user-agent": "kern",
 }
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100

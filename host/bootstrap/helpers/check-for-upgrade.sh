@@ -15,4 +15,4 @@ exec /usr/bin/curl \
   --connect-timeout 5 \
   --max-time 10 \
   --max-filesize 64 \
-  'https://raw.githubusercontent.com/infiloop2/trustyclaw/refs/heads/main/VERSION'
+  'https://raw.githubusercontent.com/infiloop2/kern/refs/heads/main/VERSION'

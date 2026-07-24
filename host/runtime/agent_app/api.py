@@ -1,7 +1,7 @@
 """Agent-facing app API service: HTTP over a Unix domain socket.
 
 Agents working an app-created task call their app's backend through this
-service (the dedicated ``trustyclaw-agent-app`` process; see
+service (the dedicated ``kern-agent-app`` process; see
 ``agent_app_service``). The MCP shim forwards the ``app_api`` tool here; this
 module authenticates the caller, reads its host thread from a kernel-owned
 scope, derives that thread's owning app, and reverse-proxies the call to the app
@@ -10,7 +10,7 @@ allows to open new connections to app ports.
 
 Attribution is kernel-verified, not claimed: the orchestrator spawns every
 task turn inside a systemd scope named after its host thread id
-(``trustyclaw-agent-thread-<thread_id>.scope`` via the run-claude-code /
+(``kern-agent-thread-<thread_id>.scope`` via the run-claude-code /
 run-codex-app-server helpers), so the caller's thread is read from
 ``/proc/<peer pid>/cgroup``. A process cannot rewrite its own cgroup (the
 cgroupfs is root-owned and delegation is off), so — unlike an environment
@@ -50,8 +50,8 @@ from host.constants import AGENT_APP_SOCKET_PATH, LOOPBACK
 from host.runtime.core import app_platform
 
 DEFAULT_SOCKET_PATH = AGENT_APP_SOCKET_PATH
-SOCKET_PATH = os.environ.get("TRUSTYCLAW_AGENT_APP_SOCKET", DEFAULT_SOCKET_PATH)
-AGENT_PEER_USER = "trustyclaw-agent"
+SOCKET_PATH = os.environ.get("KERN_AGENT_APP_SOCKET", DEFAULT_SOCKET_PATH)
+AGENT_PEER_USER = "kern-agent"
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 # App backends parse the response themselves; cap what one call can pull back
 # through the socket so a misbehaving app cannot balloon agent turns.
@@ -74,14 +74,14 @@ ALLOWED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 # Trusted markers the app backend receives instead of anything agent-claimed;
 # they arrive only over the app's loopback port, which nftables restricts to
 # the admin and agent-app service uids.
-AGENT_THREAD_HEADER = "X-TrustyClaw-Agent-Thread"
-AGENT_PROXY_HEADER = "X-TrustyClaw-Agent-App-Proxy"
+AGENT_THREAD_HEADER = "X-Kern-Agent-Thread"
+AGENT_PROXY_HEADER = "X-Kern-Agent-App-Proxy"
 # The systemd scope the runtime helpers create per host thread; matching on the
-# full trustyclaw_agent.slice path rejects scopes an agent could mint through
+# full kern_agent.slice path rejects scopes an agent could mint through
 # a user manager (those live under user.slice).
 _THREAD_SCOPE_RE = re.compile(
-    r"^\d+:[^:]*:/trustyclaw_agent\.slice/"
-    r"trustyclaw-agent-thread-([A-Za-z0-9_-]{1,64})\.scope(?:/|$)",
+    r"^\d+:[^:]*:/kern_agent\.slice/"
+    r"kern-agent-thread-([A-Za-z0-9_-]{1,64})\.scope(?:/|$)",
     re.MULTILINE,
 )
 
@@ -307,5 +307,5 @@ class AgentAppServer(ThreadingHTTPServer):
 
 def serve_forever(socket_path: str = SOCKET_PATH) -> None:
     """Bind the agent-app socket and serve it in the foreground (the dedicated
-    trustyclaw-agent-app service entry point)."""
+    kern-agent-app service entry point)."""
     AgentAppServer(socket_path, agent_peer_uids()).serve_forever()

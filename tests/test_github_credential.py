@@ -160,25 +160,25 @@ class WorkflowTriggerParsingTests(unittest.TestCase):
 
         def fake_no_pages_get(token: str, path: str):  # type: ignore[no-untyped-def]
             calls.append(path)
-            if path == "/repos/infiloop2/trustyclaw":
+            if path == "/repos/infiloop2/kern":
                 return {"visibility": "private", "has_pages": False}
             raise not_found()
 
         with patch("host.runtime.root_helpers.audit_github_repo._get", side_effect=fake_no_pages_get):
-            facts = audit_github_repo.audit_repository("token", "infiloop2", "trustyclaw")
+            facts = audit_github_repo.audit_repository("token", "infiloop2", "kern")
         # pages_public is the single stored Pages fact (tri-state); has_pages
         # only decides locally whether the /pages endpoint is queried.
         self.assertNotIn("has_pages", facts)
         self.assertEqual(facts["pages_public"], False)
-        self.assertNotIn("/repos/infiloop2/trustyclaw/pages", calls)
+        self.assertNotIn("/repos/infiloop2/kern/pages", calls)
 
         def fake_unreadable_pages_get(token: str, path: str):  # type: ignore[no-untyped-def]
-            if path == "/repos/infiloop2/trustyclaw":
+            if path == "/repos/infiloop2/kern":
                 return {"visibility": "private", "has_pages": True}
             raise not_found()
 
         with patch("host.runtime.root_helpers.audit_github_repo._get", side_effect=fake_unreadable_pages_get):
-            facts = audit_github_repo.audit_repository("token", "infiloop2", "trustyclaw")
+            facts = audit_github_repo.audit_repository("token", "infiloop2", "kern")
         self.assertNotIn("has_pages", facts)
         self.assertIsNone(facts["pages_public"])
 

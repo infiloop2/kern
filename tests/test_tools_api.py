@@ -52,7 +52,7 @@ class StreamMaterializationUnitTests(unittest.TestCase):
             **{
                 "Content-Length": str(len(payload)),
                 "Content-Type": "video/mp4",
-                "X-TrustyClaw-Filename": "generated.mp4",
+                "X-Kern-Filename": "generated.mp4",
             },
         )
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}):
@@ -68,7 +68,7 @@ class StreamMaterializationUnitTests(unittest.TestCase):
             **{
                 "Content-Length": "512",
                 "Content-Type": "video/mp4",
-                "X-TrustyClaw-Filename": "generated.mp4",
+                "X-Kern-Filename": "generated.mp4",
             },
         )
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}):
@@ -82,7 +82,7 @@ class StreamMaterializationUnitTests(unittest.TestCase):
             **{
                 "Content-Length": "1",
                 "Content-Type": "application/octet-stream",
-                "X-TrustyClaw-Filename": "generated.bin",
+                "X-Kern-Filename": "generated.bin",
             },
         )
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as target:
@@ -489,7 +489,7 @@ class ToolsSocketTests(ToolsApiTestCase):
 class McpShimTests(ToolsApiTestCase):
     def start_shim(self, socket_path: str) -> subprocess.Popen[str]:
         env = os.environ.copy()
-        env["TRUSTYCLAW_TOOLS_SOCKET"] = socket_path
+        env["KERN_TOOLS_SOCKET"] = socket_path
         env["PYTHONPATH"] = str(REPO_ROOT)
         env["HOME"] = str(Path(socket_path).parent)
         shim = subprocess.Popen(
@@ -530,7 +530,7 @@ class McpShimTests(ToolsApiTestCase):
 
         initialized = self.rpc(shim, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
         self.assertEqual(initialized["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual(initialized["result"]["serverInfo"]["name"], "trustyclaw-tools")
+        self.assertEqual(initialized["result"]["serverInfo"]["name"], "kern-tools")
 
         # Notifications get no response; the next reply must match the next id.
         shim.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")

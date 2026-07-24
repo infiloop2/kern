@@ -59,7 +59,7 @@ function clearLegacyPasswordCookie() {
   // Pre-0.44 UIs stored the cleartext admin password in this JavaScript-readable
   // cookie. Expire it on every load so an upgraded browser never keeps the
   // password readable or keeps sending it to the origin until it ages out.
-  document.cookie = "trustyclaw_admin=; path=/; max-age=0; samesite=strict";
+  document.cookie = "kern_admin=; path=/; max-age=0; samesite=strict";
 }
 
 async function login() {
@@ -345,23 +345,23 @@ function chatIconSvg() {
 window.addEventListener("message", event => {
   const message = event.data;
   if (!message || ![
-    "trustyclaw-app-api",
-    "trustyclaw-app-open-file",
-    "trustyclaw-app-upload-file",
+    "kern-app-api",
+    "kern-app-open-file",
+    "kern-app-upload-file",
   ].includes(message.type)) return;
   const app = installedApps.find(candidate => appFrames.get(candidate.id)?.contentWindow === event.source);
   if (!app) return;
-  if (message.type === "trustyclaw-app-open-file") {
+  if (message.type === "kern-app-open-file") {
     const path = typeof message.path === "string" ? message.path : "";
     if (!path.startsWith("/") || path.split("/").includes("..")) return;
     showTab("files");
     openAgentPath(path, "file").catch(error => notice(error.message, true));
     return;
   }
-  if (message.type === "trustyclaw-app-upload-file") {
+  if (message.type === "kern-app-upload-file") {
     handleAppUploadMessage(app, event.source, message).catch(error => {
       event.source.postMessage({
-        type: "trustyclaw-app-upload-file-result",
+        type: "kern-app-upload-file-result",
         request_id: String(message.request_id || ""),
         ok: false,
         error: error.message,
@@ -371,7 +371,7 @@ window.addEventListener("message", event => {
   }
   handleAppApiMessage(app, event.source, message).catch(error => {
     event.source.postMessage({
-      type: "trustyclaw-app-api-result",
+      type: "kern-app-api-result",
       request_id: message.request_id,
       ok: false,
       error: error.message,
@@ -392,7 +392,7 @@ async function handleAppUploadMessage(app, source, message) {
       const files = await chooseUploadFiles();
       if (files === null) {
         source.postMessage({
-          type: "trustyclaw-app-upload-file-result",
+          type: "kern-app-upload-file-result",
           request_id: String(message.request_id || ""),
           ok: true,
           cancelled: true,
@@ -413,7 +413,7 @@ async function handleAppUploadMessage(app, source, message) {
         };
       });
       source.postMessage({
-        type: "trustyclaw-app-upload-file-result",
+        type: "kern-app-upload-file-result",
         request_id: String(message.request_id || ""),
         ok: true,
         body: { selections },
@@ -433,7 +433,7 @@ async function handleAppUploadMessage(app, source, message) {
   if (action === "discard") {
     removeAppUploadSelection(app.id, selectionId);
     source.postMessage({
-      type: "trustyclaw-app-upload-file-result",
+      type: "kern-app-upload-file-result",
       request_id: String(message.request_id || ""),
       ok: true,
       body: { discarded: true },
@@ -455,7 +455,7 @@ async function handleAppUploadMessage(app, source, message) {
     throw error;
   }
   source.postMessage({
-    type: "trustyclaw-app-upload-file-result",
+    type: "kern-app-upload-file-result",
     request_id: String(message.request_id || ""),
     ok: true,
     body,
@@ -532,9 +532,9 @@ async function handleAppApiMessage(app, source, message) {
   ) {
     throw new Error("app API route is not allowed");
   }
-  const body = await api(message.method, message.path, message.body, { "X-TrustyClaw-App-Bridge": app.id });
+  const body = await api(message.method, message.path, message.body, { "X-Kern-App-Bridge": app.id });
   source.postMessage({
-    type: "trustyclaw-app-api-result",
+    type: "kern-app-api-result",
     request_id: String(message.request_id || ""),
     ok: true,
     body,

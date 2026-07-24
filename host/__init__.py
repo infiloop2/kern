@@ -1,1 +1,1 @@
-"""TrustyClaw deployment and runtime package."""
+"""Kern deployment and runtime package."""

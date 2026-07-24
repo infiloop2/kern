@@ -45,7 +45,7 @@ class WriteConfigTests(unittest.TestCase):
 
     def payload(self, **overrides) -> dict:
         value = {
-            "agent_name": "trustyclaw-test",
+            "agent_name": "kern-test",
             "admin_password_sha256": PAYLOAD_HASH,
             "operator_connections": [SSH_CONNECTION],
         }
@@ -77,7 +77,7 @@ class WriteConfigTests(unittest.TestCase):
                 self.assertEqual(code, 0, stderr)
                 stored = load_config()
                 # agent_name always comes from the payload; credentials never do.
-                self.assertEqual(stored["agent_name"], "trustyclaw-test")
+                self.assertEqual(stored["agent_name"], "kern-test")
                 self.assertEqual(stored["admin_password_sha256"], STORED_HASH)
                 self.assertEqual(stored["operator_connections"], [CLOUDFLARE_CONNECTION])
                 self.assertEqual(json.loads(stdout), stored)

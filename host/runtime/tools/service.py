@@ -3,9 +3,9 @@
 Tool packages make outbound HTTPS calls to third parties (Google, Brave) and
 parse their responses, so they need internet egress and are the host code most
 exposed to attacker-influenced data. This service runs them out of the admin
-service: it runs as the dedicated ``trustyclaw-tools`` user, which is the only
+service: it runs as the dedicated ``kern-tools`` user, which is the only
 non-root uid that executes tool packages with direct DNS and HTTPS, and
-connects to Postgres as the ``trustyclaw-tools`` role. That role is limited to
+connects to Postgres as the ``kern-tools`` role. That role is limited to
 the tool tables plus read access to the encryption key used for tool secrets.
 The admin service therefore holds no internet egress and executes no
 third-party tool action.

@@ -1,4 +1,4 @@
-"""Shared types for TrustyClaw host lifecycle commands."""
+"""Shared types for Kern host lifecycle commands."""
 
 from __future__ import annotations
 

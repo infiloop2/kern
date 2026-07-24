@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exec /usr/sbin/runuser -u trustyclaw-agent -- env HOME=/mnt/trustyclaw-agent/agent-home /usr/bin/python3 - "$@" <<'PY'
+exec /usr/sbin/runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home /usr/bin/python3 - "$@" <<'PY'
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path, PurePosixPath
 
 
-AGENT_HOME = Path("/mnt/trustyclaw-agent/agent-home").resolve(strict=True)
+AGENT_HOME = Path("/mnt/kern-agent/agent-home").resolve(strict=True)
 MAX_LIST_ENTRIES = 1000
 MAX_READ_BYTES = 1024 * 1024
 MAX_STREAM_BYTES = 200_000_000

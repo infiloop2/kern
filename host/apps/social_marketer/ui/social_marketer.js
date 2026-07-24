@@ -63,7 +63,7 @@ function utcToLocalInput(value) {
 window.addEventListener("message", event => {
   if (event.source !== window.parent) return;
   const message = event.data;
-  if (!message || message.type !== "trustyclaw-app-api-result") return;
+  if (!message || message.type !== "kern-app-api-result") return;
   const callbacks = pending.get(message.request_id);
   if (!callbacks) return;
   pending.delete(message.request_id);
@@ -74,7 +74,7 @@ window.addEventListener("message", event => {
 function api(method, path, body) {
   if (!path.startsWith("/")) throw new Error("app API path must be absolute");
   const requestId = String(nextRequestId++);
-  parent.postMessage({ type: "trustyclaw-app-api", request_id: requestId, method, path: "/v1/apps/social_marketer/api" + path, body }, "*");
+  parent.postMessage({ type: "kern-app-api", request_id: requestId, method, path: "/v1/apps/social_marketer/api" + path, body }, "*");
   return new Promise((resolve, reject) => {
     pending.set(requestId, { resolve, reject });
     setTimeout(() => {

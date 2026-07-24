@@ -35,7 +35,7 @@ const $ = id => document.getElementById(id);
 
 window.addEventListener("message", event => {
   const message = event.data;
-  if (event.source !== parent || !message || message.type !== "trustyclaw-app-api-result") return;
+  if (event.source !== parent || !message || message.type !== "kern-app-api-result") return;
   const pending = pendingApi.get(message.request_id);
   if (!pending) return;
   pendingApi.delete(message.request_id);
@@ -48,7 +48,7 @@ function api(method, path, body) {
   return new Promise((resolve, reject) => {
     pendingApi.set(requestId, { resolve, reject });
     parent.postMessage({
-      type: "trustyclaw-app-api",
+      type: "kern-app-api",
       request_id: requestId,
       method,
       path: `/v1/apps/${APP_ID}/api${path}`,

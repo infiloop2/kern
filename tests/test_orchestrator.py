@@ -95,7 +95,7 @@ class OrchestratorTests(unittest.TestCase):
         self.addCleanup(self.proxy_temp_dir.cleanup)
         self.env_patch = patch.dict(
             "os.environ",
-            {"TRUSTYCLAW_STATE_DIR": self.temp_dir.name, "TRUSTYCLAW_PROXY_STATE_DIR": self.proxy_temp_dir.name},
+            {"KERN_STATE_DIR": self.temp_dir.name, "KERN_PROXY_STATE_DIR": self.proxy_temp_dir.name},
         )
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)

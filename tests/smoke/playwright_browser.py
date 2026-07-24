@@ -15,7 +15,7 @@ from typing import Any
 from playwright.sync_api import Frame, sync_playwright
 
 
-CHROME_EXECUTABLE_ENV = "TRUSTYCLAW_SMOKE_CHROME"
+CHROME_EXECUTABLE_ENV = "KERN_SMOKE_CHROME"
 
 
 def _launch_options() -> dict[str, Any]:

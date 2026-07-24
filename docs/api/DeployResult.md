@@ -11,18 +11,18 @@ return this shape:
 
 ```json
 {
-  "agent_name": "trustyclaw-dev-agent",
+  "agent_name": "kern-dev-agent",
   "instance_id": "i-0123456789abcdef0",
   "region": "us-east-1",
   "public_dns": "ec2-203-0-113-10.compute-1.amazonaws.com",
-  "ssh_user": "trustyclaw-operator",
+  "ssh_user": "kern-operator",
   "admin_ui_local_url": "http://127.0.0.1:7443",
   "admin_volume_id": "vol-0123456789abcdef0",
   "agent_volume_id": "vol-0fedcba9876543210",
   "version": "x.y.z",
   "operator_connections": [
     {"mode": "ssh"},
-    {"mode": "cloudflare_tunnel", "hostname": "trustyclaw.example.com"}
+    {"mode": "cloudflare_tunnel", "hostname": "kern.example.com"}
   ]
 }
 ```
@@ -31,7 +31,7 @@ return this shape:
 | --- | --- | --- |
 | `agent_name`, `instance_id`, `region` | Always | Input host name and the created/replacement EC2 instance identity. |
 | `public_dns` | Always | EC2 public DNS name used for SSH access when an SSH endpoint is configured. |
-| `ssh_user` | Always | `trustyclaw-operator`. |
+| `ssh_user` | Always | `kern-operator`. |
 | `admin_ui_local_url` | Always | Local URL after forwarding the admin port: `http://127.0.0.1:7443`. |
 | `admin_volume_id`, `agent_volume_id` | Always | Durable EBS volume ids attached to the host. |
 | `version` | Always | Target `VERSION` installed by this provisioning command. |
@@ -45,7 +45,7 @@ existing instance's power transition:
 
 ```json
 {
-  "agent_name": "trustyclaw-dev-agent",
+  "agent_name": "kern-dev-agent",
   "instance_id": "i-0123456789abcdef0",
   "region": "us-east-1",
   "operation": "start",
@@ -53,7 +53,7 @@ existing instance's power transition:
   "state": "running",
   "public_dns": "ec2-203-0-113-10.compute-1.amazonaws.com",
   "public_ip": "203.0.113.10",
-  "ssh_user": "trustyclaw-operator",
+  "ssh_user": "kern-operator",
   "admin_ui_local_url": "http://127.0.0.1:7443",
   "admin_volume_id": "vol-0123456789abcdef0",
   "agent_volume_id": "vol-0fedcba9876543210"
@@ -76,5 +76,5 @@ Power results never contain `version`, `operator_connections`, or
 
 Only deploy and reconfigure result files contain `admin_password`; keep them
 private. With SSH access, the matching private SSH key is also required. With a
-Cloudflare Tunnel, the operator enters the TrustyClaw admin password. Lifecycle
+Cloudflare Tunnel, the operator enters the Kern admin password. Lifecycle
 result files are created mode `0600`.

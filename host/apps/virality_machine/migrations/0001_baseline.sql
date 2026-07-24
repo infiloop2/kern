@@ -1,11 +1,21 @@
--- Mission Pursuit app state: the single evolving workspace, its conversation feed,
--- host-task run tracking, agent-created schedules, and agent-created artifacts.
+-- Virality Machine app schema. Kern 1.0.0 is a fresh start, so this is the
+-- app's single genesis migration: the workspace_kit base schema (byte-for-byte
+-- the shared base, with the host-supported runtime constraint) plus the
+-- Virality Machine render queue.
+--
+-- render_jobs holds one row per Runway generation or editing job the agent
+-- starts, upserted as the agent polls runway_get_task to a terminal status.
+-- The operator render-queue UI reads it through GET /api/render_jobs. Every
+-- field the agent writes is bounded in backend.py before it reaches this
+-- table; the enum CHECKs below are defense in depth against a damaged write
+-- path. video_path is the durable workspace file the job produced (short-lived
+-- staged asset ids stay transport between adjacent MCP calls, not stored here).
 
 -- migrate:up
 
 CREATE TABLE IF NOT EXISTS workspace (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-    agent_runtime TEXT CHECK (agent_runtime IN ('codex', 'claude_code')),
+    agent_runtime TEXT CHECK (agent_runtime IN ('codex', 'claude_code', 'hermes')),
     model TEXT,
     effort TEXT,
     thread_seq INTEGER NOT NULL DEFAULT 1,
@@ -83,8 +93,23 @@ CREATE TABLE IF NOT EXISTS tools (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS render_jobs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ('video', 'edit', 'image', 'speech')),
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+    output_url TEXT,
+    video_path TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_render_jobs_updated ON render_jobs(updated_at DESC);
+
 -- migrate:down
 
+DROP TABLE IF EXISTS render_jobs;
 DROP TABLE IF EXISTS tools;
 DROP TABLE IF EXISTS memories;
 DROP TABLE IF EXISTS artifacts;

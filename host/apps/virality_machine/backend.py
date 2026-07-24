@@ -336,12 +336,12 @@ def digest_sections(cur: Any) -> list[tuple[str, list[str]]]:
 
 CONFIG = WorkspaceAppConfig(
     app_id=APP_ID,
-    db_schema=os.environ.get("TRUSTYCLAW_APP_DB_SCHEMA", "app_virality_machine"),
-    port=int(os.environ.get("TRUSTYCLAW_APP_PORT", "7454")),
+    db_schema=os.environ.get("KERN_APP_DB_SCHEMA", "app_virality_machine"),
+    port=int(os.environ.get("KERN_APP_PORT", "7454")),
     title="Virality Machine",
-    host=os.environ.get("TRUSTYCLAW_APP_HOST", LOOPBACK),
+    host=os.environ.get("KERN_APP_HOST", LOOPBACK),
     admin_api_socket=os.environ.get(
-        "TRUSTYCLAW_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH
+        "KERN_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH
     ),
     setup_brief=REEL_SETUP_BRIEF,
     seed=seed,

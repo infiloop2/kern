@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /mnt/trustyclaw-agent/agent-home
+cd /mnt/kern-agent/agent-home
 
 # Bootstrap installs Hermes's static harness config. This launcher supplies
 # the task-specific region and builds the process boundary:
@@ -35,7 +35,7 @@ if [ "${1:-}" = "--thread-scope" ]; then
     echo "invalid --thread-scope thread id: ${2:-<missing>}" >&2
     exit 64
   fi
-  unit_args=(--unit "trustyclaw-agent-thread-$2")
+  unit_args=(--unit "kern-agent-thread-$2")
   shift 2
 fi
 
@@ -48,16 +48,16 @@ fi
 # to the Hermes runtime.
 
 # SSL_CERT_FILE covers Hermes'\''s httpx clients and AWS_CA_BUNDLE its boto3
-# chain; both point at the system bundle that includes the TrustyClaw proxy
+# chain; both point at the system bundle that includes the Kern proxy
 # CA. IMDS is disabled so the AWS SDKs never wait on the unreachable
 # instance-metadata endpoint before reading the injected signing identity.
-export AWS_ACCESS_KEY_ID="AKIATRUSTYCLAWHERMES"
-export AWS_SECRET_ACCESS_KEY="trustyclaw-bedrock-dummy-secret"
-exec systemd-run --quiet --collect --scope --slice=trustyclaw_agent.slice \
+export AWS_ACCESS_KEY_ID="AKIAKERNHERMES"
+export AWS_SECRET_ACCESS_KEY="kern-bedrock-dummy-secret"
+exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   "${unit_args[@]}" \
-  --property=BindsTo=trustyclaw-admin-api.service \
-  /usr/sbin/runuser -u trustyclaw-agent -- env \
-  HOME=/mnt/trustyclaw-agent/agent-home \
+  --property=BindsTo=kern-admin-api.service \
+  /usr/sbin/runuser -u kern-agent -- env \
+  HOME=/mnt/kern-agent/agent-home \
   AWS_REGION="${region}" \
   HTTP_PROXY=http://127.0.0.1:@PROXY_PORT@ \
   HTTPS_PROXY=http://127.0.0.1:@PROXY_PORT@ \
@@ -67,5 +67,5 @@ exec systemd-run --quiet --collect --scope --slice=trustyclaw_agent.slice \
   AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
   AWS_EC2_METADATA_DISABLED=true \
   /usr/local/lib/hermes-venv/bin/python \
-  /usr/local/lib/trustyclaw-host/hermes-stdin.py \
+  /usr/local/lib/kern-host/hermes-stdin.py \
   "$@"

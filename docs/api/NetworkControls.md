@@ -7,9 +7,9 @@ host opens network access incrementally through `PUT /v1/network/policy`.
 Network controls govern the agent and host service users, not root-owned host
 bootstrap and maintenance work. At the host firewall, root (uid 0) has outbound
 access for package installation, security updates, and ordinary root-owned
-system traffic. The dedicated `trustyclaw-proxy` uid has outbound access only so
+system traffic. The dedicated `kern-proxy` uid has outbound access only so
 it can make policy-approved upstream connections on behalf of the agent. The
-separate `trustyclaw-tools` uid has DNS and HTTPS access for bundled tool
+separate `kern-tools` uid has DNS and HTTPS access for bundled tool
 packages; tool calls follow each action's data policy and approval contract,
 not the agent's domain policy. When a
 Cloudflare Tunnel operator endpoint is configured, the dedicated `cloudflared` uid
@@ -38,7 +38,7 @@ integration.
     "github": {
       "enabled": true,
       "write_repositories": [
-        {"owner": "infiloop2", "repo": "trustyclaw"},
+        {"owner": "infiloop2", "repo": "kern"},
         {"owner": "infiloop2", "repo": "infibot"}
       ]
     },
@@ -181,7 +181,7 @@ alters or gates the relayed bytes.
 {
   "enabled": true,
   "write_repositories": [
-    {"owner": "infiloop2", "repo": "trustyclaw"},
+    {"owner": "infiloop2", "repo": "kern"},
     {"owner": "infiloop2", "repo": "infibot"}
   ]
 }

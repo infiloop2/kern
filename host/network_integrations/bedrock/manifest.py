@@ -38,8 +38,8 @@ def region_host(region: str) -> str:
 # on its ordinary long-term-key path. They carry no AWS
 # capability; the proxy replaces their signature only after the request
 # passes the Bedrock guard.
-ROUTING_ACCESS_KEY_ID = "AKIATRUSTYCLAWHERMES"
-ROUTING_SECRET_ACCESS_KEY = "trustyclaw-bedrock-dummy-secret"
+ROUTING_ACCESS_KEY_ID = "AKIAKERNHERMES"
+ROUTING_SECRET_ACCESS_KEY = "kern-bedrock-dummy-secret"
 
 # Hardcoded on-demand Bedrock inference rates for the session model catalog,
 # in USD per one million (input, output) tokens: US-region serverless pricing

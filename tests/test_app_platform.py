@@ -27,10 +27,10 @@ class AppPlatformTests(unittest.TestCase):
 
         agent_chat = next(app for app in apps if app.id == "agent_chat")
 
-        self.assertEqual(agent_chat.linux_user, "trustyclaw-app-agent_chat")
+        self.assertEqual(agent_chat.linux_user, "kern-app-0")
         self.assertEqual(agent_chat.db_schema, "app_agent_chat")
-        self.assertEqual(agent_chat.db_role, "trustyclaw-app-agent_chat")
-        self.assertEqual(agent_chat.service_name, "trustyclaw-app-agent_chat.service")
+        self.assertEqual(agent_chat.db_role, "kern-app-0")
+        self.assertEqual(agent_chat.service_name, "kern-app-agent_chat.service")
         self.assertEqual(agent_chat.port, APP_PORT_BASE)
         self.assertIn("You are working in Agent Chat", agent_chat.agent_instructions)
         self.assertFalse(agent_chat.agent_api)
@@ -98,39 +98,32 @@ class AppPlatformTests(unittest.TestCase):
         self.assertTrue(builder.agent_api)
         self.assertEqual(builder.release_stage, "stable")
         self.assertEqual(builder.allocation.port_offset, 6)
-        self.assertEqual(builder.linux_user, "trustyclaw-app-6")
-        self.assertEqual(builder.db_role, "trustyclaw-app-6")
-        self.assertLessEqual(
-            len(builder.linux_user.encode()),
-            app_platform.LINUX_ACCOUNT_NAME_LIMIT,
-        )
+        self.assertEqual(builder.linux_user, "kern-app-6")
+        self.assertEqual(builder.db_role, "kern-app-6")
         self.assertIn("dedicated capability worker", builder.agent_instructions)
         for app_id, app in apps.items():
             if app_id != builder.id:
                 self.assertFalse(app.capability_worker, app_id)
 
-    def test_app_account_names_are_bounded_at_thirty_two_bytes(self) -> None:
+    def test_app_account_names_are_always_the_host_slot(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            fits = "a" * (app_platform.LINUX_ACCOUNT_NAME_LIMIT - len(app_platform.APP_ACCOUNT_PREFIX))
-            too_long = "b" * (len(fits) + 1)
-            another_long = "c" * (len(fits) + 1)
-            self._write_minimal_app(root, fits, host_slot=7)
-            self._write_minimal_app(root, too_long, host_slot=8)
-            self._write_minimal_app(root, another_long, host_slot=9)
+            # App ids of any length all resolve to a slot-based account name;
+            # the account name never derives from the app id.
+            short = "aa"
+            long_a = "b" * 40
+            long_b = "c" * 40
+            self._write_minimal_app(root, short, host_slot=7)
+            self._write_minimal_app(root, long_a, host_slot=8)
+            self._write_minimal_app(root, long_b, host_slot=9)
 
             apps = {app.id: app for app in app_platform.installed_apps(root)}
 
-            self.assertEqual(apps[fits].linux_user, f"{app_platform.APP_ACCOUNT_PREFIX}{fits}")
-            self.assertEqual(len(apps[fits].linux_user.encode()), app_platform.LINUX_ACCOUNT_NAME_LIMIT)
-            self.assertEqual(apps[too_long].linux_user, "trustyclaw-app-8")
-            self.assertEqual(apps[another_long].linux_user, "trustyclaw-app-9")
-            self.assertEqual(apps[too_long].db_role, "trustyclaw-app-8")
+            self.assertEqual(apps[short].linux_user, "kern-app-7")
+            self.assertEqual(apps[long_a].linux_user, "kern-app-8")
+            self.assertEqual(apps[long_b].linux_user, "kern-app-9")
+            self.assertEqual(apps[long_a].db_role, "kern-app-8")
             self.assertEqual(len({app.linux_user for app in apps.values()}), 3)
-            self.assertTrue(all(
-                len(app.linux_user.encode()) <= app_platform.LINUX_ACCOUNT_NAME_LIMIT
-                for app in apps.values()
-            ))
 
     def test_installed_apps_have_unique_host_owned_names(self) -> None:
         apps = app_platform.installed_apps()

@@ -49,7 +49,7 @@ SAMPLE_AWS_ENV = {
 
 
 def sample_input_config():  # type: ignore[no-untyped-def]
-    return build_input_config("trustyclaw-test", "us-east-1")
+    return build_input_config("kern-test", "us-east-1")
 
 
 SAMPLE_ADMIN_PASSWORD_SHA256 = "f" * 64
@@ -58,7 +58,7 @@ SAMPLE_ADMIN_PASSWORD_SHA256 = "f" * 64
 def _fake_deploy_key(workdir: object) -> Path:
     key_path = Path(str(workdir)) / "deploy_key"
     key_path.write_text("fake-private-key")
-    key_path.with_suffix(".pub").write_text("ssh-ed25519 AAAADEPLOY trustyclaw-deploy")
+    key_path.with_suffix(".pub").write_text("ssh-ed25519 AAAADEPLOY kern-deploy")
     return key_path
 
 
@@ -88,13 +88,13 @@ class DeployUnitTests(unittest.TestCase):
                 lifecycle_aws._aws_env(config)
 
     def test_build_input_config_validates_name_and_region(self) -> None:
-        config = build_input_config(" trustyclaw-test ", "us-east-1")
-        self.assertEqual(config.agent_name, "trustyclaw-test")
+        config = build_input_config(" kern-test ", "us-east-1")
+        self.assertEqual(config.agent_name, "kern-test")
         self.assertEqual(config.aws_region, "us-east-1")
         with self.assertRaisesRegex(ConfigError, "agent name must be"):
             build_input_config("bad name!", "us-east-1")
         with self.assertRaisesRegex(ConfigError, "AWS region must look like"):
-            build_input_config("trustyclaw-test", "everywhere")
+            build_input_config("kern-test", "everywhere")
 
     def test_build_operator_connections_validates_and_requires_one(self) -> None:
         connections = build_operator_connections(SAMPLE_SSH_PUBLIC_KEY, None, None)
@@ -112,7 +112,7 @@ class DeployUnitTests(unittest.TestCase):
             build_operator_connections("not-a-key", None, None)
         with self.assertRaisesRegex(ConfigError, "exact domain"):
             build_operator_connections(None, "*.example.com", "token-value")
-        with self.assertRaisesRegex(ConfigError, "TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN"):
+        with self.assertRaisesRegex(ConfigError, "KERN_CLOUDFLARE_TUNNEL_TOKEN"):
             build_operator_connections(None, "agent.example.com", None)
         with self.assertRaisesRegex(ConfigError, "single Cloudflare tunnel token"):
             build_operator_connections(None, "agent.example.com", "two tokens")
@@ -194,8 +194,8 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("--tag-specifications", create_group)
         tag_spec = create_group[create_group.index("--tag-specifications") + 1]
         self.assertIn("ResourceType=security-group", tag_spec)
-        self.assertIn("Key=trustyclaw-host,Value=true", tag_spec)
-        self.assertIn("Key=trustyclaw-host-agent-name,Value=trustyclaw-test", tag_spec)
+        self.assertIn("Key=kern-host,Value=true", tag_spec)
+        self.assertIn("Key=kern-host-agent-name,Value=kern-test", tag_spec)
         self.assertEqual(create_tags, [])
         self.assertEqual(len(ingress), 1)
         self.assertIn('"FromPort": 22', ingress[0][-1])
@@ -266,7 +266,7 @@ class DeployUnitTests(unittest.TestCase):
                     try:
                         with patch.dict(
                             os.environ,
-                            {**SAMPLE_AWS_ENV, "TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN": "token-value"},
+                            {**SAMPLE_AWS_ENV, "KERN_CLOUDFLARE_TUNNEL_TOKEN": "token-value"},
                         ), \
                                 patch("host.cli.lifecycle._existing_storage_volume_availability_zone", return_value=None), \
                                 patch("host.cli.lifecycle._find_existing_instances", return_value=[]), \
@@ -288,7 +288,7 @@ class DeployUnitTests(unittest.TestCase):
                             self.assertEqual(
                                 deploy.main_for_mode(
                                     "deploy",
-                                    ["--agent-name", "trustyclaw-test", *operator_args],
+                                    ["--agent-name", "kern-test", *operator_args],
                                 ),
                                 0,
                             )
@@ -308,7 +308,7 @@ class DeployUnitTests(unittest.TestCase):
                 else:
                     ssh_ingress.assert_not_called()
 
-    def test_existing_instance_lookup_requires_trustyclaw_owner_tag(self) -> None:
+    def test_existing_instance_lookup_requires_kern_owner_tag(self) -> None:
         config = sample_input_config()
         calls: list[tuple[str, ...]] = []
 
@@ -320,8 +320,8 @@ class DeployUnitTests(unittest.TestCase):
             self.assertEqual(deploy._find_existing_instances(config, {}), ["i-owned"])
 
         filters = calls[0][calls[0].index("--filters") + 1:]
-        self.assertIn("Name=tag:trustyclaw-host-agent-name,Values=trustyclaw-test", filters)
-        self.assertIn("Name=tag:trustyclaw-host,Values=true", filters)
+        self.assertIn("Name=tag:kern-host-agent-name,Values=kern-test", filters)
+        self.assertIn("Name=tag:kern-host,Values=true", filters)
 
     def test_existing_security_group_without_owner_tag_is_rejected(self) -> None:
         config = sample_input_config()
@@ -334,37 +334,37 @@ class DeployUnitTests(unittest.TestCase):
             return {}
 
         with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
-            with self.assertRaisesRegex(ConfigError, "not tagged as a TrustyClaw resource"):
+            with self.assertRaisesRegex(ConfigError, "not tagged as a Kern resource"):
                 deploy._ensure_security_group(config, {}, "vpc-1", ssh_ingress=True, cloudflare_egress=True)
 
-    def test_iam_policies_restrict_trustyclaw_resource_access(self) -> None:
+    def test_iam_policies_restrict_kern_resource_access(self) -> None:
         policy = json.loads(Path("iam_policy.json").read_text())
         smoke_policy = json.loads(Path("tests/smoke/iam_policy_smoke.json").read_text())
         stage_policy = json.loads(Path("tests/stage/iam_policy_stage.json").read_text())
-        for scoped_policy, agent_name in ((smoke_policy, "trustyclaw-smoke"), (stage_policy, "trustyclaw-stage")):
+        for scoped_policy, agent_name in ((smoke_policy, "kern-smoke"), (stage_policy, "kern-stage")):
             policy_without_agent_name = copy.deepcopy(scoped_policy)
             scoped_statements = {statement["Sid"]: statement for statement in policy_without_agent_name["Statement"]}
             self.assertEqual(
-                scoped_statements["CreateTaggedTrustyClawResources"]["Condition"]["StringEquals"].pop(
-                    "aws:RequestTag/trustyclaw-host-agent-name"
+                scoped_statements["CreateTaggedKernResources"]["Condition"]["StringEquals"].pop(
+                    "aws:RequestTag/kern-host-agent-name"
                 ),
                 agent_name,
             )
             self.assertEqual(
-                scoped_statements["RunInstancesWithTrustyClawSecurityGroups"]["Condition"]["StringEquals"].pop(
-                    "aws:ResourceTag/trustyclaw-host-agent-name"
+                scoped_statements["RunInstancesWithKernSecurityGroups"]["Condition"]["StringEquals"].pop(
+                    "aws:ResourceTag/kern-host-agent-name"
                 ),
                 agent_name,
             )
             self.assertEqual(
-                scoped_statements["TagOnlyDuringTrustyClawResourceCreation"]["Condition"]["StringEquals"].pop(
-                    "aws:RequestTag/trustyclaw-host-agent-name"
+                scoped_statements["TagOnlyDuringKernResourceCreation"]["Condition"]["StringEquals"].pop(
+                    "aws:RequestTag/kern-host-agent-name"
                 ),
                 agent_name,
             )
             self.assertEqual(
-                scoped_statements["ManageOnlyTrustyClawResources"]["Condition"]["StringEquals"].pop(
-                    "aws:ResourceTag/trustyclaw-host-agent-name"
+                scoped_statements["ManageOnlyKernResources"]["Condition"]["StringEquals"].pop(
+                    "aws:ResourceTag/kern-host-agent-name"
                 ),
                 agent_name,
             )
@@ -390,16 +390,16 @@ class DeployUnitTests(unittest.TestCase):
         self.assertNotIn("ec2:AuthorizeSecurityGroupIngress", discovery_actions)
         self.assertNotIn("ec2:AuthorizeSecurityGroupEgress", discovery_actions)
 
-        create_statement = statements["CreateTaggedTrustyClawResources"]
+        create_statement = statements["CreateTaggedKernResources"]
         create_conditions = create_statement["Condition"]
         self.assertEqual(
             sorted(create_statement["Action"]),
             ["ec2:CreateSecurityGroup", "ec2:CreateVolume", "ec2:RunInstances"],
         )
         self.assertEqual(create_statement["Resource"], "*")
-        self.assertEqual(create_conditions["StringEquals"]["aws:RequestTag/trustyclaw-host"], "true")
+        self.assertEqual(create_conditions["StringEquals"]["aws:RequestTag/kern-host"], "true")
         self.assertNotIn("ec2:InstanceType", create_conditions["StringEquals"])
-        self.assertNotIn("aws:RequestTag/trustyclaw-host-volume-role", create_conditions["StringEquals"])
+        self.assertNotIn("aws:RequestTag/kern-host-volume-role", create_conditions["StringEquals"])
         self.assertNotIn("ForAllValues:StringEquals", create_conditions)
 
         dependency_statement = statements["UseEc2CreateDependencies"]
@@ -418,25 +418,25 @@ class DeployUnitTests(unittest.TestCase):
         )
         self.assertNotIn("Condition", dependency_statement)
 
-        launch_security_group_statement = statements["RunInstancesWithTrustyClawSecurityGroups"]
+        launch_security_group_statement = statements["RunInstancesWithKernSecurityGroups"]
         self.assertEqual(launch_security_group_statement["Action"], "ec2:RunInstances")
         self.assertEqual(launch_security_group_statement["Resource"], "arn:aws:ec2:*:*:security-group/*")
         self.assertEqual(
-            launch_security_group_statement["Condition"]["StringEquals"]["aws:ResourceTag/trustyclaw-host"],
+            launch_security_group_statement["Condition"]["StringEquals"]["aws:ResourceTag/kern-host"],
             "true",
         )
 
-        tag_statement = statements["TagOnlyDuringTrustyClawResourceCreation"]
+        tag_statement = statements["TagOnlyDuringKernResourceCreation"]
         self.assertEqual(tag_statement["Action"], "ec2:CreateTags")
         tag_conditions = tag_statement["Condition"]
-        self.assertEqual(tag_conditions["StringEquals"]["aws:RequestTag/trustyclaw-host"], "true")
+        self.assertEqual(tag_conditions["StringEquals"]["aws:RequestTag/kern-host"], "true")
         self.assertEqual(
             sorted(tag_conditions["StringEquals"]["ec2:CreateAction"]),
             ["CreateSecurityGroup", "CreateVolume", "RunInstances"],
         )
         self.assertNotIn("ForAllValues:StringEquals", tag_conditions)
 
-        manage_statement = statements["ManageOnlyTrustyClawResources"]
+        manage_statement = statements["ManageOnlyKernResources"]
         self.assertEqual(
             sorted(manage_statement["Action"]),
             [
@@ -455,7 +455,7 @@ class DeployUnitTests(unittest.TestCase):
             ],
         )
         self.assertEqual(manage_statement["Resource"], "*")
-        self.assertEqual(manage_statement["Condition"]["StringEquals"]["aws:ResourceTag/trustyclaw-host"], "true")
+        self.assertEqual(manage_statement["Condition"]["StringEquals"]["aws:ResourceTag/kern-host"], "true")
 
         self.assertEqual(
             statements["UbuntuAmiLookup"]["Resource"],
@@ -567,7 +567,7 @@ class DeployUnitTests(unittest.TestCase):
                 ]
             },
         ):
-            with self.assertRaisesRegex(ConfigError, "multiple TrustyClaw admin volumes"):
+            with self.assertRaisesRegex(ConfigError, "multiple Kern admin volumes"):
                 deploy._find_available_storage_volume(config, {}, "admin", "us-east-1a")
 
     def test_existing_storage_volumes_are_preserved_before_instance_termination(self) -> None:
@@ -577,7 +577,7 @@ class DeployUnitTests(unittest.TestCase):
         def fake_aws(_env, *args):  # type: ignore[no-untyped-def]
             calls.append(args)
             if args[:2] == ("ec2", "describe-volumes"):
-                role = next(arg for arg in args if arg.startswith("Name=tag:trustyclaw-host-volume-role,Values="))
+                role = next(arg for arg in args if arg.startswith("Name=tag:kern-host-volume-role,Values="))
                 if role.endswith("admin"):
                     return {"Volumes": [{"VolumeId": "vol-admin", "State": "in-use", "AvailabilityZone": "us-east-1a"}]}
                 return {"Volumes": [{"VolumeId": "vol-agent", "State": "in-use", "AvailabilityZone": "us-east-1a"}]}
@@ -684,7 +684,7 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle._set_security_group_ssh_ingress"), \
                         patch("host.cli.lifecycle_aws._aws", return_value={}), \
                         patch("sys.stdout", _StringOutput()):
-                    self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "trustyclaw-test"]), 0)
+                    self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "kern-test"]), 0)
             finally:
                 os.chdir(cwd)
 
@@ -714,7 +714,7 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle._launch_instance", side_effect=AssertionError("_launch_instance should not run")), \
                         patch("sys.stdout", _StringOutput()), \
                         patch("sys.stderr", _StringOutput()):
-                    self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "trustyclaw-test"]), 2)
+                    self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "kern-test"]), 2)
             finally:
                 os.chdir(cwd)
 
@@ -758,7 +758,7 @@ class DeployUnitTests(unittest.TestCase):
                                                     {
                                                         "InstanceId": "i-old",
                                                         "Tags": [
-                                                            {"Key": "trustyclaw-host-version", "Value": tagged_version},
+                                                            {"Key": "kern-host-version", "Value": tagged_version},
                                                         ],
                                                     }
                                                 ]
@@ -772,7 +772,7 @@ class DeployUnitTests(unittest.TestCase):
                                 patch("sys.stdout", _StringOutput()), \
                                 patch("sys.stderr", _StringOutput()) as stderr:
                             self.assertEqual(
-                                deploy.main_for_mode(mode, ["--agent-name", "trustyclaw-test", *extra_args]), 2
+                                deploy.main_for_mode(mode, ["--agent-name", "kern-test", *extra_args]), 2
                             )
                     finally:
                         os.chdir(cwd)
@@ -782,18 +782,18 @@ class DeployUnitTests(unittest.TestCase):
 
     def test_version_tag_guard_allows_compatible_tags(self) -> None:
         config = sample_input_config()
-        command = deploy.LifecycleCommand(mode="recover", agent_name="trustyclaw-test", allow_upgrade=True)
+        command = deploy.LifecycleCommand(mode="recover", agent_name="kern-test", allow_upgrade=True)
         response = {
             "Reservations": [
                 {
                     "Instances": [
                         {
                             "InstanceId": "i-same",
-                            "Tags": [{"Key": "trustyclaw-host-version", "Value": "0.6.0"}],
+                            "Tags": [{"Key": "kern-host-version", "Value": "0.6.0"}],
                         },
                         {
                             "InstanceId": "i-older",
-                            "Tags": [{"Key": "trustyclaw-host-version", "Value": "0.5.0"}],
+                            "Tags": [{"Key": "kern-host-version", "Value": "0.5.0"}],
                         },
                     ]
                 }
@@ -806,15 +806,15 @@ class DeployUnitTests(unittest.TestCase):
     def test_version_tag_guard_rejects_mode_specific_bootstrap_failures_before_replacement(self) -> None:
         config = sample_input_config()
         cases = [
-            (deploy.LifecycleCommand(mode="upgrade", agent_name="trustyclaw-test"), "0.6.0", "older than target VERSION"),
-            (deploy.LifecycleCommand(mode="recover", agent_name="trustyclaw-test"), "0.5.0", "match target VERSION"),
+            (deploy.LifecycleCommand(mode="upgrade", agent_name="kern-test"), "0.6.0", "older than target VERSION"),
+            (deploy.LifecycleCommand(mode="recover", agent_name="kern-test"), "0.5.0", "match target VERSION"),
             (
-                deploy.LifecycleCommand(mode="reconfigure", agent_name="trustyclaw-test"),
+                deploy.LifecycleCommand(mode="reconfigure", agent_name="kern-test"),
                 "0.5.0",
                 "reconfigure requires preserved state to match",
             ),
             (
-                deploy.LifecycleCommand(mode="recover", agent_name="trustyclaw-test", allow_upgrade=True),
+                deploy.LifecycleCommand(mode="recover", agent_name="kern-test", allow_upgrade=True),
                 "0.7.0",
                 "cannot move preserved state backward",
             ),
@@ -827,7 +827,7 @@ class DeployUnitTests(unittest.TestCase):
                             "Instances": [
                                 {
                                     "InstanceId": "i-tagged",
-                                    "Tags": [{"Key": "trustyclaw-host-version", "Value": tagged_version}],
+                                    "Tags": [{"Key": "kern-host-version", "Value": tagged_version}],
                                 }
                             ]
                         }
@@ -839,21 +839,21 @@ class DeployUnitTests(unittest.TestCase):
 
     def test_version_tag_guard_rejects_invalid_tags_before_replacement(self) -> None:
         config = sample_input_config()
-        command = deploy.LifecycleCommand(mode="recover", agent_name="trustyclaw-test", allow_upgrade=True)
+        command = deploy.LifecycleCommand(mode="recover", agent_name="kern-test", allow_upgrade=True)
         response = {
             "Reservations": [
                 {
                     "Instances": [
                         {
                             "InstanceId": "i-invalid",
-                            "Tags": [{"Key": "trustyclaw-host-version", "Value": "not-a-version"}],
+                            "Tags": [{"Key": "kern-host-version", "Value": "not-a-version"}],
                         }
                     ]
                 }
             ]
         }
         with patch("host.cli.lifecycle_aws._aws", return_value=response):
-            with self.assertRaisesRegex(ConfigError, "invalid trustyclaw-host-version tag"):
+            with self.assertRaisesRegex(ConfigError, "invalid kern-host-version tag"):
                 deploy._check_existing_version_hints(command, config, {}, ["i-invalid"], "0.1.0")
 
     def test_reconfigure_passes_admin_password_hash_and_operator_connections(self) -> None:
@@ -886,7 +886,7 @@ class DeployUnitTests(unittest.TestCase):
                             "reconfigure",
                             [
                                 "--agent-name",
-                                "trustyclaw-test",
+                                "kern-test",
                                 "--operator-ssh-public-key",
                                 SAMPLE_SSH_PUBLIC_KEY,
                                 "--admin-password-sha256",
@@ -937,7 +937,7 @@ class DeployUnitTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 with patch("sys.stderr", _StringOutput()) as stderr:
                     with self.assertRaises(SystemExit) as raised:
-                        deploy._parse_args("deploy", ["--agent-name", "trustyclaw-test", "--admin-password-sha256", empty_digest])
+                        deploy._parse_args("deploy", ["--agent-name", "kern-test", "--admin-password-sha256", empty_digest])
                 self.assertEqual(raised.exception.code, 2)
                 self.assertIn("SHA-256 of an empty password", stderr.value)
 
@@ -946,7 +946,7 @@ class DeployUnitTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 with patch("sys.stderr", _StringOutput()) as stderr:
                     with self.assertRaises(SystemExit) as raised:
-                        deploy._parse_args(mode, ["--agent-name", "trustyclaw-test"])
+                        deploy._parse_args(mode, ["--agent-name", "kern-test"])
                 self.assertEqual(raised.exception.code, 2)
                 self.assertIn("--admin-password-sha256", stderr.value)
 
@@ -960,7 +960,7 @@ class DeployUnitTests(unittest.TestCase):
                     "reconfigure",
                     [
                         "--agent-name",
-                        "trustyclaw-test",
+                        "kern-test",
                         "--admin-password-sha256",
                         SAMPLE_ADMIN_PASSWORD_SHA256,
                     ],
@@ -1009,14 +1009,14 @@ class DeployUnitTests(unittest.TestCase):
                 patch("sys.stdout", _StringOutput()) as stdout,
             ):
                 self.assertEqual(
-                    power.main_for_power_mode("start", ["--agent-name", "trustyclaw-test"]),
+                    power.main_for_power_mode("start", ["--agent-name", "kern-test"]),
                     0,
                 )
 
             self.assertIn(("ec2", "start-instances", "--instance-ids", "i-stage"), calls)
             self.assertIn(("ec2", "wait", "instance-running", "--instance-ids", "i-stage"), calls)
             result = json.loads(stdout.value)
-            self.assertEqual(result["agent_name"], "trustyclaw-test")
+            self.assertEqual(result["agent_name"], "kern-test")
             self.assertEqual(result["instance_id"], "i-stage")
             self.assertEqual(result["state"], "running")
             self.assertEqual(result["public_dns"], "stage.example.com")
@@ -1059,7 +1059,7 @@ class DeployUnitTests(unittest.TestCase):
                 patch("sys.stdout", _StringOutput()) as stdout,
             ):
                 self.assertEqual(
-                    power.main_for_power_mode("stop", ["--agent-name", "trustyclaw-test"]),
+                    power.main_for_power_mode("stop", ["--agent-name", "kern-test"]),
                     0,
                 )
 
@@ -1073,7 +1073,7 @@ class DeployUnitTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised:
                 power.main_for_power_mode(
                     "start",
-                    ["--agent-name", "trustyclaw-test", "--operator-ssh-public-key", SAMPLE_SSH_PUBLIC_KEY],
+                    ["--agent-name", "kern-test", "--operator-ssh-public-key", SAMPLE_SSH_PUBLIC_KEY],
                 )
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("unrecognized arguments", stderr.value)
@@ -1103,14 +1103,14 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle_aws._aws", return_value={}), \
                         patch("sys.stderr", _StringOutput()), \
                         patch("sys.stdout", _StringOutput()) as stdout:
-                    self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "trustyclaw-test"]), 0)
+                    self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "kern-test"]), 0)
             finally:
                 os.chdir(cwd)
 
             # stdout carries exactly the result JSON; no files are written and
             # nothing secret appears.
             upgrade_result = json.loads(stdout.value)
-            self.assertEqual(upgrade_result["agent_name"], "trustyclaw-test")
+            self.assertEqual(upgrade_result["agent_name"], "kern-test")
             self.assertEqual(upgrade_result["version"], deploy.repo_version())
             self.assertNotIn("admin_password", upgrade_result)
             self.assertNotIn("operator_connections", upgrade_result)
@@ -1149,7 +1149,7 @@ class DeployUnitTests(unittest.TestCase):
                             "deploy",
                             [
                                 "--agent-name",
-                                "trustyclaw-test",
+                                "kern-test",
                                 "--operator-ssh-public-key",
                                 SAMPLE_SSH_PUBLIC_KEY,
                                 "--admin-password-sha256",
@@ -1169,18 +1169,18 @@ class DeployUnitTests(unittest.TestCase):
 
     def test_preflight_deploy_rejects_preserved_resources(self) -> None:
         config = sample_input_config()
-        command = deploy.LifecycleCommand(mode="deploy", agent_name="trustyclaw-test")
-        with self.assertRaisesRegex(ConfigError, "no existing TrustyClaw instance"):
+        command = deploy.LifecycleCommand(mode="deploy", agent_name="kern-test")
+        with self.assertRaisesRegex(ConfigError, "no existing Kern instance"):
             deploy._validate_command_preflight(command, config, ["i-old"], set())
-        with self.assertRaisesRegex(ConfigError, "no existing TrustyClaw data volumes"):
+        with self.assertRaisesRegex(ConfigError, "no existing Kern data volumes"):
             deploy._validate_command_preflight(command, config, [], {"admin"})
         with self.assertRaisesRegex(ConfigError, "previous first-time deploy failed"):
             deploy._validate_command_preflight(command, config, [], {"admin", "agent"})
 
     def test_preflight_reconfigure_requires_existing_instance(self) -> None:
         config = sample_input_config()
-        command = deploy.LifecycleCommand(mode="reconfigure", agent_name="trustyclaw-test")
-        with self.assertRaisesRegex(ConfigError, "reconfigure requires an existing TrustyClaw instance"):
+        command = deploy.LifecycleCommand(mode="reconfigure", agent_name="kern-test")
+        with self.assertRaisesRegex(ConfigError, "reconfigure requires an existing Kern instance"):
             deploy._validate_command_preflight(command, config, [], {"admin", "agent"})
         deploy._validate_command_preflight(command, config, ["i-old"], {"admin", "agent"})
 
@@ -1193,12 +1193,12 @@ class DeployUnitTests(unittest.TestCase):
             mode="deploy",
             target_version="0.35.0",
         )
-        user_data = render._render_ssh_user_data(payload, "ssh-ed25519 AAAADEPLOY trustyclaw-deploy")
+        user_data = render._render_ssh_user_data(payload, "ssh-ed25519 AAAADEPLOY kern-deploy")
 
         self.assertLess(len(user_data.encode()), 16_384)
-        self.assertIn("useradd --create-home --shell /bin/bash trustyclaw-operator", user_data)
-        self.assertIn("ssh-ed25519 AAAADEPLOY trustyclaw-deploy", user_data)
-        self.assertIn("trustyclaw-operator ALL=(ALL) NOPASSWD:ALL", user_data)
+        self.assertIn("useradd --create-home --shell /bin/bash kern-operator", user_data)
+        self.assertIn("ssh-ed25519 AAAADEPLOY kern-deploy", user_data)
+        self.assertIn("kern-operator ALL=(ALL) NOPASSWD:ALL", user_data)
         self.assertIn("gpasswd -d ubuntu sudo", user_data)
         # Both deliveries stage the same payload through user data; the host
         # receives only the password hash.
@@ -1209,7 +1209,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertNotIn("@DEPLOY_PUBLIC_KEY@", user_data)
 
     def test_bootstrap_from_github_flag_validation(self) -> None:
-        base = ["--agent-name", "trustyclaw-test", "--admin-password-sha256", SAMPLE_ADMIN_PASSWORD_SHA256]
+        base = ["--agent-name", "kern-test", "--admin-password-sha256", SAMPLE_ADMIN_PASSWORD_SHA256]
         parsed = deploy._parse_args("deploy", [*base, "--bootstrap-from-github", "a" * 40])
         self.assertEqual(parsed.github_commit_sha, "a" * 40)
         # Without a value the flag pins the latest main commit.
@@ -1220,7 +1220,7 @@ class DeployUnitTests(unittest.TestCase):
         for argv, message in (
             ([*base, "--bootstrap-from-github", "abc123"], "lowercase hex commit sha"),
             ([*base, "--bootstrap-from-github", "A" * 40], "lowercase hex commit sha"),
-            (["--agent-name", "trustyclaw-test", "--admin-password-sha256", "zz"], "hex SHA-256 digest"),
+            (["--agent-name", "kern-test", "--admin-password-sha256", "zz"], "hex SHA-256 digest"),
         ):
             with self.subTest(argv=argv):
                 with patch("sys.stderr", _StringOutput()) as stderr:
@@ -1246,7 +1246,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertLess(len(user_data.encode()), 16_384)
         embedded = next(line for line in user_data.splitlines() if line.startswith("{"))
         self.assertEqual(json.loads(embedded), payload)
-        self.assertIn("https://github.com/infiloop2/trustyclaw.git", user_data)
+        self.assertIn("https://github.com/infiloop2/kern.git", user_data)
         self.assertIn("git fetch -q --depth 1 origin '" + "b" * 40 + "'", user_data)
         self.assertIn("python3 -m host.bootstrap.self_provision", user_data)
         # The CLI preflight already proved the commit readable, so host-side
@@ -1254,7 +1254,7 @@ class DeployUnitTests(unittest.TestCase):
         # extended window instead of bricking the instance.
         self.assertEqual(user_data.count("for attempt in $(seq 1 60); do"), 2)
         self.assertIn("sleep 30", user_data)
-        self.assertIn("useradd --create-home --shell /bin/bash trustyclaw-operator", user_data)
+        self.assertIn("useradd --create-home --shell /bin/bash kern-operator", user_data)
         self.assertIn("gpasswd -d ubuntu sudo", user_data)
         # The host receives only the password hash, and no deploy key exists
         # in this delivery.
@@ -1297,7 +1297,7 @@ class DeployUnitTests(unittest.TestCase):
                             "deploy",
                             [
                                 "--agent-name",
-                                "trustyclaw-test",
+                                "kern-test",
                                 "--operator-ssh-public-key",
                                 SAMPLE_SSH_PUBLIC_KEY,
                                 "--admin-password-sha256",
@@ -1324,7 +1324,7 @@ class DeployUnitTests(unittest.TestCase):
             self.assertEqual(payload["storage_volumes"], {"admin": "vol-admin", "agent": "vol-agent"})
             self.assertEqual(payload["runtime_config"]["admin_password_sha256"], SAMPLE_ADMIN_PASSWORD_SHA256)
             result = json.loads(stdout.value)
-            self.assertEqual(result["github_source"], "infiloop2/trustyclaw@" + "c" * 40)
+            self.assertEqual(result["github_source"], "infiloop2/kern@" + "c" * 40)
             self.assertNotIn("admin_password", result)
 
     def test_github_upgrade_reapplies_previous_security_group_state(self) -> None:
@@ -1364,7 +1364,7 @@ class DeployUnitTests(unittest.TestCase):
                             self.assertEqual(
                                 deploy.main_for_mode(
                                     "upgrade",
-                                    ["--agent-name", "trustyclaw-test", "--bootstrap-from-github", "d" * 40],
+                                    ["--agent-name", "kern-test", "--bootstrap-from-github", "d" * 40],
                                 ),
                                 0,
                             )
@@ -1396,17 +1396,17 @@ class DeployUnitTests(unittest.TestCase):
                 patch("builtins.input", return_value="y"), \
                 patch("sys.stderr", _StringOutput()) as stderr:
             self.assertEqual(deploy._resolve_github_pin(sha), (sha, "0.36.0"))
-        self.assertIn("raw.githubusercontent.com/infiloop2/trustyclaw/" + sha, urlopen.call_args.args[0])
-        self.assertIn("Proceed with TrustyClaw 0.36.0?", stderr.value)
+        self.assertIn("raw.githubusercontent.com/infiloop2/kern/" + sha, urlopen.call_args.args[0])
+        self.assertIn("Proceed with Kern 0.36.0?", stderr.value)
 
         # No sha: the latest main commit is resolved first, then confirmed.
         def fake_urlopen(request, timeout=0):  # type: ignore[no-untyped-def]
             del timeout
             url = request if isinstance(request, str) else request.full_url
             if url.startswith("https://api.github.com/"):
-                self.assertIn("/repos/infiloop2/trustyclaw/commits/main", url)
+                self.assertIn("/repos/infiloop2/kern/commits/main", url)
                 return _FakeResponse(json.dumps({"sha": sha}).encode())
-            self.assertIn("raw.githubusercontent.com/infiloop2/trustyclaw/" + sha, url)
+            self.assertIn("raw.githubusercontent.com/infiloop2/kern/" + sha, url)
             return _FakeResponse(b"0.36.0\n")
 
         with patch("host.cli.lifecycle.urllib.request.urlopen", side_effect=fake_urlopen), \
@@ -1550,17 +1550,17 @@ class DeployUnitTests(unittest.TestCase):
     def test_rendered_bootstrap_contains_privilege_boundary(self) -> None:
         bootstrap = render._render_bootstrap()
 
-        self.assertIn("ADMIN_MOUNT=/mnt/trustyclaw-admin", bootstrap)
-        self.assertIn('PGDATA_DIR="/mnt/trustyclaw-admin/postgres/${PG_MAJOR}/main"', bootstrap)
-        self.assertIn("PROXY_STATE_DIR=/mnt/trustyclaw-admin/proxy-state", bootstrap)
-        self.assertIn("AGENT_MOUNT=/mnt/trustyclaw-agent", bootstrap)
-        self.assertIn("AGENT_HOME_PATH=/mnt/trustyclaw-agent/agent-home", bootstrap)
+        self.assertIn("ADMIN_MOUNT=/mnt/kern-admin", bootstrap)
+        self.assertIn('PGDATA_DIR="/mnt/kern-admin/postgres/${PG_MAJOR}/main"', bootstrap)
+        self.assertIn("PROXY_STATE_DIR=/mnt/kern-admin/proxy-state", bootstrap)
+        self.assertIn("AGENT_MOUNT=/mnt/kern-agent", bootstrap)
+        self.assertIn("AGENT_HOME_PATH=/mnt/kern-agent/agent-home", bootstrap)
         self.assertIn("admin_volume_id=\"$(payload_value storage_volumes.admin)\"", bootstrap)
-        self.assertIn("prepare_volume \"$admin_volume_id\" \"$ADMIN_MOUNT\" TRUSTYCLAW_ADMIN", bootstrap)
-        self.assertIn("prepare_volume \"$agent_volume_id\" \"$AGENT_MOUNT\" TRUSTYCLAW_AGENT", bootstrap)
-        self.assertIn("TRUSTYCLAW_ADMIN_UID=47741", bootstrap)
-        self.assertIn("TRUSTYCLAW_PROXY_UID=47742", bootstrap)
-        self.assertIn("TRUSTYCLAW_AGENT_UID=47743", bootstrap)
+        self.assertIn("prepare_volume \"$admin_volume_id\" \"$ADMIN_MOUNT\" KERN_ADMIN", bootstrap)
+        self.assertIn("prepare_volume \"$agent_volume_id\" \"$AGENT_MOUNT\" KERN_AGENT", bootstrap)
+        self.assertIn("KERN_ADMIN_UID=47741", bootstrap)
+        self.assertIn("KERN_PROXY_UID=47742", bootstrap)
+        self.assertIn("KERN_AGENT_UID=47743", bootstrap)
         self.assertIn("CLOUDFLARED_UID=47744", bootstrap)
         self.assertIn("CLOUDFLARED_GID=47744", bootstrap)
         # The postgres uid is pinned before the packages install: preserved
@@ -1568,8 +1568,8 @@ class DeployUnitTests(unittest.TestCase):
         # across root-volume replacement.
         self.assertIn("POSTGRES_UID=47745", bootstrap)
         self.assertIn("App package host_slot values generate stable UID/GID assignments", bootstrap)
-        self.assertIn("TRUSTYCLAW_APP_AGENT_CHAT_UID=48000", bootstrap)
-        self.assertIn("TRUSTYCLAW_APP_AGENT_CHAT_GID=48000", bootstrap)
+        self.assertIn("KERN_APP_AGENT_CHAT_UID=48000", bootstrap)
+        self.assertIn("KERN_APP_AGENT_CHAT_GID=48000", bootstrap)
         self.assertIn("App ports are generated from the same package-local host_slot values", bootstrap)
         self.assertIn("APP_AGENT_CHAT_PORT=7450", bootstrap)
         # The four ecosystem apps take stable host slots 2-5, so their UIDs and
@@ -1580,27 +1580,32 @@ class DeployUnitTests(unittest.TestCase):
             ("VIRALITY_MACHINE", 4),
             ("SOFTWARE_BUILDER", 5),
         ):
-            self.assertIn(f"TRUSTYCLAW_APP_{app_id}_UID={48000 + slot}", bootstrap)
-            self.assertIn(f"TRUSTYCLAW_APP_{app_id}_GID={48000 + slot}", bootstrap)
+            self.assertIn(f"KERN_APP_{app_id}_UID={48000 + slot}", bootstrap)
+            self.assertIn(f"KERN_APP_{app_id}_GID={48000 + slot}", bootstrap)
             self.assertIn(f"APP_{app_id}_PORT={7450 + slot}", bootstrap)
-        for app_id in ("alpha_seeker", "social_marketer", "virality_machine", "software_builder"):
-            self.assertIn(f"User=trustyclaw-app-{app_id}", bootstrap)
-            self.assertIn(f"trustyclaw-app-{app_id}.service", bootstrap)
+        for app_id, slot in (
+            ("alpha_seeker", 2),
+            ("social_marketer", 3),
+            ("virality_machine", 4),
+            ("software_builder", 5),
+        ):
+            self.assertIn(f"User=kern-app-{slot}", bootstrap)
+            self.assertIn(f"kern-app-{app_id}.service", bootstrap)
             self.assertIn(f"python3 -m host.runtime.deploy.app_migrate pending {app_id}", bootstrap)
         self.assertIn(
-            'ensure_group trustyclaw-app-6 "$TRUSTYCLAW_APP_PERSONAL_WEB_APP_BUILDER_GID"',
+            'ensure_group kern-app-6 "$KERN_APP_PERSONAL_WEB_APP_BUILDER_GID"',
             bootstrap,
         )
-        self.assertIn("User=trustyclaw-app-6", bootstrap)
-        self.assertIn("trustyclaw-app-personal_web_app_builder.service", bootstrap)
-        self.assertNotIn("ensure_group trustyclaw-app-personal_web_app_builder", bootstrap)
+        self.assertIn("User=kern-app-6", bootstrap)
+        self.assertIn("kern-app-personal_web_app_builder.service", bootstrap)
+        self.assertNotIn("ensure_group kern-app-personal_web_app_builder", bootstrap)
         self.assertIn("ensure_user postgres \"$POSTGRES_UID\" postgres /var/lib/postgresql", bootstrap)
         self.assertLess(
             bootstrap.index('ensure_user postgres "$POSTGRES_UID"'),
             bootstrap.index('apt-get install -y -qq "postgresql-${PG_MAJOR}"'),
         )
-        self.assertIn("ensure_group trustyclaw-admin \"$TRUSTYCLAW_ADMIN_GID\"", bootstrap)
-        self.assertIn("ensure_user trustyclaw-agent \"$TRUSTYCLAW_AGENT_UID\" trustyclaw-agent /mnt/trustyclaw-agent/agent-home", bootstrap)
+        self.assertIn("ensure_group kern-admin \"$KERN_ADMIN_GID\"", bootstrap)
+        self.assertIn("ensure_user kern-agent \"$KERN_AGENT_UID\" kern-agent /mnt/kern-agent/agent-home", bootstrap)
         self.assertNotIn("remap_preserved_tree_owner", bootstrap)
         self.assertNotIn("-uid \"$old_uid\"", bootstrap)
         self.assertIn("def ensure_regular_file_slot(path: Path) -> None:", bootstrap)
@@ -1611,83 +1616,83 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn('recreate_directory(proxy_state / "generated-certs")', bootstrap)
         self.assertIn("mkfs.ext4 -F -L \"$label\" \"$device\"", bootstrap)
         self.assertIn("UUID=${uuid} ${mount_point} ext4 defaults,nofail 0 2", bootstrap)
-        self.assertNotIn("/var/lib/trustyclaw-host", bootstrap)
+        self.assertNotIn("/var/lib/kern-host", bootstrap)
         self.assertNotIn("ln -s", bootstrap)
         self.assertIn('useradd --uid "$uid" --gid "$group" $extra_args --home-dir "$home" --no-create-home --shell /usr/sbin/nologin "$name"', bootstrap)
-        self.assertIn("ensure_user trustyclaw-proxy \"$TRUSTYCLAW_PROXY_UID\" trustyclaw-proxy /mnt/trustyclaw-admin/proxy-state", bootstrap)
+        self.assertIn("ensure_user kern-proxy \"$KERN_PROXY_UID\" kern-proxy /mnt/kern-admin/proxy-state", bootstrap)
         self.assertIn("ensure_user cloudflared \"$CLOUDFLARED_UID\" cloudflared /nonexistent", bootstrap)
-        self.assertIn("ensure_user trustyclaw-app-agent_chat \"$TRUSTYCLAW_APP_AGENT_CHAT_UID\" trustyclaw-app-agent_chat /nonexistent", bootstrap)
-        self.assertIn("ensure_user trustyclaw-app-mission_pursuit \"$TRUSTYCLAW_APP_MISSION_PURSUIT_UID\" trustyclaw-app-mission_pursuit /nonexistent", bootstrap)
-        self.assertNotIn("usermod -a -G trustyclaw-admin trustyclaw-proxy", bootstrap)
-        self.assertNotIn("--groups trustyclaw-admin", bootstrap)
+        self.assertIn("ensure_user kern-app-0 \"$KERN_APP_AGENT_CHAT_UID\" kern-app-0 /nonexistent", bootstrap)
+        self.assertIn("ensure_user kern-app-1 \"$KERN_APP_MISSION_PURSUIT_UID\" kern-app-1 /nonexistent", bootstrap)
+        self.assertNotIn("usermod -a -G kern-admin kern-proxy", bootstrap)
+        self.assertNotIn("--groups kern-admin", bootstrap)
         self.assertIn('--no-create-home --shell /usr/sbin/nologin "$name"', bootstrap)
-        self.assertIn("trustyclaw-admin ALL=(root) NOPASSWD: /usr/local/lib/trustyclaw-host/reboot-host", bootstrap)
-        self.assertIn("/usr/local/lib/trustyclaw-host/read-codex-account-id", bootstrap)
-        self.assertIn("/usr/local/lib/trustyclaw-host/run-claude-code", bootstrap)
-        self.assertIn("/usr/local/lib/trustyclaw-host/read-claude-account", bootstrap)
-        self.assertIn("/usr/local/lib/trustyclaw-host/clear-agent-auth", bootstrap)
-        self.assertIn("/usr/local/lib/trustyclaw-host/read-agent-file", bootstrap)
-        self.assertIn("/usr/local/lib/trustyclaw-host/upload-agent-file", bootstrap)
-        self.assertIn("/usr/local/lib/trustyclaw-host/stop-agent-thread", bootstrap)
-        self.assertIn("/usr/local/lib/trustyclaw-host/check-for-upgrade", bootstrap)
+        self.assertIn("kern-admin ALL=(root) NOPASSWD: /usr/local/lib/kern-host/reboot-host", bootstrap)
+        self.assertIn("/usr/local/lib/kern-host/read-codex-account-id", bootstrap)
+        self.assertIn("/usr/local/lib/kern-host/run-claude-code", bootstrap)
+        self.assertIn("/usr/local/lib/kern-host/read-claude-account", bootstrap)
+        self.assertIn("/usr/local/lib/kern-host/clear-agent-auth", bootstrap)
+        self.assertIn("/usr/local/lib/kern-host/read-agent-file", bootstrap)
+        self.assertIn("/usr/local/lib/kern-host/upload-agent-file", bootstrap)
+        self.assertIn("/usr/local/lib/kern-host/stop-agent-thread", bootstrap)
+        self.assertIn("/usr/local/lib/kern-host/check-for-upgrade", bootstrap)
         # Network policy, provider pins, and network events live in the
         # database now (proxy role read-only for policy/pins); the three sudo
         # helpers that bridged the old file boundary are gone.
         self.assertNotIn("update-network-policy", bootstrap)
         self.assertNotIn("read-network-state", bootstrap)
         self.assertNotIn("update-provider-account", bootstrap)
-        self.assertIn("chmod 755 /usr/local/lib/trustyclaw-host", bootstrap)
-        self.assertIn("User=trustyclaw-admin", bootstrap)
-        self.assertIn("RuntimeDirectory=trustyclaw-admin-api", bootstrap)
+        self.assertIn("chmod 755 /usr/local/lib/kern-host", bootstrap)
+        self.assertIn("User=kern-admin", bootstrap)
+        self.assertIn("RuntimeDirectory=kern-admin-api", bootstrap)
         self.assertIn("RuntimeDirectoryMode=0755", bootstrap)
-        self.assertIn("User=trustyclaw-proxy", bootstrap)
+        self.assertIn("User=kern-proxy", bootstrap)
         self.assertIn("User=cloudflared", bootstrap)
-        self.assertIn("User=trustyclaw-app-agent_chat", bootstrap)
-        self.assertIn("User=trustyclaw-app-mission_pursuit", bootstrap)
-        self.assertIn("Slice=trustyclaw_app.slice", bootstrap)
-        self.assertIn("trustyclaw-app-agent_chat.service", bootstrap)
-        self.assertIn("trustyclaw-app-mission_pursuit.service", bootstrap)
+        self.assertIn("User=kern-app-0", bootstrap)
+        self.assertIn("User=kern-app-1", bootstrap)
+        self.assertIn("Slice=kern_app.slice", bootstrap)
+        self.assertIn("kern-app-agent_chat.service", bootstrap)
+        self.assertIn("kern-app-mission_pursuit.service", bootstrap)
         self.assertIn("python3 -m host.runtime.deploy.app_migrate pending agent_chat", bootstrap)
         self.assertIn("python3 -m host.runtime.deploy.app_migrate pending mission_pursuit", bootstrap)
         self.assertIn(
-            "runuser -u trustyclaw-app-agent_chat -- env PYTHONPATH=/opt/trustyclaw-host "
+            "runuser -u kern-app-0 -- env PYTHONPATH=/opt/kern-host "
             'python3 -m host.runtime.deploy.app_migrate apply-sql agent_chat "$app_migration_version"',
             bootstrap,
         )
         self.assertIn(
-            "runuser -u trustyclaw-app-mission_pursuit -- env PYTHONPATH=/opt/trustyclaw-host "
+            "runuser -u kern-app-1 -- env PYTHONPATH=/opt/kern-host "
             'python3 -m host.runtime.deploy.app_migrate apply-sql mission_pursuit "$app_migration_version"',
             bootstrap,
         )
         self.assertIn(
-            "runuser -u trustyclaw-admin -- env PYTHONPATH=/opt/trustyclaw-host "
+            "runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host "
             'python3 -m host.runtime.deploy.app_migrate record agent_chat "$app_migration_version"',
             bootstrap,
         )
         self.assertIn(
-            "runuser -u trustyclaw-admin -- env PYTHONPATH=/opt/trustyclaw-host "
+            "runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host "
             'python3 -m host.runtime.deploy.app_migrate record mission_pursuit "$app_migration_version"',
             bootstrap,
         )
-        self.assertNotIn('GRANT \\"trustyclaw-app-agent_chat\\" TO \\"trustyclaw-admin\\"', bootstrap)
-        self.assertNotIn('GRANT \\"trustyclaw-app-mission_pursuit\\" TO \\"trustyclaw-admin\\"', bootstrap)
+        self.assertNotIn('GRANT \\"kern-app-0\\" TO \\"kern-admin\\"', bootstrap)
+        self.assertNotIn('GRANT \\"kern-app-1\\" TO \\"kern-admin\\"', bootstrap)
         self.assertIn("CREATE SCHEMA IF NOT EXISTS app_agent_chat AUTHORIZATION", bootstrap)
         self.assertIn("CREATE SCHEMA IF NOT EXISTS app_mission_pursuit AUTHORIZATION", bootstrap)
-        self.assertIn("trustyclaw-app-agent_chat", bootstrap)
+        self.assertIn("kern-app-0", bootstrap)
         # Credential carry-over (payload for deploy/reconfigure, stored config
         # for upgrade/recover) lives in host.runtime.deploy.write_config now; bootstrap
         # passes the operation mode through and stages the effective config for
         # the root-only steps. Behavior is covered by tests/test_write_config.py.
-        self.assertIn("python3 -m host.runtime.deploy.write_config > /tmp/trustyclaw_effective_config.json", bootstrap)
+        self.assertIn("python3 -m host.runtime.deploy.write_config > /tmp/kern_effective_config.json", bootstrap)
         self.assertIn("json.dumps({'mode': payload['operation']['mode'], 'runtime_config': payload['runtime_config']})", bootstrap)
-        self.assertIn("chmod 600 /tmp/trustyclaw_effective_config.json", bootstrap)
-        self.assertIn("pathlib.Path('/tmp/trustyclaw_effective_config.json').read_text()", bootstrap)
+        self.assertIn("chmod 600 /tmp/kern_effective_config.json", bootstrap)
+        self.assertIn("pathlib.Path('/tmp/kern_effective_config.json').read_text()", bootstrap)
         self.assertNotIn("admin-state/config.json", bootstrap)
-        self.assertIn("rm -f /tmp/trustyclaw_payload.json /tmp/trustyclaw_effective_config.json", bootstrap)
+        self.assertIn("rm -f /tmp/kern_payload.json /tmp/kern_effective_config.json", bootstrap)
         self.assertIn("meta skuid 0 accept", bootstrap)
-        self.assertIn('meta skuid "trustyclaw-proxy" udp dport 53 accept', bootstrap)
-        self.assertIn('meta skuid "trustyclaw-proxy" tcp dport 53 accept', bootstrap)
-        self.assertIn('meta skuid "trustyclaw-proxy" tcp dport { 80, 443 } accept', bootstrap)
+        self.assertIn('meta skuid "kern-proxy" udp dport 53 accept', bootstrap)
+        self.assertIn('meta skuid "kern-proxy" tcp dport 53 accept', bootstrap)
+        self.assertIn('meta skuid "kern-proxy" tcp dport { 80, 443 } accept', bootstrap)
         self.assertIn("tcp dport 22 accept", bootstrap)
         # The agent must not reach the local DNS stub, while systemd-resolved
         # itself can still query upstream.
@@ -1695,27 +1700,27 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn('meta skuid "systemd-resolve" udp dport 53 accept', bootstrap)
         # The agent must only reach the loopback proxy port; every other local
         # listener stays outside its network boundary.
-        self.assertIn('oif lo tcp dport 7445 meta skuid "trustyclaw-agent" accept', bootstrap)
-        self.assertIn('oif lo meta skuid "trustyclaw-agent" drop', bootstrap)
+        self.assertIn('oif lo tcp dport 7445 meta skuid "kern-agent" accept', bootstrap)
+        self.assertIn('oif lo meta skuid "kern-agent" drop', bootstrap)
         # App services may answer the host admin API reverse proxy but cannot
         # open arbitrary loopback connections, including to the unauthenticated
         # network proxy or browser-facing admin API.
-        self.assertIn('oif lo meta skuid "trustyclaw-app-agent_chat" drop', bootstrap)
-        self.assertNotIn('oif lo tcp dport 7443 meta skuid "trustyclaw-app-agent_chat" accept', bootstrap)
-        self.assertNotIn('oif lo tcp dport 7445 meta skuid "trustyclaw-app-agent_chat" accept', bootstrap)
+        self.assertIn('oif lo meta skuid "kern-app-0" drop', bootstrap)
+        self.assertNotIn('oif lo tcp dport 7443 meta skuid "kern-app-0" accept', bootstrap)
+        self.assertNotIn('oif lo tcp dport 7445 meta skuid "kern-app-0" accept', bootstrap)
         # App backend TCP listeners are loopback-only and reachable only from
         # the admin API service uid (browser bridge) and the agent-app service
         # uid (agent app_api proxy). Other local users hit the explicit drop
         # before the broad loopback accept.
-        self.assertIn('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "trustyclaw-admin" accept', bootstrap)
-        self.assertIn('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "trustyclaw-agent-app" accept', bootstrap)
+        self.assertIn('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "kern-admin" accept', bootstrap)
+        self.assertIn('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "kern-agent-app" accept', bootstrap)
         self.assertIn("oif lo tcp dport $APP_AGENT_CHAT_PORT drop", bootstrap)
         self.assertLess(
-            bootstrap.index('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "trustyclaw-admin" accept'),
+            bootstrap.index('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "kern-admin" accept'),
             bootstrap.index("oif lo tcp dport $APP_AGENT_CHAT_PORT drop"),
         )
         self.assertLess(
-            bootstrap.index('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "trustyclaw-agent-app" accept'),
+            bootstrap.index('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "kern-agent-app" accept'),
             bootstrap.index("oif lo tcp dport $APP_AGENT_CHAT_PORT drop"),
         )
         self.assertLess(
@@ -1724,47 +1729,47 @@ class DeployUnitTests(unittest.TestCase):
         )
         # The agent-app service gets no egress rule of its own: its only
         # network reach is the per-app port accepts above.
-        self.assertNotIn('meta skuid "trustyclaw-agent-app" tcp dport 443 accept', bootstrap)
-        self.assertNotIn('meta skuid "trustyclaw-agent-app" udp dport 53 accept', bootstrap)
-        self.assertIn('oif lo meta skuid "trustyclaw-agent-app" drop', bootstrap)
+        self.assertNotIn('meta skuid "kern-agent-app" tcp dport 443 accept', bootstrap)
+        self.assertNotIn('meta skuid "kern-agent-app" udp dport 53 accept', bootstrap)
+        self.assertIn('oif lo meta skuid "kern-agent-app" drop', bootstrap)
         self.assertLess(
-            bootstrap.index('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "trustyclaw-agent-app" accept'),
-            bootstrap.index('oif lo meta skuid "trustyclaw-agent-app" drop'),
+            bootstrap.index('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "kern-agent-app" accept'),
+            bootstrap.index('oif lo meta skuid "kern-agent-app" drop'),
         )
         self.assertLess(
-            bootstrap.index('oif lo meta skuid "trustyclaw-agent-app" drop'),
+            bootstrap.index('oif lo meta skuid "kern-agent-app" drop'),
             bootstrap.index("oif lo accept"),
         )
         # The read-only agent-network service reaches Postgres and the agent
         # over Unix sockets only. It cannot turn the local policy proxy into
         # an egress path through the broad loopback accept.
-        self.assertNotIn('meta skuid "trustyclaw-agent-network" tcp dport 443 accept', bootstrap)
-        self.assertNotIn('meta skuid "trustyclaw-agent-network" udp dport 53 accept', bootstrap)
-        self.assertIn('oif lo meta skuid "trustyclaw-agent-network" drop', bootstrap)
+        self.assertNotIn('meta skuid "kern-agent-network" tcp dport 443 accept', bootstrap)
+        self.assertNotIn('meta skuid "kern-agent-network" udp dport 53 accept', bootstrap)
+        self.assertIn('oif lo meta skuid "kern-agent-network" drop', bootstrap)
         self.assertLess(
-            bootstrap.index('oif lo meta skuid "trustyclaw-agent-network" drop'),
+            bootstrap.index('oif lo meta skuid "kern-agent-network" drop'),
             bootstrap.index("oif lo accept"),
         )
         # The dedicated tools service runs the bundled tool packages, so it gets
         # DNS and HTTPS egress for their third-party APIs; the admin service holds
         # no internet egress, and the agent path is unchanged.
-        self.assertIn('meta skuid "trustyclaw-tools" udp dport 53 accept', bootstrap)
-        self.assertIn('meta skuid "trustyclaw-tools" tcp dport 53 accept', bootstrap)
-        self.assertIn('meta skuid "trustyclaw-tools" tcp dport 443 accept', bootstrap)
-        self.assertNotIn('meta skuid "trustyclaw-admin" tcp dport 443 accept', bootstrap)
-        self.assertIn("pathlib.Path('/tmp/trustyclaw_cloudflare_rules').write_text(", bootstrap)
+        self.assertIn('meta skuid "kern-tools" udp dport 53 accept', bootstrap)
+        self.assertIn('meta skuid "kern-tools" tcp dport 53 accept', bootstrap)
+        self.assertIn('meta skuid "kern-tools" tcp dport 443 accept', bootstrap)
+        self.assertNotIn('meta skuid "kern-admin" tcp dport 443 accept', bootstrap)
+        self.assertIn("pathlib.Path('/tmp/kern_cloudflare_rules').write_text(", bootstrap)
         self.assertIn("if cloudflare_enabled else ''", bootstrap)
-        self.assertIn("$(cat /tmp/trustyclaw_cloudflare_rules)", bootstrap)
-        self.assertIn("rm -f /tmp/trustyclaw_ssh_rule /tmp/trustyclaw_cloudflare_rules", bootstrap)
-        self.assertIn("rm -f /home/trustyclaw-operator/.ssh/authorized_keys2", bootstrap)
+        self.assertIn("$(cat /tmp/kern_cloudflare_rules)", bootstrap)
+        self.assertIn("rm -f /tmp/kern_ssh_rule /tmp/kern_cloudflare_rules", bootstrap)
+        self.assertIn("rm -f /home/kern-operator/.ssh/authorized_keys2", bootstrap)
         self.assertIn("CLOUDFLARED_VERSION=2026.6.1", bootstrap)
-        self.assertIn("trustyclaw-cloudflared.service", bootstrap)
-        self.assertIn("--token-file /etc/trustyclaw/cloudflared.token", bootstrap)
-        self.assertIn("install -m 0750 -o root -g cloudflared -d /etc/trustyclaw", bootstrap)
-        self.assertIn("chown root:cloudflared /etc/trustyclaw/cloudflared.token", bootstrap)
-        self.assertIn("chmod 640 /etc/trustyclaw/cloudflared.token", bootstrap)
+        self.assertIn("kern-cloudflared.service", bootstrap)
+        self.assertIn("--token-file /etc/kern/cloudflared.token", bootstrap)
+        self.assertIn("install -m 0750 -o root -g cloudflared -d /etc/kern", bootstrap)
+        self.assertIn("chown root:cloudflared /etc/kern/cloudflared.token", bootstrap)
+        self.assertIn("chmod 640 /etc/kern/cloudflared.token", bootstrap)
         self.assertNotIn("--token ${TUNNEL_TOKEN}", bootstrap)
-        self.assertNotIn("EnvironmentFile=/etc/trustyclaw/cloudflared.env", bootstrap)
+        self.assertNotIn("EnvironmentFile=/etc/kern/cloudflared.env", bootstrap)
         self.assertIn("Cloudflare tunnel probe", bootstrap)
         self.assertNotIn("curl -k", bootstrap)
         self.assertIn('meta skuid "cloudflared" udp dport 7844 accept', bootstrap)
@@ -1772,38 +1777,38 @@ class DeployUnitTests(unittest.TestCase):
         # file seeding, no pin files, no seeded initial policy (a missing
         # policy row is the fail-closed empty default).
         self.assertNotIn("network_controls.json", bootstrap)
-        self.assertNotIn("trustyclaw_initial_policy", bootstrap)
+        self.assertNotIn("kern_initial_policy", bootstrap)
         self.assertNotIn("network_status.json", bootstrap)
         self.assertNotIn("proxy_pin_files", bootstrap)
         self.assertNotIn("proxy-state/openai_account.json", bootstrap)
         self.assertNotIn("proxy-state/claude_account.json", bootstrap)
         self.assertNotIn(".network_policy.lock", bootstrap)
         self.assertIn("DURABLE_PATH_OWNERSHIP=", bootstrap)
-        self.assertIn("/mnt/trustyclaw-admin root:root 711", bootstrap)
-        self.assertIn("/mnt/trustyclaw-admin/proxy-state trustyclaw-proxy:trustyclaw-proxy 700", bootstrap)
-        self.assertIn("/mnt/trustyclaw-admin/proxy-state/generated-certs trustyclaw-proxy:trustyclaw-proxy 700", bootstrap)
+        self.assertIn("/mnt/kern-admin root:root 711", bootstrap)
+        self.assertIn("/mnt/kern-admin/proxy-state kern-proxy:kern-proxy 700", bootstrap)
+        self.assertIn("/mnt/kern-admin/proxy-state/generated-certs kern-proxy:kern-proxy 700", bootstrap)
         # Admin state lives in Postgres now; admin-state/ keeps only the
         # deploy-plane version.json, no runtime JSON state files.
-        self.assertIn("chown trustyclaw-admin:trustyclaw-admin /mnt/trustyclaw-admin/admin-state/version.json", bootstrap)
+        self.assertIn("chown kern-admin:kern-admin /mnt/kern-admin/admin-state/version.json", bootstrap)
         self.assertNotIn("admin-state/state.json", bootstrap)
         self.assertNotIn("admin-state/events.jsonl", bootstrap)
         self.assertNotIn("admin-state/openai_account.json", bootstrap)
         self.assertNotIn("admin-state/claude_account.json", bootstrap)
-        self.assertNotIn("trustyclaw-proxy:trustyclaw-admin", bootstrap)
+        self.assertNotIn("kern-proxy:kern-admin", bootstrap)
         self.assertNotIn("for path in \\", bootstrap)
-        self.assertIn("/mnt/trustyclaw-admin/proxy-state/network_proxy_ca.key trustyclaw-proxy:trustyclaw-proxy 600", bootstrap)
+        self.assertIn("/mnt/kern-admin/proxy-state/network_proxy_ca.key kern-proxy:kern-proxy 600", bootstrap)
         self.assertNotIn("setup_bedrock_routing_secrets", bootstrap)
-        self.assertIn("/mnt/trustyclaw-agent/agent-home trustyclaw-agent:trustyclaw-agent 700", bootstrap)
-        self.assertNotIn("chown -R trustyclaw-admin:trustyclaw-admin /mnt/trustyclaw-admin/admin-state", bootstrap)
-        self.assertNotIn("chown -R trustyclaw-agent:trustyclaw-agent /mnt/trustyclaw-agent/agent-home", bootstrap)
-        self.assertIn("/mnt/trustyclaw-agent root:root 711", bootstrap)
+        self.assertIn("/mnt/kern-agent/agent-home kern-agent:kern-agent 700", bootstrap)
+        self.assertNotIn("chown -R kern-admin:kern-admin /mnt/kern-admin/admin-state", bootstrap)
+        self.assertNotIn("chown -R kern-agent:kern-agent /mnt/kern-agent/agent-home", bootstrap)
+        self.assertIn("/mnt/kern-agent root:root 711", bootstrap)
         self.assertIn('agent_home / "AGENTS.md"', bootstrap)
         self.assertIn('agent_home / "CLAUDE.md"', bootstrap)
         self.assertIn('agent_home / ".codex" / "config.toml"', bootstrap)
         self.assertIn('agent_home / ".claude" / "settings.json"', bootstrap)
         self.assertIn('agent_home / ".hermes" / "config.yaml"', bootstrap)
         self.assertIn('agent_home / ".hermes" / ".env"', bootstrap)
-        self.assertIn("AGENT_HOME_SOURCE_DIR=/opt/trustyclaw-host/host/bootstrap/agent-home", bootstrap)
+        self.assertIn("AGENT_HOME_SOURCE_DIR=/opt/kern-host/host/bootstrap/agent-home", bootstrap)
         self.assertIn("install -m 0644 -o root -g root", bootstrap)
         self.assertIn("chattr -f -i", bootstrap)
         self.assertIn("chattr +i", bootstrap)
@@ -1815,18 +1820,18 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("You are running with full permissions", agent_instructions)
         self.assertIn("Do not prompt the operator for local approvals", agent_instructions)
         # The tools section tells the agent how to discover and use bundled tools.
-        self.assertIn("`trustyclaw` MCP server", agent_instructions)
+        self.assertIn("`kern` MCP server", agent_instructions)
         self.assertIn("`<tool_id>_<action_id>`", agent_instructions)
         self.assertIn("list_bundled_tools", agent_instructions)
         self.assertIn("check_tool_approval", agent_instructions)
         self.assertIn("approval_id", agent_instructions)
-        self.assertIn("TrustyClaw network policy proxy", agent_instructions)
+        self.assertIn("Kern network policy proxy", agent_instructions)
         self.assertIn("recent_network_denials", agent_instructions)
         self.assertIn("list_network_integrations", agent_instructions)
         self.assertIn("github_push_queued_for_approval", agent_instructions)
         self.assertIn("queued for approval as push-<id>", agent_instructions)
         self.assertIn("github_dot_github_rest_write_denied", agent_instructions)
-        self.assertIn("TrustyClaw admin UI", agent_instructions)
+        self.assertIn("Kern admin UI", agent_instructions)
         self.assertNotIn("AWS_REGION=", hermes_env)
         self.assertIn("always exposes `app_api`", agent_instructions)
         self.assertIn("listing the tool grants no app access", agent_instructions)
@@ -1850,10 +1855,10 @@ class DeployUnitTests(unittest.TestCase):
         # like the managed Codex config layer: same interpreter, module, and
         # host import path.
         self.assertIn("mcp_servers:", hermes_config)
-        self.assertIn("trustyclaw:", hermes_config)
+        self.assertIn("kern:", hermes_config)
         self.assertIn("command: /usr/bin/python3", hermes_config)
         self.assertIn('args: ["-m", "host.runtime.agent_shim.mcp_shim"]', hermes_config)
-        self.assertIn("PYTHONPATH: /opt/trustyclaw-host", hermes_config)
+        self.assertIn("PYTHONPATH: /opt/kern-host", hermes_config)
         self.assertIn('if [ ! -f "$PROXY_STATE_DIR/network_proxy_ca.key" ]', bootstrap)
         # Managed Codex policy restricts the agent to cached web search and
         # disables Codex-hosted app/plugin connector surfaces.
@@ -1868,46 +1873,46 @@ class DeployUnitTests(unittest.TestCase):
         # /etc/codex/managed_config.toml layer, and the admin service gets the
         # runtime directory that holds the agent-facing tools socket.
         self.assertIn("/etc/codex/managed_config.toml", bootstrap)
-        self.assertIn("[mcp_servers.trustyclaw]", bootstrap)
+        self.assertIn("[mcp_servers.kern]", bootstrap)
         self.assertIn('args = ["-m", "host.runtime.agent_shim.mcp_shim"]', bootstrap)
-        self.assertIn('env = { PYTHONPATH = "/opt/trustyclaw-host" }', bootstrap)
+        self.assertIn('env = { PYTHONPATH = "/opt/kern-host" }', bootstrap)
         # The admin-api unit's RuntimeDirectory holds the app-backend admin
         # socket dir; the agent-facing tools socket dir is owned by the dedicated
-        # trustyclaw-tools.service.
-        self.assertIn("RuntimeDirectory=trustyclaw-admin-api\n", bootstrap)
+        # kern-tools.service.
+        self.assertIn("RuntimeDirectory=kern-admin-api\n", bootstrap)
         self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.tools.service", bootstrap)
-        self.assertIn("RuntimeDirectory=trustyclaw-tools\n", bootstrap)
+        self.assertIn("RuntimeDirectory=kern-tools\n", bootstrap)
         self.assertIn("RuntimeDirectoryMode=0755", bootstrap)
         self.assertIn('tools_state = admin_mount / "tools-state"', bootstrap)
         self.assertIn('recreate_directory(tools_state / "assets")', bootstrap)
         self.assertIn(
-            "/mnt/trustyclaw-admin/tools-state/assets trustyclaw-tools:trustyclaw-tools 700",
+            "/mnt/kern-admin/tools-state/assets kern-tools:kern-tools 700",
             bootstrap,
         )
         # The dedicated agent-app service has its own user and runtime
         # directory for the agent-facing socket, with no database access.
-        self.assertIn('ensure_user trustyclaw-agent-app "$TRUSTYCLAW_AGENT_APP_UID" trustyclaw-agent-app /nonexistent', bootstrap)
-        self.assertIn("TRUSTYCLAW_AGENT_APP_UID=47747", bootstrap)
+        self.assertIn('ensure_user kern-agent-app "$KERN_AGENT_APP_UID" kern-agent-app /nonexistent', bootstrap)
+        self.assertIn("KERN_AGENT_APP_UID=47747", bootstrap)
         self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.agent_app.service", bootstrap)
-        self.assertIn("User=trustyclaw-agent-app", bootstrap)
-        self.assertIn("RuntimeDirectory=trustyclaw-agent-app\n", bootstrap)
-        self.assertIn("systemctl enable --now trustyclaw-agent-app.service", bootstrap)
+        self.assertIn("User=kern-agent-app", bootstrap)
+        self.assertIn("RuntimeDirectory=kern-agent-app\n", bootstrap)
+        self.assertIn("systemctl enable --now kern-agent-app.service", bootstrap)
         # Network introspection has a separate non-egress uid, socket, and
         # read-only database role. The egress-capable tools service cannot read
         # network policy or decision-log tables.
         self.assertIn(
-            'ensure_user trustyclaw-agent-network "$TRUSTYCLAW_AGENT_NETWORK_UID" '
-            "trustyclaw-agent-network /nonexistent",
+            'ensure_user kern-agent-network "$KERN_AGENT_NETWORK_UID" '
+            "kern-agent-network /nonexistent",
             bootstrap,
         )
-        self.assertIn("TRUSTYCLAW_AGENT_NETWORK_UID=47748", bootstrap)
+        self.assertIn("KERN_AGENT_NETWORK_UID=47748", bootstrap)
         self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.agent_network.service", bootstrap)
-        self.assertIn("User=trustyclaw-agent-network", bootstrap)
-        self.assertIn("RuntimeDirectory=trustyclaw-agent-network\n", bootstrap)
-        self.assertIn("systemctl enable --now trustyclaw-agent-network.service", bootstrap)
+        self.assertIn("User=kern-agent-network", bootstrap)
+        self.assertIn("RuntimeDirectory=kern-agent-network\n", bootstrap)
+        self.assertIn("systemctl enable --now kern-agent-network.service", bootstrap)
         self.assertIn(
-            "Wants=network-online.target trustyclaw-network-proxy.service trustyclaw-postgres.service "
-            "trustyclaw-tools.service trustyclaw-agent-network.service trustyclaw-agent-app.service",
+            "Wants=network-online.target kern-network-proxy.service kern-postgres.service "
+            "kern-tools.service kern-agent-network.service kern-agent-app.service",
             bootstrap,
         )
         # The bootstrap runs with umask 077: the npm-installed CLI and the
@@ -1923,8 +1928,8 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn('"codex-cli ${CODEX_CLI_VERSION}"', bootstrap)
         self.assertIn('"${CLAUDE_CODE_VERSION} (Claude Code)"', bootstrap)
         helper_sources = "\n".join(path.read_text() for path in Path("host/bootstrap/helpers").glob("*.sh"))
-        self.assertIn("NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/trustyclaw-network-proxy.crt", helper_sources)
-        self.assertNotIn("NODE_EXTRA_CA_CERTS=/mnt/trustyclaw-admin/proxy-state/network_proxy_ca.crt", helper_sources)
+        self.assertIn("NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/kern-network-proxy.crt", helper_sources)
+        self.assertNotIn("NODE_EXTRA_CA_CERTS=/mnt/kern-admin/proxy-state/network_proxy_ca.crt", helper_sources)
         self.assertIn('os.environ.get("CLAUDE_CONFIG_DIR"', helper_sources)
         self.assertIn('config_dir / ".credentials.json"', helper_sources)
         self.assertIn('config.get("oauthAccount")', helper_sources)
@@ -1938,10 +1943,10 @@ class DeployUnitTests(unittest.TestCase):
         self.assertNotIn('.aws" / "credentials"', clear_auth)
         self.assertIn("chmod -R a+rX /usr/local/lib/node_modules", bootstrap)
         self.assertIn("chmod 755 /etc/codex", bootstrap)
-        self.assertIn("runuser -u trustyclaw-agent -- env HOME=/mnt/trustyclaw-agent/agent-home", helper_sources)
+        self.assertIn("runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home", helper_sources)
         upload_helper = Path("host/bootstrap/helpers/upload-agent-file.sh").read_text()
         self.assertIn(
-            "/usr/bin/python3 /opt/trustyclaw-host/host/runtime/root_helpers/upload_agent_file.py",
+            "/usr/bin/python3 /opt/kern-host/host/runtime/root_helpers/upload_agent_file.py",
             upload_helper,
         )
         self.assertNotIn("PYTHONPATH", upload_helper)
@@ -1954,8 +1959,8 @@ class DeployUnitTests(unittest.TestCase):
         # guaranteed CPU, memory, and PIDs under contention. The slice name
         # must stay a single dash-free component: dashes encode slice nesting,
         # and a nested slice's weight would not compare against system.slice.
-        self.assertIn("/etc/systemd/system/trustyclaw_agent.slice", bootstrap)
-        self.assertNotIn("trustyclaw-agent.slice", bootstrap)
+        self.assertIn("/etc/systemd/system/kern_agent.slice", bootstrap)
+        self.assertNotIn("kern-agent.slice", bootstrap)
         self.assertIn("CPUWeight=50", bootstrap)
         self.assertIn("MemoryHigh=70%", bootstrap)
         self.assertIn("MemoryMax=80%", bootstrap)
@@ -1967,7 +1972,7 @@ class DeployUnitTests(unittest.TestCase):
         for launch_helper in ("run-codex-app-server", "run-claude-code", "run-hermes"):
             launch_source = Path(f"host/bootstrap/helpers/{launch_helper}.sh").read_text()
             self.assertIn(
-                "exec systemd-run --quiet --collect --scope --slice=trustyclaw_agent.slice",
+                "exec systemd-run --quiet --collect --scope --slice=kern_agent.slice",
                 launch_source,
             )
             # Ubuntu 22.04's systemd 249 rejects --pipe together with --scope.
@@ -1975,14 +1980,14 @@ class DeployUnitTests(unittest.TestCase):
             self.assertNotIn("--pipe", launch_source)
             # The scope must not outlive the admin API: stopping, restarting,
             # or crashing the admin service stops the agent scopes with it.
-            self.assertIn("--property=BindsTo=trustyclaw-admin-api.service", launch_source)
+            self.assertIn("--property=BindsTo=kern-admin-api.service", launch_source)
             # Task turns run in a scope named after the host thread id, whose
             # reserved app prefix is the kernel-owned app identity. The root
             # helper validates the id (it becomes a unit name) and never
             # forwards the pair to the CLI.
             self.assertIn('if [ "${1:-}" = "--thread-scope" ]; then', launch_source)
             self.assertIn('if ! [[ "${2:-}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then', launch_source)
-            self.assertIn('unit_args=(--unit "trustyclaw-agent-thread-$2")', launch_source)
+            self.assertIn('unit_args=(--unit "kern-agent-thread-$2")', launch_source)
             self.assertIn("shift 2", launch_source)
             self.assertIn('"${unit_args[@]}"', launch_source)
         # Kill tears down a thread's transient scope through a privileged helper
@@ -1990,7 +1995,7 @@ class DeployUnitTests(unittest.TestCase):
         # helper is installed and admin may invoke it.
         self.assertIn("stop-agent-thread", bootstrap)
         stop_source = Path("host/bootstrap/helpers/stop-agent-thread.sh").read_text()
-        self.assertIn('scope="trustyclaw-agent-thread-${thread_id}.scope"', stop_source)
+        self.assertIn('scope="kern-agent-thread-${thread_id}.scope"', stop_source)
         # SIGKILL the cgroup before stop so a child that ignores SIGTERM cannot
         # hold the scope active past systemd's TimeoutStopSec.
         self.assertIn('systemctl kill --signal=KILL "${scope}"', stop_source)
@@ -1999,12 +2004,12 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn('if ! [[ "${thread_id}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then', stop_source)
         for launch_helper in ("run-hermes",):
             launch_source = Path(f"host/bootstrap/helpers/{launch_helper}.sh").read_text()
-            self.assertIn('export AWS_SECRET_ACCESS_KEY="trustyclaw-bedrock-dummy-secret"', launch_source)
+            self.assertIn('export AWS_SECRET_ACCESS_KEY="kern-bedrock-dummy-secret"', launch_source)
             self.assertEqual(
-                launch_source.count('AWS_SECRET_ACCESS_KEY="trustyclaw-bedrock-dummy-secret"'), 1
+                launch_source.count('AWS_SECRET_ACCESS_KEY="kern-bedrock-dummy-secret"'), 1
             )
         hermes_launcher = Path("host/bootstrap/helpers/run-hermes.sh").read_text()
-        self.assertIn("/usr/local/lib/trustyclaw-host/hermes-stdin.py", hermes_launcher)
+        self.assertIn("/usr/local/lib/kern-host/hermes-stdin.py", hermes_launcher)
         self.assertNotIn("hermes chat", hermes_launcher)
         hermes_stdin = Path("host/bootstrap/helpers/hermes-stdin.py").read_text()
         self.assertIn("sys.stdin.buffer.read", hermes_stdin)
@@ -2013,19 +2018,19 @@ class DeployUnitTests(unittest.TestCase):
         # adapter must connect the bundled-tools shim synchronously and enable
         # its toolset alongside terminal and file.
         self.assertIn('importlib.import_module("tools.mcp_tool").discover_mcp_tools()', hermes_stdin)
-        self.assertIn('toolsets="terminal,file,trustyclaw"', hermes_stdin)
+        self.assertIn('toolsets="terminal,file,kern"', hermes_stdin)
         # App backends are long-running services, so bootstrap creates a
         # separate top-level slice and each generated app service joins it.
         # The lower CPU weight is soft: apps can use idle cores, but the admin
         # API and other host services in system.slice stay prioritized under
         # contention.
-        self.assertIn("/etc/systemd/system/trustyclaw_app.slice", bootstrap)
-        self.assertNotIn("trustyclaw-app.slice", bootstrap)
+        self.assertIn("/etc/systemd/system/kern_app.slice", bootstrap)
+        self.assertNotIn("kern-app.slice", bootstrap)
         self.assertIn(
             "\n".join([
-                "cat > /etc/systemd/system/trustyclaw_app.slice <<'UNIT'",
+                "cat > /etc/systemd/system/kern_app.slice <<'UNIT'",
                 "[Unit]",
-                "Description=TrustyClaw App Backends",
+                "Description=Kern App Backends",
                 "",
                 "[Slice]",
                 "CPUWeight=50",
@@ -2033,7 +2038,7 @@ class DeployUnitTests(unittest.TestCase):
             ]),
             bootstrap,
         )
-        self.assertIn("Slice=trustyclaw_app.slice", bootstrap)
+        self.assertIn("Slice=kern_app.slice", bootstrap)
         # The unused, world-accessible snapd socket is masked.
         self.assertIn("mask snapd.socket", bootstrap)
         # Pending security updates are applied during bootstrap.
@@ -2057,41 +2062,41 @@ class DeployUnitTests(unittest.TestCase):
         apps = app_platform.installed_apps()
         self.assertGreaterEqual(len(apps), 1)
         for app in apps:
-            env_prefix = f"TRUSTYCLAW_APP_{app.id.upper()}"
+            env_prefix = f"KERN_APP_{app.id.upper()}"
             with self.subTest(app_id=app.id):
                 self.assertIn(f"{env_prefix}_UID=", bootstrap)
                 self.assertIn(f"{env_prefix}_GID=", bootstrap)
                 self.assertIn(f"ensure_group {app.linux_user}", bootstrap)
                 self.assertIn(f"ensure_user {app.linux_user} \"${env_prefix}_UID\" {app.linux_user} /nonexistent", bootstrap)
-                self.assertIn(f"local  trustyclaw_admin  {app.db_role}  peer", bootstrap)
+                self.assertIn(f"local  kern_admin  {app.db_role}  peer", bootstrap)
                 self.assertIn(f"rolname = '{app.db_role}'", bootstrap)
                 self.assertIn(f'CREATE ROLE "{app.db_role}" LOGIN;', bootstrap)
                 self.assertIn(f'CREATE SCHEMA IF NOT EXISTS {app.db_schema} AUTHORIZATION \\"{app.db_role}\\";', bootstrap)
-                self.assertIn(f'GRANT CONNECT ON DATABASE trustyclaw_admin TO \\"{app.db_role}\\";', bootstrap)
+                self.assertIn(f'GRANT CONNECT ON DATABASE kern_admin TO \\"{app.db_role}\\";', bootstrap)
                 self.assertIn(f"python3 -m host.runtime.deploy.app_migrate pending {app.id}", bootstrap)
                 self.assertIn(
-                    f"runuser -u {app.linux_user} -- env PYTHONPATH=/opt/trustyclaw-host "
+                    f"runuser -u {app.linux_user} -- env PYTHONPATH=/opt/kern-host "
                     f'python3 -m host.runtime.deploy.app_migrate apply-sql {app.id} "$app_migration_version"',
                     bootstrap,
                 )
                 self.assertIn(
-                    f"runuser -u trustyclaw-admin -- env PYTHONPATH=/opt/trustyclaw-host "
+                    f"runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host "
                     f'python3 -m host.runtime.deploy.app_migrate record {app.id} "$app_migration_version"',
                     bootstrap,
                 )
                 self.assertIn(f'oif lo ct state established,related meta skuid "{app.linux_user}" accept', bootstrap)
                 self.assertIn(f'meta skuid "{app.linux_user}" drop', bootstrap)
                 port_var = f"$APP_{app.id.upper()}_PORT"
-                self.assertIn(f'oif lo tcp dport {port_var} meta skuid "trustyclaw-admin" accept', bootstrap)
+                self.assertIn(f'oif lo tcp dport {port_var} meta skuid "kern-admin" accept', bootstrap)
                 self.assertIn(f"oif lo tcp dport {port_var} drop", bootstrap)
                 self.assertIn(f"cat > /etc/systemd/system/{app.service_name} <<'UNIT'", bootstrap)
                 self.assertIn(f"User={app.linux_user}", bootstrap)
-                self.assertIn("Slice=trustyclaw_app.slice", bootstrap)
-                self.assertIn("Environment=TRUSTYCLAW_APP_ADMIN_API_SOCKET=/run/trustyclaw-admin-api/app-backend.sock", bootstrap)
-                self.assertIn(f"Environment=TRUSTYCLAW_APP_PORT={app.port}", bootstrap)
+                self.assertIn("Slice=kern_app.slice", bootstrap)
+                self.assertIn("Environment=KERN_APP_ADMIN_API_SOCKET=/run/kern-admin-api/app-backend.sock", bootstrap)
+                self.assertIn(f"Environment=KERN_APP_PORT={app.port}", bootstrap)
                 backend_entrypoint = app.backend_entrypoint.relative_to(app.package_dir)
                 self.assertIn(
-                    f"ExecStart=/usr/bin/python3 /opt/trustyclaw-host/host/apps/{app.id}/{backend_entrypoint}",
+                    f"ExecStart=/usr/bin/python3 /opt/kern-host/host/apps/{app.id}/{backend_entrypoint}",
                     bootstrap,
                 )
                 self.assertIn(f"systemctl enable {app.service_name}", bootstrap)
@@ -2123,12 +2128,12 @@ class DeployUnitTests(unittest.TestCase):
             with patch("host.bootstrap.render.app_platform.installed_apps", return_value=[app]):
                 bootstrap = render._render_bootstrap()
 
-        self.assertIn("cat > /etc/systemd/system/trustyclaw-app-custom_app.service <<'UNIT'", bootstrap)
-        self.assertIn("Description=TrustyClaw App: Custom $(touch /tmp/unsafe)", bootstrap)
-        self.assertIn("Slice=trustyclaw_app.slice", bootstrap)
-        self.assertIn("Environment=TRUSTYCLAW_APP_PORT=7457", bootstrap)
-        self.assertIn("ExecStart=/usr/bin/python3 /opt/trustyclaw-host/host/apps/custom_app/server.py", bootstrap)
-        self.assertNotIn("/opt/trustyclaw-host/host/apps/custom_app/backend.py", bootstrap)
+        self.assertIn("cat > /etc/systemd/system/kern-app-custom_app.service <<'UNIT'", bootstrap)
+        self.assertIn("Description=Kern App: Custom $(touch /tmp/unsafe)", bootstrap)
+        self.assertIn("Slice=kern_app.slice", bootstrap)
+        self.assertIn("Environment=KERN_APP_PORT=7457", bootstrap)
+        self.assertIn("ExecStart=/usr/bin/python3 /opt/kern-host/host/apps/custom_app/server.py", bootstrap)
+        self.assertNotIn("/opt/kern-host/host/apps/custom_app/backend.py", bootstrap)
 
     def test_rendered_bootstrap_pins_every_app_uid_in_reserved_range(self) -> None:
         bootstrap = render._render_bootstrap()
@@ -2136,7 +2141,7 @@ class DeployUnitTests(unittest.TestCase):
         seen_uids: set[int] = set()
 
         for app in apps:
-            env_prefix = f"TRUSTYCLAW_APP_{app.id.upper()}"
+            env_prefix = f"KERN_APP_{app.id.upper()}"
             with self.subTest(app_id=app.id):
                 uid_match = re.search(rf"^{env_prefix}_UID=(\d+)$", bootstrap, re.MULTILINE)
                 gid_match = re.search(rf"^{env_prefix}_GID=(\d+)$", bootstrap, re.MULTILINE)
@@ -2172,7 +2177,7 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap.index("\n  verify_deployment\n"), bootstrap.index("\n  finalize_deploy\n")
         )
         # The sudoers drop-in is validated at write time, not at first use.
-        self.assertIn("visudo -c -q -f /etc/sudoers.d/trustyclaw-host", bootstrap)
+        self.assertIn("visudo -c -q -f /etc/sudoers.d/kern-host", bootstrap)
         self.assertTrue(bootstrap.rstrip().endswith("\nmain"))
 
     def test_rendered_bootstrap_provisions_admin_state_postgres(self) -> None:
@@ -2202,78 +2207,76 @@ class DeployUnitTests(unittest.TestCase):
         # deploy work; when this trips, raise max_connections deliberately.
         active_session_budget = (4 + len(app_platform.installed_apps())) * db.MAX_ACTIVE_CONNECTIONS
         self.assertLessEqual(active_session_budget, 300 - 34)
-        self.assertIn("local  trustyclaw_admin  trustyclaw-admin  peer", bootstrap)
-        self.assertIn("local  trustyclaw_admin  trustyclaw-agent-network  peer", bootstrap)
-        self.assertNotIn("local  trustyclaw_admin  trustyclaw-agent-app  peer", bootstrap)
+        self.assertIn("local  kern_admin  kern-admin  peer", bootstrap)
+        self.assertIn("local  kern_admin  kern-agent-network  peer", bootstrap)
+        self.assertNotIn("local  kern_admin  kern-agent-app  peer", bootstrap)
         self.assertIn("local  all               postgres          peer", bootstrap)
         self.assertIn("local  all               all               reject", bootstrap)
-        self.assertIn('CREATE ROLE "trustyclaw-admin" LOGIN;', bootstrap)
-        self.assertIn("createdb --owner=trustyclaw-admin trustyclaw_admin", bootstrap)
-        self.assertIn("REVOKE ALL ON DATABASE trustyclaw_admin FROM PUBLIC;", bootstrap)
+        self.assertIn('CREATE ROLE "kern-admin" LOGIN;', bootstrap)
+        self.assertIn("createdb --owner=kern-admin kern_admin", bootstrap)
+        self.assertIn("REVOKE ALL ON DATABASE kern_admin FROM PUBLIC;", bootstrap)
         # The PUBLIC revoke strips the proxy role's inherited CONNECT; without
         # the explicit grant the fail-closed proxy loses its event log and
         # fails every agent request.
-        self.assertIn('GRANT CONNECT ON DATABASE trustyclaw_admin TO \\"trustyclaw-proxy\\";', bootstrap)
+        self.assertIn('GRANT CONNECT ON DATABASE kern_admin TO \\"kern-proxy\\";', bootstrap)
         # The tools service's scoped role: bootstrap provisions the role and its
         # database CONNECT before migrations run; the table grants live in the
         # schema migration (0007), the same pattern as the proxy role's grants.
-        self.assertIn('GRANT CONNECT ON DATABASE trustyclaw_admin TO \\"trustyclaw-tools\\";', bootstrap)
+        self.assertIn('GRANT CONNECT ON DATABASE kern_admin TO \\"kern-tools\\";', bootstrap)
         self.assertIn(
-            'GRANT CONNECT ON DATABASE trustyclaw_admin TO \\"trustyclaw-agent-network\\";',
+            'GRANT CONNECT ON DATABASE kern_admin TO \\"kern-agent-network\\";',
             bootstrap,
         )
         self.assertNotIn('GRANT SELECT ON enabled_tools', bootstrap)
         # Thread-scope attribution needs no agent-app database identity.
-        self.assertNotIn('CREATE ROLE "trustyclaw-agent-app" LOGIN;', bootstrap)
-        self.assertNotIn('GRANT CONNECT ON DATABASE trustyclaw_admin TO \\"trustyclaw-agent-app\\";', bootstrap)
-        migration = (Path(__file__).resolve().parents[1] / "host" / "migrations" / "0007_tool_state.sql").read_text()
+        self.assertNotIn('CREATE ROLE "kern-agent-app" LOGIN;', bootstrap)
+        self.assertNotIn('GRANT CONNECT ON DATABASE kern_admin TO \\"kern-agent-app\\";', bootstrap)
+        migration = (Path(__file__).resolve().parents[1] / "host" / "migrations" / "0001_baseline.sql").read_text()
         # Read-only on enablement and config (operator-written by the admin
-        # API); the REVOKE first drops broader grants from earlier iterations.
-        self.assertIn('REVOKE INSERT, UPDATE, DELETE ON enabled_tools, tool_config FROM "trustyclaw-tools";', migration)
-        self.assertIn('GRANT SELECT ON enabled_tools, tool_config TO "trustyclaw-tools";', migration)
+        # API). The genesis baseline grants exactly SELECT: there are no broader
+        # grants from an earlier iteration to revoke first on a fresh install.
+        self.assertIn('GRANT SELECT ON enabled_tools, tool_config TO "kern-tools";', migration)
         # Read/write on the credentials, approvals, and events it mutates (plus
         # their serial sequences), read on secret_keys to decrypt
         # config/credentials -- nothing else.
         self.assertIn(
             'GRANT SELECT, INSERT, UPDATE, DELETE ON tool_credentials, tool_approvals, '
-            'tool_events TO "trustyclaw-tools";',
+            'tool_events TO "kern-tools";',
             migration,
         )
-        self.assertIn('GRANT USAGE ON SEQUENCE tool_approvals_number_seq, tool_events_seq_seq TO "trustyclaw-tools";', migration)
-        self.assertIn('GRANT SELECT ON secret_keys TO "trustyclaw-tools";', migration)
-        network_migration = (
-            Path(__file__).resolve().parents[1] / "host" / "migrations" / "0012_network_introspection.sql"
-        ).read_text()
-        self.assertIn('TO "trustyclaw-agent-network";', network_migration)
-        self.assertNotIn('"trustyclaw-tools"', network_migration)
-        bedrock_migration = (
-            Path(__file__).resolve().parents[1] / "host" / "migrations" / "0014_bedrock_integration.sql"
-        ).read_text()
-        self.assertIn("CREATE TABLE bedrock_credentials (", bedrock_migration)
-        self.assertIn("region TEXT NOT NULL CHECK", bedrock_migration)
-        self.assertIn('GRANT SELECT ON bedrock_credentials TO "trustyclaw-proxy";', bedrock_migration)
-        self.assertNotIn("bedrock_settings", bedrock_migration)
-        self.assertNotIn("proxy_bedrock_credentials", bedrock_migration)
-        self.assertNotIn("harness_bedrock_settings", bedrock_migration)
+        self.assertIn('GRANT USAGE ON SEQUENCE tool_approvals_number_seq, tool_events_seq_seq TO "kern-tools";', migration)
+        self.assertIn('GRANT SELECT ON secret_keys TO "kern-tools";', migration)
+        # Network-introspection tables reach the agent-network role. All grants
+        # now live in the collapsed 0001_baseline.sql, so the former per-file
+        # "network migration does not mention kern-tools" isolation check no
+        # longer applies (the tool grants legitimately appear in the baseline).
+        self.assertIn('TO "kern-agent-network";', migration)
+        # Bedrock schema and grant.
+        self.assertIn("CREATE TABLE bedrock_credentials (", migration)
+        self.assertIn("region TEXT NOT NULL CHECK", migration)
+        self.assertIn('GRANT SELECT ON bedrock_credentials TO "kern-proxy";', migration)
+        self.assertNotIn("bedrock_settings", migration)
+        self.assertNotIn("proxy_bedrock_credentials", migration)
+        self.assertNotIn("harness_bedrock_settings", migration)
         # PG14 leaves the public schema creatable by PUBLIC; only the
         # schema-owning admin role may create objects.
         self.assertIn("REVOKE CREATE ON SCHEMA public FROM PUBLIC;", bootstrap)
-        self.assertIn('GRANT CREATE ON SCHEMA public TO \\"trustyclaw-admin\\";', bootstrap)
+        self.assertIn('GRANT CREATE ON SCHEMA public TO \\"kern-admin\\";', bootstrap)
         # The database runs under its own unit and the admin API waits for it.
-        self.assertIn("/etc/systemd/system/trustyclaw-postgres.service", bootstrap)
-        self.assertIn("systemctl enable --now trustyclaw-postgres.service", bootstrap)
+        self.assertIn("/etc/systemd/system/kern-postgres.service", bootstrap)
+        self.assertIn("systemctl enable --now kern-postgres.service", bootstrap)
         self.assertIn(
-            "After=network-online.target trustyclaw-network-proxy.service trustyclaw-postgres.service "
-            "trustyclaw-tools.service trustyclaw-agent-network.service trustyclaw-agent-app.service",
+            "After=network-online.target kern-network-proxy.service kern-postgres.service "
+            "kern-tools.service kern-agent-network.service kern-agent-app.service",
             bootstrap,
         )
-        # Schema migrations and config seeding run as trustyclaw-admin, after
+        # Schema migrations and config seeding run as kern-admin, after
         # the cluster is up and before the admin API starts.
         migrate_up = "python3 -m host.runtime.deploy.migrate up"
-        self.assertIn("runuser -u trustyclaw-admin -- env PYTHONPATH=/opt/trustyclaw-host " + migrate_up, bootstrap)
+        self.assertIn("runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host " + migrate_up, bootstrap)
         self.assertIn("python3 -m host.runtime.deploy.write_config", bootstrap)
         self.assertLess(
-            bootstrap.index("systemctl enable --now trustyclaw-postgres.service"),
+            bootstrap.index("systemctl enable --now kern-postgres.service"),
             bootstrap.index(migrate_up),
         )
         self.assertLess(
@@ -2282,19 +2285,19 @@ class DeployUnitTests(unittest.TestCase):
         )
         self.assertLess(
             bootstrap.index("python3 -m host.runtime.deploy.write_config"),
-            bootstrap.index("systemctl enable --now trustyclaw-admin-api.service"),
+            bootstrap.index("systemctl enable --now kern-admin-api.service"),
         )
         self.assertLess(
-            bootstrap.index("rm -f /tmp/trustyclaw_payload.json /tmp/trustyclaw_effective_config.json"),
-            bootstrap.index("systemctl enable trustyclaw-app-agent_chat.service"),
+            bootstrap.index("rm -f /tmp/kern_payload.json /tmp/kern_effective_config.json"),
+            bootstrap.index("systemctl enable kern-app-agent_chat.service"),
         )
         self.assertLess(
-            bootstrap.index("systemctl enable trustyclaw-app-agent_chat.service"),
-            bootstrap.index("systemctl start trustyclaw-app-agent_chat.service"),
+            bootstrap.index("systemctl enable kern-app-agent_chat.service"),
+            bootstrap.index("systemctl start kern-app-agent_chat.service"),
         )
         self.assertLess(
-            bootstrap.index("systemctl start trustyclaw-app-agent_chat.service"),
-            bootstrap.index("TRUSTYCLAW_TARGET_VERSION"),
+            bootstrap.index("systemctl start kern-app-agent_chat.service"),
+            bootstrap.index("KERN_TARGET_VERSION"),
         )
         # No database driver anywhere: the runtime speaks the wire protocol
         # itself (host/runtime/core/pgclient.py).
@@ -2319,7 +2322,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertNotIn("@PROXY_PORT@", bootstrap)
         self.assertNotIn("@ADMIN_PORT@", bootstrap)
         self.assertIn(f"PROXY_PORT={PROXY_PORT}", bootstrap)
-        self.assertIn(f'oif lo tcp dport {PROXY_PORT} meta skuid "trustyclaw-agent" accept', bootstrap)
+        self.assertIn(f'oif lo tcp dport {PROXY_PORT} meta skuid "kern-agent" accept', bootstrap)
         helper = (Path("host/bootstrap/helpers/run-codex-app-server.sh").read_text()).replace(
             "@PROXY_PORT@", str(PROXY_PORT)
         )
@@ -2357,7 +2360,7 @@ class DeployUnitTests(unittest.TestCase):
         # and host paths so we can observe exactly what it forwards to claude.
         raw = Path("host/bootstrap/helpers/run-claude-code.sh").read_text().replace("@PROXY_PORT@", "7445")
         harness = raw.replace(
-            "cd /mnt/trustyclaw-agent/agent-home", "cd /"
+            "cd /mnt/kern-agent/agent-home", "cd /"
         ).replace("exec systemd-run", "exec echo systemd-run")
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".sh") as handle:
             handle.write(harness)
@@ -2383,7 +2386,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("-p", off.stdout)
         self.assertIn("hello", off.stdout)
         self.assertNotIn("web-search=off", off.stdout)
-        self.assertIn("--unit trustyclaw-agent-thread-mission_pursuit__ws-3", off.stdout)
+        self.assertIn("--unit kern-agent-thread-mission_pursuit__ws-3", off.stdout)
         self.assertNotIn("--thread-scope", off.stdout)
         self.assertIn("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", off.stdout)
 
@@ -2415,7 +2418,7 @@ class DeployUnitTests(unittest.TestCase):
         helper = Path("host/bootstrap/helpers/check-for-upgrade.sh").read_text()
 
         self.assertIn(
-            "https://raw.githubusercontent.com/infiloop2/trustyclaw/refs/heads/main/VERSION",
+            "https://raw.githubusercontent.com/infiloop2/kern/refs/heads/main/VERSION",
             helper,
         )
         self.assertIn("--proto '=https'", helper)
@@ -2544,7 +2547,7 @@ class DeployUnitTests(unittest.TestCase):
         namespace: dict[str, object] = {"__name__": "read_agent_file_test"}
         exec(
             compile(
-                body.replace('Path("/mnt/trustyclaw-agent/agent-home")', f"Path({str(home_path)!r})"),
+                body.replace('Path("/mnt/kern-agent/agent-home")', f"Path({str(home_path)!r})"),
                 "read-agent-file.py",
                 "exec",
             ),
@@ -2564,7 +2567,7 @@ class DeployUnitTests(unittest.TestCase):
         )
         self.assertEqual(payload["storage_volumes"], {"admin": "vol-admin", "agent": "vol-agent"})
         self.assertEqual(payload["operation"], {"mode": "deploy", "target_version": "0.1.0", "allow_upgrade": False})
-        self.assertEqual(payload["runtime_config"]["agent_name"], "trustyclaw-test")
+        self.assertEqual(payload["runtime_config"]["agent_name"], "kern-test")
         self.assertEqual(payload["runtime_config"]["admin_password_sha256"], SAMPLE_ADMIN_PASSWORD_SHA256)
         self.assertEqual(
             payload["runtime_config"]["operator_connections"],
@@ -2583,11 +2586,11 @@ class DeployUnitTests(unittest.TestCase):
             target_version="0.1.0",
         )
 
-        self.assertEqual(payload["runtime_config"], {"agent_name": "trustyclaw-test"})
+        self.assertEqual(payload["runtime_config"], {"agent_name": "kern-test"})
 
     def test_runtime_code_archive_excludes_cli_package(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp) / "trustyclaw-host-code.tar.gz"
+            archive = Path(tmp) / "kern-host-code.tar.gz"
             render._write_runtime_code_archive(archive)
 
             with tarfile.open(archive, "r:gz") as tar:
@@ -2643,7 +2646,7 @@ class FakeCliIntegrationTests(unittest.TestCase):
                     "-m",
                     "host.cli.deploy",
                     "--agent-name",
-                    "trustyclaw-test",
+                    "kern-test",
                     "--operator-ssh-public-key",
                     SAMPLE_SSH_PUBLIC_KEY,
                     "--admin-password-sha256",
@@ -2661,8 +2664,8 @@ class FakeCliIntegrationTests(unittest.TestCase):
             result = json.loads(proc.stdout)
             self.assertIn("[deploy]", proc.stderr)
             self.assertEqual(result["admin_ui_local_url"], "http://127.0.0.1:7443")
-            self.assertEqual(result["public_dns"], "trustyclaw.example.com")
-            self.assertEqual(result["ssh_user"], "trustyclaw-operator")
+            self.assertEqual(result["public_dns"], "kern.example.com")
+            self.assertEqual(result["ssh_user"], "kern-operator")
             self.assertEqual(result["admin_volume_id"], "vol-admin")
             self.assertEqual(result["agent_volume_id"], "vol-agent")
             self.assertEqual(result["version"], deploy.repo_version())
@@ -2672,7 +2675,7 @@ class FakeCliIntegrationTests(unittest.TestCase):
             run_call = next(call for call in calls if call[1:3] == ["ec2", "run-instances"])
             self.assertIn("--associate-public-ip-address", run_call)
             self.assertIn("subnet-public", run_call)
-            self.assertTrue(any(f"Key=trustyclaw-host-version,Value={deploy.repo_version()}" in str(item) for item in run_call))
+            self.assertTrue(any(f"Key=kern-host-version,Value={deploy.repo_version()}" in str(item) for item in run_call))
             # User data is passed as fileb:// so the AWS CLI base64-encodes the raw
             # bytes (a raw string would be base64-decoded under cli_binary_format=base64
             # and corrupt the cloud-init script). Content is covered by the render test.
@@ -2695,17 +2698,17 @@ class FakeCliIntegrationTests(unittest.TestCase):
             copied = " ".join(scp_call)
             # The payload rides in user data and bootstrap renders on the
             # host; SSH pushes only the runtime code archive.
-            self.assertNotIn("trustyclaw_payload.json", copied)
-            self.assertNotIn("trustyclaw_bootstrap.sh", copied)
-            self.assertIn("trustyclaw-host-code.tar.gz", copied)
+            self.assertNotIn("kern_payload.json", copied)
+            self.assertNotIn("kern_bootstrap.sh", copied)
+            self.assertIn("kern-host-code.tar.gz", copied)
 
             provision_call = next(
                 call for call in calls if call[0] == "ssh" and any("self_provision" in item for item in call)
             )
             remote = next(item for item in provision_call if "self_provision" in item)
-            self.assertIn("tar -xzf /tmp/trustyclaw-host-code.tar.gz", remote)
+            self.assertIn("tar -xzf /tmp/kern-host-code.tar.gz", remote)
             self.assertIn("python3 -m host.bootstrap.self_provision", remote)
-            self.assertIn("--payload /tmp/trustyclaw_payload.json", remote)
+            self.assertIn("--payload /tmp/kern_payload.json", remote)
 
 
 def _fake_cli_script(name: str, log_path: Path) -> str:
@@ -2724,13 +2727,13 @@ def emit(value):
 if {name!r} == "ssh-keygen":
     key = pathlib.Path(args[args.index("-f") + 1])
     key.write_text("fake private key\\n")
-    key.with_suffix(".pub").write_text("ssh-ed25519 AAAADEPLOY trustyclaw-deploy\\n")
+    key.with_suffix(".pub").write_text("ssh-ed25519 AAAADEPLOY kern-deploy\\n")
 elif {name!r} in ("ssh", "scp"):
     pass
 elif args[:2] == ["ec2", "describe-instances"] and "--instance-ids" not in args:
     emit({{"Reservations": []}})
 elif args[:2] == ["ec2", "describe-instances"] and "--instance-ids" in args:
-    emit({{"Reservations": [{{"Instances": [{{"InstanceId": "i-123", "PublicDnsName": "trustyclaw.example.com", "Placement": {{"AvailabilityZone": "us-east-1a"}}}}]}}]}})
+    emit({{"Reservations": [{{"Instances": [{{"InstanceId": "i-123", "PublicDnsName": "kern.example.com", "Placement": {{"AvailabilityZone": "us-east-1a"}}}}]}}]}})
 elif args[:2] == ["ec2", "describe-volumes"]:
     emit({{"Volumes": []}})
 elif args[:2] == ["ec2", "create-volume"]:

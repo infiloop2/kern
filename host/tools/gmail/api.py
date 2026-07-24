@@ -17,16 +17,16 @@ GMAIL_LABEL_ID_MAX_RESULTS = 20
 GMAIL_ATTACHMENT_MAX_RESULTS = 10
 GMAIL_SNIPPET_BODY_NOTE = (
     "Only Gmail's snippet is available because this message has no plaintext body. "
-    "TrustyClaw does not render the HTML body here; double-check the message in Gmail before approving."
+    "Kern does not render the HTML body here; double-check the message in Gmail before approving."
 )
 GMAIL_SNIPPET_NO_BODY_NOTE = "Only Gmail's snippet is available because this message has no plaintext or HTML body."
 GMAIL_NO_BODY_NOTE = "No plaintext body, HTML body, or Gmail snippet was available for this message."
 GMAIL_HTML_ONLY_NO_SNIPPET_NOTE = (
-    "This message has HTML body content that TrustyClaw does not render here, and Gmail returned no "
+    "This message has HTML body content that Kern does not render here, and Gmail returned no "
     "snippet, so no preview is available. It will be sent as-is; double-check the message in Gmail before approving."
 )
 GMAIL_HTML_ALTERNATIVE_BODY_NOTE = (
-    "This message also contains an HTML alternative that is not rendered in TrustyClaw approval previews. "
+    "This message also contains an HTML alternative that is not rendered in Kern approval previews. "
     "Double-check the message in Gmail before approving."
 )
 GMAIL_DRAFT_ATTACHMENT_UNSUPPORTED_MESSAGE = (

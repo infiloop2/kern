@@ -40,7 +40,7 @@ from host.tools.shared.web import WebRequestError, encode_query, json_request
 
 IBKR_API_BASE_URL = "https://api.ibkr.com/v1/api"
 # IBKR rejects requests without a User-Agent.
-IBKR_USER_AGENT = "trustyclaw-tools/1.0"
+IBKR_USER_AGENT = "kern-tools/1.0"
 # First-party production realm; "test_realm" exists only for IBKR's shared
 # TESTCONS test consumer, which this tool does not use.
 IBKR_REALM = "limited_poa"
@@ -149,7 +149,7 @@ MANIFEST = ToolManifest(
     protections=(
         "The six configured IBKR credential values stay in write-only host config and are never returned to or read by the agent.",
         "The package exposes only four read actions. It contains no order, transfer, account-change, or trading endpoint and signs requests only to api.ibkr.com.",
-        "TrustyClaw uses the credentials only for these reads, but IBKR does not make the OAuth credential read-only. Anyone with the six values could use the permissions of the authorized IBKR username, so the setup guide recommends registering under a reduced-permission username with no trading access.",
+        "Kern uses the credentials only for these reads, but IBKR does not make the OAuth credential read-only. Anyone with the six values could use the permissions of the authorized IBKR username, so the setup guide recommends registering under a reduced-permission username with no trading access.",
     ),
     setup_steps=(
         SetupStep(
@@ -172,7 +172,7 @@ MANIFEST = ToolManifest(
         ),
         SetupStep(
             title="Register first-party OAuth through IBKR's dedicated login",
-            description="IBKR does not place this flow in the normal Client Portal menus. Open the dedicated OAuth self-service login and sign in with the exact live or paper username the agent will use, ideally the reduced-permission username from the previous step. If it opens ordinary Client Portal instead of OAuth Configuration, stop and contact IBKR API support because that username does not currently have the self-service flow. Registration and authorization finish entirely on IBKR's side, with no TrustyClaw callback.",
+            description="IBKR does not place this flow in the normal Client Portal menus. Open the dedicated OAuth self-service login and sign in with the exact live or paper username the agent will use, ideally the reduced-permission username from the previous step. If it opens ordinary Client Portal instead of OAuth Configuration, stop and contact IBKR API support because that username does not currently have the self-service flow. Registration and authorization finish entirely on IBKR's side, with no Kern callback.",
             link_url="https://ndcdyn.interactivebrokers.com/sso/Login?RL=1&action=OAUTH",
             link_label="Open IBKR OAuth self-service",
         ),
@@ -189,9 +189,9 @@ MANIFEST = ToolManifest(
             description="Run `openssl dhparam -in dhparam.pem -text -noout`. Copy only the hexadecimal Prime block, remove the leading label plus all colons, spaces, and line breaks, and keep the resulting hexadecimal string for IBKR_DH_PRIME. Do not paste the full PEM file or the generator line into that field.",
         ),
         SetupStep(
-            title="Paste the six values into TrustyClaw",
+            title="Paste the six values into Kern",
             show_config=True,
-            description="Expand Interactive Brokers in Internet Access and Tools. Set IBKR_OAUTH_CONSUMER_KEY to the nine-letter key, IBKR_OAUTH_ACCESS_TOKEN and IBKR_OAUTH_ACCESS_TOKEN_SECRET to the portal values, IBKR_SIGNATURE_KEY to the complete private_signature.pem contents, IBKR_ENCRYPTION_KEY to the complete private_encryption.pem contents, and IBKR_DH_PRIME to the cleaned hex prime. Save each write-only value, then enable the tool. TrustyClaw has no IBKR Connect button; its side is only this value paste and request signing.",
+            description="Expand Interactive Brokers in Internet Access and Tools. Set IBKR_OAUTH_CONSUMER_KEY to the nine-letter key, IBKR_OAUTH_ACCESS_TOKEN and IBKR_OAUTH_ACCESS_TOKEN_SECRET to the portal values, IBKR_SIGNATURE_KEY to the complete private_signature.pem contents, IBKR_ENCRYPTION_KEY to the complete private_encryption.pem contents, and IBKR_DH_PRIME to the cleaned hex prime. Save each write-only value, then enable the tool. Kern has no IBKR Connect button; its side is only this value paste and request signing.",
         ),
     ),
     data_summary=DataSummary(
@@ -225,7 +225,7 @@ MANIFEST = ToolManifest(
                 title="How long IBKR retains it",
                 description=(
                     "IBKR keeps brokerage and access records under its regulatory retention duties, which outlast this "
-                    "integration. Clearing TrustyClaw config removes the local secrets only; disable or revoke the OAuth "
+                    "integration. Clearing Kern config removes the local secrets only; disable or revoke the OAuth "
                     "consumer in IBKR Client Portal to end API access on IBKR's side."
                 ),
                 links=(

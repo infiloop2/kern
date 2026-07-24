@@ -32,7 +32,7 @@ def main() -> None:
     # over stdin instead of argparse/argv.
     os.environ["HERMES_YOLO_MODE"] = "1"
 
-    # Connect the bundled-tools MCP shim (mcp_servers.trustyclaw in the
+    # Connect the bundled-tools MCP shim (mcp_servers.kern in the
     # managed ~/.hermes/config.yaml) before the agent snapshots its tool
     # list. Hermes only starts MCP discovery from its TUI, gateway, and ACP
     # entrypoints, never from the single-query path this wrapper uses, so
@@ -47,7 +47,7 @@ def main() -> None:
     hermes_main(
         query=prompt,
         model=args.model,
-        toolsets="terminal,file,trustyclaw",
+        toolsets="terminal,file,kern",
         quiet=True,
         resume=args.resume,
         pass_session_id=True,

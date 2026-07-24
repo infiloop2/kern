@@ -1,6 +1,6 @@
 # Deployment and Upgrades
 
-TrustyClaw has explicit host lifecycle commands:
+Kern has explicit host lifecycle commands:
 
 ```text
 python3 -m host.cli.deploy --agent-name <name> ...
@@ -26,19 +26,19 @@ The command is intentionally split by lifecycle intent:
 
 | Command | Preconditions checked before launch | Bootstrap version check | State effect |
 | --- | --- | --- | --- |
-| `host.cli.deploy` | No existing TrustyClaw instance or admin/agent data volumes for `agent_name`. | Admin state must be empty. | Creates new admin and agent state at the target `VERSION`. |
+| `host.cli.deploy` | No existing Kern instance or admin/agent data volumes for `agent_name`. | Admin state must be empty. | Creates new admin and agent state at the target `VERSION`. |
 | `host.cli.upgrade` | Existing instance plus existing admin and agent data volumes. | Admin state version must be lower than the target `VERSION`. | Replaces root volume and preserves admin password, operator endpoints, network policy, tasks, account pins, and agent home. |
-| `host.cli.recover` | Existing admin and agent data volumes and no existing TrustyClaw instance. | Admin state version must equal the target `VERSION`; with `--allow-upgrade`, it may be older than or equal to the target `VERSION`. | Creates a new root host using preserved admin password and operator endpoints. With `--allow-upgrade`, it can also advance older preserved state. |
+| `host.cli.recover` | Existing admin and agent data volumes and no existing Kern instance. | Admin state version must equal the target `VERSION`; with `--allow-upgrade`, it may be older than or equal to the target `VERSION`. | Creates a new root host using preserved admin password and operator endpoints. With `--allow-upgrade`, it can also advance older preserved state. |
 | `host.cli.reconfigure` | Existing instance plus existing admin and agent data volumes. | Admin state version must equal the target `VERSION`. | Replaces root volume, replaces the full operator endpoint list, and installs a new admin password. |
-| `host.cli.start` | Exactly one existing TrustyClaw instance plus existing admin and agent data volumes. | None. | Starts the EC2 instance and waits for `running`; does not mutate TrustyClaw state. |
-| `host.cli.stop` | Exactly one existing TrustyClaw instance plus existing admin and agent data volumes. | None. | Stops the EC2 instance and waits for `stopped`; does not mutate TrustyClaw state. |
+| `host.cli.start` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Starts the EC2 instance and waits for `running`; does not mutate Kern state. |
+| `host.cli.stop` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Stops the EC2 instance and waits for `stopped`; does not mutate Kern state. |
 
 The target `VERSION` is the local checkout's `VERSION`, or the pinned
 commit's `VERSION` on the GitHub delivery.
 
 Deploy and reconfigure take operator endpoint arguments
 (`--operator-ssh-public-key` and `--operator-cloudflare-hostname`, the tunnel
-token from `TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN`) because those commands create
+token from `KERN_CLOUDFLARE_TUNNEL_TOKEN`) because those commands create
 or refresh operator access; at least one endpoint is required and at most one
 per mode exists. `reconfigure` always receives the full desired endpoint list
 rather than a partial patch. Upgrade, recover, start, and stop reject
@@ -51,8 +51,8 @@ delivered to the instance one of two ways.
 
 **SSH delivery** (the default) happens in two stages:
 
-1. **EC2 user data**: creates the `trustyclaw-operator` account with the
-   generated single-use deploy key, grants `trustyclaw-operator` passwordless
+1. **EC2 user data**: creates the `kern-operator` account with the
+   generated single-use deploy key, grants `kern-operator` passwordless
    sudo, and stages the provisioning payload. Both deliveries stage the same
    payload through user data; user data never installs persistent operator
    SSH keys.
@@ -91,7 +91,7 @@ the development path: it deploys unpublished code without any public pin.
 **GitHub delivery** (`--bootstrap-from-github [COMMIT_SHA]`, available on
 deploy, upgrade, recover, and reconfigure) is single-stage and detached. The
 pinned commit always comes from the fixed public repository
-(`host.constants.PUBLIC_GITHUB_REPOSITORY`, `infiloop2/trustyclaw`); there is
+(`host.constants.PUBLIC_GITHUB_REPOSITORY`, `infiloop2/kern`); there is
 no repository knob, and without a value the latest `main` commit is pinned.
 The CLI first reads the pinned commit's `VERSION` from GitHub, and that
 version, not the local checkout's, is the operation's target: the CLI prints
@@ -146,7 +146,7 @@ Cloudflare Tunnel, or the EC2 security group; operator app requests go through
 the authenticated admin API app proxy.
 
 For a Cloudflare Tunnel endpoint, bootstrap installs a pinned `cloudflared`
-binary and a `trustyclaw-cloudflared.service` systemd unit with `Restart=always`
+binary and a `kern-cloudflared.service` systemd unit with `Restart=always`
 and `WantedBy=multi-user.target`, so the tunnel reconnects after service crashes
 and host reboots. The tunnel carries transport and Cloudflare edge protection
 only; the admin login is the authentication boundary, with no Cloudflare Access
@@ -166,8 +166,8 @@ resolver bypasses security groups. This 7844 rule is outbound egress only; it
 does not open inbound access to the EC2 instance and does not create a listener
 the internet can connect to. The host-level nftables policy is the per-user
 enforcement layer: only root and the dedicated `cloudflared` uid can use the
-Cloudflare Tunnel egress path, while `trustyclaw-agent`, `trustyclaw-admin`,
-`trustyclaw-proxy`, and `trustyclaw-tools` cannot directly send traffic on
+Cloudflare Tunnel egress path, while `kern-agent`, `kern-admin`,
+`kern-proxy`, and `kern-tools` cannot directly send traffic on
 7844. If the agent has not
 escalated to root or compromised the `cloudflared` process/user, opening 7844
 does not give it a new network path. The security group bounds what even a fully
@@ -179,18 +179,18 @@ credentials from instance metadata.
 
 ## Drive lifecycle
 
-TrustyClaw splits host data across three EBS volumes with different lifecycle
+Kern splits host data across three EBS volumes with different lifecycle
 contracts:
 
 - **Root drive**: replaceable system volume. It holds the OS, packages,
-  root-owned TrustyClaw runtime code, bootstrap helpers, systemd units,
+  root-owned Kern runtime code, bootstrap helpers, systemd units,
   nftables config, global CLI installs, logs, and swap.
-- **Admin state drive**: durable data volume mounted at `/mnt/trustyclaw-admin`.
+- **Admin state drive**: durable data volume mounted at `/mnt/kern-admin`.
   It holds the admin-state Postgres data directory (task history,
   thread/session mappings, provider account metadata, config, network state,
   tool state, and app migration records) plus proxy CA, generated certificate,
   held-Git-push files, and the bounded temporary tool-media spool.
-- **Agent state drive**: durable data volume mounted at `/mnt/trustyclaw-agent`.
+- **Agent state drive**: durable data volume mounted at `/mnt/kern-agent`.
   It holds the agent user's home directory, provider auth/session files, CLI
   caches, and workspace data.
 
@@ -209,10 +209,10 @@ the account until a cleanup path deletes them.
 
 On upgrade or reconfiguration, deploy treats any existing EC2 instance and root
 drive as disposable. It terminates the instance, creates a fresh root drive from
-the current Ubuntu image, reinstalls packages and TrustyClaw root-owned code,
+the current Ubuntu image, reinstalls packages and Kern root-owned code,
 and reattaches the preserved admin and agent state drives for the same
 `agent_name`. `recover` does the same host creation from preserved drives, but
-requires that no current TrustyClaw instance exists. Bootstrap refreshes
+requires that no current Kern instance exists. Bootstrap refreshes
 root-volume code and config, sanitizes managed mount paths against symlink
 attacks, reuses the preserved Postgres data directory, and runs `migrate up` to
 bring the preserved schema to the new code's version; it does not overwrite
@@ -230,9 +230,9 @@ Version is stored in three places with different authority:
 
 | Location | Authority | Purpose |
 | --- | --- | --- |
-| `/mnt/trustyclaw-admin/admin-state/version.json` | Authoritative preserved-state version. | Bootstrap reads this after mounting the admin disk and uses it to allow or deny deploy, upgrade, and recovery. |
-| `/opt/trustyclaw-host/VERSION` | Running root/runtime version. | Admin API health compares it with admin state so mismatches are visible. |
-| EC2 tag `trustyclaw-host-version` | Pre-replacement safety hint, not state authority. | Lets operators see the last launched root version from AWS before SSH/bootstrap. Deploy uses a parseable tag to reject lifecycle commands that bootstrap would reject before terminating the instance. Bootstrap still follows admin state if the tag is stale. |
+| `/mnt/kern-admin/admin-state/version.json` | Authoritative preserved-state version. | Bootstrap reads this after mounting the admin disk and uses it to allow or deny deploy, upgrade, and recovery. |
+| `/opt/kern-host/VERSION` | Running root/runtime version. | Admin API health compares it with admin state so mismatches are visible. |
+| EC2 tag `kern-host-version` | Pre-replacement safety hint, not state authority. | Lets operators see the last launched root version from AWS before SSH/bootstrap. Deploy uses a parseable tag to reject lifecycle commands that bootstrap would reject before terminating the instance. Bootstrap still follows admin state if the tag is stale. |
 
 This avoids making AWS tags authoritative for preserved state. A tag can be
 stale after a partial recovery or manual AWS operation, but the admin disk is
@@ -247,14 +247,14 @@ Health is degraded if the root version is missing, the admin state version is
 missing, or they do not match.
 
 The admin service also checks the public
-`infiloop2/trustyclaw` main-branch `VERSION` on startup and every four hours.
+`infiloop2/kern` main-branch `VERSION` on startup and every four hours.
 The result is advisory and process-local: `/v1/health` reports it under
 `upgrade`, and the admin toolbar shows a small passive upgrade icon only when
 that version is strictly newer than the running root version. Hovering or
 focusing the icon shows the available version and tells the operator to use the
 operator plane to upgrade. Equal versions and private builds ahead of public
 main are both current, so the same spot shows a small checkmark whose popup
-confirms that TrustyClaw is at the latest version. Neither icon is an action. A
+confirms that Kern is at the latest version. Neither icon is an action. A
 failed check hides the status only until the first successful check; later
 failures preserve the last successful version without degrading host health.
 
@@ -278,12 +278,12 @@ Upgrade/recovery safety checks exist in two layers:
    preserved volumes. It also validates that preserved volumes are in one
    availability zone and selects a matching public subnet before terminating an
    existing instance. If an existing instance has a parseable
-   `trustyclaw-host-version` tag, the command applies the same mode-specific
+   `kern-host-version` tag, the command applies the same mode-specific
    version shape bootstrap will enforce: `upgrade` requires an older tag,
    `reconfigure` requires an equal tag, and `recover --allow-upgrade` allows
    equal or older tags when no instance exists. `start` and `stop` require
    exactly one existing instance and both preserved volumes but do not check
-   version because they do not mutate TrustyClaw state.
+   version because they do not mutate Kern state.
 2. Bootstrap checks the authoritative admin disk version after the volumes are
    mounted and managed path slots are sanitized. This catches stale EC2 tags,
    partially completed previous runs, and any mismatch between AWS discovery and
@@ -296,14 +296,14 @@ which terminates it: instances launch with instance-initiated shutdown
 behavior set to terminate, because the root volume is disposable by contract
 and the durable data volumes survive termination. The `stop` command parks
 compute through the EC2 API, which that attribute does not affect; an
-OS-level shutdown on any TrustyClaw host terminates it, and `recover`
+OS-level shutdown on any Kern host terminates it, and `recover`
 rebuilds the host from the preserved volumes.
 
 Data volumes created by a failed run are left in place and their ids are
 printed when the CLI is attached. A later `deploy` retry refuses those
 existing volumes and explains that blank volumes from a failed first install
 must be deleted before retrying; preserved volumes are never deleted.
-Recovery commands are reserved for initialized TrustyClaw volumes with admin
+Recovery commands are reserved for initialized Kern volumes with admin
 state.
 
 Upgrade preserves credentials by reading the existing stored config (the
@@ -336,12 +336,12 @@ principals holding `ec2:DescribeInstanceAttribute` in the target account, so
 the token's exposure there is bounded by that account's own IAM surface;
 `reconfigure` rotates operator access, replacing the token. Bootstrap creates a dedicated
 unprivileged Linux user and group named `cloudflared`, and
-`trustyclaw-cloudflared.service` runs as that `cloudflared` user. The token is
-also written to `/etc/trustyclaw/cloudflared.token` on the root volume with
+`kern-cloudflared.service` runs as that `cloudflared` user. The token is
+also written to `/etc/kern/cloudflared.token` on the root volume with
 owner `root`, group `cloudflared`, and mode `0640`. That means the token file is
 readable by root and by processes running as the `cloudflared` user/group; it is
-not directly readable by the `trustyclaw-admin`, `trustyclaw-agent`, or
-`trustyclaw-proxy` users. The SSH operator can read it only by deliberately
+not directly readable by the `kern-admin`, `kern-agent`, or
+`kern-proxy` users. The SSH operator can read it only by deliberately
 using unrestricted sudo. The service passes the token
 to cloudflared with `--token-file`, so the token value is not exposed in process
 argv.

@@ -1,12 +1,12 @@
-"""Constants shared by TrustyClaw host lifecycle commands."""
+"""Constants shared by Kern host lifecycle commands."""
 
 from __future__ import annotations
 
-INSTANCE_TAG_KEY = "trustyclaw-host-agent-name"
-OWNER_TAG_KEY = "trustyclaw-host"
-VOLUME_ROLE_TAG_KEY = "trustyclaw-host-volume-role"
-VERSION_TAG_KEY = "trustyclaw-host-version"
-SSH_USER = "trustyclaw-operator"
+INSTANCE_TAG_KEY = "kern-host-agent-name"
+OWNER_TAG_KEY = "kern-host"
+VOLUME_ROLE_TAG_KEY = "kern-host-volume-role"
+VERSION_TAG_KEY = "kern-host-version"
+SSH_USER = "kern-operator"
 INSTANCE_TYPE = "t3.small"
 ROOT_VOLUME_SIZE_GB = 16
 # Sized for the event retention caps (1M network + 1M agent events with

@@ -16,22 +16,22 @@ umask 077
 on_exit() {
   code=$?
   if [ "$code" != 0 ]; then
-    echo "TrustyClaw provisioning failed (exit $code); shutting down to terminate this instance" >&2
+    echo "Kern provisioning failed (exit $code); shutting down to terminate this instance" >&2
     shutdown -h now
   fi
 }
 trap on_exit EXIT
 
-id -u trustyclaw-operator >/dev/null 2>&1 || useradd --create-home --shell /bin/bash trustyclaw-operator
-echo 'trustyclaw-operator ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/trustyclaw-operator
-chmod 440 /etc/sudoers.d/trustyclaw-operator
+id -u kern-operator >/dev/null 2>&1 || useradd --create-home --shell /bin/bash kern-operator
+echo 'kern-operator ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/kern-operator
+chmod 440 /etc/sudoers.d/kern-operator
 gpasswd -d ubuntu sudo >/dev/null 2>&1 || true
 rm -f /etc/sudoers.d/90-cloud-init-users
 
-cat > /tmp/trustyclaw_payload.json <<'TRUSTYCLAW_PAYLOAD_EOF'
+cat > /tmp/kern_payload.json <<'KERN_PAYLOAD_EOF'
 @PAYLOAD_JSON@
-TRUSTYCLAW_PAYLOAD_EOF
-chmod 600 /tmp/trustyclaw_payload.json
+KERN_PAYLOAD_EOF
+chmod 600 /tmp/kern_payload.json
 
 # The lifecycle CLI already proved the pinned commit exists and is readable
 # before launching this instance, so failures below are transient network or
@@ -42,28 +42,28 @@ for attempt in $(seq 1 60); do
     break
   fi
   if [ "$attempt" = 60 ]; then
-    echo "could not install git for TrustyClaw provisioning" >&2
+    echo "could not install git for Kern provisioning" >&2
     exit 1
   fi
   sleep 20
 done
 
-rm -rf /tmp/trustyclaw-checkout
-git init -q /tmp/trustyclaw-checkout
-cd /tmp/trustyclaw-checkout
+rm -rf /tmp/kern-checkout
+git init -q /tmp/kern-checkout
+cd /tmp/kern-checkout
 git remote add origin 'https://github.com/@GITHUB_REPOSITORY@.git'
 for attempt in $(seq 1 60); do
   if git fetch -q --depth 1 origin '@COMMIT_SHA@'; then
     break
   fi
   if [ "$attempt" = 60 ]; then
-    echo "could not fetch pinned TrustyClaw commit @COMMIT_SHA@" >&2
+    echo "could not fetch pinned Kern commit @COMMIT_SHA@" >&2
     exit 1
   fi
   sleep 30
 done
 git checkout -q --detach FETCH_HEAD
 
-PYTHONPATH=/tmp/trustyclaw-checkout python3 -m host.bootstrap.self_provision \
-  --payload /tmp/trustyclaw_payload.json \
-  --checkout /tmp/trustyclaw-checkout
+PYTHONPATH=/tmp/kern-checkout python3 -m host.bootstrap.self_provision \
+  --payload /tmp/kern_payload.json \
+  --checkout /tmp/kern-checkout

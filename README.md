@@ -1,16 +1,16 @@
-# TrustyClaw
+# Kern
 
-TrustyClaw is a controlled AI agent host with strong network activity gating.
+Kern is a controlled AI agent host with strong network activity gating.
 It runs Codex and Claude Code on infrastructure you own while keeping the agent
 behind an explicit, auditable network policy. Learn more at
-[trustyclaw.me](https://trustyclaw.me).
+[kernai.cloud](https://kernai.cloud).
 
 ## Deploy Your First Host
 
-TrustyClaw uses a Cloudflare Tunnel to give the admin UI a stable HTTPS address,
+Kern uses a Cloudflare Tunnel to give the admin UI a stable HTTPS address,
 protected by your admin password login and Cloudflare's edge (DDoS) protection.
 The steps below use this setup. It takes a few extra steps if you are new to
-Cloudflare, but once configured you can open TrustyClaw securely from any
+Cloudflare, but once configured you can open Kern securely from any
 browser, including mobile.
 
 Alternatively, you can deploy without HTTPS UI access and connect using SSH
@@ -32,7 +32,7 @@ You need:
 
 ### Cost
 
-TrustyClaw deploys one `t3.small` EC2 instance, one public IPv4 address, and
+Kern deploys one `t3.small` EC2 instance, one public IPv4 address, and
 40 GiB of gp3 disk, plus a Cloudflare Tunnel. A newly
 created [AWS Free Tier](https://aws.amazon.com/free/) account usually costs
 `$0` while its included credits remain; outside those credits, expect about
@@ -41,11 +41,11 @@ created [AWS Free Tier](https://aws.amazon.com/free/) account usually costs
 costs `$0` for limited personal use. AI provider usage is billed separately
 through your Codex or Claude Code subscription.
 
-### 1. Download TrustyClaw
+### 1. Download Kern
 
 ```bash
-git clone https://github.com/infiloop2/trustyclaw.git
-cd trustyclaw
+git clone https://github.com/infiloop2/kern.git
+cd kern
 ```
 
 ### 2. Create Temporary AWS Administrator Credentials
@@ -67,7 +67,7 @@ aws sts get-caller-identity
 ```
 
 The last command prints the account and identity that will create the
-TrustyClaw resources. This creates temporary administrator credentials in the
+Kern resources. This creates temporary administrator credentials in the
 current terminal; it does not create or store a root access key.
 
 Set the region for the host as well; it is part of the agent's identity, so
@@ -86,7 +86,7 @@ work: export `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
 
 ### 3. Set Up a Cloudflare Tunnel
 
-A Cloudflare Tunnel is recommended because it gives TrustyClaw a persistent
+A Cloudflare Tunnel is recommended because it gives Kern a persistent
 HTTPS address and an admin UI you can open securely from anywhere. The tunnel is
 transport and Cloudflare edge (DDoS) protection only; your admin password login
 is what protects the admin UI, so no Cloudflare Access application is needed. To
@@ -118,12 +118,12 @@ instructions.
 
 #### 3.3. Create a Tunnel and Copy Its Token
 
-Choose the final hostname now, for example `trustyclaw.example.com`.
+Choose the final hostname now, for example `kern.example.com`.
 
 - Go to **Networking > Tunnels > Create a tunnel** and name it, for example
-  `trustyclaw`.
+  `kern`.
 - The next screen shows connector installation commands. Do not run them;
-  TrustyClaw installs the connector on the host. Copy only the long token
+  Kern installs the connector on the host. Copy only the long token
   starting with `eyJ` from the end of any installation command.
 - The tunnel remains **Inactive** or **Down** until deploy connects it. This is
   expected.
@@ -140,7 +140,7 @@ Choose the final hostname now, for example `trustyclaw.example.com`.
 #### 3.5. Export the Tunnel Token
 
 ```bash
-export TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN='eyJ...'
+export KERN_CLOUDFLARE_TUNNEL_TOKEN='eyJ...'
 ```
 
 If you lose the token, open the tunnel's **Overview** tab and copy it from the
@@ -161,7 +161,7 @@ password with `printf %s 'your-chosen-password' | sha256sum`):
 
 ```bash
 python3 -m host.cli.deploy \
-  --agent-name my-trustyclaw \
+  --agent-name my-kern \
   --operator-cloudflare-hostname <hostname-from-step-3> \
   --admin-password-sha256 <sha256-from-above>
 ```
@@ -172,7 +172,7 @@ tunnel — pass `--operator-ssh-public-key` with your OpenSSH public key in
 place of (or alongside) `--operator-cloudflare-hostname`. See
 [SSH Operator Access](#ssh-operator-access) to create the key.
 
-The command creates the host and installs TrustyClaw, streaming progress as
+The command creates the host and installs Kern, streaming progress as
 it runs, and finishes by printing a result JSON with the host's address.
 
 The AWS credentials are no longer needed after deploy. Remove them from this
@@ -183,7 +183,7 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 aws logout
 ```
 
-### 5. Open TrustyClaw
+### 5. Open Kern
 
 Have the admin password you chose in step 4 ready.
 
@@ -194,9 +194,9 @@ If you deployed without Cloudflare, use the `public_dns` value from the same
 deploy result to start the SSH tunnel. Leave this terminal open:
 
 ```bash
-ssh -i ~/.ssh/trustyclaw_operator \
+ssh -i ~/.ssh/kern_operator \
   -L 7443:127.0.0.1:7443 \
-  trustyclaw-operator@<public-dns>
+  kern-operator@<public-dns>
 ```
 
 Then open [http://127.0.0.1:7443](http://127.0.0.1:7443) and sign in with the
@@ -206,7 +206,7 @@ keeps running.
 Your host is ready. The admin UI guides you through connecting an AI provider,
 enabling network access, and adding optional tools.
 
-## Why Use TrustyClaw
+## Why Use Kern
 
 - **Runs in the cloud by default:** keep long-running agents active without
   keeping your laptop open.
@@ -262,7 +262,7 @@ Environment variables:
 | `AWS_REGION` | AWS region of the host. Required by every command; `AWS_DEFAULT_REGION` also works. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | AWS credentials. |
 | `AWS_SESSION_TOKEN` | Set only for temporary credentials (an assumed STS role); unset it when using long-lived access keys, or every AWS call fails with an authentication error. |
-| `TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN` | The Cloudflare Tunnel token. Required when `--operator-cloudflare-hostname` is passed. |
+| `KERN_CLOUDFLARE_TUNNEL_TOKEN` | The Cloudflare Tunnel token. Required when `--operator-cloudflare-hostname` is passed. |
 
 For long-lived credentials, export `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY`. For temporary credentials, also export
@@ -276,8 +276,8 @@ avoids creating an access key. Deploy uses the default VPC and needs a default
 subnet with public IPv4 routing.
 
 For regular use or automation, attach `iam_policy.json` to a federated IAM role.
-The policy requires TrustyClaw tags on created resources, allows EC2 updates
-and cleanup only on TrustyClaw-tagged resources, and leaves region selection to
+The policy requires Kern tags on created resources, allows EC2 updates
+and cleanup only on Kern-tagged resources, and leaves region selection to
 `AWS_REGION`.
 See [`docs/architecture/iam-policy.md`](docs/architecture/iam-policy.md) for
 why each policy statement is needed and how its resource scope is constrained.
@@ -290,15 +290,15 @@ credentials for real data.
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 
 aws iam create-policy \
-  --policy-name trustyclaw-host-deploy \
+  --policy-name kern-host-deploy \
   --policy-document file://iam_policy.json
 
-aws iam create-user --user-name trustyclaw-host-deploy
+aws iam create-user --user-name kern-host-deploy
 aws iam attach-user-policy \
-  --user-name trustyclaw-host-deploy \
-  --policy-arn "arn:aws:iam::$AWS_ACCOUNT_ID:policy/trustyclaw-host-deploy"
+  --user-name kern-host-deploy \
+  --policy-arn "arn:aws:iam::$AWS_ACCOUNT_ID:policy/kern-host-deploy"
 
-aws iam create-access-key --user-name trustyclaw-host-deploy
+aws iam create-access-key --user-name kern-host-deploy
 
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
@@ -309,17 +309,17 @@ export AWS_SECRET_ACCESS_KEY=...
 Create an SSH keypair if you do not already have one:
 
 ```bash
-ssh-keygen -t ed25519 -C trustyclaw-operator -f ~/.ssh/trustyclaw_operator
+ssh-keygen -t ed25519 -C kern-operator -f ~/.ssh/kern_operator
 ```
 
 Then pass the public key to deploy or reconfigure:
 
 ```bash
---operator-ssh-public-key "ssh-ed25519 AAAA... trustyclaw-operator"
+--operator-ssh-public-key "ssh-ed25519 AAAA... kern-operator"
 ```
 
-When an SSH endpoint is configured, TrustyClaw keeps EC2 security-group ingress
-for TCP 22 and installs the key for `trustyclaw-operator`. If SSH is omitted,
+When an SSH endpoint is configured, Kern keeps EC2 security-group ingress
+for TCP 22 and installs the key for `kern-operator`. If SSH is omitted,
 the final host closes EC2 SSH ingress after bootstrap.
 
 ### Cloudflare Tunnel Operator Access
@@ -329,11 +329,11 @@ Pass the published hostname to deploy or reconfigure and export the tunnel
 token:
 
 ```bash
-export TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN='eyJ...'
---operator-cloudflare-hostname trustyclaw.example.com
+export KERN_CLOUDFLARE_TUNNEL_TOKEN='eyJ...'
+--operator-cloudflare-hostname kern.example.com
 ```
 
-TrustyClaw installs `cloudflared` as a systemd service, enables it across
+Kern installs `cloudflared` as a systemd service, enables it across
 reboots, and verifies during bootstrap that the configured hostname reaches the
 admin API's login gate (never an unauthenticated `200`). The tunnel is transport
 and Cloudflare edge protection only; the admin password login is the
@@ -352,9 +352,9 @@ Host lifecycle commands:
 
 | Command | Behavior | Credential behavior |
 | --- | --- | --- |
-| `python3 -m host.cli.deploy --agent-name <name>` | Creates a new host. Fails if a TrustyClaw instance or data volume already exists for `agent_name`. | Installs the `--admin-password-sha256` digest as the admin password hash. Installs the configured operator endpoints. |
+| `python3 -m host.cli.deploy --agent-name <name>` | Creates a new host. Fails if a Kern instance or data volume already exists for `agent_name`. | Installs the `--admin-password-sha256` digest as the admin password hash. Installs the configured operator endpoints. |
 | `python3 -m host.cli.upgrade --agent-name <name>` | Replaces the EC2 instance/root volume and reuses the preserved admin and agent data volumes. Requires an existing instance and existing data volumes. Bootstrap requires the admin state version to be lower than the repo `VERSION`. | Preserves the existing admin password and operator endpoints from admin state. |
-| `python3 -m host.cli.recover --agent-name <name>` | Creates a replacement host from preserved admin and agent data volumes when no TrustyClaw instance exists. Bootstrap requires the admin state version to equal the repo `VERSION`, unless `--allow-upgrade` is supplied. | Preserves the existing admin password and operator endpoints from admin state. |
+| `python3 -m host.cli.recover --agent-name <name>` | Creates a replacement host from preserved admin and agent data volumes when no Kern instance exists. Bootstrap requires the admin state version to equal the repo `VERSION`, unless `--allow-upgrade` is supplied. | Preserves the existing admin password and operator endpoints from admin state. |
 | `python3 -m host.cli.reconfigure --agent-name <name>` | Replaces an existing EC2 instance/root volume, reuses preserved admin and agent data volumes, and replaces the full operator endpoint list. Requires an existing instance and existing data volumes. Bootstrap requires the admin state version to equal the repo `VERSION`. | Installs the `--admin-password-sha256` digest as the new admin password hash. |
 | `python3 -m host.cli.start --agent-name <name>` | Starts the existing EC2 instance for the agent and waits until it is running. | Does not change credentials, root disk, data volumes, version, or operator endpoints. |
 | `python3 -m host.cli.stop --agent-name <name>` | Stops the existing EC2 instance for the agent and waits until it is stopped. | Does not change credentials, root disk, data volumes, version, or operator endpoints. |
@@ -366,9 +366,9 @@ Shared flags:
 | --- | --- | --- |
 | `--agent-name <name>` | all | Required. Stable host name: 1-50 characters of letters, numbers, hyphen, underscore. |
 | `--operator-ssh-public-key <key>` | `deploy`, `reconfigure` | Installs this OpenSSH public key as the SSH operator endpoint. At least one operator endpoint is required. |
-| `--operator-cloudflare-hostname <host>` | `deploy`, `reconfigure` | Configures a Cloudflare Tunnel operator endpoint at this exact hostname; the tunnel token is read from `TRUSTYCLAW_CLOUDFLARE_TUNNEL_TOKEN`. At least one operator endpoint is required. |
+| `--operator-cloudflare-hostname <host>` | `deploy`, `reconfigure` | Configures a Cloudflare Tunnel operator endpoint at this exact hostname; the tunnel token is read from `KERN_CLOUDFLARE_TUNNEL_TOKEN`. At least one operator endpoint is required. |
 | `--admin-password-sha256 <hex>` | `deploy`, `reconfigure` | Required. SHA-256 hex digest of the chosen admin password, for example `printf %s 'your-password' | sha256sum`. The CLI and the host only ever see this hash. |
-| `--bootstrap-from-github [commit-sha]` | `deploy`, `upgrade`, `recover`, `reconfigure` | Provisions the instance from a pinned `infiloop2/trustyclaw` commit via EC2 user data instead of pushing the local checkout over SSH; without a value, the latest `main` commit is pinned. The CLI first reads the commit's `VERSION` from GitHub — that version is the operation's target — and asks for confirmation. The command returns once the instance is launched with its volumes attached; bootstrap completes on the host, and a bootstrap failure terminates the instance. |
+| `--bootstrap-from-github [commit-sha]` | `deploy`, `upgrade`, `recover`, `reconfigure` | Provisions the instance from a pinned `infiloop2/kern` commit via EC2 user data instead of pushing the local checkout over SSH; without a value, the latest `main` commit is pinned. The CLI first reads the commit's `VERSION` from GitHub — that version is the operation's target — and asks for confirmation. The command returns once the instance is launched with its volumes attached; bootstrap completes on the host, and a bootstrap failure terminates the instance. |
 | `--allow-upgrade` | `recover` | Allows no-instance recovery to advance preserved admin state from an older version to the target `VERSION`. |
 
 Lifecycle commands fail before replacing an existing instance when the AWS
@@ -393,18 +393,18 @@ Every AWS resource deploy creates is tagged so it can be found and cleaned up:
 
 | Tag | Value | On |
 | --- | --- | --- |
-| `trustyclaw-host-agent-name` | `<agent_name>` | instance, volume, security group |
-| `trustyclaw-host` | `true` | instance, volume, security group |
-| `Name` | `trustyclaw-host-<agent_name>` | instance, volume |
-| `trustyclaw-host-volume-role` | `admin` or `agent` | data volumes |
-| `trustyclaw-host-version` | repo `VERSION` | instance |
+| `kern-host-agent-name` | `<agent_name>` | instance, volume, security group |
+| `kern-host` | `true` | instance, volume, security group |
+| `Name` | `kern-host-<agent_name>` | instance, volume |
+| `kern-host-volume-role` | `admin` or `agent` | data volumes |
+| `kern-host-version` | repo `VERSION` | instance |
 
 See [`docs/api/DeployResult.md`](docs/api/DeployResult.md) for the lifecycle
 result file schema.
 
 ## Admin API and File Uploads
 
-With the SSH tunnel from [step 5](#5-open-trustyclaw) active, log in once to get a
+With the SSH tunnel from [step 5](#5-open-kern) active, log in once to get a
 session cookie, then reuse it (with the CSRF header) for API calls:
 
 ```bash
@@ -412,7 +412,7 @@ curl -c cookies.txt -H "Content-Type: application/json" \
   -d '{"password": "<admin-password>"}' \
   http://127.0.0.1:7443/v1/login
 
-curl -b cookies.txt -H "X-TrustyClaw-Csrf: 1" \
+curl -b cookies.txt -H "X-Kern-Csrf: 1" \
   http://127.0.0.1:7443/v1/health
 ```
 
@@ -424,7 +424,7 @@ durable agent workspace with a sortable UTC timestamp prefix and returns the
 relative path to reference in a task:
 
 ```bash
-curl -b cookies.txt -H "X-TrustyClaw-Csrf: 1" \
+curl -b cookies.txt -H "X-Kern-Csrf: 1" \
   --data-binary @./reference.png \
   'http://127.0.0.1:7443/v1/agent-files/upload?filename=reference.png'
 ```
@@ -454,7 +454,7 @@ For deeper architecture and contribution notes, read:
 
 ## License
 
-TrustyClaw is source-available under the Business Source License 1.1.
+Kern is source-available under the Business Source License 1.1.
 Production or commercial use is not granted by the public license. Commercial
 licenses are available on request from the copyright holder.
 

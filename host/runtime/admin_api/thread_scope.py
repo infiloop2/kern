@@ -1,7 +1,7 @@
 """Host-side teardown of per-thread transient agent scopes.
 
 Every task turn runs inside a systemd scope named after its host thread
-(``trustyclaw-agent-thread-<thread_id>.scope``, created by the run-*
+(``kern-agent-thread-<thread_id>.scope``, created by the run-*
 launchers). Freeing that scope after a turn — killed or completed — is a host
 invariant shared by all three runtimes, so it lives here rather than in each
 adapter: the privileged stop-agent-thread helper SIGKILLs the scope's whole
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import subprocess
 
-STOP_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/stop-agent-thread"]
+STOP_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/stop-agent-thread"]
 
 
 def stop_thread_scope(

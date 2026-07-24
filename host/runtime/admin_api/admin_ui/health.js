@@ -109,7 +109,7 @@ function renderUpgradeNotice(upgrade) {
   const available = upgrade.available === true;
   const title = available
     ? `Upgrade available: version ${upgrade.latest}`
-    : "Your TrustyClaw is at the latest version.";
+    : "Your Kern is at the latest version.";
   const detail = available ? "Use your operator plane to upgrade." : "";
   const label = detail ? `${title}. ${detail}` : title;
   notice.classList.toggle("upgrade-available", available);

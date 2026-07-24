@@ -23,7 +23,7 @@ from host.runtime.core import state
 from host.runtime.admin_api.github_credential import HelperError, _run_helper_json
 from host.runtime.core.network_policy import managed_integration
 
-AUDIT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/audit-github-repo"]
+AUDIT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/audit-github-repo"]
 # Repository configuration changes rarely; the forced refreshes on credential
 # and repository-list changes cover the moments that matter, and the poller
 # re-checks on this TTL to catch drift made directly on GitHub.
@@ -102,7 +102,7 @@ def _incomplete_warning(reason: str) -> dict[str, str]:
     return {
         "code": "repository_audit_incomplete",
         "severity": "warning",
-        "message": f"Repository audit could not verify this write target: {reason}. TrustyClaw "
+        "message": f"Repository audit could not verify this write target: {reason}. Kern "
         "does not have enough information to check repository visibility, GitHub Pages, default "
         "branch protection, or workflows. Configure a working GitHub credential and re-check "
         "repository audits.",

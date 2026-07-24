@@ -23,10 +23,10 @@ from host.runtime.core import db
 from host.session_options import public_session_options, session_config_error
 
 
-HOST = os.environ.get("TRUSTYCLAW_APP_HOST", LOOPBACK)
-PORT = int(os.environ.get("TRUSTYCLAW_APP_PORT", "7450"))
-DB_SCHEMA = os.environ.get("TRUSTYCLAW_APP_DB_SCHEMA", "app_agent_chat")
-ADMIN_API_SOCKET = os.environ.get("TRUSTYCLAW_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH)
+HOST = os.environ.get("KERN_APP_HOST", LOOPBACK)
+PORT = int(os.environ.get("KERN_APP_PORT", "7450"))
+DB_SCHEMA = os.environ.get("KERN_APP_DB_SCHEMA", "app_agent_chat")
+ADMIN_API_SOCKET = os.environ.get("KERN_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH)
 MAX_REQUEST_BODY_BYTES = 128 * 1024
 # Admin API responses (a thread's full task history) can exceed the inbound
 # request-body cap; size the response cap to the admin API's own body limit.
@@ -43,7 +43,7 @@ class AppError(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TrustyClawAgentChat/0.1"
+    server_version = "KernAgentChat/0.1"
 
     def do_GET(self) -> None:
         self._handle("GET")
@@ -109,7 +109,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"message": str(exc)}})
 
     def _require_host_proxy(self) -> None:
-        if self.headers.get("X-TrustyClaw-App-Proxy") != APP_ID:
+        if self.headers.get("X-Kern-App-Proxy") != APP_ID:
             raise AppError(HTTPStatus.UNAUTHORIZED, "missing host app proxy marker")
 
     def _read_body(self) -> Any:
@@ -426,7 +426,7 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
     only connect() replaced."""
 
     def __init__(self, socket_path: str, timeout: float) -> None:
-        super().__init__("trustyclaw-admin-api", timeout=timeout)
+        super().__init__("kern-admin-api", timeout=timeout)
         self._socket_path = socket_path
 
     def connect(self) -> None:
@@ -438,7 +438,7 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
 
 def call_admin_api(method: str, path: str, body: Any = None) -> dict[str, Any]:
     encoded_body = None if body is None else json.dumps(body, sort_keys=True).encode()
-    headers = {"X-TrustyClaw-App-Backend": APP_ID}
+    headers = {"X-Kern-App-Backend": APP_ID}
     if encoded_body is not None:
         headers["Content-Type"] = "application/json"
     conn = _UnixHTTPConnection(ADMIN_API_SOCKET, timeout=10)

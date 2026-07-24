@@ -56,7 +56,7 @@ class NetworkIntrospectionTests(unittest.TestCase):
                 "network_integrations": {
                     "github": {
                         "enabled": True,
-                        "write_repositories": [{"owner": "infiloop2", "repo": "trustyclaw"}],
+                        "write_repositories": [{"owner": "infiloop2", "repo": "kern"}],
                         "require_dot_github_approval": True,
                     },
                     "custom": {"domains": {"example.com": {"allow_http_methods": ["GET"]}}},
@@ -79,7 +79,7 @@ class NetworkIntrospectionTests(unittest.TestCase):
         self.assertEqual(
             by_id["github"]["options"],
             {
-                "write_repositories": [{"owner": "infiloop2", "repo": "trustyclaw"}],
+                "write_repositories": [{"owner": "infiloop2", "repo": "kern"}],
                 "require_dot_github_approval": True,
             },
         )
@@ -123,8 +123,8 @@ class NetworkIntrospectionTests(unittest.TestCase):
     def test_mcp_shim_aggregates_the_dedicated_socket(self) -> None:
         network_socket = self.start_server()
         env = os.environ.copy()
-        env["TRUSTYCLAW_TOOLS_SOCKET"] = "/nonexistent/tools.sock"
-        env["TRUSTYCLAW_AGENT_NETWORK_SOCKET"] = network_socket
+        env["KERN_TOOLS_SOCKET"] = "/nonexistent/tools.sock"
+        env["KERN_AGENT_NETWORK_SOCKET"] = network_socket
         env["PYTHONPATH"] = str(REPO_ROOT)
         shim = subprocess.Popen(
             [sys.executable, "-m", "host.runtime.agent_shim.mcp_shim"],

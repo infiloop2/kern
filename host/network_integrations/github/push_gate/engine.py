@@ -47,7 +47,7 @@ MAX_CHANGED_PATHS = 200
 CHANGED_PATHS_TRUNCATED = ".github/... (additional paths omitted)"
 # The quarantine mirrors live under the proxy's own state directory (proxy-owned,
 # root-readable so the approval helper can replay from them).
-QUARANTINE_ROOT = Path("/mnt/trustyclaw-admin/proxy-state/github-quarantine")
+QUARANTINE_ROOT = Path("/mnt/kern-admin/proxy-state/github-quarantine")
 
 
 class GateError(Exception):

@@ -1,6 +1,6 @@
 # Apps
 
-Apps are TrustyClaw-managed product surfaces that run next to the host admin
+Apps are Kern-managed product surfaces that run next to the host admin
 plane. An app provides code for a narrow workflow: a backend API service,
 database migrations, and UI assets. The host decides how that code is mounted,
 which local user runs it, which database namespace it receives, and where its UI
@@ -12,7 +12,7 @@ with that work. Host-owned resources such as agent tasks, runtime credentials,
 network policy, process control, files, and logs stay behind the host admin API.
 
 The important security property is that the host can load app code without
-letting that code quietly bypass the policies that make TrustyClaw fail closed.
+letting that code quietly bypass the policies that make Kern fail closed.
 App code may orchestrate a workflow, but host boundaries remain host-enforced.
 
 ## Product Thesis
@@ -155,8 +155,8 @@ mounting stay inside an intentionally bounded surface. Bootstrap provisioning
 and `/v1/apps` metadata are generated from the validated package list.
 
 The host derives names from the app id and stable host slot. The app account is
-`trustyclaw-app-<app_id>` when that fits Linux's 32-byte account-name limit.
-Longer ids use `trustyclaw-app-<host_slot>`. The slot is unique and immutable,
+`kern-app-<app_id>` when that fits Linux's 32-byte account-name limit.
+Longer ids use `kern-app-<host_slot>`. The slot is unique and immutable,
 so the bounded fallback remains stable without changing existing short account
 names.
 
@@ -165,7 +165,7 @@ names.
 | Linux user | app account |
 | Postgres schema | `app_<app_id>` |
 | Postgres role | app account |
-| systemd unit | `trustyclaw-app-<app_id>.service` |
+| systemd unit | `kern-app-<app_id>.service` |
 | app API route | `/v1/apps/<app_id>/api/` |
 | app UI route | `/v1/apps/<app_id>/ui/` |
 
@@ -174,7 +174,7 @@ does not get direct access to agent home directories, proxy state, root helpers,
 runtime auth files, or host-owned database tables. It may connect to Postgres as
 the matching app role.
 
-All app backend service units run in the top-level `trustyclaw_app.slice` with
+All app backend service units run in the top-level `kern_app.slice` with
 a lower CPU weight than `system.slice`. This is a soft resource priority rather
 than a hard quota: app backends can use idle cores, but under CPU contention
 the admin API, proxy, Postgres, SSH, and other host services in `system.slice`
@@ -192,9 +192,9 @@ The complete iframe-to-parent request allowlist is:
 
 | Message type | Fields | Parent behavior |
 | --- | --- | --- |
-| `trustyclaw-app-api` | `request_id`, `method`, `path`, optional `body` | Makes one authenticated request only to that same app's `/v1/apps/<app_id>/api/...` route, then returns `trustyclaw-app-api-result` to the iframe. |
-| `trustyclaw-app-open-file` | absolute agent-workspace `path` | Switches the parent operator UI to Agent workspace / Files and opens the path there. It returns no file bytes to the iframe. |
-| `trustyclaw-app-upload-file` | `request_id`, `action`, optional `selection_id`, optional `max_files` | `select` opens a host-owned native file picker and retains up to ten files in parent memory; `upload` publishes one selection through the authenticated host upload endpoint; `discard` forgets one. Results return through `trustyclaw-app-upload-file-result`. |
+| `kern-app-api` | `request_id`, `method`, `path`, optional `body` | Makes one authenticated request only to that same app's `/v1/apps/<app_id>/api/...` route, then returns `kern-app-api-result` to the iframe. |
+| `kern-app-open-file` | absolute agent-workspace `path` | Switches the parent operator UI to Agent workspace / Files and opens the path there. It returns no file bytes to the iframe. |
+| `kern-app-upload-file` | `request_id`, `action`, optional `selection_id`, optional `max_files` | `select` opens a host-owned native file picker and retains up to ten files in parent memory; `upload` publishes one selection through the authenticated host upload endpoint; `discard` forgets one. Results return through `kern-app-upload-file-result`. |
 
 The API message is the app UI's only backend-request mechanism. The parent adds
 the operator's existing admin auth only for the sending app's reverse-proxy
@@ -270,8 +270,8 @@ expected to bind the provided loopback address and port, but the host does not
 rely on app self-discipline for route security: the admin API proxies only to
 the host-derived app port, and nftables makes that assigned listener
 proxy-only. New TCP connections to the assigned app port are accepted only
-from the `trustyclaw-admin` uid (the browser bridge) and the
-`trustyclaw-agent-app` uid (the agent app API proxy, for apps that opt into
+from the `kern-admin` uid (the browser bridge) and the
+`kern-agent-app` uid (the agent app API proxy, for apps that opt into
 `agent.api`; see [Agent App API](agent-app-api.md)) and are dropped for every
 other local uid before the broad loopback allow rule. If app code binds a different port, the host will
 not route app UI traffic to it, it is not exposed through SSH forwarding,
@@ -391,7 +391,7 @@ is designed around bad or compromised app assets:
   ownership of host resources, an app role limited to the app schema, and no
   direct reachability to host-owned listeners. The app TCP listener binds only
   loopback and nftables accepts new connections to that app port only from the
-  `trustyclaw-admin` uid; agent runtimes, app users, and ordinary local users
+  `kern-admin` uid; agent runtimes, app users, and ordinary local users
   cannot call it directly even if they spoof the host proxy header.
   App users do not get arbitrary outbound TCP loopback access. They can answer
   established admin-proxy TCP connections to their assigned app port, and they
@@ -403,7 +403,7 @@ is designed around bad or compromised app assets:
   app id before the normal host route handlers run. App-specific credentials,
   broader route/capability scopes, explicit grants for non-task host objects,
   and rate limits are not implemented.
-  App service units run under `trustyclaw_app.slice` with a lower CPU weight
+  App service units run under `kern_app.slice` with a lower CPU weight
   than host services, so CPU loops in app code do not get equal priority with
   the admin plane under contention. This is not full resource containment:
   memory and swap caps, task-count caps, and bounded restart bursts remain
@@ -420,7 +420,7 @@ Those threat cases drive the concrete controls:
 
 - App ids are validated and all host object names are derived by the host.
 - App services run as separate Linux users.
-- App services share a host-owned `trustyclaw_app.slice` with reduced CPU
+- App services share a host-owned `kern_app.slice` with reduced CPU
   weight, preserving admin-plane CPU priority under contention.
 - App backend TCP listeners bind only loopback, are not exposed by operator
   access endpoints, and are reachable only from the admin API service uid.

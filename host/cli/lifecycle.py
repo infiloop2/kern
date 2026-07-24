@@ -4,7 +4,7 @@ Provisioning artifacts (payload, bootstrap script, runtime code archive) are
 rendered by ``host.bootstrap.render`` and delivered one of two ways:
 
 1. **SSH delivery** (default): EC2 user data creates the
-   ``trustyclaw-operator`` account with a single-use deploy key and stages the
+   ``kern-operator`` account with a single-use deploy key and stages the
    provisioning payload, then the CLI copies the local checkout's runtime code
    archive to the instance over SSH, where the same
    ``host.bootstrap.self_provision`` entry the GitHub delivery uses renders
@@ -108,10 +108,10 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
     if mode not in {"deploy", "upgrade", "recover", "reconfigure"}:
         raise ValueError(f"unsupported lifecycle mode: {mode}")
     descriptions = {
-        "deploy": "Create a new TrustyClaw host with no existing instance or data volumes",
-        "upgrade": "Upgrade preserved TrustyClaw state without changing admin password or operator access",
+        "deploy": "Create a new Kern host with no existing instance or data volumes",
+        "upgrade": "Upgrade preserved Kern state without changing admin password or operator access",
         "recover": "Create a replacement host from preserved data volumes and existing operator access",
-        "reconfigure": "Replace operator access and refresh the admin password for preserved TrustyClaw state",
+        "reconfigure": "Replace operator access and refresh the admin password for preserved Kern state",
     }
     parser = argparse.ArgumentParser(
         prog=f"python3 -m host.cli.{mode}",
@@ -225,7 +225,7 @@ def main_for_mode(mode: str, argv: list[str] | None = None) -> int:
         aws_env = _aws_env(config)
         _log(
             f"region {config.aws_region}; preparing {command.mode} for "
-            f"'{config.agent_name}' at TrustyClaw {target_version}"
+            f"'{config.agent_name}' at Kern {target_version}"
         )
         preferred_availability_zone = _existing_storage_volume_availability_zone(config, aws_env)
         existing = _find_existing_instances(config, aws_env)
@@ -323,7 +323,7 @@ def main_for_mode(mode: str, argv: list[str] | None = None) -> int:
                     "provisioning failed after creating data volume(s) "
                     f"{', '.join(created_storage_volumes)}; leaving them in place. "
                     "A later deploy retry will refuse existing data volumes. If this was a failed first install "
-                    "and those volumes contain no initialized TrustyClaw state, delete the tagged volumes before "
+                    "and those volumes contain no initialized Kern state, delete the tagged volumes before "
                     "retrying deploy."
                 )
             raise
@@ -401,7 +401,7 @@ def _resolve_github_pin(commit_sha: str) -> tuple[str, str]:
         head_url = f"https://api.github.com/repos/{PUBLIC_GITHUB_REPOSITORY}/commits/main"
         request = urllib.request.Request(
             head_url,
-            headers={"User-Agent": "trustyclaw-cli", "Accept": "application/vnd.github+json"},
+            headers={"User-Agent": "kern-cli", "Accept": "application/vnd.github+json"},
         )
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
@@ -425,12 +425,12 @@ def _resolve_github_pin(commit_sha: str) -> tuple[str, str]:
         raise ConfigError(f"pinned commit has an invalid VERSION {pinned_version!r}") from exc
     if compare_versions(pinned_version, _MIN_GITHUB_DELIVERY_VERSION) < 0:
         raise ConfigError(
-            f"pinned commit is TrustyClaw {pinned_version}, but the GitHub delivery requires "
+            f"pinned commit is Kern {pinned_version}, but the GitHub delivery requires "
             f"{_MIN_GITHUB_DELIVERY_VERSION} or newer; use the SSH delivery for older versions"
         )
-    _log(f"pinned commit {commit_sha} deploys TrustyClaw {pinned_version} from {PUBLIC_GITHUB_REPOSITORY}")
+    _log(f"pinned commit {commit_sha} deploys Kern {pinned_version} from {PUBLIC_GITHUB_REPOSITORY}")
     try:
-        print(f"Proceed with TrustyClaw {pinned_version}? [y/N]: ", end="", file=sys.stderr, flush=True)
+        print(f"Proceed with Kern {pinned_version}? [y/N]: ", end="", file=sys.stderr, flush=True)
         answer = input()
     except EOFError as exc:
         raise ConfigError(

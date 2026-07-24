@@ -2,16 +2,16 @@
 
 | systemd unit | User | Purpose |
 | --- | --- | --- |
-| `trustyclaw-network-proxy.service` | `trustyclaw-proxy` | Policy proxy on `127.0.0.1:7445`. |
-| `trustyclaw-postgres.service` | `postgres` | Admin-state PostgreSQL, Unix socket only (no TCP listener). |
-| `trustyclaw-admin-api.service` | `trustyclaw-admin` | Admin API on `127.0.0.1:7443`. Owns admin state; holds no internet egress. |
-| `trustyclaw-tools.service` | `trustyclaw-tools` | Runs the bundled tool packages and owns the agent-facing tools socket `/run/trustyclaw-tools/tools.sock` (peer-credential authenticated). The only TrustyClaw application service besides the proxy with DNS+HTTPS egress; its Postgres role is scoped to the five tool tables plus read access to the encryption key needed for tool secrets. |
-| `trustyclaw-agent-network.service` | `trustyclaw-agent-network` | Serves read-only network integration and denial introspection on `/run/trustyclaw-agent-network/agent-network.sock`. No egress; its Postgres role has SELECT-only policy and network-event grants. |
-| `trustyclaw-agent-app.service` | `trustyclaw-agent-app` | Serves the agent-facing app API socket `/run/trustyclaw-agent-app/agent-app.sock` (peer-credential authenticated, agent uid only) and proxies thread-scope-attributed `app_api` calls to app backend ports. No database access or egress. See [agent-app-api.md](apps/agent-app-api.md). |
-| `trustyclaw-app-<app_id>.service` | per-app account | Installed app backend on its host-assigned loopback app port, reachable only from the admin API and agent-app service uids. |
-| `trustyclaw-cloudflared.service` | `cloudflared` | Optional Cloudflare Tunnel connector for Cloudflare Tunnel operator endpoints. Installed only when `operator_connections` contains `cloudflare_tunnel`. |
-| `trustyclaw_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; `MemoryHigh=70%`/`MemoryMax=80%`/`MemorySwapMax=5G` contain a runaway agent's RAM and swap to its own cgroup; `TasksMax=4096` stops a fork bomb from exhausting kernel PIDs. |
-| `trustyclaw_app.slice` | — | Top-level cgroup slice holding installed app services. `CPUWeight=50` gives host services priority under contention while allowing apps to use idle CPU; the current app slice does not impose memory, swap, or task-count caps. |
+| `kern-network-proxy.service` | `kern-proxy` | Policy proxy on `127.0.0.1:7445`. |
+| `kern-postgres.service` | `postgres` | Admin-state PostgreSQL, Unix socket only (no TCP listener). |
+| `kern-admin-api.service` | `kern-admin` | Admin API on `127.0.0.1:7443`. Owns admin state; holds no internet egress. |
+| `kern-tools.service` | `kern-tools` | Runs the bundled tool packages and owns the agent-facing tools socket `/run/kern-tools/tools.sock` (peer-credential authenticated). The only Kern application service besides the proxy with DNS+HTTPS egress; its Postgres role is scoped to the five tool tables plus read access to the encryption key needed for tool secrets. |
+| `kern-agent-network.service` | `kern-agent-network` | Serves read-only network integration and denial introspection on `/run/kern-agent-network/agent-network.sock`. No egress; its Postgres role has SELECT-only policy and network-event grants. |
+| `kern-agent-app.service` | `kern-agent-app` | Serves the agent-facing app API socket `/run/kern-agent-app/agent-app.sock` (peer-credential authenticated, agent uid only) and proxies thread-scope-attributed `app_api` calls to app backend ports. No database access or egress. See [agent-app-api.md](apps/agent-app-api.md). |
+| `kern-app-<app_id>.service` | per-app account | Installed app backend on its host-assigned loopback app port, reachable only from the admin API and agent-app service uids. |
+| `kern-cloudflared.service` | `cloudflared` | Optional Cloudflare Tunnel connector for Cloudflare Tunnel operator endpoints. Installed only when `operator_connections` contains `cloudflare_tunnel`. |
+| `kern_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; `MemoryHigh=70%`/`MemoryMax=80%`/`MemorySwapMax=5G` contain a runaway agent's RAM and swap to its own cgroup; `TasksMax=4096` stops a fork bomb from exhausting kernel PIDs. |
+| `kern_app.slice` | — | Top-level cgroup slice holding installed app services. `CPUWeight=50` gives host services priority under contention while allowing apps to use idle CPU; the current app slice does not impose memory, swap, or task-count caps. |
 
 ## Process Inventory
 
@@ -19,22 +19,22 @@
 | --- | --- | --- | --- |
 | `systemd` | root | OS boot | Starts nftables, Postgres, proxy, tools, admin API, installed app, and optional Cloudflare Tunnel services. |
 | `nftables` | kernel/root configured | bootstrap/systemd | Enforces inbound and per-user outbound network policy. |
-| `trustyclaw-network-proxy.service` | `trustyclaw-proxy` | systemd | Handles all agent HTTP(S)/WS(S) egress and writes network events. |
-| `trustyclaw-postgres.service` | `postgres` | systemd | Stores admin state; local Unix-socket connections only. |
-| `trustyclaw-admin-api.service` | `trustyclaw-admin` | systemd | Serves localhost API/UI, owns task state, and supervises runtime work. |
-| `trustyclaw-tools.service` | `trustyclaw-tools` | systemd | Executes bundled tool calls and operator-delegated OAuth/approval work; owns the peer-authenticated tools socket. |
-| `trustyclaw-agent-network.service` | `trustyclaw-agent-network` | systemd | Serves the peer-authenticated network-introspection socket from SELECT-only policy and event state, without egress. |
-| `trustyclaw-agent-app.service` | `trustyclaw-agent-app` | systemd | Attributes agent `app_api` calls to their app-prefixed thread by cgroup and proxies them to the owning app backend; owns the peer-authenticated agent-app socket. |
-| `trustyclaw-app-<app_id>.service` | per-app account | systemd | Serves an installed app API on a loopback app port selected by the host. The admin API and agent-app service are the only uids allowed to open new TCP connections to that listener. |
-| `trustyclaw-cloudflared.service` | `cloudflared` | systemd | Optional Cloudflare Tunnel connector. Reads `/etc/trustyclaw/cloudflared.token` and exposes the admin API through the configured Cloudflare Tunnel hostname. |
-| `run-codex-app-server` helper | starts as root, then `trustyclaw-agent` | admin API via sudo | Starts one Codex stdio app-server process. |
-| `codex app-server` | `trustyclaw-agent` | launch helper | Executes one Codex turn, resuming its provider thread by id, then exits. |
-| `run-claude-code` helper | starts as root, then `trustyclaw-agent` | admin API via sudo | Starts one Claude Code CLI process. |
-| `claude` | `trustyclaw-agent` | launch helper | Executes one Claude Code turn, then exits. |
-| `tools MCP shim` | `trustyclaw-agent` | Codex / Claude Code | Aggregates the tools, network-introspection, and app sockets into one MCP server; one per agent session that uses host tools. |
-| `read-codex-account-id` / `read-claude-account` | starts as root, then `trustyclaw-agent` | admin API via sudo | Reads provider auth files narrowly and prints only account guard metadata. |
-| `clear-agent-auth` | starts as root, then `trustyclaw-agent` | admin API via sudo | Removes local Codex/Claude auth files during linked-account reset. |
-| `read-agent-file` helper | starts as root, then `trustyclaw-agent` | admin API via sudo | Lists agent-home directories, returns a bounded text preview, or streams one bounded regular file to the authenticated Files viewer without giving admin general agent-home access. |
+| `kern-network-proxy.service` | `kern-proxy` | systemd | Handles all agent HTTP(S)/WS(S) egress and writes network events. |
+| `kern-postgres.service` | `postgres` | systemd | Stores admin state; local Unix-socket connections only. |
+| `kern-admin-api.service` | `kern-admin` | systemd | Serves localhost API/UI, owns task state, and supervises runtime work. |
+| `kern-tools.service` | `kern-tools` | systemd | Executes bundled tool calls and operator-delegated OAuth/approval work; owns the peer-authenticated tools socket. |
+| `kern-agent-network.service` | `kern-agent-network` | systemd | Serves the peer-authenticated network-introspection socket from SELECT-only policy and event state, without egress. |
+| `kern-agent-app.service` | `kern-agent-app` | systemd | Attributes agent `app_api` calls to their app-prefixed thread by cgroup and proxies them to the owning app backend; owns the peer-authenticated agent-app socket. |
+| `kern-app-<app_id>.service` | per-app account | systemd | Serves an installed app API on a loopback app port selected by the host. The admin API and agent-app service are the only uids allowed to open new TCP connections to that listener. |
+| `kern-cloudflared.service` | `cloudflared` | systemd | Optional Cloudflare Tunnel connector. Reads `/etc/kern/cloudflared.token` and exposes the admin API through the configured Cloudflare Tunnel hostname. |
+| `run-codex-app-server` helper | starts as root, then `kern-agent` | admin API via sudo | Starts one Codex stdio app-server process. |
+| `codex app-server` | `kern-agent` | launch helper | Executes one Codex turn, resuming its provider thread by id, then exits. |
+| `run-claude-code` helper | starts as root, then `kern-agent` | admin API via sudo | Starts one Claude Code CLI process. |
+| `claude` | `kern-agent` | launch helper | Executes one Claude Code turn, then exits. |
+| `tools MCP shim` | `kern-agent` | Codex / Claude Code | Aggregates the tools, network-introspection, and app sockets into one MCP server; one per agent session that uses host tools. |
+| `read-codex-account-id` / `read-claude-account` | starts as root, then `kern-agent` | admin API via sudo | Reads provider auth files narrowly and prints only account guard metadata. |
+| `clear-agent-auth` | starts as root, then `kern-agent` | admin API via sudo | Removes local Codex/Claude auth files during linked-account reset. |
+| `read-agent-file` helper | starts as root, then `kern-agent` | admin API via sudo | Lists agent-home directories, returns a bounded text preview, or streams one bounded regular file to the authenticated Files viewer without giving admin general agent-home access. |
 | `mint-github-app-token` helper | root | admin API via sudo | Mints installation-wide GitHub App tokens through root egress because the admin service has none; the proxy repo guard is the per-repository boundary. |
 | `audit-github-repo` helper | root | admin API via sudo | Reads GitHub repository/security facts with the working token and returns facts without storing secrets. |
 | `approve-github-push` helper | root | admin API via sudo | Replays or cleans up a push held by the `.github` approval gate using the proxy-state quarantine mirror and a working GitHub token piped on stdin. |
@@ -55,8 +55,8 @@
 | Proxy certificate lock users | network proxy | Serialize per-host certificate generation so concurrent TLS CONNECTs do not race on cert files. |
 
 Agent runtimes are spawned through fixed sudo helpers that demote them to
-`trustyclaw-agent`, each inside a transient systemd scope under
-`trustyclaw_agent.slice`. Without the scope they would inherit the admin API's
+`kern-agent`, each inside a transient systemd scope under
+`kern_agent.slice`. Without the scope they would inherit the admin API's
 service cgroup and compete with the host services for resources. The slice's
 `CPUWeight=50` versus `system.slice`'s default 100 keeps the admin API, proxy,
 and Postgres responsive while an agent build or test run saturates the cores,
@@ -69,7 +69,7 @@ keeps 1G of the 6G swapfile available to host services (systemd 249 offers no
 percentage form for swap, and bootstrap owns the swapfile size). `TasksMax=4096`
 bounds agent threads and processes so a fork bomb cannot exhaust kernel PIDs,
 which would otherwise block the admin API from spawning helpers at all. Each
-scope is `BindsTo=trustyclaw-admin-api.service`: leaving the admin API's
+scope is `BindsTo=kern-admin-api.service`: leaving the admin API's
 cgroup must not decouple lifecycles, so when the admin service stops,
 restarts, or crashes, systemd stops the scopes too and no orphaned runtime
 keeps running after its task was recovered as failed.

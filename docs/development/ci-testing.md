@@ -42,7 +42,7 @@ is needed: the runtime brings its own protocol client.
 
 If PostgreSQL is missing locally, the database-backed tests skip with
 instructions; install it with `apt install postgresql` (or point
-`TRUSTYCLAW_TEST_PG_BIN` at a Postgres `bin/` directory). The CI sandbox image
+`KERN_TEST_PG_BIN` at a Postgres `bin/` directory). The CI sandbox image
 installs it, so CI always runs the full suite.
 
 ## CI: tests inside a no-network sandbox

@@ -23,7 +23,7 @@ from typing import BinaryIO, Iterator, Literal
 
 from host.tools.host_api import AssetMetadata
 
-DEFAULT_ASSET_ROOT = Path("/mnt/trustyclaw-admin/tools-state/assets")
+DEFAULT_ASSET_ROOT = Path("/mnt/kern-admin/tools-state/assets")
 MAX_VIDEO_BYTES = 200_000_000
 MIN_VIDEO_BYTES = 512
 MAX_IMAGE_BYTES = 200_000_000

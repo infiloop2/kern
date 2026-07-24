@@ -31,8 +31,7 @@ APP_UID_BASE = 48000
 APP_UID_MAX = APP_UID_BASE + MAX_INSTALLED_APPS - 1
 APP_PORT_OFFSET_MIN = 0
 APP_PORT_OFFSET_MAX = MAX_INSTALLED_APPS - 1
-APP_ACCOUNT_PREFIX = "trustyclaw-app-"
-LINUX_ACCOUNT_NAME_LIMIT = 32
+APP_ACCOUNT_PREFIX = "kern-app-"
 ReleaseStage = Literal["stable", "beta"]
 
 
@@ -64,7 +63,7 @@ class AppManifest:
     agent_instructions: str
     # Opt-in agent-facing backend API: when true, agents working this app's
     # tasks get the app_api tool, proxied to the backend's /agent/ routes by
-    # the trustyclaw-agent-app service (docs/architecture/apps/agent-app-api.md).
+    # the kern-agent-app service (docs/architecture/apps/agent-app-api.md).
     agent_api: bool = False
     # Opt-in for an app that executes untrusted computation in a blob-backed
     # dedicated worker. The worker remains under the app frame's CSP; no
@@ -73,9 +72,9 @@ class AppManifest:
 
     @property
     def linux_user(self) -> str:
-        candidate = f"{APP_ACCOUNT_PREFIX}{self.id}"
-        if len(candidate.encode()) <= LINUX_ACCOUNT_NAME_LIMIT:
-            return candidate
+        # Always the host slot, never the app id: one uniform, length-bounded
+        # account name (and thus uid/gid and network identity) for every app,
+        # regardless of how long the app id is.
         return f"{APP_ACCOUNT_PREFIX}{self.allocation.port_offset}"
 
     @property
@@ -88,7 +87,7 @@ class AppManifest:
 
     @property
     def service_name(self) -> str:
-        return f"trustyclaw-app-{self.id}.service"
+        return f"kern-app-{self.id}.service"
 
     @property
     def api_route(self) -> str:

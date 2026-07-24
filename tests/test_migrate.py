@@ -36,11 +36,11 @@ def _app_up(app_id: str) -> list[int]:
 
 
 class MigrateRunnerTests(unittest.TestCase):
-    DB_NAME = "trustyclaw_migrate_test"
+    DB_NAME = "kern_migrate_test"
 
     def setUp(self) -> None:
         pg_harness.create_database(self.DB_NAME)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_DB_NAME": self.DB_NAME})
+        self.env_patch = patch.dict("os.environ", {"KERN_DB_NAME": self.DB_NAME})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         # Close pooled connections to this class's database before the env
@@ -132,308 +132,12 @@ class MigrateRunnerTests(unittest.TestCase):
         self.assertEqual(self.table_names(), {"schema_migrations"})
 
 
-
-class RepoMigrationDataTests(unittest.TestCase):
-    """Data-migration behavior of the real repo migrations."""
-
-    DB_NAME = "trustyclaw_migrate_repo_test"
-
-    def setUp(self) -> None:
-        pg_harness.create_database(self.DB_NAME)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_DB_NAME": self.DB_NAME})
-        self.env_patch.start()
-        self.addCleanup(self.env_patch.stop)
-        # Close pooled connections to this class's database before the env
-        # restore, so no later test checks one out against the wrong database.
-        self.addCleanup(db.close_pool)
-        self.repo_migrations = Path(__file__).resolve().parents[1] / "host" / "migrations"
-
-    def test_0002_migrates_legacy_preset_policy_rows(self) -> None:
-        # A host upgraded from the raw-preset era: managed provider rows plus
-        # raw GitHub/PyPI/npm domain rules in the stored policy.
-        migrate.up(target=1, directory=self.repo_migrations, quiet=True)
-        with db.transaction() as cur:
-            cur.execute("INSERT INTO network_policy (singleton, updated_at) VALUES (TRUE, '2026-01-01T00:00:00Z')")
-            cur.execute("INSERT INTO managed_provider_access (provider) VALUES ('openai')")
-            for domain in (
-                "github.com", "api.github.com", "raw.githubusercontent.com",
-                "pypi.org", "files.pythonhosted.org", "*.npmjs.org",
-                "example.com",
-            ):
-                cur.execute("INSERT INTO allowed_domains (domain) VALUES (%s)", (domain,))
-            cur.execute("INSERT INTO domain_methods (domain, position, method) VALUES ('github.com', 0, 'GET')")
-            cur.execute("INSERT INTO domain_methods (domain, position, method) VALUES ('example.com', 0, 'GET')")
-
-        migrate.up(directory=self.repo_migrations, quiet=True)
-
-        with db.transaction() as cur:
-            cur.execute("SELECT integration FROM managed_integrations ORDER BY integration")
-            integrations = [row[0] for row in cur.fetchall()]
-            cur.execute("SELECT domain FROM allowed_domains")
-            domains = {row[0] for row in cur.fetchall()}
-            cur.execute("SELECT domain FROM domain_methods")
-            method_domains = {row[0] for row in cur.fetchall()}
-        # Reserved preset domains (GitHub, package) are dropped so the policy
-        # validates again, but no integration is auto-activated — only the
-        # carried-over openai provider row remains. The operator re-enables
-        # the package integrations they want. Manual rules survive.
-        self.assertEqual(integrations, ["openai"])
-        self.assertEqual(domains, {"example.com"})
-        self.assertEqual(method_domains, {"example.com"})
-
-        # The migrated policy parses — an upgraded host keeps its egress
-        # instead of failing closed on reserved domains.
-        from host.config import parse_network_controls
-        from host.runtime.core.network_policy import load_policy
-
-        parsed = parse_network_controls(load_policy())
-        self.assertTrue(parsed.integrations["openai"].enabled)
-        self.assertFalse(parsed.integrations["python_packages"].enabled)
-        self.assertFalse(parsed.integrations["npm_packages"].enabled)
-        self.assertFalse(parsed.integrations["github"].enabled)
-
-    def test_0008_migrates_existing_tasks_and_provider_sessions(self) -> None:
-        migrate.up(target=7, directory=self.repo_migrations, quiet=True)
-        with db.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO tasks (
-                    number, status, agent_runtime, thread_id, input_message,
-                    created_at, updated_at
-                ) VALUES
-                    (1, 'completed', 'codex', 'codex-thread', 'done', '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z'),
-                    (2, 'queued', 'claude_code', 'claude-thread', 'waiting', '2026-01-01T00:00:02Z', '2026-01-01T00:00:02Z')
-                """
-            )
-            cur.execute(
-                """
-                INSERT INTO thread_sessions (
-                    agent_runtime, thread_id, provider_session_id, last_used_at
-                ) VALUES ('codex', 'codex-thread', 'provider-thread', '2026-01-01T00:00:01Z')
-                """
-            )
-
-        self.assertEqual(migrate.up(target=8, directory=self.repo_migrations, quiet=True), [8])
-
-        with db.transaction() as cur:
-            cur.execute("SELECT thread_id FROM tasks ORDER BY number")
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("codex-thread",),
-                    ("claude-thread",),
-                ],
-            )
-            cur.execute(
-                "SELECT column_name FROM information_schema.columns"
-                " WHERE table_schema = 'public' AND table_name = 'tasks'"
-                " ORDER BY ordinal_position"
-            )
-            self.assertEqual(
-                [row[0] for row in cur.fetchall()],
-                [
-                    "number",
-                    "status",
-                    "thread_id",
-                    "input_message",
-                    "output_message",
-                    "error_message",
-                    "created_at",
-                    "updated_at",
-                ],
-            )
-            cur.execute(
-                "SELECT thread_id, provider_session_id, model, effort"
-                " FROM thread_sessions ORDER BY thread_id"
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("claude-thread", None, "opus", "high"),
-                    ("codex-thread", "provider-thread", "gpt-5.6-terra", "high"),
-                ],
-            )
-
-        with self.assertRaises(Exception), db.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO thread_sessions (
-                    agent_runtime, thread_id, provider_session_id, last_used_at, model, effort
-                ) VALUES (
-                    'codex', 'invalid', NULL, '2026-01-01T00:00:03Z',
-                    'gpt-5.6-luna', 'ultra'
-                )
-                """
-            )
-
-        self.assertEqual(
-            migrate.down(target=7, directory=self.repo_migrations, quiet=True),
-            [8],
-        )
-        with db.transaction() as cur:
-            cur.execute("SELECT number, agent_runtime, thread_id FROM tasks ORDER BY number")
-            self.assertEqual(
-                cur.fetchall(),
-                [(1, "codex", "codex-thread"), (2, "claude_code", "claude-thread")],
-            )
-            cur.execute(
-                "SELECT agent_runtime, thread_id, provider_session_id"
-                " FROM thread_sessions ORDER BY thread_id"
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [("codex", "codex-thread", "provider-thread")],
-            )
-
-    def test_0013_removes_only_the_obsolete_serpapi_config(self) -> None:
-        migrate.up(target=12, directory=self.repo_migrations, quiet=True)
-        with db.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO tool_config (tool_id, key, value) VALUES
-                    ('linkedin_discovery', 'SERPAPI_API_KEY', 'old-ciphertext'),
-                    ('linkedin_discovery', 'SERPERAPI_API_KEY', 'new-ciphertext'),
-                    ('brave_search', 'BRAVE_SEARCH_API_KEY', 'other-ciphertext')
-                """
-            )
-
-        self.assertEqual(
-            migrate.up(target=13, directory=self.repo_migrations, quiet=True),
-            [13],
-        )
-        with db.transaction() as cur:
-            cur.execute("SELECT tool_id, key FROM tool_config ORDER BY tool_id, key")
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("brave_search", "BRAVE_SEARCH_API_KEY"),
-                    ("linkedin_discovery", "SERPERAPI_API_KEY"),
-                ],
-            )
-
-        self.assertEqual(
-            migrate.down(target=12, directory=self.repo_migrations, quiet=True),
-            [13],
-        )
-        with db.transaction() as cur:
-            cur.execute("SELECT tool_id, key FROM tool_config ORDER BY tool_id, key")
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("brave_search", "BRAVE_SEARCH_API_KEY"),
-                    ("linkedin_discovery", "SERPERAPI_API_KEY"),
-                ],
-            )
-
-    def test_0016_removes_pi_state_and_collapses_bedrock_usage(self) -> None:
-        migrate.up(target=15, directory=self.repo_migrations, quiet=True)
-        with db.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO thread_sessions (
-                    agent_runtime, thread_id, provider_session_id, last_used_at, model, effort
-                ) VALUES
-                    ('pi', 'pi-thread', 'pi-session', '2026-07-01T00:00:00Z',
-                     'deepseek.v3.2', 'high'),
-                    ('hermes', 'hermes-thread', 'hermes-session', '2026-07-01T00:00:00Z',
-                     'deepseek.v3.2', 'high')
-                """
-            )
-            cur.execute(
-                """
-                INSERT INTO tasks (
-                    number, status, thread_id, input_message, created_at, updated_at
-                ) VALUES
-                    (1, 'completed', 'pi-thread', 'old pi task',
-                     '2026-07-01T00:00:00Z', '2026-07-01T00:00:01Z'),
-                    (2, 'completed', 'hermes-thread', 'kept hermes task',
-                     '2026-07-01T00:00:00Z', '2026-07-01T00:00:01Z')
-                """
-            )
-            cur.execute(
-                """
-                INSERT INTO agent_events (
-                    created_at, event_type, task_id, agent_runtime
-                ) VALUES
-                    ('2026-07-01T00:00:00Z', 'task.created', 'task_1', NULL),
-                    ('2026-07-01T00:00:00Z', 'agent_runtime.active', NULL, 'pi'),
-                    ('2026-07-01T00:00:00Z', 'task.created', 'task_2', NULL),
-                    ('2026-07-01T00:00:00Z', 'agent_runtime.active', NULL, 'hermes')
-                """
-            )
-            cur.execute(
-                """
-                INSERT INTO bedrock_usage (
-                    runtime, model_id, day, requests, metered_requests,
-                    input_tokens, output_tokens, cost_usd
-                ) VALUES
-                    ('pi', 'deepseek.v3.2', '2026-07-01', 2, 2, 20, 10, 0.1),
-                    ('hermes', 'deepseek.v3.2', '2026-07-01', 3, 3, 30, 15, 0.2)
-                """
-            )
-
-        self.assertEqual(
-            migrate.up(target=16, directory=self.repo_migrations, quiet=True),
-            [16],
-        )
-        with db.transaction() as cur:
-            cur.execute("SELECT agent_runtime, thread_id FROM thread_sessions")
-            self.assertEqual(cur.fetchall(), [("hermes", "hermes-thread")])
-            cur.execute("SELECT number, thread_id FROM tasks")
-            self.assertEqual(cur.fetchall(), [(2, "hermes-thread")])
-            cur.execute(
-                "SELECT task_id, agent_runtime FROM agent_events"
-                " ORDER BY task_id NULLS LAST, agent_runtime"
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [("task_2", None), (None, "hermes")],
-            )
-            cur.execute(
-                "SELECT model_id, requests, metered_requests, input_tokens,"
-                " output_tokens, cost_usd::double precision FROM bedrock_usage"
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [("deepseek.v3.2", 3, 3, 30, 15, 0.2)],
-            )
-            cur.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'bedrock_usage'
-                ORDER BY ordinal_position
-                """
-            )
-            self.assertNotIn("runtime", [row[0] for row in cur.fetchall()])
-
-        with self.assertRaises(Exception), db.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO thread_sessions (
-                    agent_runtime, thread_id, provider_session_id, last_used_at, model, effort
-                ) VALUES (
-                    'pi', 'rejected-pi', NULL, '2026-07-01T00:00:00Z',
-                    'deepseek.v3.2', 'high'
-                )
-                """
-            )
-
-        self.assertEqual(
-            migrate.down(target=15, directory=self.repo_migrations, quiet=True),
-            [16],
-        )
-        with db.transaction() as cur:
-            cur.execute("SELECT runtime, model_id, requests FROM bedrock_usage")
-            self.assertEqual(cur.fetchall(), [("hermes", "deepseek.v3.2", 3)])
-
-
 class AppMigrationTests(unittest.TestCase):
-    DB_NAME = "trustyclaw_app_migrate_test"
+    DB_NAME = "kern_app_migrate_test"
 
     def setUp(self) -> None:
         pg_harness.create_database(self.DB_NAME)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_DB_NAME": self.DB_NAME})
+        self.env_patch = patch.dict("os.environ", {"KERN_DB_NAME": self.DB_NAME})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         # Close pooled connections to this class's database before the env
@@ -445,18 +149,18 @@ class AppMigrationTests(unittest.TestCase):
                 """
                 DO $$
                 BEGIN
-                  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trustyclaw-app-agent_chat') THEN
-                    CREATE ROLE "trustyclaw-app-agent_chat" LOGIN;
+                  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-app-0') THEN
+                    CREATE ROLE "kern-app-0" LOGIN;
                   END IF;
                 END
                 $$;
                 """
             )
             cur.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
-            cur.execute('CREATE SCHEMA app_agent_chat AUTHORIZATION "trustyclaw-app-agent_chat"')
+            cur.execute('CREATE SCHEMA app_agent_chat AUTHORIZATION "kern-app-0"')
 
     def test_app_migration_runs_in_app_schema_and_records_host_version(self) -> None:
-        self.assertEqual(_app_up("agent_chat"), [1, 2, 3, 4])
+        self.assertEqual(_app_up("agent_chat"), [1])
         self.assertEqual(_app_up("agent_chat"), [])
 
         with db.transaction() as cur:
@@ -493,105 +197,30 @@ class AppMigrationTests(unittest.TestCase):
                 ],
             )
             cur.execute("SELECT app_id, version, name FROM app_schema_migrations")
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("agent_chat", 1, "app_state"),
-                    ("agent_chat", 2, "clear_stale_host_refs"),
-                    ("agent_chat", 3, "minimal_thread_index"),
-                    ("agent_chat", 4, "drop_preferences"),
-                ],
-            )
+            self.assertEqual(cur.fetchall(), [("agent_chat", 1, "baseline")])
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'preferences'")
             self.assertEqual(cur.fetchall(), [])
 
     def test_app_migration_recovers_when_sql_commits_before_host_record(self) -> None:
-        app_migrate.apply_sql("agent_chat", 1, connection_user="trustyclaw-app-agent_chat")
+        # The baseline's CREATE ... IF NOT EXISTS statements make a re-applied,
+        # never-recorded version idempotent: the loop reapplies and records it.
+        app_migrate.apply_sql("agent_chat", 1, connection_user="kern-app-0")
 
-        self.assertEqual(_app_up("agent_chat"), [1, 2, 3, 4])
+        self.assertEqual(_app_up("agent_chat"), [1])
 
         with db.transaction() as cur:
             cur.execute("SELECT app_id, version, name FROM app_schema_migrations")
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("agent_chat", 1, "app_state"),
-                    ("agent_chat", 2, "clear_stale_host_refs"),
-                    ("agent_chat", 3, "minimal_thread_index"),
-                    ("agent_chat", 4, "drop_preferences"),
-                ],
-            )
+            self.assertEqual(cur.fetchall(), [("agent_chat", 1, "baseline")])
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'app_agent_chat'")
             self.assertEqual({row[0] for row in cur.fetchall()}, {"thread_tasks", "threads"})
 
-    def test_agent_chat_cleanup_migration_deletes_stale_host_references(self) -> None:
-        app_migrate.apply_sql("agent_chat", 1, connection_user="trustyclaw-app-agent_chat")
-        app_migrate.record("agent_chat", 1)
-        with db.transaction() as cur:
-            cur.execute("SET LOCAL search_path TO app_agent_chat")
-            cur.execute(
-                """
-                INSERT INTO threads (thread_id, agent_runtime, archived, created_at, updated_at)
-                VALUES ('old-thread', 'codex', FALSE, '2026-06-08T00:00:00Z', '2026-06-08T00:00:00Z')
-                """
-            )
-            cur.execute(
-                """
-                INSERT INTO thread_tasks (task_id, thread_id, created_at)
-                VALUES ('task_1', 'old-thread', '2026-06-08T00:00:00Z')
-                """
-            )
-
-        self.assertEqual(_app_up("agent_chat"), [2, 3, 4])
-
-        with db.transaction() as cur:
-            cur.execute("SELECT count(*) FROM app_agent_chat.thread_tasks")
-            self.assertEqual(cur.fetchone(), (0,))
-            cur.execute("SELECT count(*) FROM app_agent_chat.threads")
-            self.assertEqual(cur.fetchone(), (0,))
-
-    def test_agent_chat_migration_removes_host_owned_thread_configuration(self) -> None:
-        for version in (1, 2):
-            app_migrate.apply_sql(
-                "agent_chat", version, connection_user="trustyclaw-app-agent_chat"
-            )
-            app_migrate.record("agent_chat", version)
-        with db.transaction(user="trustyclaw-app-agent_chat") as cur:
-            cur.execute("SET LOCAL search_path TO app_agent_chat")
-            cur.execute(
-                """
-                INSERT INTO threads (thread_id, agent_runtime, archived, created_at, updated_at)
-                VALUES
-                    ('codex-thread', 'codex', FALSE, '2026-06-08T00:00:00Z', '2026-06-08T00:00:00Z'),
-                    ('claude-thread', 'claude_code', FALSE, '2026-06-08T00:00:00Z', '2026-06-08T00:00:00Z')
-                """
-            )
-
-        self.assertEqual(_app_up("agent_chat"), [3, 4])
-
-        with db.transaction() as cur:
-            cur.execute(
-                "SELECT column_name FROM information_schema.columns"
-                " WHERE table_schema = 'app_agent_chat' AND table_name = 'threads'"
-                " ORDER BY ordinal_position"
-            )
-            self.assertEqual(
-                [row[0] for row in cur.fetchall()],
-                ["thread_id", "archived"],
-            )
-            cur.execute("SELECT thread_id FROM app_agent_chat.threads ORDER BY thread_id")
-            self.assertEqual(cur.fetchall(), [("claude-thread",), ("codex-thread",)])
-
-    def test_workspace_apps_clear_saved_pi_runtime_configuration(self) -> None:
-        removal_versions = {
-            "alpha_seeker": 3,
-            "mission_pursuit": 3,
-            "social_marketer": 4,
-            "software_builder": 3,
-            "virality_machine": 5,
-        }
+    def test_workspace_apps_reject_pi_runtime_in_baseline(self) -> None:
+        # Kern 1.0.0 never installs the pi runtime, so the collapsed baseline's
+        # workspace constraint accepts hermes and rejects pi outright: there is
+        # no pi state to clear because none can be written in the first place.
         apps = {app.id: app for app in app_platform.installed_apps()}
-        for app_id, removal_version in removal_versions.items():
+        for app_id in ("alpha_seeker", "mission_pursuit", "social_marketer",
+                       "software_builder", "virality_machine"):
             app = apps[app_id]
             with self.subTest(app_id=app_id):
                 with db.transaction() as cur:
@@ -604,14 +233,9 @@ class AppMigrationTests(unittest.TestCase):
                     cur.execute(
                         f'CREATE SCHEMA {app.db_schema} AUTHORIZATION "{app.db_role}"'
                     )
-                for version in range(1, removal_version):
-                    app_migrate.apply_sql(
-                        app_id,
-                        version,
-                        connection_user=app.db_role,
-                    )
-                    app_migrate.record(app_id, version)
-                with db.transaction(user=app.db_role) as cur:
+                self.assertEqual(_app_up(app_id), [1])
+
+                with self.assertRaises(Exception), db.transaction(user=app.db_role) as cur:
                     cur.execute(f"SET LOCAL search_path TO {app.db_schema}")
                     cur.execute(
                         """
@@ -623,47 +247,16 @@ class AppMigrationTests(unittest.TestCase):
                         )
                         """
                     )
-                    cur.execute(
-                        """
-                        INSERT INTO schedules (
-                            schedule_id, title, prompt, every_minutes, next_run_at,
-                            enabled, created_at, updated_at
-                        ) VALUES (
-                            'legacy-pi-schedule', 'Legacy Pi schedule', 'Run legacy work',
-                            60, '2026-07-01T01:00:00Z', TRUE,
-                            '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z'
-                        )
-                        """
-                    )
-
-                self.assertEqual(_app_up(app_id), [removal_version])
-                with db.transaction() as cur:
-                    cur.execute(
-                        f"SELECT agent_runtime, model, effort FROM {app.db_schema}.workspace"
-                    )
-                    self.assertEqual(cur.fetchone(), (None, None, None))
-                    cur.execute(
-                        f"SELECT enabled FROM {app.db_schema}.schedules"
-                        " WHERE schedule_id = 'legacy-pi-schedule'"
-                    )
-                    self.assertEqual(cur.fetchone(), (False,))
-
-                with self.assertRaises(Exception), db.transaction(user=app.db_role) as cur:
-                    cur.execute(f"SET LOCAL search_path TO {app.db_schema}")
-                    cur.execute(
-                        """
-                        UPDATE workspace
-                        SET agent_runtime = 'pi', model = 'deepseek.v3.2', effort = 'high'
-                        """
-                    )
                 with db.transaction(user=app.db_role) as cur:
                     cur.execute(f"SET LOCAL search_path TO {app.db_schema}")
                     cur.execute(
                         """
-                        UPDATE workspace
-                        SET agent_runtime = 'hermes',
-                            model = 'deepseek.v3.2',
-                            effort = 'high'
+                        INSERT INTO workspace (
+                            agent_runtime, model, effort, created_at, updated_at
+                        ) VALUES (
+                            'hermes', 'deepseek.v3.2', 'high',
+                            '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z'
+                        )
                         """
                     )
 

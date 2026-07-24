@@ -45,7 +45,7 @@ class ManifestTests(unittest.TestCase):
         assert app is not None
         self.assertEqual(app.allocation.port_offset, 3)
         self.assertEqual(app.db_schema, "app_social_marketer")
-        self.assertEqual(app.db_role, "trustyclaw-app-social_marketer")
+        self.assertEqual(app.db_role, "kern-app-3")
         self.assertEqual(app.port, app_platform.APP_PORT_BASE + 3)
         self.assertTrue(app.agent_api)
         self.assertIn("resident agent of Social Marketer", app.agent_instructions)
@@ -156,7 +156,7 @@ class SetPostStatusShapeTests(unittest.TestCase):
 
 
 class SocialMarketerDbTests(unittest.TestCase):
-    DB_NAME = "trustyclaw_social_marketer_test"
+    DB_NAME = "kern_social_marketer_test"
     _initialized = False
 
     def setUp(self) -> None:
@@ -164,7 +164,7 @@ class SocialMarketerDbTests(unittest.TestCase):
         pg_harness.ensure_database()
         if not SocialMarketerDbTests._initialized:
             pg_harness.create_database(self.DB_NAME)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_DB_NAME": self.DB_NAME})
+        self.env_patch = patch.dict("os.environ", {"KERN_DB_NAME": self.DB_NAME})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         self.addCleanup(db.close_pool)
@@ -175,15 +175,15 @@ class SocialMarketerDbTests(unittest.TestCase):
                     """
                     DO $$
                     BEGIN
-                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trustyclaw-app-social_marketer') THEN
-                        CREATE ROLE "trustyclaw-app-social_marketer" LOGIN;
+                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-app-3') THEN
+                        CREATE ROLE "kern-app-3" LOGIN;
                       END IF;
                     END
                     $$;
                     """
                 )
                 cur.execute(
-                    'CREATE SCHEMA IF NOT EXISTS app_social_marketer AUTHORIZATION "trustyclaw-app-social_marketer"'
+                    'CREATE SCHEMA IF NOT EXISTS app_social_marketer AUTHORIZATION "kern-app-3"'
                 )
             app = app_platform.app_by_id("social_marketer")
             assert app is not None

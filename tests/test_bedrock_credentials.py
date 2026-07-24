@@ -103,7 +103,7 @@ class BedrockCredentialsTests(unittest.TestCase):
             "-c",
             (
                 "import json, os; print(json.dumps({"
-                "'access_key_id': os.environ['TRUSTYCLAW_BEDROCK_AWS_ACCESS_KEY_ID'],"
+                "'access_key_id': os.environ['KERN_BEDROCK_AWS_ACCESS_KEY_ID'],"
                 " 'account_id': '123456789012', 'arn': 'arn:aws:iam::123456789012:user/hermes'}))"
             ),
         ]

@@ -92,15 +92,15 @@ class ProxyMarkerTests(unittest.TestCase):
             self.headers = headers
 
     def test_operator_and_agent_routes_require_distinct_exact_proxy_markers(self) -> None:
-        host = self.StubHandler({"X-TrustyClaw-App-Proxy": backend.APP_ID})
-        agent = self.StubHandler({"X-TrustyClaw-Agent-App-Proxy": backend.APP_ID})
+        host = self.StubHandler({"X-Kern-App-Proxy": backend.APP_ID})
+        agent = self.StubHandler({"X-Kern-Agent-App-Proxy": backend.APP_ID})
         server.Handler._require_host_proxy(host)  # type: ignore[arg-type]
         server.Handler._require_agent_proxy(agent)  # type: ignore[arg-type]
 
         for headers, check in (
             ({}, server.Handler._require_host_proxy),
-            ({"X-TrustyClaw-App-Proxy": "another_app"}, server.Handler._require_host_proxy),
-            ({"X-TrustyClaw-App-Proxy": backend.APP_ID}, server.Handler._require_agent_proxy),
+            ({"X-Kern-App-Proxy": "another_app"}, server.Handler._require_host_proxy),
+            ({"X-Kern-App-Proxy": backend.APP_ID}, server.Handler._require_agent_proxy),
         ):
             with self.subTest(headers=headers), self.assertRaises(backend.AppError) as error:
                 check(self.StubHandler(headers))  # type: ignore[arg-type]
@@ -111,7 +111,7 @@ class ProxyMarkerTests(unittest.TestCase):
 
         class Stub:
             path = "/workspace"
-            headers = {"X-TrustyClaw-App-Proxy": backend.APP_ID}
+            headers = {"X-Kern-App-Proxy": backend.APP_ID}
 
             def _read_body(self) -> None:
                 return None
@@ -564,7 +564,7 @@ class ClipEncodedTextTests(unittest.TestCase):
 
 
 class MissionPursuitDbTests(unittest.TestCase):
-    DB_NAME = "trustyclaw_mission_pursuit_test"
+    DB_NAME = "kern_mission_pursuit_test"
     _initialized = False
 
     def setUp(self) -> None:
@@ -574,7 +574,7 @@ class MissionPursuitDbTests(unittest.TestCase):
         pg_harness.ensure_database()
         if not MissionPursuitDbTests._initialized:
             pg_harness.create_database(self.DB_NAME)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_DB_NAME": self.DB_NAME})
+        self.env_patch = patch.dict("os.environ", {"KERN_DB_NAME": self.DB_NAME})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         # Do not leave this app-specific database in the process-wide pool
@@ -587,14 +587,14 @@ class MissionPursuitDbTests(unittest.TestCase):
                     """
                     DO $$
                     BEGIN
-                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trustyclaw-app-mission_pursuit') THEN
-                        CREATE ROLE "trustyclaw-app-mission_pursuit" LOGIN;
+                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-app-1') THEN
+                        CREATE ROLE "kern-app-1" LOGIN;
                       END IF;
                     END
                     $$;
                     """
                 )
-                cur.execute('CREATE SCHEMA IF NOT EXISTS app_mission_pursuit AUTHORIZATION "trustyclaw-app-mission_pursuit"')
+                cur.execute('CREATE SCHEMA IF NOT EXISTS app_mission_pursuit AUTHORIZATION "kern-app-1"')
             app = app_platform.app_by_id("mission_pursuit")
             assert app is not None
             for version in app_migrate.pending(app.id):

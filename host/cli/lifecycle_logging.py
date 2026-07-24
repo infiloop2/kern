@@ -1,4 +1,4 @@
-"""Small logging helper for TrustyClaw host lifecycle commands.
+"""Small logging helper for Kern host lifecycle commands.
 
 Progress goes to stderr; stdout carries only the final result JSON, so
 callers can redirect or parse it directly.

@@ -2,7 +2,7 @@
 
 This is the complete, host-neutral contract between a **tool package** and its
 **host**: one document, because the two sides are one contract. How *this* host
-(TrustyClaw) implements the contract is a separate document:
+(Kern) implements the contract is a separate document:
 [`host-integration.md`](host-integration.md).
 
 The Python protocols under `host/tools/` express this contract as code
@@ -159,7 +159,7 @@ class ToolManifest:
 - **`protections`** are short operator-facing statements of the integration's
   real safeguards. The compact info popover and full Integration Guides entry render
   the same values.
-- **`setup_steps`** are the ordered provider-side and TrustyClaw steps needed to
+- **`setup_steps`** are the ordered provider-side and Kern steps needed to
   connect the tool. Each may link to an authoritative provider page and to one
   local, audited PNG under `/guide-assets/` with descriptive alt text. Provider
   links use HTTPS. Bundled-tool images live with their owning tool or shared

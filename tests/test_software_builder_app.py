@@ -45,7 +45,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(app.allocation.port_offset, 5)
         self.assertTrue(app.agent_api)
         self.assertEqual(app.db_schema, "app_software_builder")
-        self.assertEqual(app.db_role, "trustyclaw-app-software_builder")
+        self.assertEqual(app.db_role, "kern-app-5")
         self.assertEqual(app.port, builder.CONFIG.port)
 
     def test_config_targets_builder_schema(self) -> None:
@@ -59,20 +59,17 @@ class ManifestTests(unittest.TestCase):
 class WorkspaceBaseMigrationTests(unittest.TestCase):
     def test_first_migration_is_byte_identical_to_sibling_kit_apps(self) -> None:
         # There is no canonical kit schema file; the embedded copies are the
-        # applied history, and test_workspace_kit pins them to each other.
-        sibling = (REPO_ROOT / "host" / "apps" / "alpha_seeker" / "migrations" / "0001_workspace_base.sql").read_bytes()
-        mine = (BUILDER_DIR / "migrations" / "0001_workspace_base.sql").read_bytes()
+        # single genesis migration, and test_workspace_kit pins them to each
+        # other.
+        sibling = (REPO_ROOT / "host" / "apps" / "alpha_seeker" / "migrations" / "0001_baseline.sql").read_bytes()
+        mine = (BUILDER_DIR / "migrations" / "0001_baseline.sql").read_bytes()
         self.assertEqual(mine, sibling)
 
     def test_builder_ships_no_domain_migration(self) -> None:
         # Software Builder represents pull requests as generic artifacts. It has
-        # no domain tables, so its migrations are the copied workspace base and
-        # the kit-wide runtime-constraint update.
+        # no domain tables, so its single baseline is the copied workspace base.
         migrations = sorted(p.name for p in (BUILDER_DIR / "migrations").glob("*.sql"))
-        self.assertEqual(
-            migrations,
-            ["0001_workspace_base.sql", "0002_pi_hermes_runtimes.sql", "0003_remove_pi_runtime.sql"],
-        )
+        self.assertEqual(migrations, ["0001_baseline.sql"])
 
 
 class AgentInstructionsTests(unittest.TestCase):
@@ -106,7 +103,7 @@ class SetupBriefTests(unittest.TestCase):
 
 
 class BuilderSeedDbTests(unittest.TestCase):
-    DB_NAME = "trustyclaw_builder_test"
+    DB_NAME = "kern_builder_test"
     _initialized = False
 
     def setUp(self) -> None:
@@ -114,7 +111,7 @@ class BuilderSeedDbTests(unittest.TestCase):
         pg_harness.ensure_database()
         if not BuilderSeedDbTests._initialized:
             pg_harness.create_database(self.DB_NAME)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_DB_NAME": self.DB_NAME})
+        self.env_patch = patch.dict("os.environ", {"KERN_DB_NAME": self.DB_NAME})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         self.addCleanup(db.close_pool)
@@ -125,14 +122,14 @@ class BuilderSeedDbTests(unittest.TestCase):
                     """
                     DO $$
                     BEGIN
-                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trustyclaw-app-software_builder') THEN
-                        CREATE ROLE "trustyclaw-app-software_builder" LOGIN;
+                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-app-5') THEN
+                        CREATE ROLE "kern-app-5" LOGIN;
                       END IF;
                     END
                     $$;
                     """
                 )
-                cur.execute('CREATE SCHEMA IF NOT EXISTS app_software_builder AUTHORIZATION "trustyclaw-app-software_builder"')
+                cur.execute('CREATE SCHEMA IF NOT EXISTS app_software_builder AUTHORIZATION "kern-app-5"')
             app = app_platform.app_by_id("software_builder")
             assert app is not None
             for version in app_migrate.pending(app.id):

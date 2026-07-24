@@ -120,13 +120,13 @@ MANIFEST = ToolManifest(
     setup_steps=(
         SetupStep(
             title="Understand why you need a LinkedIn Page",
-            description="LinkedIn requires every developer app, including a personal self-serve app, to name a LinkedIn Page as its publisher. The Page is public and identifies the organization responsible for the app; it does not become the account your agent uses. TrustyClaw connects your personal profile and never reads from or posts to the Page. Your profile must be a Page super admin only so you can approve the app association. Other Page admins can see your admin role, but the role does not add the Page to your profile's Experience section. If you want a public link between them, add the organization to your profile separately, and only when that relationship is accurate.",
+            description="LinkedIn requires every developer app, including a personal self-serve app, to name a LinkedIn Page as its publisher. The Page is public and identifies the organization responsible for the app; it does not become the account your agent uses. Kern connects your personal profile and never reads from or posts to the Page. Your profile must be a Page super admin only so you can approve the app association. Other Page admins can see your admin role, but the role does not add the Page to your profile's Experience section. If you want a public link between them, add the organization to your profile separately, and only when that relationship is accurate.",
             link_url="https://www.linkedin.com/help/linkedin/answer/a548360/associate-an-app-with-a-linkedin-page",
             link_label="See why LinkedIn requires a Page",
         ),
         SetupStep(
             title="Use or create a minimal LinkedIn Page",
-            description="Use an existing LinkedIn Page where your personal profile is a super admin. If you have none, on LinkedIn desktop open For Business > Create a Company Page > Company. Enter a truthful project or solo-business name, an available public URL, your public TrustyClaw or GitHub URL as Website, the closest Industry, Myself Only as Company size, and the closest accurate Company type; skip optional profile details and create the Page. The Page needs no followers or posts. LinkedIn records it only as the developer app's publisher; TrustyClaw never reads from or posts to it.",
+            description="Use an existing LinkedIn Page where your personal profile is a super admin. If you have none, on LinkedIn desktop open For Business > Create a Company Page > Company. Enter a truthful project or solo-business name, an available public URL, your public Kern or GitHub URL as Website, the closest Industry, Myself Only as Company size, and the closest accurate Company type; skip optional profile details and create the Page. The Page needs no followers or posts. LinkedIn records it only as the developer app's publisher; Kern never reads from or posts to it.",
             link_url="https://www.linkedin.com/help/linkedin/answer/a543852",
             link_label="View LinkedIn's Page creation steps",
         ),
@@ -145,12 +145,12 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Register the callback URI and copy the credentials",
             show_callback=True,
-            description="Stay on the app's Auth tab. Under OAuth 2.0 settings, find Authorized redirect URLs for your app, choose the edit pencil, paste the exact Callback URI for this host displayed in the Connection section below, choose Update, and confirm the URI appears in the saved list. Copy the Client ID. Reveal and copy the Primary Client Secret; store it only in the write-only TrustyClaw field, never in an agent prompt. The callback's scheme, hostname, port, path, and trailing slash must match exactly or LinkedIn rejects Connect.",
+            description="Stay on the app's Auth tab. Under OAuth 2.0 settings, find Authorized redirect URLs for your app, choose the edit pencil, paste the exact Callback URI for this host displayed in the Connection section below, choose Update, and confirm the URI appears in the saved list. Copy the Client ID. Reveal and copy the Primary Client Secret; store it only in the write-only Kern field, never in an agent prompt. The callback's scheme, hostname, port, path, and trailing slash must match exactly or LinkedIn rejects Connect.",
         ),
         SetupStep(
-            title="Configure and connect TrustyClaw",
+            title="Configure and connect Kern",
             show_config=True,
-            description="Expand LinkedIn in Internet Access and Tools. Save the Client ID as LINKEDIN_OAUTH_CLIENT_ID and Primary Client Secret as LINKEDIN_OAUTH_CLIENT_SECRET, enable the tool, choose Connect, and approve the four displayed scopes while signed in to the personal profile you want the agent to use. TrustyClaw replaces no account silently; confirm the row shows that profile's expected name and email before giving the agent access.",
+            description="Expand LinkedIn in Internet Access and Tools. Save the Client ID as LINKEDIN_OAUTH_CLIENT_ID and Primary Client Secret as LINKEDIN_OAUTH_CLIENT_SECRET, enable the tool, choose Connect, and approve the four displayed scopes while signed in to the personal profile you want the agent to use. Kern replaces no account silently; confirm the row shows that profile's expected name and email before giving the agent access.",
         ),
     ),
     data_summary=DataSummary(

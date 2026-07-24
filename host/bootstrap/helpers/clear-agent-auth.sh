@@ -15,7 +15,7 @@ case "${runtime}" in
     ;;
 esac
 
-exec /usr/sbin/runuser -u trustyclaw-agent -- env HOME=/mnt/trustyclaw-agent/agent-home CLAUDE_CONFIG_DIR=/mnt/trustyclaw-agent/agent-home/.claude /usr/bin/python3 - "${runtime}" <<'PY'
+exec /usr/sbin/runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home CLAUDE_CONFIG_DIR=/mnt/kern-agent/agent-home/.claude /usr/bin/python3 - "${runtime}" <<'PY'
 import json
 import os
 from pathlib import Path

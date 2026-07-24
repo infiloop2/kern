@@ -62,14 +62,25 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # Applied migrations are immutable history: a migration file that
-          # exists on the base branch must be byte-identical here, and never
-          # deleted — schema changes always ship as a new NNNN+1 file. This
-          # covers the host migrations and every app's migrations.
-          # --no-renames: a replaced migration must report as D + A under its
-          # real paths; rename detection can pair the deletion with an added
-          # file in a different app and misattribute the violation.
+          # Applied migrations are immutable history: a migration file must be
+          # byte-identical across PRs and never deleted — schema changes always
+          # ship as a new NNNN+1 file. Covers the host migrations and every
+          # app's migrations.
+          #
+          # One-time reset exception: Kern 1.0.0 collapsed the incremental host
+          # migrations (0001-0017) into a single 0001_baseline.sql. That reset
+          # merges into the pre-collapse main commit below, so bypass the check
+          # for exactly that base. Every later PR branches from a base that
+          # already contains the baseline, so its base differs and the check
+          # below runs normally.
+          MIGRATION_RESET_BASE_SHA="20b5713338c8f91643b65a52c2fb9a2f01b63e56"
           paths=(host/migrations/ 'host/apps/*/migrations/*')
+          if [ "${BASE_SHA}" = "${MIGRATION_RESET_BASE_SHA}" ]; then
+            echo "migration immutability bypassed for the one-time Kern 1.0.0 baseline reset"
+            exit 0
+          fi
+          # --no-renames: a replaced migration must report as D + A under its
+          # real paths; rename detection can misattribute the violation.
           changed="$(git diff --name-only --no-renames --diff-filter=MD "${BASE_SHA}"...HEAD -- "${paths[@]}" || true)"
           if [ -n "${changed}" ]; then
             echo "migration files may only be added, never edited, renamed, or deleted:" >&2

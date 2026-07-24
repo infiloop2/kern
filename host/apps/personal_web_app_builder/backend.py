@@ -27,10 +27,10 @@ from host.session_options import public_session_options, session_config_error
 
 APP_ID = "personal_web_app_builder"
 THREAD_ID = "builder"
-HOST = os.environ.get("TRUSTYCLAW_APP_HOST", LOOPBACK)
-PORT = int(os.environ.get("TRUSTYCLAW_APP_PORT", "7456"))
-DB_SCHEMA = os.environ.get("TRUSTYCLAW_APP_DB_SCHEMA", "app_personal_web_app_builder")
-ADMIN_API_SOCKET = os.environ.get("TRUSTYCLAW_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH)
+HOST = os.environ.get("KERN_APP_HOST", LOOPBACK)
+PORT = int(os.environ.get("KERN_APP_PORT", "7456"))
+DB_SCHEMA = os.environ.get("KERN_APP_DB_SCHEMA", "app_personal_web_app_builder")
+ADMIN_API_SOCKET = os.environ.get("KERN_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH)
 MAX_REQUEST_BODY_BYTES = 768 * 1024
 MAX_ADMIN_RESPONSE_BYTES = ADMIN_MAX_REQUEST_BODY_BYTES
 MAX_HTML_BYTES = 128 * 1024
@@ -62,7 +62,7 @@ class AppError(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TrustyClawPersonalWebAppBuilder/0.1"
+    server_version = "KernPersonalWebAppBuilder/0.1"
 
     def do_GET(self) -> None:
         self._handle("GET")
@@ -92,13 +92,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"message": "app request failed"}})
 
     def _require_host_proxy(self) -> None:
-        if self.headers.get("X-TrustyClaw-App-Proxy") != APP_ID:
+        if self.headers.get("X-Kern-App-Proxy") != APP_ID:
             raise AppError(HTTPStatus.UNAUTHORIZED, "missing host app proxy marker")
 
     def _require_agent_proxy(self) -> None:
         if (
-            self.headers.get("X-TrustyClaw-Agent-App-Proxy") != APP_ID
-            or self.headers.get("X-TrustyClaw-Agent-Thread") != THREAD_ID
+            self.headers.get("X-Kern-Agent-App-Proxy") != APP_ID
+            or self.headers.get("X-Kern-Agent-Thread") != THREAD_ID
         ):
             raise AppError(HTTPStatus.UNAUTHORIZED, "missing agent app context")
 
@@ -556,7 +556,7 @@ def _path_segment(value: str) -> str:
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
     def __init__(self, socket_path: str, timeout: float) -> None:
-        super().__init__("trustyclaw-admin-api", timeout=timeout)
+        super().__init__("kern-admin-api", timeout=timeout)
         self._socket_path = socket_path
 
     def connect(self) -> None:
@@ -568,7 +568,7 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
 
 def call_admin_api(method: str, path: str, body: Any = None) -> dict[str, Any]:
     encoded = None if body is None else json.dumps(body, sort_keys=True).encode()
-    headers = {"X-TrustyClaw-App-Backend": APP_ID}
+    headers = {"X-Kern-App-Backend": APP_ID}
     if encoded is not None:
         headers["Content-Type"] = "application/json"
     conn = _UnixHTTPConnection(ADMIN_API_SOCKET, timeout=10)

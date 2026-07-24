@@ -1,4 +1,4 @@
-"""Periodic discovery of newer TrustyClaw releases.
+"""Periodic discovery of newer Kern releases.
 
 The admin service has no egress. A fixed root helper fetches the public
 repository's ``VERSION`` file, then this module validates and compares the
@@ -18,7 +18,7 @@ from host.version import compare_versions, read_root_version
 
 CHECK_INTERVAL_SECONDS = 4 * 60 * 60
 HELPER_TIMEOUT_SECONDS = 15
-HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/trustyclaw-host/check-for-upgrade"]
+HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/check-for-upgrade"]
 
 _lock = threading.Lock()
 _latest_version: str | None = None

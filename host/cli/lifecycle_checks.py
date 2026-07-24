@@ -20,15 +20,15 @@ def _validate_command_preflight(
     if command.mode == "deploy":
         if existing_instances:
             raise ConfigError(
-                f"deploy requires no existing TrustyClaw instance for {config.agent_name}; "
+                f"deploy requires no existing Kern instance for {config.agent_name}; "
                 "use upgrade or recover for preserved hosts"
             )
         if storage_roles:
             raise ConfigError(
-                f"deploy requires no existing TrustyClaw data volumes for {config.agent_name}; "
+                f"deploy requires no existing Kern data volumes for {config.agent_name}; "
                 f"found {', '.join(sorted(storage_roles))}. If a previous first-time deploy failed after creating "
                 "blank data volumes, delete those tagged volumes before retrying deploy. Use recover only for "
-                "initialized TrustyClaw volumes with admin-state/version.json."
+                "initialized Kern volumes with admin-state/version.json."
             )
         return
 
@@ -41,12 +41,12 @@ def _validate_command_preflight(
         )
     if command.mode in {"upgrade", "reconfigure"} and not existing_instances:
         raise ConfigError(
-            f"{command.mode} requires an existing TrustyClaw instance for {config.agent_name}; "
+            f"{command.mode} requires an existing Kern instance for {config.agent_name}; "
             "use recover to recreate a missing or broken host"
         )
     if command.mode == "recover" and existing_instances:
         raise ConfigError(
-            f"recover requires no existing TrustyClaw instance for {config.agent_name}; "
+            f"recover requires no existing Kern instance for {config.agent_name}; "
             "use upgrade for a normal release upgrade, or reconfigure to change admin password or operator access"
         )
 
@@ -69,7 +69,7 @@ def _check_existing_version_hints(
             if isinstance(hint, str) and hint:
                 hints[instance["InstanceId"]] = hint
     if not hints:
-        _log("existing EC2 instance has no TrustyClaw version tag; admin disk version will be authoritative")
+        _log("existing EC2 instance has no Kern version tag; admin disk version will be authoritative")
         return
     hint_text = ", ".join(f"{instance_id}={version}" for instance_id, version in sorted(hints.items()))
     _log(f"existing EC2 version tag hint(s): {hint_text}; admin disk version is authoritative")
@@ -78,12 +78,12 @@ def _check_existing_version_hints(
             comparison = compare_versions(version, target_version)
         except ValueError:
             raise ConfigError(
-                f"existing TrustyClaw instance {instance_id} has invalid {VERSION_TAG_KEY} tag {version!r}; "
+                f"existing Kern instance {instance_id} has invalid {VERSION_TAG_KEY} tag {version!r}; "
                 "fix or remove the tag before running upgrade or recover"
             )
         error = _version_hint_error(command, version, target_version, comparison)
         if error is not None:
-            raise ConfigError(f"existing TrustyClaw instance {instance_id} is tagged with version {version}; {error}")
+            raise ConfigError(f"existing Kern instance {instance_id} is tagged with version {version}; {error}")
 
 
 def _version_hint_error(
@@ -96,7 +96,7 @@ def _version_hint_error(
         if comparison >= 0:
             return (
                 f"upgrade requires preserved state older than target VERSION {target_version}; "
-                "run recover for same-version repair, or target a newer TrustyClaw version for newer preserved state"
+                "run recover for same-version repair, or target a newer Kern version for newer preserved state"
             )
         return None
     if command.mode == "recover":
@@ -104,13 +104,13 @@ def _version_hint_error(
             if comparison > 0:
                 return (
                     f"recover --allow-upgrade cannot move preserved state backward to target VERSION {target_version}; "
-                    "target the same or a newer TrustyClaw version"
+                    "target the same or a newer Kern version"
                 )
             return None
         if comparison != 0:
             return (
                 f"recover requires preserved state to match target VERSION {target_version}; "
-                "use recover --allow-upgrade to advance older state, or target a newer TrustyClaw version for newer preserved state"
+                "use recover --allow-upgrade to advance older state, or target a newer Kern version for newer preserved state"
             )
     if command.mode == "reconfigure":
         if comparison != 0:

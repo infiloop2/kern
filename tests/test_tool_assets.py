@@ -305,7 +305,7 @@ class ShimVideoStageTests(unittest.TestCase):
         self.assertEqual(result, {"video_asset_id": "opaque-id"})
         self.assertEqual(connection.body, b"x" * 512)
         self.assertEqual(connection.path, "/assets/video")
-        self.assertEqual(connection.headers["X-TrustyClaw-Filename"], "clip.mp4")
+        self.assertEqual(connection.headers["X-Kern-Filename"], "clip.mp4")
         self.assertNotIn(str(video), connection.headers.values())
 
     def test_shim_rejects_symlink_without_connecting(self) -> None:
@@ -359,7 +359,7 @@ class ShimVideoStageTests(unittest.TestCase):
         self.assertEqual(connection.body, b"x" * 512)
         self.assertEqual(connection.path, "/assets/image")
         self.assertEqual(connection.headers["Content-Type"], "image/webp")
-        self.assertEqual(connection.headers["X-TrustyClaw-Filename"], "frame.webp")
+        self.assertEqual(connection.headers["X-Kern-Filename"], "frame.webp")
         self.assertNotIn(str(image), connection.headers.values())
 
 

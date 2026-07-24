@@ -672,7 +672,7 @@ def seed_state() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TrustyClawMock/0.2"
+    server_version = "KernMock/0.2"
 
     def do_GET(self) -> None:
         self._handle("GET")
@@ -1104,7 +1104,7 @@ def health() -> dict[str, Any]:
     gib = 1024**3
     return {
         "status": "ok",
-        "agent_name": "trustyclaw-mock",
+        "agent_name": "kern-mock",
         "version": {"status": "ok", "runtime": VERSION, "state": VERSION},
         "upgrade": {
             "available": upgrade_available,
@@ -1240,7 +1240,7 @@ def agent_accounts() -> dict[str, Any]:
             bedrock_account.update(
                 {
                     "account_id": "123456789012",
-                    "arn": "arn:aws:iam::123456789012:user/trustyclaw-bedrock",
+                    "arn": "arn:aws:iam::123456789012:user/kern-bedrock",
                 }
             )
         accounts.append(bedrock_account)
@@ -1296,7 +1296,7 @@ def oauth(runtime: str, method: str) -> dict[str, str]:
         if not STATE.claude_oauth:
             STATE.claude_oauth = {
                 "status": "awaiting_code",
-                "login_url": "https://claude.com/cai/oauth/authorize?client=trustyclaw-mock",
+                "login_url": "https://claude.com/cai/oauth/authorize?client=kern-mock",
                 "expires_at": expires,
             }
         return dict(STATE.claude_oauth)
@@ -1721,17 +1721,17 @@ def list_agent_files(path: str) -> dict[str, Any]:
 
 def read_agent_file(path: str) -> dict[str, Any]:
     contents = {
-        "/.gitconfig": "[user]\n\tname = TrustyClaw Agent\n\temail = agent@trustyclaw.invalid\n[init]\n\tdefaultBranch = main\n",
+        "/.gitconfig": "[user]\n\tname = Kern Agent\n\temail = agent@kern.invalid\n[init]\n\tdefaultBranch = main\n",
         "/AGENTS.md": (
-            "# TrustyClaw Agent Host\n\n"
-            "You are running as `trustyclaw-agent` on a TrustyClaw host.\n\n"
+            "# Kern Agent Host\n\n"
+            "You are running as `kern-agent` on a Kern host.\n\n"
             "You are runnign with full permissions. Do not prompt the operator for local approvals.\n\n"
-            "Network access is controlled by TrustyClaw, not by the local agent sandbox. "
-            "Agent traffic goes through the TrustyClaw network policy proxy. If a "
+            "Network access is controlled by Kern, not by the local agent sandbox. "
+            "Agent traffic goes through the Kern network policy proxy. If a "
             "request is blocked, call the recent_network_denials tool for the denial "
             "code and guidance, and ask the operator for the named integration or "
             "domain rule.\n\n"
-            "When GitHub access is configured, TrustyClaw injects credentials through "
+            "When GitHub access is configured, Kern injects credentials through "
             "the proxy. Use normal `git` and REST-backed `gh api` commands from this host.\n\n"
             "GitHub GraphQL requests are denied by policy because repository scope cannot be "
             "verified safely from GraphQL bodies. If a `gh` command fails because it uses "
@@ -1739,15 +1739,15 @@ def read_agent_file(path: str) -> dict[str, Any]:
             "for clone, fetch, and push operations.\n"
         ),
         "/CLAUDE.md": (
-            "# TrustyClaw Agent Host\n\n"
-            "You are running as `trustyclaw-agent` on a TrustyClaw host.\n\n"
+            "# Kern Agent Host\n\n"
+            "You are running as `kern-agent` on a Kern host.\n\n"
             "You are runnign with full permissions. Do not prompt the operator for local approvals.\n\n"
-            "Network access is controlled by TrustyClaw, not by the local agent sandbox. "
-            "Agent traffic goes through the TrustyClaw network policy proxy. If a "
+            "Network access is controlled by Kern, not by the local agent sandbox. "
+            "Agent traffic goes through the Kern network policy proxy. If a "
             "request is blocked, call the recent_network_denials tool for the denial "
             "code and guidance, and ask the operator for the named integration or "
             "domain rule.\n\n"
-            "When GitHub access is configured, TrustyClaw injects credentials through "
+            "When GitHub access is configured, Kern injects credentials through "
             "the proxy. Use normal `git` and REST-backed `gh api` commands from this host.\n\n"
             "GitHub GraphQL requests are denied by policy because repository scope cannot be "
             "verified safely from GraphQL bodies. If a `gh` command fails because it uses "
@@ -1757,10 +1757,10 @@ def read_agent_file(path: str) -> dict[str, Any]:
         "/.claude/settings.json": '{\n  "permissions": {\n    "defaultMode": "bypassPermissions"\n  },\n  "skipDangerousModePermissionPrompt": true\n}\n',
         "/.codex/auth.json": '{"mock": "redacted"}\n',
         "/.codex/config.toml": (
-            '# Managed by TrustyClaw bootstrap; rewritten on every deploy.\n'
+            '# Managed by Kern bootstrap; rewritten on every deploy.\n'
             'approval_policy = "never"\n'
             'sandbox_mode = "danger-full-access"\n\n'
-            '[projects."/mnt/trustyclaw-agent/agent-home"]\n'
+            '[projects."/mnt/kern-agent/agent-home"]\n'
             'trust_level = "trusted"\n'
         ),
         '/workspace/bad" onclick="window.__xss=1" x=".txt': "quote-bearing mock file\n",
@@ -1869,7 +1869,7 @@ def github_repo_audits_locked() -> list[dict[str, Any]]:
                         "code": "repository_audit_incomplete",
                         "severity": "warning",
                         "message": "Repository audit could not verify this write target: no credential token "
-                        "to audit with. TrustyClaw does not have enough information to check repository "
+                        "to audit with. Kern does not have enough information to check repository "
                         "visibility, GitHub Pages, default branch protection, or workflows.",
                     }
                 ],
@@ -1920,7 +1920,7 @@ def github_repo_audits_locked() -> list[dict[str, Any]]:
                     "code": "repository_audit_incomplete",
                     "severity": "warning",
                     "message": "Repository audit could not verify this write target: GET /repos returned "
-                    "403 (token cannot see this repository). TrustyClaw does not have enough information "
+                    "403 (token cannot see this repository). Kern does not have enough information "
                     "to check repository visibility, GitHub Pages, default branch protection, or workflows.",
                 }
             ],
@@ -1931,7 +1931,7 @@ def github_repo_audits_locked() -> list[dict[str, Any]]:
                     "code": "repository_audit_incomplete",
                     "severity": "warning",
                     "message": "Repository audit could not verify this write target: repository audit has "
-                    "not run yet. TrustyClaw does not have enough information to check repository "
+                    "not run yet. Kern does not have enough information to check repository "
                     "visibility, GitHub Pages, default branch protection, or workflows.",
                 }
             ]
@@ -2171,7 +2171,7 @@ def seed_demo_state() -> None:
             "github": {
                 "enabled": True,
                 "write_repositories": [
-                    {"owner": "infiloop2", "repo": "trustyclaw"},
+                    {"owner": "infiloop2", "repo": "kern"},
                     {"owner": "infiloop2", "repo": "infibot"},
                     {"owner": "infiloop2", "repo": "dotfiles"},
                     {"owner": "acme", "repo": "private-infra"},
@@ -2207,7 +2207,7 @@ def main(argv: list[str] | None = None) -> int:
         seed_demo_state()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     actual_host, actual_port = server.server_address
-    print(f"TrustyClaw mock admin UI: http://{actual_host}:{actual_port}/")
+    print(f"Kern mock admin UI: http://{actual_host}:{actual_port}/")
     print(f"Admin password: {PASSWORD}")
     try:
         server.serve_forever()

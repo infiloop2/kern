@@ -83,8 +83,8 @@ class HeaderSignatureTests(unittest.TestCase):
     BODY_HASH = "23aab397f4d1f51b8846a1cea8ead51c4766038fe8b80730645a50f05af4d41e"
     HOST = "bedrock-runtime.us-east-1.amazonaws.com"
     AMZ_DATE = "20260717T162253Z"
-    VECTOR_KEY = "AKIATRUSTYCLAWBEDROK"
-    VECTOR_SECRET = "trustyclaw-proxy-signs-this-request"
+    VECTOR_KEY = "AKIAKERNBEDROK"
+    VECTOR_SECRET = "kern-proxy-signs-this-request"
 
     def signature(self, *, path: str, signed: tuple[str, ...], key: str, secret: str, extra: list[tuple[str, str]]) -> str:
         headers = [("content-type", "application/json"), ("host", self.HOST), ("x-amz-date", self.AMZ_DATE), *extra]
@@ -105,7 +105,7 @@ class HeaderSignatureTests(unittest.TestCase):
                 key=self.VECTOR_KEY, secret=self.VECTOR_SECRET,
                 extra=[("x-amz-content-sha256", self.BODY_HASH)],
             ),
-            "fab6ca44eff3b5419e60e6f671b9534401445ec6bce132f4b6722f28f3d6565a",
+            "5051ac457c4a31751df16e510057443a1db5fd60266314063c567b588a2a8b1b",
         )
 
     def test_request_without_content_hash_header_matches_botocore(self) -> None:
@@ -116,7 +116,7 @@ class HeaderSignatureTests(unittest.TestCase):
                 key=self.VECTOR_KEY, secret=self.VECTOR_SECRET,
                 extra=[],
             ),
-            "d0ab79dc56cf7cb6a6c9f2c88ea92bc06132420bc34e2a17cd36775a9cf919a0",
+            "d0d8d0b55f67382e9ccd04c9409781de8037a43e40dcd492b1eec4e3ab5d92c1",
         )
 
     def test_resigning_with_the_real_key_matches_botocore(self) -> None:
@@ -132,11 +132,11 @@ class HeaderSignatureTests(unittest.TestCase):
 
     def test_parse_authorization_round_trips(self) -> None:
         parsed = aws_sigv4.parse_authorization(
-            "AWS4-HMAC-SHA256 Credential=AKIATRUSTYCLAWBEDROK/20260717/us-east-1/bedrock/aws4_request, "
+            "AWS4-HMAC-SHA256 Credential=AKIAKERNBEDROK/20260717/us-east-1/bedrock/aws4_request, "
             "SignedHeaders=content-type;host;x-amz-date, Signature=" + "a" * 64
         )
         assert parsed is not None
-        self.assertEqual(parsed.access_key_id, "AKIATRUSTYCLAWBEDROK")
+        self.assertEqual(parsed.access_key_id, "AKIAKERNBEDROK")
         self.assertEqual(parsed.date_stamp, "20260717")
         self.assertEqual(parsed.region, "us-east-1")
         self.assertEqual(parsed.service, "bedrock")

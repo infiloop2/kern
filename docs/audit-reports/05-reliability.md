@@ -34,7 +34,7 @@ explicitly (or state that it was skipped):
 - **Assets:** the operator's ability to observe and control the host at all
   times, and the host's ability to run indefinitely without manual disk or
   database surgery.
-- **In scope:** `trustyclaw_agent.slice` limits (`CPUWeight`, `MemoryHigh`/
+- **In scope:** `kern_agent.slice` limits (`CPUWeight`, `MemoryHigh`/
   `MemoryMax`, `MemorySwapMax`, `TasksMax`) and what they do *not* cover
   (disk, file descriptors, I/O); volume layout separating agent storage from
   service storage; admin API threading (state lock discipline, nine workers /
@@ -92,7 +92,7 @@ a live host.
 
 ### What was reviewed
 
-- `host/bootstrap/bootstrap.sh`: `trustyclaw_agent.slice`
+- `host/bootstrap/bootstrap.sh`: `kern_agent.slice`
   (`CPUWeight`/`MemoryHigh`/`MemoryMax`/`MemorySwapMax`/`TasksMax`), the
   network-proxy/admin-api/postgres units and restart policies, the volume
   layout, `postgresql.conf` (`max_connections=50`), and `pg_hba.conf`.
@@ -118,7 +118,7 @@ a live host.
 ### Coverage and confidence
 
 - **REL-A (starvation):** CPU/memory/PIDs are bounded for agent runtimes by
-  `trustyclaw_agent.slice` (`CPUWeight=50`, `MemoryHigh/Max`, `MemorySwapMax`,
+  `kern_agent.slice` (`CPUWeight=50`, `MemoryHigh/Max`, `MemorySwapMax`,
   `TasksMax=4096`) and agent-home is on a separate volume, so those are sound.
   The gaps are the resources the slice does not cover and the services that
   are *not* in it: the Postgres connection budget (REL-1), the admin-volume
@@ -185,7 +185,7 @@ and filesystem growth paths. I did not run stress tests or a live host.
 
 | ID | Status | Severity | Location | Summary |
 | --- | --- | --- | --- | --- |
-| REL-001 | Open | High | `host/runtime/network_proxy/service.py:55` | The proxy can buffer up to 128 MiB per handler and allows 64 concurrent handlers, so a malicious agent can force roughly 8 GiB of request-body buffers in `trustyclaw-proxy`, which is outside `trustyclaw_agent.slice`. Plain HTTP reads the body before policy validation (`host/runtime/network_proxy/service.py:230`), so even the fail-closed empty policy does not prevent this memory pressure. On the documented small host, this can OOM or swap-storm non-agent services and break operator control. Move cheap host/method/policy denial before body reads where possible, add an aggregate body-memory semaphore well below host reserve, and/or put the proxy service itself under a memory limit that preserves admin/Postgres/sshd. |
+| REL-001 | Open | High | `host/runtime/network_proxy/service.py:55` | The proxy can buffer up to 128 MiB per handler and allows 64 concurrent handlers, so a malicious agent can force roughly 8 GiB of request-body buffers in `kern-proxy`, which is outside `kern_agent.slice`. Plain HTTP reads the body before policy validation (`host/runtime/network_proxy/service.py:230`), so even the fail-closed empty policy does not prevent this memory pressure. On the documented small host, this can OOM or swap-storm non-agent services and break operator control. Move cheap host/method/policy denial before body reads where possible, add an aggregate body-memory semaphore well below host reserve, and/or put the proxy service itself under a memory limit that preserves admin/Postgres/sshd. |
 | REL-002 | Open | Medium | `host/runtime/network_proxy/service.py:362` | Per-host MITM certificates are generated into the durable admin volume and are never pruned or capped. With a wildcard rule such as `*.example.com`, the agent can CONNECT to unbounded unique subdomains; each accepted host writes `.key`, `.csr`, `.ext`, and `.crt` files under `proxy-state/generated-certs` (`host/runtime/core/state.py:112`). Over time this can fill the admin volume that also holds Postgres state. Add an LRU/count/size cap, prune on startup/maintenance, or generate short-lived certs outside durable admin storage. |
 
 ### Coverage and confidence
@@ -193,7 +193,7 @@ and filesystem growth paths. I did not run stress tests or a live host.
 REL-A, service starvation: I enumerated CPU, memory, swap, PIDs, file
 descriptors, disk, inodes, I/O bandwidth, and loopback connections. CPU,
 memory, swap, and PIDs for runtime processes are bounded by
-`trustyclaw_agent.slice`; agent loopback access is limited by nftables to the
+`kern_agent.slice`; agent loopback access is limited by nftables to the
 proxy port. REL-001 covers proxy memory that the agent can consume outside the
 agent cgroup. REL-002 covers admin-volume disk/inode growth through proxy certs.
 I did not find explicit I/O bandwidth or fd cgroup controls; no concrete

@@ -105,7 +105,7 @@ class StageBedrockChecks(AwsSmoke):
         self._assert_provider_metadata(runtime, account)
 
         encrypted_rows = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             + shlex.quote(
                 "SELECT "
                 "(SELECT count(*) FROM bedrock_credentials WHERE singleton = TRUE) || ':' || "
@@ -130,7 +130,7 @@ class StageBedrockChecks(AwsSmoke):
                 f"Signature={'0' * 64}"
             )
             return self._ssh_code(
-                f"sudo -u trustyclaw-agent env HTTPS_PROXY={proxy} "
+                f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
                 "curl -s --max-time 20 -X POST -H 'Content-Type: application/json' "
                 "-H 'X-Amz-Date: 20260718T000000Z' "
                 f"-H {shlex.quote(f'Authorization: {authorization}')} "
@@ -244,7 +244,7 @@ class StageBedrockChecks(AwsSmoke):
         if status != "deactivated":
             raise AssertionError(f"disabling Bedrock did not deactivate Hermes: {status}")
         rows = self._ssh_code(
-            "sudo -u postgres psql -tA -d trustyclaw_admin -c "
+            "sudo -u postgres psql -tA -d kern_admin -c "
             "'SELECT count(*) FROM bedrock_credentials'"
         ).strip()
         if rows != "1":

@@ -214,7 +214,7 @@ and the refresh is what converts its completion into an anchor, a pin, and
    available while the runtime is `awaiting_login` or `error`). Codex parks a
    device-code app-server that drives the provider's device flow; Claude
    starts a CLI login process and shows the login URL.
-2. The provider-side flow completes outside TrustyClaw: the operator approves
+2. The provider-side flow completes outside Kern: the operator approves
    in the browser (Codex) or submits the code
    (`POST /v1/agent-runtime/claude-oauth-login/complete`, which finishes the
    CLI login and records sha256 of the token that login wrote).

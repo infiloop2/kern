@@ -1,6 +1,6 @@
-# TrustyClaw Tools
+# Kern Tools
 
-TrustyClaw's bundled tool framework and bundled tool packages. The framework and
+Kern's bundled tool framework and bundled tool packages. The framework and
 packages live under `host/tools/`; they are host-neutral (no UI, and the only
 state they own is one OAuth credential), so the same package could run on another
 host implementation of the same contract.

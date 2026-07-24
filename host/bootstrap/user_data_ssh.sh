@@ -6,21 +6,21 @@
 set -euo pipefail
 umask 077
 
-id -u trustyclaw-operator >/dev/null 2>&1 || useradd --create-home --shell /bin/bash trustyclaw-operator
-mkdir -p /home/trustyclaw-operator/.ssh
-cat > /home/trustyclaw-operator/.ssh/authorized_keys2 <<'KEYS'
+id -u kern-operator >/dev/null 2>&1 || useradd --create-home --shell /bin/bash kern-operator
+mkdir -p /home/kern-operator/.ssh
+cat > /home/kern-operator/.ssh/authorized_keys2 <<'KEYS'
 @DEPLOY_PUBLIC_KEY@
 KEYS
-chmod 700 /home/trustyclaw-operator/.ssh
-chmod 600 /home/trustyclaw-operator/.ssh/authorized_keys2
-chown -R trustyclaw-operator:trustyclaw-operator /home/trustyclaw-operator/.ssh
+chmod 700 /home/kern-operator/.ssh
+chmod 600 /home/kern-operator/.ssh/authorized_keys2
+chown -R kern-operator:kern-operator /home/kern-operator/.ssh
 
-echo 'trustyclaw-operator ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/trustyclaw-operator
-chmod 440 /etc/sudoers.d/trustyclaw-operator
+echo 'kern-operator ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/kern-operator
+chmod 440 /etc/sudoers.d/kern-operator
 gpasswd -d ubuntu sudo >/dev/null 2>&1 || true
 rm -f /etc/sudoers.d/90-cloud-init-users
 
-cat > /tmp/trustyclaw_payload.json <<'TRUSTYCLAW_PAYLOAD_EOF'
+cat > /tmp/kern_payload.json <<'KERN_PAYLOAD_EOF'
 @PAYLOAD_JSON@
-TRUSTYCLAW_PAYLOAD_EOF
-chmod 600 /tmp/trustyclaw_payload.json
+KERN_PAYLOAD_EOF
+chmod 600 /tmp/kern_payload.json

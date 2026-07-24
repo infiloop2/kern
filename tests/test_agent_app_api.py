@@ -94,25 +94,25 @@ class _StubHandler(BaseHTTPRequestHandler):
 
 class ThreadScopeParsingTests(unittest.TestCase):
     def test_matches_only_thread_scopes_under_the_agent_slice(self) -> None:
-        inside = "0::/trustyclaw_agent.slice/trustyclaw-agent-thread-workbench__ws-1.scope\n"
+        inside = "0::/kern_agent.slice/kern-agent-thread-workbench__ws-1.scope\n"
         match = agent_app_api._THREAD_SCOPE_RE.search(inside)
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), "workbench__ws-1")
         # A scope the agent could mint through a user manager lives under
-        # user.slice, not trustyclaw_agent.slice, and must not attribute.
-        forged = "0::/user.slice/user-47743.slice/user@47743.service/trustyclaw-agent-thread-workbench__ws-1.scope\n"
+        # user.slice, not kern_agent.slice, and must not attribute.
+        forged = "0::/user.slice/user-47743.slice/user@47743.service/kern-agent-thread-workbench__ws-1.scope\n"
         self.assertIsNone(agent_app_api._THREAD_SCOPE_RE.search(forged))
         forged_nested_slice = (
             "0::/user.slice/user-47743.slice/user@47743.service/"
-            "trustyclaw_agent.slice/trustyclaw-agent-thread-workbench__ws-1.scope\n"
+            "kern_agent.slice/kern-agent-thread-workbench__ws-1.scope\n"
         )
         self.assertIsNone(agent_app_api._THREAD_SCOPE_RE.search(forged_nested_slice))
         # Non-thread scopes in the agent slice (status probes, logins) carry
         # systemd's generated names and must not attribute either.
-        probe = "0::/trustyclaw_agent.slice/run-r3f5a.scope\n"
+        probe = "0::/kern_agent.slice/run-r3f5a.scope\n"
         self.assertIsNone(agent_app_api._THREAD_SCOPE_RE.search(probe))
         # Nested cgroups created inside the scope still attribute to it.
-        nested = "0::/trustyclaw_agent.slice/trustyclaw-agent-thread-agent_chat__chat.scope/child\n"
+        nested = "0::/kern_agent.slice/kern-agent-thread-agent_chat__chat.scope/child\n"
         nested_match = agent_app_api._THREAD_SCOPE_RE.search(nested)
         self.assertIsNotNone(nested_match)
         self.assertEqual(nested_match.group(1), "agent_chat__chat")
@@ -232,8 +232,8 @@ class AgentAppSocketTests(AgentAppApiTestCase):
         self.assertEqual(request["path"], "/agent/artifacts")
         self.assertEqual(request["body"], {"title": "Tracker"})
         headers = request["headers"]
-        self.assertEqual(headers["X-TrustyClaw-Agent-App-Proxy"], "workbench")
-        self.assertEqual(headers["X-TrustyClaw-Agent-Thread"], "ws-1")
+        self.assertEqual(headers["X-Kern-Agent-App-Proxy"], "workbench")
+        self.assertEqual(headers["X-Kern-Agent-Thread"], "ws-1")
 
     def test_app_error_statuses_pass_through_for_in_turn_retry(self) -> None:
         stub = self.start_stub_backend()
@@ -315,8 +315,8 @@ class AgentAppSocketTests(AgentAppApiTestCase):
 class McpShimAppApiTests(AgentAppApiTestCase):
     def start_shim(self, agent_app_socket: str, tools_socket: str | None = None) -> subprocess.Popen[str]:
         env = os.environ.copy()
-        env["TRUSTYCLAW_AGENT_APP_SOCKET"] = agent_app_socket
-        env["TRUSTYCLAW_TOOLS_SOCKET"] = tools_socket or str(Path(agent_app_socket).parent / "no-tools.sock")
+        env["KERN_AGENT_APP_SOCKET"] = agent_app_socket
+        env["KERN_TOOLS_SOCKET"] = tools_socket or str(Path(agent_app_socket).parent / "no-tools.sock")
         env["PYTHONPATH"] = str(REPO_ROOT)
         shim = subprocess.Popen(
             [sys.executable, "-m", "host.runtime.agent_shim.mcp_shim"],

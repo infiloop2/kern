@@ -24,7 +24,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TrustyClawWorkspaceKit/0.1"
+    server_version = "KernWorkspaceKit/0.1"
 
     def do_GET(self) -> None:
         self._handle("GET")
@@ -52,7 +52,7 @@ class Handler(BaseHTTPRequestHandler):
                     method,
                     parsed.path,
                     body,
-                    thread_id=self.headers.get("X-TrustyClaw-Agent-Thread", ""),
+                    thread_id=self.headers.get("X-Kern-Agent-Thread", ""),
                 )
             else:
                 self._require_host_proxy()
@@ -68,11 +68,11 @@ class Handler(BaseHTTPRequestHandler):
             )
 
     def _require_host_proxy(self) -> None:
-        if self.headers.get("X-TrustyClaw-App-Proxy") != engine.APP_ID:
+        if self.headers.get("X-Kern-App-Proxy") != engine.APP_ID:
             raise engine.AppError(HTTPStatus.UNAUTHORIZED, "missing host app proxy marker")
 
     def _require_agent_proxy(self) -> None:
-        if self.headers.get("X-TrustyClaw-Agent-App-Proxy") != engine.APP_ID:
+        if self.headers.get("X-Kern-Agent-App-Proxy") != engine.APP_ID:
             raise engine.AppError(HTTPStatus.UNAUTHORIZED, "missing host agent proxy marker")
 
     def _read_body(self) -> Any:

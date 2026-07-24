@@ -180,7 +180,7 @@ import tests.stage.stage_aws
 
     def test_complete_github_stage_secrets_are_parsed(self) -> None:
         env = {
-            STAGE_GITHUB_APP_ENV["write_repo"]: "infiloop2/trustyclaw-stage",
+            STAGE_GITHUB_APP_ENV["write_repo"]: "infiloop2/kern-stage",
             STAGE_GITHUB_APP_ENV["app_id"]: "123",
             STAGE_GITHUB_APP_ENV["installation_id"]: "456",
             STAGE_GITHUB_APP_ENV["private_key"]: "key",
@@ -192,7 +192,7 @@ import tests.stage.stage_aws
             config,
             {
                 "owner": "infiloop2",
-                "repo": "trustyclaw-stage",
+                "repo": "kern-stage",
                 "app_id": "123",
                 "installation_id": "456",
                 "private_key_pem": "key",
@@ -373,7 +373,7 @@ import tests.stage.stage_aws
         self.assertEqual(api_status.call_args_list[0].args[1], "/v1/tasks/task_1/steer")
         self.assertEqual(api_status.call_args_list[1].args[1], "/v1/tasks/task_1/kill")
         # The kill check asserts the thread's scope unit is gone from systemd.
-        self.assertIn("trustyclaw-agent-thread-smoke-kill-hermes.scope", ssh_code.call_args.args[0])
+        self.assertIn("kern-agent-thread-smoke-kill-hermes.scope", ssh_code.call_args.args[0])
         self.assertEqual((stage.passed, stage.total), (1, 1))
 
     def test_report_distinguishes_failure_from_unavailable_skip(self) -> None:
@@ -414,7 +414,7 @@ import tests.stage.stage_aws
         }
         with patch.object(stage, "_shim_call", return_value=response):
             with self.assertRaisesRegex(CredentialUnavailable, "rejected the configured API key"):
-                stage._shim_tool_result("brave_search_search_web", {"query": "TrustyClaw"})
+                stage._shim_tool_result("brave_search_search_web", {"query": "Kern"})
 
     def test_action_summary_appends_markdown(self) -> None:
         report = StageReport("all")

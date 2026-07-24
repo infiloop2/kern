@@ -1,4 +1,4 @@
-"""AWS resource operations for TrustyClaw host lifecycle commands."""
+"""AWS resource operations for Kern host lifecycle commands."""
 
 from __future__ import annotations
 
@@ -217,7 +217,7 @@ def _existing_storage_volume_availability_zone(config: InputConfig, env: dict[st
                 availability_zones.add(availability_zone)
     if len(availability_zones) > 1:
         raise ConfigError(
-            f"TrustyClaw storage volumes for {config.agent_name} are split across availability zones: "
+            f"Kern storage volumes for {config.agent_name} are split across availability zones: "
             f"{', '.join(sorted(availability_zones))}"
         )
     return next(iter(availability_zones), None)
@@ -238,7 +238,7 @@ def _find_storage_volume(config: InputConfig, env: dict[str, str], role: str) ->
         return None
     if len(volumes) > 1:
         volume_ids = ", ".join(sorted(volume["VolumeId"] for volume in volumes))
-        raise ConfigError(f"multiple TrustyClaw {role} volumes found for {config.agent_name}: {volume_ids}")
+        raise ConfigError(f"multiple Kern {role} volumes found for {config.agent_name}: {volume_ids}")
     return volumes[0]
 
 
@@ -261,18 +261,18 @@ def _find_available_storage_volume(
         volume = _find_storage_volume(config, env, role)
         if volume is None:
             raise ConfigError(
-                f"TrustyClaw {role} volume {volume_id} for {config.agent_name} disappeared while waiting to detach"
+                f"Kern {role} volume {volume_id} for {config.agent_name} disappeared while waiting to detach"
             )
         state = volume.get("State")
     if state != "available":
         raise ConfigError(
-            f"TrustyClaw {role} volume {volume['VolumeId']} for {config.agent_name} is {state}; "
+            f"Kern {role} volume {volume['VolumeId']} for {config.agent_name} is {state}; "
             "detach it or wait for the previous instance to terminate before redeploying"
         )
     volume_availability_zone = volume.get("AvailabilityZone")
     if volume_availability_zone != availability_zone:
         raise ConfigError(
-            f"TrustyClaw {role} volume {volume['VolumeId']} is in {volume_availability_zone}, "
+            f"Kern {role} volume {volume['VolumeId']} is in {volume_availability_zone}, "
             f"but the replacement instance is in {availability_zone}"
         )
     return volume["VolumeId"]
@@ -396,7 +396,7 @@ def _default_network(
         if not candidate_subnets:
             raise ConfigError(
                 f"AWS default VPC has no default subnet in {preferred_availability_zone} "
-                "for the existing TrustyClaw storage volumes"
+                "for the existing Kern storage volumes"
             )
     public_subnets = [
         subnet
@@ -455,7 +455,7 @@ def _ensure_security_group(
     additionally keeps SSH ingress open at launch for the single-use deploy
     key and closes it after bootstrap when the derived state says so.
     """
-    name = f"trustyclaw-host-{config.agent_name}"
+    name = f"kern-host-{config.agent_name}"
     groups = _aws(env,
         "ec2",
         "describe-security-groups",
@@ -470,7 +470,7 @@ def _ensure_security_group(
             _log(f"warning: reusing existing security group {group_id} named {name}")
         else:
             raise ConfigError(
-                f"existing security group {group_id} named {name} is not tagged as a TrustyClaw resource; "
+                f"existing security group {group_id} named {name} is not tagged as a Kern resource; "
                 "rename or delete it before deploying"
             )
     else:
@@ -480,7 +480,7 @@ def _ensure_security_group(
             "--group-name",
             name,
             "--description",
-            f"TrustyClaw {config.agent_name}",
+            f"Kern {config.agent_name}",
             "--vpc-id",
             vpc_id,
             "--tag-specifications",
@@ -512,7 +512,7 @@ def _security_group_access_state(
     deploy or reconfigure converged these rules to the stored operator
     connections, so on the GitHub delivery upgrade and recover reapply them
     at launch."""
-    name = f"trustyclaw-host-{config.agent_name}"
+    name = f"kern-host-{config.agent_name}"
     groups = _aws(env,
         "ec2",
         "describe-security-groups",
@@ -612,7 +612,7 @@ def _tag_spec(resource_type: str, agent_name: str, *, target_version: str | None
     tags = [
         f"{{Key={INSTANCE_TAG_KEY},Value={agent_name}}}",
         f"{{Key={OWNER_TAG_KEY},Value=true}}",
-        f"{{Key=Name,Value=trustyclaw-host-{agent_name}}}",
+        f"{{Key=Name,Value=kern-host-{agent_name}}}",
     ]
     if resource_type == "instance" and target_version is not None:
         tags.append(f"{{Key={VERSION_TAG_KEY},Value={target_version}}}")
@@ -625,7 +625,7 @@ def _volume_tag_spec(agent_name: str, role: str) -> str:
         f"{{Key={INSTANCE_TAG_KEY},Value={agent_name}}},"
         f"{{Key={OWNER_TAG_KEY},Value=true}},"
         f"{{Key={VOLUME_ROLE_TAG_KEY},Value={role}}},"
-        f"{{Key=Name,Value=trustyclaw-host-{agent_name}-{role}}}"
+        f"{{Key=Name,Value=kern-host-{agent_name}-{role}}}"
         "]"
     )
 

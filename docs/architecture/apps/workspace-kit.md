@@ -90,12 +90,12 @@ files:
 }
 ```
 
-The app embeds the shared base migration because applied migrations are
-per-app immutable history. Copy an existing non-Mission Workspace Kit app's
-`migrations/0001_workspace_base.sql` byte for byte into the new app with the
-same name. Put domain tables in `0002_<domain>.sql` and later migrations. Tests
-require every Workspace Kit app's first migration to create the same base
-schema.
+Each app ships a single `migrations/0001_baseline.sql` that provisions its
+whole schema. A base-only app (no domain tables) copies an existing base-only
+Workspace Kit app's `0001_baseline.sql` byte for byte. An app with domain
+tables inlines that same base and appends its own tables in the one file. Tests
+require every Workspace Kit app's baseline to create the same base schema, and
+the base-only baselines to be byte-identical to each other.
 
 The declarative view renderer is one host-owned shared asset, not an embedded
 copy. Load it from the app's `index.html`:
@@ -134,13 +134,13 @@ def seed(cur: Any, now: str) -> None:
 
 CONFIG = WorkspaceAppConfig(
     app_id=APP_ID,
-    db_schema=os.environ.get("TRUSTYCLAW_APP_DB_SCHEMA", f"app_{APP_ID}"),
-    port=int(os.environ.get("TRUSTYCLAW_APP_PORT", "7450")),
+    db_schema=os.environ.get("KERN_APP_DB_SCHEMA", f"app_{APP_ID}"),
+    port=int(os.environ.get("KERN_APP_PORT", "7450")),
     title="My Workspace App",
-    host=os.environ.get("TRUSTYCLAW_APP_HOST", LOOPBACK),
+    host=os.environ.get("KERN_APP_HOST", LOOPBACK),
     admin_api_socket=os.environ.get(
-        "TRUSTYCLAW_APP_ADMIN_API_SOCKET",
-        "/run/trustyclaw-admin-api/app-backend.sock",
+        "KERN_APP_ADMIN_API_SOCKET",
+        "/run/kern-admin-api/app-backend.sock",
     ),
     setup_brief="Explain how the agent should initialize this workspace.",
     seed=seed,
@@ -181,8 +181,8 @@ typed domain state adds its own tables and config hooks:
 The app UI owns its product layout but calls the shared workspace routes for
 activation, messages, settings, artifacts, schedules, memories, tools, and
 deactivation. It uses its own routes only for domain records. Requests go
-through the `trustyclaw-app-api` parent bridge; agent-workspace files open
-through `trustyclaw-app-open-file`. Agent-authored values remain data rendered
+through the `kern-app-api` parent bridge; agent-workspace files open
+through `kern-app-open-file`. Agent-authored values remain data rendered
 by text-safe DOM operations or the shared declarative view-block renderer.
 
 The package includes focused backend tests in `tests/test_<app_id>_app.py` and

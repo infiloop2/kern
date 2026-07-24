@@ -130,7 +130,7 @@ class TrendScanTests(unittest.TestCase):
 
 
 class RenderJobsDbTests(unittest.TestCase):
-    DB_NAME = "trustyclaw_virality_machine_test"
+    DB_NAME = "kern_virality_machine_test"
     _initialized = False
 
     def setUp(self) -> None:
@@ -138,7 +138,7 @@ class RenderJobsDbTests(unittest.TestCase):
         pg_harness.ensure_database()
         if not RenderJobsDbTests._initialized:
             pg_harness.create_database(self.DB_NAME)
-        self.env_patch = patch.dict("os.environ", {"TRUSTYCLAW_DB_NAME": self.DB_NAME})
+        self.env_patch = patch.dict("os.environ", {"KERN_DB_NAME": self.DB_NAME})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         self.addCleanup(db.close_pool)
@@ -149,14 +149,14 @@ class RenderJobsDbTests(unittest.TestCase):
                     """
                     DO $$
                     BEGIN
-                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trustyclaw-app-virality_machine') THEN
-                        CREATE ROLE "trustyclaw-app-virality_machine" LOGIN;
+                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-app-4') THEN
+                        CREATE ROLE "kern-app-4" LOGIN;
                       END IF;
                     END
                     $$;
                     """
                 )
-                cur.execute('CREATE SCHEMA IF NOT EXISTS app_virality_machine AUTHORIZATION "trustyclaw-app-virality_machine"')
+                cur.execute('CREATE SCHEMA IF NOT EXISTS app_virality_machine AUTHORIZATION "kern-app-4"')
             app = app_platform.app_by_id("virality_machine")
             assert app is not None
             for version in app_migrate.pending(app.id):

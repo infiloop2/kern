@@ -18,9 +18,9 @@ from host.runtime.core import db, pgclient
 
 def connect() -> pgclient.Connection:
     return pgclient.connect(
-        socket_dir=os.environ["TRUSTYCLAW_DB_SOCKET_DIR"],
-        dbname=os.environ["TRUSTYCLAW_DB_NAME"],
-        user=os.environ["TRUSTYCLAW_DB_USER"],
+        socket_dir=os.environ["KERN_DB_SOCKET_DIR"],
+        dbname=os.environ["KERN_DB_NAME"],
+        user=os.environ["KERN_DB_USER"],
     )
 
 

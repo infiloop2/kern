@@ -194,16 +194,16 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure user authentication",
             show_callback=True,
-            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, set App permissions to Read and write, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. If X requires a Website URL, use your public TrustyClaw base URL: for a callback such as https://host.example/oauth/callback, use https://host.example. You do not need a separate website. Then save. TrustyClaw requests exactly tweet.read, users.read, tweet.write, and offline.access; offline.access is what lets X issue refresh tokens after the two-hour access token expires.",
+            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, set App permissions to Read and write, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. If X requires a Website URL, use your public Kern base URL: for a callback such as https://host.example/oauth/callback, use https://host.example. You do not need a separate website. Then save. Kern requests exactly tweet.read, users.read, tweet.write, and offline.access; offline.access is what lets X issue refresh tokens after the two-hour access token expires.",
             link_url="https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code",
             link_label="View X OAuth 2.0 authorization-code documentation",
         ),
         SetupStep(
             title="Copy all three app values",
-            description="Open Keys and tokens for the same app. Copy the OAuth 2.0 Client ID and Client Secret, then copy or regenerate the app-only Bearer Token under Authentication Tokens. Regenerating any value invalidates the old one, so update TrustyClaw immediately. The Bearer Token is required for public trend endpoints that do not accept the connected user's token; do not substitute an OAuth 1.0a access-token pair.",
+            description="Open Keys and tokens for the same app. Copy the OAuth 2.0 Client ID and Client Secret, then copy or regenerate the app-only Bearer Token under Authentication Tokens. Regenerating any value invalidates the old one, so update Kern immediately. The Bearer Token is required for public trend endpoints that do not accept the connected user's token; do not substitute an OAuth 1.0a access-token pair.",
         ),
         SetupStep(
-            title="Configure and connect TrustyClaw",
+            title="Configure and connect Kern",
             show_config=True,
             description="Expand X in Internet Access and Tools. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, choose Connect, sign in as the account the agent may read and publish from, and approve the four displayed scopes. Confirm the row shows the expected @username.",
         ),

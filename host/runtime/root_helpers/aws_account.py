@@ -2,7 +2,7 @@
 
 The admin service decrypts the Bedrock provider's connected AWS key pair
 and hands it to this helper through the environment
-(``TRUSTYCLAW_BEDROCK_AWS_ACCESS_KEY_ID`` / ``..._SECRET_ACCESS_KEY``); the
+(``KERN_BEDROCK_AWS_ACCESS_KEY_ID`` / ``..._SECRET_ACCESS_KEY``); the
 helper answers one question about it, never printing the secret:
 
 - ``--attest``: ``{"access_key_id", "account_id", "arn", "user_id"}`` — who
@@ -39,8 +39,8 @@ import xml.etree.ElementTree as ET
 
 from host.runtime.core.aws_sigv4 import sign_post
 
-ACCESS_KEY_ID_ENV = "TRUSTYCLAW_BEDROCK_AWS_ACCESS_KEY_ID"
-SECRET_ACCESS_KEY_ENV = "TRUSTYCLAW_BEDROCK_AWS_SECRET_ACCESS_KEY"
+ACCESS_KEY_ID_ENV = "KERN_BEDROCK_AWS_ACCESS_KEY_ID"
+SECRET_ACCESS_KEY_ENV = "KERN_BEDROCK_AWS_SECRET_ACCESS_KEY"
 # STS is signed with its own fixed region: us-east-1 serves every account. It
 # is not the Bedrock inference region, which only the proxy guard cares about.
 STS_HOST = "sts.us-east-1.amazonaws.com"

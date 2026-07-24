@@ -57,92 +57,92 @@ EXTERNAL_PROBE_HOST = "1.1.1.1"
 PROBE_TIMEOUT_SECONDS = 3
 
 CORE_UNITS = (
-    "trustyclaw-postgres.service",
-    "trustyclaw-network-proxy.service",
-    "trustyclaw-tools.service",
-    "trustyclaw-agent-network.service",
-    "trustyclaw-agent-app.service",
-    "trustyclaw-admin-api.service",
+    "kern-postgres.service",
+    "kern-network-proxy.service",
+    "kern-tools.service",
+    "kern-agent-network.service",
+    "kern-agent-app.service",
+    "kern-admin-api.service",
 )
 
 MANAGED_AGENT_FILES = (
-    "/mnt/trustyclaw-agent/agent-home/AGENTS.md",
-    "/mnt/trustyclaw-agent/agent-home/CLAUDE.md",
-    "/mnt/trustyclaw-agent/agent-home/.codex/config.toml",
-    "/mnt/trustyclaw-agent/agent-home/.claude/settings.json",
-    "/mnt/trustyclaw-agent/agent-home/.hermes/config.yaml",
-    "/mnt/trustyclaw-agent/agent-home/.hermes/.env",
+    "/mnt/kern-agent/agent-home/AGENTS.md",
+    "/mnt/kern-agent/agent-home/CLAUDE.md",
+    "/mnt/kern-agent/agent-home/.codex/config.toml",
+    "/mnt/kern-agent/agent-home/.claude/settings.json",
+    "/mnt/kern-agent/agent-home/.hermes/config.yaml",
+    "/mnt/kern-agent/agent-home/.hermes/.env",
 )
 
 # path, owner, group, mode, is_directory
 PathFact = tuple[str, str, str, int, bool]
 
 PATH_FACTS: tuple[PathFact, ...] = (
-    ("/mnt/trustyclaw-admin", "root", "root", 0o711, True),
-    ("/mnt/trustyclaw-agent", "root", "root", 0o711, True),
-    ("/mnt/trustyclaw-admin/postgres", "root", "root", 0o711, True),
-    ("/mnt/trustyclaw-admin/admin-state", "trustyclaw-admin", "trustyclaw-admin", 0o700, True),
-    ("/mnt/trustyclaw-admin/admin-home", "trustyclaw-admin", "trustyclaw-admin", 0o700, True),
-    ("/mnt/trustyclaw-agent/agent-home", "trustyclaw-agent", "trustyclaw-agent", 0o700, True),
-    ("/mnt/trustyclaw-agent/agent-home/.codex", "trustyclaw-agent", "trustyclaw-agent", 0o700, True),
-    ("/mnt/trustyclaw-agent/agent-home/.claude", "trustyclaw-agent", "trustyclaw-agent", 0o700, True),
-    ("/mnt/trustyclaw-agent/agent-home/.hermes", "trustyclaw-agent", "trustyclaw-agent", 0o700, True),
-    ("/mnt/trustyclaw-admin/proxy-state", "trustyclaw-proxy", "trustyclaw-proxy", 0o700, True),
+    ("/mnt/kern-admin", "root", "root", 0o711, True),
+    ("/mnt/kern-agent", "root", "root", 0o711, True),
+    ("/mnt/kern-admin/postgres", "root", "root", 0o711, True),
+    ("/mnt/kern-admin/admin-state", "kern-admin", "kern-admin", 0o700, True),
+    ("/mnt/kern-admin/admin-home", "kern-admin", "kern-admin", 0o700, True),
+    ("/mnt/kern-agent/agent-home", "kern-agent", "kern-agent", 0o700, True),
+    ("/mnt/kern-agent/agent-home/.codex", "kern-agent", "kern-agent", 0o700, True),
+    ("/mnt/kern-agent/agent-home/.claude", "kern-agent", "kern-agent", 0o700, True),
+    ("/mnt/kern-agent/agent-home/.hermes", "kern-agent", "kern-agent", 0o700, True),
+    ("/mnt/kern-admin/proxy-state", "kern-proxy", "kern-proxy", 0o700, True),
     (
-        "/mnt/trustyclaw-admin/proxy-state/generated-certs",
-        "trustyclaw-proxy",
-        "trustyclaw-proxy",
+        "/mnt/kern-admin/proxy-state/generated-certs",
+        "kern-proxy",
+        "kern-proxy",
         0o700,
         True,
     ),
     (
-        "/mnt/trustyclaw-admin/proxy-state/network_proxy_ca.key",
-        "trustyclaw-proxy",
-        "trustyclaw-proxy",
+        "/mnt/kern-admin/proxy-state/network_proxy_ca.key",
+        "kern-proxy",
+        "kern-proxy",
         0o600,
         False,
     ),
     (
-        "/mnt/trustyclaw-admin/proxy-state/network_proxy_ca.crt",
-        "trustyclaw-proxy",
-        "trustyclaw-proxy",
+        "/mnt/kern-admin/proxy-state/network_proxy_ca.crt",
+        "kern-proxy",
+        "kern-proxy",
         0o644,
         False,
     ),
-    ("/mnt/trustyclaw-admin/tools-state", "trustyclaw-tools", "trustyclaw-tools", 0o700, True),
+    ("/mnt/kern-admin/tools-state", "kern-tools", "kern-tools", 0o700, True),
     (
-        "/mnt/trustyclaw-admin/tools-state/assets",
-        "trustyclaw-tools",
-        "trustyclaw-tools",
+        "/mnt/kern-admin/tools-state/assets",
+        "kern-tools",
+        "kern-tools",
         0o700,
         True,
     ),
-    ("/opt/trustyclaw-host", "root", "root", 0o755, True),
-    ("/opt/trustyclaw-host/VERSION", "root", "root", 0o644, False),
-    ("/usr/local/lib/trustyclaw-host", "root", "root", 0o755, True),
+    ("/opt/kern-host", "root", "root", 0o755, True),
+    ("/opt/kern-host/VERSION", "root", "root", 0o644, False),
+    ("/usr/local/lib/kern-host", "root", "root", 0o755, True),
     ("/usr/local/bin/gh", "root", "root", 0o755, False),
-    ("/etc/sudoers.d/trustyclaw-host", "root", "root", 0o440, False),
+    ("/etc/sudoers.d/kern-host", "root", "root", 0o440, False),
     ("/etc/codex/requirements.toml", "root", "root", 0o644, False),
     ("/etc/codex/managed_config.toml", "root", "root", 0o644, False),
-    ("/mnt/trustyclaw-agent/agent-home/AGENTS.md", "root", "root", 0o644, False),
-    ("/mnt/trustyclaw-agent/agent-home/CLAUDE.md", "root", "root", 0o644, False),
-    ("/mnt/trustyclaw-agent/agent-home/.codex/config.toml", "root", "root", 0o644, False),
-    ("/mnt/trustyclaw-agent/agent-home/.claude/settings.json", "root", "root", 0o644, False),
-    ("/mnt/trustyclaw-agent/agent-home/.hermes/config.yaml", "root", "root", 0o644, False),
-    ("/mnt/trustyclaw-agent/agent-home/.hermes/.env", "root", "root", 0o644, False),
+    ("/mnt/kern-agent/agent-home/AGENTS.md", "root", "root", 0o644, False),
+    ("/mnt/kern-agent/agent-home/CLAUDE.md", "root", "root", 0o644, False),
+    ("/mnt/kern-agent/agent-home/.codex/config.toml", "root", "root", 0o644, False),
+    ("/mnt/kern-agent/agent-home/.claude/settings.json", "root", "root", 0o644, False),
+    ("/mnt/kern-agent/agent-home/.hermes/config.yaml", "root", "root", 0o644, False),
+    ("/mnt/kern-agent/agent-home/.hermes/.env", "root", "root", 0o644, False),
 )
 
 CLOUDFLARE_PATH_FACTS: tuple[PathFact, ...] = (
-    ("/etc/trustyclaw/cloudflared.token", "root", "cloudflared", 0o640, False),
-    ("/etc/trustyclaw/cloudflare_hostname", "root", "root", 0o644, False),
+    ("/etc/kern/cloudflared.token", "root", "cloudflared", 0o640, False),
+    ("/etc/kern/cloudflare_hostname", "root", "root", 0o644, False),
 )
 
 # socket path -> owning service account
 SOCKET_OWNERS = {
-    TOOLS_SOCKET_PATH: "trustyclaw-tools",
-    AGENT_APP_SOCKET_PATH: "trustyclaw-agent-app",
-    AGENT_NETWORK_SOCKET_PATH: "trustyclaw-agent-network",
-    APP_BACKEND_ADMIN_SOCKET_PATH: "trustyclaw-admin",
+    TOOLS_SOCKET_PATH: "kern-tools",
+    AGENT_APP_SOCKET_PATH: "kern-agent-app",
+    AGENT_NETWORK_SOCKET_PATH: "kern-agent-network",
+    APP_BACKEND_ADMIN_SOCKET_PATH: "kern-admin",
     POSTGRES_SOCKET: "postgres",
 }
 
@@ -185,12 +185,12 @@ def pgdata_path_facts() -> list[PathFact]:
     """The versioned data directory is discovered, not assumed, so a future
     pg_upgrade does not silently skip these checks."""
     facts: list[PathFact] = []
-    for pgdata in sorted(glob.glob("/mnt/trustyclaw-admin/postgres/*/main")):
+    for pgdata in sorted(glob.glob("/mnt/kern-admin/postgres/*/main")):
         facts.append((pgdata, "postgres", "postgres", 0o700, True))
         facts.append((f"{pgdata}/postgresql.conf", "postgres", "postgres", 0o600, False))
         facts.append((f"{pgdata}/pg_hba.conf", "postgres", "postgres", 0o600, False))
     if not facts:
-        facts.append(("/mnt/trustyclaw-admin/postgres/<major>/main", "postgres", "postgres", 0o700, True))
+        facts.append(("/mnt/kern-admin/postgres/<major>/main", "postgres", "postgres", 0o700, True))
     return facts
 
 
@@ -265,7 +265,7 @@ def check_tcp_listeners(
 ) -> list[str]:
     failures = []
     listeners = parse_tcp_listeners(read_text("/proc/net/tcp"))
-    for port, owner in ((ADMIN_API_PORT, "trustyclaw-admin"), (PROXY_PORT, "trustyclaw-proxy")):
+    for port, owner in ((ADMIN_API_PORT, "kern-admin"), (PROXY_PORT, "kern-proxy")):
         uid = resolve_uid(owner)
         if ("127.0.0.1", port, uid) not in listeners:
             matches = sorted(entry for entry in listeners if entry[1] == port)
@@ -290,8 +290,8 @@ def check_firewall_ruleset(run: Runner = _run) -> list[str]:
         return [f"nftables: `nft list ruleset` failed: {result.stderr.strip()}"]
     ruleset = result.stdout
     failures = []
-    if "table inet trustyclaw" not in ruleset:
-        failures.append("nftables: table inet trustyclaw is not loaded")
+    if "table inet kern" not in ruleset:
+        failures.append("nftables: table inet kern is not loaded")
     for marker in (
         "type filter hook input priority filter; policy drop;",
         "type filter hook output priority filter; policy drop;",
@@ -335,15 +335,15 @@ def enforced_probes() -> list[Probe]:
     can never false-fail here. The one "reachable" expectation is loopback."""
     return [
         # The agent's entire network world is the loopback proxy port.
-        ("trustyclaw-agent", "127.0.0.1", PROXY_PORT, "reachable", "agent to egress proxy"),
-        ("trustyclaw-agent", "127.0.0.1", ADMIN_API_PORT, "blocked", "agent to admin API"),
-        ("trustyclaw-agent", EXTERNAL_PROBE_HOST, 443, "blocked", "agent direct egress"),
-        ("trustyclaw-agent", EXTERNAL_PROBE_HOST, 53, "blocked", "agent direct DNS"),
-        ("trustyclaw-admin", EXTERNAL_PROBE_HOST, 443, "blocked", "admin service egress"),
-        ("trustyclaw-agent-app", EXTERNAL_PROBE_HOST, 443, "blocked", "agent-app egress"),
-        ("trustyclaw-agent-network", EXTERNAL_PROBE_HOST, 443, "blocked", "agent-network egress"),
+        ("kern-agent", "127.0.0.1", PROXY_PORT, "reachable", "agent to egress proxy"),
+        ("kern-agent", "127.0.0.1", ADMIN_API_PORT, "blocked", "agent to admin API"),
+        ("kern-agent", EXTERNAL_PROBE_HOST, 443, "blocked", "agent direct egress"),
+        ("kern-agent", EXTERNAL_PROBE_HOST, 53, "blocked", "agent direct DNS"),
+        ("kern-admin", EXTERNAL_PROBE_HOST, 443, "blocked", "admin service egress"),
+        ("kern-agent-app", EXTERNAL_PROBE_HOST, 443, "blocked", "agent-app egress"),
+        ("kern-agent-network", EXTERNAL_PROBE_HOST, 443, "blocked", "agent-network egress"),
         (
-            "trustyclaw-agent-network",
+            "kern-agent-network",
             "127.0.0.1",
             PROXY_PORT,
             "blocked",
@@ -357,8 +357,8 @@ def advisory_probes() -> list[Probe]:
     egress-restricted customer network may legitimately block the probe
     target while the deploy is healthy, so these warn instead of failing."""
     return [
-        ("trustyclaw-tools", EXTERNAL_PROBE_HOST, 443, "reachable", "tools service egress"),
-        ("trustyclaw-proxy", EXTERNAL_PROBE_HOST, 443, "reachable", "proxy egress"),
+        ("kern-tools", EXTERNAL_PROBE_HOST, 443, "reachable", "tools service egress"),
+        ("kern-proxy", EXTERNAL_PROBE_HOST, 443, "reachable", "proxy egress"),
     ]
 
 
@@ -388,15 +388,15 @@ def check_database_access(run: Runner = _run) -> list[str]:
     """Peer auth to and fro: the admin role connects, the agent has no path."""
     failures = []
     admin = run(
-        ["runuser", "-u", "trustyclaw-admin", "--", "psql", "-d", "trustyclaw_admin", "-tAc", "SELECT 1"]
+        ["runuser", "-u", "kern-admin", "--", "psql", "-d", "kern_admin", "-tAc", "SELECT 1"]
     )
     if admin.returncode != 0 or admin.stdout.strip() != "1":
-        failures.append(f"database: trustyclaw-admin cannot query trustyclaw_admin: {admin.stderr.strip()}")
+        failures.append(f"database: kern-admin cannot query kern_admin: {admin.stderr.strip()}")
     agent = run(
-        ["runuser", "-u", "trustyclaw-agent", "--", "psql", "-d", "trustyclaw_admin", "-tAc", "SELECT 1"]
+        ["runuser", "-u", "kern-agent", "--", "psql", "-d", "kern_admin", "-tAc", "SELECT 1"]
     )
     if agent.returncode == 0:
-        failures.append("database: trustyclaw-agent was admitted to trustyclaw_admin; pg_hba must reject it")
+        failures.append("database: kern-agent was admitted to kern_admin; pg_hba must reject it")
     return failures
 
 
@@ -436,7 +436,7 @@ def run_all_checks(cloudflare_enabled: bool, run: Runner = _run) -> list[str]:
     path_facts: list[PathFact] = list(PATH_FACTS) + pgdata_path_facts()
     if cloudflare_enabled:
         path_facts.extend(CLOUDFLARE_PATH_FACTS)
-    units = CORE_UNITS + (("trustyclaw-cloudflared.service",) if cloudflare_enabled else ())
+    units = CORE_UNITS + (("kern-cloudflared.service",) if cloudflare_enabled else ())
     failures: list[str] = []
     failures += check_service_accounts(expected_accounts())
     failures += check_path_facts(path_facts)

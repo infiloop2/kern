@@ -1,6 +1,6 @@
 # Audit Reports
 
-This folder holds recurring AI/human audit reports for TrustyClaw, one document
+This folder holds recurring AI/human audit reports for Kern, one document
 per audit axis. Each axis document states a fixed audit question and threat
 model, followed by each reviewer's current audit report.
 

@@ -399,12 +399,12 @@ class CodexAppServerTests(unittest.TestCase):
     def test_initialize_sends_client_name_and_version(self) -> None:
         self.assertEqual(
             codex_app_server_module._client_info(),
-            {"clientInfo": {"name": "trustyclaw-host", "version": "v1.0"}},
+            {"clientInfo": {"name": "kern-host", "version": "v1.0"}},
         )
 
     def test_account_status_reads_account_id_from_helper_for_active_chatgpt_account(self) -> None:
         # Real Codex 0.124.0 account/read returns email/plan/type, not the
-        # account id. TrustyClaw stores only the public identity fields it uses.
+        # account id. Kern stores only the public identity fields it uses.
         result = {"account": {"email": "dev@example.com", "planType": "pro", "type": "chatgpt"}}
         with patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"):
             self.assertEqual(
@@ -911,7 +911,7 @@ class CodexAppServerTests(unittest.TestCase):
         self.assertEqual(thread["id"], "thread_1")
         self.assertEqual(calls[0][0], "thread/start")
         instructions = calls[0][1]["developerInstructions"]
-        self.assertIn("You are running inside TrustyClaw", instructions)
+        self.assertIn("You are running inside Kern", instructions)
         self.assertIn("App instructions:\nUse only /agent/workspace.", instructions)
 
     def test_run_turn_refreshes_instructions_and_model_when_resuming_a_thread(self) -> None:
