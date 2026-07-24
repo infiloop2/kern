@@ -127,7 +127,7 @@ import tests.stage.stage_aws
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
         calls: list[tuple[str, dict]] = []
 
-        def successful(name: str, arguments: dict) -> dict:
+        def responder(name: str, arguments: dict) -> dict:
             calls.append((name, arguments))
             if name == "instagram_discovery_get_trending_reels":
                 return {
@@ -142,10 +142,14 @@ import tests.stage.stage_aws
                 return {"reels": [{"url": "https://www.instagram.com/reel/Stale/"}]}
             return {}
 
-        with patch.object(stage, "_successful_tool_call", side_effect=successful):
+        # Trending is the strict anchor read; the searches and derived reads go
+        # through the best-effort _optional_tool_result path, so stub both.
+        with patch.object(
+            stage, "_successful_tool_call", side_effect=responder
+        ), patch.object(stage, "_optional_tool_result", side_effect=responder):
             detail = stage._check_instagram_discovery_live()
 
-        self.assertIn("2 provider-result-derived read(s)", detail)
+        self.assertIn("2/2 provider-result-derived read(s)", detail)
         self.assertIn(
             (
                 "instagram_discovery_get_reel_details",
@@ -153,6 +157,42 @@ import tests.stage.stage_aws
             ),
             calls,
         )
+
+    def test_optional_tool_result_skips_no_content_but_fails_real_errors(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+
+        with patch.object(
+            stage,
+            "_shim_tool_response",
+            return_value=(
+                {"isError": True},
+                "ScrapeCreators could not find public Instagram content for that request.",
+            ),
+        ):
+            self.assertEqual(
+                stage._optional_tool_result("instagram_discovery_search_reels", {}), {}
+            )
+
+        with patch.object(
+            stage,
+            "_shim_tool_response",
+            return_value=(
+                {"isError": True},
+                "ScrapeCreators returned 429 Too Many Requests: credits exhausted.",
+            ),
+        ):
+            with self.assertRaises(AssertionError):
+                stage._optional_tool_result("instagram_discovery_search_reels", {})
+
+        with patch.object(
+            stage,
+            "_shim_tool_response",
+            return_value=({}, '{"reels": [{"url": "https://www.instagram.com/reel/A/"}]}'),
+        ):
+            self.assertEqual(
+                stage._optional_tool_result("instagram_discovery_search_reels", {}),
+                {"reels": [{"url": "https://www.instagram.com/reel/A/"}]},
+            )
 
     def test_runway_stage_uses_uuid_shaped_missing_task(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
