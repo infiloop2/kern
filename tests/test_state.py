@@ -89,6 +89,28 @@ class StateStorageTests(unittest.TestCase):
         self.assertEqual(task["status"], "queued")
         self.assertEqual(read_agent_events(), [])
 
+    def test_activity_event_escapes_nul_before_jsonb_persistence(self) -> None:
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur,
+                "task.activity",
+                None,
+                {
+                    "activity": {
+                        "activity_id": "command-1",
+                        "title": "binary\x00output",
+                        "nested": {"output": "before\x00after"},
+                    }
+                },
+            )
+
+        event = read_agent_events()[0]
+        self.assertEqual(event["payload"]["activity"]["title"], r"binary\0output")
+        self.assertEqual(
+            event["payload"]["activity"]["nested"]["output"],
+            r"before\0after",
+        )
+
     def test_task_rows_round_trip(self) -> None:
         with state.mutation() as cur:
             task = make_task(1)
@@ -251,6 +273,12 @@ class StateStorageTests(unittest.TestCase):
 
     def test_event_pages_are_newest_first_and_cursor_bounded(self) -> None:
         with state.mutation() as cur:
+            state.append_agent_event(
+                cur,
+                "task.activity",
+                "task_1",
+                {"activity": {"activity_id": "command-1", "kind": "command", "output": "done"}},
+            )
             for index in range(8):
                 state.append_agent_event(cur, "task.message", "task_1" if index % 2 else None, {"message": f"m{index}", "source": "user"})
         page = state.page_agent_events_before(None, limit=5)
@@ -262,6 +290,8 @@ class StateStorageTests(unittest.TestCase):
         self.assertTrue(all(event["seq"] < seqs[-1] for event in older))
         task_page = state.page_task_events("task_1", None)
         self.assertTrue(all(event["task_id"] == "task_1" for event in task_page))
+        activity = next(event for event in task_page if event["event_type"] == "task.activity")
+        self.assertEqual(activity["payload"]["activity"]["output"], "done")
 
     def test_thread_events_span_all_tasks_oldest_first_and_page_by_since(self) -> None:
         with state.mutation() as cur:

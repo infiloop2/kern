@@ -227,6 +227,13 @@ class OrchestratorTests(unittest.TestCase):
         def fake_run_turn(server, input_message, codex_thread_id, model, effort, steers, on_message, steer_delivered):
             observed_config.append((model, effort))
             observed.append(steers())
+            on_message({
+                "provider": "codex",
+                "activity_id": "command-1",
+                "kind": "command",
+                "phase": "completed",
+                "title": "pytest",
+            })
             steer_delivered("first")
             observed.append(steers())
             return "codex-t1", "done"
@@ -242,8 +249,15 @@ class OrchestratorTests(unittest.TestCase):
         events = [event for event in read_agent_events() if event.get("task_id") == "task_1"]
         self.assertEqual(
             [(event["event_type"], event.get("payload", {}).get("message")) for event in events],
-            [("task.started", None), ("task.message", "task 1"), ("task.completed", None)],
+            [
+                ("task.started", None),
+                ("task.message", "task 1"),
+                ("task.activity", None),
+                ("task.completed", None),
+            ],
         )
+        activity_event = next(event for event in events if event["event_type"] == "task.activity")
+        self.assertEqual(activity_event["payload"]["activity"]["activity_id"], "command-1")
 
     def test_runs_up_to_worker_count_tasks_in_parallel_one_per_thread(self) -> None:
         # 4 queued Codex tasks on 3 distinct threads: t1 twice. At most the

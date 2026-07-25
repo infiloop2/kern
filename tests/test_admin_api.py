@@ -87,14 +87,18 @@ class AdminUiStaticTests(unittest.TestCase):
         # exercised before CI.
         AdminApiIntegrationTests.test_admin_ui_has_thread_task_event_smoke_path(self)
 
-    def test_agent_chat_hides_unsupported_hermes_steering(self) -> None:
+    def test_agent_chat_uses_one_backend_authoritative_composer(self) -> None:
         script = (
             Path(__file__).parents[1] / "host/apps/agent_chat/ui/agent_chat.js"
         ).read_text()
-        self.assertIn(
-            'task.status === "running" && task.agent_runtime !== "hermes"',
-            script,
-        )
+        self.assertIn('api("POST", "/messages", request)', script)
+        self.assertIn('["task.message", "task.activity"]', script)
+        self.assertNotIn("hydrateCompletePrompts", script)
+        self.assertNotIn("completePromptByTask", script)
+        self.assertNotIn('"task.created"', script)
+        self.assertNotIn('"task.updated"', script)
+        self.assertNotIn("task-steer-input", script)
+        self.assertNotIn("task.output_message", script)
 
     def test_app_upload_bridge_uses_a_host_owned_file_picker(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui"
@@ -105,6 +109,9 @@ class AdminUiStaticTests(unittest.TestCase):
         ).read_text()
         css = (runtime.parent / "admin_ui.css").read_text()
         self.assertIn('message.type === "kern-app-upload-file"', app)
+        self.assertIn('message.type === "kern-app-copy-text"', app)
+        self.assertIn('"kern-app-copy-text-result"', app)
+        self.assertIn("navigator.clipboard.writeText(text)", app)
         self.assertIn('input.type = "file"', app)
         self.assertIn("input.multiple = true", app)
         self.assertIn('input.className = "host-file-picker"', app)
@@ -491,12 +498,138 @@ class AdminUiStaticTests(unittest.TestCase):
         page.assert_called_once_with("thread_1", 2, 5)
         payload = response["events"][0]["payload"]
         self.assertLessEqual(len(payload["message"].encode()), message_bytes)
-        self.assertTrue(payload["message"].endswith("…"))
+        self.assertTrue(payload["message"].endswith("… (truncated)"))
         self.assertLessEqual(len(payload["error_message"].encode()), message_bytes)
         self.assertLess(
             len(json.dumps(response, sort_keys=True).encode()),
             admin_api.MAX_REQUEST_BODY_BYTES,
         )
+
+    def test_thread_events_bound_nested_activity_output_without_dropping_event(self) -> None:
+        message_bytes = 120 * 1024
+        events = [{
+            "seq": 1,
+            "task_id": "task_1",
+            "event_type": "task.activity",
+            "payload": {
+                "activity": {
+                    "activity_id": "command-1",
+                    "kind": "command",
+                    "phase": "completed",
+                    "title": "large command",
+                    "detail": "d" * (40 * 1024),
+                    "output": "o" * (200 * 1024),
+                }
+            },
+        }]
+        with patch(
+            "host.runtime.admin_api.service.state.page_thread_events",
+            return_value=events,
+        ):
+            response = admin_api.thread_route(
+                "GET",
+                "/v1/threads/thread_1/events",
+                {"limit": ["1"], "message_bytes": [str(message_bytes)]},
+            )
+
+        activity = response["events"][0]["payload"]["activity"]
+        self.assertEqual(activity["activity_id"], "command-1")
+        self.assertTrue(activity["detail"].endswith("… (truncated)"))
+        self.assertTrue(activity["output"].endswith("… (truncated)"))
+        self.assertLess(len(json.dumps(response).encode()), admin_api.MAX_REQUEST_BODY_BYTES)
+
+    def test_six_large_activity_events_leave_room_for_wire_metadata(self) -> None:
+        message_bytes = 120 * 1024
+        events = [
+            {
+                "seq": seq,
+                "task_id": "task_1",
+                "event_type": "task.activity",
+                "payload": {
+                    "activity": {
+                        "provider": "codex",
+                        "activity_id": "😀" * 512,
+                        "kind": "command",
+                        "phase": "completed",
+                        "title": "😀" * 512,
+                        "status": "completed",
+                        "detail": "d" * (40 * 1024),
+                        "output": "o" * (200 * 1024),
+                    }
+                },
+            }
+            for seq in range(6)
+        ]
+        with patch(
+            "host.runtime.admin_api.service.state.page_thread_events",
+            return_value=events,
+        ):
+            response = admin_api.thread_route(
+                "GET",
+                "/v1/threads/thread_1/events",
+                {"limit": ["6"], "message_bytes": [str(message_bytes)]},
+            )
+
+        self.assertEqual(len(response["events"]), 6)
+        self.assertLess(
+            len(json.dumps(response).encode()),
+            admin_api.MAX_REQUEST_BODY_BYTES,
+        )
+
+    def test_large_event_page_stays_below_bridge_cap_after_json_escaping(self) -> None:
+        message_bytes = 120 * 1024
+        events = [
+            {
+                "seq": seq,
+                "task_id": "task_1",
+                "event_type": "task.message",
+                "payload": {"message": "\x01" * message_bytes, "source": "agent"},
+            }
+            for seq in range(8)
+        ]
+        with patch(
+            "host.runtime.admin_api.service.state.page_thread_events",
+            return_value=events,
+        ):
+            response = admin_api.thread_route(
+                "GET",
+                "/v1/threads/thread_1/events",
+                {"limit": ["8"], "message_bytes": [str(message_bytes)]},
+            )
+
+        self.assertEqual(len(response["events"]), 8)
+        self.assertTrue(all(
+            event["payload"]["message"].endswith("… (truncated)")
+            for event in response["events"]
+        ))
+        self.assertLess(len(json.dumps(response).encode()), admin_api.MAX_REQUEST_BODY_BYTES)
+
+    def test_large_non_ascii_event_page_uses_wire_json_size(self) -> None:
+        message_bytes = 120 * 1024
+        events = [
+            {
+                "seq": seq,
+                "task_id": "task_1",
+                "event_type": "task.message",
+                "payload": {"message": "😀" * message_bytes, "source": "agent"},
+            }
+            for seq in range(8)
+        ]
+        with patch(
+            "host.runtime.admin_api.service.state.page_thread_events",
+            return_value=events,
+        ):
+            response = admin_api.thread_route(
+                "GET",
+                "/v1/threads/thread_1/events",
+                {"limit": ["8"], "message_bytes": [str(message_bytes)]},
+            )
+
+        self.assertTrue(all(
+            event["payload"]["message"].endswith("… (truncated)")
+            for event in response["events"]
+        ))
+        self.assertLess(len(json.dumps(response).encode()), admin_api.MAX_REQUEST_BODY_BYTES)
 
     def test_app_backend_bulk_thread_list_is_filtered_to_the_calling_app(self) -> None:
         with patch(
@@ -1685,7 +1818,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, cancelled = self.request("GET", f"/v1/tasks/{task_id}")
         self.assertEqual(cancelled["status"], "cancelled")
         _, events = self.request("GET", f"/v1/tasks/{task_id}/events")
-        self.assertEqual([event["event_type"] for event in events["events"]], ["task.cancelled"])
+        self.assertEqual(
+            [event["event_type"] for event in events["events"]],
+            ["task.cancelled"],
+        )
 
     def test_task_create_validates_and_returns_session_options(self) -> None:
         status, codex = self.request(
@@ -1873,7 +2009,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "status": "completed",
                 "agent_runtime": "codex",
                 "thread_id": "shared",
-                "input_message": "codex old",
+                "input_message": "codex old " * 10,
                 "steer_messages": [],
                 "created_at": "2026-06-08T00:00:00Z",
                 "updated_at": "2026-06-08T00:00:07Z",
@@ -1906,10 +2042,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, body = self.request("GET", "/v1/threads/shared/tasks")
         self.assertEqual([task["task_id"] for task in body["tasks"]], ["task_1", "task_2"])
         self.assertEqual(body["tasks"][1]["output_message"], "done")
-        _, bounded = self.request("GET", "/v1/threads/shared/tasks?limit=1&message_bytes=8")
+        _, bounded = self.request("GET", "/v1/threads/shared/tasks?limit=1&message_bytes=32")
         self.assertEqual([task["task_id"] for task in bounded["tasks"]], ["task_1"])
-        self.assertLessEqual(len(bounded["tasks"][0]["input_message"].encode()), 8)
-        self.assertTrue(bounded["tasks"][0]["input_message"].endswith("…"))
+        self.assertLessEqual(len(bounded["tasks"][0]["input_message"].encode()), 32)
+        self.assertTrue(bounded["tasks"][0]["input_message"].endswith("… (truncated)"))
 
     def test_create_task_rejects_conflicting_configuration_for_existing_threads(self) -> None:
         state = load_state()

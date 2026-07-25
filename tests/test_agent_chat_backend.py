@@ -52,6 +52,13 @@ class AgentChatBackendTests(unittest.TestCase):
             },
         )
 
+    def test_event_page_reserves_bridge_space_for_metadata(self) -> None:
+        text_budget = backend.THREAD_EVENT_PAGE * backend.THREAD_EVENT_MESSAGE_BYTES
+        self.assertLessEqual(
+            text_budget,
+            backend.MAX_ADMIN_RESPONSE_BYTES - 256 * 1024,
+        )
+
     def test_follow_up_uses_host_owned_session_options(self) -> None:
         request = {"input_message": "continue", "thread_id": "existing"}
         response = {
@@ -195,8 +202,128 @@ class AgentChatBackendTests(unittest.TestCase):
         ):
             response = backend.list_app_thread_events("thread-1", {"since": ["2"]})
 
-        admin_call.assert_called_once_with("GET", "/v1/threads/thread-1/events?since=2")
+        admin_call.assert_called_once_with(
+            "GET",
+            "/v1/threads/thread-1/events"
+            f"?limit={backend.THREAD_EVENT_PAGE}"
+            f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}&since=2",
+        )
         self.assertEqual(response, events)
+
+    def test_list_app_thread_tasks_bounds_duplicate_task_messages(self) -> None:
+        tasks = {"tasks": [{"task_id": "task_1", "input_message": "short"}]}
+        with (
+            patch("host.apps.agent_chat.backend._require_app_thread"),
+            patch("host.apps.agent_chat.backend._app_task_ids_for_thread", return_value={"task_1"}),
+            patch("host.apps.agent_chat.backend.call_admin_api", return_value=tasks) as admin_call,
+        ):
+            self.assertEqual(backend.list_app_thread_tasks("thread-1"), tasks)
+
+        admin_call.assert_called_once_with(
+            "GET",
+            f"/v1/threads/thread-1/tasks?message_bytes={backend.THREAD_TASK_MESSAGE_BYTES}",
+        )
+
+    def test_send_message_steers_the_current_running_task(self) -> None:
+        running = {
+            "tasks": [{
+                "task_id": "task_1",
+                "status": "running",
+                "created_at": "2026-07-25T00:00:00Z",
+            }]
+        }
+        with (
+            patch("host.apps.agent_chat.backend.list_app_thread_tasks", return_value=running),
+            patch("host.apps.agent_chat.backend.call_admin_api", return_value={"status": "accepted"}) as admin_call,
+        ):
+            result = backend.send_app_message(
+                {"thread_id": "thread-1", "input_message": "follow up"}
+            )
+
+        self.assertEqual(
+            result,
+            {"action": "steered", "task_id": "task_1", "thread_id": "thread-1"},
+        )
+        admin_call.assert_called_once_with(
+            "POST",
+            "/v1/tasks/task_1/steer",
+            {"steer_message": "follow up"},
+        )
+
+    def test_send_message_without_a_thread_starts_a_new_turn(self) -> None:
+        request = {
+            "input_message": "start here",
+            "agent_runtime": "codex",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+        }
+        created = {
+            "task_id": "task_1",
+            "thread_id": "thread-1",
+            "agent_runtime": "codex",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+        }
+        with patch(
+            "host.apps.agent_chat.backend.create_app_task",
+            return_value=created,
+        ) as create:
+            self.assertEqual(
+                backend.send_app_message(request),
+                {**created, "action": "created"},
+            )
+
+        create.assert_called_once_with(request)
+
+    def test_send_message_creates_after_a_steer_races_completion(self) -> None:
+        running = {
+            "tasks": [{
+                "task_id": "task_1",
+                "status": "running",
+                "created_at": "2026-07-25T00:00:00Z",
+            }]
+        }
+        created = {
+            "task_id": "task_2",
+            "thread_id": "thread-1",
+            "agent_runtime": "codex",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+        }
+        with (
+            patch(
+                "host.apps.agent_chat.backend.list_app_thread_tasks",
+                side_effect=(running, {"tasks": []}),
+            ),
+            patch(
+                "host.apps.agent_chat.backend.call_admin_api",
+                side_effect=backend.AppError(HTTPStatus.CONFLICT, "only running tasks can be steered"),
+            ),
+            patch("host.apps.agent_chat.backend.create_app_task", return_value=created) as create,
+        ):
+            result = backend.send_app_message(
+                {"thread_id": "thread-1", "input_message": "continue"}
+            )
+
+        self.assertEqual(result, {**created, "action": "created"})
+        create.assert_called_once_with(
+            {"thread_id": "thread-1", "input_message": "continue"}
+        )
+
+    def test_send_message_never_queues_behind_a_queued_task(self) -> None:
+        queued = {"tasks": [{"task_id": "task_1", "status": "queued"}]}
+        with (
+            patch("host.apps.agent_chat.backend.list_app_thread_tasks", return_value=queued),
+            patch("host.apps.agent_chat.backend.create_app_task") as create,
+            self.assertRaises(backend.AppError) as error,
+        ):
+            backend.send_app_message(
+                {"thread_id": "thread-1", "input_message": "do this too"}
+            )
+
+        self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("task is starting", error.exception.message)
+        create.assert_not_called()
 
     def test_list_app_thread_events_rejects_non_numeric_since(self) -> None:
         with (

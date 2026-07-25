@@ -187,3 +187,67 @@ export function bedrockUsage(account) {
     meteredRequests: Number(usage.metered_requests) || 0,
   };
 }
+
+// Codex (OpenAI) rate limit usage from account/rateLimits/read, formatted for
+// display; null when the payload is absent.
+export function codexUsage(account) {
+  const usage = account.codex_usage;
+  const rateLimits = usage && typeof usage === "object" ? usage.rate_limits : null;
+  if (!rateLimits || typeof rateLimits !== "object") return null;
+  // Extract primary window data (most important for rate limiting)
+  const primary = rateLimits.primary || {};
+  const secondary = rateLimits.secondary || {};
+  const credits = rateLimits.credits;
+  const primaryPercent = Number(primary.used_percent);
+  const secondaryPercent = Number(secondary.used_percent);
+  // Return usage data if we have at least one window percentage
+  if (!Number.isFinite(primaryPercent) && !Number.isFinite(secondaryPercent)) return null;
+  // Preserve absent/unknown credit state - only process if credits object exists
+  const creditsInfo = credits && typeof credits === "object" ? {
+    hasCredits: credits.has_credits === true,
+    hasCreditsExplicitlyFalse: credits.has_credits === false,
+    unlimited: credits.unlimited === true,
+    balance: Number(credits.balance) || null,
+  } : null;
+  return {
+    primary: {
+      usedPercent: primaryPercent,
+      windowDurationMins: Number(primary.window_duration_mins) || null,
+      resetsAt: primary.resets_at || null,
+    },
+    secondary: {
+      usedPercent: secondaryPercent,
+      windowDurationMins: Number(secondary.window_duration_mins) || null,
+      resetsAt: secondary.resets_at || null,
+    },
+    credits: creditsInfo,
+  };
+}
+
+// Claude Code usage from /usage command, formatted for display;
+// null when the payload is absent.
+export function claudeUsage(account) {
+  const usage = account.claude_usage;
+  if (!usage || typeof usage !== "object") return null;
+  const sessionPercent = Number(usage.current_session_used_percent);
+  const weeklyPercent = Number(usage.weekly_used_percent);
+  const fablePercent = Number(usage.fable_weekly_used_percent);
+  // Return usage data if we have at least one percentage value
+  if (!Number.isFinite(sessionPercent) && !Number.isFinite(weeklyPercent) && !Number.isFinite(fablePercent)) {
+    return null;
+  }
+  return {
+    currentSession: {
+      usedPercent: sessionPercent,
+      resetsAt: usage.current_session_resets_at || null,
+    },
+    weekly: {
+      usedPercent: weeklyPercent,
+      resetsAt: usage.weekly_resets_at || null,
+    },
+    fableWeekly: {
+      usedPercent: fablePercent,
+      resetsAt: usage.fable_weekly_resets_at || null,
+    },
+  };
+}

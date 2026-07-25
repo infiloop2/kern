@@ -193,6 +193,7 @@ The complete iframe-to-parent request allowlist is:
 | Message type | Fields | Parent behavior |
 | --- | --- | --- |
 | `kern-app-api` | `request_id`, `method`, `path`, optional `body` | Makes one authenticated request only to that same app's `/v1/apps/<app_id>/api/...` route, then returns `kern-app-api-result` to the iframe. |
+| `kern-app-copy-text` | `request_id`, `text` | Copies 1 byte–2 MiB of app-presented text through the top-level operator page, then returns `kern-app-copy-text-result`. This is the sandbox-safe path for copy controls inside app frames. |
 | `kern-app-open-file` | absolute agent-workspace `path` | Switches the parent operator UI to Agent workspace / Files and opens the path there. It returns no file bytes to the iframe. |
 | `kern-app-upload-file` | `request_id`, `action`, optional `selection_id`, optional `max_files` | `select` opens a host-owned native file picker and retains up to ten files in parent memory; `upload` publishes one selection through the authenticated host upload endpoint; `discard` forgets one. Results return through `kern-app-upload-file-result`. |
 

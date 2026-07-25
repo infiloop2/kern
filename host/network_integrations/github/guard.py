@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import base64
 import json
-from urllib.parse import parse_qs
+import re
+from urllib.parse import parse_qs, parse_qsl, urlencode
 
 from host.network_integrations.base import request_param_denial
 from host.network_integrations.github import push_gate
 from host.network_integrations.github.manifest import GitHubIntegration
+from host.param_guard import find_denial
 from host.runtime.core.network_policy import normalized_path, route_allowed
 from host.runtime.core.state import enqueue_pending_push, read_proxy_github_token
 
@@ -37,7 +39,11 @@ GITHUB_STRIP_ONLY_DOMAINS = {
     "github-cloud.githubusercontent.com",
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
+    "results-receiver.actions.githubusercontent.com",
 }
+GITHUB_ACTIONS_BLOB_APEX = "blob.core.windows.net"
+GITHUB_ACTIONS_BLOB_ROUTE = (("GET", "HEAD"), ())
+AZURE_SAS_SIGNATURE_RE = re.compile(r"[A-Za-z0-9+/]{43}=")
 ROUTES = {
     "github.com": (("GET", "HEAD", "POST"), ()),
     "api.github.com": (("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"), ()),
@@ -47,13 +53,29 @@ ROUTES = {
     "objects.githubusercontent.com": (("GET", "HEAD"), ()),
     "github-cloud.githubusercontent.com": (("GET", "HEAD"), ()),
     "release-assets.githubusercontent.com": (("GET", "HEAD"), ()),
+    "results-receiver.actions.githubusercontent.com": (("GET", "HEAD"), ()),
 }
 GUARDED_HOSTS = frozenset({"github.com", "api.github.com", "uploads.github.com"})
 
 
+def _is_github_actions_blob_host(host: str) -> bool:
+    lowered = host.lower()
+    return (
+        lowered != GITHUB_ACTIONS_BLOB_APEX
+        and lowered.endswith(f".{GITHUB_ACTIONS_BLOB_APEX}")
+    )
+
+
+def _route(host: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    lowered = host.lower()
+    if _is_github_actions_blob_host(lowered):
+        return GITHUB_ACTIONS_BLOB_ROUTE
+    return ROUTES.get(lowered)
+
+
 def host_allowed(config: GitHubIntegration, host: str) -> bool:
     del config
-    return host.lower() in ROUTES
+    return _route(host) is not None
 
 
 def rewrite_request_headers(
@@ -79,10 +101,15 @@ def rewrite_request_headers(
     re-sign bodies (Bedrock)."""
     del config, method, path, query, body
     lowered = host.lower()
-    if lowered not in GITHUB_BEARER_DOMAINS and lowered not in GITHUB_BASIC_DOMAINS and lowered not in GITHUB_STRIP_ONLY_DOMAINS:
+    if (
+        lowered not in GITHUB_BEARER_DOMAINS
+        and lowered not in GITHUB_BASIC_DOMAINS
+        and lowered not in GITHUB_STRIP_ONLY_DOMAINS
+        and not _is_github_actions_blob_host(lowered)
+    ):
         return headers
     headers = [(key, value) for key, value in headers if key.lower() != "authorization"]
-    if lowered in GITHUB_STRIP_ONLY_DOMAINS:
+    if lowered in GITHUB_STRIP_ONLY_DOMAINS or _is_github_actions_blob_host(lowered):
         return headers
     token = read_proxy_github_token()
     if not token:
@@ -105,9 +132,11 @@ def request_denied(
     body: bytes,
 ) -> str | None:
     """Apply the GitHub-owned route and repository write guard."""
-    route = ROUTES.get(host.lower())
+    route = _route(host)
     if route is None or not route_allowed(method, path, query, *route):
         return "network_policy_denied"
+    if _is_github_actions_blob_host(host):
+        return _github_actions_blob_request_denied(path, query)
     if host.lower() not in GUARDED_HOSTS:
         return None
     if query and method.upper() in ("GET", "HEAD"):
@@ -135,6 +164,46 @@ def request_denied(
     if host == "uploads.github.com":
         return _github_api_request_denied(write_repos, method, path, host=host, require_approval=False)
     return "github_repo_scope_required"
+
+
+def _github_actions_blob_request_denied(path: str, query: str) -> str | None:
+    """Guard GitHub Actions' provider-issued Azure Blob download query.
+
+    The global parameter guard deliberately remains destination-agnostic and
+    continues to reject credential-named ``sig`` query values. Here, after the
+    GitHub integration has selected an HTTPS, GET/HEAD-only Azure Blob host,
+    inspect each decoded signature with every global guard except the final
+    UNNATURAL_TOKEN heuristic, require Azure's Base64 HMAC-SHA256 signature
+    shape, then substitute a neutral value before applying the unchanged
+    full-query guard. All non-``sig`` query keys and values retain the
+    standard checks.
+    """
+    try:
+        pairs = parse_qsl(
+            query,
+            keep_blank_values=True,
+            encoding="utf-8",
+            errors="strict",
+        )
+    except UnicodeDecodeError:
+        return "request_param_encoded_blob_denied"
+    signatures = [
+        value for key, value in pairs if key.lower() == "sig"
+    ]
+    if len(signatures) != 1 or not signatures[0]:
+        return "network_policy_denied"
+    sanitized: list[tuple[str, str]] = []
+    for key, value in pairs:
+        if key.lower() != "sig":
+            sanitized.append((key, value))
+            continue
+        denial = find_denial(value, allow_unnatural_token=True)
+        if denial is not None:
+            return denial.reason
+        if AZURE_SAS_SIGNATURE_RE.fullmatch(value) is None:
+            return "network_policy_denied"
+        sanitized.append((key, "signedurlvalue"))
+    return request_param_denial(path, urlencode(sanitized), token_rules=True)
 
 
 def gate_response(

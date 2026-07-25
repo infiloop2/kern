@@ -1818,6 +1818,10 @@ class DeployUnitTests(unittest.TestCase):
         hermes_config = Path("host/bootstrap/agent-home/.hermes/config.yaml").read_text()
         hermes_env = Path("host/bootstrap/agent-home/.hermes/.env").read_text()
         self.assertIn("You are running with full permissions", agent_instructions)
+        self.assertEqual(
+            json.loads(claude_settings)["env"]["FORCE_PROMPT_CACHING_5M"],
+            "1",
+        )
         self.assertIn("Do not prompt the operator for local approvals", agent_instructions)
         # The tools section tells the agent how to discover and use bundled tools.
         self.assertIn("`kern` MCP server", agent_instructions)

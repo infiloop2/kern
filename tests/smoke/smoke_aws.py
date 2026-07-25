@@ -1613,8 +1613,14 @@ class AwsSmoke:
                 raise AssertionError(f"create with {label} returned {status}, expected 400")
 
         events = self._api("GET", f"/v1/tasks/{task_id}/events?since=0")["events"]
-        if [event["event_type"] for event in events] != ["task.started", "task.message", "task.failed"]:
-            raise AssertionError(f"fail-fast should emit started/message/failed exactly, got: {events}")
+        if [event["event_type"] for event in events] != [
+            "task.started",
+            "task.message",
+            "task.failed",
+        ]:
+            raise AssertionError(
+                f"fail-fast should emit started/message/failed exactly, got: {events}"
+            )
         if any(event["task_id"] != task_id for event in events):
             raise AssertionError("per-task events leaked another task's events")
 

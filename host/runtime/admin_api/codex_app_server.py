@@ -38,12 +38,13 @@ from collections import deque
 from dataclasses import dataclass, field
 import json
 import queue
+import re
 import subprocess
 import threading
 import time
 from typing import Any, Callable
 
-from host.runtime.admin_api import thread_scope
+from host.runtime.admin_api import agent_activity, thread_scope
 from host.runtime.core.state import read_proxy_openai_account_id
 
 DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-codex-app-server"]
@@ -55,6 +56,9 @@ CLIENT_VERSION = "v1.0"
 # always revalidates, while the five-second pending poll never becomes a
 # provider-traffic loop.
 LIVE_VALIDATION_RETRY_SECONDS = 240
+COMMAND_OUTPUT_EMIT_SECONDS = 0.75
+COMMAND_OUTPUT_EMIT_BYTES = 24 * 1024
+COMMAND_OUTPUT_MAX_EVENTS = 80
 
 
 @dataclass
@@ -194,9 +198,11 @@ class CodexAppServer:
         assert proc is not None and proc.stdout is not None
         for line in proc.stdout:
             try:
-                self._messages.put(json.loads(line))
+                message = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(message, dict):
+                self._messages.put(message)
 
     def _read_stderr(self) -> None:
         # Drain stderr (so the child never blocks on a full pipe) and keep the
@@ -647,7 +653,7 @@ def run_turn(
     model: str,
     effort: str,
     steer_messages: Callable[[], list[str]],
-    on_message: Callable[[str], None],
+    on_message: Callable[[str | dict[str, Any]], None],
     steer_delivered: Callable[[str], None],
 ) -> tuple[str, str]:
     """Run one task turn to completion. ``steer_messages`` returns the
@@ -688,7 +694,41 @@ def run_turn(
     )["turn"]
     turn_id = turn["id"]
     current_parts: list[str] = []
+    command_output_parts: dict[str, list[str]] = {}
+    command_output_last_emit: dict[str, float] = {}
+    command_output_emit_count: dict[str, int] = {}
+    command_output_capped: set[str] = set()
     last_message = ""
+
+    def emit_command_output(item_id: str, now: float) -> None:
+        parts = command_output_parts.get(item_id) or []
+        pending_output = "".join(parts)
+        command_output_parts[item_id] = []
+        if not pending_output or item_id in command_output_capped:
+            return
+        count = command_output_emit_count.get(item_id, 0)
+        if count >= COMMAND_OUTPUT_MAX_EVENTS:
+            output = agent_activity.TRUNCATION_SUFFIX
+            command_output_capped.add(item_id)
+        else:
+            output = agent_activity.clip_text(
+                pending_output,
+                COMMAND_OUTPUT_EMIT_BYTES,
+            )
+            command_output_emit_count[item_id] = count + 1
+        update = agent_activity.activity(
+            "codex",
+            item_id,
+            "command",
+            "started",
+            "Command output",
+            output=output,
+            status="running",
+        )
+        update["append_output"] = True
+        on_message(update)
+        command_output_last_emit[item_id] = now
+
     while True:
         for steer in steer_messages():
             try:
@@ -716,26 +756,181 @@ def run_turn(
             message = server.read_message(timeout=1.0)
         except CodexTimeout:
             continue
+        if not isinstance(message, dict):
+            continue
         method = message.get("method")
         params = message.get("params", {})
+        if not isinstance(params, dict):
+            continue
         if method == "item/agentMessage/delta":
-            current_parts.append(params.get("delta", ""))
+            delta = params.get("delta")
+            if isinstance(delta, str) and delta:
+                current_parts.append(agent_activity.clean_text(delta))
+        elif method == "item/commandExecution/outputDelta":
+            item_id = str(params.get("itemId") or params.get("item_id") or "")
+            delta = params.get("delta")
+            if (
+                item_id
+                and isinstance(delta, str)
+                and delta
+                and item_id not in command_output_capped
+            ):
+                delta = agent_activity.clean_text(delta)
+                parts = command_output_parts.setdefault(item_id, [])
+                parts.append(delta)
+                pending_output = "".join(parts)
+                now = time.monotonic()
+                if (
+                    command_output_emit_count.get(item_id, 0)
+                    >= COMMAND_OUTPUT_MAX_EVENTS
+                    or item_id not in command_output_last_emit
+                    or now - command_output_last_emit[item_id] >= COMMAND_OUTPUT_EMIT_SECONDS
+                    or len(pending_output.encode()) >= COMMAND_OUTPUT_EMIT_BYTES
+                ):
+                    emit_command_output(item_id, now)
+        elif method == "item/started":
+            item = params.get("item", {})
+            rich_activity = _codex_item_activity(item, "started")
+            if rich_activity is not None:
+                on_message(rich_activity)
         elif method == "item/completed":
             item = params.get("item", {})
+            if not isinstance(item, dict):
+                continue
             if item.get("type") == "agentMessage":
-                last_message = item.get("text") or "".join(current_parts)
+                item_text = item.get("text")
+                last_message = (
+                    agent_activity.clean_text(item_text)
+                    if isinstance(item_text, str) and item_text
+                    else "".join(current_parts)
+                )
                 current_parts = []
                 if last_message:
                     on_message(last_message)
+            else:
+                item_id = str(item.get("id") or "")
+                streamed_output = (
+                    item_id in command_output_emit_count
+                    or bool(command_output_parts.get(item_id))
+                )
+                if item_id and command_output_parts.get(item_id):
+                    emit_command_output(item_id, time.monotonic())
+                rich_activity = _codex_item_activity(item, "completed")
+                if rich_activity is not None:
+                    # Streaming already persisted this command output under the
+                    # same activity id. Do not store the aggregated duplicate;
+                    # Agent Chat keeps the accumulated output when the
+                    # completion snapshot omits the field.
+                    if streamed_output:
+                        rich_activity.pop("output", None)
+                    on_message(rich_activity)
         elif method == "turn/completed":
+            for item_id in list(command_output_parts):
+                if command_output_parts[item_id]:
+                    emit_command_output(item_id, time.monotonic())
             turn = params.get("turn", {})
+            if not isinstance(turn, dict):
+                continue
             if turn.get("status") == "completed":
                 # Fall back to any deltas not yet flushed by an item/completed,
                 # so a final message streamed as bare deltas is not lost.
                 final = last_message or "".join(current_parts)
                 return thread_id, final or "Task completed."
             error = turn.get("error") or {}
+            if not isinstance(error, dict):
+                error = {}
             raise CodexAppServerError(error.get("message", "Codex turn failed"))
+
+
+def _codex_item_activity(item: Any, phase: str) -> dict[str, Any] | None:
+    """Fail-soft boundary for provider-owned ThreadItem payloads."""
+    try:
+        return _codex_item_activity_unchecked(item, phase)
+    except Exception:
+        return None
+
+
+def _codex_item_activity_unchecked(item: Any, phase: str) -> dict[str, Any] | None:
+    """Normalize Codex ThreadItems without coupling Agent Chat to its schema."""
+    if not isinstance(item, dict):
+        return None
+    item_type = str(item.get("type") or "")
+    if item_type in {"", "userMessage", "hookPrompt", "agentMessage"}:
+        return None
+    activity_id = str(item.get("id") or f"{item_type}:{id(item)}")
+    status = item.get("status")
+    title = item_type
+    kind = "status"
+    detail: Any = None
+    output: Any = None
+
+    if item_type == "reasoning":
+        kind, title = "reasoning", "Reasoning"
+        detail = item.get("summary") or item.get("content")
+    elif item_type == "plan":
+        kind, title = "plan", "Plan"
+        detail = item.get("text") or item.get("plan")
+    elif item_type == "commandExecution":
+        kind = "command"
+        command = item.get("command") or item.get("commandLine") or "Command"
+        title = agent_activity.clip_text(command, agent_activity.ACTIVITY_SHORT_TEXT_BYTES)
+        cwd = item.get("cwd")
+        detail = f"Working directory: {cwd}" if cwd else None
+        output = item.get("aggregatedOutput") or item.get("output")
+        if item.get("exitCode") is not None:
+            status = f"exit {item['exitCode']}"
+    elif item_type == "fileChange":
+        kind, title = "file_change", "File changes"
+        changes = item.get("changes") or item.get("files")
+        detail = agent_activity.json_text(changes) if changes is not None else item.get("diff")
+    elif item_type in {"mcpToolCall", "dynamicToolCall"}:
+        kind = "tool"
+        tool_name = item.get("tool") or item.get("name") or item.get("server") or "Tool"
+        title = f"Tool: {tool_name}"
+        arguments = item.get("arguments") or item.get("input")
+        detail = agent_activity.json_text(arguments) if arguments is not None else None
+        result = item.get("result") or item.get("output") or item.get("error")
+        output = agent_activity.json_text(result) if result is not None else None
+    elif item_type in {"collabAgentToolCall", "subAgentActivity"}:
+        kind, title = "agent", "Sub-agent activity"
+        detail = agent_activity.json_text(
+            item.get("prompt") or item.get("receivers") or item.get("agents") or item
+        )
+    elif item_type == "webSearch":
+        kind, title = "search", "Web search"
+        detail = item.get("query") or item.get("queries")
+    elif item_type == "imageView":
+        kind, title = "image", "Viewed image"
+        detail = item.get("path")
+    elif item_type == "imageGeneration":
+        kind, title = "image", "Generated image"
+        detail = item.get("prompt")
+        output = item.get("path") or item.get("output")
+    elif item_type == "sleep":
+        kind, title = "wait", "Waiting"
+        detail = item.get("reason") or item.get("duration")
+    elif item_type == "contextCompaction":
+        kind, title = "status", "Compacted context"
+    elif item_type == "enteredReviewMode":
+        kind, title = "status", "Entered review mode"
+    elif item_type == "exitedReviewMode":
+        kind, title = "status", "Exited review mode"
+    else:
+        title = re.sub(r"(?<!^)(?=[A-Z])", " ", item_type).capitalize()
+        detail = agent_activity.json_text(item)
+
+    if isinstance(detail, (dict, list)):
+        detail = agent_activity.json_text(detail)
+    return agent_activity.activity(
+        "codex",
+        activity_id,
+        kind,
+        phase,
+        title,
+        detail=detail,
+        output=output,
+        status=str(status) if status is not None else None,
+    )
 
 
 def _start_thread(server: CodexAppServer, model: str) -> dict[str, Any]:

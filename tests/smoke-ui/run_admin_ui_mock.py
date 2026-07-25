@@ -435,6 +435,125 @@ def seed_state() -> None:
                 ("agent", "The inline script is placed after the stylesheet link, so the stylesheet paints first. Moving it up."),
                 ("user", "Also make sure the scrollbar matches, it flashes white too."),
                 ("agent", "Good catch. Added color-scheme to :root so the scrollbar and native controls follow the theme from the first frame."),
+                ("user", "The toggle still flashes light theme for a frame on a cold load. Fix the flash."),
+            ],
+            "activities": [
+                {
+                    "provider": "codex",
+                    "activity_id": "reasoning-11",
+                    "kind": "reasoning",
+                    "phase": "completed",
+                    "title": "Reasoning",
+                    "detail": "The stylesheet can paint before the theme bootstrap runs.",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "plan-11",
+                    "kind": "plan",
+                    "phase": "completed",
+                    "title": "Fix first-paint ordering",
+                    "detail": "Move the bootstrap above CSS, then cover native controls.",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "command-11",
+                    "kind": "command",
+                    "phase": "started",
+                    "title": "npm test",
+                    "detail": "Working directory: /workspace/acme-web",
+                    "status": "running",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "command-11",
+                    "kind": "command",
+                    "phase": "started",
+                    "title": "Command output",
+                    "output": "6 passed",
+                    "status": "running",
+                    "append_output": True,
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "command-11",
+                    "kind": "command",
+                    "phase": "completed",
+                    "title": "npm test",
+                    "status": "exit 0",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "files-11",
+                    "kind": "file_change",
+                    "phase": "completed",
+                    "title": "File changes",
+                    "detail": "index.html\nsrc/app.css",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "tool-11",
+                    "kind": "tool",
+                    "phase": "started",
+                    "title": "Tool: browser",
+                    "detail": "Cold-load trace",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "tool-11",
+                    "kind": "tool",
+                    "phase": "completed",
+                    "title": "Tool result",
+                    "output": "No light frame detected",
+                    "status": "completed",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "tool-failed-11",
+                    "kind": "tool",
+                    "phase": "completed",
+                    "title": "Tool: screenshot",
+                    "output": "Viewport was already closed",
+                    "status": "failed",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "agent-11",
+                    "kind": "agent",
+                    "phase": "completed",
+                    "title": "Sub-agent activity",
+                    "detail": "Review theme boot order",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "search-11",
+                    "kind": "search",
+                    "phase": "completed",
+                    "title": "Web search",
+                    "detail": "CSS color-scheme native controls",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "image-11",
+                    "kind": "image",
+                    "phase": "completed",
+                    "title": "Viewed image",
+                    "detail": "/workspace/first-paint.png",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "wait-11",
+                    "kind": "wait",
+                    "phase": "completed",
+                    "title": "Waiting for cold load",
+                    "detail": "Network idle",
+                },
+                {
+                    "provider": "codex",
+                    "activity_id": "status-11",
+                    "kind": "status",
+                    "phase": "completed",
+                    "title": "Browser session initialized",
+                },
             ],
             "output_message": (
                 "Root cause: the inline script ran after the stylesheet link, so first paint could happen with "
@@ -498,6 +617,25 @@ def seed_state() -> None:
                 ("agent", "Cut the intro from four sentences to two and led with the one-hand stat; it reads harder now."),
                 ("agent", "Drafting the offline section: local cache first, background reconcile, order drafts that survive a dead zone."),
             ],
+            "activities": [
+                {
+                    "provider": "claude_code",
+                    "activity_id": "reasoning-14",
+                    "kind": "reasoning",
+                    "phase": "completed",
+                    "title": "Reasoning",
+                    "detail": "The draft needs another 38 words after tightening.",
+                },
+                {
+                    "provider": "claude_code",
+                    "activity_id": "command-14",
+                    "kind": "command",
+                    "phase": "started",
+                    "title": "python word_count.py launch-post.md",
+                    "detail": "Working directory: /workspace/acme-web",
+                    "status": "running",
+                },
+            ],
             "created_min": 14,
             "started_min": 13,
             "completed_min": 12,
@@ -552,11 +690,16 @@ def seed_state() -> None:
         STATE.tasks.append(task)
 
         task_id = spec["task_id"]
-        STATE.add_agent_event(
-            "task.created", task_id, {"message": spec["input_message"], "source": "user"}, ago(spec["created_min"])
-        )
         if spec["started_min"] is not None:
             STATE.add_agent_event("task.started", task_id, {}, ago(spec["started_min"]))
+            # Match the orchestrator's claim-time opening prompt. It is the
+            # first user message in Agent Chat; later user messages are steers.
+            STATE.add_agent_event(
+                "task.message",
+                task_id,
+                {"message": spec["input_message"], "source": "user"},
+                ago(spec["started_min"]),
+            )
             STATE.add_agent_event(
                 "task.message",
                 task_id,
@@ -572,6 +715,13 @@ def seed_state() -> None:
             for index, (source, message) in enumerate(stream, start=1):
                 moment = spec["started_min"] - span * index / (len(stream) + 1)
                 STATE.add_agent_event("task.message", task_id, {"message": message, "source": source}, ago(moment))
+            for activity in spec.get("activities") or []:
+                STATE.add_agent_event(
+                    "task.activity",
+                    task_id,
+                    {"activity": activity},
+                    ago(spec["completed_min"] + 0.5),
+                )
         if spec["status"] == "completed":
             STATE.add_agent_event(
                 "task.message", task_id, {"message": spec["output_message"], "source": "agent"}, ago(spec["completed_min"])
@@ -1437,7 +1587,6 @@ def create_task(body: Any) -> dict[str, Any]:
             "updated_at": now,
         }
         STATE.tasks.append(task)
-        STATE.add_agent_event("task.created", task_id, {"message": input_message, "source": "user"})
         start_queued_tasks_locked()
         return STATE.public_task(task, queue_position=queue_position_locked(task))
 
@@ -2098,6 +2247,11 @@ def start_queued_tasks_locked() -> None:
         running_threads.add(task["thread_id"])
         running_by_runtime[task["agent_runtime"]] += 1
         STATE.add_agent_event("task.started", task["task_id"], {})
+        STATE.add_agent_event(
+            "task.message",
+            task["task_id"],
+            {"message": task["input_message"], "source": "user"},
+        )
 
 
 def progress_running_tasks_locked() -> None:

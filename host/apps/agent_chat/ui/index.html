@@ -40,6 +40,13 @@
     <footer class="composer-dock">
       <div id="status" class="app-status" hidden></div>
       <div class="composer">
+        <div id="composer-running" class="composer-running" hidden>
+          <div class="agent-working">
+            <span>Agent is working</span>
+            <span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          </div>
+          <button class="danger ghost sm" id="stop-task">Stop</button>
+        </div>
         <textarea id="new-task" rows="1" placeholder="Describe a task for the agent"></textarea>
         <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
         <div class="composer-bar">
@@ -64,6 +71,7 @@
     </footer>
   </main>
 </div>
+<script src="rich_text.js"></script>
 <script src="agent_chat.js"></script>
 </body>
 </html>

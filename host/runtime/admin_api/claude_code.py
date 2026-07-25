@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from host.runtime.admin_api import thread_scope
+from host.runtime.admin_api import agent_activity, thread_scope
 
 DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-claude-code"]
 DEFAULT_ACCOUNT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/read-claude-account"]
@@ -162,7 +162,7 @@ class ClaudeCodeSession:
         model: str,
         effort: str,
         steer_messages: Callable[[], list[str]],
-        on_message: Callable[[str], None],
+        on_message: Callable[[str | dict[str, Any]], None],
         steer_delivered: Callable[[str], None],
     ) -> tuple[str, str]:
         # State the operator's web-search decision to the launcher as its
@@ -272,12 +272,23 @@ class ClaudeCodeSession:
                 text = _assistant_text(message)
                 if text:
                     last_message = text
-                    on_message(text)
+                _emit_claude_content(message, on_message)
+            elif message.get("type") == "user":
+                _emit_claude_tool_results(message, on_message)
+            elif message.get("type") != "result":
+                _emit_claude_stream_status(message, on_message)
             if message.get("type") == "result":
                 if message.get("subtype") != "success" or message.get("is_error"):
-                    raise ClaudeCodeError(str(message.get("result") or message.get("subtype") or "Claude turn failed"))
+                    error = agent_activity.clean_text(
+                        message.get("result")
+                        or message.get("subtype")
+                        or "Claude turn failed"
+                    )
+                    raise ClaudeCodeError(error)
                 outstanding_user_messages = max(0, outstanding_user_messages - 1)
-                final = str(message.get("result") or last_message or "Task completed.")
+                final = agent_activity.clean_text(
+                    message.get("result") or last_message or "Task completed."
+                )
                 if outstanding_user_messages:
                     # Either a queued steer's turn is still running (its events
                     # disarm the deadline above) or the steer was merged and
@@ -305,9 +316,11 @@ class ClaudeCodeSession:
         assert proc is not None and proc.stdout is not None
         for line in proc.stdout:
             try:
-                self._messages.put(json.loads(line))
+                message = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(message, dict):
+                self._messages.put(message)
 
     def _read_stderr(self) -> None:
         proc = self._proc
@@ -660,7 +673,7 @@ def run_turn(
     model: str,
     effort: str,
     steer_messages: Callable[[], list[str]],
-    on_message: Callable[[str], None],
+    on_message: Callable[[str | dict[str, Any]], None],
     steer_delivered: Callable[[str], None],
 ) -> tuple[str, str]:
     return server.run(
@@ -709,8 +722,185 @@ def _assistant_text(message: dict[str, Any]) -> str:
     if not isinstance(content, list):
         return ""
     parts = [
-        block.get("text", "")
+        agent_activity.clean_text(block.get("text", ""))
         for block in content
         if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
     ]
     return "".join(parts)
+
+
+def _message_content(message: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = message.get("message")
+    if not isinstance(payload, dict):
+        return []
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict)]
+
+
+def _claude_message_id(message: dict[str, Any], block: dict[str, Any], index: int) -> str:
+    value = block.get("id") or block.get("tool_use_id") or message.get("uuid")
+    if value:
+        return str(value)
+    payload = message.get("message")
+    if isinstance(payload, dict) and payload.get("id"):
+        return f"{payload['id']}:{index}"
+    return f"claude:{index}:{time.monotonic_ns()}"
+
+
+def _claude_tool_title(name: Any, block: dict[str, Any]) -> str:
+    tool_name = str(name or "Tool")
+    tool_input = block.get("input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    if tool_name == "Bash":
+        command = tool_input.get("command")
+        return agent_activity.clip_text(command or "Shell command", agent_activity.ACTIVITY_SHORT_TEXT_BYTES)
+    if tool_name in {"Read", "Write", "Edit", "Glob", "Grep"}:
+        target = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("pattern")
+        return f"{tool_name}: {target}" if target else tool_name
+    if tool_name in {"WebSearch", "WebFetch"}:
+        return "Web search" if tool_name == "WebSearch" else "Fetch web page"
+    return f"Tool: {tool_name}"
+
+
+def _claude_tool_kind(name: Any) -> str:
+    tool_name = str(name or "")
+    if tool_name == "Bash":
+        return "command"
+    if tool_name in {"Write", "Edit"}:
+        return "file_change"
+    if tool_name in {"WebSearch", "WebFetch"}:
+        return "search"
+    return "tool"
+
+
+def _emit_claude_content(
+    message: dict[str, Any],
+    on_message: Callable[[str | dict[str, Any]], None],
+) -> None:
+    """Emit text once plus semantic thinking/tool activity from one assistant message."""
+    content = _message_content(message)
+    text_emitted = False
+    for index, block in enumerate(content):
+        event: str | dict[str, Any] | None = None
+        try:
+            block_type = str(block.get("type") or "")
+            if block_type == "text":
+                if not text_emitted:
+                    text_emitted = True
+                    event = _assistant_text(message) or None
+            else:
+                activity_id = _claude_message_id(message, block, index)
+                if block_type == "thinking":
+                    event = agent_activity.activity(
+                        "claude_code",
+                        activity_id,
+                        "reasoning",
+                        "completed",
+                        "Reasoning",
+                        detail=block.get("thinking"),
+                    )
+                elif block_type in {"tool_use", "server_tool_use"}:
+                    name = block.get("name")
+                    tool_input = block.get("input")
+                    event = agent_activity.activity(
+                        "claude_code",
+                        activity_id,
+                        _claude_tool_kind(name),
+                        "started",
+                        _claude_tool_title(name, block),
+                        detail=agent_activity.json_text(tool_input) if tool_input is not None else None,
+                    )
+        except Exception:
+            # Provider progress is best-effort. One malformed block must not
+            # abort the running task or hide later valid blocks.
+            continue
+        if event is not None:
+            # Deliberately outside the parser try: persistence failures are
+            # host failures and must remain visible.
+            on_message(event)
+
+
+def _emit_claude_tool_results(
+    message: dict[str, Any],
+    on_message: Callable[[str | dict[str, Any]], None],
+) -> None:
+    for index, block in enumerate(_message_content(message)):
+        try:
+            block_type = str(block.get("type") or "")
+            if block_type != "tool_result" and not block_type.endswith("_tool_result"):
+                continue
+            is_error = bool(block.get("is_error"))
+            content = block.get("content")
+            output = agent_activity.json_text(content) if isinstance(content, (dict, list)) else content
+            event = agent_activity.activity(
+                "claude_code",
+                _claude_message_id(message, block, index),
+                "tool",
+                "completed",
+                "Tool result",
+                output=output,
+                status="failed" if is_error else "completed",
+            )
+        except Exception:
+            continue
+        on_message(event)
+
+
+def _emit_claude_stream_status(
+    message: dict[str, Any],
+    on_message: Callable[[str | dict[str, Any]], None],
+) -> None:
+    event: dict[str, Any] | None = None
+    try:
+        message_type = str(message.get("type") or "")
+        subtype = str(message.get("subtype") or "")
+        if message_type == "system" and subtype == "init":
+            visible = {
+                key: message[key]
+                for key in ("model", "cwd", "tools", "permissionMode", "claude_code_version")
+                if message.get(key) not in (None, "", [])
+            }
+            event = agent_activity.activity(
+                "claude_code",
+                _claude_message_id(message, {}, 0),
+                "status",
+                "completed",
+                "Claude session initialized",
+                detail=agent_activity.json_text(visible) if visible else None,
+            )
+        elif message_type == "tool_progress":
+            tool_use_id = str(message.get("tool_use_id") or _claude_message_id(message, {}, 0))
+            elapsed = message.get("elapsed_time_seconds")
+            event = agent_activity.activity(
+                "claude_code",
+                tool_use_id,
+                "tool",
+                "started",
+                "Tool progress",
+                status=f"{elapsed}s" if elapsed is not None else "running",
+            )
+        elif message_type in {"tool_use_summary", "rate_limit_event", "auth_status"}:
+            title = {
+                "tool_use_summary": "Tool summary",
+                "rate_limit_event": "Rate limit status",
+                "auth_status": "Authentication status",
+            }[message_type]
+            event = agent_activity.activity(
+                "claude_code",
+                _claude_message_id(message, {}, 0),
+                "status",
+                "completed",
+                title,
+                detail=agent_activity.json_text({
+                    key: value
+                    for key, value in message.items()
+                    if key not in {"type", "session_id", "uuid"}
+                }),
+            )
+    except Exception:
+        return
+    if event is not None:
+        on_message(event)
