@@ -31,7 +31,7 @@ import threading
 import time
 from typing import Any, Iterator
 
-from host.runtime.core import db, secretbox
+from host.runtime.core import db, pgclient, secretbox
 
 
 DEFAULT_PROXY_STATE_DIR = Path("/mnt/kern-admin/proxy-state")
@@ -672,7 +672,7 @@ def _read_provider_account(provider: str, cur: Any = None) -> dict[str, Any]:
 
 
 # The typed event payload fields; every event the runtime emits uses a subset.
-_EVENT_PAYLOAD_COLUMNS = ("message", "source", "error_message", "agent_runtime")
+_EVENT_PAYLOAD_COLUMNS = ("message", "source", "error_message", "agent_runtime", "activity")
 _EVENT_FIELDS = "seq, created_at, event_type, task_id, " + ", ".join(_EVENT_PAYLOAD_COLUMNS)
 
 
@@ -691,6 +691,22 @@ def _event_dict(row: Any) -> dict[str, Any]:
     }
 
 
+def _jsonb_safe(value: Any) -> Any:
+    """Recursively escape NULs, which PostgreSQL JSONB cannot represent."""
+    if isinstance(value, str):
+        return value.replace("\x00", "\\0")
+    if isinstance(value, list):
+        return [_jsonb_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_jsonb_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            _jsonb_safe(key) if isinstance(key, str) else key: _jsonb_safe(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def append_agent_event(cur: Any, event_type: str, task_id: str | None, payload: dict[str, Any]) -> int:
     """Insert one event inside the caller's mutation transaction, so the event
     commits or rolls back with the state change that caused it. seq is a
@@ -700,10 +716,17 @@ def append_agent_event(cur: Any, event_type: str, task_id: str | None, payload: 
     unknown = set(payload) - set(_EVENT_PAYLOAD_COLUMNS)
     if unknown:
         raise ValueError(f"unsupported event payload keys: {sorted(unknown)}")
+    values = [
+        pgclient.Jsonb(_jsonb_safe(payload[column]))
+        if column == "activity" and payload.get(column) is not None
+        else payload.get(column)
+        for column in _EVENT_PAYLOAD_COLUMNS
+    ]
     cur.execute(
         "INSERT INTO agent_events (created_at, event_type, task_id, message, source,"
-        " error_message, agent_runtime) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING seq",
-        (utc_now(), event_type, task_id, *(payload.get(column) for column in _EVENT_PAYLOAD_COLUMNS)),
+        " error_message, agent_runtime, activity)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING seq",
+        (utc_now(), event_type, task_id, *values),
     )
     seq = int(cur.fetchone()[0])
     if seq % PRUNE_EVERY == 0:

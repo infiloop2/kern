@@ -131,6 +131,41 @@ class MigrateRunnerTests(unittest.TestCase):
         self.assertEqual(reverted, list(reversed(applied)))
         self.assertEqual(self.table_names(), {"schema_migrations"})
 
+    def test_github_actions_blob_migration_removes_overlapping_custom_domains(self) -> None:
+        self.assertEqual(migrate.up(target=2, quiet=True), [1, 2])
+        removed = (
+            "blob.core.windows.net",
+            "productionresultssa17.blob.core.windows.net",
+            "*.blob.core.windows.net",
+            "*.core.windows.net",
+            "*.windows.net",
+        )
+        retained = ("example.com", "*.example.com", "other.core.windows.net")
+        with db.transaction() as cur:
+            for domain in removed + retained:
+                cur.execute(
+                    "INSERT INTO allowed_domains (domain) VALUES (%s)",
+                    (domain,),
+                )
+                cur.execute(
+                    "INSERT INTO domain_methods "
+                    "(domain, position, method) VALUES (%s, 0, 'GET')",
+                    (domain,),
+                )
+
+        self.assertEqual(migrate.up(target=3, quiet=True), [3])
+        with db.transaction() as cur:
+            cur.execute("SELECT domain FROM allowed_domains ORDER BY domain")
+            self.assertEqual(
+                [domain for (domain,) in cur.fetchall()],
+                sorted(retained),
+            )
+            cur.execute("SELECT domain FROM domain_methods ORDER BY domain")
+            self.assertEqual(
+                [domain for (domain,) in cur.fetchall()],
+                sorted(retained),
+            )
+
 
 class AppMigrationTests(unittest.TestCase):
     DB_NAME = "kern_app_migrate_test"

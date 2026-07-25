@@ -3,7 +3,7 @@
 // with per-repository audits, and the GitHub credential controls.
 
 import { api } from "./api.js";
-import { $, badge, bedrockUsage, esc, formatTokenCount, informationIcon, inlineCode, inlineMessage, objectValue, providerRuntime, replaceIntegrationRows, runtimeLabel, RUNTIME_PROVIDERS, setHtml } from "./helpers.js";
+import { $, badge, bedrockUsage, claudeUsage, codexUsage, esc, formatTokenCount, formatUnixTime, informationIcon, inlineCode, inlineMessage, objectValue, providerRuntime, replaceIntegrationRows, runtimeLabel, RUNTIME_PROVIDERS, setHtml } from "./helpers.js";
 import { providerAccounts, refreshHealth, refreshProviderAccounts, runtimeRecords } from "./health.js";
 import { CUSTOM_DOMAIN_GUIDE, MANAGED_INTEGRATIONS, integrationInfo } from "./integration_catalog.js";
 
@@ -326,10 +326,10 @@ export function renderIntegrationAccounts() {
           : `<p class="muted">Enable ${esc(MANAGED_INTEGRATIONS[provider].label)} access before starting a login.</p>`
         : "";
     const canLogin = provider !== BEDROCK_INTEGRATION && enabled && (record.status === "awaiting_login" || record.status === "error");
-    const billing = provider === BEDROCK_INTEGRATION ? bedrockBillingMetadata(account) : "";
+    const usageDisplay = providerUsageBox(provider, account);
     setHtml(node, `
       ${summary ? `<p class="connection-summary">${summary}</p>` : ""}
-      ${billing}
+      ${usageDisplay}
       ${guidance}
       <span class="provider-account-actions">
         ${canLogin ? `<button class="sm" data-action="start-login" data-runtime="${esc(runtime)}">Start ${esc(runtimeLabel)} login</button>` : ""}
@@ -365,6 +365,73 @@ function bedrockUsageBox(account) {
       <span class="bedrock-usage-tokens">${esc(tokenParts.join(" · "))} · ${esc(String(usage.requests))} req</span>
       ${caveatHtml}
     </span>`;
+}
+
+function codexUsageBox(account) {
+  const usage = codexUsage(account);
+  if (!usage) return "";
+  const parts = [];
+  // Primary window is the most relevant for rate limiting
+  if (Number.isFinite(usage.primary.usedPercent)) {
+    parts.push(`${usage.primary.usedPercent}% primary`);
+  }
+  if (Number.isFinite(usage.secondary.usedPercent)) {
+    parts.push(`${usage.secondary.usedPercent}% secondary`);
+  }
+  // Credits info - only show when credits data is present
+  let creditsInfo = "";
+  if (usage.credits) {
+    if (usage.credits.unlimited) {
+      creditsInfo = "unlimited";
+    } else if (usage.credits.hasCredits && Number.isFinite(usage.credits.balance)) {
+      creditsInfo = `$${usage.credits.balance.toFixed(2)} credits`;
+    } else if (usage.credits.hasCreditsExplicitlyFalse) {
+      creditsInfo = "no credits";
+    }
+  }
+  const ariaLabel = `Rate limit usage: ${parts.join(", ")}${creditsInfo ? `; ${creditsInfo}` : ""}`;
+  return `
+    <span class="bedrock-usage-box provider-usage-box" role="group" aria-label="${esc(ariaLabel)}">
+      <span class="bedrock-usage-tokens">${esc(parts.join(" · "))}</span>
+      ${creditsInfo ? `<span class="bedrock-usage-cost">${esc(creditsInfo)}</span>` : ""}
+    </span>`;
+}
+
+function claudeUsageBox(account) {
+  const usage = claudeUsage(account);
+  if (!usage) return "";
+  const parts = [];
+  // Session usage is most relevant for current activity
+  if (Number.isFinite(usage.currentSession.usedPercent)) {
+    parts.push(`${usage.currentSession.usedPercent}% session`);
+  }
+  if (Number.isFinite(usage.weekly.usedPercent)) {
+    parts.push(`${usage.weekly.usedPercent}% weekly`);
+  }
+  if (Number.isFinite(usage.fableWeekly.usedPercent)) {
+    parts.push(`${usage.fableWeekly.usedPercent}% Fable`);
+  }
+  if (!parts.length) return "";
+  const ariaLabel = `Usage: ${parts.join(", ")}`;
+  return `
+    <span class="bedrock-usage-box provider-usage-box" role="group" aria-label="${esc(ariaLabel)}">
+      <span class="bedrock-usage-tokens">${esc(parts.join(" · "))}</span>
+    </span>`;
+}
+
+function providerUsageBox(provider, account) {
+  if (provider === "openai") {
+    const box = codexUsageBox(account);
+    return box ? `<div class="bedrock-usage-boxes">${box}</div>` : "";
+  }
+  if (provider === "claude") {
+    const box = claudeUsageBox(account);
+    return box ? `<div class="bedrock-usage-boxes">${box}</div>` : "";
+  }
+  if (provider === "bedrock") {
+    return bedrockBillingMetadata(account);
+  }
+  return "";
 }
 
 export async function resetLinkedAccount(provider) {

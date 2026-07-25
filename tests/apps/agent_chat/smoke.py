@@ -69,13 +69,39 @@ def route_app_api(
         _require_agent_chat_thread(thread_id, api_error, include_archived=True)
         AGENT_CHAT_THREADS[thread_id]["archived"] = True
         return {"thread": dict(AGENT_CHAT_THREADS[thread_id])}
-    if method == "POST" and relative == "tasks":
+    if method == "POST" and relative == "messages":
         if (
             isinstance(body, dict)
             and body.get("thread_id") in AGENT_CHAT_THREADS
             and any(field in body for field in ("agent_runtime", "model", "effort"))
         ):
             raise api_error(HTTPStatus.BAD_REQUEST, "follow-up must use the stored session configuration")
+        if isinstance(body, dict) and body.get("thread_id") in AGENT_CHAT_THREADS:
+            thread_id = body["thread_id"]
+            known = {
+                task_id
+                for task_id, known_thread_id in AGENT_CHAT_TASK_IDS.items()
+                if known_thread_id == thread_id
+            }
+            tasks = host_api("GET", f"/v1/threads/{thread_id}/tasks", {}, None)["tasks"]
+            running = [
+                task for task in tasks
+                if task["task_id"] in known and task["status"] == "running"
+            ]
+            if running:
+                task_id = running[-1]["task_id"]
+                host_api(
+                    "POST",
+                    f"/v1/tasks/{task_id}/steer",
+                    {},
+                    {"steer_message": body.get("input_message", "")},
+                )
+                return {"action": "steered", "task_id": task_id, "thread_id": thread_id}
+            if any(
+                task["task_id"] in known and task["status"] == "queued"
+                for task in tasks
+            ):
+                raise api_error(HTTPStatus.CONFLICT, "the task is starting")
         if isinstance(body, dict) and "thread_id" not in body:
             # Mirror the real backend: no thread_id means a new thread with
             # the next successive generated name.
@@ -87,14 +113,13 @@ def route_app_api(
             "archived": False,
         }
         AGENT_CHAT_TASK_IDS[task["task_id"]] = thread_id
-        return task
-    match = re.fullmatch(r"tasks/([^/]+)(?:/(cancel|kill|steer))?", relative)
-    if match:
+        return {**task, "action": "created"}
+    match = re.fullmatch(r"tasks/([^/]+)/(cancel|kill)", relative)
+    if method == "POST" and match:
         task_id, action = match.groups()
         if task_id not in AGENT_CHAT_TASK_IDS:
             raise api_error(HTTPStatus.NOT_FOUND, "task not found")
-        suffix = "" if action is None else f"/{action}"
-        return host_api(method, f"/v1/tasks/{task_id}{suffix}", {}, body)
+        return host_api(method, f"/v1/tasks/{task_id}/{action}", {}, body)
     raise api_error(HTTPStatus.NOT_FOUND, "mock app route not found")
 
 
@@ -122,7 +147,8 @@ def desktop_smoke(page: Any) -> None:
 
     frame.locator("#threads .thread-item", has_text="website-redesign").click()
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
-    expect(frame.locator("#thread-detail")).to_contain_text("denied by policy")
+    expect(frame.locator("#thread-detail")).to_contain_text("Push the responsive fixes")
+    expect(frame.locator("#thread-detail")).to_contain_text("failed")
     expect(frame.locator("#thread-detail .turn").nth(0)).to_contain_text("Audit the marketing site")
 
     frame.get_by_role("button", name="New thread").click()
@@ -255,6 +281,7 @@ def mobile_smoke(page: Any) -> None:
     _assert_single_scroll(page, frame, "agent_chat app (mobile)")
     _assert_full_message_stream(frame)
     _assert_mobile_chat_scrolling(page, frame)
+    _assert_rich_activity_stream(frame)
     _assert_mobile_composer_ergonomics(frame)
     _assert_mobile_steering(frame)
     _assert_mobile_send_flow(frame)
@@ -272,11 +299,55 @@ def _assert_full_message_stream(frame: Any) -> None:
     # The mid-task steer renders as a follow-up bubble on the user's side.
     steer = flash_turn.locator(".turn-user .steer-bubble", has_text="scrollbar matches")
     expect(steer).to_have_count(1)
+    repeated_steer = flash_turn.locator(
+        ".turn-user .steer-bubble",
+        has_text="The toggle still flashes light theme for a frame on a cold load. Fix the flash.",
+    )
+    expect(repeated_steer).to_have_count(1)
     # The opening prompt is a plain bubble, not a steer bubble.
-    opening = flash_turn.locator(".turn-user .bubble", has_text="Fix the flash")
+    opening = flash_turn.locator(
+        ".turn-user .bubble:not(.steer-bubble)",
+        has_text="Fix the flash",
+    )
+    expect(opening).to_have_count(1)
     expect(opening).not_to_have_class(re.compile(r"steer-bubble"))
     # The final answer still lands after the interim stream.
     expect(flash_turn).to_contain_text("no flash in 20 cold loads")
+
+
+def _assert_rich_activity_stream(frame: Any) -> None:
+    """Every provider-neutral activity kind receives its distinct rich card."""
+    from playwright.sync_api import expect
+
+    flash_turn = frame.locator("#thread-detail .turn", has_text="Fix the flash")
+    expected = {
+        "reasoning": ("Reasoning", "Reasoning"),
+        "plan": ("Fix first-paint ordering", "Plan"),
+        "command": ("npm test", "Command"),
+        "file_change": ("File changes", "File change"),
+        "tool": ("Tool: browser", "Tool"),
+        "agent": ("Sub-agent activity", "Sub-agent"),
+        "search": ("Web search", "Search"),
+        "image": ("Viewed image", "Image"),
+        "wait": ("Waiting for cold load", "Wait"),
+        "status": ("Browser session initialized", "Status"),
+    }
+    for kind, (title, label) in expected.items():
+        card = flash_turn.locator(f".activity-{kind}", has_text=title)
+        expect(card).to_have_count(1)
+        expect(card.locator(".activity-kind")).to_have_text(label)
+    command = flash_turn.locator(".activity-command", has_text="npm test")
+    command.locator("summary").click()
+    expect(command).to_contain_text("Terminal output")
+    expect(command).to_contain_text("6 passed")
+    expect(command.locator(".activity-status")).to_have_text("exit 0")
+    expect(flash_turn.locator(".activity-status", has_text="completed")).to_have_count(0)
+    failed = flash_turn.locator(".activity-status.failed")
+    expect(failed).to_have_count(1)
+    expect(failed).to_have_text("failed")
+    expect(
+        flash_turn.locator(".activity-card.activity-static", has_text="Browser session initialized")
+    ).to_have_count(1)
 
 
 def _assert_mobile_chat_scrolling(page: Any, frame: Any) -> None:
@@ -337,8 +408,7 @@ def _assert_mobile_composer_ergonomics(frame: Any) -> None:
 
 
 def _assert_mobile_steering(frame: Any) -> None:
-    """The seeded running task exposes steering inline; Enter submits and
-    clears the field."""
+    """The one main composer steers the seeded running task."""
     from playwright.sync_api import expect
 
     frame.get_by_role("button", name="Show thread list").click()
@@ -346,14 +416,32 @@ def _assert_mobile_steering(frame: Any) -> None:
     expect(frame.locator("#thread-detail")).to_contain_text("launch blog post")
     running_turn = frame.locator("#thread-detail .turn", has_text="Tighten the intro")
     expect(running_turn.locator(".status")).to_have_text("running")
-    steer_input = running_turn.locator(".task-steer-input")
-    steer_font = steer_input.evaluate("element => parseFloat(getComputedStyle(element).fontSize)")
-    if steer_font < 16:
-        raise AssertionError(f"steer input font below 16px zooms iOS on focus: {steer_font}px")
-    steer_input.fill("keep the beta tester thank-you")
-    steer_input.press("Enter")
-    expect(steer_input).to_have_value("")
-    expect(running_turn.get_by_role("button", name="Stop")).to_be_visible()
+    expect(frame.locator(".task-steer-input")).to_have_count(0)
+    expect(running_turn.get_by_role("button", name="Stop")).to_have_count(0)
+    expect(frame.locator("#composer-running")).to_be_visible()
+    expect(frame.locator("#composer-running")).to_contain_text("Agent is working")
+    expect(frame.locator("#composer-running").get_by_role("button", name="Stop")).to_be_visible()
+    live_command = running_turn.locator(
+        ".activity-command.started",
+        has_text="python word_count.py",
+    )
+    expect(live_command).to_have_count(1)
+    expect(live_command).to_have_attribute("open", "")
+    expect(live_command.locator(".activity-phase")).to_have_text("Running")
+    composer = frame.locator("#new-task")
+    expect(composer).to_have_attribute(
+        "placeholder",
+        "Send a follow-up to steer the running task",
+    )
+    composer.fill("keep the beta tester thank-you")
+    composer.press("Enter")
+    expect(composer).to_have_value("")
+    expect(
+        running_turn.locator(
+            ".turn-user .steer-bubble",
+            has_text="keep the beta tester thank-you",
+        )
+    ).to_have_count(1)
 
 
 def _assert_mobile_send_flow(frame: Any) -> None:

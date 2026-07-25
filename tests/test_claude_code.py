@@ -12,6 +12,264 @@ from host.runtime.admin_api import claude_code, thread_scope
 
 
 class ClaudeCodeTests(unittest.TestCase):
+    def test_structured_assistant_content_emits_text_reasoning_and_tool(self) -> None:
+        emitted = []
+        claude_code._emit_claude_content(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "message-1",
+                    "content": [
+                        {"type": "thinking", "thinking": "I should inspect the repo."},
+                        {"type": "text", "text": "I’m checking it now."},
+                        {"type": "text", "text": "\nThen I’ll test it."},
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Bash",
+                            "input": {"command": "pytest -q"},
+                        },
+                    ],
+                },
+            },
+            emitted.append,
+        )
+
+        self.assertEqual(emitted[0]["kind"], "reasoning")
+        self.assertEqual(emitted[1], "I’m checking it now.\nThen I’ll test it.")
+        self.assertEqual(emitted[2]["activity_id"], "tool-1")
+        self.assertEqual(emitted[2]["title"], "pytest -q")
+        self.assertEqual(emitted[2]["phase"], "started")
+
+    def test_tool_result_completes_the_matching_activity(self) -> None:
+        emitted = []
+        claude_code._emit_claude_tool_results(
+            {
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "tool-1",
+                        "content": "all tests passed",
+                    }],
+                },
+            },
+            emitted.append,
+        )
+
+        self.assertEqual(emitted[0]["activity_id"], "tool-1")
+        self.assertEqual(emitted[0]["phase"], "completed")
+        self.assertEqual(emitted[0]["output"], "all tests passed")
+
+    def test_tool_progress_updates_the_matching_activity(self) -> None:
+        emitted = []
+        claude_code._emit_claude_stream_status(
+            {
+                "type": "tool_progress",
+                "tool_use_id": "tool-1",
+                "tool_name": "Bash",
+                "elapsed_time_seconds": 4.5,
+            },
+            emitted.append,
+        )
+
+        self.assertEqual(emitted[0]["activity_id"], "tool-1")
+        self.assertEqual(emitted[0]["phase"], "started")
+        self.assertEqual(emitted[0]["title"], "Tool progress")
+        self.assertEqual(emitted[0]["status"], "4.5s")
+
+    def test_claude_tool_titles_cover_file_search_and_fallback_tools(self) -> None:
+        cases = (
+            ("Read", {"input": {"file_path": "/workspace/app.py"}}, "Read: /workspace/app.py"),
+            ("Write", {"input": {"path": "/workspace/out.txt"}}, "Write: /workspace/out.txt"),
+            ("Edit", {"input": {"file_path": "/workspace/edit.py"}}, "Edit: /workspace/edit.py"),
+            ("Glob", {"input": {"pattern": "**/*.py"}}, "Glob: **/*.py"),
+            ("Grep", {"input": {"pattern": "needle"}}, "Grep: needle"),
+            ("Bash", {"input": {}}, "Shell command"),
+            ("WebSearch", {"input": {"query": "Kern"}}, "Web search"),
+            ("WebFetch", {"input": {"url": "https://example.com"}}, "Fetch web page"),
+            ("CustomTool", {"input": {}}, "Tool: CustomTool"),
+        )
+        for name, block, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(claude_code._claude_tool_title(name, block), expected)
+
+    def test_claude_tools_map_to_provider_neutral_activity_kinds(self) -> None:
+        expected = {
+            "Bash": "command",
+            "Write": "file_change",
+            "Edit": "file_change",
+            "WebSearch": "search",
+            "WebFetch": "search",
+            "Read": "tool",
+            "Grep": "tool",
+            "CustomTool": "tool",
+        }
+        for name, kind in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(claude_code._claude_tool_kind(name), kind)
+
+    def test_server_tool_use_is_normalized_as_search_activity(self) -> None:
+        emitted = []
+        claude_code._emit_claude_content(
+            {
+                "message": {
+                    "id": "message-1",
+                    "content": [{
+                        "type": "server_tool_use",
+                        "name": "WebSearch",
+                        "input": {"query": "latest release"},
+                    }],
+                },
+            },
+            emitted.append,
+        )
+
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(emitted[0]["activity_id"], "message-1:0")
+        self.assertEqual(emitted[0]["kind"], "search")
+        self.assertEqual(emitted[0]["title"], "Web search")
+        self.assertIn("latest release", emitted[0]["detail"])
+
+    def test_claude_activity_id_fallback_order_is_stable(self) -> None:
+        self.assertEqual(
+            claude_code._claude_message_id(
+                {"uuid": "message-uuid"},
+                {"id": "block-id", "tool_use_id": "tool-id"},
+                2,
+            ),
+            "block-id",
+        )
+        self.assertEqual(
+            claude_code._claude_message_id(
+                {"uuid": "message-uuid"},
+                {"tool_use_id": "tool-id"},
+                2,
+            ),
+            "tool-id",
+        )
+        self.assertEqual(
+            claude_code._claude_message_id(
+                {"uuid": "message-uuid"},
+                {},
+                2,
+            ),
+            "message-uuid",
+        )
+        self.assertEqual(
+            claude_code._claude_message_id(
+                {"message": {"id": "assistant-message"}},
+                {},
+                2,
+            ),
+            "assistant-message:2",
+        )
+        self.assertTrue(
+            claude_code._claude_message_id({}, {}, 2).startswith("claude:2:")
+        )
+
+    def test_tool_results_cover_structured_errors_and_suffix_variants(self) -> None:
+        emitted = []
+        claude_code._emit_claude_tool_results(
+            {
+                "uuid": "user-message",
+                "message": {
+                    "content": [{
+                        "type": "server_tool_result",
+                        "tool_use_id": "tool-2",
+                        "content": {"error": "request failed"},
+                        "is_error": True,
+                    }],
+                },
+            },
+            emitted.append,
+        )
+
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(emitted[0]["activity_id"], "tool-2")
+        self.assertEqual(emitted[0]["status"], "failed")
+        self.assertIn("request failed", emitted[0]["output"])
+
+    def test_stream_status_covers_init_and_summary_events(self) -> None:
+        emitted = []
+        claude_code._emit_claude_stream_status(
+            {
+                "type": "system",
+                "subtype": "init",
+                "uuid": "init-1",
+                "model": "opus",
+                "cwd": "/workspace",
+                "tools": ["Bash"],
+                "permissionMode": "bypassPermissions",
+                "claude_code_version": "1.2.3",
+            },
+            emitted.append,
+        )
+        for message_type in ("tool_use_summary", "rate_limit_event", "auth_status"):
+            claude_code._emit_claude_stream_status(
+                {
+                    "type": message_type,
+                    "uuid": message_type,
+                    "status": "ok",
+                },
+                emitted.append,
+            )
+
+        self.assertEqual(
+            [event["title"] for event in emitted],
+            [
+                "Claude session initialized",
+                "Tool summary",
+                "Rate limit status",
+                "Authentication status",
+            ],
+        )
+        self.assertIn("/workspace", emitted[0]["detail"])
+        self.assertTrue(all(event["phase"] == "completed" for event in emitted))
+
+    def test_malformed_claude_content_is_ignored(self) -> None:
+        emitted = []
+        for message in (
+            {},
+            {"message": "not an object"},
+            {"message": {"content": "not a list"}},
+            {"message": {"content": ["not a block", {"type": "unknown"}]}},
+        ):
+            claude_code._emit_claude_content(message, emitted.append)
+            claude_code._emit_claude_tool_results(message, emitted.append)
+
+        self.assertEqual(emitted, [])
+
+    def test_one_malformed_claude_block_does_not_hide_later_content(self) -> None:
+        emitted = []
+        with patch(
+            "host.runtime.admin_api.claude_code._claude_tool_title",
+            side_effect=ValueError("malformed provider block"),
+        ):
+            claude_code._emit_claude_content(
+                {
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "name": "Broken", "input": {}},
+                            {"type": "text", "text": "The remaining message is visible."},
+                        ],
+                    },
+                },
+                emitted.append,
+            )
+
+        self.assertEqual(emitted, ["The remaining message is visible."])
+
+    def test_claude_parser_does_not_hide_persistence_failures(self) -> None:
+        def reject(_message: str | dict[str, object]) -> None:
+            raise RuntimeError("database unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            claude_code._emit_claude_content(
+                {"message": {"content": [{"type": "text", "text": "persist me"}]}},
+                reject,
+            )
+
     def test_thread_scope_is_separate_from_the_launcher_command(self) -> None:
         # The web-search decision must remain the launcher's first argument, so
         # app attribution stores its scope id separately from the command.

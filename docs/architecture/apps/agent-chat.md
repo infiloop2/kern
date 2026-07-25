@@ -78,9 +78,23 @@ first message) or appends a task to an existing one:
   same thread, which runs after the current task finishes.
 - `GET /threads/<thread_id>/events?since=<seq>` proxies the host thread event
   stream so the UI shows every message of every task, not just the prompt and
-  final answer: interim agent progress and mid-task operator steering both
-  render inline, for running and finished tasks alike. The UI accumulates the
-  stream forward-paged by `seq`, so a poll fetches only new events.
+  final answer. Claude Code stream-json content blocks and Codex app-server
+  ThreadItems are normalized into provider-independent activity records for
+  reasoning, plans, commands and output, file changes, tool calls, searches,
+  sub-agents, images, waits, and context state. Started/completed snapshots
+  fold into one expandable card. Mid-task operator steering still renders
+  inline. The UI accumulates the stream forward-paged by `seq`; it polls once
+  per second while any task is active and every five seconds while idle.
+- The event page is deliberately small (eight events), with up to 120 KiB of
+  message/activity text per event, so it remains below the app bridge's fixed
+  1 MiB response ceiling. Paging drains every event rather than skipping a
+  large record. Full agent messages remain stored in the host database;
+  provider activity fields retain up to 256 KiB and any response-bound or
+  retention-bound clipping ends with `… (truncated)`.
+- Agent replies render a safe Markdown subset: headings, emphasis, lists and
+  task lists, blockquotes, tables, links, inline code, and fenced code blocks
+  with Copy controls. Markdown images become links instead of automatically
+  loading agent-selected remote resources.
 - `POST /threads/<thread_id>/archive` hides a thread from the index without
   touching host state.
 
@@ -91,8 +105,10 @@ created by another app or by the core admin surface.
 ## Security Posture
 
 Agent Chat introduces no agent-controlled write channel into the app: the
-agent's output is displayed, never parsed for instructions. The UI
-HTML-escapes all task output before rendering. Everything else is the standard
-app-platform boundary: sandboxed opaque-origin UI frame, bridge-only backend
-access, peer-authenticated socket with the narrow task/thread allowlist, and
-an app role limited to the `app_agent_chat` schema.
+agent's output is displayed, never parsed for instructions. The Markdown
+renderer always escapes raw HTML, creates only its own allowlisted elements,
+accepts only `http`, `https`, and `mailto` links, and opens links with
+`noopener noreferrer nofollow`. Everything else is the standard app-platform
+boundary: sandboxed opaque-origin UI frame, bridge-only backend access,
+peer-authenticated socket with the narrow task/thread allowlist, and an app
+role limited to the `app_agent_chat` schema.

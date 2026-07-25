@@ -14,6 +14,7 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -33,6 +34,14 @@ MAX_REQUEST_BODY_BYTES = 128 * 1024
 MAX_ADMIN_RESPONSE_BYTES = ADMIN_MAX_REQUEST_BODY_BYTES
 APP_ID = "agent_chat"
 RUNTIME_OPTIONS = {"codex", "claude_code", "hermes"}
+# Keep each proxy response comfortably below the fixed 1 MiB bridge cap.
+# Six 120 KiB event text budgets leave more than 300 KiB for JSON envelopes
+# and bounded activity metadata. The UI drains all pages, so the smaller page
+# does not skip events. Full task messages remain stored by the host.
+THREAD_TASK_MESSAGE_BYTES = 1024
+THREAD_EVENT_MESSAGE_BYTES = 120 * 1024
+THREAD_EVENT_PAGE = 6
+MESSAGE_SEND_LOCK = threading.Lock()
 
 
 class AppError(Exception):
@@ -84,18 +93,11 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) != 3:
                     raise AppError(HTTPStatus.NOT_FOUND, "route not found")
                 response = {"thread": archive_app_thread(_path_segment(parts[1]))}
-            elif method == "POST" and path == "/tasks":
-                response = create_app_task(body)
-            elif method == "GET" and path.startswith("/tasks/"):
-                parts = path.strip("/").split("/")
-                if len(parts) != 2:
-                    raise AppError(HTTPStatus.NOT_FOUND, "route not found")
-                task_id = _path_segment(parts[1])
-                _require_app_task(task_id)
-                response = call_admin_api("GET", f"/v1/tasks/{quote(task_id, safe='')}")
+            elif method == "POST" and path == "/messages":
+                response = send_app_message(body)
             elif method == "POST" and path.startswith("/tasks/"):
                 parts = path.strip("/").split("/")
-                if len(parts) != 3 or parts[2] not in {"cancel", "kill", "steer"}:
+                if len(parts) != 3 or parts[2] not in {"cancel", "kill"}:
                     raise AppError(HTTPStatus.NOT_FOUND, "route not found")
                 task_id = _path_segment(parts[1])
                 _require_app_task(task_id)
@@ -210,7 +212,10 @@ def _app_thread_summary(summary: dict[str, Any], recorded_task_ids: set[str]) ->
 def list_app_thread_tasks(thread_id: str) -> dict[str, Any]:
     _require_app_thread(thread_id)
     known_task_ids = _app_task_ids_for_thread(thread_id)
-    response = call_admin_api("GET", f"/v1/threads/{quote(thread_id, safe='')}/tasks")
+    response = call_admin_api(
+        "GET",
+        f"/v1/threads/{quote(thread_id, safe='')}/tasks?message_bytes={THREAD_TASK_MESSAGE_BYTES}",
+    )
     host_tasks = response.get("tasks", [])
     if not isinstance(host_tasks, list):
         raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid task list")
@@ -226,17 +231,77 @@ def list_app_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[
     """
     _require_app_thread(thread_id)
     since_values = query.get("since") or []
-    path = f"/v1/threads/{quote(thread_id, safe='')}/events"
+    path = (
+        f"/v1/threads/{quote(thread_id, safe='')}/events"
+        f"?limit={THREAD_EVENT_PAGE}&message_bytes={THREAD_EVENT_MESSAGE_BYTES}"
+    )
     if since_values:
         since = since_values[0]
         if not since.isdigit():
             raise AppError(HTTPStatus.BAD_REQUEST, "since must be a non-negative integer")
-        path += f"?since={since}"
+        path += f"&since={since}"
     response = call_admin_api("GET", path)
     events = response.get("events")
     if not isinstance(events, list):
         raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid event list")
     return {"events": events}
+
+
+def send_app_message(body: Any) -> dict[str, Any]:
+    """Steer current work or start one new turn, decided from host state.
+
+    The browser never chooses between those operations. Serializing sends
+    prevents double submissions from creating parallel queued tasks, while a
+    rejected steer is retried against fresh task state so completion races
+    become a new turn instead of losing the operator's message.
+    """
+    if not isinstance(body, dict):
+        raise AppError(HTTPStatus.BAD_REQUEST, "message request must be an object")
+    _required_text(body.get("input_message"), "input_message")
+    with MESSAGE_SEND_LOCK:
+        if "thread_id" not in body:
+            return {**create_app_task(body), "action": "created"}
+        thread_id = _required_text(body.get("thread_id"), "thread_id")
+        for _attempt in range(2):
+            thread_tasks = list_app_thread_tasks(thread_id).get("tasks", [])
+            running = [
+                task for task in thread_tasks
+                if isinstance(task, dict) and task.get("status") == "running"
+            ]
+            if running:
+                task = max(
+                    running,
+                    key=lambda item: str(item.get("created_at") or ""),
+                )
+                task_id = _required_response_text(task.get("task_id"), "task_id")
+                try:
+                    call_admin_api(
+                        "POST",
+                        f"/v1/tasks/{quote(task_id, safe='')}/steer",
+                        {"steer_message": body["input_message"]},
+                    )
+                except AppError as exc:
+                    if exc.status == HTTPStatus.CONFLICT:
+                        continue
+                    raise
+                return {
+                    "action": "steered",
+                    "task_id": task_id,
+                    "thread_id": thread_id,
+                }
+            if any(
+                isinstance(task, dict) and task.get("status") == "queued"
+                for task in thread_tasks
+            ):
+                raise AppError(
+                    HTTPStatus.CONFLICT,
+                    "the task is starting; wait for it to begin before sending a follow-up",
+                )
+            return {**create_app_task(body), "action": "created"}
+        raise AppError(
+            HTTPStatus.CONFLICT,
+            "the task changed state while sending; retry the message",
+        )
 
 
 def create_app_task(body: Any) -> dict[str, Any]:

@@ -101,7 +101,11 @@ def guard_request_parameter_string(value: str, *, allow_identifiers: bool = Fals
 
 
 def find_denial(
-    value: str, *, token_rules: bool = True, allow_identifiers: bool = False
+    value: str,
+    *,
+    token_rules: bool = True,
+    allow_identifiers: bool = False,
+    allow_unnatural_token: bool = False,
 ) -> GuardDenial | None:
     """Run the guards over one decoded value and return the first denial.
 
@@ -114,6 +118,10 @@ def find_denial(
     personal-identifier guards, because a personal identifier is legitimate
     search syntax against an account the operator already owns, while still
     denying secret/credential shapes and encoded payloads.
+
+    ``allow_unnatural_token=True`` skips only the final random-looking-token
+    heuristic. Destination-specific callers must separately validate the
+    provider token's exact grammar.
     """
     # G1 LENGTH - the floor that works when every other guard misses. Lone
     # surrogates (JSON escapes can produce them) cannot encode; treat them
@@ -156,7 +164,11 @@ def find_denial(
                     "encoded payload. Remove it and retry.",
                 )
     return _find_pattern_denial(
-        value, tokens, token_rules=token_rules, allow_identifiers=allow_identifiers
+        value,
+        tokens,
+        token_rules=token_rules,
+        allow_identifiers=allow_identifiers,
+        allow_unnatural_token=allow_unnatural_token,
     )
 
 
@@ -197,7 +209,12 @@ def _mask_public_addresses(value: str, tokens: list[str]) -> tuple[str, list[str
 
 
 def _find_pattern_denial(
-    value: str, tokens: list[str], *, token_rules: bool, allow_identifiers: bool
+    value: str,
+    tokens: list[str],
+    *,
+    token_rules: bool,
+    allow_identifiers: bool,
+    allow_unnatural_token: bool,
 ) -> GuardDenial | None:
     value, tokens = _mask_public_addresses(value, tokens)
     # --- Secret-shaped values -------------------------------------------
@@ -263,7 +280,7 @@ def _find_pattern_denial(
             return _pii("DIGIT_RUN", f"an unbroken run of {MIN_BARE_DIGIT_RUN}-{MAX_BARE_DIGIT_RUN} digits (phone-, card-, or account-number length)")
     # G5 UNNATURAL_TOKEN - scored gibberish check, run last in code because
     # everything with a more specific shape should be named first.
-    if token_rules and _has_unnatural_token(tokens):
+    if token_rules and not allow_unnatural_token and _has_unnatural_token(tokens):
         return GuardDenial(
             "UNNATURAL_TOKEN",
             REASON_ENCODED_BLOB,

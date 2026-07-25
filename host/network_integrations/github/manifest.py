@@ -31,9 +31,14 @@ MANIFEST = IntegrationManifest(
         "the credential reaches are allowed, pushes and API writes must target a configured "
         "write repository, and repository administration (access grants, hooks, publishing, "
         "workflow control) is denied even there. Optionally holds pushes that change "
-        ".github/ paths for operator approval."
+        ".github/ paths for operator approval. Also permits read-only GitHub Actions log, "
+        "artifact, summary, and cache downloads from GitHub's documented Azure Blob hosts."
     ),
-    owned_apexes=("github.com", "githubusercontent.com"),
+    # GitHub documents Azure Blob storage as the backing service for Actions
+    # job summaries, logs, workflow artifacts, and caches. Owning the apex
+    # here makes it available only while the GitHub integration is enabled;
+    # a custom-domain wildcard cannot bypass the GitHub-specific guard.
+    owned_apexes=("github.com", "githubusercontent.com", "blob.core.windows.net"),
     denial_reasons=(
         DenialReason(
             "github_write_repo_required",

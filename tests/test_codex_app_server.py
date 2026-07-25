@@ -81,6 +81,70 @@ for line in sys.stdin:
 """
 
 
+FAKE_ACTIVITY_SERVER = r"""
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg["id"], "result": {}})
+    elif method == "thread/start":
+        send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
+    elif method == "turn/start":
+        send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
+        send({"method": "item/started", "params": {"item": {
+            "type": "commandExecution", "id": "cmd-1", "command": "pytest -q"
+        }}})
+        send({"method": "item/commandExecution/outputDelta", "params": {
+            "itemId": "cmd-1", "delta": "test is running\n"
+        }})
+        send({"method": "item/completed", "params": {"item": {
+            "type": "commandExecution", "id": "cmd-1", "command": "pytest -q",
+            "aggregatedOutput": "1 passed\n", "exitCode": 0
+        }}})
+        send({"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "text": "Done"
+        }}})
+        send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+"""
+
+
+FAKE_CAPPED_OUTPUT_SERVER = r"""
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg["id"], "result": {}})
+    elif method == "thread/start":
+        send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
+    elif method == "turn/start":
+        send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
+        for delta in ("first chunk\n", "second chunk\n", "ignored chunk\n"):
+            send({"method": "item/commandExecution/outputDelta", "params": {
+                "itemId": "cmd-capped", "delta": delta
+            }})
+        send({"method": "item/completed", "params": {"item": {
+            "type": "commandExecution", "id": "cmd-capped", "command": "yes",
+            "aggregatedOutput": "duplicated final output\n", "exitCode": 0
+        }}})
+        send({"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "text": "Done"
+        }}})
+        send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+"""
+
+
 # Rejects the first turn/steer with the transient "no active turn" error the
 # real app-server returns when a steer races turn startup; the retried steer
 # is accepted and acknowledged in the final message.
@@ -895,6 +959,231 @@ class CodexAppServerTests(unittest.TestCase):
         self.assertEqual(thread_id, "thread_1")
         self.assertEqual(messages, ["Hello", "Final answer"])
         self.assertEqual(output, "Final answer")
+
+    def test_codex_thread_items_are_normalized_as_rich_activity(self) -> None:
+        started = codex_app_server_module._codex_item_activity(
+            {
+                "type": "commandExecution",
+                "id": "cmd-1",
+                "command": "pytest -q",
+                "cwd": "/workspace",
+                "status": "inProgress",
+            },
+            "started",
+        )
+        completed = codex_app_server_module._codex_item_activity(
+            {
+                "type": "commandExecution",
+                "id": "cmd-1",
+                "command": "pytest -q",
+                "aggregatedOutput": "passed",
+                "exitCode": 0,
+            },
+            "completed",
+        )
+
+        self.assertEqual(started["activity_id"], "cmd-1")
+        self.assertEqual(started["kind"], "command")
+        self.assertEqual(started["detail"], "Working directory: /workspace")
+        self.assertEqual(completed["output"], "passed")
+        self.assertEqual(completed["status"], "exit 0")
+
+    def test_all_codex_thread_item_activity_types_are_normalized(self) -> None:
+        cases = (
+            (
+                {"type": "reasoning", "summary": "Inspect the code"},
+                "reasoning",
+                "Reasoning",
+                {"detail": "Inspect the code"},
+            ),
+            (
+                {"type": "plan", "text": "Run the tests"},
+                "plan",
+                "Plan",
+                {"detail": "Run the tests"},
+            ),
+            (
+                {"type": "fileChange", "changes": [{"path": "app.py"}]},
+                "file_change",
+                "File changes",
+                {"detail": "app.py"},
+            ),
+            (
+                {"type": "mcpToolCall", "tool": "calendar", "arguments": {"day": "Monday"}},
+                "tool",
+                "Tool: calendar",
+                {"detail": "Monday"},
+            ),
+            (
+                {"type": "dynamicToolCall", "name": "browser", "input": {"url": "https://example.com"}},
+                "tool",
+                "Tool: browser",
+                {"detail": "example.com"},
+            ),
+            (
+                {"type": "collabAgentToolCall", "prompt": "review this"},
+                "agent",
+                "Sub-agent activity",
+                {"detail": "review this"},
+            ),
+            (
+                {"type": "subAgentActivity", "agents": ["reviewer"]},
+                "agent",
+                "Sub-agent activity",
+                {"detail": "reviewer"},
+            ),
+            (
+                {"type": "webSearch", "query": "Codex docs"},
+                "search",
+                "Web search",
+                {"detail": "Codex docs"},
+            ),
+            (
+                {"type": "imageView", "path": "/workspace/a.png"},
+                "image",
+                "Viewed image",
+                {"detail": "a.png"},
+            ),
+            (
+                {"type": "imageGeneration", "prompt": "diagram", "path": "/workspace/generated.png"},
+                "image",
+                "Generated image",
+                {"detail": "diagram", "output": "generated.png"},
+            ),
+            ({"type": "sleep", "duration": "5s"}, "wait", "Waiting", {"detail": "5s"}),
+            ({"type": "contextCompaction"}, "status", "Compacted context", {}),
+            ({"type": "enteredReviewMode"}, "status", "Entered review mode", {}),
+            ({"type": "exitedReviewMode"}, "status", "Exited review mode", {}),
+            (
+                {"type": "futureItem", "value": "preserved"},
+                "status",
+                "Future item",
+                {"detail": "preserved"},
+            ),
+        )
+        for item, expected_kind, expected_title, expected_fields in cases:
+            with self.subTest(item_type=item["type"]):
+                activity = codex_app_server_module._codex_item_activity(
+                    {"id": f"{item['type']}-1", **item},
+                    "completed",
+                )
+                self.assertIsNotNone(activity)
+                self.assertEqual(activity["kind"], expected_kind)
+                self.assertEqual(activity["title"], expected_title)
+                self.assertEqual(activity["phase"], "completed")
+                for field, fragment in expected_fields.items():
+                    self.assertIn(fragment, activity[field])
+
+    def test_codex_thread_item_ignore_and_fallback_paths(self) -> None:
+        for item in (
+            None,
+            "not an item",
+            {},
+            {"type": "userMessage"},
+            {"type": "hookPrompt"},
+            {"type": "agentMessage"},
+        ):
+            with self.subTest(item=item):
+                self.assertIsNone(
+                    codex_app_server_module._codex_item_activity(item, "started")
+                )
+
+        activity = codex_app_server_module._codex_item_activity(
+            {"type": "reasoning", "content": ["fallback detail"], "status": 3},
+            "started",
+        )
+        self.assertTrue(activity["activity_id"].startswith("reasoning:"))
+        self.assertIn("fallback detail", activity["detail"])
+        self.assertEqual(activity["status"], "3")
+
+    def test_codex_activity_normalization_skips_parser_failures(self) -> None:
+        with patch(
+            "host.runtime.admin_api.codex_app_server.agent_activity.activity",
+            side_effect=ValueError("malformed provider item"),
+        ):
+            self.assertIsNone(
+                codex_app_server_module._codex_item_activity(
+                    {"type": "reasoning", "summary": "bad"},
+                    "completed",
+                )
+            )
+
+    def test_codex_large_activity_output_is_stored_with_explicit_marker(self) -> None:
+        activity = codex_app_server_module._codex_item_activity(
+            {
+                "type": "commandExecution",
+                "id": "cmd-large",
+                "command": "large-output",
+                "aggregatedOutput": "x" * (300 * 1024),
+            },
+            "completed",
+        )
+
+        self.assertLessEqual(
+            len(activity["output"].encode()),
+            codex_app_server_module.agent_activity.ACTIVITY_TEXT_BYTES,
+        )
+        self.assertTrue(activity["output"].endswith("… (truncated)"))
+
+    def test_run_turn_emits_started_live_output_and_completed_activity(self) -> None:
+        events = []
+        with CodexAppServer([sys.executable, "-u", "-c", FAKE_ACTIVITY_SERVER]) as server:
+            _, output = run_turn(
+                server,
+                "test it",
+                None,
+                "gpt-5.6-sol",
+                "high",
+                lambda: [],
+                events.append,
+                lambda _message: None,
+            )
+
+        activity = [event for event in events if isinstance(event, dict)]
+        self.assertEqual([event["phase"] for event in activity], ["started", "started", "completed"])
+        self.assertTrue(activity[1]["append_output"])
+        self.assertEqual(activity[1]["output"], "test is running\n")
+        self.assertEqual(activity[2]["status"], "exit 0")
+        self.assertEqual(events[-1], "Done")
+        self.assertEqual(output, "Done")
+
+    def test_run_turn_caps_persisted_output_events_per_command(self) -> None:
+        events = []
+        with (
+            patch.object(codex_app_server_module, "COMMAND_OUTPUT_MAX_EVENTS", 1),
+            CodexAppServer(
+                [sys.executable, "-u", "-c", FAKE_CAPPED_OUTPUT_SERVER]
+            ) as server,
+        ):
+            _, output = run_turn(
+                server,
+                "run it",
+                None,
+                "gpt-5.6-sol",
+                "high",
+                lambda: [],
+                events.append,
+                lambda _message: None,
+            )
+
+        activity = [event for event in events if isinstance(event, dict)]
+        streamed = [
+            event
+            for event in activity
+            if event.get("append_output")
+        ]
+        self.assertEqual(
+            [event["output"] for event in streamed],
+            ["first chunk\n", codex_app_server_module.agent_activity.TRUNCATION_SUFFIX],
+        )
+        completed = [
+            event
+            for event in activity
+            if event["activity_id"] == "cmd-capped"
+            and event["phase"] == "completed"
+        ][0]
+        self.assertNotIn("output", completed)
+        self.assertEqual(output, "Done")
 
     def test_new_app_thread_receives_manifest_instructions_as_developer_instructions(self) -> None:
         calls: list[tuple[str, dict[str, Any]]] = []

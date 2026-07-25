@@ -293,6 +293,8 @@ export const MANAGED_INTEGRATIONS = {
       ["objects.githubusercontent.com", "GET and HEAD for signed download URLs only"],
       ["github-cloud.githubusercontent.com", "GET and HEAD for signed download URLs only"],
       ["release-assets.githubusercontent.com", "GET and HEAD for signed release-asset URLs only"],
+      ["results-receiver.actions.githubusercontent.com", "GET and HEAD for GitHub Actions result downloads; provider-signed URL only"],
+      ["*.blob.core.windows.net", "GET and HEAD for GitHub Actions logs, summaries, artifacts, and caches; exactly one validated Azure SAS signature required"],
     ],
   },
   python_packages: {

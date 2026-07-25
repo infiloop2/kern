@@ -62,6 +62,7 @@ from typing import Any
 from host.config import AGENT_RUNTIMES
 from host.runtime.core import app_platform, network_policy, state
 from host.runtime.admin_api import (
+    agent_activity,
     bedrock_credentials,
     claude_code,
     codex_app_server,
@@ -1040,8 +1041,16 @@ def run_next_task() -> None:
         with state.mutation() as cur:
             state.pop_task_steer(cur, task_id, message)
 
-    def on_agent_message(message: str) -> None:
-        state.record_agent_event("task.message", task_id, {"message": message, "source": "agent"})
+    def on_agent_message(message: str | dict[str, Any]) -> None:
+        if isinstance(message, dict):
+            activity = agent_activity.normalize_record(message)
+            if activity is None:
+                return
+            state.record_agent_event("task.activity", task_id, {"activity": activity})
+        elif isinstance(message, str):
+            text = agent_activity.clean_text(message)
+            if text:
+                state.record_agent_event("task.message", task_id, {"message": text, "source": "agent"})
 
     # Everything from here is inside one try: the task was claimed (marked
     # RUNNING) above, so ANY exception — including a failure to create or

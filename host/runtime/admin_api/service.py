@@ -1133,7 +1133,18 @@ def thread_route(method: str, path: str, query: dict[str, list[str]]) -> Any:
                 for field in ("message", "error_message"):
                     value = payload.get(field)
                     if isinstance(value, str):
-                        payload[field] = _clip_encoded_text(value, message_bytes)
+                        payload[field] = _clip_json_encoded_text(value, message_bytes)
+                activity = payload.get("activity")
+                if isinstance(activity, dict):
+                    # A single event must stay below the app bridge's 1 MiB
+                    # response cap. Keep the useful command/tool output large,
+                    # but bound both rich text fields and mark every clip.
+                    detail_budget = min(message_bytes, 24 * 1024)
+                    output_budget = max(1, message_bytes - detail_budget)
+                    for field, budget in (("detail", detail_budget), ("output", output_budget)):
+                        value = activity.get(field)
+                        if isinstance(value, str):
+                            activity[field] = _clip_json_encoded_text(value, budget)
         return {"events": events}
     raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
 
@@ -1898,14 +1909,26 @@ def public_task(
         "model": task["model"],
         "effort": task["effort"],
         "thread_id": task["thread_id"],
-        "input_message": _clip_encoded_text(task["input_message"], message_bytes),
+        "input_message": (
+            task["input_message"]
+            if message_bytes is None
+            else _clip_json_encoded_text(task["input_message"], message_bytes)
+        ),
         "created_at": task["created_at"],
         "updated_at": task["updated_at"],
     }
     if task.get("output_message") is not None:
-        value["output_message"] = _clip_encoded_text(task["output_message"], message_bytes)
+        value["output_message"] = (
+            task["output_message"]
+            if message_bytes is None
+            else _clip_json_encoded_text(task["output_message"], message_bytes)
+        )
     if task.get("error_message") is not None:
-        value["error_message"] = _clip_encoded_text(task["error_message"], message_bytes)
+        value["error_message"] = (
+            task["error_message"]
+            if message_bytes is None
+            else _clip_json_encoded_text(task["error_message"], message_bytes)
+        )
     if queue_position is not None:
         value["queue_position"] = queue_position
     return value
@@ -2120,10 +2143,37 @@ def _clip_encoded_text(value: str, maximum: int | None) -> str:
     encoded = value.encode()
     if len(encoded) <= maximum:
         return value
-    suffix = "…".encode()
+    suffix_text = "\n… (truncated)"
+    suffix = suffix_text.encode()
     if maximum < len(suffix):
         return encoded[:maximum].decode(errors="ignore")
-    return encoded[: maximum - len(suffix)].decode(errors="ignore") + "…"
+    return encoded[: maximum - len(suffix)].decode(errors="ignore") + suffix_text
+
+
+def _clip_json_encoded_text(value: str, maximum: int) -> str:
+    """Bound the encoded JSON string, including escaping of control bytes.
+
+    Event pages cross a hard 1 MiB bridge. A UTF-8-only bound is insufficient:
+    one control byte or non-ASCII code point can expand under the default JSON
+    serializer used by both HTTP hops.
+    """
+    def encoded_size(text: str) -> int:
+        return len(json.dumps(text).encode())
+
+    if encoded_size(value) <= maximum:
+        return value
+    suffix = "\n… (truncated)"
+    if encoded_size(suffix) > maximum:
+        return _clip_encoded_text(value, maximum)
+    low = 0
+    high = len(value)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if encoded_size(value[:middle] + suffix) <= maximum:
+            low = middle
+        else:
+            high = middle - 1
+    return value[:low] + suffix
 
 
 def _network_event_decision(query: dict[str, list[str]]) -> str | None:

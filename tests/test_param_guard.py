@@ -199,6 +199,11 @@ class FindDenialTest(unittest.TestCase):
             "read https://example.com/cb?access_token=AbCdEfGh1234567890",
             "CRED_URL",
         )
+        self.assert_guard(
+            "https://example.com/file"
+            "?sig=HhC%2FUPa%2FtitCP1DLVLa0ZnGPCw0RT338fxdeQ04ZoPw%3D",
+            "CRED_URL",
+        )
         self.assertIsNone(find_denial("read https://example.com/page?id=42&sort=asc"))
 
     def test_entropy_near_keyword_denies_but_needs_the_keyword(self) -> None:
@@ -209,6 +214,16 @@ class FindDenialTest(unittest.TestCase):
         denial = find_denial(f"lookup {token} details")
         assert denial is not None
         self.assertNotEqual(denial.guard, "ENTROPY_NEAR_KEYWORD")
+
+    def test_allow_unnatural_token_skips_only_that_final_heuristic(self) -> None:
+        token = "x7Kp2mQv9zR4tYw8LbN3"
+        self.assertIsNone(find_denial(token, allow_unnatural_token=True))
+        denial = find_denial(
+            "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+            allow_unnatural_token=True,
+        )
+        assert denial is not None
+        self.assertEqual(denial.guard, "CRED_PREFIX")
 
     def test_password_requires_a_connective(self) -> None:
         self.assert_guard("password: hunter2secret", "PASSWORD_KEYWORD")

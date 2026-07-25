@@ -363,7 +363,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(newest_card).to_contain_text("denied by policy")
     expect(older_card).to_contain_text("Audit the marketing site")
     older_card.get_by_role("button", name="Events").click()
-    expect(older_card).to_contain_text("task.created")
+    expect(older_card).to_contain_text("task.started")
     expect(page.locator("#task-events-detail")).to_have_text("")
     expect(older_card.get_by_role("button", name="Hide events")).to_be_visible()
     failed_card = newest_card
@@ -401,7 +401,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#panel-agent-log")).to_be_visible()
     expect(page.locator("#panel-agent-log")).to_have_css("opacity", "1")
     expect(page.locator("#events tr").nth(1)).to_be_visible()
-    expect(page.locator("#events")).to_contain_text("task.created")
+    expect(page.locator("#events")).to_contain_text("task.started")
     expect(page.locator("#events")).to_contain_text("agent_runtime.deactivated")
     expect(page.locator("#agent-page-summary")).to_contain_text("Page 1")
     expect(page.locator("#agent-page-summary")).to_contain_text("live")
@@ -566,6 +566,12 @@ def desktop_smoke(page, url: str) -> None:
         raise AssertionError("opening an integration guide did not reset the previous tab's page position")
     expect(page.locator(".connection-guide-entry")).to_have_count(1)
     expect(page.locator("[data-guide-section='github']")).to_contain_text("Exact network boundary")
+    expect(page.locator("[data-guide-section='github']")).to_contain_text(
+        "results-receiver.actions.githubusercontent.com"
+    )
+    expect(page.locator("[data-guide-section='github']")).to_contain_text(
+        "*.blob.core.windows.net"
+    )
     expect(page.locator("[data-guide-section='github'] .guide-kind")).to_have_text("Direct network integration")
     expect(page.locator("[data-guide-section='github'] .guide-network-scope")).to_be_visible()
     expect(page.locator("[data-guide-section='github'] details.guide-network-scope")).to_have_count(0)
@@ -1552,7 +1558,7 @@ def mobile_smoke(page, url: str) -> None:
     assert_no_horizontal_overflow(page, "agent")
 
     mobile_go_to(page, "Agent audit log")
-    expect(page.locator("#events")).to_contain_text("task.created")
+    expect(page.locator("#events")).to_contain_text("task.started")
     assert_no_horizontal_overflow(page, "agent event log")
 
     mobile_go_to(page, "Agent processes")

@@ -340,6 +340,115 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         )
         self.assertNotEqual(write_denial, "request_param_pii_denied")
 
+    def test_github_actions_blob_allows_only_scoped_signed_downloads(self) -> None:
+        from host.network_integrations.github import guard
+        from host.network_integrations.github.manifest import GitHubIntegration
+
+        config = GitHubIntegration(enabled=True)
+        deny = guard.request_denied
+        host = "productionresultssa17.blob.core.windows.net"
+        sas_signature = (
+            "sig=HhC%2FUPa%2FtitCP1DLVLa0ZnGPCw0RT338fxdeQ04ZoPw%3D"
+        )
+        sas_query = (
+            "sp=r&st=2026-07-25T14%3A00%3A00Z&se=2026-07-25T16%3A00%3A00Z"
+            "&spr=https&sv=2025-07-05&sr=b"
+            f"&{sas_signature}"
+        )
+        self.assertIsNone(
+            deny(config, "GET", host, "/actions-results/job/logs.zip", sas_query, [], b"")
+        )
+        self.assertIsNone(
+            deny(config, "HEAD", host, "/actions-results/job/logs.zip", sas_query, [], b"")
+        )
+        self.assertEqual(
+            deny(config, "POST", host, "/actions-results/job/logs.zip", sas_query, [], b""),
+            "network_policy_denied",
+        )
+        for unsigned in (
+            "",
+            "sv=2025-07-05",
+            "sig=",
+            "sig=abc",
+            "sig=one&sig=two",
+        ):
+            with self.subTest(unsigned=unsigned):
+                self.assertEqual(
+                    deny(
+                        config,
+                        "GET",
+                        host,
+                        "/actions-results/job/logs.zip",
+                        unsigned,
+                        [],
+                        b"",
+                    ),
+                    "network_policy_denied",
+                )
+        # The destination-specific sig handling still checks explicit secret
+        # shapes before neutralizing the provider-issued random signature.
+        self.assertEqual(
+            deny(
+                config,
+                "GET",
+                host,
+                "/actions-results/job/logs.zip",
+                "sig=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+                [],
+                b"",
+            ),
+            "request_param_secret_denied",
+        )
+        # Every other query key retains the unchanged global parameter guard.
+        self.assertEqual(
+            deny(
+                config,
+                "GET",
+                host,
+                "/actions-results/job/logs.zip",
+                f"{sas_signature}&token=passwordpassword",
+                [],
+                b"",
+            ),
+            "request_param_secret_denied",
+        )
+        self.assertEqual(
+            deny(
+                config,
+                "GET",
+                host,
+                "/actions-results/job/logs.zip",
+                f"{sas_signature}&note=x7Kp2mQv9zR4tYw8LbN3",
+                [],
+                b"",
+            ),
+            "request_param_encoded_blob_denied",
+        )
+        self.assertEqual(
+            deny(
+                config,
+                "GET",
+                host,
+                "/actions-results/x7Kp2mQv9zR4tYw8LbN3/logs.zip",
+                sas_signature,
+                [],
+                b"",
+            ),
+            "request_param_encoded_blob_denied",
+        )
+        self.assertEqual(
+            deny(
+                config,
+                "GET",
+                host,
+                "/actions-results/ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/logs.zip",
+                sas_signature,
+                [],
+                b"",
+            ),
+            "request_param_secret_denied",
+        )
+
     def test_proxy_guard_rejects_invalid_percent_encoding(self) -> None:
         from host.network_integrations.base import request_param_denial
 
@@ -359,6 +468,20 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         # smuggled secret even though the value alone would pass.
         self.assertEqual(
             request_param_denial("/x", "access_token=mFzQpLdRaWxVkHsN"),
+            "request_param_secret_denied",
+        )
+        self.assertEqual(
+            request_param_denial(
+                "/file",
+                "sig=HhC%2FUPa%2FtitCP1DLVLa0ZnGPCw0RT338fxdeQ04ZoPw%3D",
+            ),
+            "request_param_secret_denied",
+        )
+        self.assertEqual(
+            request_param_denial(
+                "/upload",
+                "sig=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+            ),
             "request_param_secret_denied",
         )
         self.assertIsNone(request_param_denial("/x", "sort=ascending&page=2"))

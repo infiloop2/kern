@@ -81,7 +81,8 @@ Expected notifications:
 | Notification | Expected behavior |
 | --- | --- |
 | `item/agentMessage/delta` | Carries partial assistant text in `params.delta`. |
-| `item/completed` | Carries completed assistant messages as `params.item.type == "agentMessage"` with text in `params.item.text`. |
+| `item/started` | Starts a structured ThreadItem. Kern normalizes reasoning, plans, command execution, file changes, MCP/dynamic/collaboration tools, sub-agent activity, web search, images, waits, review mode, and context compaction into provider-independent task activity. |
+| `item/completed` | Completes the matching structured ThreadItem. Agent messages carry text as `params.item.type == "agentMessage"`; other supported item types update the matching activity card with status and bounded output. |
 | `turn/completed` | Ends the turn. `params.turn.status == "completed"` is success; any other status must include enough error detail to fail the task. |
 
 The adapter relies on responses and notifications being interleavable: a
@@ -225,13 +226,23 @@ Claude Code `2.1.206` accepts the exposed model aliases `opus`, `fable`, and
 effort. `ultracode` combines xhigh effort with dynamic workflow orchestration,
 so an older CLI that silently ignores that value is not compatible.
 
+The stream adapter consumes the documented assistant content blocks rather
+than reducing each record to text: `thinking` becomes reasoning activity,
+`tool_use`/`server_tool_use` starts a tool or search card, and the matching
+user `tool_result` completes it with output and error status. Text blocks are
+still combined and emitted once as the assistant message. Kern intentionally
+does not persist every partial token delta: semantic activity provides
+interactive progress without a database transaction per generated token.
+
 Bootstrap installs `/mnt/kern-agent/agent-home/.claude/settings.json`
 from `host/bootstrap/agent-home/.claude/settings.json` (root-owned, readable,
 immutable). It sets `permissions.defaultMode = "bypassPermissions"` and
-`skipDangerousModePermissionPrompt = true`; `--setting-sources user` keeps stale
-local or project settings out of the task harness while still allowing
-`CLAUDE.md` instructions to load, and makes this file the only loaded settings
-source.
+`skipDangerousModePermissionPrompt = true`. Its
+`env.FORCE_PROMPT_CACHING_5M = "1"` pins Claude Code to the five-minute prompt
+cache TTL used by the Infiverse development box, instead of allowing the CLI
+to select a longer cache policy. `--setting-sources user` keeps stale local or
+project settings out of the task harness while still allowing `CLAUDE.md`
+instructions to load, and makes this file the only loaded settings source.
 
 WebSearch availability follows the operator's
 `network_integrations.claude.web_search` toggle (default off) and is

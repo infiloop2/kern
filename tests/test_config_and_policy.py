@@ -256,9 +256,42 @@ class ConfigTests(unittest.TestCase):
             "objects.githubusercontent.com",
             "github-cloud.githubusercontent.com",
             "release-assets.githubusercontent.com",
+            "results-receiver.actions.githubusercontent.com",
         ):
             self.assertTrue(request_allowed(controls, "GET", signed_domain, "/asset"))
             self.assertFalse(request_allowed(controls, "POST", signed_domain, "/asset"))
+        actions_blob = "productionresultssa17.blob.core.windows.net"
+        signed_query = (
+            "sv=2025-07-05"
+            "&sig=HhC%2FUPa%2FtitCP1DLVLa0ZnGPCw0RT338fxdeQ04ZoPw%3D"
+        )
+        self.assertTrue(
+            request_allowed(
+                controls,
+                "GET",
+                actions_blob,
+                "/actions-results/file",
+                signed_query,
+            )
+        )
+        self.assertTrue(
+            request_allowed(
+                controls,
+                "HEAD",
+                actions_blob,
+                "/actions-results/file",
+                signed_query,
+            )
+        )
+        self.assertFalse(
+            request_allowed(
+                controls,
+                "POST",
+                actions_blob,
+                "/actions-results/file",
+                signed_query,
+            )
+        )
         self.assertTrue(request_allowed(controls, "GET", "pypi.org", "/simple/pkg"))
         self.assertTrue(request_allowed(controls, "GET", "registry.npmjs.org", "/pkg"))
 
@@ -311,6 +344,27 @@ class ConfigTests(unittest.TestCase):
                     "network_integrations": { "custom": {"domains": {"*.githubusercontent.com": {"allow_http_methods": ["GET"]}}} },
                 }
             )
+        for domain in (
+            "blob.core.windows.net",
+            "productionresultssa17.blob.core.windows.net",
+            "*.blob.core.windows.net",
+            "*.core.windows.net",
+            "*.windows.net",
+        ):
+            with self.subTest(domain=domain), self.assertRaisesRegex(
+                ConfigError, "network_integrations"
+            ):
+                parse_network_controls(
+                    {
+                        "network_integrations": {
+                            "custom": {
+                                "domains": {
+                                    domain: {"allow_http_methods": ["GET"]}
+                                }
+                            }
+                        },
+                    }
+                )
         # An unrelated wildcard still works.
         controls = parse_network_controls(
             {
@@ -1284,6 +1338,8 @@ class DisabledIntegrationDispatchTests(unittest.TestCase):
             "api.openai.com", "chatgpt.com", "auth.openai.com",
             "api.anthropic.com", "platform.claude.com",
             "github.com", "api.github.com", "raw.githubusercontent.com",
+            "results-receiver.actions.githubusercontent.com",
+            "productionresultssa17.blob.core.windows.net",
             "pypi.org", "registry.npmjs.org",
             "custom.example.com",
         ):
@@ -1313,6 +1369,8 @@ class DisabledIntegrationDispatchTests(unittest.TestCase):
         )
         for host in (
             "api.openai.com", "api.anthropic.com", "github.com",
+            "results-receiver.actions.githubusercontent.com",
+            "productionresultssa17.blob.core.windows.net",
             "pypi.org", "registry.npmjs.org", "custom.example.com",
         ):
             with self.subTest(host=host):

@@ -346,6 +346,7 @@ window.addEventListener("message", event => {
   const message = event.data;
   if (!message || ![
     "kern-app-api",
+    "kern-app-copy-text",
     "kern-app-open-file",
     "kern-app-upload-file",
   ].includes(message.type)) return;
@@ -356,6 +357,17 @@ window.addEventListener("message", event => {
     if (!path.startsWith("/") || path.split("/").includes("..")) return;
     showTab("files");
     openAgentPath(path, "file").catch(error => notice(error.message, true));
+    return;
+  }
+  if (message.type === "kern-app-copy-text") {
+    handleAppCopyTextMessage(event.source, message).catch(error => {
+      event.source.postMessage({
+        type: "kern-app-copy-text-result",
+        request_id: String(message.request_id || ""),
+        ok: false,
+        error: error.message,
+      }, "*");
+    });
     return;
   }
   if (message.type === "kern-app-upload-file") {
@@ -378,6 +390,41 @@ window.addEventListener("message", event => {
     }, "*");
   });
 });
+
+async function handleAppCopyTextMessage(source, message) {
+  const text = typeof message.text === "string" ? message.text : "";
+  if (!text || new TextEncoder().encode(text).length > 2 * 1024 * 1024) {
+    throw new Error("app clipboard text must be between 1 byte and 2 MiB");
+  }
+  let copied = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch (_error) {
+      // Fall through to the selection-based copy path for browsers that
+      // expose the API but deny it in this embedding context.
+    }
+  }
+  if (!copied) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.append(area);
+    area.select();
+    copied = document.execCommand("copy");
+    area.remove();
+    if (!copied) throw new Error("copy failed");
+  }
+  source.postMessage({
+    type: "kern-app-copy-text-result",
+    request_id: String(message.request_id || ""),
+    ok: true,
+    body: { copied: true },
+  }, "*");
+}
 
 async function handleAppUploadMessage(app, source, message) {
   const action = message.action;
