@@ -122,7 +122,7 @@ SMOKE_MANAGED_PROVIDERS = {"openai": True, "claude": True, "bedrock": True}
 SMOKE_BEDROCK_REGION = "us-east-1"
 SMOKE_RUNTIME_MODELS = {
     "codex": "gpt-5.6-terra",
-    "claude_code": "opus",
+    "claude_code": "claude-opus-5",
     "hermes": "qwen.qwen3-coder-next",
 }
 SMOKE_BEDROCK_MODELS = (

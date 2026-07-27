@@ -54,7 +54,7 @@ How the synchronization fits together:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import threading
 import time
 from typing import Any
@@ -114,6 +114,8 @@ class _Turn:
     thread_id: str
     task_id: str
     closing: bool = False
+    close_lock: threading.Lock = field(default_factory=threading.Lock)
+    close_succeeded: bool = False
 
 
 # runtime/thread key -> live turn process. An entry exists from task claim
@@ -940,7 +942,9 @@ def _stop_runtime_processes(runtime_type: str, reason: str) -> None:
     with _LIVE_LOCK:
         turns = [turn for turn in _LIVE.values() if turn.runtime_type == runtime_type]
     for turn in turns:
-        _close_turn(_live_key(turn.runtime_type, turn.thread_id), turn.server)
+        # The owning worker releases the fence after it observes the stopped
+        # process and persists any provider session id learned mid-turn.
+        _close_turn(_live_key(turn.runtime_type, turn.thread_id), turn.server, release=False)
     WORKER_WAKE.set()
 
 
@@ -1052,6 +1056,31 @@ def run_next_task() -> None:
             if text:
                 state.record_agent_event("task.message", task_id, {"message": text, "source": "agent"})
 
+    def finish_claude_turn(provider_session_id: str, output: str) -> list[str]:
+        """Atomically choose between delivering pending steers and finishing.
+
+        ``steer_task`` uses the same mutation lock. A steer therefore either
+        commits before this transaction and is returned to Claude, or observes
+        the completed task afterwards and is rejected.
+        """
+        with state.mutation() as cur:
+            task = state.get_task(task_id, cur)
+            if task is None or task["status"] != RUNNING:
+                return []
+            pending = state.task_steers(task_id, cur)
+            if pending:
+                return pending
+            _finish_running_task(
+                cur,
+                task,
+                COMPLETED,
+                output=output,
+                runtime_type=runtime_type,
+                thread_id=thread_id,
+                provider_session_id=provider_session_id,
+            )
+            return []
+
     # Everything from here is inside one try: the task was claimed (marked
     # RUNNING) above, so ANY exception — including a failure to create or
     # start the server — must fail the task. An exception that escaped to
@@ -1097,16 +1126,29 @@ def run_next_task() -> None:
         current = state.get_task(task_id)
         if current is None or current["status"] != RUNNING:
             return
-        new_provider_session_id, output = provider.run_turn(
-            server,
-            input_message,
-            provider_session_id,
-            model,
-            effort,
-            steers,
-            on_agent_message,
-            steer_delivered,
-        )
+        if runtime_type == "claude_code":
+            new_provider_session_id, output = provider.run_turn(
+                server,
+                input_message,
+                provider_session_id,
+                model,
+                effort,
+                steers,
+                on_agent_message,
+                steer_delivered,
+                finish_claude_turn,
+            )
+        else:
+            new_provider_session_id, output = provider.run_turn(
+                server,
+                input_message,
+                provider_session_id,
+                model,
+                effort,
+                steers,
+                on_agent_message,
+                steer_delivered,
+            )
         _finish_task(
             task_id,
             COMPLETED,
@@ -1116,7 +1158,21 @@ def run_next_task() -> None:
             provider_session_id=new_provider_session_id,
         )
     except Exception as exc:
-        _finish_task(task_id, FAILED, error_message=str(exc), runtime_type=runtime_type, thread_id=thread_id)
+        # A killed task dies here too (close_task_server tears down the
+        # process, and the worker blocked in run_turn surfaces it as an
+        # error). The provider may have already reported a session_id before
+        # dying — read whatever it last saw so a killed turn's session isn't
+        # silently dropped; _finish_task persists it even though this task's
+        # own status update below is a no-op (kill_task already set CANCELLED).
+        last_session_id = getattr(server, "last_known_session_id", None) if server is not None else None
+        _finish_task(
+            task_id,
+            FAILED,
+            error_message=str(exc),
+            runtime_type=runtime_type,
+            thread_id=thread_id,
+            provider_session_id=last_session_id,
+        )
     finally:
         if server is not None:
             _close_turn(_live_key(runtime_type, thread_id), server)
@@ -1198,28 +1254,38 @@ def close_task_server(task_id: str) -> None:
     with _LIVE_LOCK:
         turn = next((t for t in _LIVE.values() if t.task_id == task_id), None)
     if turn is not None:
-        _close_turn(_live_key(turn.runtime_type, turn.thread_id), turn.server)
+        # Do not make the thread claimable here. The owning worker must first
+        # observe the stopped process and persist its last-known provider
+        # session id; its finally block releases the fence afterwards.
+        _close_turn(_live_key(turn.runtime_type, turn.thread_id), turn.server, release=False)
 
 
-def _close_turn(key: str, server: Any) -> None:
+def _close_turn(key: str, server: Any, *, release: bool = True) -> None:
     """Close a turn's runtime process and free its thread. The kill path and
-    the worker's finally can both get here for the same turn; exactly one wins
-    ownership (``closing``) and the entry stays registered until its close
-    completes, so no new turn can start on this thread while the old process
-    may still be dying. The close itself runs outside _LIVE_LOCK: shutdown can
-    take seconds and must not block claiming."""
+    the worker's finally can both get here for the same turn; exactly one owns
+    the close and the others wait for its result. External stop paths pass
+    ``release=False`` so only the worker can remove the entry, after its
+    completion/error handling has persisted any mid-turn provider session id.
+    The close itself runs outside _LIVE_LOCK: shutdown can take seconds and
+    must not block claiming."""
     with _LIVE_LOCK:
         turn = _LIVE.get(key)
-        if turn is None or turn.server is not server or turn.closing:
+        if turn is None or turn.server is not server:
             return
-        turn.closing = True
-    try:
-        server.close()
-    except Exception:
-        # The task has already been finished/failed, so operator flows can
-        # continue. Keep the entry fenced: we cannot safely claim same-thread
-        # work while the old process may live.
-        return
+    # The per-turn lock is held across the slow close on purpose: it blocks
+    # only another closer for this process, never claims or unrelated turns.
+    with turn.close_lock:
+        if not turn.closing:
+            turn.closing = True
+            try:
+                server.close()
+            except Exception:
+                # Keep the entry fenced: we cannot safely claim same-thread
+                # work while the old process may live.
+                return
+            turn.close_succeeded = True
+        if not release or not turn.close_succeeded:
+            return
     with _LIVE_LOCK:
         if _LIVE.get(key) is turn:
             del _LIVE[key]
@@ -1238,26 +1304,74 @@ def _finish_task(
 ) -> None:
     with state.mutation() as cur:
         task = state.get_task(task_id, cur)
-        if task is None or task["status"] != RUNNING:
-            return  # killed while the turn was in flight
-        task_status.set_status(task, status, now=utc_now())
-        if status == COMPLETED:
-            task["output_message"] = output
-            state.save_task(cur, task)
-            state.save_thread_session(
-                cur,
-                runtime_type,
-                thread_id,
-                provider_session_id,
-                utc_now(),
-                task["model"],
-                task["effort"],
-            )
-            state.append_agent_event(cur, "task.completed", task_id, {})
-        else:
-            task["error_message"] = error_message
-            state.save_task(cur, task)
-            state.append_agent_event(cur, "task.failed", task_id, {"error_message": error_message})
+        if task is None:
+            return
+        if task["status"] != RUNNING:
+            if task["status"] == COMPLETED:
+                # Claude's atomic finish callback already persisted the full
+                # successful result before run_turn returned.
+                return
+            # killed while the turn was in flight: kill_task already recorded
+            # a terminal status, so leave it alone here. Still persist whatever
+            # session_id the provider handed back before it died —
+            # otherwise the thread's next task can't resume the CLI session
+            # the killed turn was using and silently starts over (worst case:
+            # the killed turn was the thread's first, so there is no earlier
+            # session to fall back to at all).
+            if provider_session_id:
+                state.save_thread_session(
+                    cur,
+                    runtime_type,
+                    thread_id,
+                    provider_session_id,
+                    utc_now(),
+                    task["model"],
+                    task["effort"],
+                )
+            return
+        _finish_running_task(
+            cur,
+            task,
+            status,
+            output=output,
+            error_message=error_message,
+            runtime_type=runtime_type,
+            thread_id=thread_id,
+            provider_session_id=provider_session_id,
+        )
+
+
+def _finish_running_task(
+    cur: Any,
+    task: dict[str, Any],
+    status: str,
+    *,
+    output: str | None = None,
+    error_message: str | None = None,
+    runtime_type: str,
+    thread_id: str,
+    provider_session_id: str | None = None,
+) -> None:
+    """Persist the terminal state for a task already verified as RUNNING."""
+    task_id = task["task_id"]
+    task_status.set_status(task, status, now=utc_now())
+    if status == COMPLETED:
+        task["output_message"] = output
+        state.save_task(cur, task)
+        state.save_thread_session(
+            cur,
+            runtime_type,
+            thread_id,
+            provider_session_id,
+            utc_now(),
+            task["model"],
+            task["effort"],
+        )
+        state.append_agent_event(cur, "task.completed", task_id, {})
+    else:
+        task["error_message"] = error_message
+        state.save_task(cur, task)
+        state.append_agent_event(cur, "task.failed", task_id, {"error_message": error_message})
 
 
 def _task_number(task_id: str) -> int:

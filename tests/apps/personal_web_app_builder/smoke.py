@@ -146,7 +146,7 @@ def _built_app() -> dict[str, Any]:
 def _completed_task_fixture() -> dict[str, Any]:
     return {
         "task_id": "task_builder_1",
-        "thread_id": builder_backend.THREAD_ID,
+        "thread_id": builder_backend.THREAD_BASE_ID,
         "input_message": "Requested by user:\nBuild a small weekly focus dashboard.",
         "output_message": "Built the dashboard with durable priorities and an Add priority interaction.",
         "error_message": "",
@@ -165,11 +165,13 @@ APP: dict[str, Any] = {}
 TASKS: list[dict[str, Any]] = []
 EVENTS: list[dict[str, Any]] = []
 HOST_THREAD_SESSION: dict[str, str] | None = None
+THREAD_SEQ = 1
 
 
 def reset_mock_state() -> None:
-    global HOST_THREAD_SESSION
+    global HOST_THREAD_SESSION, THREAD_SEQ
     with MOCK_LOCK:
+        THREAD_SEQ = 1
         APP.clear()
         APP.update(_empty_app())
         TASKS.clear()
@@ -222,6 +224,8 @@ def _route_app_api(
             }
         if method == "GET" and relative == "conversation/events":
             return _conversation_events(query or {})
+        if method == "POST" and relative == "reset":
+            return _reset_app()
         if method == "POST" and relative == "runtime/actions":
             return _runtime_action(body)
         if method == "POST" and relative == "messages":
@@ -232,6 +236,31 @@ def _route_app_api(
         if method == "POST" and task_match:
             return _stop_task(task_match.group(1), task_match.group(2))
     raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "route not found")
+
+
+def _reset_app() -> dict[str, Any]:
+    """Mirror the backend: clear the bundle and move to a new builder thread.
+
+    The conversation goes with the thread, so the app returns to first run.
+    The revision keeps counting up rather than returning to zero.
+    """
+    global HOST_THREAD_SESSION, THREAD_SEQ
+    # The real backend stops anything still queued or running first; the mock
+    # has no worker, so clearing the list is the same end state.
+    THREAD_SEQ += 1
+    HOST_THREAD_SESSION = None
+    TASKS.clear()
+    EVENTS.clear()
+    APP.update({
+        "revision": APP["revision"] + 1,
+        "html": "",
+        "css": "",
+        "javascript": "",
+        "data": {},
+        "updated_at": _now(),
+    })
+    thread_id = builder_backend.THREAD_BASE_ID if THREAD_SEQ <= 1 else f"{builder_backend.THREAD_BASE_ID}-{THREAD_SEQ}"
+    return {"app": copy.deepcopy(APP), "thread_id": thread_id}
 
 
 def _conversation_tasks() -> list[dict[str, Any]]:
@@ -370,7 +399,7 @@ def _create_message(body: Any, *, requested_by: str) -> dict[str, Any]:
     status = "queued" if any(task["status"] == "running" for task in TASKS) else "running"
     task = {
         "task_id": f"task_builder_{len(TASKS) + 1}",
-        "thread_id": builder_backend.THREAD_ID,
+        "thread_id": builder_backend.THREAD_BASE_ID,
         "input_message": input_message,
         "output_message": "",
         "error_message": "",
@@ -615,6 +644,10 @@ def desktop_smoke(page: Any) -> None:
     if leaked:
         raise AssertionError(f"generated interaction caused browser requests: {leaked}")
 
+    # Start over stays available on a built app; the mobile pass runs it, so
+    # this pass leaves the dashboard standing for it.
+    expect(frame.get_by_role("button", name="Start over", exact=True)).to_be_enabled()
+
 
 def mobile_smoke(page: Any) -> None:
     from playwright.sync_api import expect
@@ -638,3 +671,19 @@ def mobile_smoke(page: Any) -> None:
     )
     if overflow > 1:
         raise AssertionError(f"Personal Web App Builder overflows horizontally by {overflow}px")
+
+    # Start over discards the generated app and its conversation together: the
+    # builder continues in a new host thread, so the app returns to first run.
+    # That is the way out of a builder whose thread can no longer run work.
+    page.once("dialog", lambda dialog: dialog.accept())
+    frame.get_by_role("button", name="Start over", exact=True).click()
+    expect(frame.locator("#empty-state")).to_be_visible()
+    expect(frame.locator("#first-run-how")).to_be_visible()
+    expect(frame.locator("#revision-label")).to_have_text("Empty app")
+    expect(frame.locator(".dashboard")).to_have_count(0)
+    # The new thread has no fixed configuration yet, so the selectors return.
+    expect(frame.locator("#runtime")).to_be_visible()
+    expect(frame.locator("#runtime-fixed")).to_be_hidden()
+    frame.get_by_role("button", name="Agent chat", exact=True).click()
+    expect(frame.locator("#chat-history")).not_to_contain_text("Built the dashboard")
+    frame.get_by_role("button", name="Close agent chat", exact=True).click()

@@ -99,6 +99,11 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn('"task.updated"', script)
         self.assertNotIn("task-steer-input", script)
         self.assertNotIn("task.output_message", script)
+        self.assertIn("`/threads/${encodeURIComponent(threadId)}/events`", script)
+        self.assertIn("events?before=${before}", script)
+        self.assertIn("events?since=${threadEventsNewestSeq}", script)
+        self.assertIn('"/threads?archived=true"', script)
+        self.assertIn('"unarchive"', script)
 
     def test_app_upload_bridge_uses_a_host_owned_file_picker(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui"
@@ -495,7 +500,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 },
             )
 
-        page.assert_called_once_with("thread_1", 2, 5)
+        page.assert_called_once_with("thread_1", 2, 5, before=None)
         payload = response["events"][0]["payload"]
         self.assertLessEqual(len(payload["message"].encode()), message_bytes)
         self.assertTrue(payload["message"].endswith("… (truncated)"))
@@ -504,6 +509,29 @@ class AdminUiStaticTests(unittest.TestCase):
             len(json.dumps(response, sort_keys=True).encode()),
             admin_api.MAX_REQUEST_BODY_BYTES,
         )
+
+    def test_thread_events_support_before_but_reject_combined_cursors(self) -> None:
+        with patch(
+            "host.runtime.admin_api.service.state.page_thread_events",
+            return_value=[],
+        ) as page:
+            self.assertEqual(
+                admin_api.thread_route(
+                    "GET",
+                    "/v1/threads/thread_1/events",
+                    {"before": ["42"], "limit": ["5"]},
+                ),
+                {"events": []},
+            )
+
+        page.assert_called_once_with("thread_1", None, 5, before=42)
+        with self.assertRaises(admin_api.ApiError) as error:
+            admin_api.thread_route(
+                "GET",
+                "/v1/threads/thread_1/events",
+                {"since": ["2"], "before": ["42"]},
+            )
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
 
     def test_thread_events_bound_nested_activity_output_without_dropping_event(self) -> None:
         message_bytes = 120 * 1024
@@ -1025,7 +1053,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             body = dict(body)
             if "model" not in body and "effort" not in body:
                 if body.get("agent_runtime") == "claude_code":
-                    body.update({"model": "opus", "effort": "high"})
+                    body.update({"model": "claude-opus-5", "effort": "high"})
                 elif body.get("agent_runtime") == "codex":
                     body.update({"model": "gpt-5.6-terra", "effort": "high"})
         data = json.dumps(body).encode() if body is not None else None
@@ -1845,16 +1873,16 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "input_message": "claude task",
                 "thread_id": "claude-options",
                 "agent_runtime": "claude_code",
-                "model": "fable",
+                "model": "claude-fable-5",
                 "effort": "ultracode",
             },
         )
         self.assertEqual(status, 200)
-        self.assertEqual((claude["model"], claude["effort"]), ("fable", "ultracode"))
+        self.assertEqual((claude["model"], claude["effort"]), ("claude-fable-5", "ultracode"))
 
         invalid = [
             {"model": "gpt-5.6-luna", "effort": "ultra"},
-            {"model": "opus", "effort": "high"},
+            {"model": "claude-opus-5", "effort": "high"},
             {"model": "gpt-5.6-terra"},
             {"effort": "high"},
             {"model": None, "effort": None},
@@ -1933,6 +1961,56 @@ class AdminApiIntegrationTests(unittest.TestCase):
             (follow_up["agent_runtime"], follow_up["model"], follow_up["effort"]),
             (body["agent_runtime"], body["model"], body["effort"]),
         )
+
+    def test_thread_on_a_superseded_model_runs_no_further_tasks(self) -> None:
+        # A thread's configuration is fixed for its lifetime, so one whose
+        # configuration left the option matrix cannot run another task. The row
+        # and its history stay readable; the next task starts a new thread.
+        with state.mutation() as cur:
+            state.save_thread_session(
+                cur,
+                "claude_code",
+                "legacy-alias-thread",
+                None,
+                "2026-06-08T00:00:01Z",
+                "opus",
+                "high",
+            )
+
+        for fields in (
+            {},
+            {"agent_runtime": "claude_code", "model": "opus", "effort": "high"},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(
+                    "POST",
+                    "/v1/tasks",
+                    {"input_message": "follow up", "thread_id": "legacy-alias-thread", **fields},
+                )
+            self.assertEqual(error.exception.code, 409)
+            self.assertIn("no longer offered", error.exception.read().decode())
+
+        # The thread stays in the listing rather than disappearing with its
+        # tasks, and starting a fresh thread on a superseded model is refused
+        # by the option matrix itself.
+        _, threads = self.request("GET", "/v1/threads")
+        listed = {thread["thread_id"]: thread for thread in threads["threads"]}
+        self.assertEqual(listed["legacy-alias-thread"]["model"], "opus")
+
+        with self.assertRaises(urllib.error.HTTPError) as new_thread_error:
+            self.request(
+                "POST",
+                "/v1/tasks",
+                {
+                    "input_message": "new thread",
+                    "thread_id": "new-alias-thread",
+                    "agent_runtime": "claude_code",
+                    "model": "opus",
+                    "effort": "high",
+                },
+            )
+        self.assertEqual(new_thread_error.exception.code, 400)
+        self.assertIn("model must be one of", new_thread_error.exception.read().decode())
 
     def test_task_without_session_options_requires_an_existing_thread(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as error:
@@ -4481,6 +4559,54 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, task = self.request("GET", "/v1/tasks/task_1")
         self.assertEqual(task["status"], "failed")
         self.assertIn("restarted while the task was running", task["error_message"])
+
+    def test_initialize_state_fails_queued_tasks_a_release_can_no_longer_run(self) -> None:
+        # The option matrix ships with the release, so an upgrade can retire the
+        # configuration a queued task was waiting under. Claiming it would run a
+        # model the operator never chose, and its thread can never run again.
+        with state.mutation() as cur:
+            state.save_thread_session(
+                cur, "claude_code", "superseded", None, "2026-06-08T00:00:01Z", "opus", "high"
+            )
+            state.insert_task(
+                cur,
+                {
+                    "task_id": "task_1",
+                    "status": "queued",
+                    "agent_runtime": "claude_code",
+                    "model": "opus",
+                    "effort": "high",
+                    "thread_id": "superseded",
+                    "input_message": "queued before the upgrade",
+                    "created_at": "2026-06-08T00:00:00Z",
+                    "updated_at": "2026-06-08T00:00:00Z",
+                },
+            )
+            state.save_thread_session(
+                cur, "claude_code", "offered", None, "2026-06-08T00:00:01Z", "claude-opus-5", "high"
+            )
+            state.insert_task(
+                cur,
+                {
+                    "task_id": "task_2",
+                    "status": "queued",
+                    "agent_runtime": "claude_code",
+                    "model": "claude-opus-5",
+                    "effort": "high",
+                    "thread_id": "offered",
+                    "input_message": "still runnable",
+                    "created_at": "2026-06-08T00:00:00Z",
+                    "updated_at": "2026-06-08T00:00:00Z",
+                },
+            )
+
+        admin_api.initialize_state()
+
+        _, superseded = self.request("GET", "/v1/tasks/task_1")
+        self.assertEqual(superseded["status"], "failed")
+        self.assertIn("no longer offered", superseded["error_message"])
+        _, offered = self.request("GET", "/v1/tasks/task_2")
+        self.assertEqual(offered["status"], "queued")
 
     def test_event_seq_commits_atomically_with_the_event(self) -> None:
         # Event seqs come from a database serial: unique and increasing, and

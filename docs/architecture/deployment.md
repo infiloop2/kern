@@ -33,8 +33,8 @@ The command is intentionally split by lifecycle intent:
 | `host.cli.start` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Starts the EC2 instance and waits for `running`; does not mutate Kern state. |
 | `host.cli.stop` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Stops the EC2 instance and waits for `stopped`; does not mutate Kern state. |
 
-The target `VERSION` is the local checkout's `VERSION`, or the pinned
-commit's `VERSION` on the GitHub delivery.
+The target `VERSION` is the local checkout's `VERSION`; the GitHub delivery
+requires the pinned commit's `VERSION` to equal it.
 
 Deploy and reconfigure take operator endpoint arguments
 (`--operator-ssh-public-key` and `--operator-cloudflare-hostname`, the tunnel
@@ -65,8 +65,11 @@ delivered to the instance one of two ways.
    durable data volumes, creates the pinned service accounts (rendered from
    `host/constants.py`), enforces the command/version preconditions against the
    authoritative admin disk state, installs packages (Python, PostgreSQL,
-   Node, npm, Codex CLI, Claude Code CLI, git, gh, nftables, OpenSSL),
-   applies pending security updates, starts the admin-state Postgres on the
+   Node, npm, Codex CLI, Claude Code CLI, git, gh, nftables, OpenSSL) with the
+   first-boot apt timers quiesced so background update downloads cannot hold
+   the dpkg lock against the deploy (they restart afterwards and apply
+   security updates in the background, off the deploy critical path), starts
+   the admin-state Postgres on the
    durable admin volume and applies schema migrations, creates a 6 GiB
    swapfile, creates the proxy CA, applies the declarative durable-path
    ownership table, installs the Postgres, proxy, tools, admin,
@@ -93,13 +96,15 @@ deploy, upgrade, recover, and reconfigure) is single-stage and detached. The
 pinned commit always comes from the fixed public repository
 (`host.constants.PUBLIC_GITHUB_REPOSITORY`, `infiloop2/kern`); there is
 no repository knob, and without a value the latest `main` commit is pinned.
-The CLI first reads the pinned commit's `VERSION` from GitHub, and that
-version, not the local checkout's, is the operation's target: the CLI prints
-the fetched version and asks for confirmation, and non-interactive callers
-pipe the confirmation into stdin. Pins older than 0.35.0 are rejected because
-`host.bootstrap.self_provision` does not exist before it; the SSH delivery
-serves older versions. Any GitHub read failure, an old pin, or a declined
-confirmation aborts before anything in AWS is touched.
+The CLI first reads the pinned commit's `VERSION` from GitHub and requires it
+to equal the local CLI's `VERSION`: the user data rendered by the CLI and the
+bootstrap the instance fetches from the pinned commit provision one host, so
+both always come from one version, and every deploy is a combination that was
+tested together. Deploying older code means checking out that commit and
+running its CLI. The CLI prints the fetched version and asks for
+confirmation; non-interactive callers pipe the confirmation into stdin. Any
+GitHub read failure, a version mismatch, or a declined confirmation aborts
+before anything in AWS is touched.
 
 EC2 user data then hardens the base accounts, stages the provisioning payload,
 installs git, fetches the pinned commit (a `git fetch` of the full commit sha,

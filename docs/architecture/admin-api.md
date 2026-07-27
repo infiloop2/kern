@@ -161,7 +161,10 @@ and show up in the same agent slice.
   it stays unclaimable until the old process has fully shut down, so a new
   turn never races a dying one for the same runtime thread/session.
   A worker that was mid-turn cannot resurrect a cancelled task. After a host
-  reboot, tasks left `running` are marked `failed`.
+  reboot, tasks left `running` are marked `failed`, and so are queued tasks on
+  a thread whose session configuration this release no longer offers: the
+  option matrix ships with the release, and claiming such a task would run a
+  model the operator never chose.
 - Codex login uses its device-code flow. Claude Code login starts
   `claude auth login --claudeai`, returns the browser URL, and later writes the
   browser code back to the waiting CLI process. After login, the admin service

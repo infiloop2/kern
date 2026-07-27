@@ -11,7 +11,7 @@ can break when a harness package is upgraded.
 | Harness | Package | Pinned version | Runtime id | Adapter |
 | --- | --- | --- | --- | --- |
 | Codex | `@openai/codex` | `0.144.0` | `codex` | `host/runtime/admin_api/codex_app_server.py` |
-| Claude Code | `@anthropic-ai/claude-code` | `2.1.206` | `claude_code` | `host/runtime/admin_api/claude_code.py` |
+| Claude Code | `@anthropic-ai/claude-code` | `2.1.220` | `claude_code` | `host/runtime/admin_api/claude_code.py` |
 | Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/admin_api/hermes_agent.py` |
 
 Bootstrap installs the npm packages globally with npm, installs Hermes with
@@ -221,10 +221,17 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
 ```
 
 Kern passes the session selection on every new and resumed process.
-Claude Code `2.1.206` accepts the exposed model aliases `opus`, `fable`, and
-`sonnet`; it also accepts `high`, `max`, and the session-only `ultracode`
-effort. `ultracode` combines xhigh effort with dynamic workflow orchestration,
-so an older CLI that silently ignores that value is not compatible.
+Claude Code `2.1.220` accepts the exposed model ids `claude-opus-5`,
+`claude-fable-5`, and `claude-sonnet-5`; it also accepts `high`, `max`, and the
+session-only `ultracode` effort. `ultracode` combines xhigh effort with dynamic
+workflow orchestration, so an older CLI that silently ignores that value is not
+compatible. The catalog names exact model ids rather than the CLI's
+unversioned aliases (`opus`, `fable`, `sonnet`): an alias re-points to a new
+model generation on a CLI upgrade, which would move existing threads across
+generations without the operator choosing it. Threads created while the catalog
+offered aliases keep their stored alias and stay readable, but they run no
+further tasks: a thread's configuration is fixed for its lifetime, so once it
+leaves the catalog the thread is history rather than a session to resume.
 
 The stream adapter consumes the documented assistant content blocks rather
 than reducing each record to text: `thinking` becomes reasoning activity,
@@ -264,7 +271,7 @@ and `Bash` stay enabled — their egress is client-side and already gated by the
 domain allow-list. The launcher also sets
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (telemetry/feedback/auto-update
 suppression; it does not affect WebSearch/WebFetch) for every invocation except
-the host-owned `/usage` probe. Claude Code `2.1.206` classifies its account-limit
+the host-owned `/usage` probe. Claude Code `2.1.220` classifies its account-limit
 fetch as nonessential, so the probe must omit this environment variable or it
 exits successfully without returning any usage windows.
 
@@ -452,7 +459,7 @@ Claude usage is read with:
 claude -p "/usage" --output-format json
 ```
 
-On pinned Claude Code `2.1.206`, the command returns a JSON object whose
+On pinned Claude Code `2.1.220`, the command returns a JSON object whose
 `result` string contains lines like:
 
 ```text
@@ -517,7 +524,7 @@ Kern runs one Hermes headless chat process per prompt through the
 ``run-hermes`` launcher and its small stdin adapter:
 
 ```text
-hermes-stdin.py --model <model> [--resume <session_id>]
+hermes-stdin.py --model <model> [--resume <session_id>] [--activity-nonce <nonce>]
 stdin: <prompt>
 ```
 
@@ -580,7 +587,36 @@ Expected behavior:
 | --- | --- |
 | exit code | ``0`` on success; any non-zero exit fails the turn with the process's stderr/stdout tail. |
 | stderr | ``--pass-session-id`` prints a ``session_id: <id>`` line; the host mints nothing, it reads Hermes's id and resumes with ``--resume``. |
-| stdout | The final answer text (minus the session line). |
+| stdout | The final answer text, interleaved with sentinel-framed live activity records (below). The adapter streams stdout line by line, routes the activity lines away, and keeps the remaining lines (minus the session line) as the answer. |
+
+### Live activity
+
+Hermes runs quiet, so unlike the Codex app-server and the Claude Code
+stream-json transports it emits no structured event stream of its own. To give
+Agent Chat the same live activity the other harnesses show, the stdin adapter
+subscribes to Hermes's ``pre_tool_call`` and ``post_tool_call`` plugin hooks —
+appending two observer callbacks to the process-global plugin manager without
+triggering plugin discovery, so it loads nothing the single-query path would
+not otherwise load, while the universal tool dispatcher still invokes them for
+every tool — and prints one provider-independent activity record per event to
+stdout. Each record is a single line behind an
+ASCII Record-Separator sentinel (``ACTIVITY_LINE_PREFIX``) plus the per-turn
+``--activity-nonce`` the host mints fresh each turn; the host only treats a
+stdout line carrying that exact secret as activity, and everything else is
+answer text. Keying on a per-turn secret — not just the sentinel — is what
+keeps the two channels separate on a shared stdout: the model never sees the
+nonce, so its (model-controlled) answer text cannot reproduce the frame to
+forge a card or steal a line out of the response. (A same-user shell that reads
+the process argv could still emit the frame, but that is the OS/proxy boundary's
+concern, as everywhere in these harnesses, not the activity channel's.)
+``terminal``/``process`` calls map to command activity, ``write_file``/``patch``
+to file changes, ``search_files`` to searches, and every other tool (bundled
+MCP tools, file reads) to a generic tool card; the shared ``tool_call_id`` folds
+the started and completed snapshots into one card. Emission is best-effort — a
+hook that raises is swallowed so agent progress can never fail a turn — and the
+host re-validates and bounds every record (``agent_activity.normalize_record``)
+at its trust boundary before persisting it, dropping any malformed or
+out-of-contract line.
 
 Hermes does not support steering. ``POST /v1/tasks/{task_id}/steer`` returns
 ``409`` for a Hermes task, and Agent Chat does not render its steering control.

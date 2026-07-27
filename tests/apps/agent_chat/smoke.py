@@ -13,6 +13,7 @@ from host.session_options import public_session_options
 
 ApiErrorFactory = Callable[[HTTPStatus, str], Exception]
 HostApi = Callable[[str, str, dict[str, list[str]], Any], dict[str, Any]]
+AGENT_CHAT_EVENT_PAGE = 6
 # Agent Chat surfaces a curated set of the host's seeded threads, a lived-in mix
 # of runtimes and task states: a shipped infra fix (codex, two completed turns),
 # a design audit with a failed deploy (claude_code), an active incident (codex,
@@ -20,7 +21,7 @@ HostApi = Callable[[str, str, dict[str, list[str]], Any], dict[str, Any]]
 # (claude_code). The app-facing thread id must equal the host thread id, since
 # tasks and archive routes query the host by it directly.
 AGENT_CHAT_THREADS: dict[str, dict[str, Any]] = {
-    thread_id: {"thread_id": thread_id, "archived": False}
+    thread_id: {"thread_id": thread_id, "name": thread_id, "archived": False}
     for thread_id in ("website-redesign", "thread-1", "thread-2", "thread-3")
 }
 AGENT_CHAT_TASK_IDS: dict[str, str] = {
@@ -49,25 +50,40 @@ def route_app_api(
     if method == "GET" and relative == "session-options":
         return {"session_options": public_session_options()}
     if method == "GET" and relative == "threads":
-        return {"threads": _list_threads(host_api)}
+        archived = (query.get("archived") or ["false"])[0] == "true"
+        return {"threads": _list_threads(host_api, archived=archived)}
     match = re.fullmatch(r"threads/([^/]+)/tasks", relative)
     if method == "GET" and match:
         thread_id = match.group(1)
-        _require_agent_chat_thread(thread_id, api_error)
+        _require_agent_chat_thread(thread_id, api_error, include_archived=True)
         known = {task_id for task_id, known_thread_id in AGENT_CHAT_TASK_IDS.items() if known_thread_id == thread_id}
         tasks = host_api("GET", f"/v1/threads/{thread_id}/tasks", {}, None)["tasks"]
         return {"tasks": [task for task in tasks if task["task_id"] in known]}
     match = re.fullmatch(r"threads/([^/]+)/events", relative)
     if method == "GET" and match:
         thread_id = match.group(1)
-        _require_agent_chat_thread(thread_id, api_error)
-        since = (query.get("since") or ["0"])[0]
-        return host_api("GET", f"/v1/threads/{thread_id}/events", {"since": [since]}, None)
-    match = re.fullmatch(r"threads/([^/]+)/archive", relative)
+        _require_agent_chat_thread(thread_id, api_error, include_archived=True)
+        host_query = {"limit": [str(AGENT_CHAT_EVENT_PAGE)]}
+        host_query.update({
+            key: query[key]
+            for key in ("since", "before")
+            if key in query
+        })
+        return host_api("GET", f"/v1/threads/{thread_id}/events", host_query, None)
+    match = re.fullmatch(r"threads/([^/]+)/(archive|unarchive)", relative)
     if method == "POST" and match:
+        thread_id, action = match.groups()
+        _require_agent_chat_thread(thread_id, api_error, include_archived=True)
+        AGENT_CHAT_THREADS[thread_id]["archived"] = action == "archive"
+        return {"thread": dict(AGENT_CHAT_THREADS[thread_id])}
+    match = re.fullmatch(r"threads/([^/]+)/name", relative)
+    if method == "PUT" and match:
         thread_id = match.group(1)
         _require_agent_chat_thread(thread_id, api_error, include_archived=True)
-        AGENT_CHAT_THREADS[thread_id]["archived"] = True
+        name = body.get("name", "").strip() if isinstance(body, dict) else ""
+        if not name or len(name) > 100:
+            raise api_error(HTTPStatus.BAD_REQUEST, "invalid thread name")
+        AGENT_CHAT_THREADS[thread_id]["name"] = name
         return {"thread": dict(AGENT_CHAT_THREADS[thread_id])}
     if method == "POST" and relative == "messages":
         if (
@@ -78,6 +94,7 @@ def route_app_api(
             raise api_error(HTTPStatus.BAD_REQUEST, "follow-up must use the stored session configuration")
         if isinstance(body, dict) and body.get("thread_id") in AGENT_CHAT_THREADS:
             thread_id = body["thread_id"]
+            _require_agent_chat_thread(thread_id, api_error)
             known = {
                 task_id
                 for task_id, known_thread_id in AGENT_CHAT_TASK_IDS.items()
@@ -110,6 +127,7 @@ def route_app_api(
         thread_id = task["thread_id"]
         AGENT_CHAT_THREADS[thread_id] = {
             "thread_id": thread_id,
+            "name": thread_id,
             "archived": False,
         }
         AGENT_CHAT_TASK_IDS[task["task_id"]] = thread_id
@@ -119,6 +137,7 @@ def route_app_api(
         task_id, action = match.groups()
         if task_id not in AGENT_CHAT_TASK_IDS:
             raise api_error(HTTPStatus.NOT_FOUND, "task not found")
+        _require_agent_chat_thread(AGENT_CHAT_TASK_IDS[task_id], api_error)
         return host_api(method, f"/v1/tasks/{task_id}/{action}", {}, body)
     raise api_error(HTTPStatus.NOT_FOUND, "mock app route not found")
 
@@ -147,6 +166,14 @@ def desktop_smoke(page: Any) -> None:
 
     frame.locator("#threads .thread-item", has_text="website-redesign").click()
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
+    page.once("dialog", lambda dialog: dialog.accept("Website refresh"))
+    frame.get_by_role("button", name="Rename thread", exact=True).click()
+    expect(frame.locator(".thread-title")).to_have_text("Website refresh")
+    expect(frame.locator("#threads")).to_contain_text("Website refresh")
+    page.once("dialog", lambda dialog: dialog.accept("website-redesign"))
+    frame.get_by_role("button", name="Rename thread", exact=True).click()
+    expect(frame.locator(".thread-title")).to_have_text("website-redesign")
+    _load_older_history(frame, expected_turns=2)
     expect(frame.locator("#thread-detail")).to_contain_text("Push the responsive fixes")
     expect(frame.locator("#thread-detail")).to_contain_text("failed")
     expect(frame.locator("#thread-detail .turn").nth(0)).to_contain_text("Audit the marketing site")
@@ -246,9 +273,20 @@ def desktop_smoke(page: Any) -> None:
     frame.locator("#new-task").fill("agent app smoke follow up")
     frame.get_by_role("button", name="Send").click()
     expect(frame.locator("#thread-detail")).to_contain_text("agent app smoke follow up")
-    frame.get_by_role("button", name="Archive").click()
+    frame.get_by_role("button", name="Archive", exact=True).click()
     expect(frame.locator(".thread-title")).to_have_text("New thread")
     expect(frame.locator("#threads")).not_to_contain_text(generated_thread)
+    frame.get_by_role("button", name="Show archived").click()
+    expect(frame.locator(".thread-title")).to_have_text("Archived threads")
+    expect(frame.get_by_role("button", name="New thread")).to_be_hidden()
+    expect(frame.locator("#threads")).to_contain_text(generated_thread)
+    frame.locator("#threads .thread-item", has_text=generated_thread).click()
+    expect(frame.locator("#composer")).to_be_hidden()
+    expect(frame.get_by_role("button", name="Unarchive")).to_be_visible()
+    frame.get_by_role("button", name="Unarchive").click()
+    expect(frame.locator("#threads")).not_to_contain_text(generated_thread)
+    frame.get_by_role("button", name="Show active").click()
+    expect(frame.locator("#threads")).to_contain_text(generated_thread)
     _assert_single_scroll(page, frame, "agent_chat app (desktop)")
 
 
@@ -276,15 +314,74 @@ def mobile_smoke(page: Any) -> None:
     frame.get_by_role("button", name="Show thread list").click()
     frame.locator("#threads .thread-item", has_text="thread-1").click()
     expect(frame.locator(".thread-pane")).to_have_js_property("inert", True)
-    expect(frame.locator("#thread-detail")).to_contain_text("tour of the codebase")
+    expect(frame.locator("#thread-detail")).to_contain_text("Document the theming setup")
     _assert_frame_no_horizontal_overflow(frame, "agent_chat app")
     _assert_single_scroll(page, frame, "agent_chat app (mobile)")
+    _assert_initial_tail(frame)
+    _load_older_history(frame, expected_turns=5)
     _assert_full_message_stream(frame)
     _assert_mobile_chat_scrolling(page, frame)
     _assert_rich_activity_stream(frame)
     _assert_mobile_composer_ergonomics(frame)
     _assert_mobile_steering(frame)
     _assert_mobile_send_flow(frame)
+
+
+def _assert_initial_tail(frame: Any) -> None:
+    """Opening a long thread paints only its newest bounded page at the bottom."""
+    from playwright.sync_api import expect
+
+    expect(frame.get_by_role("button", name="Load earlier messages")).to_be_visible()
+    metrics = frame.locator("#chat-scroll").evaluate(
+        "element => [element.scrollHeight, element.clientHeight, element.scrollTop]"
+    )
+    scroll_height, client_height, scroll_top = metrics
+    if scroll_top < scroll_height - client_height - 2:
+        raise AssertionError(f"opening a thread did not land at the newest page: {metrics}")
+
+
+def _load_older_history(frame: Any, *, expected_turns: int) -> None:
+    """Exercise backward pagination until the seeded thread is fully loaded."""
+    from playwright.sync_api import expect
+
+    button = frame.locator("#load-earlier")
+    # Selecting a thread updates its title before the initial event request
+    # completes. Wait for that first full page to expose the loader so this
+    # helper cannot mistake the pre-request hidden state for exhausted history.
+    expect(button).to_be_visible()
+    for _ in range(100):
+        if not button.is_visible():
+            break
+        button.evaluate(
+            """element => {
+              const loader = element.closest("#history-loader");
+              const before = loader.dataset.oldestSeq;
+              element.click();
+              return new Promise((resolve, reject) => {
+                const finished = () => loader.hidden || loader.dataset.oldestSeq !== before;
+                if (finished()) {
+                  resolve();
+                  return;
+                }
+                const observer = new MutationObserver(() => {
+                  if (!finished()) return;
+                  clearTimeout(timer);
+                  observer.disconnect();
+                  resolve();
+                });
+                const timer = setTimeout(() => {
+                  observer.disconnect();
+                  reject(new Error("older history cursor did not advance"));
+                }, 5000);
+                observer.observe(loader, {
+                  attributes: true,
+                  attributeFilter: ["hidden", "data-oldest-seq"],
+                });
+              });
+            }"""
+        )
+    expect(button).to_be_hidden()
+    expect(frame.locator("#thread-detail .turn")).to_have_count(expected_turns)
 
 
 def _assert_full_message_stream(frame: Any) -> None:
@@ -365,9 +462,6 @@ def _assert_mobile_chat_scrolling(page: Any, frame: Any) -> None:
         raise AssertionError(
             f"seeded thread-1 is not long enough to exercise scrolling: {metrics}"
         )
-    # Opening a thread lands at the newest turn.
-    if scroll_top < scroll_height - client_height - 2:
-        raise AssertionError(f"opening a thread did not land at the bottom: {metrics}")
     # The whole history is reachable: jump to the top and read the first turn.
     scroller.evaluate("element => { element.scrollTop = 0; }")
     expect(frame.locator("#thread-detail .turn").nth(0)).to_be_in_viewport()
@@ -413,7 +507,7 @@ def _assert_mobile_steering(frame: Any) -> None:
 
     frame.get_by_role("button", name="Show thread list").click()
     frame.locator("#threads .thread-item", has_text="thread-2").click()
-    expect(frame.locator("#thread-detail")).to_contain_text("launch blog post")
+    expect(frame.locator("#thread-detail")).to_contain_text("Tighten the intro")
     running_turn = frame.locator("#thread-detail .turn", has_text="Tighten the intro")
     expect(running_turn.locator(".status")).to_have_text("running")
     expect(frame.locator(".task-steer-input")).to_have_count(0)
@@ -426,7 +520,7 @@ def _assert_mobile_steering(frame: Any) -> None:
         has_text="python word_count.py",
     )
     expect(live_command).to_have_count(1)
-    expect(live_command).to_have_attribute("open", "")
+    expect(live_command).not_to_have_attribute("open", "")
     expect(live_command.locator(".activity-phase")).to_have_text("Running")
     composer = frame.locator("#new-task")
     expect(composer).to_have_attribute(
@@ -459,7 +553,7 @@ def _assert_mobile_send_flow(frame: Any) -> None:
     expect(frame.locator("#thread-detail")).to_contain_text("mobile smoke: check the deploy status")
     sent_bubble = frame.locator("#thread-detail .turn-user").last
     expect(sent_bubble).to_be_in_viewport()
-    frame.get_by_role("button", name="Archive").click()
+    frame.get_by_role("button", name="Archive", exact=True).click()
     expect(frame.locator(".thread-title")).to_have_text("New thread")
 
 
@@ -472,19 +566,21 @@ def _generate_thread_id() -> str:
     return f"thread-{max(numbers, default=0) + 1}"
 
 
-def _list_threads(host_api: HostApi) -> list[dict[str, Any]]:
+def _list_threads(host_api: HostApi, *, archived: bool = False) -> list[dict[str, Any]]:
     """Mirror the real backend: one bulk host summaries call, shown only for
-    unarchived threads with recorded tasks, with count and active ids taken
+    threads in the requested archive state with recorded tasks, with count and active ids taken
     from the app's own recorded tasks (never the host's raw totals)."""
     recorded: dict[str, set[str]] = {}
     for task_id, thread_id in AGENT_CHAT_TASK_IDS.items():
         thread = AGENT_CHAT_THREADS.get(thread_id)
-        if thread is not None and not thread["archived"]:
+        if thread is not None and thread["archived"] == archived:
             recorded.setdefault(thread_id, set()).add(task_id)
     summaries = host_api("GET", "/v1/threads", {}, None)["threads"]
     threads = [
         {
             **summary,
+            "name": AGENT_CHAT_THREADS[summary["thread_id"]]["name"],
+            "archived": archived,
             "task_count": len(recorded[summary["thread_id"]]),
             "active_tasks": [
                 task for task in summary["active_tasks"] if task["task_id"] in recorded[summary["thread_id"]]

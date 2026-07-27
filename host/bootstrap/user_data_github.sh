@@ -33,12 +33,21 @@ cat > /tmp/kern_payload.json <<'KERN_PAYLOAD_EOF'
 KERN_PAYLOAD_EOF
 chmod 600 /tmp/kern_payload.json
 
+# The apt-daily/apt-daily-upgrade timers fire right after first boot and hold
+# the apt/dpkg locks while downloading pending updates; stop them so the
+# install below cannot stall behind them. The fetched bootstrap restarts them
+# once its own apt work is done (it is always this same version: the CLI
+# refuses a pin whose VERSION differs from its own).
+systemctl stop apt-daily.timer apt-daily-upgrade.timer
+systemctl stop apt-daily.service apt-daily-upgrade.service
+
 # The lifecycle CLI already proved the pinned commit exists and is readable
 # before launching this instance, so failures below are transient network or
 # GitHub availability issues. Retry for an extended window (roughly half an
 # hour each) so an outage delays provisioning instead of failing it.
 for attempt in $(seq 1 60); do
-  if apt-get update -q && apt-get install -y -q git; then
+  if apt-get -q -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::Languages=none update \
+    && apt-get -q -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::Languages=none install -y git; then
     break
   fi
   if [ "$attempt" = 60 ]; then

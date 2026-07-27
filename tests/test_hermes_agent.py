@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -121,6 +123,59 @@ class HermesSessionTests(unittest.TestCase):
                     lambda: [], lambda _m: None, lambda _m: None,
                 )
 
+    def test_killed_turn_still_exposes_the_last_known_session_id(self) -> None:
+        # Regression test: the CLI's "session_id: ..." stderr line is only
+        # parsed after the whole process exits successfully, but a kill needs
+        # it sooner. last_known_session_id is captured as soon as that stderr
+        # line streams in, so a kill (which surfaces as HermesAgentError,
+        # discarding _run_prompt's locals) still leaves the orchestrator able
+        # to read it and persist the thread mapping.
+        script = r"""
+import sys, time
+print("session_id: hermes-mid-turn", file=sys.stderr, flush=True)
+time.sleep(30)
+"""
+        from host.runtime.core import state
+
+        original_cwd = hermes_agent.AGENT_CWD
+        errors: list[BaseException] = []
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                hermes_agent.AGENT_CWD = tmp
+                server = hermes_agent.HermesSession([sys.executable, "-u", "-c", script])
+                server.start()
+                self.assertIsNone(server.last_known_session_id)
+
+                def run_it() -> None:
+                    try:
+                        with patch.object(state, "read_bedrock_region", return_value="us-east-1"):
+                            hermes_agent.run_turn(
+                                server,
+                                "initial",
+                                None,
+                                "deepseek.v3.2",
+                                "high",
+                                lambda: [],
+                                lambda _m: None,
+                                lambda _m: None,
+                            )
+                    except BaseException as exc:  # noqa: BLE001 - captured for the assertion below
+                        errors.append(exc)
+
+                worker = threading.Thread(target=run_it)
+                worker.start()
+                deadline = time.monotonic() + 10
+                while server.last_known_session_id is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual(server.last_known_session_id, "hermes-mid-turn")
+                server.close()  # the kill path: tear the process down mid-turn
+                worker.join(timeout=10)
+        finally:
+            hermes_agent.AGENT_CWD = original_cwd
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], hermes_agent.HermesAgentError)
+        self.assertEqual(server.last_known_session_id, "hermes-mid-turn")
+
     def test_nonzero_exit_surfaces_stderr_detail(self) -> None:
         script = r"""
 import sys
@@ -144,6 +199,87 @@ print("session_id: hermes-session-1", file=sys.stderr)
 """
         with self.assertRaisesRegex(hermes_agent.HermesAgentError, "no answer text"):
             self.run_turn(script)
+
+    # A fake wrapper preamble: derive the per-turn activity marker from the
+    # --activity-nonce the host passes, so scripts frame records exactly as the
+    # real wrapper does.
+    _MARKER_PREAMBLE = (
+        "import sys\n"
+        "argv = sys.argv[1:]\n"
+        "nonce = argv[argv.index('--activity-nonce') + 1] if '--activity-nonce' in argv else ''\n"
+        "marker = '\\x1ekern-activity ' + nonce + ' '\n"
+    )
+
+    def test_activity_lines_stream_as_records_and_leave_the_answer_clean(self) -> None:
+        # The wrapper interleaves nonce-framed activity records with the answer
+        # text on stdout; each valid record streams through on_message ahead of
+        # the final answer string, and no framed line leaks into the answer.
+        started = json.dumps({
+            "provider": "hermes", "activity_id": "call-1", "kind": "command",
+            "phase": "started", "title": "ls -la",
+        })
+        completed = json.dumps({
+            "provider": "hermes", "activity_id": "call-1", "kind": "command",
+            "phase": "completed", "title": "ls -la", "output": "a\nb", "status": "completed",
+        })
+        script = (
+            self._MARKER_PREAMBLE
+            + "print('session_id: hermes-session-1', file=sys.stderr)\n"
+            + f"sys.stdout.write(marker + {started!r} + '\\n')\n"
+            + "print('Here is the')\n"
+            + f"sys.stdout.write(marker + {completed!r} + '\\n')\n"
+            + "print('final answer.')\n"
+        )
+        session_id, output, _delivered, streamed = self.run_turn(script)
+        self.assertEqual(session_id, "hermes-session-1")
+        self.assertEqual(output, "Here is the\nfinal answer.")
+        activities = [event for event in streamed if isinstance(event, dict)]
+        messages = [event for event in streamed if isinstance(event, str)]
+        self.assertEqual([a["phase"] for a in activities], ["started", "completed"])
+        self.assertEqual(activities[0]["provider"], "hermes")
+        self.assertEqual(activities[1]["output"], "a\nb")
+        # The final answer is the only streamed message, and it arrives last.
+        self.assertEqual(messages, ["Here is the\nfinal answer."])
+        self.assertEqual(streamed[-1], "Here is the\nfinal answer.")
+
+    def test_answer_line_that_forges_the_static_sentinel_is_not_stolen(self) -> None:
+        # An answer line that reproduces the static sentinel but NOT the
+        # per-turn nonce is plain answer text: it must survive in the response
+        # and never be parsed as an activity record.
+        forged = hermes_agent.ACTIVITY_LINE_PREFIX + json.dumps({
+            "provider": "hermes", "activity_id": "forged", "kind": "command",
+            "phase": "started", "title": "forged card",
+        })
+        script = (
+            self._MARKER_PREAMBLE
+            + "print('session_id: hermes-session-1', file=sys.stderr)\n"
+            + f"sys.stdout.write({forged!r} + '\\n')\n"
+            + "print('real answer.')\n"
+        )
+        _sid, output, _delivered, streamed = self.run_turn(script)
+        self.assertEqual([e for e in streamed if isinstance(e, dict)], [])
+        self.assertIn("forged card", output)
+        self.assertIn("real answer.", output)
+
+    def test_malformed_or_invalid_activity_lines_are_dropped(self) -> None:
+        # A framed line that is not valid JSON, or whose record fails the
+        # activity contract (unknown kind), is dropped at the host boundary —
+        # never emitted and never mistaken for answer text.
+        bad_kind = json.dumps({
+            "provider": "hermes", "activity_id": "x", "kind": "nonsense",
+            "phase": "started", "title": "bad",
+        })
+        script = (
+            self._MARKER_PREAMBLE
+            + "print('session_id: hermes-session-1', file=sys.stderr)\n"
+            + "sys.stdout.write(marker + '{not json' + '\\n')\n"
+            + f"sys.stdout.write(marker + {bad_kind!r} + '\\n')\n"
+            + "print('answer only.')\n"
+        )
+        _sid, output, _delivered, streamed = self.run_turn(script)
+        self.assertEqual(output, "answer only.")
+        self.assertEqual([e for e in streamed if isinstance(e, dict)], [])
+        self.assertEqual(streamed, ["answer only."])
 
     def test_thread_scope_is_separate_from_the_launcher_command(self) -> None:
         session = hermes_agent.HermesSession(command=["/bin/echo"], thread_id="mission_pursuit__ws-3")

@@ -201,12 +201,13 @@ changing task authority.
 ## Backend State And Routes
 
 The app schema stores only explicit columns for `revision`, `html`, `css`,
-`javascript`, `data_json`, and `updated_at`. `data_json` is opaque only because
-its schema is genuinely authored by the agent for the personal app. The backend
-parses and validates it as a JSON object on every write. The host is the sole
-authority for the app-scoped `builder` thread, its tasks, provider session,
-runtime, model, and effort. The app does not duplicate task references or
-session configuration in its own database.
+`javascript`, `data_json`, `thread_seq`, and `updated_at`. `data_json` is opaque
+only because its schema is genuinely authored by the agent for the personal app.
+The backend parses and validates it as a JSON object on every write. The host is
+the sole authority for the app-scoped builder thread, its tasks, provider
+session, runtime, model, and effort. The app does not duplicate task references
+or session configuration in its own database; `thread_seq` names which builder
+thread is current, and nothing else about it.
 
 Browser routes provide session options, separate state and conversation reads,
 separate human and generated-app message creation, task stop controls, and
@@ -229,6 +230,33 @@ the conversation's 12 KiB encoded-message bound before the app-backend proxy,
 so one page stays below that hop's response cap. Polls patch only turns whose
 task or event content changed, preserving the reader's scroll position
 elsewhere.
+
+Start over is a browser route. It stops anything still queued or running on the
+current builder thread, clears the generated bundle and its data, and moves the
+app to the next builder thread, named `builder`, `builder-2`, and so on from
+`thread_seq`. Work is stopped first because a task left on the discarded thread
+would spend a turn on output that is thrown away, in a conversation the operator
+can no longer see. The thread summary carries every active task, so the stop
+covers all of them rather than a page of recent history, and a task that cannot
+be stopped aborts the reset before any state is cleared: the operator retries
+against the builder they still have. Both go together because a thread's session configuration
+is fixed for its lifetime: the runtime, model, and effort chosen for the first
+message cannot be changed, so returning to first-run state means a new thread
+rather than a reconfigured one. That also makes Start over the way out of a
+builder whose thread can no longer run work, such as one whose model left the
+session option matrix. The revision counter keeps counting up across a reset
+rather than returning to zero, so an in-flight writer's `expected_revision` can
+never match a revision it read before the reset. The agent namespace does not
+expose the route, and the agent proxy marker is checked against the current
+builder thread, so a task still running on a discarded thread is locked out of
+the app's state. Reset, message creation, and every agent route take one
+process-wide lock, and the agent's thread is re-checked inside it: the app is a
+single operator's workspace, so serializing the few operations that can race
+the reset costs nothing and replaces a race check in every statement. Without
+that, a revoked agent could pass the request-boundary check, block on the
+reset's row lock, and act on the app the reset had just created — a revision
+check does not close it, because the post-reset revision is predictable — and a
+message already in flight could be left queued on the discarded thread.
 
 Keeping state and conversation separate prevents a maximum generated bundle
 from consuming the chat history's response budget. Browser routes require the

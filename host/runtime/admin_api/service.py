@@ -47,7 +47,7 @@ from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
 from host.network_integrations.bedrock.manifest import SUPPORTED_REGIONS as BEDROCK_REGIONS
 from host.network_integrations.github.push_gate import pending as github_pending_push
-from host.session_options import session_config_error
+from host.session_options import offered_session_configs, session_config_error
 # app_backend_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
 # object and reads its attributes only at request time, never during import.
@@ -1116,14 +1116,19 @@ def thread_route(method: str, path: str, query: dict[str, list[str]]) -> Any:
         thread_id = parts[2]
         if not THREAD_ID_RE.fullmatch(thread_id):
             raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
-        _reject_query_keys(query, {"since", "limit", "message_bytes"}, "thread event")
+        _reject_query_keys(query, {"since", "before", "limit", "message_bytes"}, "thread event")
         message_bytes = _optional_bounded_positive_query_int(
             query, "message_bytes", THREAD_TASK_MESSAGE_BYTES_LIMIT
         )
+        since = _optional_non_negative_int(query, "since")
+        before = _optional_non_negative_int(query, "before")
+        if since is not None and before is not None:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "since and before cannot be combined")
         events = state.page_thread_events(
             thread_id,
-            _optional_non_negative_int(query, "since"),
+            since,
             _event_page_limit(query),
+            before=before,
         )
         if message_bytes is not None:
             for event in events:
@@ -2025,6 +2030,16 @@ def _resolve_task_session_config(
     fields = ("agent_runtime", "model", "effort")
     supplied = [field for field in fields if field in body]
     if stored is not None:
+        # A thread's configuration is fixed for its lifetime, so a thread whose
+        # configuration left the option matrix can no longer run a task at all.
+        # It stays readable — its row, tasks, and history are untouched — but a
+        # new task starts a new thread on a configuration the matrix offers.
+        if session_config_error(*stored) is not None:
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "this thread runs a session configuration that is no longer offered;"
+                " select a currently offered model to continue",
+            )
         if not supplied:
             return stored
         if len(supplied) != len(fields):
@@ -2212,7 +2227,9 @@ def _minutes_from_now(minutes: int) -> str:
 
 def initialize_state() -> None:
     """Recover after a restart or reboot: a task that was mid-turn has no
-    worker attached anymore, so fail it rather than leave it running forever.
+    worker attached anymore, so fail it rather than leave it running forever,
+    and a queued task whose session configuration this release no longer offers
+    can never run, so fail it too rather than leave it to be claimed.
     (A pending push interrupted mid-resolve is still pending and the operator
     approves or rejects it again.) The tools service applies the same policy to its own
     interrupted state at its startup: an approval caught mid-execution is
@@ -2221,6 +2238,20 @@ def initialize_state() -> None:
     with state.mutation() as cur:
         for task_id in state.fail_running_tasks(cur, error_message):
             state.append_agent_event(cur, "task.failed", task_id, {"error_message": error_message})
+        # A task can only be queued under a configuration the matrix offered at
+        # the time, and the matrix ships with the release — so this is the one
+        # moment it can go stale, and sweeping here covers every case. Nothing
+        # downstream would catch it: the launcher passes the stored model
+        # through, and a retired value the harness still accepts — an alias like
+        # `opus`, which now resolves to a newer generation — would run and
+        # report success on a model the operator never chose.
+        superseded_message = "the thread's session configuration is no longer offered"
+        for task_id in state.fail_queued_tasks_outside(
+            cur, offered_session_configs(), superseded_message
+        ):
+            state.append_agent_event(
+                cur, "task.failed", task_id, {"error_message": superseded_message}
+            )
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):

@@ -25,7 +25,7 @@ _BASE = "2026-06-08T00:0{}:00Z"
 
 WORKSPACE: dict[str, Any] = {
     "agent_runtime": "claude_code",
-    "model": "opus",
+    "model": "claude-opus-5",
     "effort": "high",
     "thread_seq": 1,
     "goal": "Find asymmetric ideas in US large-cap tech and event-driven prediction markets",

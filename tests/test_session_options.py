@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from host.session_options import SESSION_OPTIONS, public_session_options, session_config_error
+from host.session_options import (
+    SESSION_OPTIONS,
+    public_session_options,
+    recorded_session_config,
+    session_config_error,
+)
 
 
 class SessionOptionsTests(unittest.TestCase):
@@ -16,9 +21,9 @@ class SessionOptionsTests(unittest.TestCase):
                     "gpt-5.6-luna": ("high", "max"),
                 },
                 "claude_code": {
-                    "opus": ("high", "max", "ultracode"),
-                    "fable": ("high", "max", "ultracode"),
-                    "sonnet": ("high", "max", "ultracode"),
+                    "claude-opus-5": ("high", "max", "ultracode"),
+                    "claude-fable-5": ("high", "max", "ultracode"),
+                    "claude-sonnet-5": ("high", "max", "ultracode"),
                 },
                 "hermes": {
                     "deepseek.v3.2": ("high",),
@@ -30,19 +35,47 @@ class SessionOptionsTests(unittest.TestCase):
 
     def test_rejects_cross_runtime_and_luna_ultra_combinations(self) -> None:
         self.assertIsNone(session_config_error("codex", "gpt-5.6-sol", "ultra"))
-        self.assertIsNone(session_config_error("claude_code", "fable", "ultracode"))
+        self.assertIsNone(session_config_error("claude_code", "claude-fable-5", "ultracode"))
         self.assertIsNotNone(session_config_error("codex", "gpt-5.6-luna", "ultra"))
-        self.assertIsNotNone(session_config_error("codex", "opus", "high"))
-        self.assertIsNotNone(session_config_error("claude_code", "fable", "ultra"))
+        self.assertIsNotNone(session_config_error("codex", "claude-opus-5", "high"))
+        self.assertIsNotNone(session_config_error("claude_code", "claude-fable-5", "ultra"))
         self.assertIsNotNone(session_config_error("unsupported", "deepseek.v3.2", "max"))
         self.assertIsNone(session_config_error("hermes", "deepseek.v3.2", "high"))
         self.assertIsNotNone(session_config_error("hermes", "deepseek.v3.2", "max"))
+
+    def test_rejects_the_superseded_claude_code_aliases(self) -> None:
+        # The aliases are no longer offered, so they cannot start a thread or
+        # run new work on one.
+        for alias in ("opus", "fable", "sonnet"):
+            self.assertIsNotNone(session_config_error("claude_code", alias, "high"))
+
+    def test_recorded_config_accepts_any_model_and_checks_only_the_shape(self) -> None:
+        # The read path: a recorded configuration may predate the matrix, so
+        # history stays readable whatever it names.
+        self.assertEqual(
+            recorded_session_config({"agent_runtime": "claude_code", "model": "opus", "effort": "high"}),
+            ("claude_code", "opus", "high"),
+        )
+        self.assertEqual(
+            recorded_session_config(
+                {"agent_runtime": "retired_runtime", "model": "retired-model", "effort": "retired"}
+            ),
+            ("retired_runtime", "retired-model", "retired"),
+        )
+        for payload in (
+            {},
+            {"agent_runtime": "claude_code", "model": "claude-opus-5"},
+            {"agent_runtime": "claude_code", "model": "", "effort": "high"},
+            {"agent_runtime": "claude_code", "model": 5, "effort": "high"},
+        ):
+            with self.subTest(payload=payload):
+                self.assertIsNone(recorded_session_config(payload))
 
     def test_public_options_are_json_facing_copies(self) -> None:
         options = public_session_options()
         self.assertEqual(options["codex"]["gpt-5.6-luna"], ["high", "max"])
         self.assertEqual(
-            options["claude_code"]["fable"],
+            options["claude_code"]["claude-fable-5"],
             ["high", "max", "ultracode"],
         )
         options["codex"]["gpt-5.6-luna"].append("invalid")

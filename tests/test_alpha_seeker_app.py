@@ -37,7 +37,7 @@ def _load_alpha_seeker_backend() -> Any:
 
 alpha = _load_alpha_seeker_backend()
 
-CLAUDE_SETTINGS = {"agent_runtime": "claude_code", "model": "opus", "effort": "high"}
+CLAUDE_SETTINGS = {"agent_runtime": "claude_code", "model": "claude-opus-5", "effort": "high"}
 
 
 class AlphaManifestTests(unittest.TestCase):

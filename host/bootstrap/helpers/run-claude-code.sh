@@ -27,7 +27,7 @@ case "${1:-}" in
 esac
 shift
 
-# Claude Code 2.1.206 classifies the account-limit fetch behind `/usage` as
+# Claude Code 2.1.220 classifies the account-limit fetch behind `/usage` as
 # nonessential traffic. Suppressing that traffic makes the command exit zero
 # while omitting every usage window, which leaves the admin UI with no fresh
 # snapshot. Keep telemetry/feedback/auto-update suppression for agent and auth

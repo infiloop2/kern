@@ -115,6 +115,12 @@ class CodexAppServer:
         # separate from the task's user input and applied when a provider
         # thread is created as subordinate developer instructions.
         self.app_instructions: str | None = None
+        # run_turn sets this as soon as the Codex threadId for this turn is
+        # known — well before turn/start, let alone turn/completed — so a
+        # kill (which surfaces run_turn's call()/read_message() as an
+        # exception, discarding its locals) still leaves the orchestrator
+        # able to read it and persist the thread mapping.
+        self.last_known_session_id: str | None = None
         # Task turns run inside a systemd scope named after the host thread:
         # the helper consumes this pair and turns it into systemd-run --unit,
         # which lets the agent-app service derive an app from the trusted
@@ -682,6 +688,7 @@ def run_turn(
     else:
         thread = _start_thread(server, model)
     thread_id = str(thread["id"])
+    server.last_known_session_id = thread_id
     turn = server.call(
         "turn/start",
         {

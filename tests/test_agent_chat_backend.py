@@ -39,9 +39,9 @@ class AgentChatBackendTests(unittest.TestCase):
                         "gpt-5.6-luna": ["high", "max"],
                     },
                     "claude_code": {
-                        "opus": ["high", "max", "ultracode"],
-                        "fable": ["high", "max", "ultracode"],
-                        "sonnet": ["high", "max", "ultracode"],
+                        "claude-opus-5": ["high", "max", "ultracode"],
+                        "claude-fable-5": ["high", "max", "ultracode"],
+                        "claude-sonnet-5": ["high", "max", "ultracode"],
                     },
                     "hermes": {
                         "deepseek.v3.2": ["high"],
@@ -139,9 +139,9 @@ class AgentChatBackendTests(unittest.TestCase):
         # no recorded task (also absent). Both must stay out of the index even
         # though the host still returns summaries for them.
         cursor.fetchall.return_value = [
-            ("thread-1", "task_9"),
-            ("thread-1", "task_8"),
-            ("thread-2", "task_3"),
+            ("thread-1", "task_9", "Customer launch"),
+            ("thread-1", "task_8", "Customer launch"),
+            ("thread-2", "task_3", "thread-2"),
         ]
         summaries = {
             "threads": [
@@ -171,7 +171,7 @@ class AgentChatBackendTests(unittest.TestCase):
                 {
                     "thread_id": "thread-2",
                     "agent_runtime": "claude_code",
-                    "model": "opus",
+                    "model": "claude-opus-5",
                     "effort": "max",
                     "last_used_at": "2026-07-17T09:00:00Z",
                     "task_count": 1,
@@ -193,6 +193,65 @@ class AgentChatBackendTests(unittest.TestCase):
         # orphaned active task is dropped.
         self.assertEqual(first["task_count"], 2)
         self.assertEqual(first["active_tasks"], [{"task_id": "task_9", "status": "running"}])
+        self.assertEqual(first["name"], "Customer launch")
+        self.assertFalse(first["archived"])
+
+    def test_list_app_threads_can_select_archived_threads(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchall.return_value = [("thread-1", "task_1", "thread-1")]
+        summaries = {
+            "threads": [{
+                "thread_id": "thread-1",
+                "agent_runtime": "codex",
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "last_used_at": "2026-07-17T10:00:00Z",
+                "task_count": 1,
+                "active_tasks": [],
+            }]
+        }
+        with (
+            patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction),
+            patch("host.apps.agent_chat.backend.call_admin_api", return_value=summaries),
+        ):
+            response = backend.list_app_threads(archived=True)
+
+        self.assertTrue(response["threads"][0]["archived"])
+        archived_query = next(
+            item for item in cursor.execute.call_args_list
+            if "WHERE threads.archived" in item.args[0]
+        )
+        self.assertEqual(archived_query.args[1], (True,))
+
+    def test_list_app_threads_keeps_threads_on_a_superseded_model(self) -> None:
+        # A thread started under an earlier catalog stays listed with the model
+        # it recorded; the option matrix only gates what may be created.
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchall.return_value = [("thread-1", "task_1", "thread-1")]
+        summaries = {
+            "threads": [
+                {
+                    "thread_id": "thread-1",
+                    "agent_runtime": "claude_code",
+                    "model": "opus",
+                    "effort": "high",
+                    "last_used_at": "2026-07-17T10:00:00Z",
+                    "task_count": 1,
+                    "active_tasks": [],
+                }
+            ]
+        }
+        with (
+            patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction),
+            patch("host.apps.agent_chat.backend.call_admin_api", return_value=summaries),
+        ):
+            response = backend.list_app_threads()
+
+        self.assertEqual(response["threads"][0]["model"], "opus")
 
     def test_list_app_thread_events_proxies_with_since(self) -> None:
         events = {"events": [{"seq": 5, "task_id": "task_1", "event_type": "task.message"}]}
@@ -209,6 +268,36 @@ class AgentChatBackendTests(unittest.TestCase):
             f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}&since=2",
         )
         self.assertEqual(response, events)
+
+    def test_list_app_thread_events_opens_latest_and_pages_before(self) -> None:
+        events = {"events": [{"seq": 5, "task_id": "task_1", "event_type": "task.message"}]}
+        with (
+            patch("host.apps.agent_chat.backend._require_app_thread"),
+            patch("host.apps.agent_chat.backend.call_admin_api", return_value=events) as admin_call,
+        ):
+            self.assertEqual(backend.list_app_thread_events("thread-1", {}), events)
+            self.assertEqual(
+                backend.list_app_thread_events("thread-1", {"before": ["5"]}),
+                events,
+            )
+
+        self.assertEqual(
+            admin_call.call_args_list,
+            [
+                call(
+                    "GET",
+                    "/v1/threads/thread-1/events"
+                    f"?limit={backend.THREAD_EVENT_PAGE}"
+                    f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}",
+                ),
+                call(
+                    "GET",
+                    "/v1/threads/thread-1/events"
+                    f"?limit={backend.THREAD_EVENT_PAGE}"
+                    f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}&before=5",
+                ),
+            ],
+        )
 
     def test_list_app_thread_tasks_bounds_duplicate_task_messages(self) -> None:
         tasks = {"tasks": [{"task_id": "task_1", "input_message": "short"}]}
@@ -333,6 +422,86 @@ class AgentChatBackendTests(unittest.TestCase):
             backend.list_app_thread_events("thread-1", {"since": ["nope"]})
 
         self.assertEqual(error.exception.status, 400)
+
+    def test_list_app_thread_events_rejects_combined_cursors(self) -> None:
+        with (
+            patch("host.apps.agent_chat.backend._require_app_thread"),
+            self.assertRaises(backend.AppError) as error,
+        ):
+            backend.list_app_thread_events(
+                "thread-1",
+                {"since": ["2"], "before": ["5"]},
+            )
+
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+
+    def test_archive_state_can_be_reversed(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchone.side_effect = [
+            ("thread-1", True),
+            ("thread-1", False),
+        ]
+        with patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction):
+            self.assertEqual(
+                backend.archive_app_thread("thread-1"),
+                {"thread_id": "thread-1", "archived": True},
+            )
+            self.assertEqual(
+                backend.unarchive_app_thread("thread-1"),
+                {"thread_id": "thread-1", "archived": False},
+            )
+
+        update_calls = [
+            item for item in cursor.execute.call_args_list
+            if "UPDATE threads SET archived" in item.args[0]
+        ]
+        self.assertEqual(
+            [item.args[1] for item in update_calls],
+            [(True, "thread-1"), (False, "thread-1")],
+        )
+
+    def test_thread_can_be_renamed_without_changing_its_id(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchone.return_value = ("thread-1", "Release planning")
+        with patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction):
+            self.assertEqual(
+                backend.rename_app_thread("thread-1", {"name": "  Release planning  "}),
+                {"thread_id": "thread-1", "name": "Release planning"},
+            )
+
+        update = next(
+            item for item in cursor.execute.call_args_list
+            if "UPDATE threads SET name" in item.args[0]
+        )
+        self.assertEqual(update.args[1], ("Release planning", "thread-1"))
+
+    def test_thread_name_must_be_nonempty_and_bounded(self) -> None:
+        for name in ("   ", "x" * (backend.THREAD_NAME_MAX_CHARS + 1)):
+            with self.subTest(name=name), self.assertRaises(backend.AppError) as error:
+                backend.rename_app_thread("thread-1", {"name": name})
+            self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+
+    def test_recording_a_task_cannot_revive_an_archived_thread(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchone.return_value = (True,)
+        with (
+            patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction),
+            self.assertRaises(backend.AppError) as error,
+        ):
+            backend._record_app_task("thread-1", "task_2")
+
+        self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("read-only", error.exception.message)
+        self.assertFalse(any(
+            "INSERT INTO thread_tasks" in item.args[0]
+            for item in cursor.execute.call_args_list
+        ))
 
     def test_unknown_app_thread_error_comes_from_the_host(self) -> None:
         with (

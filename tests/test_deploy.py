@@ -1254,6 +1254,15 @@ class DeployUnitTests(unittest.TestCase):
         # extended window instead of bricking the instance.
         self.assertEqual(user_data.count("for attempt in $(seq 1 60); do"), 2)
         self.assertIn("sleep 30", user_data)
+        # The first-boot apt timers are stopped before the git install (they
+        # hold the dpkg lock for unbounded archive downloads otherwise); the
+        # same-version bootstrap restarts them after its own apt work.
+        self.assertIn("systemctl stop apt-daily.timer apt-daily-upgrade.timer", user_data)
+        self.assertNotIn("systemctl start apt-daily.timer", user_data)
+        self.assertLess(
+            user_data.index("systemctl stop apt-daily.timer"),
+            user_data.index("apt-get -q -o DPkg::Lock::Timeout=300"),
+        )
         self.assertIn("useradd --create-home --shell /bin/bash kern-operator", user_data)
         self.assertIn("gpasswd -d ubuntu sudo", user_data)
         # The host receives only the password hash, and no deploy key exists
@@ -1393,6 +1402,7 @@ class DeployUnitTests(unittest.TestCase):
 
         # Pinned sha: the fetched version is shown and confirmed.
         with patch("host.cli.lifecycle.urllib.request.urlopen", return_value=_FakeResponse(b"0.36.0\n")) as urlopen, \
+                patch("host.cli.lifecycle.repo_version", return_value="0.36.0"), \
                 patch("builtins.input", return_value="y"), \
                 patch("sys.stderr", _StringOutput()) as stderr:
             self.assertEqual(deploy._resolve_github_pin(sha), (sha, "0.36.0"))
@@ -1410,12 +1420,14 @@ class DeployUnitTests(unittest.TestCase):
             return _FakeResponse(b"0.36.0\n")
 
         with patch("host.cli.lifecycle.urllib.request.urlopen", side_effect=fake_urlopen), \
+                patch("host.cli.lifecycle.repo_version", return_value="0.36.0"), \
                 patch("builtins.input", return_value="y"), \
                 patch("sys.stderr", _StringOutput()):
             self.assertEqual(deploy._resolve_github_pin(""), (sha, "0.36.0"))
 
         # Decline aborts before anything is touched.
         with patch("host.cli.lifecycle.urllib.request.urlopen", return_value=_FakeResponse(b"0.36.0\n")), \
+                patch("host.cli.lifecycle.repo_version", return_value="0.36.0"), \
                 patch("builtins.input", return_value="n"), \
                 patch("sys.stderr", _StringOutput()):
             with self.assertRaisesRegex(ConfigError, "aborted"):
@@ -1423,15 +1435,19 @@ class DeployUnitTests(unittest.TestCase):
 
         # No terminal points at piping the confirmation.
         with patch("host.cli.lifecycle.urllib.request.urlopen", return_value=_FakeResponse(b"0.36.0\n")), \
+                patch("host.cli.lifecycle.repo_version", return_value="0.36.0"), \
                 patch("builtins.input", side_effect=EOFError()), \
                 patch("sys.stderr", _StringOutput()):
             with self.assertRaisesRegex(ConfigError, "pipe 'y' into stdin"):
                 deploy._resolve_github_pin(sha)
 
-        # Pins older than the first self_provision release fail before
-        # anything is touched instead of failing bootstrap on the host.
-        with patch("host.cli.lifecycle.urllib.request.urlopen", return_value=_FakeResponse(b"0.34.0\n")):
-            with self.assertRaisesRegex(ConfigError, "requires 0.35.0 or newer"):
+        # A pin whose VERSION differs from this CLI's fails before anything
+        # is touched: the user data rendered here and the bootstrap fetched
+        # on the instance must come from one version. Deploying older code
+        # means running that commit's own CLI.
+        with patch("host.cli.lifecycle.urllib.request.urlopen", return_value=_FakeResponse(b"0.34.0\n")), \
+                patch("host.cli.lifecycle.repo_version", return_value="0.36.0"):
+            with self.assertRaisesRegex(ConfigError, "deploy with its CLI"):
                 deploy._resolve_github_pin(sha)
 
         # GitHub failures and garbage content fail closed.
@@ -1602,7 +1618,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("ensure_user postgres \"$POSTGRES_UID\" postgres /var/lib/postgresql", bootstrap)
         self.assertLess(
             bootstrap.index('ensure_user postgres "$POSTGRES_UID"'),
-            bootstrap.index('apt-get install -y -qq "postgresql-${PG_MAJOR}"'),
+            bootstrap.index('apt_get install -y "postgresql-${PG_MAJOR}"'),
         )
         self.assertIn("ensure_group kern-admin \"$KERN_ADMIN_GID\"", bootstrap)
         self.assertIn("ensure_user kern-agent \"$KERN_AGENT_UID\" kern-agent /mnt/kern-agent/agent-home", bootstrap)
@@ -1923,7 +1939,7 @@ class DeployUnitTests(unittest.TestCase):
         # managed config directory must be opened up so the agent can use
         # them, and the deploy verifies the agent can actually run both CLIs.
         self.assertIn("CODEX_CLI_VERSION=0.144.0", bootstrap)
-        self.assertIn("CLAUDE_CODE_VERSION=2.1.206", bootstrap)
+        self.assertIn("CLAUDE_CODE_VERSION=2.1.220", bootstrap)
         self.assertIn("HERMES_AGENT_VERSION=0.18.2", bootstrap)
         self.assertIn('"@openai/codex@${CODEX_CLI_VERSION}"', bootstrap)
         self.assertIn('"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"', bootstrap)
@@ -2045,11 +2061,25 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("Slice=kern_app.slice", bootstrap)
         # The unused, world-accessible snapd socket is masked.
         self.assertIn("mask snapd.socket", bootstrap)
-        # Pending security updates are applied during bootstrap.
-        self.assertIn("unattended-upgrade", bootstrap)
+        # Security updates stay off the deploy critical path: the first-boot
+        # apt timers are quiesced while bootstrap runs apt (they hold the
+        # dpkg lock for unbounded archive downloads otherwise), then restarted
+        # so unattended-upgrades patches the host in the background.
+        self.assertIn("systemctl stop apt-daily.timer apt-daily-upgrade.timer", bootstrap)
+        self.assertIn("systemctl start apt-daily.timer apt-daily-upgrade.timer", bootstrap)
+        self.assertIn(" unattended-upgrades ", bootstrap)
+        self.assertNotIn("unattended-upgrade || true", bootstrap)
+        self.assertLess(
+            bootstrap.index("systemctl stop apt-daily.timer"),
+            bootstrap.index("apt_get update"),
+        )
+        self.assertLess(
+            bootstrap.index('apt_get install -y "postgresql-${PG_MAJOR}"'),
+            bootstrap.index("systemctl start apt-daily.timer"),
+        )
         # Node comes from the official tarball, not the bloated apt npm package.
         self.assertIn("nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-", bootstrap)
-        apt_line = next(line for line in bootstrap.splitlines() if "apt-get install" in line)
+        apt_line = next(line for line in bootstrap.splitlines() if "apt_get install" in line)
         self.assertNotIn(" npm", apt_line)
         self.assertNotIn(" nodejs", apt_line)
         # git and gh back the managed GitHub integration; both come from the
@@ -2191,11 +2221,11 @@ class DeployUnitTests(unittest.TestCase):
         # server package installs; the real data directory lives on the
         # durable admin volume, versioned by Postgres major.
         self.assertIn("create_main_cluster = false", bootstrap)
-        self.assertIn('apt-get install -y -qq "postgresql-${PG_MAJOR}"', bootstrap)
+        self.assertIn('apt_get install -y "postgresql-${PG_MAJOR}"', bootstrap)
         self.assertIn("PG_MAJOR=14", bootstrap)
         self.assertLess(
             bootstrap.index("create_main_cluster = false"),
-            bootstrap.index('apt-get install -y -qq "postgresql-${PG_MAJOR}"'),
+            bootstrap.index('apt_get install -y "postgresql-${PG_MAJOR}"'),
         )
         self.assertIn('runuser -u postgres -- "$PG_BIN/initdb" -D "$PGDATA_DIR"', bootstrap)
         # Unix-socket only, peer auth: no TCP listener, admin and superuser
