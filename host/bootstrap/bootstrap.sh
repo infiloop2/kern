@@ -7,7 +7,7 @@ umask 077
 cd /
 NODE_VERSION=22.12.0
 CODEX_CLI_VERSION=0.144.0
-CLAUDE_CODE_VERSION=2.1.206
+CLAUDE_CODE_VERSION=2.1.220
 HERMES_AGENT_VERSION=0.18.2
 # hermes-agent requires Python 3.11-3.13; the base image ships 3.10, so uv
 # provisions a standalone interpreter for its dedicated venv.
@@ -382,30 +382,50 @@ chmod -R a+rX /opt/kern-host
 chmod 644 /opt/kern-host/VERSION
 }
 
-# Base OS packages and security updates.
+# apt-get with a bounded lock wait and download retries. -q keeps one line per
+# action, so a slow mirror or lock wait is visible in the deploy log instead of
+# indistinguishable from a hang; the lock timeout turns leftover contention
+# into a loud failure after five minutes instead of a silent unbounded wait.
+# Languages=none skips the ~8 MB of Translation indexes apt fetches by default
+# (2026-07-27 a degraded regional mirror priced every critical-path megabyte).
+apt_get() {
+  apt-get -q -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::Languages=none "$@"
+}
+
+# Base OS packages.
 install_system_packages() {
 echo "== installing system packages =="
+# First boot races the AMI's apt-daily/apt-daily-upgrade timers: both are
+# persistent, so on a fresh instance they fire within seconds of launch and
+# hold the apt/dpkg locks while downloading the pending security batch, and
+# the installs below wait on the lock (2026-07-27: two smokes spent 13 minutes
+# in this normally 40-second phase). Stop them for the duration of this
+# function; they are restarted below and patch the host in the background off
+# the deploy critical path.
+systemctl stop apt-daily.timer apt-daily-upgrade.timer
+systemctl stop apt-daily.service apt-daily-upgrade.service
+
 # Node.js (and npm) come from the official tarball below, not apt: the Ubuntu
-# npm package pulls in hundreds of node-* dependencies. -qq keeps the output to
-# warnings and errors.
-apt-get update -qq
-apt-get install -y -qq ca-certificates curl gh git jq nftables openssl python3 python3-venv sudo unattended-upgrades xz-utils
+# npm package pulls in hundreds of node-* dependencies.
+apt_get update
+apt_get install -y ca-certificates curl gh git jq nftables openssl python3 python3-venv sudo unattended-upgrades xz-utils
 
 # PostgreSQL for admin state. postgresql-common is installed first so its
 # default-cluster creation can be disabled: the data directory must live on
 # the durable admin volume (set up below), not on this replaceable root volume.
-apt-get install -y -qq postgresql-common
+apt_get install -y postgresql-common
 sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf
-apt-get install -y -qq "postgresql-${PG_MAJOR}"
+apt_get install -y "postgresql-${PG_MAJOR}"
 # The packaged umbrella unit only manages clusters registered with the Debian
 # tooling; the Kern cluster runs under its own unit below.
 systemctl disable --now postgresql.service >/dev/null 2>&1 || true
 
-# Apply pending security updates now to close the window before the
-# unattended-upgrades timer would run on its own. A new kernel takes effect on
-# the next reboot; userspace (setuid binaries, libraries) is patched immediately.
-echo "== applying security updates =="
-unattended-upgrade || true
+# Security updates are deliberately not applied inline: the pending batch is
+# unbounded (it grows with the age of the current Canonical AMI) and would put
+# archive download time on the deploy critical path. The restarted timers run
+# unattended-upgrades in the background shortly after boot instead, so a fresh
+# host is patched within the hour without delaying the deploy.
+systemctl start apt-daily.timer apt-daily-upgrade.timer
 }
 
 setup_postgres() {

@@ -293,7 +293,7 @@ class StateStorageTests(unittest.TestCase):
         activity = next(event for event in task_page if event["event_type"] == "task.activity")
         self.assertEqual(activity["payload"]["activity"]["output"], "done")
 
-    def test_thread_events_span_all_tasks_oldest_first_and_page_by_since(self) -> None:
+    def test_thread_events_open_at_latest_and_page_in_both_directions(self) -> None:
         with state.mutation() as cur:
             insert_task(cur, make_task(1, thread_id="chat"))
             insert_task(cur, make_task(2, thread_id="chat"))
@@ -302,16 +302,20 @@ class StateStorageTests(unittest.TestCase):
             state.append_agent_event(cur, "task.message", "task_2", {"message": "b", "source": "agent"})
             state.append_agent_event(cur, "task.message", "task_3", {"message": "c", "source": "agent"})
             state.append_agent_event(cur, "task.message", "task_1", {"message": "d", "source": "agent"})
-        page = state.page_thread_events("chat", None, 100)
-        # Both of the thread's tasks, oldest-first, and never the other thread's.
-        self.assertEqual([event["payload"]["message"] for event in page], ["a", "b", "d"])
-        seqs = [event["seq"] for event in page]
+        all_events = state.page_thread_events("chat", None, 100)
+        # Both of the thread's tasks, chronological, and never the other thread's.
+        self.assertEqual([event["payload"]["message"] for event in all_events], ["a", "b", "d"])
+        seqs = [event["seq"] for event in all_events]
         self.assertEqual(seqs, sorted(seqs))
+        # An uncursored bounded page opens at the newest events.
+        latest = state.page_thread_events("chat", None, 2)
+        self.assertEqual([event["payload"]["message"] for event in latest], ["b", "d"])
+        # A before cursor walks backward while preserving chronological output.
+        older = state.page_thread_events("chat", None, 2, before=latest[0]["seq"])
+        self.assertEqual([event["payload"]["message"] for event in older], ["a"])
         # A since cursor returns only newer events.
         rest = state.page_thread_events("chat", seqs[0], 100)
         self.assertEqual([event["payload"]["message"] for event in rest], ["b", "d"])
-        # limit caps the page.
-        self.assertEqual(len(state.page_thread_events("chat", None, 1)), 1)
 
     def test_prune_keeps_the_newest_finished_tasks_and_sessions(self) -> None:
         with state.mutation() as cur:

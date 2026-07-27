@@ -66,7 +66,7 @@ def _provision_over_ssh(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    _log("running bootstrap: apt + security updates, Postgres + schema migrations, npm,")
+    _log("running bootstrap: apt, Postgres + schema migrations, npm,")
     _log("agent CLIs, services. This takes several minutes; the host's own output streams below.")
     print("-" * 70, file=sys.stderr, flush=True)
     _run_bootstrap(ssh, target)

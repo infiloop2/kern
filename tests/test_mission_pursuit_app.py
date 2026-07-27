@@ -52,7 +52,7 @@ CODEX_SETTINGS = {
 }
 CLAUDE_SETTINGS = {
     "agent_runtime": "claude_code",
-    "model": "opus",
+    "model": "claude-opus-5",
     "effort": "max",
 }
 
@@ -1152,7 +1152,7 @@ class MissionPursuitDbTests(unittest.TestCase):
         result = backend.update_agent_settings(CLAUDE_SETTINGS)
         self.assertEqual(result["thread_seq"], 2)
         self.assertEqual(result["agent_runtime"], "claude_code")
-        self.assertEqual(result["model"], "opus")
+        self.assertEqual(result["model"], "claude-opus-5")
         self.assertEqual(result["effort"], "max")
         backend.send_message({"content": "after switch"})
         self.host_responses["POST /v1/tasks"] = {"task_id": "task_1", "thread_id": "ws-2", "agent_runtime": "claude_code", "status": "queued"}
@@ -1160,7 +1160,7 @@ class MissionPursuitDbTests(unittest.TestCase):
         _, _, body = self.host_calls[-1]
         self.assertEqual(body["thread_id"], "ws-2")
         self.assertEqual(body["agent_runtime"], "claude_code")
-        self.assertEqual(body["model"], "opus")
+        self.assertEqual(body["model"], "claude-opus-5")
         self.assertEqual(body["effort"], "max")
         self.assertIn("== Recent conversation ==\nHuman: first", body["input_message"])
         self.assertIn("== Message from the human ==\nafter switch", body["input_message"])

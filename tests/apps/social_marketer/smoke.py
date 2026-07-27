@@ -38,7 +38,7 @@ from host.session_options import public_session_options, session_config_error  #
 
 WORKSPACE: dict[str, Any] = {
     "agent_runtime": "claude_code",
-    "model": "opus",
+    "model": "claude-opus-5",
     "effort": "high",
     "thread_seq": 1,
     "goal": "Grow Acme's launch audience across X and LinkedIn",

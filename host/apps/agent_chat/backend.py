@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from host.constants import APP_BACKEND_ADMIN_SOCKET_PATH, LOOPBACK, MAX_REQUEST_BODY_BYTES as ADMIN_MAX_REQUEST_BODY_BYTES
 from host.runtime.core import db
-from host.session_options import public_session_options, session_config_error
+from host.session_options import public_session_options, recorded_session_config, session_config_error
 
 
 HOST = os.environ.get("KERN_APP_HOST", LOOPBACK)
@@ -75,12 +75,28 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and path == "/session-options":
                 response = {"session_options": public_session_options()}
             elif method == "GET" and path == "/threads":
-                response = list_app_threads()
+                query = parse_qs(urlparse(self.path).query)
+                unexpected = sorted(set(query) - {"archived"})
+                if unexpected:
+                    raise AppError(
+                        HTTPStatus.BAD_REQUEST,
+                        f"unsupported thread query parameter: {unexpected[0]}",
+                    )
+                archived_values = query.get("archived") or []
+                archived = False
+                if archived_values:
+                    if archived_values[0] not in {"true", "false"}:
+                        raise AppError(HTTPStatus.BAD_REQUEST, "archived must be true or false")
+                    archived = archived_values[0] == "true"
+                response = list_app_threads(archived=archived)
             elif method == "GET" and path.startswith("/threads/") and path.endswith("/tasks"):
                 parts = path.strip("/").split("/")
                 if len(parts) != 3:
                     raise AppError(HTTPStatus.NOT_FOUND, "route not found")
-                response = list_app_thread_tasks(_path_segment(parts[1]))
+                response = list_app_thread_tasks(
+                    _path_segment(parts[1]),
+                    include_archived=True,
+                )
             elif method == "GET" and path.startswith("/threads/") and path.endswith("/events"):
                 parts = path.strip("/").split("/")
                 if len(parts) != 3:
@@ -88,11 +104,27 @@ class Handler(BaseHTTPRequestHandler):
                 response = list_app_thread_events(
                     _path_segment(parts[1]), parse_qs(urlparse(self.path).query)
                 )
-            elif method == "POST" and path.startswith("/threads/") and path.endswith("/archive"):
+            elif (
+                method == "POST"
+                and path.startswith("/threads/")
+                and (path.endswith("/archive") or path.endswith("/unarchive"))
+            ):
                 parts = path.strip("/").split("/")
                 if len(parts) != 3:
                     raise AppError(HTTPStatus.NOT_FOUND, "route not found")
-                response = {"thread": archive_app_thread(_path_segment(parts[1]))}
+                response = {
+                    "thread": set_app_thread_archived(
+                        _path_segment(parts[1]),
+                        archived=parts[2] == "archive",
+                    )
+                }
+            elif method == "PUT" and path.startswith("/threads/") and path.endswith("/name"):
+                parts = path.strip("/").split("/")
+                if len(parts) != 3:
+                    raise AppError(HTTPStatus.NOT_FOUND, "route not found")
+                response = {
+                    "thread": rename_app_thread(_path_segment(parts[1]), body)
+                }
             elif method == "POST" and path == "/messages":
                 response = send_app_message(body)
             elif method == "POST" and path.startswith("/tasks/"):
@@ -140,7 +172,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def list_app_threads() -> dict[str, Any]:
+def list_app_threads(*, archived: bool = False) -> dict[str, Any]:
     """The thread index: one bulk host call joined against the app's own
     thread bookkeeping. The host's app-scoped `GET /v1/threads` returns
     session config and live status for exactly this app's threads, so the
@@ -153,13 +185,18 @@ def list_app_threads() -> dict[str, Any]:
     `_record_app_task` failed) never inflates a count or resurrects a thread
     the app never finished recording. A reservation that never got a task has
     no `thread_tasks` rows and stays invisible."""
-    recorded = _recorded_task_ids_by_thread()
+    recorded = _recorded_threads(archived=archived)
     response = call_admin_api("GET", "/v1/threads")
     summaries = response.get("threads")
     if not isinstance(summaries, list):
         raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread list")
     app_threads = [
-        _app_thread_summary(summary, recorded[summary["thread_id"]])
+        _app_thread_summary(
+            summary,
+            recorded[summary["thread_id"]][0],
+            name=recorded[summary["thread_id"]][1],
+            archived=archived,
+        )
         for summary in summaries
         if isinstance(summary, dict) and summary.get("thread_id") in recorded
     ]
@@ -167,33 +204,51 @@ def list_app_threads() -> dict[str, Any]:
     return {"threads": app_threads}
 
 
-def _recorded_task_ids_by_thread() -> dict[str, set[str]]:
-    """This app's unarchived threads mapped to their recorded task ids. Only
-    threads with at least one recorded task appear, matching the index rule."""
+def _recorded_threads(*, archived: bool) -> dict[str, tuple[set[str], str]]:
+    """Threads in one archive state mapped to recorded task ids and names.
+
+    Only threads with at least one recorded task appear, matching the index
+    rule. Threads without a custom name keep showing their stable host id.
+    """
     with db.transaction() as cur:
         _set_search_path(cur)
         cur.execute(
-            "SELECT thread_tasks.thread_id, thread_tasks.task_id"
+            "SELECT thread_tasks.thread_id, thread_tasks.task_id,"
+            " COALESCE(threads.name, thread_tasks.thread_id)"
             " FROM thread_tasks JOIN threads ON threads.thread_id = thread_tasks.thread_id"
-            " WHERE threads.archived = FALSE"
+            " WHERE threads.archived = %s",
+            (archived,),
         )
         rows = cur.fetchall()
-    recorded: dict[str, set[str]] = {}
-    for thread_id, task_id in rows:
-        recorded.setdefault(thread_id, set()).add(task_id)
-    return recorded
+    task_ids: dict[str, set[str]] = {}
+    names: dict[str, str] = {}
+    for thread_id, task_id, name in rows:
+        task_ids.setdefault(thread_id, set()).add(task_id)
+        names[thread_id] = name
+    return {
+        thread_id: (ids, names[thread_id])
+        for thread_id, ids in task_ids.items()
+    }
 
 
-def _app_thread_summary(summary: dict[str, Any], recorded_task_ids: set[str]) -> dict[str, Any]:
+def _app_thread_summary(
+    summary: dict[str, Any],
+    recorded_task_ids: set[str],
+    *,
+    name: str,
+    archived: bool,
+) -> dict[str, Any]:
     runtime, model, effort = _host_task_session_config(summary)
     active_tasks = summary.get("active_tasks")
     if not isinstance(active_tasks, list):
         raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread summary")
     return {
         "thread_id": _required_response_text(summary.get("thread_id"), "thread_id"),
+        "name": name,
         "agent_runtime": runtime,
         "model": model,
         "effort": effort,
+        "archived": archived,
         "last_used_at": str(summary.get("last_used_at") or ""),
         # Count and active ids come from the app's recorded tasks, never the
         # host's raw totals, so an orphaned host task cannot inflate them.
@@ -209,8 +264,12 @@ def _app_thread_summary(summary: dict[str, Any], recorded_task_ids: set[str]) ->
     }
 
 
-def list_app_thread_tasks(thread_id: str) -> dict[str, Any]:
-    _require_app_thread(thread_id)
+def list_app_thread_tasks(
+    thread_id: str,
+    *,
+    include_archived: bool = False,
+) -> dict[str, Any]:
+    _require_app_thread(thread_id, include_archived=include_archived)
     known_task_ids = _app_task_ids_for_thread(thread_id)
     response = call_admin_api(
         "GET",
@@ -223,23 +282,32 @@ def list_app_thread_tasks(thread_id: str) -> dict[str, Any]:
 
 
 def list_app_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
-    """The thread's full event stream, oldest first, forward-paged by ``since``.
+    """One chronological page of the thread's event stream.
 
-    Every event under the app-scoped thread comes from a task this app
-    created, so the stream passes through unfiltered; the UI groups events by
-    task and ignores ids it does not know.
+    An uncursored request returns the latest page, ``before`` loads earlier
+    history, and ``since`` keeps a loaded tail current. Every event under the
+    app-scoped thread comes from a task this app created, so the stream passes
+    through unfiltered; the UI groups events by task and ignores ids it does
+    not know.
     """
-    _require_app_thread(thread_id)
+    _require_app_thread(thread_id, include_archived=True)
     since_values = query.get("since") or []
+    before_values = query.get("before") or []
+    if since_values and before_values:
+        raise AppError(HTTPStatus.BAD_REQUEST, "since and before cannot be combined")
     path = (
         f"/v1/threads/{quote(thread_id, safe='')}/events"
         f"?limit={THREAD_EVENT_PAGE}&message_bytes={THREAD_EVENT_MESSAGE_BYTES}"
     )
-    if since_values:
-        since = since_values[0]
-        if not since.isdigit():
-            raise AppError(HTTPStatus.BAD_REQUEST, "since must be a non-negative integer")
-        path += f"&since={since}"
+    cursor_name = "since" if since_values else "before" if before_values else None
+    if cursor_name is not None:
+        cursor = (since_values if cursor_name == "since" else before_values)[0]
+        if not cursor.isdigit():
+            raise AppError(
+                HTTPStatus.BAD_REQUEST,
+                f"{cursor_name} must be a non-negative integer",
+            )
+        path += f"&{cursor_name}={cursor}"
     response = call_admin_api("GET", path)
     events = response.get("events")
     if not isinstance(events, list):
@@ -344,13 +412,13 @@ def _cancel_orphaned_host_task(task_id: str) -> None:
             continue
 
 
-def archive_app_thread(thread_id: str) -> dict[str, Any]:
+def set_app_thread_archived(thread_id: str, *, archived: bool) -> dict[str, Any]:
     with db.transaction() as cur:
         _set_search_path(cur)
         cur.execute(
-            "UPDATE threads SET archived = TRUE WHERE thread_id = %s"
+            "UPDATE threads SET archived = %s WHERE thread_id = %s"
             " RETURNING thread_id, archived",
-            (thread_id,),
+            (archived, thread_id),
         )
         row = cur.fetchone()
     if not row:
@@ -359,6 +427,39 @@ def archive_app_thread(thread_id: str) -> dict[str, Any]:
         "thread_id": row[0],
         "archived": row[1],
     }
+
+
+def archive_app_thread(thread_id: str) -> dict[str, Any]:
+    return set_app_thread_archived(thread_id, archived=True)
+
+
+def unarchive_app_thread(thread_id: str) -> dict[str, Any]:
+    return set_app_thread_archived(thread_id, archived=False)
+
+
+THREAD_NAME_MAX_CHARS = 100
+
+
+def rename_app_thread(thread_id: str, body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise AppError(HTTPStatus.BAD_REQUEST, "rename request must be an object")
+    name = _required_text(body.get("name"), "name")
+    if len(name) > THREAD_NAME_MAX_CHARS:
+        raise AppError(
+            HTTPStatus.BAD_REQUEST,
+            f"name must be at most {THREAD_NAME_MAX_CHARS} characters",
+        )
+    with db.transaction() as cur:
+        _set_search_path(cur)
+        cur.execute(
+            "UPDATE threads SET name = %s WHERE thread_id = %s"
+            " RETURNING thread_id, name",
+            (name, thread_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise AppError(HTTPStatus.NOT_FOUND, "thread not found")
+    return {"thread_id": row[0], "name": row[1]}
 
 
 THREAD_NAME_RE = re.compile(r"thread-([1-9][0-9]*)")
@@ -403,11 +504,20 @@ def _record_app_task(thread_id: str, task_id: str) -> None:
             """
             INSERT INTO threads (thread_id, archived)
             VALUES (%s, FALSE)
-            ON CONFLICT (thread_id) DO UPDATE SET
-                archived = FALSE
+            ON CONFLICT (thread_id) DO NOTHING
             """,
             (thread_id,),
         )
+        # Serialize against archive/unarchive. If archive won the row lock,
+        # fail the send and let create_app_task cancel the just-created host
+        # task instead of silently reviving a read-only thread.
+        cur.execute(
+            "SELECT archived FROM threads WHERE thread_id = %s FOR UPDATE",
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        if row is None or row[0]:
+            raise AppError(HTTPStatus.CONFLICT, "archived threads are read-only")
         cur.execute(
             """
             INSERT INTO thread_tasks (task_id, thread_id)
@@ -418,10 +528,13 @@ def _record_app_task(thread_id: str, task_id: str) -> None:
         )
 
 
-def _require_app_thread(thread_id: str) -> None:
+def _require_app_thread(thread_id: str, *, include_archived: bool = False) -> None:
     with db.transaction() as cur:
         _set_search_path(cur)
-        cur.execute("SELECT 1 FROM threads WHERE thread_id = %s AND archived = FALSE", (thread_id,))
+        query = "SELECT 1 FROM threads WHERE thread_id = %s"
+        if not include_archived:
+            query += " AND archived = FALSE"
+        cur.execute(query, (thread_id,))
         row = cur.fetchone()
     if not row:
         raise AppError(HTTPStatus.NOT_FOUND, "thread not found")
@@ -449,12 +562,17 @@ def _requested_session_config(body: dict[str, Any]) -> tuple[str, str, str] | No
 
 
 def _host_task_session_config(task: dict[str, Any]) -> tuple[str, str, str]:
-    runtime = _required_response_text(task.get("agent_runtime"), "agent_runtime")
-    model = _required_response_text(task.get("model"), "model")
-    effort = _required_response_text(task.get("effort"), "effort")
-    if session_config_error(runtime, model, effort) is not None:
+    """Read back the session configuration the host recorded for a thread.
+
+    Read path (`host.session_options`): the recorded model may predate the
+    current matrix, so a thread started under an earlier catalog stays listed
+    and openable even though the host refuses to run further tasks on it. The
+    matrix check belongs on the create path (`_requested_session_config`).
+    """
+    config = recorded_session_config(task)
+    if config is None:
         raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid session configuration")
-    return runtime, model, effort
+    return config
 
 
 def _app_task_ids_for_thread(thread_id: str) -> set[str]:
@@ -468,7 +586,12 @@ def _app_task_ids_for_thread(thread_id: str) -> set[str]:
 def _require_app_task(task_id: str) -> None:
     with db.transaction() as cur:
         _set_search_path(cur)
-        cur.execute("SELECT 1 FROM thread_tasks WHERE task_id = %s", (task_id,))
+        cur.execute(
+            "SELECT 1 FROM thread_tasks"
+            " JOIN threads ON threads.thread_id = thread_tasks.thread_id"
+            " WHERE thread_tasks.task_id = %s AND threads.archived = FALSE",
+            (task_id,),
+        )
         row = cur.fetchone()
     if not row:
         raise AppError(HTTPStatus.NOT_FOUND, "task not found")

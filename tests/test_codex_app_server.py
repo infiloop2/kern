@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -959,6 +961,55 @@ class CodexAppServerTests(unittest.TestCase):
         self.assertEqual(thread_id, "thread_1")
         self.assertEqual(messages, ["Hello", "Final answer"])
         self.assertEqual(output, "Final answer")
+
+    def test_killed_turn_still_exposes_the_last_known_thread_id(self) -> None:
+        # Regression test: run_turn's local thread_id is known immediately
+        # after thread/start or thread/resume, long before turn/completed —
+        # but a kill mid-turn used to discard it along with every other local
+        # when the next call()/read_message() surfaces the dead process as an
+        # exception. Exposing it as an attribute lets the orchestrator persist
+        # a killed turn's Codex thread mapping instead of silently starting a
+        # fresh thread on the next task.
+        script = r"""
+import json, sys, time
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg["id"], "result": {}})
+    elif method == "thread/start":
+        send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
+    elif method == "turn/start":
+        send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
+        time.sleep(30)
+"""
+        server = CodexAppServer([sys.executable, "-u", "-c", script])
+        server.start()
+        self.assertIsNone(server.last_known_session_id)
+        errors: list[BaseException] = []
+
+        def run_it() -> None:
+            try:
+                run_turn(server, "do the task", None, "gpt-5.6-sol", "ultra", lambda: [], lambda _m: None, lambda _m: None)
+            except BaseException as exc:  # noqa: BLE001 - captured for the assertion below
+                errors.append(exc)
+
+        worker = threading.Thread(target=run_it)
+        worker.start()
+        deadline = time.monotonic() + 10
+        while server.last_known_session_id is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(server.last_known_session_id, "thread_1")
+        server.close()  # the kill path: tear the process down mid-turn
+        worker.join(timeout=10)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], CodexAppServerError)
+        self.assertEqual(server.last_known_session_id, "thread_1")
 
     def test_codex_thread_items_are_normalized_as_rich_activity(self) -> None:
         started = codex_app_server_module._codex_item_activity(

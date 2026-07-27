@@ -41,6 +41,10 @@ class FakeServer:
         self.started = 0
         self.closed = False
         self.thread_id = thread_id
+        # Mirrors ClaudeCodeSession.last_known_session_id: a test can set this
+        # mid-turn to simulate the provider having already reported a
+        # session_id before the turn ends (e.g. before it gets killed).
+        self.last_known_session_id: str | None = None
         FakeServer.instances.append(self)
 
     def start(self, init_timeout: float = 60.0) -> None:
@@ -56,7 +60,7 @@ class FakeServer:
 def make_task(number: int, thread_id: str, status: str = "queued", runtime: str = "codex") -> dict[str, object]:
     model = {
         "codex": "gpt-5.6-terra",
-        "claude_code": "opus",
+        "claude_code": "claude-opus-5",
         "hermes": "qwen.qwen3-coder-next",
     }[runtime]
     effort = "high"
@@ -152,7 +156,17 @@ class OrchestratorTests(unittest.TestCase):
         """A run_turn replacement: returns ("codex-<user thread>", output),
         optionally blocking until the test releases it."""
 
-        def fake_run_turn(server, input_message, codex_thread_id, model, effort, steers, on_message, steer_delivered):
+        def fake_run_turn(
+            server,
+            input_message,
+            codex_thread_id,
+            model,
+            effort,
+            steers,
+            on_message,
+            steer_delivered,
+            finish_turn=None,
+        ):
             if release is not None:
                 if not release.wait(timeout=10):
                     raise AssertionError("test never released the fake turn")
@@ -311,7 +325,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(
             orchestrator._claim_next_task(),
-            ("task_2", "claude_code", "new-claude", "task 2", "opus", "high", None),
+            ("task_2", "claude_code", "new-claude", "task 2", "claude-opus-5", "high", None),
         )
         self.assertEqual(self.task_status("task_1"), "queued")
         self.assertEqual(self.task_status("task_2"), "running")
@@ -460,13 +474,23 @@ class OrchestratorTests(unittest.TestCase):
     def test_claude_runtime_records_and_resumes_session_id(self) -> None:
         save_attested_claude_account("acct", access_token_sha256="f" * 64)
         task = make_task(1, "chat", runtime="claude_code")
-        task["model"] = "fable"
+        task["model"] = "claude-fable-5"
         task["effort"] = "ultracode"
         self.seed_tasks(task)
         seen: list[str | None] = []
         seen_config: list[tuple[str, str]] = []
 
-        def fake_run_turn(server, input_message, session_id, model, effort, steers, on_message, steer_delivered):
+        def fake_run_turn(
+            server,
+            input_message,
+            session_id,
+            model,
+            effort,
+            steers,
+            on_message,
+            steer_delivered,
+            finish_turn=None,
+        ):
             seen.append(session_id)
             seen_config.append((model, effort))
             return "claude-session-1", "done"
@@ -484,14 +508,14 @@ class OrchestratorTests(unittest.TestCase):
 
         state = load_state()
         self.assertEqual(seen, [None])
-        self.assertEqual(seen_config, [("fable", "ultracode")])
+        self.assertEqual(seen_config, [("claude-fable-5", "ultracode")])
         self.assertEqual(state["claude_sessions"]["chat"]["session_id"], "claude-session-1")
         self.assertNotIn("chat", state["codex_threads"])
 
         completed = make_task(1, "chat", status="completed", runtime="claude_code")
         follow_up = make_task(2, "chat", runtime="claude_code")
         for seeded in (completed, follow_up):
-            seeded["model"] = "fable"
+            seeded["model"] = "claude-fable-5"
             seeded["effort"] = "ultracode"
         self.seed_tasks(completed, follow_up)
         with (
@@ -506,7 +530,59 @@ class OrchestratorTests(unittest.TestCase):
             orchestrator.run_next_task()
 
         self.assertEqual(seen, [None, "claude-session-1"])
-        self.assertEqual(seen_config, [("fable", "ultracode"), ("fable", "ultracode")])
+        self.assertEqual(seen_config, [("claude-fable-5", "ultracode"), ("claude-fable-5", "ultracode")])
+
+    def test_claude_completion_atomically_hands_off_from_steers_to_terminal_state(self) -> None:
+        # The last pending-steer check and RUNNING -> COMPLETED transition
+        # share one mutation. A steer is therefore either returned for
+        # delivery or rejected after completion, never accepted into the gap.
+        from host.runtime.admin_api import service
+        from host.runtime.admin_api.errors import ApiError
+
+        save_attested_claude_account("acct", access_token_sha256="f" * 64)
+        task = make_task(1, "chat", runtime="claude_code")
+        task["steer_messages"] = ["already queued"]
+        self.seed_tasks(task)
+        delivered: list[str] = []
+
+        def fake_run_turn(
+            server,
+            input_message,
+            session_id,
+            model,
+            effort,
+            steers,
+            on_message,
+            steer_delivered,
+            finish_turn,
+        ):
+            ready = finish_turn("claude-session-1", "done")
+            self.assertEqual(ready, ["already queued"])
+            for message in ready:
+                delivered.append(message)
+                steer_delivered(message)
+
+            self.assertEqual(finish_turn("claude-session-1", "done"), [])
+            self.assertEqual(self.task_status("task_1"), "completed")
+            with self.assertRaises(ApiError) as caught:
+                service.steer_task("task_1", {"steer_message": "too late"})
+            self.assertEqual(caught.exception.status.value, 409)
+            return "claude-session-1", "done"
+
+        with (
+            patch.object(orchestrator.claude_code, "ClaudeCodeSession", FakeServer),
+            patch.object(orchestrator.claude_code, "run_turn", fake_run_turn),
+            patch.object(
+                orchestrator.claude_code,
+                "account_status",
+                return_value=("active", None, {"account_id": "acct", "access_token_sha256": "f" * 64}),
+            ),
+        ):
+            orchestrator.run_next_task()
+
+        self.assertEqual(delivered, ["already queued"])
+        self.assertEqual(self.task_status("task_1"), "completed")
+        self.assertEqual(load_state()["claude_sessions"]["chat"]["session_id"], "claude-session-1")
 
     def test_claude_task_repins_rotated_token_before_turn(self) -> None:
         # The Claude CLI refreshes its OAuth access token on its own schedule.
@@ -963,6 +1039,67 @@ class OrchestratorTests(unittest.TestCase):
         # _finish_task saw the cancelled status and did not flip it to failed.
         self.assertEqual(self.task_status("task_1"), "cancelled")
 
+    def test_all_runtimes_persist_killed_first_turn_session_before_releasing_thread(self) -> None:
+        # Every adapter exposes the provider id it learned mid-turn. The
+        # orchestrator reads that one generic attribute, persists it, and only
+        # then releases the same-thread fence.
+        for runtime in ("codex", "claude_code", "hermes"):
+            with self.subTest(runtime=runtime):
+                thread_id = f"{runtime}-chat"
+                session_id = f"{runtime}-mid-turn"
+                self.seed_tasks(
+                    make_task(1, thread_id, runtime=runtime),
+                    make_task(2, thread_id, runtime=runtime),
+                )
+                running = threading.Event()
+                release = threading.Event()
+                provider = MagicMock()
+
+                def blocking_run_turn(server, *_args):
+                    server.last_known_session_id = session_id
+                    running.set()
+                    if not release.wait(timeout=10):
+                        raise AssertionError("never released")
+                    raise RuntimeError("provider process stopped")
+
+                provider.run_turn.side_effect = blocking_run_turn
+                with (
+                    patch.object(orchestrator, "_runtime_network_enabled", return_value=True),
+                    patch.object(orchestrator, "runtime_status", return_value="active"),
+                    patch.object(orchestrator, "refresh_runtime_status", return_value="active"),
+                    patch.object(
+                        orchestrator,
+                        "_new_agent_server",
+                        side_effect=lambda _runtime, thread: FakeServer(thread_id=thread),
+                    ),
+                    patch.object(orchestrator, "_provider_module", return_value=provider),
+                ):
+                    worker = threading.Thread(target=orchestrator.run_next_task)
+                    worker.start()
+                    try:
+                        self.assertTrue(running.wait(timeout=10))
+                        with state.mutation() as cur:
+                            task = state.get_task("task_1", cur)
+                            assert task is not None
+                            task["status"] = "cancelled"
+                            state.save_task(cur, task)
+                        orchestrator.close_task_server("task_1")
+
+                        self.assertIn(f"{runtime}:{thread_id}", orchestrator._LIVE)
+                        self.assertIsNone(orchestrator._claim_next_task())
+                        self.assertEqual(self.task_status("task_2"), "queued")
+                    finally:
+                        release.set()
+                        worker.join(timeout=10)
+
+                with state.mutation() as cur:
+                    session = state.thread_session(cur, runtime, thread_id)
+                self.assertIsNotNone(session)
+                assert session is not None
+                self.assertEqual(session["provider_session_id"], session_id)
+                self.assertEqual(self.task_status("task_1"), "cancelled")
+                self.assertNotIn(f"{runtime}:{thread_id}", orchestrator._LIVE)
+
     def test_deactivate_runtime_fails_running_tasks_and_closes_only_that_runtime(self) -> None:
         codex_busy = FakeServer()
         codex_busy.started = 1
@@ -977,6 +1114,9 @@ class OrchestratorTests(unittest.TestCase):
         self.register_live_turn(claude_busy, "claude_code", "claude-running", "task_3")
 
         orchestrator.deactivate_runtime("codex", "provider disabled")
+        # Mimic the stopped turn's owning worker reaching its finally after
+        # handling the failed task.
+        orchestrator._close_turn("codex:codex-running", codex_busy)
 
         state = load_state()
         tasks = {task["task_id"]: task for task in state["tasks"]}
@@ -1355,6 +1495,7 @@ class OrchestratorTests(unittest.TestCase):
         save_proxy_openai_account_id("acct-local")
 
         self.assertIsNone(orchestrator.reset_linked_account("codex"))
+        orchestrator._close_turn("codex:chat", server)
 
         self.assertEqual(self.task_status("task_1"), "failed")
         self.assertTrue(server.closed)
@@ -1380,6 +1521,10 @@ class OrchestratorTests(unittest.TestCase):
         save_proxy_openai_account_id("acct-local")
 
         self.assertIsNone(orchestrator.reset_linked_account("codex"))
+        # The owning worker releases the successfully closed turn. A failed
+        # close remains fenced even when its worker attempts the release.
+        orchestrator._close_turn("codex:other", good_server)
+        orchestrator._close_turn("codex:chat", bad_server)
 
         self.assertEqual(self.task_status("task_1"), "failed")
         self.assertEqual(self.task_status("task_2"), "failed")

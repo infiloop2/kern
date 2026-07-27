@@ -10,7 +10,9 @@ const fullMessages = new Map();
 const $ = id => document.getElementById(id);
 const runtimeLabel = runtime => runtime === "claude_code" ? "Claude Code" : runtime === "codex" ? "Codex" : runtime === "hermes" ? "Hermes" : runtime;
 const optionLabel = value => String(value).split(/[-_]/).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
-const modelLabel = (runtime, model) => runtime === "codex" ? model : optionLabel(model);
+// Claude Code model ids carry the provider prefix ("claude-opus-5"); the
+// runtime name already says Claude Code, so the pill reads "Opus 5".
+const modelLabel = (runtime, model) => runtime === "codex" ? model : optionLabel(String(model).replace(/^claude-/, ""));
 const formatDateTime = value => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value || "");

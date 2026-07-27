@@ -21,6 +21,7 @@
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
       New thread
     </button>
+    <button id="archived-toggle" class="archive-toggle ghost sm">Show archived</button>
     <div id="threads" class="thread-list"></div>
   </aside>
   <main class="chat-main">
@@ -29,17 +30,25 @@
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M4 10h12M4 14h12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
       </button>
       <div class="chat-head-title">
-        <span class="thread-title" id="thread-title">New thread</span>
+        <div class="thread-title-row">
+          <span class="thread-title" id="thread-title">New thread</span>
+          <button class="thread-rename-button" id="rename-thread" aria-label="Rename thread" title="Rename thread" hidden>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4.5 14.5-.5 2 2-.5 9-9-1.5-1.5-9 9ZM12.5 6.5 14 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
         <span class="thread-subtitle" id="thread-subtitle" hidden></span>
       </div>
       <button class="ghost sm" id="archive-thread" hidden>Archive</button>
     </header>
     <div class="chat-scroll" id="chat-scroll">
+      <div class="history-loader" id="history-loader" hidden>
+        <button class="ghost sm" id="load-earlier">Load earlier messages</button>
+      </div>
       <div class="chat-column" id="thread-detail"></div>
     </div>
-    <footer class="composer-dock">
+    <footer class="composer-dock" id="composer-dock">
       <div id="status" class="app-status" hidden></div>
-      <div class="composer">
+      <div class="composer" id="composer">
         <div id="composer-running" class="composer-running" hidden>
           <div class="agent-working">
             <span>Agent is working</span>
@@ -67,7 +76,7 @@
           </button>
         </div>
       </div>
-      <p class="composer-hint">Enter to send &middot; Shift+Enter for a new line</p>
+      <p class="composer-hint" id="composer-hint">Enter to send &middot; Shift+Enter for a new line</p>
     </footer>
   </main>
 </div>

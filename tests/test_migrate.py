@@ -195,7 +195,7 @@ class AppMigrationTests(unittest.TestCase):
             cur.execute('CREATE SCHEMA app_agent_chat AUTHORIZATION "kern-app-0"')
 
     def test_app_migration_runs_in_app_schema_and_records_host_version(self) -> None:
-        self.assertEqual(_app_up("agent_chat"), [1])
+        self.assertEqual(_app_up("agent_chat"), [1, 2])
         self.assertEqual(_app_up("agent_chat"), [])
 
         with db.transaction() as cur:
@@ -214,6 +214,7 @@ class AppMigrationTests(unittest.TestCase):
                 [
                     ("thread_id", "text"),
                     ("archived", "boolean"),
+                    ("name", "text"),
                 ],
             )
             cur.execute(
@@ -232,7 +233,13 @@ class AppMigrationTests(unittest.TestCase):
                 ],
             )
             cur.execute("SELECT app_id, version, name FROM app_schema_migrations")
-            self.assertEqual(cur.fetchall(), [("agent_chat", 1, "baseline")])
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("agent_chat", 1, "baseline"),
+                    ("agent_chat", 2, "thread_names"),
+                ],
+            )
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'preferences'")
             self.assertEqual(cur.fetchall(), [])
 
@@ -241,11 +248,17 @@ class AppMigrationTests(unittest.TestCase):
         # never-recorded version idempotent: the loop reapplies and records it.
         app_migrate.apply_sql("agent_chat", 1, connection_user="kern-app-0")
 
-        self.assertEqual(_app_up("agent_chat"), [1])
+        self.assertEqual(_app_up("agent_chat"), [1, 2])
 
         with db.transaction() as cur:
             cur.execute("SELECT app_id, version, name FROM app_schema_migrations")
-            self.assertEqual(cur.fetchall(), [("agent_chat", 1, "baseline")])
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("agent_chat", 1, "baseline"),
+                    ("agent_chat", 2, "thread_names"),
+                ],
+            )
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'app_agent_chat'")
             self.assertEqual({row[0] for row in cur.fetchall()}, {"thread_tasks", "threads"})
 

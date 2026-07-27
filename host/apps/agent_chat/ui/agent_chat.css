@@ -60,6 +60,11 @@ body {
 
 .new-thread-button svg { height: 15px; width: 15px; }
 
+.archive-toggle {
+  align-self: flex-start;
+  color: var(--text-dim);
+}
+
 .thread-list {
   display: flex;
   flex-direction: column;
@@ -156,14 +161,38 @@ button.thread-item.selected { background: var(--surface-3); }
   min-width: 0;
 }
 
+.thread-title-row {
+  align-items: center;
+  display: flex;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
 .thread-title {
   color: var(--text);
+  flex: 0 1 auto;
   font-size: 0.95rem;
   font-weight: 650;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+button.thread-rename-button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--text-dim);
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  padding: 0.15rem;
+}
+
+button.thread-rename-button:hover { color: var(--text); }
+
+button.thread-rename-button svg { height: 14px; width: 14px; }
 
 .thread-subtitle {
   color: var(--text-dim);
@@ -195,6 +224,13 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.history-loader {
+  margin: 0 auto;
+  max-width: 48rem;
+  padding: 0.75rem 1rem 0;
+  text-align: center;
 }
 
 .chat-column {
@@ -512,6 +548,8 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   padding: 0.35rem 1rem calc(0.85rem + env(safe-area-inset-bottom));
 }
 
+.composer-dock.readonly { padding: 0; }
+
 .composer-dock > * {
   margin: 0 auto;
   max-width: 48rem;
@@ -541,6 +579,8 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   grid-template-columns: minmax(0, 1fr);
   padding: 0.6rem 0.6rem 0.5rem 0.95rem;
 }
+
+.composer[hidden], .composer-hint[hidden] { display: none; }
 
 .composer:focus-within { border-color: rgba(148, 163, 184, 0.5); }
 

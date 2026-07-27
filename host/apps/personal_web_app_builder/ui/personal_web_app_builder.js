@@ -839,11 +839,16 @@ async function refreshSnapshot() {
     snapshot = next;
     if (next.app.revision !== renderedRevision) {
       renderedRevision = next.app.revision;
-      $("revision-label").textContent = next.app.revision ? `Revision ${next.app.revision}` : "Empty app";
+      // The label follows what exists, not the counter: reset clears the app
+      // while the revision keeps counting up.
       if (next.app.html || next.app.css || next.app.javascript) {
+        $("revision-label").textContent = `Revision ${next.app.revision}`;
         renderGenerated(next.app.html, next.app.css);
         runCapabilityWorker();
-      } else clearGenerated();
+      } else {
+        $("revision-label").textContent = "Empty app";
+        clearGenerated();
+      }
     }
     renderChat();
     syncEmptyState();
@@ -851,6 +856,28 @@ async function refreshSnapshot() {
     showRuntimeStatus("Builder backend unavailable", "error");
   } finally {
     pollBusy = false;
+  }
+}
+
+async function resetApp() {
+  if (!confirm("Start over? This deletes the generated app, its data, and the chat history, and begins a new builder conversation.")) return;
+  const button = $("reset-app");
+  button.disabled = true;
+  try {
+    await api("POST", "/reset");
+    // The new thread numbers its events from the start, so the chat cursor
+    // resets with it; renderedRevision forces a re-render of the empty app.
+    conversationEvents = [];
+    conversationEventsSeq = 0;
+    renderedRevision = -1;
+    snapshot = { app: null, tasks: [], session: null };
+    closeChat();
+    await refreshSnapshot();
+    showRuntimeStatus("Started over. Describe the app you want.", "info");
+  } catch (error) {
+    showRuntimeStatus(error.message || "Start over failed", "error");
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -874,6 +901,7 @@ async function initialize() {
 $("open-chat").addEventListener("click", () => $("chat-drawer").hidden ? openChat() : closeChat());
 $("empty-open-chat").addEventListener("click", openChat);
 $("close-chat").addEventListener("click", closeChat);
+$("reset-app").addEventListener("click", resetApp);
 $("runtime").addEventListener("change", setSessionOptions);
 $("model").addEventListener("change", setSessionOptions);
 $("send-message").addEventListener("click", () => sendMessage());

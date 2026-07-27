@@ -28,7 +28,10 @@ the agent actually did.
 
 ## How It Works
 
-The UI lists unarchived threads newest-first with their tasks and statuses.
+The UI lists unarchived threads newest-first with their tasks and statuses. A
+top-level **Show archived** toggle swaps the sidebar to archived threads only;
+their retained history remains readable, but the composer and task controls
+are unavailable until the operator unarchives the thread.
 The index is one bulk host call: `GET /v1/threads` over the app-backend
 socket returns summaries (runtime, model, effort, last-used time, task count,
 active task ids) for exactly this app's threads, which the backend joins
@@ -76,16 +79,23 @@ first message) or appends a task to an existing one:
   so its running tasks omit the Steer control; the host also rejects a direct
   Hermes steer request. The composer queues later input as a new task on the
   same thread, which runs after the current task finishes.
-- `GET /threads/<thread_id>/events?since=<seq>` proxies the host thread event
-  stream so the UI shows every message of every task, not just the prompt and
-  final answer. Claude Code stream-json content blocks and Codex app-server
-  ThreadItems are normalized into provider-independent activity records for
-  reasoning, plans, commands and output, file changes, tool calls, searches,
-  sub-agents, images, waits, and context state. Started/completed snapshots
-  fold into one expandable card. Mid-task operator steering still renders
-  inline. The UI accumulates the stream forward-paged by `seq`; it polls once
-  per second while any task is active and every five seconds while idle.
-- The event page is deliberately small (eight events), with up to 120 KiB of
+- `GET /threads/<thread_id>/events` initially returns only the newest event
+  page, in chronological display order. Reaching the top loads older pages
+  with `before=<oldest_seq>` and preserves the visible scroll anchor; a
+  **Load earlier messages** control is also available when the first page is
+  shorter than the viewport. Live updates continue forward from
+  `since=<newest_seq>`. This makes a long thread useful after one bounded
+  request instead of draining its complete history before first paint, while
+  still making every retained event reachable. The stream shows every
+  message of every loaded task, not just the prompt and final answer. Claude
+  Code stream-json content blocks, Codex app-server ThreadItems, and Hermes
+  tool-call hook events are normalized into provider-independent activity
+  records for reasoning, plans, commands and output, file changes, tool calls,
+  searches, sub-agents, images, waits, and context state. Started/completed
+  snapshots fold into one expandable card. Mid-task operator steering still
+  renders inline. The UI polls once per second while any task is active and
+  every five seconds while idle.
+- The event page is deliberately small (six events), with up to 120 KiB of
   message/activity text per event, so it remains below the app bridge's fixed
   1 MiB response ceiling. Paging drains every event rather than skipping a
   large record. Full agent messages remain stored in the host database;
@@ -95,8 +105,11 @@ first message) or appends a task to an existing one:
   task lists, blockquotes, tables, links, inline code, and fenced code blocks
   with Copy controls. Markdown images become links instead of automatically
   loading agent-selected remote resources.
-- `POST /threads/<thread_id>/archive` hides a thread from the index without
-  touching host state.
+- `POST /threads/<thread_id>/archive` moves a thread to the archived index
+  without touching host task state. Archived task and event reads remain
+  available, but message sends and task controls fail closed. The archived
+  view exposes `POST /threads/<thread_id>/unarchive` to return it to the
+  active index.
 
 Thread ids the app sends over the socket are app-scoped by the host
 (`agent_chat__<thread_id>` internally), so Agent Chat cannot reach threads

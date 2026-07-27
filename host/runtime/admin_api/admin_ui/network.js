@@ -367,16 +367,33 @@ function bedrockUsageBox(account) {
     </span>`;
 }
 
+// Label a Codex rate-limit window by its duration — a 5-hour and a weekly
+// window — matching the runtime summary toolbar, which identifies windows by
+// duration rather than primary/secondary position. Falls back to a derived
+// label, then to the positional name, so a window is never dropped.
+function codexWindowLabel(mins, fallback) {
+  const n = Number(mins);
+  if (n === 300) return "5h";
+  if (n === 10080) return "weekly";
+  if (Number.isFinite(n) && n > 0) {
+    if (n % 1440 === 0) return `${n / 1440}d`;
+    if (n % 60 === 0) return `${n / 60}h`;
+    return `${n}m`;
+  }
+  return fallback;
+}
+
 function codexUsageBox(account) {
   const usage = codexUsage(account);
   if (!usage) return "";
   const parts = [];
-  // Primary window is the most relevant for rate limiting
-  if (Number.isFinite(usage.primary.usedPercent)) {
-    parts.push(`${usage.primary.usedPercent}% primary`);
-  }
-  if (Number.isFinite(usage.secondary.usedPercent)) {
-    parts.push(`${usage.secondary.usedPercent}% secondary`);
+  // Show each window by its duration (5h, weekly), so the integration bar reads
+  // as an expanded version of the toolbar box rather than exposing raw
+  // primary/secondary positions.
+  for (const [window, fallback] of [[usage.primary, "primary"], [usage.secondary, "secondary"]]) {
+    if (Number.isFinite(window.usedPercent)) {
+      parts.push(`${window.usedPercent}% ${codexWindowLabel(window.windowDurationMins, fallback)}`);
+    }
   }
   // Credits info - only show when credits data is present
   let creditsInfo = "";

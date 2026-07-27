@@ -16,17 +16,22 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from host.constants import APP_BACKEND_ADMIN_SOCKET_PATH, LOOPBACK, MAX_REQUEST_BODY_BYTES as ADMIN_MAX_REQUEST_BODY_BYTES
 from host.runtime.core import db
-from host.session_options import public_session_options, session_config_error
+from host.session_options import public_session_options, recorded_session_config, session_config_error
 
 
 APP_ID = "personal_web_app_builder"
-THREAD_ID = "builder"
+# The builder runs one host thread at a time. A thread's session configuration
+# is fixed for its lifetime, so reset moves the app to the next thread rather
+# than reconfiguring the current one. Sequence 1 keeps the original id, which
+# is what carries an existing conversation through the reset migration.
+THREAD_BASE_ID = "builder"
 HOST = os.environ.get("KERN_APP_HOST", LOOPBACK)
 PORT = int(os.environ.get("KERN_APP_PORT", "7456"))
 DB_SCHEMA = os.environ.get("KERN_APP_DB_SCHEMA", "app_personal_web_app_builder")
@@ -48,6 +53,13 @@ CONVERSATION_EVENT_PAGE_LIMIT = 5
 MAX_PATH_DEPTH = 16
 MAX_PATH_KEY_BYTES = 128
 JAVASCRIPT_FORBIDDEN = re.compile(r"\bimport\b")
+# Start over rotates the builder onto a new thread while clearing the app, so
+# it must not interleave with work that belongs to the old one. Everything that
+# could is serialized here rather than each path defending itself: the app is
+# one operator's single workspace, so the contention this costs is nil and the
+# alternative is a race check in every statement. Held across the host call in
+# create_message, as Agent Chat does for its own send path.
+BUILDER_LOCK = threading.Lock()
 REQUEST_PREFIXES = {
     "user": "Requested by user:",
     "app": "Requested by app:",
@@ -79,7 +91,9 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_body()
             if parsed.path.startswith("/agent/"):
                 self._require_agent_proxy()
-                response = route_agent(method, parsed.path, body)
+                response = route_agent(
+                    method, parsed.path, body, self.headers.get("X-Kern-Agent-Thread") or ""
+                )
             else:
                 self._require_host_proxy()
                 response = route_browser(method, parsed.path, body, parse_qs(parsed.query))
@@ -96,9 +110,16 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(HTTPStatus.UNAUTHORIZED, "missing host app proxy marker")
 
     def _require_agent_proxy(self) -> None:
+        """Reject anything without the kernel-attributed markers.
+
+        This is the cheap gate. The attributed thread is checked again inside
+        the transaction that reads or mutates `app_state`, because Start over
+        can revoke a thread between this check and that statement; only the
+        in-transaction check is authoritative.
+        """
         if (
             self.headers.get("X-Kern-Agent-App-Proxy") != APP_ID
-            or self.headers.get("X-Kern-Agent-Thread") != THREAD_ID
+            or self.headers.get("X-Kern-Agent-Thread") != builder_thread_id()
         ):
             raise AppError(HTTPStatus.UNAUTHORIZED, "missing agent app context")
 
@@ -142,10 +163,15 @@ def route_browser(
         return browser_conversation()
     if method == "GET" and path == "/conversation/events":
         return browser_conversation_events(query or {})
+    if method == "POST" and path == "/reset":
+        with BUILDER_LOCK:
+            return reset_app()
     if method == "POST" and path == "/messages":
-        return create_message(body, requested_by="user")
+        with BUILDER_LOCK:
+            return create_message(body, requested_by="user")
     if method == "POST" and path == "/runtime/agent-requests":
-        return create_message(body, requested_by="app")
+        with BUILDER_LOCK:
+            return create_message(body, requested_by="app")
     if method == "POST" and path == "/runtime/actions":
         return apply_runtime_action(body)
     match = re.fullmatch(r"/tasks/([^/]+)/(cancel|kill)", path)
@@ -156,18 +182,25 @@ def route_browser(
     raise AppError(HTTPStatus.NOT_FOUND, "route not found")
 
 
-def route_agent(method: str, path: str, body: Any) -> dict[str, Any]:
-    if method == "GET" and path == "/agent/state":
-        return {"app": load_app_state()}
-    if method == "POST" and path == "/agent/actions":
-        return apply_agent_action(body)
+def route_agent(method: str, path: str, body: Any, agent_thread: str) -> dict[str, Any]:
+    with BUILDER_LOCK:
+        # The handler's marker check happens before this lock, so Start over can
+        # revoke the thread in between; re-check here, where reset cannot run
+        # until the request finishes.
+        if agent_thread != builder_thread_id():
+            raise AppError(HTTPStatus.UNAUTHORIZED, "missing agent app context")
+        if method == "GET" and path == "/agent/state":
+            return {"app": load_app_state()}
+        if method == "POST" and path == "/agent/actions":
+            return apply_agent_action(body)
     raise AppError(HTTPStatus.NOT_FOUND, "agent route not found")
 
 
 def browser_conversation() -> dict[str, Any]:
+    thread_id = builder_thread_id()
     response = call_admin_api(
         "GET",
-        f"/v1/threads/{THREAD_ID}/tasks"
+        f"/v1/threads/{thread_id}/tasks"
         f"?limit={CONVERSATION_TASK_LIMIT}&message_bytes={CONVERSATION_MESSAGE_BYTES}",
     )
     host_tasks = response.get("tasks")
@@ -197,7 +230,7 @@ def browser_conversation_events(query: dict[str, list[str]]) -> dict[str, Any]:
         if not since.isdigit():
             raise AppError(HTTPStatus.BAD_REQUEST, "since must be a non-negative integer")
         parameters.insert(0, f"since={since}")
-    path = f"/v1/threads/{THREAD_ID}/events?{'&'.join(parameters)}"
+    path = f"/v1/threads/{builder_thread_id()}/events?{'&'.join(parameters)}"
     response = call_admin_api("GET", path)
     events = response.get("events")
     if not isinstance(events, list) or not all(isinstance(event, dict) for event in events):
@@ -216,7 +249,8 @@ def create_message(body: Any, *, requested_by: str) -> dict[str, Any]:
         MAX_CHAT_MESSAGE_BYTES - len(f"{prefix}\n".encode()),
     )
     input_message = f"{prefix}\n{content}"
-    host_request: dict[str, Any] = {"input_message": input_message, "thread_id": THREAD_ID}
+    thread_id = builder_thread_id()
+    host_request: dict[str, Any] = {"input_message": input_message, "thread_id": thread_id}
     config_fields = ("agent_runtime", "model", "effort")
     supplied = [field for field in config_fields if field in request]
     if supplied:
@@ -232,10 +266,92 @@ def create_message(body: Any, *, requested_by: str) -> dict[str, Any]:
         host_request.update({"agent_runtime": runtime, "model": model, "effort": effort})
     response = call_admin_api("POST", "/v1/tasks", host_request)
     task_id = _response_text(response.get("task_id"), "task_id")
-    if _response_text(response.get("thread_id"), "thread_id") != THREAD_ID:
+    if _response_text(response.get("thread_id"), "thread_id") != thread_id:
         _stop_orphan(task_id)
         raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned mismatched task reference")
     return response
+
+
+def _thread_id_for_seq(seq: int) -> str:
+    return THREAD_BASE_ID if seq <= 1 else f"{THREAD_BASE_ID}-{seq}"
+
+
+def builder_thread_id() -> str:
+    """The host thread the builder is currently working in."""
+    with db.transaction() as cur:
+        _set_search_path(cur)
+        cur.execute("SELECT thread_seq FROM app_state WHERE singleton = TRUE")
+        row = cur.fetchone()
+    if row is None:
+        raise AppError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
+    return _thread_id_for_seq(row[0])
+
+
+def _stop_builder_tasks(thread_id: str) -> None:
+    """Stop everything active on the thread, or fail without resetting.
+
+    The thread summary carries every active task, so this sees all of them
+    rather than a page of recent history — a thread may hold up to the host's
+    queued-task limit. A task that cannot be stopped aborts the reset: the
+    caller has not touched any state yet, so the operator retries against the
+    builder they still have, rather than one that was cleared while hidden work
+    kept running.
+    """
+    response = call_admin_api("GET", "/v1/threads")
+    threads = response.get("threads")
+    if not isinstance(threads, list):
+        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread list")
+    summary = next(
+        (
+            thread
+            for thread in threads
+            if isinstance(thread, dict) and thread.get("thread_id") == thread_id
+        ),
+        None,
+    )
+    if summary is None:
+        return
+    active = summary.get("active_tasks")
+    if not isinstance(active, list):
+        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread summary")
+    for task in active:
+        if not isinstance(task, dict):
+            raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread summary")
+        _stop_task(_response_text(task.get("task_id"), "task_id"))
+
+
+def reset_app() -> dict[str, Any]:
+    """Stop the builder's work, clear the generated app, and start a new thread.
+
+    Start over means exactly that: nothing from before survives it. Anything
+    still queued or running is stopped first, because a task left on the
+    discarded thread would keep burning a turn on work whose output is thrown
+    away and whose conversation the operator can no longer see. Then the bundle
+    and its data go, and the app moves to a fresh host thread — a thread's
+    session configuration is fixed for its lifetime, so first-run state means a
+    new thread rather than a reconfigured one.
+
+    Only the browser can call this; the agent must not discard its own thread.
+    The revision keeps counting up rather than returning to zero, so a stale
+    writer's `expected_revision` can never match again.
+    """
+    _stop_builder_tasks(builder_thread_id())
+    now = _utc_now()
+    with db.transaction() as cur:
+        _set_search_path(cur)
+        cur.execute(
+            "SELECT revision, thread_seq FROM app_state WHERE singleton = TRUE FOR UPDATE"
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise AppError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
+        revision, thread_seq = row[0] + 1, row[1] + 1
+        cur.execute(
+            "UPDATE app_state SET revision = %s, html = '', css = '', javascript = '',"
+            " data_json = '{}', thread_seq = %s, updated_at = %s WHERE singleton = TRUE",
+            (revision, thread_seq, now),
+        )
+    return {"app": load_app_state(), "thread_id": _thread_id_for_seq(thread_seq)}
 
 
 def load_app_state() -> dict[str, Any]:
@@ -477,21 +593,37 @@ def _child(parent: Any, segment: str | int) -> Any:
 
 
 def _task_session_config(task: dict[str, Any]) -> dict[str, str]:
-    runtime = _response_text(task.get("agent_runtime"), "agent_runtime")
-    model = _response_text(task.get("model"), "model")
-    effort = _response_text(task.get("effort"), "effort")
-    if session_config_error(runtime, model, effort) is not None:
+    """Read back the session configuration the host recorded for a task.
+
+    Read path (`host.session_options`): the recorded model may predate the
+    current matrix, so a retained conversation stays readable even though the
+    host refuses to run further tasks on its thread. The matrix check belongs
+    on the send path.
+    """
+    config = recorded_session_config(task)
+    if config is None:
         raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid task configuration")
+    runtime, model, effort = config
     return {"agent_runtime": runtime, "model": model, "effort": effort}
 
 
-def _stop_orphan(task_id: str) -> None:
+def _stop_task(task_id: str) -> None:
+    """Cancel a queued task, or kill one a worker already claimed."""
     for action in ("cancel", "kill"):
         try:
             call_admin_api("POST", f"/v1/tasks/{quote(task_id, safe='')}/{action}", {})
             return
         except Exception:
             continue
+    raise AppError(HTTPStatus.BAD_GATEWAY, "could not stop the builder's active work; try again")
+
+
+def _stop_orphan(task_id: str) -> None:
+    """Best effort: the caller is already failing and owns that error."""
+    try:
+        _stop_task(task_id)
+    except AppError:
+        return
 
 
 def _required_object(value: Any, label: str) -> dict[str, Any]:

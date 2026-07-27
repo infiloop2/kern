@@ -73,6 +73,37 @@ class AgentChatRichTextTests(unittest.TestCase):
         })
 
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
+    def test_activity_compaction_preserves_first_sequence_across_merges(self) -> None:
+        renderer = Path("host/apps/agent_chat/ui/rich_text.js").resolve()
+        script = (
+            f"const rich = require({json.dumps(str(renderer))});"
+            "const activity = (seq, phase) => ({"
+            "seq, task_id: 'task_1', event_type: 'task.activity', payload: {activity: {"
+            "activity_id: 'command-1', kind: 'command', phase, title: 'npm test'}}});"
+            "const message = seq => ({"
+            "seq, task_id: 'task_1', event_type: 'task.message', payload: {message: {role: 'user'}}});"
+            "const first = rich.compactActivityEvents(["
+            "activity(10, 'started'), message(11), activity(12, 'completed')]);"
+            "const second = rich.compactActivityEvents(["
+            "...first, message(13), activity(14, 'completed')].sort((a, b) => a.seq - b.seq));"
+            "process.stdout.write(JSON.stringify(second.map(event => ({"
+            "seq: event.seq, type: event.event_type, phase: event.payload.activity?.phase"
+            "}))));"
+        )
+        compacted = json.loads(subprocess.run(
+            ["node", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout)
+
+        self.assertEqual(compacted, [
+            {"seq": 10, "type": "task.activity", "phase": "completed"},
+            {"seq": 11, "type": "task.message"},
+            {"seq": 13, "type": "task.message"},
+        ])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_deeply_nested_blockquotes_do_not_overflow_the_stack(self) -> None:
         renderer = Path("host/apps/agent_chat/ui/rich_text.js").resolve()
         script = (

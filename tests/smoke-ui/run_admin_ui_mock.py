@@ -672,7 +672,7 @@ def seed_state() -> None:
             "task_id": spec["task_id"],
             "status": spec["status"],
             "agent_runtime": spec["agent_runtime"],
-            "model": "opus" if spec["agent_runtime"] == "claude_code" else "gpt-5.6-terra",
+            "model": "claude-opus-5" if spec["agent_runtime"] == "claude_code" else "gpt-5.6-terra",
             "effort": "high",
             "thread_id": spec["thread_id"],
             "input_message": spec["input_message"],
@@ -1689,12 +1689,14 @@ def list_thread_tasks(thread_id: str) -> dict[str, Any]:
 
 
 def list_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
-    """The thread's task events, oldest first, forward-paged by ``since`` —
-    the seq-ordered stream the chat UI accumulates into per-task messages."""
-    unsupported = sorted(set(query) - {"since", "limit"})
+    """A chronological thread-event page around a forward or backward cursor."""
+    unsupported = sorted(set(query) - {"since", "before", "limit"})
     if unsupported:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"unsupported thread event query parameter: {unsupported[0]}")
-    since = int((query.get("since") or ["0"])[0])
+    since = int(query["since"][0]) if query.get("since") else None
+    before = int(query["before"][0]) if query.get("before") else None
+    if since is not None and before is not None:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "since and before cannot be combined")
     limit = int((query.get("limit") or ["100"])[0])
     with STATE.lock:
         progress_running_tasks_locked()
@@ -1703,9 +1705,15 @@ def list_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[str,
         events = [
             event
             for event in STATE.agent_events
-            if event["task_id"] in task_ids and event["seq"] > since
+            if (
+                event["task_id"] in task_ids
+                and (since is None or event["seq"] > since)
+                and (before is None or event["seq"] < before)
+            )
         ]
-        return {"events": events[:limit]}
+        if since is not None:
+            return {"events": events[:limit]}
+        return {"events": events[-limit:]}
 
 
 def event_page_query(

@@ -426,6 +426,26 @@ def fail_running_tasks(cur: Any, error_message: str, runtime: str | None = None)
     return [f"task_{row[0]}" for row in cur.fetchall()]
 
 
+def fail_queued_tasks_outside(
+    cur: Any, offered: list[tuple[str, str, str]], error_message: str
+) -> list[str]:
+    """Fail every queued task whose thread runs a configuration not in
+    ``offered`` (runtime, model, effort) and return the affected task ids; the
+    caller records the per-task events in the same transaction."""
+    if not offered:
+        raise ValueError("offered session configurations must not be empty")
+    placeholders = ", ".join(["(%s, %s, %s)"] * len(offered))
+    cur.execute(
+        "UPDATE tasks SET status = 'failed', error_message = %s, updated_at = %s"
+        " WHERE status = 'queued' AND thread_id IN ("
+        "SELECT thread_id FROM thread_sessions"
+        f" WHERE (agent_runtime, model, effort) NOT IN ({placeholders}))"
+        " RETURNING number",
+        [error_message, utc_now(), *(value for config in offered for value in config)],
+    )
+    return [f"task_{row[0]}" for row in cur.fetchall()]
+
+
 def prune_finished_tasks(cur: Any, keep: int) -> None:
     """Drop the oldest finished tasks beyond ``keep`` (active tasks are never
     pruned). Recency follows the task history order: updated_at, then task
@@ -801,17 +821,41 @@ def page_task_events(task_id: str, since: int | None) -> list[dict[str, Any]]:
         return [_event_dict(row) for row in cur.fetchall()]
 
 
-def page_thread_events(thread_id: str, since: int | None, limit: int) -> list[dict[str, Any]]:
-    """One oldest-first page of a thread's task events: rows with
-    ``seq > since`` across every task in the thread, so a chat surface can
-    accumulate the full message stream incrementally."""
+def page_thread_events(
+    thread_id: str,
+    since: int | None,
+    limit: int,
+    *,
+    before: int | None = None,
+) -> list[dict[str, Any]]:
+    """One chronological page of a thread's task events.
+
+    ``since`` pages forward for live updates. ``before`` pages backward from
+    the oldest event a client already has. With neither cursor, the newest
+    page is returned so opening a long thread does not scan its full history.
+    Backward and initial pages are selected newest-first in the inner query,
+    then restored to chronological order for chat rendering.
+    """
     with db.transaction() as cur:
-        cur.execute(
-            f"SELECT {_EVENT_FIELDS} FROM agent_events"
-            " WHERE task_id IN (SELECT 'task_' || number FROM tasks WHERE thread_id = %s)"
-            " AND seq > %s ORDER BY seq LIMIT %s",
-            (thread_id, since if since is not None else 0, limit),
-        )
+        if since is not None:
+            cur.execute(
+                f"SELECT {_EVENT_FIELDS} FROM agent_events"
+                " WHERE task_id IN (SELECT 'task_' || number FROM tasks WHERE thread_id = %s)"
+                " AND seq > %s ORDER BY seq LIMIT %s",
+                (thread_id, since, limit),
+            )
+        else:
+            before_clause = " AND seq < %s" if before is not None else ""
+            params: tuple[Any, ...] = (
+                (thread_id, before, limit) if before is not None else (thread_id, limit)
+            )
+            cur.execute(
+                f"SELECT * FROM (SELECT {_EVENT_FIELDS} FROM agent_events"
+                " WHERE task_id IN (SELECT 'task_' || number FROM tasks WHERE thread_id = %s)"
+                f"{before_clause} ORDER BY seq DESC LIMIT %s) AS newest"
+                " ORDER BY seq",
+                params,
+            )
         return [_event_dict(row) for row in cur.fetchall()]
 
 

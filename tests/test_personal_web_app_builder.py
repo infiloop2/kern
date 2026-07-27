@@ -8,6 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -100,6 +101,11 @@ class PersonalWebAppBuilderContractTests(unittest.TestCase):
         self.assertIn("Use the app directly", index)
         self.assertIn("Its controls can update saved data", index)
         self.assertIn("const firstRun = !snapshot.session", source)
+        self.assertIn('id="reset-app"', index)
+        self.assertIn('aria-label="Start over"', index)
+        self.assertIn('await api("POST", "/reset")', source)
+        self.assertIn("conversationEventsSeq = 0;", source)
+        self.assertIn('$("revision-label").textContent = "Empty app";', source)
         self.assertIn('$("first-run-how").hidden = !firstRun', source)
         self.assertIn('$("first-run-guidance").hidden = !firstRun', source)
         self.assertNotIn('id="session-options"', index)
@@ -112,6 +118,10 @@ class PersonalWebAppBuilderContractTests(unittest.TestCase):
             self.assertIn(column, migration)
         self.assertNotIn("thread_tasks", migration)
         self.assertNotIn("builder_session", migration)
+        # Reset needs a durable thread name, since a thread's session
+        # configuration is fixed and cannot be reconfigured in place.
+        reset_migration = (APP_DIR / "migrations" / "0002_builder_thread_reset.sql").read_text()
+        self.assertIn("thread_seq BIGINT", reset_migration)
 
 
 class AgentActionValidationTests(unittest.TestCase):
@@ -239,6 +249,13 @@ class ConversationTests(unittest.TestCase):
         "effort": "high",
     }
 
+    def setUp(self) -> None:
+        # The builder's thread id lives in the app database (reset moves it on);
+        # these tests exercise the host round trip, so they name it directly.
+        thread_patch = patch.object(backend, "builder_thread_id", return_value=backend.THREAD_BASE_ID)
+        thread_patch.start()
+        self.addCleanup(thread_patch.stop)
+
     def test_conversation_bounds_history_before_it_crosses_the_app_backend_proxy(self) -> None:
         host_task = {
             "task_id": "task_1",
@@ -261,6 +278,23 @@ class ConversationTests(unittest.TestCase):
             "GET",
             "/v1/threads/builder/tasks?limit=20&message_bytes=12288",
         )
+
+    def test_conversation_opens_on_a_superseded_model(self) -> None:
+        # A conversation started under an earlier catalog keeps its recorded
+        # model; the option matrix only gates what may be created, so opening
+        # it must not fail on a value the catalog no longer offers.
+        legacy_session = {"agent_runtime": "claude_code", "model": "opus", "effort": "high"}
+        host_task = {
+            "task_id": "task_1",
+            "input_message": "Build it",
+            "status": "completed",
+            **legacy_session,
+        }
+        with patch.object(backend, "call_admin_api", return_value={"tasks": [host_task]}):
+            self.assertEqual(
+                backend.browser_conversation(),
+                {"tasks": [host_task], "session": legacy_session},
+            )
 
     def test_empty_host_thread_is_the_first_run_marker(self) -> None:
         with patch.object(
@@ -316,7 +350,7 @@ class ConversationTests(unittest.TestCase):
     def test_follow_up_omits_configuration_and_leaves_it_to_the_host(self) -> None:
         host_task = {
             "task_id": "task_2",
-            "thread_id": backend.THREAD_ID,
+            "thread_id": backend.THREAD_BASE_ID,
             "status": "queued",
         }
         with patch.object(backend, "call_admin_api", return_value=host_task) as host:
@@ -340,7 +374,7 @@ class ConversationTests(unittest.TestCase):
     def test_app_callback_gets_durable_origin_without_a_second_thread(self) -> None:
         host_task = {
             "task_id": "task_3",
-            "thread_id": backend.THREAD_ID,
+            "thread_id": backend.THREAD_BASE_ID,
             "status": "queued",
         }
         with patch.object(backend, "call_admin_api", return_value=host_task) as host:
@@ -365,7 +399,7 @@ class ConversationTests(unittest.TestCase):
     def test_first_message_sends_configuration_without_storing_it(self) -> None:
         host_task = {
             "task_id": "task_1",
-            "thread_id": backend.THREAD_ID,
+            "thread_id": backend.THREAD_BASE_ID,
             "status": "queued",
         }
         with patch.object(backend, "call_admin_api", return_value=host_task) as host:
@@ -591,7 +625,7 @@ class PersonalWebAppBuilderMockTests(unittest.TestCase):
                 {
                     "content": "Change it again.",
                     "agent_runtime": "claude_code",
-                    "model": "opus",
+                    "model": "claude-opus-5",
                     "effort": "high",
                 },
             )
@@ -656,9 +690,15 @@ class PersonalWebAppBuilderDbTests(unittest.TestCase):
             cur.execute("SET LOCAL search_path TO app_personal_web_app_builder")
             cur.execute(
                 "UPDATE app_state SET revision = 0, html = '', css = '', javascript = '',"
-                " data_json = '{}', updated_at = '1970-01-01T00:00:00Z'"
+                " data_json = '{}', thread_seq = 1, updated_at = '1970-01-01T00:00:00Z'"
                 " WHERE singleton = TRUE"
             )
+
+    def _reset(self) -> dict[str, Any]:
+        """reset_app() stops active work through the host; stub that here."""
+        summaries = {"threads": [{"thread_id": backend.builder_thread_id(), "active_tasks": []}]}
+        with patch.object(backend, "call_admin_api", return_value=summaries):
+            return backend.reset_app()
 
     def test_agent_and_runtime_writes_share_one_revision_chain(self) -> None:
         initial = backend.load_app_state()
@@ -686,10 +726,158 @@ class PersonalWebAppBuilderDbTests(unittest.TestCase):
         self.assertEqual(stale.exception.status, HTTPStatus.CONFLICT)
 
 
+    def test_reset_clears_the_app_and_moves_to_a_new_builder_thread(self) -> None:
+        backend.apply_agent_action({
+            "action": "replace_app",
+            "expected_revision": 0,
+            "html": "<p>built</p>",
+            "css": "p { color: red; }",
+            "javascript": "app.on('noop', () => {});",
+            "data": {"count": 1},
+        })
+        self.assertEqual(backend.builder_thread_id(), "builder")
+
+        reset = self._reset()
+
+        # The bundle is gone and the app reads as new, but the revision keeps
+        # counting up: a stale writer's expected_revision must never match a
+        # revision it saw before the reset.
+        self.assertEqual(
+            (reset["app"]["html"], reset["app"]["css"], reset["app"]["javascript"], reset["app"]["data"]),
+            ("", "", "", {}),
+        )
+        self.assertEqual(reset["app"]["revision"], 2)
+        self.assertEqual(backend.load_app_state()["revision"], 2)
+
+        # A thread's session configuration is fixed for its lifetime, so the
+        # builder continues in a new thread rather than reusing the old one.
+        self.assertEqual(reset["thread_id"], "builder-2")
+        self.assertEqual(backend.builder_thread_id(), "builder-2")
+        self.assertEqual(self._reset()["thread_id"], "builder-3")
+
+    def test_reset_locks_out_an_agent_still_running_on_the_old_thread(self) -> None:
+        handler = object.__new__(backend.Handler)
+        handler.headers = Message()
+        handler.headers["X-Kern-Agent-App-Proxy"] = backend.APP_ID
+        handler.headers["X-Kern-Agent-Thread"] = "builder"
+        handler._require_agent_proxy()
+
+        self._reset()
+
+        with self.assertRaises(backend.AppError) as error:
+            handler._require_agent_proxy()
+        self.assertEqual(error.exception.status, HTTPStatus.UNAUTHORIZED)
+
+    def test_agent_authority_is_rechecked_inside_the_state_transaction(self) -> None:
+        # The handler's marker check happens before the statement that reads or
+        # writes app_state, so a revoked agent can pass it and then act on the
+        # app the reset just created. Simulate that gap: the agent's thread is
+        # current when the request starts, and revoked by the time it lands.
+        backend.route_agent("POST", "/agent/actions", {
+            "action": "replace_app",
+            "expected_revision": 0,
+            "html": "<p>built</p>",
+            "css": "",
+            "javascript": "",
+            "data": {},
+        }, "builder")
+        self._reset()
+
+        for action in (
+            {
+                "action": "replace_data",
+                # The post-reset revision is trivially predictable, so the
+                # revision check alone does not stop the revoked agent.
+                "expected_revision": backend.load_app_state()["revision"],
+                "data": {"injected": True},
+            },
+            {
+                "action": "set",
+                "expected_revision": backend.load_app_state()["revision"],
+                "path": ["injected"],
+                "value": True,
+            },
+        ):
+            with self.subTest(action=action["action"]), self.assertRaises(backend.AppError) as write:
+                backend.route_agent("POST", "/agent/actions", action, "builder")
+            self.assertEqual(write.exception.status, HTTPStatus.UNAUTHORIZED)
+
+        with self.assertRaises(backend.AppError) as read:
+            backend.route_agent("GET", "/agent/state", None, "builder")
+        self.assertEqual(read.exception.status, HTTPStatus.UNAUTHORIZED)
+
+        # The current thread's agent still works, and the browser is unaffected.
+        self.assertEqual(backend.route_agent("GET", "/agent/state", None, "builder-2")["app"]["data"], {})
+        self.assertEqual(backend.load_app_state()["data"], {})
+
+    def test_reset_stops_every_task_left_on_the_discarded_thread(self) -> None:
+        # Start over means nothing from before survives it: a task left on the
+        # old thread would spend a turn on work whose output is discarded and
+        # whose conversation the operator can no longer see. The thread summary
+        # carries every active task, so this is not a page of recent history.
+        summaries = {
+            "threads": [
+                {"thread_id": "builder", "active_tasks": [
+                    {"task_id": f"task_{number}", "status": "queued"} for number in range(1, 26)
+                ]},
+                {"thread_id": "other", "active_tasks": [{"task_id": "task_99", "status": "running"}]},
+            ]
+        }
+        with (
+            patch.object(backend, "call_admin_api", return_value=summaries),
+            patch.object(backend, "_stop_task") as stop,
+        ):
+            backend.reset_app()
+
+        self.assertEqual(
+            [call.args[0] for call in stop.call_args_list],
+            [f"task_{number}" for number in range(1, 26)],
+        )
+
+    def test_reset_does_not_clear_state_when_work_cannot_be_stopped(self) -> None:
+        # The guarantee is that nothing survives Start over. If active work
+        # cannot be stopped, the honest outcome is to leave the builder alone
+        # rather than clear it and let hidden work keep running.
+        backend.apply_agent_action({
+            "action": "replace_app",
+            "expected_revision": 0,
+            "html": "<p>built</p>",
+            "css": "",
+            "javascript": "",
+            "data": {},
+        })
+        summaries = {
+            "threads": [
+                {"thread_id": "builder", "active_tasks": [{"task_id": "task_1", "status": "running"}]}
+            ]
+        }
+        with (
+            patch.object(backend, "call_admin_api", return_value=summaries),
+            patch.object(backend, "_stop_task", side_effect=backend.AppError(
+                HTTPStatus.BAD_GATEWAY, "could not stop the builder's active work; try again"
+            )),
+            self.assertRaises(backend.AppError) as error,
+        ):
+            backend.reset_app()
+
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
+        state_after = backend.load_app_state()
+        self.assertEqual(state_after["html"], "<p>built</p>")
+        self.assertEqual(backend.builder_thread_id(), "builder")
+
+    def test_reset_is_not_reachable_from_the_agent_namespace(self) -> None:
+        with self.assertRaises(backend.AppError) as error:
+            backend.route_agent("POST", "/agent/reset", None, "builder")
+        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
+
+
 class RouteBoundaryTests(unittest.TestCase):
     def test_agent_namespace_does_not_expose_browser_routes(self) -> None:
-        with self.assertRaises(backend.AppError) as error:
-            backend.route_agent("GET", "/agent/snapshot", None)
+        with (
+            patch.object(backend, "builder_thread_id", return_value="builder"),
+            self.assertRaises(backend.AppError) as error,
+        ):
+            backend.route_agent("GET", "/agent/snapshot", None, "builder")
         self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
 
     def test_agent_proxy_is_pinned_to_the_builder_thread(self) -> None:
@@ -697,7 +885,10 @@ class RouteBoundaryTests(unittest.TestCase):
         handler.headers = Message()
         handler.headers["X-Kern-Agent-App-Proxy"] = backend.APP_ID
         handler.headers["X-Kern-Agent-Thread"] = "other"
-        with self.assertRaises(backend.AppError) as error:
+        with (
+            patch.object(backend, "builder_thread_id", return_value=backend.THREAD_BASE_ID),
+            self.assertRaises(backend.AppError) as error,
+        ):
             handler._require_agent_proxy()
         self.assertEqual(error.exception.status, HTTPStatus.UNAUTHORIZED)
 

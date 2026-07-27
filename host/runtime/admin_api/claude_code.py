@@ -115,6 +115,18 @@ class ClaudeCodeSession:
         self._proc: subprocess.Popen[str] | None = None
         self._messages: queue.Queue[dict[str, Any]] = queue.Queue()
         self._stderr_tail: deque[str] = deque(maxlen=20)
+        # Mirrors run()'s local result_session_id, but as an attribute so a
+        # kill (which surfaces as an exception out of run(), discarding its
+        # locals) still leaves the last session_id the CLI reported somewhere
+        # the caller can read it. See last_known_session_id.
+        self._last_session_id: str | None = None
+
+    @property
+    def last_known_session_id(self) -> str | None:
+        """The most recent session_id the CLI reported this run, even if run()
+        exited via an exception (e.g. the process was killed mid-turn) rather
+        than a normal return. None until the CLI has reported one."""
+        return self._last_session_id
 
     def start(self, init_timeout: float = 60.0) -> None:
         return
@@ -164,6 +176,7 @@ class ClaudeCodeSession:
         steer_messages: Callable[[], list[str]],
         on_message: Callable[[str | dict[str, Any]], None],
         steer_delivered: Callable[[str], None],
+        finish_turn: Callable[[str, str], list[str]] | None = None,
     ) -> tuple[str, str]:
         # State the operator's web-search decision to the launcher as its
         # required first argument; the launcher translates it into the WebSearch
@@ -223,34 +236,59 @@ class ClaudeCodeSession:
         outstanding_user_messages = 1
         last_message = ""
         result_session_id = session_id
+        self._last_session_id = session_id
         final: str | None = None
         settle_deadline: float | None = None
-        while True:
-            for steer in steer_messages():
+
+        def deliver_ready_steers(ready: list[str] | None = None) -> None:
+            nonlocal outstanding_user_messages, settle_deadline
+            for steer in steer_messages() if ready is None else ready:
                 self._send_user_message(steer)
                 outstanding_user_messages += 1
                 # The CLI acts on every steer — merged into the running turn
                 # or run as its own turn — so more events are coming either way.
                 settle_deadline = None
                 steer_delivered(steer)
+
+        def finish_or_deliver_late_steers() -> bool:
+            """Return true once the caller has atomically finished the task.
+
+            Without ``finish_turn`` this retains the standalone session
+            helper's old behavior. The orchestrator callback couples the last
+            pending-steer read to the RUNNING -> COMPLETED transition, so an
+            API steer cannot be accepted in between this check and process
+            shutdown.
+            """
+            if not result_session_id:
+                raise ClaudeCodeError("Claude result did not include a session_id")
+            assert final is not None
+            ready = (
+                steer_messages()
+                if finish_turn is None
+                else finish_turn(result_session_id, final)
+            )
+            if not ready:
+                return True
+            deliver_ready_steers(ready)
+            return False
+
+        while True:
+            deliver_ready_steers()
             try:
                 message = self._messages.get(timeout=1.0)
             except queue.Empty:
-                if (
-                    settle_deadline is not None
-                    and time.monotonic() >= settle_deadline
-                    and not steer_messages()
-                ):
+                if settle_deadline is not None and time.monotonic() >= settle_deadline:
                     # A result left sent user messages unaccounted for and the
                     # CLI has stayed idle since: the steer was merged into the
                     # turn that just ended, its result already covers every
-                    # message, and no further result is coming (see
-                    # STEER_SETTLE_TIMEOUT_SECONDS).
-                    assert final is not None
-                    self.close()
-                    if not result_session_id:
-                        raise ClaudeCodeError("Claude result did not include a session_id")
-                    return result_session_id, final
+                    # message, and no further result is coming. The atomic
+                    # finish callback still gets the final say: a steer that
+                    # arrived at this boundary must be delivered instead.
+                    if finish_or_deliver_late_steers():
+                        self.close()
+                        assert result_session_id is not None
+                        assert final is not None
+                        return result_session_id, final
                 self._require_proc()
                 continue
             message_type = message.get("type")
@@ -268,6 +306,7 @@ class ClaudeCodeSession:
                 settle_deadline = time.monotonic() + STEER_SETTLE_TIMEOUT_SECONDS
             if isinstance(message.get("session_id"), str):
                 result_session_id = message["session_id"]
+                self._last_session_id = result_session_id
             if message.get("type") == "assistant":
                 text = _assistant_text(message)
                 if text:
@@ -289,6 +328,12 @@ class ClaudeCodeSession:
                 final = agent_activity.clean_text(
                     message.get("result") or last_message or "Task completed."
                 )
+                if not outstanding_user_messages and not finish_or_deliver_late_steers():
+                    # The atomic handoff found a steer, so its own result (or a
+                    # merged result followed by the settle timeout) is still
+                    # outstanding.
+                    settle_deadline = time.monotonic() + STEER_SETTLE_TIMEOUT_SECONDS
+                    continue
                 if outstanding_user_messages:
                     # Either a queued steer's turn is still running (its events
                     # disarm the deadline above) or the steer was merged and
@@ -297,8 +342,7 @@ class ClaudeCodeSession:
                     settle_deadline = time.monotonic() + STEER_SETTLE_TIMEOUT_SECONDS
                     continue
                 self.close()
-                if not result_session_id:
-                    raise ClaudeCodeError("Claude result did not include a session_id")
+                assert result_session_id is not None
                 return result_session_id, final
 
     def _send_user_message(self, text: str) -> None:
@@ -675,6 +719,7 @@ def run_turn(
     steer_messages: Callable[[], list[str]],
     on_message: Callable[[str | dict[str, Any]], None],
     steer_delivered: Callable[[str], None],
+    finish_turn: Callable[[str, str], list[str]] | None = None,
 ) -> tuple[str, str]:
     return server.run(
         input_message,
@@ -684,6 +729,7 @@ def run_turn(
         steer_messages,
         on_message,
         steer_delivered,
+        finish_turn,
     )
 
 

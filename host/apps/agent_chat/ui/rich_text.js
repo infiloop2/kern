@@ -76,6 +76,10 @@
       }
       compacted[existingIndex] = {
         ...event,
+        // The snapshot is rendered where the activity first appeared. Keep
+        // that stable ordering key when later updates replace its contents so
+        // a subsequent merge/sort cannot move it across intervening messages.
+        seq: previousEvent.seq,
         payload: {
           ...event.payload,
           activity: {

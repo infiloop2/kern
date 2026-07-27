@@ -21,7 +21,7 @@ HOSTILE_VIEW_TEXT = '"><img src=x onerror=window.__x=1>'
 
 WORKSPACE: dict[str, Any] = {
     "agent_runtime": "claude_code",
-    "model": "opus",
+    "model": "claude-opus-5",
     "effort": "high",
     "thread_seq": 1,
     "goal": "Get the launch tracker ready for Friday",
@@ -505,10 +505,10 @@ def desktop_smoke(page: Any) -> None:
     frame.locator("#agent-runtime").select_option("claude_code")
     expect(frame.locator("#agent-settings-warning")).to_be_visible()
     expect(frame.locator("#agent-settings-warning")).to_contain_text("short-term memory")
-    frame.locator("#agent-model").select_option("opus")
+    frame.locator("#agent-model").select_option("claude-opus-5")
     frame.locator("#agent-effort").select_option("max")
     frame.get_by_role("button", name="Apply changes", exact=True).click()
-    expect(frame.locator("#agent-settings-toggle")).to_contain_text("Claude Code · Opus · Max")
+    expect(frame.locator("#agent-settings-toggle")).to_contain_text("Claude Code · Opus 5 · Max")
     expect(frame.locator("#feed")).to_contain_text("Switched to Claude Code")
 
     # Feed renders every role: user, agent (with inline markup), event, error.

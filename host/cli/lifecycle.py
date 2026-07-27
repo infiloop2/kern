@@ -18,11 +18,13 @@ rendered by ``host.bootstrap.render`` and delivered one of two ways:
    fetches the pinned commit of the fixed public repository
    (``host.constants.PUBLIC_GITHUB_REPOSITORY``) and runs the same bootstrap
    on itself (``host.bootstrap.self_provision``). The CLI first reads the
-   pinned commit's ``VERSION`` from GitHub; that version, not the local
-   checkout's, is the operation's target, and the CLI asks for confirmation
+   pinned commit's ``VERSION`` from GitHub, requires it to equal the local
+   CLI's version (the user data rendered here and the bootstrap fetched there
+   provision one host, so both must come from one version; deploying older
+   code means running that commit's own CLI), and asks for confirmation
    before proceeding (non-interactive callers pipe the confirmation into
-   stdin). Any GitHub failure or a declined confirmation aborts before
-   anything in AWS is touched. No deploy key
+   stdin). Any GitHub failure, version mismatch, or declined confirmation
+   aborts before anything in AWS is touched. No deploy key
    exists and the CLI returns once the instance is launched with its volumes
    attached; bootstrap outcome is observable through the operator endpoints
    coming up.
@@ -90,14 +92,10 @@ from host.cli.lifecycle_checks import _check_existing_version_hints, _validate_c
 from host.cli.lifecycle_constants import SSH_USER
 from host.cli.lifecycle_logging import _log
 from host.cli.lifecycle_types import LifecycleCommand
-from host.version import compare_versions, parse_version, repo_version
+from host.version import parse_version, repo_version
 
 
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-# First release carrying host.bootstrap.self_provision; older pins would pass
-# the VERSION preflight and then fail bootstrap on the host, after the
-# instance and volumes were already mutated.
-_MIN_GITHUB_DELIVERY_VERSION = "0.35.0"
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 # SHA-256 of the empty string: a syntactically valid digest that installs an
 # empty admin password. A caller hashing an unset env var lands exactly here.
@@ -392,10 +390,11 @@ def _resolve_github_pin(commit_sha: str) -> tuple[str, str]:
     returning (commit_sha, target_version) after the operator confirms.
 
     An empty commit_sha pins the latest main commit. Fails closed before
-    anything in AWS is touched: on any GitHub read failure and on a declined
-    or impossible confirmation. Non-interactive callers pipe the confirmation
-    into stdin. The host-side gate in self_provision then re-checks the
-    fetched checkout against this version authoritatively.
+    anything in AWS is touched: on any GitHub read failure, on a pinned
+    VERSION that differs from this CLI's, and on a declined or impossible
+    confirmation. Non-interactive callers pipe the confirmation into stdin.
+    The host-side gate in self_provision then re-checks the fetched checkout
+    against this version authoritatively.
     """
     if not commit_sha:
         head_url = f"https://api.github.com/repos/{PUBLIC_GITHUB_REPOSITORY}/commits/main"
@@ -423,10 +422,16 @@ def _resolve_github_pin(commit_sha: str) -> tuple[str, str]:
         parse_version(pinned_version)
     except ValueError as exc:
         raise ConfigError(f"pinned commit has an invalid VERSION {pinned_version!r}") from exc
-    if compare_versions(pinned_version, _MIN_GITHUB_DELIVERY_VERSION) < 0:
+    # The user data this CLI renders and the bootstrap the instance fetches
+    # from the pinned commit provision the same host; requiring one version
+    # for both keeps every deploy a combination that was actually tested
+    # together. To deploy older code, run that commit's own CLI.
+    cli_version = repo_version()
+    if pinned_version != cli_version:
         raise ConfigError(
-            f"pinned commit is Kern {pinned_version}, but the GitHub delivery requires "
-            f"{_MIN_GITHUB_DELIVERY_VERSION} or newer; use the SSH delivery for older versions"
+            f"pinned commit is Kern {pinned_version}, but this CLI is Kern {cli_version}; "
+            "a deploy's user data and bootstrap must come from one version, so check out "
+            "the pinned commit and deploy with its CLI"
         )
     _log(f"pinned commit {commit_sha} deploys Kern {pinned_version} from {PUBLIC_GITHUB_REPOSITORY}")
     try:

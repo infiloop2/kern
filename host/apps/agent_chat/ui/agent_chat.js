@@ -2,17 +2,26 @@ const pending = new Map();
 let nextRequestId = 1;
 let threads = [];
 let tasks = [];
-// The selected thread's accumulated task events (its full message stream),
-// fetched forward-paged by seq; EVENTS_PAGE mirrors the app backend page size.
+// The selected thread opens on its newest event page. Live events page
+// forward from the newest cursor; earlier history is prepended on demand from
+// the oldest cursor. EVENTS_PAGE mirrors the app backend page size.
 let threadEvents = [];
-let threadEventsSeq = 0;
+let threadEventsOldestSeq = null;
+let threadEventsNewestSeq = 0;
+let threadEventsInitialized = false;
+let hasOlderThreadEvents = false;
+let loadingOlderThreadEvents = false;
+let lastChatScrollTop = 0;
 const EVENTS_PAGE = 6;
 const ACTIVE_REFRESH_MS = 1000;
 const IDLE_REFRESH_MS = 5000;
 let selectedThreadId = null;
+let selectedThreadName = null;
 let selectedThreadRuntime = null;
 let selectedThreadModel = null;
 let selectedThreadEffort = null;
+let selectedThreadArchived = false;
+let showingArchivedThreads = false;
 let sessionOptions = {};
 let pendingAttachments = [];
 let attachmentActivity = null;
@@ -43,7 +52,9 @@ let forceScrollBottom = false;
 const $ = id => document.getElementById(id);
 const runtimeLabel = runtime => runtime === "claude_code" ? "Claude Code" : runtime === "codex" ? "Codex" : runtime === "hermes" ? "Hermes" : runtime;
 const optionLabel = value => value.split(/[-_]/).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
-const modelLabel = (runtime, value) => runtime === "codex" ? value : optionLabel(value);
+// Claude Code model ids carry the provider prefix ("claude-opus-5"); the
+// runtime name already says Claude Code, so the pill reads "Opus 5".
+const modelLabel = (runtime, value) => runtime === "codex" ? value : optionLabel(String(value).replace(/^claude-/, ""));
 const esc = value => KernRichText.escapeHtml(value);
 const markdown = value => KernRichText.renderMarkdown(value);
 const escAttr = value => esc(value).replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -149,8 +160,12 @@ async function refresh() {
     }
     // A successful /threads already proves the backend is up; when it is down
     // the bridge's own 502 ("app backend unavailable") surfaces as the error.
-    const response = await api("GET", "/threads");
+    const archivedView = showingArchivedThreads;
+    const response = await api("GET", archivedView ? "/threads?archived=true" : "/threads");
+    if (archivedView !== showingArchivedThreads) return;
     threads = response.threads || [];
+    const selectedThread = threads.find(thread => thread.thread_id === selectedThreadId);
+    if (selectedThread) selectedThreadName = selectedThread.name;
     renderThreads();
     if (selectedThreadId) await refreshSelectedThread();
     setStatus("");
@@ -160,20 +175,22 @@ async function refresh() {
 }
 
 function renderThreads() {
-  const key = JSON.stringify([selectedThreadId, threads]);
+  const key = JSON.stringify([selectedThreadId, showingArchivedThreads, threads]);
   if (key === renderedThreadsKey) return;
   renderedThreadsKey = key;
   if (!threads.length) {
-    $("threads").innerHTML = `<div class="sidebar-empty">No threads yet. Send a message below to start one.</div>`;
+    $("threads").innerHTML = showingArchivedThreads
+      ? `<div class="sidebar-empty">No archived threads.</div>`
+      : `<div class="sidebar-empty">No threads yet. Send a message below to start one.</div>`;
     return;
   }
   $("threads").innerHTML = threads.map(thread => {
     const active = (thread.active_tasks || []).length > 0;
     const count = `${thread.task_count} task${thread.task_count === 1 ? "" : "s"}`;
     return `
-    <button class="thread-item${thread.thread_id === selectedThreadId ? " selected" : ""}" data-thread-id="${esc(thread.thread_id)}" data-runtime="${esc(thread.agent_runtime)}" data-model="${esc(thread.model)}" data-effort="${esc(thread.effort)}">
-      <span class="thread-name"><span>${esc(thread.thread_id)}</span>${active ? `<span class="thread-dot running"></span>` : ""}</span>
-      <span class="thread-meta">${esc(runtimeLabel(thread.agent_runtime))} &middot; ${esc(thread.model)}</span>
+    <button class="thread-item${thread.thread_id === selectedThreadId ? " selected" : ""}" data-thread-id="${escAttr(thread.thread_id)}" data-name="${escAttr(thread.name)}" data-runtime="${escAttr(thread.agent_runtime)}" data-model="${escAttr(thread.model)}" data-effort="${escAttr(thread.effort)}" data-archived="${thread.archived ? "true" : "false"}">
+      <span class="thread-name"><span>${esc(thread.name)}</span>${active ? `<span class="thread-dot running"></span>` : ""}</span>
+      <span class="thread-meta">${esc(runtimeLabel(thread.agent_runtime))} &middot; ${esc(modelLabel(thread.agent_runtime, thread.model))}</span>
       <span class="thread-meta">${esc(count)} &middot; ${esc(relativeTime(thread.last_used_at))}</span>
     </button>`;
   }).join("");
@@ -181,15 +198,27 @@ function renderThreads() {
 
 function updateComposer() {
   const hasThread = selectedThreadId !== null;
+  const readOnly = showingArchivedThreads || selectedThreadArchived;
   const queuedTask = tasks.find(task => task.status === "queued");
   const runningTask = tasks.find(task => task.status === "running");
-  $("thread-title").textContent = hasThread ? selectedThreadId : "New thread";
+  $("thread-title").textContent = hasThread
+    ? selectedThreadName || selectedThreadId
+    : showingArchivedThreads
+      ? "Archived threads"
+      : "New thread";
   const subtitle = hasThread
-    ? `${runtimeLabel(selectedThreadRuntime)} · ${selectedThreadModel} · ${optionLabel(selectedThreadEffort)}`
+    ? `${runtimeLabel(selectedThreadRuntime)} · ${modelLabel(selectedThreadRuntime, selectedThreadModel)} · ${optionLabel(selectedThreadEffort)}`
     : "";
   $("thread-subtitle").textContent = subtitle;
   $("thread-subtitle").hidden = !subtitle;
+  $("rename-thread").hidden = !hasThread;
   $("archive-thread").hidden = !hasThread;
+  $("archive-thread").textContent = selectedThreadArchived ? "Unarchive" : "Archive";
+  $("composer").hidden = readOnly;
+  $("composer-hint").hidden = readOnly;
+  $("composer-dock").classList.toggle("readonly", readOnly);
+  $("new-thread").hidden = showingArchivedThreads;
+  $("archived-toggle").textContent = showingArchivedThreads ? "Show active" : "Show archived";
   // Follow-up tasks reuse the thread's stored session configuration, so the
   // pills only show while composing the first task of a new thread. The
   // thread id itself is backend-generated, never typed.
@@ -327,14 +356,15 @@ async function removeAttachment(selectionId) {
   }
 }
 
-async function showThread(threadId, runtime, model, effort) {
+async function showThread(threadId, name, runtime, model, effort, archived) {
   selectedThreadId = threadId;
+  selectedThreadName = name;
   selectedThreadRuntime = runtime;
   selectedThreadModel = model;
   selectedThreadEffort = effort;
+  selectedThreadArchived = archived;
   tasks = [];
-  threadEvents = [];
-  threadEventsSeq = 0;
+  resetThreadEvents();
   updateComposer();
   renderThreads();
   await refreshSelectedThread();
@@ -351,41 +381,134 @@ async function refreshSelectedThread() {
   const response = await api("GET", `/threads/${encodeURIComponent(threadId)}/tasks`);
   if (threadId !== selectedThreadId) return;
   tasks = response.tasks || [];
-  await drainThreadEvents(threadId);
+  await refreshThreadEvents(threadId);
   if (threadId !== selectedThreadId) return;
   updateComposer();
   renderThreadHistory();
 }
 
-async function drainThreadEvents(threadId) {
-  // Forward-paged accumulation: each page picks up after the last seen seq,
-  // so the first open drains the backlog and later polls fetch only news.
+function resetThreadEvents() {
+  threadEvents = [];
+  threadEventsOldestSeq = null;
+  threadEventsNewestSeq = 0;
+  threadEventsInitialized = false;
+  hasOlderThreadEvents = false;
+  loadingOlderThreadEvents = false;
+  lastChatScrollTop = 0;
+  renderHistoryLoader();
+}
+
+function mergeThreadEvents(events) {
+  const bySeq = new Map(threadEvents.map(event => [event.seq, event]));
+  for (const event of events) bySeq.set(event.seq, event);
+  const ordered = Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
+  // Keep one bounded snapshot per semantic activity. Streaming command
+  // deltas can otherwise retain and repeatedly rebuild an unbounded list of
+  // large chunks for the lifetime of the browser tab.
+  threadEvents = KernRichText.compactActivityEvents(ordered);
+}
+
+async function refreshThreadEvents(threadId) {
+  if (!threadEventsInitialized) {
+    // No cursor means "latest page"; opening a long thread therefore paints
+    // its useful tail after one bounded request instead of draining history.
+    const response = await api(
+      "GET",
+      `/threads/${encodeURIComponent(threadId)}/events`,
+    );
+    if (threadId !== selectedThreadId) return;
+    const events = response.events || [];
+    mergeThreadEvents(events);
+    if (events.length) {
+      threadEventsOldestSeq = events[0].seq;
+      threadEventsNewestSeq = events[events.length - 1].seq;
+    }
+    hasOlderThreadEvents = events.length === EVENTS_PAGE;
+    threadEventsInitialized = true;
+    renderHistoryLoader();
+    return;
+  }
+  // Once the tail is loaded, forward paging drains only events that arrived
+  // after it. This keeps live activity complete without revisiting history.
   for (;;) {
     const response = await api(
       "GET",
-      `/threads/${encodeURIComponent(threadId)}/events?since=${threadEventsSeq}`,
+      `/threads/${encodeURIComponent(threadId)}/events?since=${threadEventsNewestSeq}`,
     );
     if (threadId !== selectedThreadId) return;
     const events = response.events || [];
     // Only accept events past the cursor, so a server that re-sends an
     // overlapping page can never double-append into the stream.
-    const fresh = events.filter(event => event.seq > threadEventsSeq);
+    const fresh = events.filter(event => event.seq > threadEventsNewestSeq);
     if (fresh.length) {
-      // Keep one bounded snapshot per semantic activity. Streaming command
-      // deltas can otherwise retain and repeatedly rebuild an unbounded list
-      // of large chunks for the lifetime of the browser tab.
-      threadEvents = KernRichText.compactActivityEvents([...threadEvents, ...fresh]);
-      threadEventsSeq = fresh[fresh.length - 1].seq;
+      mergeThreadEvents(fresh);
+      threadEventsNewestSeq = fresh[fresh.length - 1].seq;
+      if (threadEventsOldestSeq === null) threadEventsOldestSeq = fresh[0].seq;
     }
-    // Keep paging only while the cursor advanced by a full page; a short or
-    // no-progress page means the backlog is drained (and prevents a loop if a
-    // server ignores `since` and keeps returning the same rows).
+    // Keep paging only while the cursor advanced by a full page. A short or
+    // no-progress page means the live tail is caught up.
     if (fresh.length < EVENTS_PAGE) return;
   }
 }
 
+async function loadOlderThreadEvents() {
+  if (
+    !selectedThreadId
+    || !threadEventsInitialized
+    || !hasOlderThreadEvents
+    || loadingOlderThreadEvents
+    || threadEventsOldestSeq === null
+  ) return;
+  const threadId = selectedThreadId;
+  const before = threadEventsOldestSeq;
+  loadingOlderThreadEvents = true;
+  renderHistoryLoader();
+  try {
+    const response = await api(
+      "GET",
+      `/threads/${encodeURIComponent(threadId)}/events?before=${before}`,
+    );
+    if (threadId !== selectedThreadId) return;
+    const events = response.events || [];
+    const older = events.filter(event => event.seq < before);
+    const scroller = $("chat-scroll");
+    // Capture immediately before mutating the DOM so reading movement during
+    // the request is respected. Compensating by the added scroll height keeps
+    // the same content under the operator's eyes as older turns are prepended.
+    const previousHeight = scroller.scrollHeight;
+    const previousTop = scroller.scrollTop;
+    if (older.length) {
+      mergeThreadEvents(older);
+      threadEventsOldestSeq = older[0].seq;
+    }
+    hasOlderThreadEvents = older.length === EVENTS_PAGE;
+    renderThreadHistory();
+    scroller.scrollTop = previousTop + (scroller.scrollHeight - previousHeight);
+  } finally {
+    loadingOlderThreadEvents = false;
+    if (threadId === selectedThreadId) renderHistoryLoader();
+  }
+}
+
+function renderHistoryLoader() {
+  const loader = $("history-loader");
+  if (!loader) return;
+  loader.hidden = !selectedThreadId || !hasOlderThreadEvents;
+  loader.dataset.oldestSeq = threadEventsOldestSeq === null ? "" : String(threadEventsOldestSeq);
+  const button = $("load-earlier");
+  button.disabled = loadingOlderThreadEvents;
+  button.textContent = loadingOlderThreadEvents ? "Loading earlier messages…" : "Load earlier messages";
+}
+
 function renderThreadHistory() {
-  const key = JSON.stringify([selectedThreadId, tasks, threadEventsSeq]);
+  const key = JSON.stringify([
+    selectedThreadId,
+    showingArchivedThreads,
+    tasks,
+    threadEventsOldestSeq,
+    threadEventsNewestSeq,
+    threadEvents.length,
+  ]);
   if (key === renderedHistoryKey) return;
   renderedHistoryKey = key;
   const switched = renderedHistoryThread !== selectedThreadId;
@@ -393,13 +516,19 @@ function renderThreadHistory() {
   const detail = $("thread-detail");
   if (!selectedThreadId) {
     renderedTurnHtml.clear();
-    detail.innerHTML = `
-      <div class="chat-hero">
-        <h2>What should the agent work on?</h2>
-        <p>Send one message at a time. A follow-up steers running work; otherwise it starts the next turn in the same agent session.</p>
-      </div>`;
+    renderHistoryLoader();
+    detail.innerHTML = showingArchivedThreads
+      ? `<div class="chat-hero">
+          <h2>Archived threads</h2>
+          <p>Select a thread to read it, or return to active threads.</p>
+        </div>`
+      : `<div class="chat-hero">
+          <h2>What should the agent work on?</h2>
+          <p>Send one message at a time. A follow-up steers running work; otherwise it starts the next turn in the same agent session.</p>
+        </div>`;
     return;
   }
+  renderHistoryLoader();
   const scroller = $("chat-scroll");
   const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
   // Patch turns in place instead of rebuilding the whole history: a poll that
@@ -483,7 +612,7 @@ function renderActivity(value, openActivities) {
         <span class="activity-kind">${presentation.label}</span>
       </span>
       ${status}
-      <span class="activity-phase">${phase === "started" ? "Running" : "Done"}</span>`;
+      ${phase === "started" ? `<span class="activity-phase">Running</span>` : ""}`;
   const cardClass = `activity-card activity-${esc(kind)} ${phase}`;
   const label = `${presentation.label}: ${String(value.title || "Agent activity")}`;
   if (!body) {
@@ -492,7 +621,7 @@ function renderActivity(value, openActivities) {
         <div class="activity-summary">${summary}</div>
       </div>`;
   }
-  const open = phase === "started" || openActivities.has(activityId);
+  const open = openActivities.has(activityId);
   return `
     <details class="${cardClass}" data-activity-id="${escAttr(activityId)}" aria-label="${escAttr(label)}"${open ? " open" : ""}>
       <summary>${summary}</summary>
@@ -558,13 +687,14 @@ function renderTurn(task, events, openActivities) {
         ${task.status === "completed" ? "" : badge(task.status)}
         <span class="mono">${esc(task.task_id)}</span>
         <span title="${esc(formatDateTime(task.created_at))}">${esc(relativeTime(task.created_at))}</span>
-        ${task.status === "queued" ? `<button class="ghost sm" data-task-action="cancel" data-task-id="${esc(task.task_id)}">Cancel</button>` : ""}
+        ${task.status === "queued" && !selectedThreadArchived ? `<button class="ghost sm" data-task-action="cancel" data-task-id="${esc(task.task_id)}">Cancel</button>` : ""}
       </div>
       ${stream.join("")}
     </article>`;
 }
 
 async function sendMessage() {
+  if (showingArchivedThreads || selectedThreadArchived) return;
   const message = $("new-task").value.trim();
   const runtime = $("new-task-runtime").value;
   const model = $("new-task-model").value;
@@ -606,12 +736,12 @@ async function sendMessage() {
   autosizeComposer();
   if (startingNewThread) {
     // A brand-new thread has no prior event stream to keep; start its
-    // accumulator clean so the first poll drains only this task's events.
-    threadEvents = [];
-    threadEventsSeq = 0;
+    // newest-page accumulator clean so its first poll reads only this task.
+    resetThreadEvents();
   }
   selectedThreadId = result.thread_id;
   if (startingNewThread) {
+    selectedThreadName = result.thread_id;
     selectedThreadRuntime = result.agent_runtime;
     selectedThreadModel = result.model;
     selectedThreadEffort = result.effort;
@@ -637,24 +767,66 @@ async function stopRunningTask() {
   await refreshSelectedThread();
 }
 
-async function archiveSelectedThread() {
+async function setSelectedThreadArchived() {
   if (!selectedThreadId) return;
-  await api("POST", `/threads/${encodeURIComponent(selectedThreadId)}/archive`);
-  startNewThread();
+  const action = selectedThreadArchived ? "unarchive" : "archive";
+  await api("POST", `/threads/${encodeURIComponent(selectedThreadId)}/${action}`);
+  clearSelectedThread();
   await refresh();
 }
 
-function startNewThread() {
+async function renameSelectedThread() {
+  if (!selectedThreadId) return;
+  const threadId = selectedThreadId;
+  const requestedName = prompt("Rename thread (max 100 characters):", selectedThreadName || threadId);
+  if (requestedName === null) return;
+  const name = requestedName.trim();
+  if (!name) {
+    setStatus("Thread name cannot be empty.");
+    return;
+  }
+  const response = await api(
+    "PUT",
+    `/threads/${encodeURIComponent(threadId)}/name`,
+    { name },
+  );
+  const renamedName = response.thread.name;
+  threads = threads.map(thread => (
+    thread.thread_id === threadId
+      ? { ...thread, name: renamedName }
+      : thread
+  ));
+  if (selectedThreadId === threadId) {
+    selectedThreadName = renamedName;
+    updateComposer();
+  }
+  renderThreads();
+  setStatus("");
+}
+
+function clearSelectedThread() {
   selectedThreadId = null;
+  selectedThreadName = null;
   selectedThreadRuntime = null;
   selectedThreadModel = null;
   selectedThreadEffort = null;
+  selectedThreadArchived = false;
   tasks = [];
-  threadEvents = [];
-  threadEventsSeq = 0;
+  resetThreadEvents();
   updateComposer();
   renderThreadHistory();
   renderThreads();
+}
+
+function startNewThread() {
+  showingArchivedThreads = false;
+  clearSelectedThread();
+}
+
+async function toggleArchivedThreads() {
+  showingArchivedThreads = !showingArchivedThreads;
+  clearSelectedThread();
+  await refresh();
 }
 
 // Must match the drawer breakpoint in agent_chat.css.
@@ -704,7 +876,14 @@ document.addEventListener("click", event => {
   const thread = event.target.closest && event.target.closest(".thread-item");
   if (thread) {
     setSidebarOpen(false);
-    showThread(thread.dataset.threadId, thread.dataset.runtime, thread.dataset.model, thread.dataset.effort).catch(error => setStatus(error.message));
+    showThread(
+      thread.dataset.threadId,
+      thread.dataset.name,
+      thread.dataset.runtime,
+      thread.dataset.model,
+      thread.dataset.effort,
+      thread.dataset.archived === "true",
+    ).catch(error => setStatus(error.message));
     return;
   }
   const taskButton = event.target.closest && event.target.closest("button[data-task-action]");
@@ -725,7 +904,17 @@ $("new-thread").addEventListener("click", () => {
   startNewThread();
   $("new-task").focus();
 });
-$("archive-thread").addEventListener("click", () => archiveSelectedThread().catch(error => setStatus(error.message)));
+$("archived-toggle").addEventListener("click", () => toggleArchivedThreads().catch(error => setStatus(error.message)));
+$("rename-thread").addEventListener("click", () => renameSelectedThread().catch(error => setStatus(error.message)));
+$("archive-thread").addEventListener("click", () => setSelectedThreadArchived().catch(error => setStatus(error.message)));
+$("load-earlier").addEventListener("click", () => loadOlderThreadEvents().catch(error => setStatus(error.message)));
+$("chat-scroll").addEventListener("scroll", () => {
+  const scroller = $("chat-scroll");
+  const movedUp = scroller.scrollTop < lastChatScrollTop;
+  lastChatScrollTop = scroller.scrollTop;
+  if (!movedUp || scroller.scrollTop > 160) return;
+  loadOlderThreadEvents().catch(error => setStatus(error.message));
+}, { passive: true });
 $("stop-task").addEventListener("click", () => stopRunningTask().catch(error => setStatus(error.message)));
 $("create-task").addEventListener("click", () => sendMessage().catch(error => setStatus(error.message)));
 $("attach-file").addEventListener("click", () => attachFile().catch(error => setStatus(error.message)));
