@@ -1588,8 +1588,8 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("KERN_APP_AGENT_CHAT_GID=48000", bootstrap)
         self.assertIn("App ports are generated from the same package-local host_slot values", bootstrap)
         self.assertIn("APP_AGENT_CHAT_PORT=7450", bootstrap)
-        # The four ecosystem apps take stable host slots 2-5, so their UIDs and
-        # ports follow the same 48000+slot / 7450+slot derivation.
+        # Deprecated app packages keep stable migration UIDs but no longer
+        # reserve live backend ports or services.
         for app_id, slot in (
             ("ALPHA_SEEKER", 2),
             ("SOCIAL_MARKETER", 3),
@@ -1598,15 +1598,19 @@ class DeployUnitTests(unittest.TestCase):
         ):
             self.assertIn(f"KERN_APP_{app_id}_UID={48000 + slot}", bootstrap)
             self.assertIn(f"KERN_APP_{app_id}_GID={48000 + slot}", bootstrap)
-            self.assertIn(f"APP_{app_id}_PORT={7450 + slot}", bootstrap)
+            self.assertNotIn(f"APP_{app_id}_PORT=", bootstrap)
         for app_id, slot in (
             ("alpha_seeker", 2),
             ("social_marketer", 3),
             ("virality_machine", 4),
             ("software_builder", 5),
         ):
-            self.assertIn(f"User=kern-app-{slot}", bootstrap)
-            self.assertIn(f"kern-app-{app_id}.service", bootstrap)
+            service = f"kern-app-{app_id}.service"
+            self.assertNotIn(f"User=kern-app-{slot}", bootstrap)
+            self.assertNotIn(
+                f"cat > /etc/systemd/system/{service} <<'UNIT'",
+                bootstrap,
+            )
             self.assertIn(f"python3 -m host.runtime.deploy.app_migrate pending {app_id}", bootstrap)
         self.assertIn(
             'ensure_group kern-app-6 "$KERN_APP_PERSONAL_WEB_APP_BUILDER_GID"',
@@ -1664,10 +1668,13 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("User=kern-proxy", bootstrap)
         self.assertIn("User=cloudflared", bootstrap)
         self.assertIn("User=kern-app-0", bootstrap)
-        self.assertIn("User=kern-app-1", bootstrap)
+        self.assertNotIn("User=kern-app-1", bootstrap)
         self.assertIn("Slice=kern_app.slice", bootstrap)
         self.assertIn("kern-app-agent_chat.service", bootstrap)
-        self.assertIn("kern-app-mission_pursuit.service", bootstrap)
+        self.assertNotIn(
+            "cat > /etc/systemd/system/kern-app-mission_pursuit.service <<'UNIT'",
+            bootstrap,
+        )
         self.assertIn("python3 -m host.runtime.deploy.app_migrate pending agent_chat", bootstrap)
         self.assertIn("python3 -m host.runtime.deploy.app_migrate pending mission_pursuit", bootstrap)
         self.assertIn(
@@ -1718,12 +1725,81 @@ class DeployUnitTests(unittest.TestCase):
         # listener stays outside its network boundary.
         self.assertIn('oif lo tcp dport 7445 meta skuid "kern-agent" accept', bootstrap)
         self.assertIn('oif lo meta skuid "kern-agent" drop', bootstrap)
+        # Agent preview ports: the agent may originate connections to its own
+        # preview range (to test what it serves) and its listeners there may
+        # reply to an operator's SSH local forward; both accepts sit before the
+        # general agent-loopback drop, and the reply rule is scoped to
+        # established traffic so a preview source port cannot originate a flow.
+        # The range must never collide with a platform listener: not the admin
+        # API, the network proxy, or any possible installed-app port.
+        from host.constants import (
+            ADMIN_API_PORT,
+            AGENT_PREVIEW_PORT_BASE,
+            AGENT_PREVIEW_PORT_COUNT,
+            APP_PORT_BASE,
+            PROXY_PORT,
+        )
+        from host.runtime.core.app_platform import MAX_INSTALLED_APPS
+        preview_ports = range(
+            AGENT_PREVIEW_PORT_BASE, AGENT_PREVIEW_PORT_BASE + AGENT_PREVIEW_PORT_COUNT
+        )
+        self.assertNotIn(ADMIN_API_PORT, preview_ports)
+        self.assertNotIn(PROXY_PORT, preview_ports)
+        self.assertFalse(
+            set(preview_ports) & set(range(APP_PORT_BASE, APP_PORT_BASE + MAX_INSTALLED_APPS))
+        )
+        self.assertIn('oif lo tcp dport 8000-8015 meta skuid "kern-agent" accept', bootstrap)
+        self.assertIn(
+            'oif lo ct state established,related tcp sport 8000-8015 meta skuid "kern-agent" accept',
+            bootstrap,
+        )
+        # The preview range is default-deny: after the agent + operator allows,
+        # both a destination-port and a source-port drop catch every other
+        # principal, before the broad `oif lo accept` fall-through. This is what
+        # closes the whole class — a compromised egress-capable service cannot
+        # dial a preview server (dport drop) and cannot answer one the agent
+        # originated (sport drop), and a future service/user gains no access.
+        self.assertIn('oif lo tcp dport 8000-8015 meta skuid "kern-operator" accept', bootstrap)
+        self.assertIn('oif lo tcp dport 8000-8015 drop', bootstrap)
+        self.assertIn('oif lo tcp sport 8000-8015 drop', bootstrap)
+        # Allowlist entries precede the two default drops, which precede the
+        # broad accept and the general agent-loopback drop.
+        self.assertLess(
+            bootstrap.index('oif lo ct state established,related tcp sport 8000-8015 meta skuid "kern-agent" accept'),
+            bootstrap.index('oif lo tcp dport 8000-8015 drop'),
+        )
+        self.assertLess(
+            bootstrap.index('oif lo tcp dport 8000-8015 meta skuid "kern-operator" accept'),
+            bootstrap.index('oif lo tcp dport 8000-8015 drop'),
+        )
+        self.assertLess(
+            bootstrap.index('oif lo tcp sport 8000-8015 drop'),
+            bootstrap.index('oif lo accept'),
+        )
+        # A compromised egress-capable service can neither dial nor be dialed on
+        # the range: with no per-service rule, both directions fall to the
+        # default drops above rather than the broad accept. Assert no accept
+        # rule readmits a service account into the range.
+        from host.constants import SERVICE_ACCOUNTS
+        for name in SERVICE_ACCOUNTS:
+            if name == "kern-agent":
+                continue
+            self.assertNotIn(f'dport 8000-8015 meta skuid "{name}" accept', bootstrap)
+            self.assertNotIn(f'sport 8000-8015 meta skuid "{name}" accept', bootstrap)
         # App services may answer the host admin API reverse proxy but cannot
         # open arbitrary loopback connections, including to the unauthenticated
         # network proxy or browser-facing admin API.
         self.assertIn('oif lo meta skuid "kern-app-0" drop', bootstrap)
         self.assertNotIn('oif lo tcp dport 7443 meta skuid "kern-app-0" accept', bootstrap)
         self.assertNotIn('oif lo tcp dport 7445 meta skuid "kern-app-0" accept', bootstrap)
+        # An app that bound a preview port cannot answer an agent-originated
+        # connection there: the range-wide source-port drop above precedes the
+        # app rules, so no per-app preview rule is needed and none is emitted.
+        self.assertNotIn('sport 8000-8015 meta skuid "kern-app-0" drop', bootstrap)
+        self.assertLess(
+            bootstrap.index('oif lo tcp sport 8000-8015 drop'),
+            bootstrap.index('oif lo ct state established,related meta skuid "kern-app-0" accept'),
+        )
         # App backend TCP listeners are loopback-only and reachable only from
         # the admin API service uid (browser bridge) and the agent-app service
         # uid (agent app_api proxy). Other local users hit the explicit drop
@@ -1859,6 +1935,22 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("GitHub GraphQL requests are denied by policy", agent_instructions)
         self.assertIn("equivalent REST endpoint with `gh api`", agent_instructions)
         self.assertNotIn("alternate transports", agent_instructions)
+        # The agent instructions advertise the preview port range and defer the
+        # operator's viewing steps to the README (kept concise, no exact SSH
+        # commands here). The range must track the firewall constants.
+        from host.constants import AGENT_PREVIEW_PORT_BASE, AGENT_PREVIEW_PORT_COUNT
+        preview_range = f"{AGENT_PREVIEW_PORT_BASE}-{AGENT_PREVIEW_PORT_BASE + AGENT_PREVIEW_PORT_COUNT - 1}"
+        self.assertIn(f"## Test web servers: ports {preview_range}", agent_instructions)
+        self.assertIn(f"`curl 127.0.0.1:{AGENT_PREVIEW_PORT_BASE}`", agent_instructions)
+        self.assertIn("point them to the repo README", agent_instructions)
+        self.assertIn("no way to view these ports", agent_instructions)
+        # The exact operator SSH-forward instructions live in the README, not the
+        # agent's own instructions.
+        self.assertNotIn("ssh -L", agent_instructions)
+        readme = Path("README.md").read_text()
+        self.assertIn(f"-L {AGENT_PREVIEW_PORT_BASE}:127.0.0.1:{AGENT_PREVIEW_PORT_BASE}", readme)
+        self.assertIn(f"http://preview.localhost:{AGENT_PREVIEW_PORT_BASE}", readme)
+        self.assertIn("cookies are scoped by hostname", readme)
         self.assertIn('"$AGENT_HOME_SOURCE_DIR/agents_claude.md" "$AGENT_HOME_PATH/AGENTS.md"', bootstrap)
         self.assertIn('"$AGENT_HOME_SOURCE_DIR/agents_claude.md" "$AGENT_HOME_PATH/CLAUDE.md"', bootstrap)
         self.assertIn('approval_policy = "never"', codex_config)
@@ -2154,12 +2246,11 @@ class DeployUnitTests(unittest.TestCase):
                 backend_entrypoint=backend,
                 migrations_dir=migrations,
                 ui_dir=ui,
-                port=7457,
                 allocation=app_platform.AppAllocation(uid=48007, gid=48007, port_offset=7),
                 agent_instructions="Test app instructions.",
             )
 
-            with patch("host.bootstrap.render.app_platform.installed_apps", return_value=[app]):
+            with patch("host.bootstrap.render.app_platform.migration_apps", return_value=[app]):
                 bootstrap = render._render_bootstrap()
 
         self.assertIn("cat > /etc/systemd/system/kern-app-custom_app.service <<'UNIT'", bootstrap)
@@ -2171,7 +2262,7 @@ class DeployUnitTests(unittest.TestCase):
 
     def test_rendered_bootstrap_pins_every_app_uid_in_reserved_range(self) -> None:
         bootstrap = render._render_bootstrap()
-        apps = app_platform.installed_apps()
+        apps = app_platform.migration_apps()
         seen_uids: set[int] = set()
 
         for app in apps:
@@ -2409,7 +2500,7 @@ class DeployUnitTests(unittest.TestCase):
         off = forwarded(
             "web-search=off",
             "--thread-scope",
-            "mission_pursuit__ws-3",
+            "sample_app__ws-3",
             "-p",
             "hello",
         )
@@ -2420,7 +2511,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("-p", off.stdout)
         self.assertIn("hello", off.stdout)
         self.assertNotIn("web-search=off", off.stdout)
-        self.assertIn("--unit kern-agent-thread-mission_pursuit__ws-3", off.stdout)
+        self.assertIn("--unit kern-agent-thread-sample_app__ws-3", off.stdout)
         self.assertNotIn("--thread-scope", off.stdout)
         self.assertIn("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", off.stdout)
 

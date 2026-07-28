@@ -274,9 +274,9 @@ class ClaudeCodeTests(unittest.TestCase):
     def test_thread_scope_is_separate_from_the_launcher_command(self) -> None:
         # The web-search decision must remain the launcher's first argument, so
         # app attribution stores its scope id separately from the command.
-        session = claude_code.ClaudeCodeSession(command=["/bin/echo"], thread_id="mission_pursuit__ws-3")
+        session = claude_code.ClaudeCodeSession(command=["/bin/echo"], thread_id="sample_app__ws-3")
         self.assertEqual(session._command, ["/bin/echo"])
-        self.assertEqual(session._thread_id, "mission_pursuit__ws-3")
+        self.assertEqual(session._thread_id, "sample_app__ws-3")
         self.assertEqual(claude_code.ClaudeCodeSession(command=["/bin/echo"])._command, ["/bin/echo"])
         self.assertIsNone(claude_code._subprocess_cwd(claude_code.DEFAULT_COMMAND))
         self.assertEqual(claude_code._subprocess_cwd(session._command), claude_code.AGENT_CWD)
@@ -298,7 +298,7 @@ class ClaudeCodeTests(unittest.TestCase):
 
     def test_close_does_not_stop_a_scope_for_a_test_command_or_threadless_turn(self) -> None:
         for session in (
-            claude_code.ClaudeCodeSession(command=["/bin/echo"], thread_id="mission_pursuit__ws-3"),
+            claude_code.ClaudeCodeSession(command=["/bin/echo"], thread_id="sample_app__ws-3"),
             claude_code.ClaudeCodeSession(command=claude_code.DEFAULT_COMMAND, thread_id=None),
         ):
             with patch.object(thread_scope.subprocess, "run") as run:
@@ -1019,7 +1019,7 @@ print(json.dumps({
                 argv_path = Path(tmp) / "argv.json"
                 server = claude_code.ClaudeCodeSession(
                     [sys.executable, "-u", "-c", script, str(argv_path)],
-                    thread_id="mission_pursuit__ws-3",
+                    thread_id="sample_app__ws-3",
                 )
                 server.app_instructions = "Use only the documented app routes."
                 with patch("host.runtime.core.state.read_claude_web_search", return_value=False):
@@ -1044,7 +1044,7 @@ print(json.dumps({
         self.assertIn("--strict-mcp-config", argv)
         self.assertEqual(
             argv[:3],
-            ["web-search=off", "--thread-scope", "mission_pursuit__ws-3"],
+            ["web-search=off", "--thread-scope", "sample_app__ws-3"],
         )
         self.assertEqual(
             argv[argv.index("--append-system-prompt") + 1],

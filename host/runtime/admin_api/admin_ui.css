@@ -300,7 +300,31 @@ button.runtime-summary:hover {
 
 /* Labels are wider than the rings, so the gap keeps neighboring window
    labels from reading as one line. */
-.runtime-usage { align-items: center; display: flex; flex: 0 0 auto; gap: 0.3rem; }
+.runtime-usage {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.3rem;
+  position: relative;
+}
+
+/* A mouse can inspect the compact desktop readout without changing the
+   toolbar or blocking its provider-settings button. Phones keep their
+   separate tap-to-expand panel and never match this hover-capable query. */
+@media (min-width: 861px) and (hover: hover) and (pointer: fine) {
+  button.runtime-summary:hover { z-index: 2; }
+
+  button.runtime-summary:hover > .runtime-usage {
+    background: rgba(12, 16, 23, 0.98);
+    border-radius: 5px;
+    box-shadow:
+      0 0 0 0.3rem rgba(12, 16, 23, 0.98),
+      0 12px 30px rgba(0, 0, 0, 0.55);
+    pointer-events: none;
+    transform: scale(1.42);
+    z-index: 1;
+  }
+}
 
 .usage-ring { align-items: center; color: var(--text-dim); display: grid; font-family: var(--font-mono); font-size: 0.55rem; justify-items: center; line-height: 1; }
 
@@ -701,10 +725,8 @@ h2 {
 
 /* ---------- Hero app ---------- */
 
-/* The hero app is the host's main interface. Its nav entry sits directly
-   below Home as a peer of the host tabs (same icon and text treatment); the
-   home panel opens with a navigator card whose CTA comes from the app
-   manifest. */
+/* The home panel opens with an Agent Chat navigator card. Its sidebar entry
+   remains a normal stable app. */
 
 .home-hero-card {
   align-items: center;

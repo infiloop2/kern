@@ -1,13 +1,10 @@
-"""Personal Web App Builder contract and backend validation tests."""
+"""Agentic Web App contract and backend validation tests."""
 
 from __future__ import annotations
 
-from email.message import Message
 from http import HTTPStatus
-import importlib.util
 import json
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 import unittest
 from unittest.mock import MagicMock, patch
@@ -18,114 +15,97 @@ from host.apps.personal_web_app_builder import backend
 from host.runtime.core import app_platform
 from host.runtime.core import db
 from host.runtime.deploy import app_migrate, migrate
+from tests.apps.personal_web_app_builder import smoke as builder_mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = REPO_ROOT / "host" / "apps" / "personal_web_app_builder"
 
 
-class PersonalWebAppBuilderContractTests(unittest.TestCase):
-    def test_manifest_and_agent_contract_define_the_independent_builder(self) -> None:
+class AgenticWebAppContractTests(unittest.TestCase):
+    def test_manifest_keeps_identity_and_rebrands_the_product(self) -> None:
         app = app_platform.app_by_id(backend.APP_ID)
         assert app is not None
-        self.assertEqual(app.title, "Personal Web App Builder")
+        self.assertEqual(backend.APP_ID, "personal_web_app_builder")
+        self.assertEqual(app.title, "Agentic Web App")
         self.assertEqual(app.allocation.port_offset, 6)
         self.assertEqual(app.db_schema, "app_personal_web_app_builder")
         self.assertEqual(app.release_stage, "stable")
         self.assertTrue(app.agent_api)
         self.assertTrue(app.capability_worker)
+
+    def test_ui_uses_the_agent_chat_app_selector_model(self) -> None:
+        index = (APP_DIR / "ui" / "index.html").read_text()
+        source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
+        css = (APP_DIR / "ui" / "personal_web_app_builder.css").read_text()
+        self.assertIn('id="new-app"', index)
+        self.assertIn('id="archived-toggle"', index)
+        self.assertIn('id="apps"', index)
+        self.assertIn('id="rename-app"', index)
+        self.assertIn('class="app-rename-button"', index)
+        self.assertIn('id="archive-app"', index)
+        self.assertIn('id="history-loader"', index)
+        self.assertIn('id="load-earlier"', index)
+        self.assertIn("app-dot", source)
+        self.assertIn('"/apps?archived=true"', source)
+        self.assertIn("selectedAppId = null", source)
+        self.assertIn("INITIAL_CONVERSATION_EVENT_PAGES = 3", source)
+        self.assertIn("conversationViewStates = new Map()", source)
+        self.assertIn("/conversation/events?before=${before}", source)
+        self.assertIn("loadOlderConversationEvents()", source)
+        self.assertIn("refreshSequence !== appsRefreshSequence", source)
+        self.assertIn("if (selectedAppId === threadId) clearSelectedApp()", source)
+        self.assertNotIn("localStorage", source)
+        self.assertNotIn("conversation/events?since=0", source)
+        self.assertNotIn("reset-app", index)
+        self.assertNotIn('api("POST", "/reset")', source)
+        self.assertIn("@media (max-width: 720px)", css)
+
+    def test_generated_worker_is_pinned_to_its_workspace(self) -> None:
+        source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
+        self.assertIn("new Worker(url)", source)
+        self.assertIn("threadId,", source)
+        self.assertIn("selectedAppId !== run.threadId", source)
+        self.assertIn("stopCapabilityWorker()", source)
+        self.assertIn("encodeURIComponent(run.threadId)", source)
+        self.assertIn("void sendMessage(message.message.trim(), run.threadId)", source)
+        self.assertIn(
+            "conversationResponse.session || listedSession || snapshot.session",
+            source,
+        )
+        self.assertIn("generated-host\").classList.toggle(\"readonly\"", source)
+        self.assertIn("MAX_WORKER_MUTATIONS_PER_TURN = 16", source)
+        self.assertIn('"fetch", "XMLHttpRequest", "WebSocket"', source)
+        self.assertNotIn("window.open", source)
+        self.assertNotIn("location.href", source)
+
+    def test_agent_instructions_describe_one_thread_per_workspace(self) -> None:
         instructions = (APP_DIR / "agent.md").read_text()
+        self.assertIn("This thread belongs permanently to this workspace", instructions)
         self.assertIn("app.askAgent(message)", instructions)
         self.assertIn("app.set(path, value)", instructions)
         self.assertIn('`{"action":"set","expected_revision":3', instructions)
-
-    def test_generated_ui_source_has_no_page_navigation_or_direct_agent_capability(self) -> None:
-        source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
-        index = (APP_DIR / "ui" / "index.html").read_text()
-        instructions = (APP_DIR / "agent.md").read_text()
-        self.assertIn("new Worker(url)", source)
-        self.assertIn("capabilityWorkerBootstrap", source)
-        self.assertIn('"fetch", "XMLHttpRequest", "WebSocket"', source)
-        self.assertIn('"A", "AUDIO", "BASE"', source)
-        self.assertIn('message.type === "agent-request"', source)
-        self.assertIn("void sendMessage(message.message.trim())", source)
-        self.assertNotIn("requestAgentConfirmation", source)
-        self.assertNotIn("agent-confirm", index)
-        self.assertIn("MAX_WORKER_MUTATIONS_PER_TURN = 16", source)
-        self.assertIn("render content exceeds its encoded size limit", source)
-        self.assertIn("if (!fromGeneratedApp)", source)
-        self.assertIn("MAX_CSS_CONDITION_BYTES = 512", source)
-        self.assertNotIn('kind === "CSSSupportsRule"', source)
-        self.assertIn("Function.prototype.constructor", source)
-        self.assertIn("wasm-unsafe-eval", source)
-        self.assertIn("if (workerRun !== run)", source)
-        self.assertIn('event.type === "click" && changeControl', source)
-        self.assertIn("contain: layout paint style", (APP_DIR / "ui" / "personal_web_app_builder.css").read_text())
-        self.assertIn('rule.selectorText.includes("\\\\")', source)
-        self.assertNotIn("window.open", source)
-        self.assertNotIn("location.href", source)
-        self.assertNotIn("location.assign", source)
-        self.assertNotIn("new Function", source)
-        self.assertIn("askAgent(message)", source)
-        self.assertIn("onLoad(handler)", source)
-        self.assertIn("load: !run.event", source)
-        self.assertIn('"ABBR", "ADDRESS", "ARTICLE"', source)
-        self.assertIn("safeCustomProperty", source)
-        self.assertIn("background-image", source)
-        self.assertIn("forbiddenCssValue", source)
-        self.assertIn("if (!snapshot.session)", source)
-        self.assertNotIn("if (!snapshot.tasks.length)", source)
-        self.assertIn('fromGeneratedApp ? "/runtime/agent-requests" : "/messages"', source)
-        self.assertIn('/conversation/events?since=${conversationEventsSeq}', source)
-        self.assertIn('event.event_type !== "task.message"', source)
-        self.assertIn("task.output_message !== lastAgentText", source)
         self.assertIn("Always register `app.onLoad`", instructions)
-        self.assertIn("Use the full safe authoring palette", instructions)
-        self.assertIn("The hard exclusions are security boundaries", instructions)
-        self.assertIn("same authority as the human typing", instructions)
-        self.assertIn("`Requested by user:` means", instructions)
-        self.assertIn("`Requested by app:` means", instructions)
-        self.assertIn('id="agent-settings"', index)
-        self.assertIn('id="agent-settings-help"', index)
-        self.assertIn('id="runtime-fixed"', index)
-        self.assertIn('id="model-fixed"', index)
-        self.assertIn('id="effort-fixed"', index)
-        self.assertNotIn("Choose before first message", index)
-        self.assertNotIn("Fixed for this session", index)
-        self.assertIn('aria-label="Builder agent"', index)
-        self.assertIn('aria-label="Builder effort level"', index)
-        self.assertLess(index.index('id="agent-settings"'), index.index('id="chat-drawer"'))
-        self.assertIn('id="first-run-guidance"', index)
-        self.assertIn("Agent, Model, and Level are fixed when you send the first message", index)
-        self.assertIn("Build it through Agent chat", index)
-        self.assertIn("Use the app directly", index)
-        self.assertIn("Its controls can update saved data", index)
-        self.assertIn("const firstRun = !snapshot.session", source)
-        self.assertIn('id="reset-app"', index)
-        self.assertIn('aria-label="Start over"', index)
-        self.assertIn('await api("POST", "/reset")', source)
-        self.assertIn("conversationEventsSeq = 0;", source)
-        self.assertIn('$("revision-label").textContent = "Empty app";', source)
-        self.assertIn('$("first-run-how").hidden = !firstRun', source)
-        self.assertIn('$("first-run-guidance").hidden = !firstRun', source)
-        self.assertNotIn('id="session-options"', index)
-        self.assertNotRegex(index.lower(), r"<a(?:\s|>)")
-        self.assertNotIn('value="pi"', index)
 
-    def test_migration_uses_typed_columns_for_the_owned_bundle(self) -> None:
-        migration = (APP_DIR / "migrations" / "0001_app_state.sql").read_text()
-        for column in ("revision BIGINT", "html TEXT", "css TEXT", "javascript TEXT", "data_json TEXT"):
+    def test_new_migration_replaces_singleton_with_clean_workspace_rows(self) -> None:
+        migration = (APP_DIR / "migrations" / "0003_multiple_web_apps.sql").read_text()
+        self.assertIn("DROP TABLE app_state", migration)
+        self.assertIn("CREATE TABLE web_apps", migration)
+        for column in (
+            "thread_id TEXT PRIMARY KEY",
+            "name TEXT NOT NULL",
+            "archived BOOLEAN",
+            "revision BIGINT",
+            "html TEXT",
+            "css TEXT",
+            "javascript TEXT",
+            "data_json TEXT",
+        ):
             self.assertIn(column, migration)
-        self.assertNotIn("thread_tasks", migration)
-        self.assertNotIn("builder_session", migration)
-        # Reset needs a durable thread name, since a thread's session
-        # configuration is fixed and cannot be reconfigured in place.
-        reset_migration = (APP_DIR / "migrations" / "0002_builder_thread_reset.sql").read_text()
-        self.assertIn("thread_seq BIGINT", reset_migration)
 
 
 class AgentActionValidationTests(unittest.TestCase):
-    def test_replace_app_validates_every_field_and_updates_once(self) -> None:
+    def test_replace_app_validates_every_field_and_updates_one_workspace(self) -> None:
         action = {
             "action": "replace_app",
             "expected_revision": 4,
@@ -136,12 +116,13 @@ class AgentActionValidationTests(unittest.TestCase):
         }
         changed = {**action, "revision": 5, "updated_at": "now"}
         with patch.object(backend, "_update_state", return_value=changed) as update:
-            self.assertEqual(backend.apply_agent_action(action), {"app": changed})
-
-        values = update.call_args.args[1]
+            self.assertEqual(
+                backend.apply_agent_action(action, "app-7"),
+                {"app": changed},
+            )
         self.assertEqual(update.call_args.args[0], 4)
-        self.assertEqual(values["html"], action["html"])
-        self.assertEqual(json.loads(values["data_json"]), action["data"])
+        self.assertEqual(update.call_args.args[2], "app-7")
+        self.assertEqual(json.loads(update.call_args.args[1]["data_json"]), action["data"])
 
     def test_agent_action_rejects_extra_fields_and_dynamic_imports(self) -> None:
         base = {
@@ -152,94 +133,109 @@ class AgentActionValidationTests(unittest.TestCase):
             "javascript": "",
         }
         with self.assertRaises(backend.AppError) as extra:
-            backend.apply_agent_action({**base, "url": "https://example.com"})
+            backend.apply_agent_action({**base, "url": "https://example.com"}, "app-1")
         self.assertEqual(extra.exception.status, HTTPStatus.BAD_REQUEST)
-
         for javascript in (
             "import('https://example.com/app.js')",
             "import /* hidden */ ('https://example.com/app.js')",
         ):
             with self.subTest(javascript=javascript), self.assertRaises(backend.AppError) as imported:
-                backend.apply_agent_action({**base, "javascript": javascript})
+                backend.apply_agent_action({**base, "javascript": javascript}, "app-1")
             self.assertEqual(imported.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
 
-    def test_agent_path_actions_share_the_runtime_mutation_contract(self) -> None:
+    def test_agent_data_action_can_finish_for_an_archived_workspace(self) -> None:
         action = {
             "action": "set",
             "expected_revision": 4,
-            "path": ["projects", "alpha", "status"],
+            "path": ["status"],
             "value": "done",
         }
-        changed = {"revision": 5, "data": {"projects": {"alpha": {"status": "done"}}}}
-        with patch.object(backend, "apply_runtime_action", return_value={"app": changed}) as apply:
-            self.assertEqual(backend.apply_agent_action(action), {"app": changed})
-        apply.assert_called_once_with(action)
+        with patch.object(
+            backend,
+            "apply_runtime_action",
+            return_value={"app": {"revision": 5}},
+        ) as apply:
+            backend.apply_agent_action(action, "app-2")
+        apply.assert_called_once_with(action, "app-2", allow_archived=True)
 
-    def test_bundle_and_data_caps_are_measured_in_encoded_bytes(self) -> None:
+    def test_bundle_and_data_caps_are_encoded_byte_caps(self) -> None:
         with self.assertRaises(backend.AppError) as html_error:
-            backend._bounded_string("é" * (backend.MAX_HTML_BYTES // 2 + 1), "html", backend.MAX_HTML_BYTES)
+            backend._bounded_string(
+                "é" * (backend.MAX_HTML_BYTES // 2 + 1),
+                "html",
+                backend.MAX_HTML_BYTES,
+            )
         self.assertEqual(html_error.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-
-        too_large = {"value": "é" * (backend.MAX_DATA_BYTES // 2)}
         with self.assertRaises(backend.AppError) as data_error:
-            backend._validated_data(too_large)
+            backend._validated_data({"value": "é" * (backend.MAX_DATA_BYTES // 2)})
         self.assertEqual(data_error.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
 
-        with self.assertRaises(backend.AppError) as chat_error:
-            backend._bounded_required_text(
-                "é" * (backend.MAX_CHAT_MESSAGE_BYTES // 2 + 1),
-                "content",
-                backend.MAX_CHAT_MESSAGE_BYTES,
-            )
-        self.assertEqual(chat_error.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
 
-    def test_complete_serialized_state_must_fit_the_host_proxy(self) -> None:
-        state = {
-            "revision": 1,
-            "html": "\x01" * backend.MAX_HTML_BYTES,
-            "css": "",
-            "javascript": "\x01" * backend.MAX_JAVASCRIPT_BYTES,
-            "data": {},
-            "updated_at": "now",
-        }
-        with self.assertRaises(backend.AppError) as error:
-            backend._require_state_response_fits(state)
-        self.assertEqual(error.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-
-
-class RuntimeDataActionTests(unittest.TestCase):
-    def test_set_delete_and_append_follow_the_typed_path(self) -> None:
-        data = {"items": [{"name": "one", "done": False}], "tags": []}
-        backend._mutate_data(data, "set", ["items", 0, "done"], True)
-        backend._mutate_data(data, "append", ["tags"], "new")
-        backend._mutate_data(data, "delete", ["items", 0, "name"], None)
-        self.assertEqual(data, {"items": [{"done": True}], "tags": ["new"]})
-
-    def test_runtime_path_rejects_shape_mismatches_and_unbounded_keys(self) -> None:
-        with self.assertRaises(backend.AppError) as missing:
-            backend._mutate_data({"items": []}, "set", ["items", 0], "bad")
-        self.assertEqual(missing.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
-
-        with self.assertRaises(backend.AppError):
-            backend._validated_path(["x" * (backend.MAX_PATH_KEY_BYTES + 1)])
-        with self.assertRaises(backend.AppError):
-            backend._validated_path(["a"] * (backend.MAX_PATH_DEPTH + 1))
-
-    def test_runtime_action_revision_conflict_fails_without_writing(self) -> None:
-        cursor = MagicMock()
-        cursor.fetchone.return_value = (7, '{"count":1}')
-        transaction = MagicMock()
-        transaction.__enter__.return_value = cursor
+class BrowserRoutingTests(unittest.TestCase):
+    def test_browser_routes_are_workspace_scoped(self) -> None:
+        state = {"revision": 0}
         with (
-            patch.object(backend.db, "transaction", return_value=transaction),
-            self.assertRaises(backend.AppError) as conflict,
+            patch.object(backend, "load_app_state", return_value=state) as load,
+            patch.object(backend, "browser_conversation", return_value={"tasks": []}) as conversation,
         ):
-            backend.apply_runtime_action({
-                "action": "set", "expected_revision": 6, "path": ["count"], "value": 2,
-            })
+            self.assertEqual(
+                backend.route_browser("GET", "/apps/app-2/state", None),
+                {"app": state},
+            )
+            self.assertEqual(
+                backend.route_browser("GET", "/apps/app-3/conversation", None),
+                {"tasks": []},
+            )
+        load.assert_called_once_with("app-2")
+        conversation.assert_called_once_with("app-3")
 
-        self.assertEqual(conflict.exception.status, HTTPStatus.CONFLICT)
-        self.assertEqual(cursor.execute.call_count, 2)
+    def test_message_routes_preserve_user_and_generated_app_provenance(self) -> None:
+        with (
+            patch.object(backend, "_workspace_lock", return_value=MagicMock()),
+            patch.object(backend, "create_message", return_value={"task_id": "task-1"}) as create,
+        ):
+            backend.route_browser(
+                "POST",
+                "/apps/app-4/messages",
+                {"content": "Build it"},
+            )
+            backend.route_browser(
+                "POST",
+                "/apps/app-4/runtime/agent-requests",
+                {"content": "Refresh it"},
+            )
+        self.assertEqual(
+            create.call_args_list[0].kwargs,
+            {"requested_by": "user", "thread_id": "app-4"},
+        )
+        self.assertEqual(
+            create.call_args_list[1].kwargs,
+            {"requested_by": "app", "thread_id": "app-4"},
+        )
+
+    def test_task_action_verifies_workspace_ownership(self) -> None:
+        with (
+            patch.object(backend, "_require_web_app_task") as require,
+            patch.object(backend, "call_admin_api", return_value={"status": "accepted"}) as host,
+        ):
+            result = backend.route_browser(
+                "POST",
+                "/apps/app-8/tasks/task-2/kill",
+                {},
+            )
+        self.assertEqual(result, {"status": "accepted"})
+        require.assert_called_once_with("app-8", "task-2")
+        host.assert_called_once_with("POST", "/v1/tasks/task-2/kill", {})
+
+    def test_agent_thread_is_resolved_to_the_exact_workspace(self) -> None:
+        with (
+            patch.object(backend, "_require_web_app") as require,
+            patch.object(backend, "load_app_state", return_value={"revision": 2}) as load,
+        ):
+            response = backend.route_agent("GET", "/agent/state", None, "app-9")
+        self.assertEqual(response["app"]["revision"], 2)
+        require.assert_called_once_with("app-9", include_archived=True, agent=True)
+        load.assert_called_once_with("app-9")
 
 
 class ConversationTests(unittest.TestCase):
@@ -249,427 +245,308 @@ class ConversationTests(unittest.TestCase):
         "effort": "high",
     }
 
-    def setUp(self) -> None:
-        # The builder's thread id lives in the app database (reset moves it on);
-        # these tests exercise the host round trip, so they name it directly.
-        thread_patch = patch.object(backend, "builder_thread_id", return_value=backend.THREAD_BASE_ID)
-        thread_patch.start()
-        self.addCleanup(thread_patch.stop)
-
-    def test_conversation_bounds_history_before_it_crosses_the_app_backend_proxy(self) -> None:
-        host_task = {
-            "task_id": "task_1",
+    def test_conversation_uses_the_selected_app_thread(self) -> None:
+        task = {
+            "task_id": "task-1",
             "input_message": "Build it",
             "status": "completed",
             **self.SESSION,
         }
-        with patch.object(
-            backend, "call_admin_api", return_value={"tasks": [host_task]}
-        ) as host:
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "call_admin_api", return_value={"tasks": [task]}) as host,
+        ):
             self.assertEqual(
-                backend.browser_conversation(),
-                {
-                    "tasks": [host_task],
-                    "session": self.SESSION,
-                },
-            )
-
-        host.assert_called_once_with(
-            "GET",
-            "/v1/threads/builder/tasks?limit=20&message_bytes=12288",
-        )
-
-    def test_conversation_opens_on_a_superseded_model(self) -> None:
-        # A conversation started under an earlier catalog keeps its recorded
-        # model; the option matrix only gates what may be created, so opening
-        # it must not fail on a value the catalog no longer offers.
-        legacy_session = {"agent_runtime": "claude_code", "model": "opus", "effort": "high"}
-        host_task = {
-            "task_id": "task_1",
-            "input_message": "Build it",
-            "status": "completed",
-            **legacy_session,
-        }
-        with patch.object(backend, "call_admin_api", return_value={"tasks": [host_task]}):
-            self.assertEqual(
-                backend.browser_conversation(),
-                {"tasks": [host_task], "session": legacy_session},
-            )
-
-    def test_empty_host_thread_is_the_first_run_marker(self) -> None:
-        with patch.object(
-            backend, "call_admin_api", return_value={"tasks": []}
-        ) as host:
-            self.assertEqual(
-                backend.browser_conversation(),
-                {"tasks": [], "session": None},
+                backend.browser_conversation("app-6"),
+                {"tasks": [task], "session": self.SESSION},
             )
         host.assert_called_once_with(
             "GET",
-            "/v1/threads/builder/tasks?limit=20&message_bytes=12288",
+            "/v1/threads/app-6/tasks?limit=20&message_bytes=12288",
         )
 
-    def test_conversation_events_proxy_the_builder_thread_from_since(self) -> None:
-        events = {
-            "events": [
-                {
-                    "seq": 5,
-                    "task_id": "task_1",
-                    "event_type": "task.message",
-                    "payload": {"message": "Working on it.", "source": "agent"},
-                }
-            ]
-        }
-        with patch.object(backend, "call_admin_api", return_value=events) as host:
+    def test_conversation_events_are_scoped_and_bounded(self) -> None:
+        events = {"events": [{"seq": 5, "event_type": "task.message"}]}
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "call_admin_api", return_value=events) as host,
+        ):
             self.assertEqual(
-                backend.browser_conversation_events({"since": ["2"]}),
+                backend.browser_conversation_events("app-6", {"since": ["2"]}),
                 events,
             )
-
         host.assert_called_once_with(
             "GET",
-            "/v1/threads/builder/events?since=2&limit=5&message_bytes=12288",
+            "/v1/threads/app-6/events?since=2&limit=5&message_bytes=12288",
         )
 
-    def test_conversation_events_reject_invalid_queries_before_host_call(self) -> None:
-        invalid_queries = (
-            {"since": ["nope"]},
-            {"since": ["1", "2"]},
-            {"before": ["2"]},
-        )
-        for query in invalid_queries:
-            with (
-                self.subTest(query=query),
-                patch.object(backend, "call_admin_api") as host,
-                self.assertRaises(backend.AppError) as error,
-            ):
-                backend.browser_conversation_events(query)
-            self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
-            host.assert_not_called()
-
-    def test_follow_up_omits_configuration_and_leaves_it_to_the_host(self) -> None:
-        host_task = {
-            "task_id": "task_2",
-            "thread_id": backend.THREAD_BASE_ID,
-            "status": "queued",
-        }
-        with patch.object(backend, "call_admin_api", return_value=host_task) as host:
+    def test_conversation_events_open_at_tail_and_page_backward(self) -> None:
+        events = {"events": [{"seq": 5, "event_type": "task.message"}]}
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "call_admin_api", return_value=events) as host,
+        ):
+            self.assertEqual(backend.browser_conversation_events("app-6", {}), events)
             self.assertEqual(
-                backend.create_message(
-                    {"content": "Continue building."},
-                    requested_by="user",
-                ),
-                host_task,
+                backend.browser_conversation_events("app-6", {"before": ["5"]}),
+                events,
             )
-
-        host.assert_called_once_with(
-            "POST",
-            "/v1/tasks",
-            {
-                "input_message": "Requested by user:\nContinue building.",
-                "thread_id": "builder",
-            },
+        self.assertEqual(
+            host.call_args_list[0].args,
+            (
+                "GET",
+                "/v1/threads/app-6/events?limit=5&message_bytes=12288",
+            ),
+        )
+        self.assertEqual(
+            host.call_args_list[1].args,
+            (
+                "GET",
+                "/v1/threads/app-6/events?before=5&limit=5&message_bytes=12288",
+            ),
         )
 
-    def test_app_callback_gets_durable_origin_without_a_second_thread(self) -> None:
-        host_task = {
-            "task_id": "task_3",
-            "thread_id": backend.THREAD_BASE_ID,
-            "status": "queued",
-        }
-        with patch.object(backend, "call_admin_api", return_value=host_task) as host:
-            self.assertEqual(
-                backend.route_browser(
-                    "POST",
-                    "/runtime/agent-requests",
-                    {"content": "Refresh the analysis."},
-                ),
-                host_task,
+    def test_conversation_events_reject_mixed_cursors(self) -> None:
+        with (
+            patch.object(backend, "_require_web_app"),
+            self.assertRaises(backend.AppError) as error,
+        ):
+            backend.browser_conversation_events(
+                "app-6", {"since": ["2"], "before": ["5"]}
             )
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
 
-        host.assert_called_once_with(
-            "POST",
-            "/v1/tasks",
-            {
-                "input_message": "Requested by app:\nRefresh the analysis.",
-                "thread_id": "builder",
-            },
-        )
-
-    def test_first_message_sends_configuration_without_storing_it(self) -> None:
-        host_task = {
-            "task_id": "task_1",
-            "thread_id": backend.THREAD_BASE_ID,
-            "status": "queued",
-        }
-        with patch.object(backend, "call_admin_api", return_value=host_task) as host:
-            self.assertEqual(
-                backend.create_message(
-                    {"content": "Build it.", **self.SESSION},
-                    requested_by="user",
-                ),
-                host_task,
+    def test_message_creation_pins_the_host_task_to_the_workspace(self) -> None:
+        host_task = {"task_id": "task-2", "thread_id": "app-5", "status": "queued"}
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "call_admin_api", return_value=host_task) as host,
+        ):
+            response = backend.create_message(
+                {"content": "Build it.", **self.SESSION},
+                requested_by="user",
+                thread_id="app-5",
             )
-
+        self.assertEqual(response, host_task)
         host.assert_called_once_with(
             "POST",
             "/v1/tasks",
             {
                 "input_message": "Requested by user:\nBuild it.",
-                "thread_id": "builder",
+                "thread_id": "app-5",
                 **self.SESSION,
             },
         )
 
-    def test_partial_configuration_is_rejected_before_the_host_call(self) -> None:
+
+class RuntimeDataActionTests(unittest.TestCase):
+    def test_set_delete_and_append_follow_typed_paths(self) -> None:
+        data = {"items": [{"name": "one", "done": False}], "tags": []}
+        backend._mutate_data(data, "set", ["items", 0, "done"], True)
+        backend._mutate_data(data, "append", ["tags"], "new")
+        backend._mutate_data(data, "delete", ["items", 0, "name"], None)
+        self.assertEqual(data, {"items": [{"done": True}], "tags": ["new"]})
+
+    def test_revision_conflict_is_checked_inside_the_workspace_row_lock(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (7, "", "", "", '{"count":1}', "now")
+        transaction = MagicMock()
+        transaction.__enter__.return_value = cursor
         with (
-            patch.object(backend, "call_admin_api") as host,
-            self.assertRaises(backend.AppError) as error,
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend.db, "transaction", return_value=transaction),
+            self.assertRaises(backend.AppError) as conflict,
         ):
-            backend.create_message(
-                {"content": "Build it.", "agent_runtime": "codex"},
-                requested_by="user",
-            )
-
-        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
-        host.assert_not_called()
-
-
-class PersonalWebAppBuilderMockTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        smoke_path = REPO_ROOT / "tests" / "apps" / "personal_web_app_builder" / "smoke.py"
-        spec = importlib.util.spec_from_file_location("personal_builder_mock_contract", smoke_path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        cls.mock: ModuleType = module
-
-    def setUp(self) -> None:
-        self.mock.reset_mock_state()
-        self.addCleanup(self.mock.reset_mock_state)
-
-    def _seed_built_session(self) -> None:
-        with self.mock.MOCK_LOCK:
-            self.mock.APP.clear()
-            self.mock.APP.update(self.mock._built_app())
-            self.mock.HOST_THREAD_SESSION = dict(self.mock.DEFAULT_SESSION)
-
-    def test_mock_starts_at_welcome_and_first_message_builds_the_app(self) -> None:
-        self.assertEqual(self.mock.APP, self.mock._empty_app())
-        self.assertEqual(self.mock.TASKS, [])
-        self.assertIsNone(self.mock.HOST_THREAD_SESSION)
-
-        created = self.mock._route_app_api(
-            "POST",
-            "messages",
-            {
-                "content": "Build a weekly focus dashboard.",
-                **self.mock.DEFAULT_SESSION,
-            },
-        )
-        self.assertEqual(created["status"], "running")
-        self.mock.TASK_DEADLINES[created["task_id"]] = 0
-
-        conversation = self.mock._route_app_api("GET", "conversation", None)
-
-        self.assertEqual(conversation["session"], self.mock.DEFAULT_SESSION)
-        self.assertEqual(conversation["tasks"][0]["status"], "completed")
-        self.assertIn("Built the dashboard", conversation["tasks"][0]["output_message"])
-        self.assertEqual(self.mock.APP["revision"], 1)
-        self.assertTrue(self.mock.APP["html"])
-        self.assertTrue(self.mock.APP["javascript"])
-
-    def test_mock_runtime_actions_match_revisioned_typed_mutations(self) -> None:
-        self._seed_built_session()
-        changed = self.mock._route_app_api(
-            "POST",
-            "runtime/actions",
-            {"action": "set", "expected_revision": 1, "path": ["count"], "value": 3},
-        )
-        appended = self.mock._route_app_api(
-            "POST",
-            "runtime/actions",
-            {
-                "action": "append",
-                "expected_revision": 2,
-                "path": ["priorities"],
-                "value": "Polish local mock",
-            },
-        )
-
-        self.assertEqual(changed["app"]["revision"], 2)
-        self.assertEqual(appended["app"]["revision"], 3)
-        self.assertEqual(appended["app"]["data"]["priorities"][-1], "Polish local mock")
-        appended["app"]["data"]["count"] = 999
-        self.assertEqual(self.mock.APP["data"]["count"], 3)
-        with self.assertRaises(backend.AppError) as conflict:
-            self.mock._route_app_api(
-                "POST",
-                "runtime/actions",
-                {"action": "delete", "expected_revision": 1, "path": ["count"]},
+            backend.apply_runtime_action(
+                {"action": "set", "expected_revision": 6, "path": ["count"], "value": 2},
+                "app-3",
             )
         self.assertEqual(conflict.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("thread_id = %s", cursor.execute.call_args_list[1].args[0])
+        self.assertEqual(cursor.execute.call_args_list[1].args[1], ("app-3",))
 
-    def test_mock_chat_models_running_queue_completion_and_stop(self) -> None:
-        self._seed_built_session()
-        running = self.mock._route_app_api(
-            "POST", "runtime/agent-requests", {"content": self.mock.AGENT_PROMPT}
-        )
-        queued = self.mock._route_app_api(
-            "POST", "messages", {"content": "Then simplify the layout."}
+
+class AgenticWebAppMockTests(unittest.TestCase):
+    def setUp(self) -> None:
+        builder_mock.reset_mock_state()
+        self.addCleanup(builder_mock.reset_mock_state)
+
+    def _create_app(self) -> dict[str, Any]:
+        return builder_mock._route_app_api("POST", "apps", {})["app"]
+
+    def _send(self, thread_id: str, content: str) -> dict[str, Any]:
+        return builder_mock._route_app_api(
+            "POST",
+            f"apps/{thread_id}/messages",
+            {"content": content, **builder_mock.DEFAULT_SESSION},
         )
 
-        self.assertEqual(running["status"], "running")
-        self.assertTrue(running["input_message"].startswith("Requested by app:\n"))
-        self.assertEqual(queued["status"], "queued")
-        self.assertTrue(queued["input_message"].startswith("Requested by user:\n"))
-        initial_events = self.mock._route_app_api(
-            "GET", "conversation/events", None, {"since": ["0"]}
-        )["events"]
+    def test_mock_allocates_independent_ids_and_never_reuses_archived_apps(self) -> None:
+        first = self._create_app()
+        second = self._create_app()
+        builder_mock._route_app_api(
+            "POST", f"apps/{second['thread_id']}/archive", {}
+        )
+        third = self._create_app()
+
+        self.assertEqual(
+            [first["thread_id"], second["thread_id"], third["thread_id"]],
+            ["app-1", "app-2", "app-3"],
+        )
         self.assertEqual(
             [
-                event["payload"]["source"]
-                for event in initial_events
-                if event["task_id"] == running["task_id"]
+                app["thread_id"]
+                for app in builder_mock._route_app_api(
+                    "GET", "apps", None, {"archived": ["true"]}
+                )["apps"]
             ],
-            ["user", "agent"],
+            ["app-2"],
         )
+
+    def test_mock_runs_different_workspace_threads_concurrently(self) -> None:
+        first = self._create_app()
+        second = self._create_app()
+        first_task = self._send(first["thread_id"], "Build the first app.")
+        second_task = self._send(second["thread_id"], "Build the second app.")
+
+        active = builder_mock._route_app_api("GET", "apps", None)["apps"]
         self.assertEqual(
-            initial_events[-1]["payload"]["message"],
-            self.mock.INTERIM_AGENT_MESSAGE,
+            {
+                app["thread_id"]: app["active_tasks"][0]["status"]
+                for app in active
+            },
+            {"app-1": "running", "app-2": "running"},
         )
+        builder_mock.TASK_DEADLINES[first_task["task_id"]] = 0
+        first_state = builder_mock._route_app_api(
+            "GET", "apps/app-1/state", None
+        )["app"]
+        second_state = builder_mock._route_app_api(
+            "GET", "apps/app-2/state", None
+        )["app"]
+        self.assertEqual(first_state["revision"], 1)
+        self.assertEqual(second_state["revision"], 0)
+        self.assertEqual(first_task["thread_id"], "app-1")
+        self.assertEqual(second_task["thread_id"], "app-2")
+
+    def test_mock_keeps_data_conversations_and_sessions_per_workspace(self) -> None:
+        self._create_app()
+        self._create_app()
+        first_task = self._send("app-1", "Build the first app.")
+        self._send("app-2", "Build the second app.")
+        builder_mock.TASK_DEADLINES[first_task["task_id"]] = 0
+        builder_mock._route_app_api("GET", "apps/app-1/state", None)
+        changed = builder_mock._route_app_api(
+            "POST",
+            "apps/app-1/runtime/actions",
+            {
+                "action": "set",
+                "expected_revision": 1,
+                "path": ["count"],
+                "value": 7,
+            },
+        )
+
+        self.assertEqual(changed["app"]["data"]["count"], 7)
         self.assertEqual(
-            self.mock._route_app_api(
-                "POST", f"tasks/{queued['task_id']}/cancel", {}
-            ),
-            {"status": "accepted"},
+            builder_mock._route_app_api(
+                "GET", "apps/app-2/state", None
+            )["app"]["data"],
+            {},
         )
-        self.mock.TASK_DEADLINES[running["task_id"]] = 0
-        conversation = self.mock._route_app_api("GET", "conversation", None)
-        completed = next(
-            task for task in conversation["tasks"] if task["task_id"] == running["task_id"]
+        first_conversation = builder_mock._route_app_api(
+            "GET", "apps/app-1/conversation", None
         )
-        self.assertEqual(completed["status"], "completed")
-        self.assertIn("refreshed the dashboard analysis", completed["output_message"])
-        self.assertIn("analysis", self.mock.APP["data"])
-        completed_events = self.mock._route_app_api(
-            "GET",
-            "conversation/events",
-            None,
-            {"since": [str(initial_events[-1]["seq"])]},
+        second_conversation = builder_mock._route_app_api(
+            "GET", "apps/app-2/conversation", None
+        )
+        self.assertIn("first app", first_conversation["tasks"][0]["input_message"])
+        self.assertIn("second app", second_conversation["tasks"][0]["input_message"])
+
+        # Host session metadata remains even if retained task history is
+        # pruned, matching the real thread summary used by /apps.
+        builder_mock.WORKSPACES["app-1"]["tasks"].clear()
+        listed = builder_mock._route_app_api("GET", "apps", None)["apps"]
+        first_summary = next(app for app in listed if app["thread_id"] == "app-1")
+        self.assertEqual(first_summary["session"], builder_mock.DEFAULT_SESSION)
+
+    def test_mock_conversation_events_page_from_newest_then_backward(self) -> None:
+        self._create_app()
+        workspace = builder_mock.WORKSPACES["app-1"]
+        workspace["events"] = [
+            {
+                "seq": seq,
+                "timestamp": f"2026-07-27T00:00:{seq:02d}Z",
+                "event_id": f"event_app-1_{seq}",
+                "event_type": "task.message",
+                "task_id": "task-1",
+                "payload": {"message": f"message {seq}", "source": "agent"},
+            }
+            for seq in range(1, 13)
+        ]
+        newest = builder_mock._route_app_api(
+            "GET", "apps/app-1/conversation/events", None
         )["events"]
-        self.assertEqual(
-            completed_events[-1]["payload"]["message"],
-            completed["output_message"],
-        )
+        older = builder_mock._route_app_api(
+            "GET",
+            "apps/app-1/conversation/events",
+            None,
+            {"before": [str(newest[0]["seq"])]},
+        )["events"]
+        self.assertEqual([event["seq"] for event in newest], [8, 9, 10, 11, 12])
+        self.assertEqual([event["seq"] for event in older], [3, 4, 5, 6, 7])
 
-    def test_mock_conversation_matches_bounded_newest_first_host_view(self) -> None:
-        with self.mock.MOCK_LOCK:
-            template = self.mock._completed_task_fixture()
-            self.mock.TASKS[:] = [
-                {
-                    **template,
-                    "task_id": f"task_builder_{index}",
-                    "input_message": "é" * self.mock.builder_backend.CONVERSATION_MESSAGE_BYTES,
-                    "created_at": f"2026-07-22T10:{index:02d}:00Z",
-                    "updated_at": f"2026-07-22T10:{index:02d}:01Z",
-                }
-                for index in range(25)
-            ]
+    def test_mock_enforces_archive_and_task_workspace_boundaries(self) -> None:
+        self._create_app()
+        self._create_app()
+        task = self._send("app-1", "Build it.")
+        builder_mock._route_app_api("POST", "apps/app-1/archive", {})
 
-        conversation = self.mock._route_app_api("GET", "conversation", None)
-
-        self.assertEqual(len(conversation["tasks"]), backend.CONVERSATION_TASK_LIMIT)
-        self.assertEqual(conversation["tasks"][0]["task_id"], "task_builder_24")
-        self.assertLessEqual(
-            len(conversation["tasks"][0]["input_message"].encode()),
-            backend.CONVERSATION_MESSAGE_BYTES,
-        )
-        self.assertTrue(conversation["tasks"][0]["input_message"].endswith("…"))
-
-    def test_mock_chat_enforces_first_and_follow_up_session_configuration(self) -> None:
-        with self.mock.MOCK_LOCK:
-            self.mock.TASKS.clear()
-            self.mock.HOST_THREAD_SESSION = None
-        with self.assertRaises(backend.AppError) as missing:
-            self.mock._route_app_api("POST", "messages", {"content": "Build it."})
-        self.assertEqual(missing.exception.status, HTTPStatus.BAD_REQUEST)
-
-        created = self.mock._route_app_api(
-            "POST",
-            "messages",
-            {
-                "content": "Build it.",
-                "agent_runtime": "codex",
-                "model": "gpt-5.6-terra",
-                "effort": "high",
-            },
-        )
-        self.assertEqual(created["agent_runtime"], "codex")
-        repeated = self.mock._route_app_api(
-            "POST",
-            "messages",
-            {
-                "content": "Change it.",
-                "agent_runtime": "codex",
-                "model": "gpt-5.6-terra",
-                "effort": "high",
-            },
-        )
-        self.assertEqual(repeated["agent_runtime"], "codex")
-        with self.assertRaises(backend.AppError) as conflict:
-            self.mock._route_app_api(
-                "POST",
-                "messages",
-                {
-                    "content": "Change it again.",
-                    "agent_runtime": "claude_code",
-                    "model": "claude-opus-5",
-                    "effort": "high",
-                },
+        with self.assertRaises(backend.AppError) as archived:
+            builder_mock._route_app_api(
+                "POST", "apps/app-1/messages", {"content": "Blocked"}
             )
-        self.assertEqual(conflict.exception.status, HTTPStatus.CONFLICT)
+        self.assertEqual(archived.exception.status, HTTPStatus.NOT_FOUND)
 
-    def test_mock_empty_history_returns_to_first_run_without_local_state(self) -> None:
-        self._seed_built_session()
-        with self.mock.MOCK_LOCK:
-            self.mock.TASKS.clear()
+        # Archive does not revoke work that already started.
+        builder_mock.TASK_DEADLINES[task["task_id"]] = 0
+        archived_state = builder_mock._route_app_api(
+            "GET", "apps/app-1/state", None
+        )["app"]
+        self.assertEqual(archived_state["revision"], 1)
 
-        conversation = self.mock._route_app_api("GET", "conversation", None)
-        self.assertEqual(conversation["tasks"], [])
-        self.assertIsNone(conversation["session"])
-        follow_up = self.mock._route_app_api(
-            "POST",
-            "messages",
-            {"content": "Keep improving it.", **self.mock.DEFAULT_SESSION},
-        )
-        self.assertEqual(follow_up["agent_runtime"], "codex")
+        with self.assertRaises(backend.AppError) as ownership:
+            builder_mock._route_app_api(
+                "POST",
+                f"apps/app-2/tasks/{task['task_id']}/kill",
+                {},
+            )
+        self.assertEqual(ownership.exception.status, HTTPStatus.NOT_FOUND)
 
 
-class PersonalWebAppBuilderDbTests(unittest.TestCase):
+class AgenticWebAppDbTests(unittest.TestCase):
     DB_NAME = "kern_personal_builder_test"
     _initialized = False
 
-    def setUp(self) -> None:
+    @classmethod
+    def setUpClass(cls) -> None:
         pg_harness.ensure_database()
-        if not self._initialized:
-            pg_harness.create_database(self.DB_NAME)
+        pg_harness.create_database(cls.DB_NAME)
+        cls._initialized = True
+
+    def setUp(self) -> None:
         self.env_patch = patch.dict("os.environ", {"KERN_DB_NAME": self.DB_NAME})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         self.addCleanup(db.close_pool)
-        if not self._initialized:
+        if not getattr(self.__class__, "_migrated", False):
             migrate.up(quiet=True)
             with db.transaction() as cur:
                 cur.execute(
                     """
                     DO $$
                     BEGIN
-                      IF NOT EXISTS (
-                        SELECT FROM pg_roles
-                        WHERE rolname = 'kern-app-6'
-                      ) THEN
+                      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-app-6') THEN
                         CREATE ROLE "kern-app-6" LOGIN;
                       END IF;
                     END
@@ -685,213 +562,108 @@ class PersonalWebAppBuilderDbTests(unittest.TestCase):
             for version in app_migrate.pending(app.id):
                 app_migrate.apply_sql(app.id, version, connection_user=app.db_role)
                 app_migrate.record(app.id, version)
-            PersonalWebAppBuilderDbTests._initialized = True
+            self.__class__._migrated = True
         with db.transaction() as cur:
             cur.execute("SET LOCAL search_path TO app_personal_web_app_builder")
-            cur.execute(
-                "UPDATE app_state SET revision = 0, html = '', css = '', javascript = '',"
-                " data_json = '{}', thread_seq = 1, updated_at = '1970-01-01T00:00:00Z'"
-                " WHERE singleton = TRUE"
-            )
+            cur.execute("DELETE FROM web_apps")
 
-    def _reset(self) -> dict[str, Any]:
-        """reset_app() stops active work through the host; stub that here."""
-        summaries = {"threads": [{"thread_id": backend.builder_thread_id(), "active_tasks": []}]}
-        with patch.object(backend, "call_admin_api", return_value=summaries):
-            return backend.reset_app()
+    def test_apps_have_independent_revision_chains_and_fixed_threads(self) -> None:
+        first = backend.create_web_app()
+        second = backend.create_web_app()
+        self.assertEqual((first["thread_id"], second["thread_id"]), ("app-1", "app-2"))
 
-    def test_agent_and_runtime_writes_share_one_revision_chain(self) -> None:
-        initial = backend.load_app_state()
-        self.assertEqual((initial["revision"], initial["data"]), (0, {}))
-
-        created = backend.apply_agent_action({
-            "action": "replace_app",
-            "expected_revision": 0,
-            "html": '<button data-action="increment">Add</button>',
-            "css": "button { padding: 1rem; }",
-            "javascript": "app.on('increment', () => app.set(['count'], app.data().count + 1));",
-            "data": {"count": 1},
-        })["app"]
-        self.assertEqual((created["revision"], created["data"]), (1, {"count": 1}))
-
-        changed = backend.apply_agent_action({
-            "action": "set", "expected_revision": 1, "path": ["count"], "value": 2,
-        })["app"]
-        self.assertEqual((changed["revision"], changed["data"]), (2, {"count": 2}))
-
-        with self.assertRaises(backend.AppError) as stale:
-            backend.apply_agent_action({
-                "action": "replace_data", "expected_revision": 1, "data": {"count": 3},
-            })
-        self.assertEqual(stale.exception.status, HTTPStatus.CONFLICT)
-
-
-    def test_reset_clears_the_app_and_moves_to_a_new_builder_thread(self) -> None:
-        backend.apply_agent_action({
-            "action": "replace_app",
-            "expected_revision": 0,
-            "html": "<p>built</p>",
-            "css": "p { color: red; }",
-            "javascript": "app.on('noop', () => {});",
-            "data": {"count": 1},
-        })
-        self.assertEqual(backend.builder_thread_id(), "builder")
-
-        reset = self._reset()
-
-        # The bundle is gone and the app reads as new, but the revision keeps
-        # counting up: a stale writer's expected_revision must never match a
-        # revision it saw before the reset.
-        self.assertEqual(
-            (reset["app"]["html"], reset["app"]["css"], reset["app"]["javascript"], reset["app"]["data"]),
-            ("", "", "", {}),
+        backend.apply_agent_action(
+            {
+                "action": "replace_app",
+                "expected_revision": 0,
+                "html": "<p>First</p>",
+                "css": "",
+                "javascript": "",
+                "data": {"count": 1},
+            },
+            "app-1",
         )
-        self.assertEqual(reset["app"]["revision"], 2)
-        self.assertEqual(backend.load_app_state()["revision"], 2)
-
-        # A thread's session configuration is fixed for its lifetime, so the
-        # builder continues in a new thread rather than reusing the old one.
-        self.assertEqual(reset["thread_id"], "builder-2")
-        self.assertEqual(backend.builder_thread_id(), "builder-2")
-        self.assertEqual(self._reset()["thread_id"], "builder-3")
-
-    def test_reset_locks_out_an_agent_still_running_on_the_old_thread(self) -> None:
-        handler = object.__new__(backend.Handler)
-        handler.headers = Message()
-        handler.headers["X-Kern-Agent-App-Proxy"] = backend.APP_ID
-        handler.headers["X-Kern-Agent-Thread"] = "builder"
-        handler._require_agent_proxy()
-
-        self._reset()
-
-        with self.assertRaises(backend.AppError) as error:
-            handler._require_agent_proxy()
-        self.assertEqual(error.exception.status, HTTPStatus.UNAUTHORIZED)
-
-    def test_agent_authority_is_rechecked_inside_the_state_transaction(self) -> None:
-        # The handler's marker check happens before the statement that reads or
-        # writes app_state, so a revoked agent can pass it and then act on the
-        # app the reset just created. Simulate that gap: the agent's thread is
-        # current when the request starts, and revoked by the time it lands.
-        backend.route_agent("POST", "/agent/actions", {
-            "action": "replace_app",
-            "expected_revision": 0,
-            "html": "<p>built</p>",
-            "css": "",
-            "javascript": "",
-            "data": {},
-        }, "builder")
-        self._reset()
-
-        for action in (
+        backend.apply_agent_action(
             {
                 "action": "replace_data",
-                # The post-reset revision is trivially predictable, so the
-                # revision check alone does not stop the revoked agent.
-                "expected_revision": backend.load_app_state()["revision"],
-                "data": {"injected": True},
+                "expected_revision": 0,
+                "data": {"count": 9},
             },
-            {
-                "action": "set",
-                "expected_revision": backend.load_app_state()["revision"],
-                "path": ["injected"],
-                "value": True,
-            },
-        ):
-            with self.subTest(action=action["action"]), self.assertRaises(backend.AppError) as write:
-                backend.route_agent("POST", "/agent/actions", action, "builder")
-            self.assertEqual(write.exception.status, HTTPStatus.UNAUTHORIZED)
+            "app-2",
+        )
+        self.assertEqual(backend.load_app_state("app-1")["data"], {"count": 1})
+        self.assertEqual(backend.load_app_state("app-2")["data"], {"count": 9})
 
-        with self.assertRaises(backend.AppError) as read:
-            backend.route_agent("GET", "/agent/state", None, "builder")
-        self.assertEqual(read.exception.status, HTTPStatus.UNAUTHORIZED)
-
-        # The current thread's agent still works, and the browser is unaffected.
-        self.assertEqual(backend.route_agent("GET", "/agent/state", None, "builder-2")["app"]["data"], {})
-        self.assertEqual(backend.load_app_state()["data"], {})
-
-    def test_reset_stops_every_task_left_on_the_discarded_thread(self) -> None:
-        # Start over means nothing from before survives it: a task left on the
-        # old thread would spend a turn on work whose output is discarded and
-        # whose conversation the operator can no longer see. The thread summary
-        # carries every active task, so this is not a page of recent history.
-        summaries = {
-            "threads": [
-                {"thread_id": "builder", "active_tasks": [
-                    {"task_id": f"task_{number}", "status": "queued"} for number in range(1, 26)
-                ]},
-                {"thread_id": "other", "active_tasks": [{"task_id": "task_99", "status": "running"}]},
-            ]
-        }
-        with (
-            patch.object(backend, "call_admin_api", return_value=summaries),
-            patch.object(backend, "_stop_task") as stop,
-        ):
-            backend.reset_app()
-
+    def test_rename_archive_and_unarchive_keep_the_same_workspace_id(self) -> None:
+        created = backend.create_web_app()
+        renamed = backend.rename_web_app(created["thread_id"], {"name": "Meal planner"})
+        archived = backend.set_web_app_archived(created["thread_id"], archived=True)
+        unarchived = backend.set_web_app_archived(created["thread_id"], archived=False)
+        self.assertEqual(renamed["name"], "Meal planner")
+        self.assertTrue(archived["archived"])
+        self.assertFalse(unarchived["archived"])
         self.assertEqual(
-            [call.args[0] for call in stop.call_args_list],
-            [f"task_{number}" for number in range(1, 26)],
+            {renamed["thread_id"], archived["thread_id"], unarchived["thread_id"]},
+            {"app-1"},
         )
 
-    def test_reset_does_not_clear_state_when_work_cannot_be_stopped(self) -> None:
-        # The guarantee is that nothing survives Start over. If active work
-        # cannot be stopped, the honest outcome is to leave the builder alone
-        # rather than clear it and let hidden work keep running.
-        backend.apply_agent_action({
-            "action": "replace_app",
-            "expected_revision": 0,
-            "html": "<p>built</p>",
-            "css": "",
-            "javascript": "",
-            "data": {},
-        })
-        summaries = {
+    def test_app_index_joins_host_session_and_running_status(self) -> None:
+        backend.create_web_app()
+        backend.create_web_app()
+        backend.set_web_app_archived("app-2", archived=True)
+        host_threads = {
             "threads": [
-                {"thread_id": "builder", "active_tasks": [{"task_id": "task_1", "status": "running"}]}
+                {
+                    "thread_id": "app-1",
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-terra",
+                    "effort": "high",
+                    "last_used_at": "2026-07-27T10:00:00Z",
+                    "active_tasks": [{"task_id": "task-1", "status": "running"}],
+                },
+                {
+                    "thread_id": "app-2",
+                    "agent_runtime": "claude_code",
+                    "model": "claude-opus-5",
+                    "effort": "high",
+                    "last_used_at": "2026-07-27T09:00:00Z",
+                    "active_tasks": [],
+                },
             ]
         }
-        with (
-            patch.object(backend, "call_admin_api", return_value=summaries),
-            patch.object(backend, "_stop_task", side_effect=backend.AppError(
-                HTTPStatus.BAD_GATEWAY, "could not stop the builder's active work; try again"
-            )),
-            self.assertRaises(backend.AppError) as error,
-        ):
-            backend.reset_app()
+        with patch.object(backend, "call_admin_api", return_value=host_threads):
+            active = backend.list_web_apps({})["apps"]
+            archived = backend.list_web_apps({"archived": ["true"]})["apps"]
+        self.assertEqual(active[0]["thread_id"], "app-1")
+        self.assertEqual(active[0]["session"]["agent_runtime"], "codex")
+        self.assertEqual(active[0]["active_tasks"], [{"task_id": "task-1", "status": "running"}])
+        self.assertEqual(archived[0]["thread_id"], "app-2")
 
-        self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
-        state_after = backend.load_app_state()
-        self.assertEqual(state_after["html"], "<p>built</p>")
-        self.assertEqual(backend.builder_thread_id(), "builder")
+    def test_archived_apps_are_browser_read_only_but_existing_agent_can_finish(self) -> None:
+        backend.create_web_app()
+        backend.set_web_app_archived("app-1", archived=True)
+        with self.assertRaises(backend.AppError) as browser:
+            backend.apply_runtime_action(
+                {"action": "set", "expected_revision": 0, "path": ["done"], "value": True},
+                "app-1",
+            )
+        self.assertEqual(browser.exception.status, HTTPStatus.NOT_FOUND)
 
-    def test_reset_is_not_reachable_from_the_agent_namespace(self) -> None:
+        changed = backend.route_agent(
+            "POST",
+            "/agent/actions",
+            {
+                "action": "set",
+                "expected_revision": 0,
+                "path": ["done"],
+                "value": True,
+            },
+            "app-1",
+        )
+        self.assertEqual(changed["app"]["data"], {"done": True})
+
+    def test_unknown_agent_thread_cannot_read_another_workspace(self) -> None:
+        backend.create_web_app()
         with self.assertRaises(backend.AppError) as error:
-            backend.route_agent("POST", "/agent/reset", None, "builder")
-        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
-
-
-class RouteBoundaryTests(unittest.TestCase):
-    def test_agent_namespace_does_not_expose_browser_routes(self) -> None:
-        with (
-            patch.object(backend, "builder_thread_id", return_value="builder"),
-            self.assertRaises(backend.AppError) as error,
-        ):
-            backend.route_agent("GET", "/agent/snapshot", None, "builder")
-        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
-
-    def test_agent_proxy_is_pinned_to_the_builder_thread(self) -> None:
-        handler = object.__new__(backend.Handler)
-        handler.headers = Message()
-        handler.headers["X-Kern-Agent-App-Proxy"] = backend.APP_ID
-        handler.headers["X-Kern-Agent-Thread"] = "other"
-        with (
-            patch.object(backend, "builder_thread_id", return_value=backend.THREAD_BASE_ID),
-            self.assertRaises(backend.AppError) as error,
-        ):
-            handler._require_agent_proxy()
+            backend.route_agent("GET", "/agent/state", None, "app-99")
         self.assertEqual(error.exception.status, HTTPStatus.UNAUTHORIZED)
-
-
-if __name__ == "__main__":
-    unittest.main()

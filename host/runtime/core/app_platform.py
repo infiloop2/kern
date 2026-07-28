@@ -47,28 +47,21 @@ class AppAllocation:
 
 
 @dataclass(frozen=True)
-class AppManifest:
+class AppPackage:
     id: str
     title: str
     release_stage: ReleaseStage
     package_dir: Path
-    backend_entrypoint: Path
     migrations_dir: Path
-    ui_dir: Path
-    port: int
     allocation: AppAllocation
-    # Static app-owned behavior and protocol guidance. The host attaches this
-    # at the runtime instruction boundary for every task created by the app;
-    # current user input and app state remain separate task content.
-    agent_instructions: str
-    # Opt-in agent-facing backend API: when true, agents working this app's
-    # tasks get the app_api tool, proxied to the backend's /agent/ routes by
-    # the kern-agent-app service (docs/architecture/apps/agent-app-api.md).
-    agent_api: bool = False
-    # Opt-in for an app that executes untrusted computation in a blob-backed
-    # dedicated worker. The worker remains under the app frame's CSP; no
-    # other app gets blob worker execution by default.
-    capability_worker: bool = False
+
+    @property
+    def deprecated(self) -> bool:
+        return False
+
+    @property
+    def port(self) -> int:
+        return APP_PORT_BASE + self.allocation.port_offset
 
     @property
     def linux_user(self) -> str:
@@ -88,6 +81,39 @@ class AppManifest:
     @property
     def service_name(self) -> str:
         return f"kern-app-{self.id}.service"
+
+
+@dataclass(frozen=True)
+class DeprecatedAppManifest(AppPackage):
+    """Reserved app identity retained only for schema migrations.
+
+    Deprecated packages have no backend, UI, or agent contract and therefore
+    cannot become installed runtime apps. Their manifest and migrations remain
+    so upgrades can remove old state and the same id/host slot can be rebuilt
+    later without reassigning host-owned identities.
+    """
+
+    @property
+    def deprecated(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class AppManifest(AppPackage):
+    backend_entrypoint: Path
+    ui_dir: Path
+    # Static app-owned behavior and protocol guidance. The host attaches this
+    # at the runtime instruction boundary for every task created by the app;
+    # current user input and app state remain separate task content.
+    agent_instructions: str
+    # Opt-in agent-facing backend API: when true, agents working this app's
+    # tasks get the app_api tool, proxied to the backend's /agent/ routes by
+    # the kern-agent-app service (docs/architecture/apps/agent-app-api.md).
+    agent_api: bool = False
+    # Opt-in for an app that executes untrusted computation in a blob-backed
+    # dedicated worker. The worker remains under the app frame's CSP; no
+    # other app gets blob worker execution by default.
+    capability_worker: bool = False
 
     @property
     def api_route(self) -> str:
@@ -114,13 +140,23 @@ class AppManifest:
 
 
 def installed_apps(root: Path | None = None) -> list[AppManifest]:
+    """Active apps exposed to runtime, API, UI, and service discovery."""
+    return [
+        package
+        for package in migration_apps(root)
+        if isinstance(package, AppManifest)
+    ]
+
+
+def migration_apps(root: Path | None = None) -> list[AppPackage]:
+    """All reserved app packages, including migration-only deprecated apps."""
     root = APP_ROOT if root is None else root
     if not root.exists():
         return []
     package_dirs = _app_package_dirs(root)
     if len(package_dirs) > MAX_INSTALLED_APPS:
         raise AppError(f"too many installed apps: maximum is {MAX_INSTALLED_APPS}")
-    apps: list[AppManifest] = []
+    apps: list[AppPackage] = []
     seen_generated: set[tuple[str, str]] = set()
     for package_dir in package_dirs:
         app = _load_manifest(package_dir / "manifest.json")
@@ -142,6 +178,13 @@ def installed_apps(root: Path | None = None) -> list[AppManifest]:
 
 def app_by_id(app_id: str, root: Path | None = None) -> AppManifest | None:
     for app in installed_apps(root):
+        if app.id == app_id:
+            return app
+    return None
+
+
+def migration_app_by_id(app_id: str, root: Path | None = None) -> AppPackage | None:
+    for app in migration_apps(root):
         if app.id == app_id:
             return app
     return None
@@ -184,10 +227,9 @@ def _app_package_dirs(root: Path) -> list[Path]:
             raise AppError(f"{child}: app package directory must match {APP_ID_RE.pattern}")
         manifest_path = child / "manifest.json"
         if not manifest_path.exists() and (child / "__init__.py").is_file():
-            # An importable Python library colocated under host/apps for
-            # locality (for example workspace_kit, the shared workspace engine):
-            # it has an __init__.py and no manifest, so it is not an installed
-            # app and is skipped. A directory with neither is still a mistake.
+            # An importable Python library colocated under host/apps has an
+            # __init__.py and no manifest, so it is not an installed app and is
+            # skipped. A directory with neither is still a mistake.
             continue
         if not manifest_path.is_file() or manifest_path.is_symlink():
             raise AppError(f"{child}: app package must contain a regular manifest.json file")
@@ -195,7 +237,7 @@ def _app_package_dirs(root: Path) -> list[Path]:
     return packages
 
 
-def _load_manifest(path: Path) -> AppManifest:
+def _load_manifest(path: Path) -> AppPackage:
     try:
         data = json.loads(path.read_text())
     except json.JSONDecodeError as exc:
@@ -203,11 +245,59 @@ def _load_manifest(path: Path) -> AppManifest:
     if not isinstance(data, dict):
         raise AppError(f"{path}: manifest must be an object")
     package_dir = path.parent
+    if "release_stage" not in data:
+        raise AppError(f"{path}: manifest fields are invalid: missing release_stage")
+    app_id = package_dir.name
+    host_slot = _required_int(data, "host_slot", path)
+    if not APP_PORT_OFFSET_MIN <= host_slot <= APP_PORT_OFFSET_MAX:
+        raise AppError(
+            f"{path}: host_slot must be in {APP_PORT_OFFSET_MIN}-{APP_PORT_OFFSET_MAX}"
+        )
+    allocation = AppAllocation(
+        uid=APP_UID_BASE + host_slot,
+        gid=APP_UID_BASE + host_slot,
+        port_offset=host_slot,
+    )
+    title = _required_string(data, "title", path)
+    if "\n" in title or "\r" in title:
+        raise AppError(f"{path}: title must be a single line")
+    release_stage = _required_string(data, "release_stage", path)
+    if release_stage not in {"stable", "beta"}:
+        raise AppError(f"{path}: release_stage must be 'stable' or 'beta'")
+    database = _required_object(data, "database", path)
+    _require_exact_keys(database, {"migrations"}, path, "database")
+    migrations_dir = _required_child(package_dir, database, "migrations", path)
+    if not migrations_dir.is_dir():
+        raise AppError(f"{path}: database.migrations does not exist")
+    typed_release_stage = cast(ReleaseStage, release_stage)
+    deprecated = data.get("deprecated", False)
+    if not isinstance(deprecated, bool):
+        raise AppError(f"{path}: deprecated must be a boolean")
+    if deprecated:
+        _require_exact_keys(
+            data,
+            {"host_slot", "title", "release_stage", "deprecated", "database"},
+            path,
+            "deprecated manifest",
+        )
+        app: AppPackage = DeprecatedAppManifest(
+            id=app_id,
+            title=title,
+            release_stage=typed_release_stage,
+            package_dir=package_dir,
+            migrations_dir=migrations_dir,
+            allocation=allocation,
+        )
+        _validate_postgres_identifier(app.db_schema, "database schema", path)
+        _validate_postgres_identifier(app.db_role, "database role", path)
+        return app
+
     _require_exact_keys(
         data,
         {"host_slot", "title", "release_stage", "backend", "database", "ui", "agent"},
         path,
         "manifest",
+        optional={"deprecated"},
     )
     agent_value = _required_object(data, "agent", path)
     _require_exact_keys(agent_value, {"instructions", "api"}, path, "agent")
@@ -239,51 +329,28 @@ def _load_manifest(path: Path) -> AppManifest:
         raise AppError(
             f"{path}: agent.instructions exceeds {MAX_AGENT_INSTRUCTIONS_BYTES} bytes"
         )
-    app_id = package_dir.name
-    host_slot = _required_int(data, "host_slot", path)
-    if not APP_PORT_OFFSET_MIN <= host_slot <= APP_PORT_OFFSET_MAX:
-        raise AppError(
-            f"{path}: host_slot must be in {APP_PORT_OFFSET_MIN}-{APP_PORT_OFFSET_MAX}"
-        )
-    allocation = AppAllocation(
-        uid=APP_UID_BASE + host_slot,
-        gid=APP_UID_BASE + host_slot,
-        port_offset=host_slot,
-    )
-    title = _required_string(data, "title", path)
-    if "\n" in title or "\r" in title:
-        raise AppError(f"{path}: title must be a single line")
-    release_stage = _required_string(data, "release_stage", path)
-    if release_stage not in {"stable", "beta"}:
-        raise AppError(f"{path}: release_stage must be 'stable' or 'beta'")
     backend = _required_object(data, "backend", path)
-    database = _required_object(data, "database", path)
     ui = _required_object(data, "ui", path)
     _require_exact_keys(backend, {"entrypoint"}, path, "backend")
-    _require_exact_keys(database, {"migrations"}, path, "database")
     _require_exact_keys(ui, {"path"}, path, "ui", optional={"capability_worker"})
     capability_worker = ui.get("capability_worker", False)
     if not isinstance(capability_worker, bool):
         raise AppError(f"{path}: ui.capability_worker must be a boolean")
     backend_entrypoint = _required_child(package_dir, backend, "entrypoint", path)
-    migrations_dir = _required_child(package_dir, database, "migrations", path)
     ui_dir = _required_child(package_dir, ui, "path", path)
     if not backend_entrypoint.is_file():
         raise AppError(f"{path}: backend.entrypoint does not exist")
-    if not migrations_dir.is_dir():
-        raise AppError(f"{path}: database.migrations does not exist")
     if not ui_dir.is_dir():
         raise AppError(f"{path}: ui.path does not exist")
     app = AppManifest(
         id=app_id,
         title=title,
-        release_stage=cast(ReleaseStage, release_stage),
+        release_stage=typed_release_stage,
         package_dir=package_dir,
-        backend_entrypoint=backend_entrypoint,
         migrations_dir=migrations_dir,
-        ui_dir=ui_dir,
-        port=APP_PORT_BASE + allocation.port_offset,
         allocation=allocation,
+        backend_entrypoint=backend_entrypoint,
+        ui_dir=ui_dir,
         agent_instructions=agent_instructions,
         agent_api=agent_api,
         capability_worker=capability_worker,

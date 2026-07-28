@@ -18,6 +18,8 @@ from typing import Any
 from host.config import InputConfig, RuntimeOperatorConnection
 from host.constants import (
     ADMIN_API_PORT,
+    AGENT_PREVIEW_PORT_BASE,
+    AGENT_PREVIEW_PORT_COUNT,
     APP_BACKEND_ADMIN_SOCKET_PATH,
     APP_PORT_BASE,
     PROXY_PORT,
@@ -114,19 +116,79 @@ def _service_account_constants() -> str:
     return "\n".join(lines)
 
 
+def _agent_preview_nftables_rules() -> str:
+    """Default-deny nftables policy for the agent preview port range on loopback.
+
+    The agent may bind any loopback port (the input hook accepts all loopback),
+    so a preview server can *exist* under many uids; what this policy governs is
+    who may exchange packets with the range on the output hook. It is written as
+    an allowlist followed by a two-directional default drop, so the reachable
+    set is closed by construction — a new service account, a new local user, or
+    a future carve-out cannot silently gain access the way a fall-through to the
+    broad ``oif lo accept`` below would grant it.
+
+    Exactly three flows are allowed, then everything else in the range is
+    dropped in both directions:
+
+    - ``dport`` in range, ``kern-agent``: the agent *originates* to its own
+      servers (curl / headless-browser checks, integration tests).
+    - established ``sport`` in range, ``kern-agent``: the agent's own listeners
+      *reply*. Scoped to established so the agent cannot originate from a
+      preview source port (a NEW originated flow is dropped by the sport default
+      drop below).
+    - ``dport`` in range, ``kern-operator``: the operator's SSH local forward,
+      opened by their ``kern-operator`` session, may reach a preview server so
+      the operator can view it. (``kern-operator`` is created by stage-1 user
+      data on every deploy path, so it always resolves at ruleset-load time.)
+
+    Then:
+
+    - ``dport`` default drop: no other principal — service account, root, or any
+      future local user — may *dial* the range. This is what stops a compromised
+      egress-capable service (``kern-tools``, ``kern-proxy``, ``cloudflared``)
+      from connecting to an agent preview server and exfiltrating its content,
+      and stops the admin API from being an SSRF confused-deputy into it.
+    - ``sport`` default drop: no non-agent principal may *answer* on the range
+      (the agent's own replies are already accepted above). This stops a
+      compromised service that bound a preview port from completing a handshake
+      the agent originated — which would let a prompt-injected agent POST
+      workspace data straight to that service, bypassing the policy proxy. It
+      also subsumes the per-app source-port drop.
+
+    Net: only agent<->agent traffic and the operator's forward touch the range;
+    every other principal is denied both directions before the broad accept."""
+    first = AGENT_PREVIEW_PORT_BASE
+    last = AGENT_PREVIEW_PORT_BASE + AGENT_PREVIEW_PORT_COUNT - 1
+    return "\n".join([
+        "    # Agent preview ports: default-deny with a small allowlist. The agent",
+        "    # may originate to and serve on this range; the operator's SSH forward",
+        "    # may reach a preview server. Every other principal is dropped in both",
+        "    # directions (dport: nobody else may dial the range; sport: nobody but",
+        "    # the agent may answer on it) before the broad loopback accept, so no",
+        "    # service account, app, or future user can reach an agent preview",
+        "    # server or receive a connection the agent originated.",
+        f'    oif lo tcp dport {first}-{last} meta skuid "kern-agent" accept',
+        f'    oif lo ct state established,related tcp sport {first}-{last} meta skuid "kern-agent" accept',
+        f'    oif lo tcp dport {first}-{last} meta skuid "kern-operator" accept',
+        f"    oif lo tcp dport {first}-{last} drop",
+        f"    oif lo tcp sport {first}-{last} drop",
+    ])
+
+
 def _render_bootstrap() -> str:
     rendered = (
         BOOTSTRAP_TEMPLATE
         .replace("@ADMIN_PORT@", str(ADMIN_API_PORT))
         .replace("@APP_PORT_BASE@", str(APP_PORT_BASE))
         .replace("@PROXY_PORT@", str(PROXY_PORT))
+        .replace("@AGENT_PREVIEW_NFTABLES_RULES@", _agent_preview_nftables_rules())
         .replace("@SERVICE_ACCOUNT_CONSTANTS@", _service_account_constants())
     )
     return _render_app_bootstrap(rendered)
 
 
 def _render_app_bootstrap(template: str) -> str:
-    apps = app_platform.installed_apps()
+    apps = app_platform.migration_apps()
 
     def env_prefix(app_id: str) -> str:
         return app_id.upper()
@@ -155,13 +217,10 @@ def _render_app_bootstrap(template: str) -> str:
     for app in apps:
         allocation = app.allocation
         env = env_prefix(app.id)
-        backend_entrypoint = app.backend_entrypoint.relative_to(app.package_dir)
-        port = port_name(app.id)
         uid_lines.extend([
             f"KERN_APP_{env}_UID={allocation.uid}",
             f"KERN_APP_{env}_GID={allocation.gid}",
         ])
-        port_lines.append(f"{port}={app.port}")
         ensure_group_lines.append(f"ensure_group {app.linux_user} \"$KERN_APP_{env}_GID\"")
         ensure_user_lines.append(
             f"ensure_user {app.linux_user} \"$KERN_APP_{env}_UID\" {app.linux_user} /nonexistent"
@@ -187,10 +246,22 @@ def _render_app_bootstrap(template: str) -> str:
             f"  runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.app_migrate record {app.id} \"$app_migration_version\"",
             f"done <<< \"${pending_var}\"",
         ])
+        if isinstance(app, app_platform.DeprecatedAppManifest):
+            continue
+
+        if not isinstance(app, app_platform.AppManifest):
+            raise TypeError(f"unsupported app package: {app.id}")
+        backend_entrypoint = app.backend_entrypoint.relative_to(app.package_dir)
+        port = port_name(app.id)
+        port_lines.append(f"{port}={app.port}")
         # New connections to an app port are allowed from exactly two uids:
         # the admin service (browser-bridge reverse proxy) and the agent-app
         # service (agent app_api reverse proxy). Everything else — agent
         # runtimes, other app users, ordinary local users — hits the drop.
+        # (An app that bound a port in the agent preview range cannot answer an
+        # agent-originated connection there: the preview block above drops all
+        # non-agent source ports in the range before these app rules, so no
+        # unmediated agent<->app channel exists. See _agent_preview_nftables_rules.)
         nftables_lines.extend([
             f"    oif lo ct state established,related meta skuid \"{app.linux_user}\" accept",
             f"    oif lo meta skuid \"{app.linux_user}\" drop",

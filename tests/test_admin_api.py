@@ -91,6 +91,9 @@ class AdminUiStaticTests(unittest.TestCase):
         script = (
             Path(__file__).parents[1] / "host/apps/agent_chat/ui/agent_chat.js"
         ).read_text()
+        stylesheet = (
+            Path(__file__).parents[1] / "host/apps/agent_chat/ui/agent_chat.css"
+        ).read_text()
         self.assertIn('api("POST", "/messages", request)', script)
         self.assertIn('["task.message", "task.activity"]', script)
         self.assertNotIn("hydrateCompletePrompts", script)
@@ -102,6 +105,12 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("`/threads/${encodeURIComponent(threadId)}/events`", script)
         self.assertIn("events?before=${before}", script)
         self.assertIn("events?since=${threadEventsNewestSeq}", script)
+        self.assertIn("const INITIAL_EVENT_PAGES = 3", script)
+        self.assertIn("const threadViewStates = new Map()", script)
+        self.assertIn("saveSelectedThreadView();", script)
+        self.assertIn("restoreThreadView(threadId);", script)
+        self.assertIn('<span class="activity-phase">Started</span>', script)
+        self.assertNotIn(".activity-card.started .activity-icon", stylesheet)
         self.assertIn('"/threads?archived=true"', script)
         self.assertIn('"unarchive"', script)
 
@@ -272,6 +281,20 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn(".usage-ring.usage-warning .usage-ring-value { stroke: var(--usage-warn); }", css)
         self.assertIn(".usage-ring.usage-critical .usage-ring-value { stroke: var(--usage-critical); }", css)
 
+    def test_runtime_usage_hover_magnifier_is_desktop_only_and_click_through(self) -> None:
+        css = (
+            Path(__file__).parents[1]
+            / "host/runtime/admin_api/admin_ui.css"
+        ).read_text()
+
+        self.assertIn(
+            "@media (min-width: 861px) and (hover: hover) and (pointer: fine)",
+            css,
+        )
+        self.assertIn("button.runtime-summary:hover > .runtime-usage", css)
+        self.assertIn("pointer-events: none;", css)
+        self.assertIn("transform: scale(1.42);", css)
+
     def test_provider_usage_rings_show_compact_reset_countdowns(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
         health_js = (runtime / "admin_ui" / "health.js").read_text()
@@ -328,7 +351,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("position: fixed", css)
         self.assertIn('id="tab-processes"', html)
         self.assertIn('id="processes"', html)
-        self.assertIn('id="sidebar-apps"', html)
+        self.assertIn('id="sidebar-apps" class="sidebar-section" hidden', html)
         self.assertIn('id="sidebar-stable-apps"', html)
         self.assertIn('<div class="sidebar-section-title">Apps</div>', html)
         self.assertIn('id="stable-app-tabs"', html)
@@ -1130,6 +1153,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
         status, body = self.request("GET", "/v1/apps")
 
         self.assertEqual(status, 200)
+        self.assertEqual(
+            {item["id"] for item in body["apps"]},
+            {"agent_chat", "personal_web_app_builder"},
+        )
         app = next(item for item in body["apps"] if item["id"] == "agent_chat")
         self.assertEqual(app["title"], "Agent Chat")
         self.assertEqual(app["ui"]["iframe_src"], "/v1/apps/agent_chat/ui/index.html")
@@ -1486,7 +1513,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=5) as response:
             body = response.read().decode()
 
-        self.assertIn("Personal Web App Builder", body)
+        self.assertIn("Agentic Web App", body)
         csp = response.headers["Content-Security-Policy"]
         self.assertIn("connect-src 'none'", csp)
         self.assertIn("worker-src blob:", csp)
@@ -1665,8 +1692,6 @@ class AdminApiIntegrationTests(unittest.TestCase):
             ("/admin_ui.css", "text/css", ".shell"),
             ("/admin_ui/app.js", "application/javascript", "setInterval(tick, 5000)"),
             ("/admin_ui/health.js", "application/javascript", "/v1/health"),
-            ("/workspace-kit/view_blocks.css", "text/css", ".b-text"),
-            ("/workspace-kit/view_blocks.js", "application/javascript", "function renderBlock"),
             ("/favicon.ico", "image/svg+xml", "<svg"),
             ("/favicon.svg", "image/svg+xml", "<svg"),
         ):

@@ -966,6 +966,7 @@ $(cat /tmp/kern_cloudflare_rules)
     udp dport 53 meta skuid != 0 drop
     tcp dport 53 meta skuid != 0 drop
     oif lo tcp dport @PROXY_PORT@ meta skuid "kern-agent" accept
+@AGENT_PREVIEW_NFTABLES_RULES@
     oif lo meta skuid "kern-agent" drop
 @APP_NFTABLES_RULES@
     oif lo meta skuid "kern-agent-app" drop

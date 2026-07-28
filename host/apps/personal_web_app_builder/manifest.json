@@ -1,6 +1,6 @@
 {
   "host_slot": 6,
-  "title": "Personal Web App Builder",
+  "title": "Agentic Web App",
   "release_stage": "stable",
   "agent": {
     "instructions": "agent.md",

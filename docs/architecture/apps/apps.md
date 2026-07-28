@@ -86,10 +86,10 @@ are installed. The stage is presentation metadata only; it does not change an
 app's runtime authority or security boundary.
 
 The admin shell hardwires Agent Chat as the host's main interface: the home
-tab opens with a "Begin chat" navigator and Agent Chat's navigation entry
-sits directly below Home, above stable apps and the grouped host sections.
-Agent Chat declares `release_stage: "stable"`, but its hero placement is shell
-presentation only; the manifest contract and `/v1/apps` carry no hero field.
+tab opens with a "Begin chat" navigator. Its sidebar entry remains in the
+normal Apps section because Agent Chat declares `release_stage: "stable"`.
+The Home treatment is shell presentation only; the manifest contract and
+`/v1/apps` carry no hero field.
 
 `backend.entrypoint` is the app backend server code, relative to the app
 package. The app provides code only; the host chooses the port, local bind
@@ -111,8 +111,8 @@ the app UI CSP adds `worker-src blob:` so that audited app code can place
 untrusted computation in a dedicated blob worker. This flag does not relax
 `connect-src`, scripts in the app frame, iframe sandboxing, or parent bridge
 capabilities. An app that enables it owns the worker protocol and must keep all
-DOM and backend authority in audited renderer code. Personal Web App Builder
-defines that protocol in [Personal Web App Builder](personal-web-app-builder.md).
+DOM and backend authority in audited renderer code. Agentic Web App defines
+that protocol in [Agentic Web App](personal-web-app-builder.md).
 
 Every manifest contains an `agent` object. `agent.instructions` names a UTF-8
 Markdown file inside the app package. The host rejects a package whose
@@ -142,6 +142,35 @@ grants no authority. An app without `agent.api` exposes no agent-facing
 surface, and its tasks receive 404 if they call the tool. See
 [Agent App API](agent-app-api.md).
 
+### Deprecated packages
+
+An app that is removed after release keeps a migration-only package instead of
+deleting its identity:
+
+```json
+{
+  "host_slot": 1,
+  "title": "<Former App Title>",
+  "release_stage": "beta",
+  "deprecated": true,
+  "database": {
+    "migrations": "migrations"
+  }
+}
+```
+
+This compact manifest deliberately cannot declare an agent contract, backend,
+or UI. Runtime discovery, `/v1/apps`, route dispatch, service generation, and
+the admin shell ignore it. Bootstrap still reserves its id, slot, database
+schema, and migration role and applies its remaining migrations. A final
+migration may drop the app's old tables.
+
+Keeping the package prevents its durable id, numeric file ownership, database
+namespace, or port allocation from being silently reassigned. It also leaves a
+clear path to rebuild the app later: restore a full manifest and runtime files
+under the same directory and slot, then add forward-only migrations. Existing
+migration files remain immutable even after their app is deprecated.
+
 ## Host Integration
 
 The host integrates an app by reading the manifest, validating every referenced
@@ -150,15 +179,14 @@ invalid package directories, missing or extra manifest fields, path traversal,
 duplicate host slots, and generated-name collisions are validation errors. CI
 loads every package through this same validator, so these errors fail before
 merge rather than first appearing during a deploy. The first implementation
-caps installed apps at 100 so slot assignment, provisioning, and admin UI
+caps reserved app packages at 100 so slot assignment, provisioning, and admin UI
 mounting stay inside an intentionally bounded surface. Bootstrap provisioning
-and `/v1/apps` metadata are generated from the validated package list.
+uses the full package list for migrations and decommissioning; `/v1/apps`
+metadata and runtime services use only active packages.
 
 The host derives names from the app id and stable host slot. The app account is
-`kern-app-<app_id>` when that fits Linux's 32-byte account-name limit.
-Longer ids use `kern-app-<host_slot>`. The slot is unique and immutable,
-so the bounded fallback remains stable without changing existing short account
-names.
+always `kern-app-<host_slot>`, making the Linux identity length-bounded and
+stable regardless of the package name.
 
 | Host object | Derived value |
 | --- | --- |
@@ -349,9 +377,9 @@ the same host admin task API: each app can show the threads it started and hide
 or archive them according to its own product rules, without exposing unrelated
 threads created by another app or host surface.
 
-Each app gets:
+Each reserved app package gets:
 
-- A dedicated Linux service user.
+- A dedicated Linux account (used as the service user only while active).
 - A dedicated Postgres role with the same name.
 - A dedicated Postgres schema such as `app_<app_id>`.
 - Migration records in a host-owned migration table.
@@ -371,6 +399,11 @@ database writes, app migrations are replay-safe. If bootstrap is interrupted
 after app SQL commits but before the host records the version, the next bootstrap
 reruns the same app migration and then records it without manual database
 repair.
+
+Migration discovery includes deprecated packages. This is what lets an upgrade
+run their final cleanup migration after runtime discovery has stopped exposing
+their code. The empty schema and scoped migration role remain reserved with the
+package identity; the removed app has no running process or database client.
 
 ## Safety Model
 

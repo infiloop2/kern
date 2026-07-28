@@ -2,17 +2,8 @@
   "host_slot": 3,
   "title": "Social Marketer",
   "release_stage": "beta",
-  "agent": {
-    "instructions": "agent.md",
-    "api": true
-  },
-  "backend": {
-    "entrypoint": "backend.py"
-  },
+  "deprecated": true,
   "database": {
     "migrations": "migrations"
-  },
-  "ui": {
-    "path": "ui"
   }
 }

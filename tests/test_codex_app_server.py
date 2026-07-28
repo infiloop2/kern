@@ -426,11 +426,11 @@ class CodexAppServerTests(unittest.TestCase):
         # The helper consumes the pair and names the systemd scope after the
         # host thread; non-task servers (status probes, logins) add nothing.
         server = codex_app_server_module.CodexAppServer(
-            command=["/bin/echo"], thread_id="mission_pursuit__ws-3"
+            command=["/bin/echo"], thread_id="sample_app__ws-3"
         )
         self.assertEqual(
             server._command,
-            ["/bin/echo", "--thread-scope", "mission_pursuit__ws-3"],
+            ["/bin/echo", "--thread-scope", "sample_app__ws-3"],
         )
         self.assertEqual(
             codex_app_server_module.CodexAppServer(command=["/bin/echo"])._command, ["/bin/echo"]

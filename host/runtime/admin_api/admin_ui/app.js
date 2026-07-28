@@ -252,14 +252,13 @@ function renderAppTabs() {
   const betaContainer = $("beta-app-tabs");
   stableContainer.innerHTML = "";
   betaContainer.innerHTML = "";
-  $("hero-app-tab").innerHTML = "";
   document.querySelectorAll(".app-tab-panel").forEach(panel => panel.remove());
   appFrames.clear();
-  // Agent Chat is the host's main interface: the home hero navigator carries
-  // its CTA, and its nav entry sits directly below Home.
+  // Agent Chat gets the Home navigator, but remains an ordinary stable app in
+  // the sidebar.
   const heroApp = installedApps.find(app => app.id === HERO_APP_ID) || null;
   renderHomeHero(heroApp);
-  const stableApps = installedApps.filter(app => app !== heroApp && app.release_stage !== "beta");
+  const stableApps = installedApps.filter(app => app.release_stage !== "beta");
   const betaApps = installedApps.filter(app => app.release_stage === "beta");
   $("sidebar-stable-apps").hidden = !stableApps.length;
   $("sidebar-apps").hidden = !betaApps.length;
@@ -270,18 +269,12 @@ function renderAppTabs() {
   for (const app of installedApps) {
     const button = document.createElement("button");
     button.id = `tab-app-${app.id}`;
-    button.className = app === heroApp ? "tab-button hero-app-tab" : "tab-button";
+    button.className = "tab-button";
     button.dataset.action = "show-tab";
     button.dataset.tab = `app:${app.id}`;
-    if (app === heroApp) {
-      button.innerHTML = `${chatIconSvg()}<span></span>`;
-      button.querySelector("span").textContent = app.title || app.id;
-      $("hero-app-tab").appendChild(button);
-    } else {
-      button.innerHTML = `${appIconSvg()}<span></span>`;
-      button.querySelector("span").textContent = app.title || app.id;
-      (app.release_stage === "beta" ? betaContainer : stableContainer).appendChild(button);
-    }
+    button.innerHTML = `${appIconSvg()}<span></span>`;
+    button.querySelector("span").textContent = app.title || app.id;
+    (app.release_stage === "beta" ? betaContainer : stableContainer).appendChild(button);
 
     const panel = document.createElement("div");
     panel.id = `panel-app-${app.id}`;

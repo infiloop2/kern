@@ -250,48 +250,37 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#health")).to_contain_text("Admin volume")
     expect(page.locator("#health")).to_contain_text("Agent volume")
     expect(page.locator("#panel-home").get_by_role("button", name="Reboot host")).to_be_visible()
-    # Agent Chat is hardwired as the hero app: home opens with its
-    # "Begin chat" navigator, and its nav entry sits directly below Home,
-    # outside the Apps section.
+    # Agent Chat keeps its Home navigator but uses an ordinary entry in Apps.
     expect(page.locator("#home-hero .home-hero-card")).to_be_visible()
     expect(page.locator("#home-hero")).to_contain_text("Agent Chat")
-    hero_tab = page.locator("#hero-app-tab").get_by_role("button", name="Agent Chat", exact=True)
-    expect(hero_tab).to_be_visible()
-    hero_box = hero_tab.bounding_box()
-    home_tab_box = page.locator("#tab-home").bounding_box()
-    network_tab_box = page.locator("#tab-network").bounding_box()
-    if (
-        not hero_box
-        or not home_tab_box
-        or not network_tab_box
-        or not home_tab_box["y"] < hero_box["y"] < network_tab_box["y"]
-    ):
-        raise AssertionError("the hero app entry must sit between Home and the other nav tabs")
-    expect(page.locator("#stable-app-tabs").get_by_role("button", name="Agent Chat", exact=True)).to_have_count(0)
+    agent_chat_tab = page.locator("#stable-app-tabs").get_by_role(
+        "button", name="Agent Chat", exact=True
+    )
+    expect(agent_chat_tab).to_be_visible()
+    expect(agent_chat_tab).to_have_class("tab-button")
     stable_builder_tab = page.locator("#stable-app-tabs").get_by_role(
-        "button", name="Personal Web App Builder", exact=True
+        "button", name="Agentic Web App", exact=True
     )
     expect(stable_builder_tab).to_be_visible()
+    agent_chat_box = agent_chat_tab.bounding_box()
+    builder_box = stable_builder_tab.bounding_box()
+    if not agent_chat_box or not builder_box or agent_chat_box["y"] >= builder_box["y"]:
+        raise AssertionError("Agent Chat must be the first app in the Apps section")
     expect(page.locator("#sidebar-stable-apps")).to_be_visible()
     expect(page.locator("#sidebar-stable-apps").get_by_text("Apps", exact=True)).to_be_visible()
     expect(page.locator("#sidebar-stable-apps").get_by_role("button", name="Apps", exact=True)).to_have_count(0)
-    beta_toggle = page.get_by_role("button", name="Apps (Beta)", exact=True)
-    expect(beta_toggle).to_have_attribute("aria-expanded", "false")
+    expect(page.locator("#sidebar-apps")).to_be_hidden()
     expect(page.locator("#beta-app-tabs")).to_be_hidden()
-    beta_toggle.click()
-    expect(beta_toggle).to_have_attribute("aria-expanded", "true")
-    expect(page.locator("#beta-app-tabs").get_by_role("button", name="Mission Pursuit", exact=True)).to_be_visible()
     # App frames load only when selected. Eagerly navigating every hidden app
     # at login can leave deferred frames at about:blank on a small fresh host.
     expect(page.locator("iframe.app-frame[src]")).to_have_count(0)
-    # Below the hero, stable non-hero apps have a permanent Apps group. Host
-    # tabs follow, then the existing collapsible Apps (Beta) group.
+    # Stable apps have a permanent Apps group. Host tabs follow. The beta
+    # group is absent when no active beta app exists.
     headings = page.locator("#sidebar .sidebar-section-title:visible")
-    expect(headings).to_have_count(4)
+    expect(headings).to_have_count(3)
     expect(headings.nth(0)).to_have_text("Apps")
     expect(headings.nth(1)).to_have_text("Configuration")
     expect(headings.nth(2)).to_have_text("Audit")
-    expect(headings.nth(3).get_by_role("button", name="Apps (Beta)", exact=True)).to_be_visible()
     expect(page.locator("#sidebar-configuration .tab-button")).to_have_count(2)
     expect(page.locator("#sidebar-configuration #tab-network")).to_be_visible()
     expect(page.locator("#sidebar-audit .tab-button")).to_have_count(6)
@@ -302,7 +291,6 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator('iframe[title="Agent Chat"]')).to_have_attribute(
         "src", "/v1/apps/agent_chat/ui/index.html"
     )
-    expect(page.locator('iframe[title="Mission Pursuit"][src]')).to_have_count(0)
     expect(page.locator("#panel-home")).to_be_hidden()
     page.get_by_role("button", name="Home", exact=True).click()
     expect(page.locator("#panel-home")).to_be_visible()
@@ -322,6 +310,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#runtime-overview .usage-ring.unavailable")).to_have_count(4)
     expect(page.locator("#runtime-overview .runtime-summary-bedrock")).to_have_count(1)
     expect(page.locator("#runtime-overview")).to_contain_text("--")
+    assert_desktop_runtime_usage_hover(page)
     expect(page.locator("#panel-home").get_by_text("Agent runtimes")).to_have_count(0)
     expect(page.locator("#panel-home").get_by_text("Provider usage")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Codex login")).to_have_count(0)
@@ -1050,6 +1039,30 @@ def desktop_smoke(page, url: str) -> None:
     expect(claude_summary).to_contain_text("63%")
 
 
+def assert_desktop_runtime_usage_hover(page) -> None:
+    """A mouse magnifies usage without stealing the runtime button's click."""
+    from playwright.sync_api import expect
+
+    media = "(min-width: 861px) and (hover: hover) and (pointer: fine)"
+    if not page.evaluate(f"matchMedia({media!r}).matches"):
+        raise AssertionError("desktop smoke viewport does not match the usage-hover media query")
+    for runtime in ("Codex", "Claude Code", "Hermes"):
+        summary = page.locator("#runtime-overview .runtime-summary", has_text=runtime)
+        usage = summary.locator(":scope > .runtime-usage")
+        expect(usage).to_have_css("transform", "none")
+        summary.hover()
+        scale = usage.evaluate(
+            "element => new DOMMatrix(getComputedStyle(element).transform).a"
+        )
+        if not 1.41 <= scale <= 1.43:
+            raise AssertionError(f"{runtime} usage did not magnify on hover: scale={scale}")
+        expect(usage).to_have_css("pointer-events", "none")
+        if usage.evaluate("element => getComputedStyle(element).boxShadow") == "none":
+            raise AssertionError(f"{runtime} usage hover has no popup surface")
+        page.mouse.move(0, 0)
+        expect(usage).to_have_css("transform", "none")
+
+
 def tools_smoke(page) -> None:
     """Tool rows on the Internet Access and Tools tab: seeded state, rows
     collapsed by default in the managed-integration format, config set/clear,
@@ -1527,6 +1540,12 @@ def mobile_smoke(page, url: str) -> None:
     expect(hermes_box).to_be_visible()
     expect(page.locator("#runtime-overview .runtime-summary-bedrock")).to_have_count(1)
     expect(page.locator("#runtime-overview .runtime-stat-cost")).to_have_count(1)
+    for runtime in ("Codex", "Claude Code", "Hermes"):
+        usage = page.locator(
+            "#runtime-overview .runtime-summary",
+            has_text=runtime,
+        ).locator(":scope > .runtime-usage")
+        expect(usage).to_have_css("transform", "none")
     # Escape dismisses the overlay like a menu; the boxes hide again.
     page.keyboard.press("Escape")
     expect(overview_toggle).to_have_attribute("aria-expanded", "false")
@@ -1543,7 +1562,9 @@ def mobile_smoke(page, url: str) -> None:
 
     # The drawer closes on backdrop click, Escape, and destination selection.
     open_mobile_navigation(page)
-    expect(page.locator("#hero-app-tab").get_by_role("button", name="Agent Chat", exact=True)).to_be_visible()
+    expect(
+        page.locator("#stable-app-tabs").get_by_role("button", name="Agent Chat", exact=True)
+    ).to_be_visible()
     page.locator("#nav-backdrop").click(position={"x": 380, "y": 400})
     expect(page.locator("#nav-backdrop")).to_be_hidden()
     open_mobile_navigation(page)

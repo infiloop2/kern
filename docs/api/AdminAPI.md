@@ -1205,8 +1205,9 @@ GET                 /v1/apps/{app_id}/ui/{asset_path}
 GET|POST|PUT|DELETE /v1/apps/{app_id}/api/{backend_path}
 ```
 
-`GET /v1/apps` lists the app packages installed with this host release and the
-host-derived resources assigned to each one:
+`GET /v1/apps` lists active app packages installed with this host release and
+the host-derived resources assigned to each one. Migration-only manifests with
+`"deprecated": true` are intentionally absent and have no UI or API routes:
 
 ```json
 {
@@ -1230,7 +1231,7 @@ host-derived resources assigned to each one:
 | Field | Meaning |
 | --- | --- |
 | `apps[].id`, `title` | Stable manifest id and operator-facing title. |
-| `apps[].release_stage` | Required manifest stage: `stable` or `beta`. The admin shell places stable non-hero apps in the always-visible Apps section and beta apps in a collapsed Apps (Beta) group; this field grants no additional authority. |
+| `apps[].release_stage` | Required manifest stage: `stable` or `beta`. The admin shell places stable apps in the always-visible Apps section and beta apps in a collapsed Apps (Beta) group; this field grants no additional authority. |
 | `apps[].backend.api_route` | Authenticated admin API prefix that reverse-proxies to this app backend. |
 | `apps[].ui.iframe_src` | Static entry point mounted by the admin API. |
 | `apps[].ui.sandbox` | iframe permissions the admin shell applies. `allow-same-origin` is deliberately absent, so the app frame has an opaque origin. |

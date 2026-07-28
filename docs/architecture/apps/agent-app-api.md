@@ -74,7 +74,7 @@ needed. A thread spans turns, which is intentional: app ownership is a
 workspace property. Each runtime scope is collected when its turn process
 exits, and a later turn on the same thread creates a fresh scope with the same
 trusted name. Apps can additionally require an active run on the forwarded
-thread, as Mission Pursuit does in its own database.
+thread when its own database model requires that additional check.
 
 ## The dedicated service
 
@@ -129,11 +129,10 @@ manifest-referenced `agent.md` owns every app-specific route, request shape,
 workflow rule, and interaction style. The shim does not enumerate or discover
 routes, and the agent is told not to probe for them.
 
-What each app exposes under `/agent/` is the app's own design: Mission Pursuit
-(the first consumer, see [mission-pursuit.md](mission-pursuit.md))
-serves its action protocol at `POST /agent/actions` plus full artifact and workspace-state
-reads, and layers its own authorization on the trusted thread marker: only the
-current session's thread while it has an active run is served. The host deliberately does not schema-validate agent routes — the app
+What each app exposes under `/agent/` is the app's own design. For example, an
+app can serve an action protocol at `POST /agent/actions` plus artifact and
+workspace-state reads, and layer its own authorization on the trusted thread
+marker. The host deliberately does not schema-validate agent routes — the app
 backend owns semantic validation exactly as it owns it for its operator UI —
 but the transport (namespace, caps, and attribution) is host-enforced.
 

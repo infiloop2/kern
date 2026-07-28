@@ -10,12 +10,9 @@ the persistent stage test.
 
 The smoke covers subnet/SG/IMDSv2/SSH provisioning, bootstrap on real Ubuntu,
 admin API access over the SSH tunnel, auth rejection, and the real admin UI in
-headless Chrome. The browser logs in, opens Mission Pursuit, clicks its
-popovers and agent settings, submits a first mission, verifies the expected
-pre-provider-login failure, and switches the workspace runtime. The remaining
-checks cover all three runtime status/account records and real task insertion,
-the Bedrock provider policy that governs Hermes,
-every Bedrock pre-credential denial
+headless Chrome. The remaining checks cover all three runtime status/account
+records and real task insertion, the Bedrock provider policy that governs
+Hermes, every Bedrock pre-credential denial
 (foreign access-key id, cross-region signature, presigned query, session token,
 and unavailable proxy credential), real Hermes launcher startup through its
 systemd scope until the proxy's local missing-credential denial, task

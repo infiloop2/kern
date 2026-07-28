@@ -1,9 +1,10 @@
-"""Personal Web App Builder backend.
+"""Agentic Web App backend.
 
-The app owns one generated UI bundle, one agent-defined JSON document, and one
-fixed agent chat. The browser and agent receive separate route namespaces and
-authentication markers. Generated browser code never reaches this process as
-authority: all durable mutations are validated here and revision checked.
+Each workspace owns one generated UI bundle, one agent-defined JSON document,
+and one fixed agent thread. The browser and agent receive separate route
+namespaces and authentication markers. Generated browser code never reaches
+this process as authority: all durable mutations are validated here and
+revision checked.
 """
 
 from __future__ import annotations
@@ -27,11 +28,7 @@ from host.session_options import public_session_options, recorded_session_config
 
 
 APP_ID = "personal_web_app_builder"
-# The builder runs one host thread at a time. A thread's session configuration
-# is fixed for its lifetime, so reset moves the app to the next thread rather
-# than reconfiguring the current one. Sequence 1 keeps the original id, which
-# is what carries an existing conversation through the reset migration.
-THREAD_BASE_ID = "builder"
+THREAD_NAME_RE = re.compile(r"app-([1-9][0-9]*)")
 HOST = os.environ.get("KERN_APP_HOST", LOOPBACK)
 PORT = int(os.environ.get("KERN_APP_PORT", "7456"))
 DB_SCHEMA = os.environ.get("KERN_APP_DB_SCHEMA", "app_personal_web_app_builder")
@@ -44,6 +41,7 @@ MAX_JAVASCRIPT_BYTES = 128 * 1024
 MAX_DATA_BYTES = 256 * 1024
 MAX_STATE_RESPONSE_BYTES = 900 * 1024
 MAX_CHAT_MESSAGE_BYTES = 50_000
+MAX_APP_NAME_CHARS = 100
 CONVERSATION_TASK_LIMIT = 20
 CONVERSATION_MESSAGE_BYTES = 12 * 1024
 # json.dumps may expand each clipped byte to a six-byte \u00XX escape. Five
@@ -53,13 +51,11 @@ CONVERSATION_EVENT_PAGE_LIMIT = 5
 MAX_PATH_DEPTH = 16
 MAX_PATH_KEY_BYTES = 128
 JAVASCRIPT_FORBIDDEN = re.compile(r"\bimport\b")
-# Start over rotates the builder onto a new thread while clearing the app, so
-# it must not interleave with work that belongs to the old one. Everything that
-# could is serialized here rather than each path defending itself: the app is
-# one operator's single workspace, so the contention this costs is nil and the
-# alternative is a race check in every statement. Held across the host call in
-# create_message, as Agent Chat does for its own send path.
-BUILDER_LOCK = threading.Lock()
+# Message creation and archive changes on one workspace must not interleave.
+# Separate workspaces retain independent locks so their agents can run and
+# mutate state concurrently.
+WORKSPACE_LOCKS_GUARD = threading.Lock()
+WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
 REQUEST_PREFIXES = {
     "user": "Requested by user:",
     "app": "Requested by app:",
@@ -74,13 +70,16 @@ class AppError(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "KernPersonalWebAppBuilder/0.1"
+    server_version = "KernAgenticWebApp/0.1"
 
     def do_GET(self) -> None:
         self._handle("GET")
 
     def do_POST(self) -> None:
         self._handle("POST")
+
+    def do_PUT(self) -> None:
+        self._handle("PUT")
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -112,14 +111,12 @@ class Handler(BaseHTTPRequestHandler):
     def _require_agent_proxy(self) -> None:
         """Reject anything without the kernel-attributed markers.
 
-        This is the cheap gate. The attributed thread is checked again inside
-        the transaction that reads or mutates `app_state`, because Start over
-        can revoke a thread between this check and that statement; only the
-        in-transaction check is authoritative.
+        This is the cheap gate. ``route_agent`` resolves the attributed thread
+        to its exact workspace before any state is returned or changed.
         """
         if (
             self.headers.get("X-Kern-Agent-App-Proxy") != APP_ID
-            or self.headers.get("X-Kern-Agent-Thread") != builder_thread_id()
+            or not self.headers.get("X-Kern-Agent-Thread")
         ):
             raise AppError(HTTPStatus.UNAUTHORIZED, "missing agent app context")
 
@@ -157,50 +154,250 @@ def route_browser(
 ) -> dict[str, Any]:
     if method == "GET" and path == "/session-options":
         return {"session_options": public_session_options()}
-    if method == "GET" and path == "/state":
-        return {"app": load_app_state()}
-    if method == "GET" and path == "/conversation":
-        return browser_conversation()
-    if method == "GET" and path == "/conversation/events":
-        return browser_conversation_events(query or {})
-    if method == "POST" and path == "/reset":
-        with BUILDER_LOCK:
-            return reset_app()
-    if method == "POST" and path == "/messages":
-        with BUILDER_LOCK:
-            return create_message(body, requested_by="user")
-    if method == "POST" and path == "/runtime/agent-requests":
-        with BUILDER_LOCK:
-            return create_message(body, requested_by="app")
-    if method == "POST" and path == "/runtime/actions":
-        return apply_runtime_action(body)
-    match = re.fullmatch(r"/tasks/([^/]+)/(cancel|kill)", path)
+    if method == "GET" and path == "/apps":
+        return list_web_apps(query or {})
+    if method == "POST" and path == "/apps":
+        return {"app": create_web_app()}
+
+    match = re.fullmatch(r"/apps/([^/]+)/(state|conversation)", path)
+    if method == "GET" and match:
+        thread_id, resource = _path_segment(match.group(1)), match.group(2)
+        if resource == "state":
+            return {"app": load_app_state(thread_id)}
+        return browser_conversation(thread_id)
+
+    match = re.fullmatch(r"/apps/([^/]+)/conversation/events", path)
+    if method == "GET" and match:
+        return browser_conversation_events(
+            _path_segment(match.group(1)), query or {}
+        )
+
+    match = re.fullmatch(r"/apps/([^/]+)/name", path)
+    if method == "PUT" and match:
+        return {"app": rename_web_app(_path_segment(match.group(1)), body)}
+
+    match = re.fullmatch(r"/apps/([^/]+)/(archive|unarchive)", path)
     if method == "POST" and match:
-        task_id, action = match.groups()
-        task_id = _path_segment(task_id)
-        return call_admin_api("POST", f"/v1/tasks/{quote(task_id, safe='')}/{action}", body)
+        thread_id, action = _path_segment(match.group(1)), match.group(2)
+        with _workspace_lock(thread_id):
+            return {
+                "app": set_web_app_archived(
+                    thread_id, archived=action == "archive"
+                )
+            }
+
+    match = re.fullmatch(
+        r"/apps/([^/]+)/(messages|runtime/agent-requests|runtime/actions)", path
+    )
+    if method == "POST" and match:
+        thread_id, resource = _path_segment(match.group(1)), match.group(2)
+        with _workspace_lock(thread_id):
+            if resource == "runtime/actions":
+                return apply_runtime_action(body, thread_id)
+            requested_by = "app" if resource == "runtime/agent-requests" else "user"
+            return create_message(body, requested_by=requested_by, thread_id=thread_id)
+
+    match = re.fullmatch(r"/apps/([^/]+)/tasks/([^/]+)/(cancel|kill)", path)
+    if method == "POST" and match:
+        thread_id, task_id, action = (
+            _path_segment(match.group(1)),
+            _path_segment(match.group(2)),
+            match.group(3),
+        )
+        _require_web_app_task(thread_id, task_id)
+        return call_admin_api(
+            "POST", f"/v1/tasks/{quote(task_id, safe='')}/{action}", body
+        )
     raise AppError(HTTPStatus.NOT_FOUND, "route not found")
 
 
 def route_agent(method: str, path: str, body: Any, agent_thread: str) -> dict[str, Any]:
-    with BUILDER_LOCK:
-        # The handler's marker check happens before this lock, so Start over can
-        # revoke the thread in between; re-check here, where reset cannot run
-        # until the request finishes.
-        if agent_thread != builder_thread_id():
-            raise AppError(HTTPStatus.UNAUTHORIZED, "missing agent app context")
-        if method == "GET" and path == "/agent/state":
-            return {"app": load_app_state()}
-        if method == "POST" and path == "/agent/actions":
-            return apply_agent_action(body)
+    _require_web_app(agent_thread, include_archived=True, agent=True)
+    if method == "GET" and path == "/agent/state":
+        return {"app": load_app_state(agent_thread)}
+    if method == "POST" and path == "/agent/actions":
+        return apply_agent_action(body, agent_thread)
     raise AppError(HTTPStatus.NOT_FOUND, "agent route not found")
 
 
-def browser_conversation() -> dict[str, Any]:
-    thread_id = builder_thread_id()
+def list_web_apps(query: dict[str, list[str]]) -> dict[str, Any]:
+    unexpected = sorted(set(query) - {"archived"})
+    if unexpected:
+        raise AppError(
+            HTTPStatus.BAD_REQUEST,
+            f"unexpected app query fields: {', '.join(unexpected)}",
+        )
+    archived_values = query.get("archived") or []
+    if len(archived_values) > 1 or (
+        archived_values and archived_values[0] not in {"true", "false"}
+    ):
+        raise AppError(HTTPStatus.BAD_REQUEST, "archived must be true or false")
+    archived = bool(archived_values and archived_values[0] == "true")
+    with db.transaction() as cur:
+        _set_search_path(cur)
+        cur.execute(
+            "SELECT thread_id, name, archived, revision, created_at, updated_at"
+            " FROM web_apps WHERE archived = %s",
+            (archived,),
+        )
+        rows = cur.fetchall()
+    summaries: dict[str, dict[str, Any]] = {}
+    if rows:
+        response = call_admin_api("GET", "/v1/threads")
+        host_threads = response.get("threads")
+        if not isinstance(host_threads, list):
+            raise AppError(
+                HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread list"
+            )
+        summaries = {
+            summary["thread_id"]: summary
+            for summary in host_threads
+            if isinstance(summary, dict)
+            and isinstance(summary.get("thread_id"), str)
+        }
+    apps = [
+        _web_app_summary(row, summaries.get(row[0]))
+        for row in rows
+    ]
+    apps.sort(
+        key=lambda app: str(app.get("last_used_at") or app["updated_at"]),
+        reverse=True,
+    )
+    return {"apps": apps}
+
+
+def _web_app_summary(
+    row: tuple[Any, ...], host_summary: dict[str, Any] | None
+) -> dict[str, Any]:
+    active_tasks: list[dict[str, str]] = []
+    session: dict[str, str] | None = None
+    last_used_at = row[5]
+    if host_summary is not None:
+        active = host_summary.get("active_tasks")
+        if not isinstance(active, list):
+            raise AppError(
+                HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread summary"
+            )
+        active_tasks = [
+            {"task_id": task["task_id"], "status": task["status"]}
+            for task in active
+            if isinstance(task, dict)
+            and isinstance(task.get("task_id"), str)
+            and isinstance(task.get("status"), str)
+        ]
+        session = _task_session_config(host_summary)
+        last_used_at = str(host_summary.get("last_used_at") or row[5])
+    return {
+        "thread_id": row[0],
+        "name": row[1],
+        "archived": row[2],
+        "revision": row[3],
+        "created_at": row[4],
+        "updated_at": row[5],
+        "last_used_at": last_used_at,
+        "session": session,
+        "active_tasks": active_tasks,
+    }
+
+
+def create_web_app() -> dict[str, Any]:
+    # Match Agent Chat's allocator. The insert reserves an id across concurrent
+    # creators, and archived ids remain counted so a workspace is never reused.
+    while True:
+        now = _utc_now()
+        with db.transaction() as cur:
+            _set_search_path(cur)
+            cur.execute("SELECT thread_id FROM web_apps")
+            rows = cur.fetchall()
+            numbers = [
+                int(match.group(1))
+                for (thread_id,) in rows
+                if (match := THREAD_NAME_RE.fullmatch(thread_id)) is not None
+            ]
+            thread_id = f"app-{max(numbers, default=0) + 1}"
+            cur.execute(
+                "INSERT INTO web_apps"
+                " (thread_id, name, archived, revision, html, css, javascript,"
+                " data_json, created_at, updated_at)"
+                " VALUES (%s, %s, FALSE, 0, '', '', '', '{}', %s, %s)"
+                " ON CONFLICT (thread_id) DO NOTHING"
+                " RETURNING thread_id, name, archived, revision, created_at, updated_at",
+                (thread_id, thread_id, now, now),
+            )
+            row = cur.fetchone()
+        if row is not None:
+            return _web_app_summary(row, None)
+
+
+def rename_web_app(thread_id: str, body: Any) -> dict[str, Any]:
+    request = _required_object(body, "rename request")
+    _require_keys(request, {"name"}, required={"name"})
+    name = _required_text(request.get("name"), "name")
+    if len(name) > MAX_APP_NAME_CHARS:
+        raise AppError(
+            HTTPStatus.BAD_REQUEST,
+            f"name must be at most {MAX_APP_NAME_CHARS} characters",
+        )
+    with db.transaction() as cur:
+        _set_search_path(cur)
+        cur.execute(
+            "UPDATE web_apps SET name = %s WHERE thread_id = %s"
+            " RETURNING thread_id, name, archived, revision, created_at, updated_at",
+            (name, thread_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise AppError(HTTPStatus.NOT_FOUND, "app not found")
+    return _web_app_summary(row, None)
+
+
+def set_web_app_archived(thread_id: str, *, archived: bool) -> dict[str, Any]:
+    with db.transaction() as cur:
+        _set_search_path(cur)
+        cur.execute(
+            "UPDATE web_apps SET archived = %s WHERE thread_id = %s"
+            " RETURNING thread_id, name, archived, revision, created_at, updated_at",
+            (archived, thread_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise AppError(HTTPStatus.NOT_FOUND, "app not found")
+    return _web_app_summary(row, None)
+
+
+def _require_web_app(
+    thread_id: str, *, include_archived: bool = False, agent: bool = False
+) -> None:
+    with db.transaction() as cur:
+        _set_search_path(cur)
+        query = "SELECT 1 FROM web_apps WHERE thread_id = %s"
+        if not include_archived:
+            query += " AND archived = FALSE"
+        cur.execute(query, (thread_id,))
+        row = cur.fetchone()
+    if row is None:
+        if agent:
+            raise AppError(HTTPStatus.UNAUTHORIZED, "missing agent app context")
+        raise AppError(HTTPStatus.NOT_FOUND, "app not found")
+
+
+def _workspace_lock(thread_id: str) -> threading.Lock:
+    with WORKSPACE_LOCKS_GUARD:
+        return WORKSPACE_LOCKS.setdefault(thread_id, threading.Lock())
+
+
+def _require_web_app_task(thread_id: str, task_id: str) -> None:
+    _require_web_app(thread_id, include_archived=True)
+    task = call_admin_api("GET", f"/v1/tasks/{quote(task_id, safe='')}")
+    if task.get("thread_id") != thread_id:
+        raise AppError(HTTPStatus.NOT_FOUND, "task not found")
+
+
+def browser_conversation(thread_id: str) -> dict[str, Any]:
+    _require_web_app(thread_id, include_archived=True)
     response = call_admin_api(
         "GET",
-        f"/v1/threads/{thread_id}/tasks"
+        f"/v1/threads/{quote(thread_id, safe='')}/tasks"
         f"?limit={CONVERSATION_TASK_LIMIT}&message_bytes={CONVERSATION_MESSAGE_BYTES}",
     )
     host_tasks = response.get("tasks")
@@ -211,26 +408,37 @@ def browser_conversation() -> dict[str, Any]:
     return {"tasks": tasks, "session": session}
 
 
-def browser_conversation_events(query: dict[str, list[str]]) -> dict[str, Any]:
-    unexpected = sorted(set(query) - {"since"})
+def browser_conversation_events(
+    thread_id: str, query: dict[str, list[str]]
+) -> dict[str, Any]:
+    _require_web_app(thread_id, include_archived=True)
+    unexpected = sorted(set(query) - {"since", "before"})
     if unexpected:
         raise AppError(
             HTTPStatus.BAD_REQUEST,
             f"unexpected conversation event query fields: {', '.join(unexpected)}",
         )
     since_values = query.get("since") or []
-    if len(since_values) > 1:
-        raise AppError(HTTPStatus.BAD_REQUEST, "since must be provided once")
+    before_values = query.get("before") or []
+    if since_values and before_values:
+        raise AppError(HTTPStatus.BAD_REQUEST, "since and before cannot be combined")
+    for name, values in (("since", since_values), ("before", before_values)):
+        if len(values) > 1:
+            raise AppError(HTTPStatus.BAD_REQUEST, f"{name} must be provided once")
     parameters = [
         f"limit={CONVERSATION_EVENT_PAGE_LIMIT}",
         f"message_bytes={CONVERSATION_MESSAGE_BYTES}",
     ]
-    if since_values:
-        since = since_values[0]
-        if not since.isdigit():
-            raise AppError(HTTPStatus.BAD_REQUEST, "since must be a non-negative integer")
-        parameters.insert(0, f"since={since}")
-    path = f"/v1/threads/{builder_thread_id()}/events?{'&'.join(parameters)}"
+    cursor_name = "since" if since_values else "before" if before_values else None
+    if cursor_name is not None:
+        cursor = (since_values if cursor_name == "since" else before_values)[0]
+        if not cursor.isdigit():
+            raise AppError(
+                HTTPStatus.BAD_REQUEST,
+                f"{cursor_name} must be a non-negative integer",
+            )
+        parameters.insert(0, f"{cursor_name}={cursor}")
+    path = f"/v1/threads/{quote(thread_id, safe='')}/events?{'&'.join(parameters)}"
     response = call_admin_api("GET", path)
     events = response.get("events")
     if not isinstance(events, list) or not all(isinstance(event, dict) for event in events):
@@ -238,7 +446,10 @@ def browser_conversation_events(query: dict[str, list[str]]) -> dict[str, Any]:
     return {"events": events}
 
 
-def create_message(body: Any, *, requested_by: str) -> dict[str, Any]:
+def create_message(
+    body: Any, *, requested_by: str, thread_id: str
+) -> dict[str, Any]:
+    _require_web_app(thread_id)
     request = _required_object(body, "message request")
     allowed = {"content", "agent_runtime", "model", "effort"}
     _require_keys(request, allowed, required={"content"})
@@ -249,7 +460,6 @@ def create_message(body: Any, *, requested_by: str) -> dict[str, Any]:
         MAX_CHAT_MESSAGE_BYTES - len(f"{prefix}\n".encode()),
     )
     input_message = f"{prefix}\n{content}"
-    thread_id = builder_thread_id()
     host_request: dict[str, Any] = {"input_message": input_message, "thread_id": thread_id}
     config_fields = ("agent_runtime", "model", "effort")
     supplied = [field for field in config_fields if field in request]
@@ -272,94 +482,14 @@ def create_message(body: Any, *, requested_by: str) -> dict[str, Any]:
     return response
 
 
-def _thread_id_for_seq(seq: int) -> str:
-    return THREAD_BASE_ID if seq <= 1 else f"{THREAD_BASE_ID}-{seq}"
-
-
-def builder_thread_id() -> str:
-    """The host thread the builder is currently working in."""
-    with db.transaction() as cur:
-        _set_search_path(cur)
-        cur.execute("SELECT thread_seq FROM app_state WHERE singleton = TRUE")
-        row = cur.fetchone()
-    if row is None:
-        raise AppError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
-    return _thread_id_for_seq(row[0])
-
-
-def _stop_builder_tasks(thread_id: str) -> None:
-    """Stop everything active on the thread, or fail without resetting.
-
-    The thread summary carries every active task, so this sees all of them
-    rather than a page of recent history — a thread may hold up to the host's
-    queued-task limit. A task that cannot be stopped aborts the reset: the
-    caller has not touched any state yet, so the operator retries against the
-    builder they still have, rather than one that was cleared while hidden work
-    kept running.
-    """
-    response = call_admin_api("GET", "/v1/threads")
-    threads = response.get("threads")
-    if not isinstance(threads, list):
-        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread list")
-    summary = next(
-        (
-            thread
-            for thread in threads
-            if isinstance(thread, dict) and thread.get("thread_id") == thread_id
-        ),
-        None,
-    )
-    if summary is None:
-        return
-    active = summary.get("active_tasks")
-    if not isinstance(active, list):
-        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread summary")
-    for task in active:
-        if not isinstance(task, dict):
-            raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread summary")
-        _stop_task(_response_text(task.get("task_id"), "task_id"))
-
-
-def reset_app() -> dict[str, Any]:
-    """Stop the builder's work, clear the generated app, and start a new thread.
-
-    Start over means exactly that: nothing from before survives it. Anything
-    still queued or running is stopped first, because a task left on the
-    discarded thread would keep burning a turn on work whose output is thrown
-    away and whose conversation the operator can no longer see. Then the bundle
-    and its data go, and the app moves to a fresh host thread — a thread's
-    session configuration is fixed for its lifetime, so first-run state means a
-    new thread rather than a reconfigured one.
-
-    Only the browser can call this; the agent must not discard its own thread.
-    The revision keeps counting up rather than returning to zero, so a stale
-    writer's `expected_revision` can never match again.
-    """
-    _stop_builder_tasks(builder_thread_id())
-    now = _utc_now()
-    with db.transaction() as cur:
-        _set_search_path(cur)
-        cur.execute(
-            "SELECT revision, thread_seq FROM app_state WHERE singleton = TRUE FOR UPDATE"
-        )
-        row = cur.fetchone()
-        if row is None:
-            raise AppError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
-        revision, thread_seq = row[0] + 1, row[1] + 1
-        cur.execute(
-            "UPDATE app_state SET revision = %s, html = '', css = '', javascript = '',"
-            " data_json = '{}', thread_seq = %s, updated_at = %s WHERE singleton = TRUE",
-            (revision, thread_seq, now),
-        )
-    return {"app": load_app_state(), "thread_id": _thread_id_for_seq(thread_seq)}
-
-
-def load_app_state() -> dict[str, Any]:
+def load_app_state(thread_id: str) -> dict[str, Any]:
+    _require_web_app(thread_id, include_archived=True)
     with db.transaction() as cur:
         _set_search_path(cur)
         cur.execute(
             "SELECT revision, html, css, javascript, data_json, updated_at"
-            " FROM app_state WHERE singleton = TRUE"
+            " FROM web_apps WHERE thread_id = %s",
+            (thread_id,),
         )
         row = cur.fetchone()
     if row is None:
@@ -378,11 +508,11 @@ def load_app_state() -> dict[str, Any]:
     }
 
 
-def apply_agent_action(body: Any) -> dict[str, Any]:
+def apply_agent_action(body: Any, thread_id: str) -> dict[str, Any]:
     action = _required_object(body, "agent action")
     name = _required_text(action.get("action"), "action")
     if name in {"set", "delete", "append"}:
-        return apply_runtime_action(action)
+        return apply_runtime_action(action, thread_id, allow_archived=True)
     revision = _required_revision(action.get("expected_revision"))
     if name == "replace_app":
         _require_keys(
@@ -407,10 +537,13 @@ def apply_agent_action(body: Any) -> dict[str, Any]:
         values = {"data_json": _validated_data(action.get("data"))}
     else:
         raise AppError(HTTPStatus.UNPROCESSABLE_ENTITY, "unsupported agent action")
-    return {"app": _update_state(revision, values)}
+    return {"app": _update_state(revision, values, thread_id)}
 
 
-def apply_runtime_action(body: Any) -> dict[str, Any]:
+def apply_runtime_action(
+    body: Any, thread_id: str, *, allow_archived: bool = False
+) -> dict[str, Any]:
+    _require_web_app(thread_id, include_archived=allow_archived)
     action = _required_object(body, "runtime action")
     name = _required_text(action.get("action"), "action")
     allowed = {"action", "expected_revision", "path"}
@@ -425,9 +558,11 @@ def apply_runtime_action(body: Any) -> dict[str, Any]:
     path = _validated_path(action.get("path"))
     with db.transaction() as cur:
         _set_search_path(cur)
+        archive_clause = "" if allow_archived else " AND archived = FALSE"
         cur.execute(
             "SELECT revision, html, css, javascript, data_json, updated_at"
-            " FROM app_state WHERE singleton = TRUE FOR UPDATE"
+            f" FROM web_apps WHERE thread_id = %s{archive_clause} FOR UPDATE",
+            (thread_id,),
         )
         row = cur.fetchone()
         if row is None:
@@ -449,9 +584,10 @@ def apply_runtime_action(body: Any) -> dict[str, Any]:
         }
         _require_state_response_fits(candidate)
         cur.execute(
-            "UPDATE app_state SET data_json = %s, revision = revision + 1, updated_at = %s"
-            " WHERE singleton = TRUE RETURNING revision, html, css, javascript, data_json, updated_at",
-            (data_json, now),
+            "UPDATE web_apps SET data_json = %s, revision = revision + 1, updated_at = %s"
+            f" WHERE thread_id = %s{archive_clause}"
+            " RETURNING revision, html, css, javascript, data_json, updated_at",
+            (data_json, now, thread_id),
         )
         changed = cur.fetchone()
     assert changed is not None
@@ -482,15 +618,18 @@ def _validated_data(value: Any) -> str:
     return encoded
 
 
-def _update_state(revision: int, values: dict[str, str]) -> dict[str, Any]:
+def _update_state(
+    revision: int, values: dict[str, str], thread_id: str
+) -> dict[str, Any]:
     assignments = [f"{column} = %s" for column in values]
     now = _utc_now()
-    params: list[Any] = [*values.values(), now, revision]
+    params: list[Any] = [*values.values(), now, thread_id, revision]
     with db.transaction() as cur:
         _set_search_path(cur)
         cur.execute(
             "SELECT revision, html, css, javascript, data_json, updated_at"
-            " FROM app_state WHERE singleton = TRUE FOR UPDATE"
+            " FROM web_apps WHERE thread_id = %s FOR UPDATE",
+            (thread_id,),
         )
         current_row = cur.fetchone()
         if current_row is None:
@@ -508,8 +647,8 @@ def _update_state(revision: int, values: dict[str, str]) -> dict[str, Any]:
             candidate["data"] = json.loads(values["data_json"])
         _require_state_response_fits(candidate)
         cur.execute(
-            f"UPDATE app_state SET {', '.join(assignments)}, revision = revision + 1, updated_at = %s"
-            " WHERE singleton = TRUE AND revision = %s"
+            f"UPDATE web_apps SET {', '.join(assignments)}, revision = revision + 1, updated_at = %s"
+            " WHERE thread_id = %s AND revision = %s"
             " RETURNING revision, html, css, javascript, data_json, updated_at",
             tuple(params),
         )

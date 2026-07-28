@@ -282,9 +282,9 @@ print("session_id: hermes-session-1", file=sys.stderr)
         self.assertEqual(streamed, ["answer only."])
 
     def test_thread_scope_is_separate_from_the_launcher_command(self) -> None:
-        session = hermes_agent.HermesSession(command=["/bin/echo"], thread_id="mission_pursuit__ws-3")
+        session = hermes_agent.HermesSession(command=["/bin/echo"], thread_id="sample_app__ws-3")
         self.assertEqual(session._command, ["/bin/echo"])
-        self.assertEqual(session._thread_id, "mission_pursuit__ws-3")
+        self.assertEqual(session._thread_id, "sample_app__ws-3")
         self.assertIsNone(hermes_agent._subprocess_cwd(hermes_agent.DEFAULT_COMMAND))
         self.assertEqual(hermes_agent._subprocess_cwd(session._command), hermes_agent.AGENT_CWD)
 
@@ -305,7 +305,7 @@ print("session_id: hermes-session-1", file=sys.stderr)
 
     def test_close_does_not_stop_a_scope_for_a_test_command_or_threadless_turn(self) -> None:
         for session in (
-            hermes_agent.HermesSession(command=["/bin/echo"], thread_id="mission_pursuit__ws-3"),
+            hermes_agent.HermesSession(command=["/bin/echo"], thread_id="sample_app__ws-3"),
             hermes_agent.HermesSession(command=hermes_agent.DEFAULT_COMMAND, thread_id=None),
         ):
             with patch.object(thread_scope.subprocess, "run") as run:

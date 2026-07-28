@@ -25,7 +25,7 @@ def _app_up(app_id: str) -> list[int]:
     """The production app-migration loop (bootstrap shells pending, then
     apply-sql as the app role and record as admin per version), driven
     in-process for tests. No advisory lock: tests are single-process."""
-    app = app_platform.app_by_id(app_id)
+    app = app_platform.migration_app_by_id(app_id)
     assert app is not None
     applied = []
     for version in app_migrate.pending(app_id):
@@ -262,11 +262,8 @@ class AppMigrationTests(unittest.TestCase):
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'app_agent_chat'")
             self.assertEqual({row[0] for row in cur.fetchall()}, {"thread_tasks", "threads"})
 
-    def test_workspace_apps_reject_pi_runtime_in_baseline(self) -> None:
-        # Kern 1.0.0 never installs the pi runtime, so the collapsed baseline's
-        # workspace constraint accepts hermes and rejects pi outright: there is
-        # no pi state to clear because none can be written in the first place.
-        apps = {app.id: app for app in app_platform.installed_apps()}
+    def test_deprecated_app_migrations_drop_all_app_tables(self) -> None:
+        apps = {app.id: app for app in app_platform.migration_apps()}
         for app_id in ("alpha_seeker", "mission_pursuit", "social_marketer",
                        "software_builder", "virality_machine"):
             app = apps[app_id]
@@ -281,31 +278,22 @@ class AppMigrationTests(unittest.TestCase):
                     cur.execute(
                         f'CREATE SCHEMA {app.db_schema} AUTHORIZATION "{app.db_role}"'
                     )
-                self.assertEqual(_app_up(app_id), [1])
-
-                with self.assertRaises(Exception), db.transaction(user=app.db_role) as cur:
-                    cur.execute(f"SET LOCAL search_path TO {app.db_schema}")
+                self.assertTrue(app.deprecated)
+                self.assertEqual(_app_up(app_id), [1, 2])
+                with db.transaction() as cur:
                     cur.execute(
-                        """
-                        INSERT INTO workspace (
-                            agent_runtime, model, effort, created_at, updated_at
-                        ) VALUES (
-                            'pi', 'deepseek.v3.2', 'high',
-                            '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z'
-                        )
-                        """
+                        "SELECT tablename FROM pg_tables WHERE schemaname = %s",
+                        (app.db_schema,),
                     )
-                with db.transaction(user=app.db_role) as cur:
-                    cur.execute(f"SET LOCAL search_path TO {app.db_schema}")
+                    self.assertEqual(cur.fetchall(), [])
                     cur.execute(
-                        """
-                        INSERT INTO workspace (
-                            agent_runtime, model, effort, created_at, updated_at
-                        ) VALUES (
-                            'hermes', 'deepseek.v3.2', 'high',
-                            '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z'
-                        )
-                        """
+                        "SELECT version, name FROM app_schema_migrations "
+                        "WHERE app_id = %s ORDER BY version",
+                        (app_id,),
+                    )
+                    self.assertEqual(
+                        cur.fetchall(),
+                        [(1, "baseline"), (2, "drop_deprecated_state")],
                     )
 
     def test_app_migration_cannot_reset_back_to_host_role(self) -> None:
@@ -325,11 +313,10 @@ class AppMigrationTests(unittest.TestCase):
                 backend_entrypoint=Path(temp_dir) / "backend.py",
                 migrations_dir=migrations,
                 ui_dir=Path(temp_dir),
-                port=7450,
                 allocation=app_platform.AppAllocation(uid=48000, gid=48000, port_offset=0),
                 agent_instructions="Test app instructions.",
             )
-            with patch("host.runtime.core.app_platform.app_by_id", return_value=app):
+            with patch("host.runtime.core.app_platform.migration_app_by_id", return_value=app):
                 with self.assertRaises(Exception):
                     _app_up("agent_chat")
 

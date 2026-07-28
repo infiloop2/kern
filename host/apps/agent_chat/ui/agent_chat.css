@@ -450,9 +450,6 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   letter-spacing: -0.08em;
   width: 1.35rem;
 }
-.activity-card.started .activity-icon {
-  animation: pulse 1.2s ease infinite;
-}
 .activity-command { --activity-accent: #60a5fa; }
 .activity-file_change { --activity-accent: #34d399; }
 .activity-reasoning { --activity-accent: #a78bfa; }

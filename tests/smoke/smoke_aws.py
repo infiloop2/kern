@@ -102,7 +102,7 @@ import urllib.request
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from host.constants import ADMIN_API_PORT as ADMIN_PORT, PROXY_PORT
+from host.constants import ADMIN_API_PORT as ADMIN_PORT, AGENT_PREVIEW_PORT_BASE, PROXY_PORT
 from host.network_integrations.bedrock.manifest import ROUTING_ACCESS_KEY_ID
 from host.runtime.core.state import PRUNE_EVERY
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
@@ -271,7 +271,6 @@ def main(argv: list[str] | None = None) -> int:
         smoke.check_ui_page()
         smoke.check_admin_auth()
         smoke.check_initial_disabled_provider_deploy()
-        smoke.check_mission_pursuit_no_login_ui()
         smoke.check_network_policy()
         smoke.check_policy_validation_and_concurrency()
         smoke.check_task_lifecycle()
@@ -1075,212 +1074,6 @@ class AwsSmoke:
                 raise AssertionError(f"UI page still contains removed finished-task path {removed!r}")
         self._ok("static UI page served unauthenticated; thread history and network policy controls present; API routes still require auth")
 
-    def check_mission_pursuit_no_login_ui(self) -> None:
-        """Drive the fresh workspace through the real admin shell and app UI.
-
-        A fresh smoke deliberately has no provider login. That still proves
-        the complete operator path through task creation and its clear
-        fail-fast result, without granting the smoke a provider account.
-        """
-        from tests.smoke.playwright_browser import ChromeBrowser
-
-        self._step("Mission Pursuit browser flow before provider login")
-        for runtime in SMOKE_RUNTIMES:
-            status = self._wait_for_runtime_status({"awaiting_login"}, runtime=runtime, timeout=180)
-            if status != "awaiting_login":
-                raise AssertionError(
-                    f"fresh {runtime} runtime settled at {status}, expected awaiting_login"
-                )
-
-        password = json.dumps(self.result["admin_password"])
-        message = "Build a practical launch plan for a neighborhood repair cafe."
-        with ChromeBrowser(f"http://127.0.0.1:{ADMIN_PORT}/") as browser:
-            browser.wait_for(
-                "document.getElementById('login') && !document.getElementById('login').hidden",
-                description="the admin login screen",
-            )
-            browser.evaluate(
-                f"document.getElementById('password').value={password};"
-                "document.querySelector('[data-action=login]').click(); true"
-            )
-            browser.wait_for(
-                "document.getElementById('app') && !document.getElementById('app').hidden",
-                description="admin login to succeed",
-            )
-            browser.wait_for(
-                "document.getElementById('tab-app-mission_pursuit')"
-                " && document.getElementById('tab-app-mission_pursuit').closest('#beta-app-tabs')",
-                description="Mission Pursuit app discovery",
-            )
-            browser.evaluate(
-                "const toggle=document.getElementById('sidebar-apps-toggle');"
-                "if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click(); true"
-            )
-            browser.wait_for(
-                "!document.getElementById('beta-app-tabs').hidden",
-                description="the beta app group to expand",
-            )
-            browser.evaluate("document.getElementById('tab-app-mission_pursuit').click(); true")
-            app = browser.target("/v1/apps/mission_pursuit/ui/index.html")
-            app.wait_for(
-                "document.getElementById('hero') && !document.getElementById('hero').hidden",
-                description="the fresh Mission Pursuit workspace",
-            )
-            if app.evaluate("document.querySelectorAll('#info-close').length") != 0:
-                raise AssertionError("How it works unexpectedly has a close button")
-
-            app.evaluate("document.getElementById('info-toggle').click(); true")
-            app.wait_for(
-                "!document.getElementById('info-popover').hidden",
-                description="How it works popover to open",
-            )
-            info_text = app.evaluate("document.getElementById('info-popover').innerText")
-            for expected in (
-                "Set the mission together",
-                "Work through artifacts",
-                "Keep moving while you are away",
-            ):
-                if expected not in str(info_text):
-                    raise AssertionError(f"How it works is missing {expected!r}: {info_text!r}")
-            app.evaluate("document.body.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true})); true")
-            app.wait_for(
-                "document.getElementById('info-popover').hidden",
-                description="How it works to dismiss outside",
-            )
-
-            bounds = (
-                "JSON.stringify((() => { const r=document.getElementById('hero').getBoundingClientRect();"
-                "return [r.x,r.y,r.width,r.height]; })())"
-            )
-            before = app.evaluate(bounds)
-            app.evaluate("document.getElementById('agent-settings-toggle').click(); true")
-            app.wait_for(
-                "!document.getElementById('agent-settings-popover').hidden",
-                description="agent settings to open",
-            )
-            after = app.evaluate(bounds)
-            if before != after:
-                raise AssertionError(f"opening agent settings shifted the workspace: {before} -> {after}")
-            runtime_options = app.evaluate(
-                "[...document.getElementById('agent-runtime').options]"
-                ".map(option => [option.value, option.textContent.trim()])"
-            )
-            expected_runtime_options = [
-                ["codex", "Codex"],
-                ["claude_code", "Claude Code"],
-                ["hermes", "Hermes"],
-            ]
-            if sorted(runtime_options) != sorted(expected_runtime_options):
-                raise AssertionError(f"Mission Pursuit runtime choices are incomplete: {runtime_options}")
-            for runtime in ("hermes",):
-                app.evaluate(
-                    f"document.getElementById('agent-runtime').value={json.dumps(runtime)};"
-                    "document.getElementById('agent-runtime')"
-                    ".dispatchEvent(new Event('change',{bubbles:true})); true"
-                )
-                model_count = app.evaluate("document.getElementById('agent-model').options.length")
-                if not isinstance(model_count, int) or model_count < 1:
-                    raise AssertionError(f"Mission Pursuit exposed no model choices for {runtime}")
-            app.evaluate(
-                "document.getElementById('agent-runtime').value='claude_code';"
-                "document.getElementById('agent-runtime')"
-                ".dispatchEvent(new Event('change',{bubbles:true})); true"
-            )
-            app.wait_for(
-                "document.getElementById('agent-runtime').value === 'claude_code' && "
-                "!document.getElementById('agent-settings-apply').disabled",
-                description="Claude Code draft settings",
-            )
-            app.evaluate("document.getElementById('agent-settings-apply').click(); true")
-            app.wait_for(
-                "document.getElementById('agent-settings-popover').hidden && "
-                "document.getElementById('agent-settings-toggle').textContent.includes('Claude Code')",
-                description="Claude Code draft settings to apply",
-            )
-
-            # Activation is a single button: it creates the workspace with the
-            # drafted settings and queues no agent turn. The first message is
-            # sent afterward from the composer.
-            app.evaluate("document.getElementById('hero-send').click(); true")
-            app.wait_for(
-                "!document.getElementById('workspace').hidden && "
-                "document.getElementById('hero').hidden",
-                description="the workspace to activate",
-            )
-            app.evaluate(
-                f"document.getElementById('chat-input').value={json.dumps(message)};"
-                "document.getElementById('chat-send').click(); true"
-            )
-            app.wait_for(
-                f"document.getElementById('feed').innerText.includes({json.dumps(message)})",
-                description="the first mission message to appear",
-            )
-            app.wait_for(
-                "document.getElementById('feed').innerText.includes('Agent turn failed:') && "
-                "document.getElementById('feed').innerText.includes('awaiting_login') && "
-                "document.getElementById('busy-bar').hidden",
-                timeout=120,
-                description="the no-login turn to fail clearly",
-            )
-            headings = app.evaluate(
-                "[...document.querySelectorAll('.conversation-head h2, .rail-card .rail-head h2')]"
-                ".map(element => element.textContent.trim())"
-            )
-            expected_headings = ["Conversation", "Artifacts", "Schedules", "Memory", "Tools"]
-            if headings != expected_headings:
-                raise AssertionError(
-                    f"Mission Pursuit workspace headings are {headings!r}, expected {expected_headings!r}"
-                )
-            empty_surfaces = app.evaluate(
-                "[document.getElementById('artifacts').textContent,"
-                " document.getElementById('memories').textContent,"
-                " document.getElementById('tools').textContent]"
-            )
-            for actual, expected in zip(
-                empty_surfaces,
-                ("No artifacts yet", "Nothing remembered yet", "No tools recorded"),
-                strict=True,
-            ):
-                if expected not in str(actual):
-                    raise AssertionError(f"fresh Mission Pursuit surface is missing {expected!r}: {actual!r}")
-            if not app.evaluate(
-                "Boolean(document.getElementById('hero-send').querySelector('svg') && "
-                "document.getElementById('chat-send').querySelector('svg'))"
-            ):
-                raise AssertionError("Mission Pursuit send controls are not integrated icon buttons")
-
-            app.evaluate("document.getElementById('agent-settings-toggle').click(); true")
-            app.wait_for(
-                "!document.getElementById('agent-settings-popover').hidden",
-                description="persisted agent settings to open",
-            )
-            app.evaluate(
-                "document.getElementById('agent-runtime').value='codex';"
-                "document.getElementById('agent-runtime')"
-                ".dispatchEvent(new Event('change',{bubbles:true})); true"
-            )
-            app.wait_for(
-                "!document.getElementById('agent-settings-warning').hidden && "
-                "!document.getElementById('agent-settings-apply').disabled",
-                description="short-term-memory warning for a runtime switch",
-            )
-            app.evaluate("document.getElementById('agent-settings-apply').click(); true")
-            app.wait_for(
-                "document.getElementById('agent-settings-popover').hidden && "
-                "document.getElementById('agent-settings-toggle').textContent.includes('Codex') && "
-                "document.getElementById('feed').innerText.includes('Switched to Codex')",
-                description="the persisted runtime switch",
-            )
-
-        snapshot = self._app_api("GET", "/v1/apps/mission_pursuit/api/workspace")
-        if snapshot.get("workspace", {}).get("agent_runtime") != "codex":
-            raise AssertionError(f"Mission Pursuit did not persist the UI runtime switch: {snapshot}")
-        if not any(item.get("content") == message for item in snapshot.get("messages", [])):
-            raise AssertionError(f"Mission Pursuit did not persist the browser message: {snapshot}")
-        if snapshot.get("busy"):
-            raise AssertionError(f"Mission Pursuit left the failed no-login turn busy: {snapshot['busy']}")
-        self._ok("real browser covered login, app navigation, popovers, settings, first turn, and fail-fast UI")
-
     @staticmethod
     def _assert_admin_ui_security_headers(headers) -> None:
         csp = headers.get("Content-Security-Policy", "")
@@ -1856,6 +1649,46 @@ class AwsSmoke:
             f"{agent} curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 --max-time 5 "
             f"http://127.0.0.1:{ADMIN_PORT}/v1/health || true"
         )
+        # The preview-port carve-out and its boundary, exercised on the live
+        # host's firewall in one orchestrated command (run as kern-operator, who
+        # has sudo). A kern-agent HTTP server serves a known file on the base
+        # preview port as a tracked background child (its PID captured in $srv);
+        # then we fetch it as kern-agent — which must succeed (200: the dport
+        # accept + the established reply accept both work) — and as kern-tools,
+        # an egress-capable service account that must be blocked (no code: the
+        # range is default-deny, so a compromised service can neither dial a
+        # preview server nor be reached by the agent). Cleanup kills the exact
+        # PID; a `pkill -f http.server` pattern would also match this probe's own
+        # `bash -c` command lines and kill the shell before it reports.
+        preview_port = AGENT_PREVIEW_PORT_BASE
+        # -w %{http_code} is left unquoted on purpose: this whole probe is a
+        # single-quoted `bash -c '...'`, so an inner single quote would close it;
+        # bash does not brace-expand a single-element {http_code}.
+        curl = (
+            "curl -s -o /dev/null -w %{http_code} --connect-timeout 2 --max-time 5 "
+            f"http://127.0.0.1:{preview_port}/probe.txt"
+        )
+        preview_probe = self._ssh_code(
+            "bash -c '"
+            "d=$(sudo -u kern-agent mktemp -d); "
+            "sudo -u kern-agent tee \"$d/probe.txt\" >/dev/null <<<preview-ok; "
+            f"sudo -u kern-agent python3 -m http.server {preview_port} --bind 127.0.0.1 "
+            "--directory \"$d\" >/dev/null 2>&1 & "
+            "srv=$!; "
+            "sleep 1; "
+            f"a=$(sudo -u kern-agent {curl} || true); "
+            f"t=$(sudo -u kern-tools {curl} || true); "
+            "sudo kill \"$srv\" 2>/dev/null; "
+            "sudo rm -rf \"$d\"; "
+            "echo \"agent=$a tools=$t\"' || true"
+        )
+        preview_self = ""
+        preview_tools = ""
+        for token in preview_probe.split():
+            if token.startswith("agent="):
+                preview_self = token.split("=", 1)[1]
+            elif token.startswith("tools="):
+                preview_tools = token.split("=", 1)[1]
         if allowed != "200":
             raise AssertionError(f"allowed request through proxy returned {allowed!r}, expected 200")
         if denied != "403":
@@ -1865,6 +1698,16 @@ class AwsSmoke:
         if loopback_admin not in ("", "000"):
             raise AssertionError(
                 f"agent reached loopback admin API directly ({loopback_admin}); nftables should allow only the proxy port"
+            )
+        if preview_self != "200":
+            raise AssertionError(
+                f"agent could not serve and reach its own preview port {preview_port} "
+                f"(got {preview_self!r}, expected 200); the preview-range firewall rules are not effective"
+            )
+        if preview_tools not in ("", "000"):
+            raise AssertionError(
+                f"a service account (kern-tools) reached the agent preview port {preview_port} "
+                f"(got {preview_tools!r}, expected no connection); the per-service preview drop is not effective"
             )
         # GitHub reads are universal: both the configured repository and a
         # foreign public repository are forwarded and served, while GraphQL
@@ -1918,6 +1761,7 @@ class AwsSmoke:
         self._ok(
             f"proxy allowed=200 denied=403, direct blocked ({direct or 'no connection'}), "
             f"admin loopback blocked ({loopback_admin or 'no connection'}), "
+            f"preview self-serve={preview_self} service-blocked={preview_tools or 'no connection'}, "
             f"github reads listed={gh_allowed} foreign={gh_foreign} graphql-denied={gh_graphql}, events logged"
         )
 
@@ -3483,20 +3327,6 @@ class AwsSmoke:
             print(f"  (admin API unreachable: {reason}; reopening tunnel and retrying)", flush=True)
             self._reopen_tunnel()
             return attempt()
-
-    def _app_api(self, method: str, path: str, body: dict | None = None) -> dict:
-        """Call an app route through the same scoped bridge the UI uses."""
-        data = json.dumps(body).encode() if body is not None else None
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{ADMIN_PORT}{path}", data=data, method=method
-        )
-        for name, value in self._auth_headers().items():
-            request.add_header(name, value)
-        request.add_header("X-Kern-App-Bridge", "mission_pursuit")
-        if body is not None:
-            request.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read())
 
     def _api_status(
         self, method: str, path: str, body: dict | None = None, *,

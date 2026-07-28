@@ -145,16 +145,18 @@ def route_app_api(
 def desktop_smoke(page: Any) -> None:
     from playwright.sync_api import expect
 
-    # Agent Chat is the hero app: it sits directly below Home, outside the
-    # Apps section, and the home tab opens with its Begin chat CTA.
+    # Agent Chat keeps the Home hero CTA but sits in the normal Apps section.
     expect(page.locator("#home-hero")).to_contain_text("Agent Chat")
-    expect(page.locator("#sidebar-apps")).to_contain_text("Apps")
-    expect(page.locator("#stable-app-tabs").get_by_role("button", name="Agent Chat", exact=True)).to_have_count(0)
+    agent_chat_tab = page.locator("#stable-app-tabs").get_by_role(
+        "button", name="Agent Chat", exact=True
+    )
+    expect(agent_chat_tab).to_be_visible()
+    expect(agent_chat_tab).to_have_class("tab-button")
     expect(page.locator("#beta-app-tabs").get_by_role("button", name="Agent Chat", exact=True)).to_have_count(0)
     page.locator("#home-hero").get_by_role("button", name="Begin chat", exact=True).click()
     expect(page.locator("#panel-app-agent_chat")).to_be_visible()
     page.get_by_role("button", name="Home", exact=True).click()
-    page.locator("#hero-app-tab").get_by_role("button", name="Agent Chat", exact=True).click()
+    agent_chat_tab.click()
     expect(page.locator("#panel-app-agent_chat")).to_be_visible()
     frame = page.frame_locator('iframe[title="Agent Chat"]')
 
@@ -321,6 +323,7 @@ def mobile_smoke(page: Any) -> None:
     _load_older_history(frame, expected_turns=5)
     _assert_full_message_stream(frame)
     _assert_mobile_chat_scrolling(page, frame)
+    _assert_thread_view_memory(frame)
     _assert_rich_activity_stream(frame)
     _assert_mobile_composer_ergonomics(frame)
     _assert_mobile_steering(frame)
@@ -328,7 +331,7 @@ def mobile_smoke(page: Any) -> None:
 
 
 def _assert_initial_tail(frame: Any) -> None:
-    """Opening a long thread paints only its newest bounded page at the bottom."""
+    """Opening a long thread preloads three bounded pages at the bottom."""
     from playwright.sync_api import expect
 
     expect(frame.get_by_role("button", name="Load earlier messages")).to_be_visible()
@@ -336,8 +339,10 @@ def _assert_initial_tail(frame: Any) -> None:
         "element => [element.scrollHeight, element.clientHeight, element.scrollTop]"
     )
     scroll_height, client_height, scroll_top = metrics
+    if scroll_height <= client_height:
+        raise AssertionError(f"initial thread history is not scrollable: {metrics}")
     if scroll_top < scroll_height - client_height - 2:
-        raise AssertionError(f"opening a thread did not land at the newest page: {metrics}")
+        raise AssertionError(f"opening a thread did not land at the newest preloaded history: {metrics}")
 
 
 def _load_older_history(frame: Any, *, expected_turns: int) -> None:
@@ -345,10 +350,11 @@ def _load_older_history(frame: Any, *, expected_turns: int) -> None:
     from playwright.sync_api import expect
 
     button = frame.locator("#load-earlier")
-    # Selecting a thread updates its title before the initial event request
-    # completes. Wait for that first full page to expose the loader so this
-    # helper cannot mistake the pre-request hidden state for exhausted history.
-    expect(button).to_be_visible()
+    loader = frame.locator("#history-loader")
+    # Selecting a thread updates its title before the initial event requests
+    # complete. Wait for a real cursor so a hidden loader means the three-page
+    # preload exhausted history, rather than merely not having started yet.
+    expect(loader).to_have_attribute("data-oldest-seq", re.compile(r"\d+"))
     for _ in range(100):
         if not button.is_visible():
             break
@@ -480,6 +486,30 @@ def _assert_mobile_chat_scrolling(page: Any, frame: Any) -> None:
         raise AssertionError("a background poll rebuilt the chat history DOM while reading")
 
 
+def _assert_thread_view_memory(frame: Any) -> None:
+    """A thread switch retains the loaded window and the reader's position."""
+    from playwright.sync_api import expect
+
+    scroller = frame.locator("#chat-scroll")
+    previous_scroll_top = scroller.evaluate("element => element.scrollTop")
+    frame.get_by_role("button", name="Show thread list").click()
+    frame.locator("#threads .thread-item", has_text="thread-2").click()
+    expect(frame.locator(".thread-title")).to_have_text("thread-2")
+    expect(frame.locator("#thread-detail")).to_contain_text("Draft a launch blog post")
+
+    frame.get_by_role("button", name="Show thread list").click()
+    frame.locator("#threads .thread-item", has_text="thread-1").click()
+    expect(frame.locator(".thread-title")).to_have_text("thread-1")
+    expect(frame.locator("#thread-detail .turn")).to_have_count(5)
+    expect(frame.get_by_role("button", name="Load earlier messages")).to_be_hidden()
+    restored_scroll_top = scroller.evaluate("element => element.scrollTop")
+    if abs(restored_scroll_top - previous_scroll_top) > 1:
+        raise AssertionError(
+            "returning to a thread did not restore its reading position: "
+            f"{previous_scroll_top} -> {restored_scroll_top}"
+        )
+
+
 def _assert_mobile_composer_ergonomics(frame: Any) -> None:
     """iOS-critical input ergonomics: 16px fields so focus does not zoom the
     page, and thumb-sized primary controls."""
@@ -521,7 +551,14 @@ def _assert_mobile_steering(frame: Any) -> None:
     )
     expect(live_command).to_have_count(1)
     expect(live_command).not_to_have_attribute("open", "")
-    expect(live_command.locator(".activity-phase")).to_have_text("Running")
+    expect(live_command.locator(".activity-phase")).to_have_text("Started")
+    activity_animation = live_command.locator(".activity-icon").evaluate(
+        "element => getComputedStyle(element).animationName"
+    )
+    if activity_animation != "none":
+        raise AssertionError(
+            f"started activity still implies live work with animation {activity_animation!r}"
+        )
     composer = frame.locator("#new-task")
     expect(composer).to_have_attribute(
         "placeholder",

@@ -14,20 +14,35 @@ const MAX_EVENT_FIELD_BYTES = 8192;
 const MAX_EVENT_PAYLOAD_BYTES = 64 * 1024;
 const MAX_DATA_VALUE_BYTES = 256 * 1024;
 const CONVERSATION_EVENTS_PAGE = 5;
+const INITIAL_CONVERSATION_EVENT_PAGES = 3;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const pendingApi = new Map();
 let requestCounter = 0;
 let sessionOptions = {};
+let apps = [];
+let showingArchivedApps = false;
+let selectedAppId = null;
+let selectedAppName = null;
+let selectedAppArchived = false;
+let renderedAppsKey = "";
 let snapshot = { app: null, tasks: [], session: null };
 let conversationEvents = [];
-let conversationEventsSeq = 0;
+let conversationEventsOldestSeq = null;
+let conversationEventsNewestSeq = 0;
+let conversationEventsInitialized = false;
+let hasOlderConversationEvents = false;
+let loadingOlderConversationEvents = false;
+let lastChatScrollTop = 0;
+let restoredChatScrollTop = null;
+const conversationViewStates = new Map();
 const renderedChatTurns = new Map();
 let renderedRevision = -1;
 let generatedRoot = null;
 let workerRun = null;
-let pollBusy = false;
-let messageBusy = false;
+let appsRefreshSequence = 0;
+const messageBusyApps = new Set();
+let selectedRefreshSequence = 0;
 let establishedSession = null;
 let establishedSessionKey = "";
 
@@ -390,14 +405,31 @@ function clearGenerated() {
 }
 
 function syncEmptyState() {
+  const hasApp = selectedAppId !== null;
+  if (!hasApp) {
+    $("first-run-how").hidden = true;
+    $("first-run-guidance").hidden = true;
+    $("empty-title").textContent = showingArchivedApps ? "Archived apps" : "Select an app";
+    $("empty-description").textContent = showingArchivedApps
+      ? "Choose an archived app to view it, or return to active apps."
+      : "Choose an app from the list, or create a new workspace.";
+    $("empty-primary").textContent = showingArchivedApps ? "Show active" : "New app";
+    return;
+  }
   const firstRun = !snapshot.session;
   $("first-run-how").hidden = !firstRun;
   $("first-run-guidance").hidden = !firstRun;
-  $("empty-title").textContent = firstRun ? "Build your personal app" : "Your app will appear here";
-  $("empty-description").textContent = firstRun
-    ? "Open agent chat and describe what you want. The agent can create the interface, behavior, and structured data."
-    : "Open agent chat to continue building or ask the agent to create the first version.";
-  $("empty-open-chat").textContent = firstRun ? "Start building" : "Open agent chat";
+  $("empty-title").textContent = selectedAppArchived
+    ? "This app is archived"
+    : firstRun ? "Build this app" : "Your app will appear here";
+  $("empty-description").textContent = selectedAppArchived
+    ? "Unarchive it to keep building or use its interactive controls."
+    : firstRun
+      ? "Open agent chat and describe what you want. The agent can create the interface, behavior, and structured data."
+      : "Open agent chat to continue building or ask the agent to create the first version.";
+  $("empty-primary").textContent = selectedAppArchived
+    ? "Unarchive"
+    : firstRun ? "Start building" : "Open agent chat";
 }
 
 function eventPayload(element) {
@@ -437,6 +469,7 @@ function jsonByteLength(value) {
 }
 
 function generatedInteraction(event) {
+  if (!selectedAppId || selectedAppArchived) return;
   if (!(event.target instanceof Element)) return;
   const changeControl = event.target.closest("input, select, textarea");
   if ((event.type === "click" && changeControl) || (event.type === "change" && !changeControl)) return;
@@ -451,17 +484,22 @@ function generatedInteraction(event) {
 }
 
 async function runCapabilityWorker(pendingEvent = null) {
-  if (!snapshot.app || !snapshot.app.javascript) return;
+  if (!selectedAppId || selectedAppArchived || !snapshot.app || !snapshot.app.javascript) return;
   if (workerRun) workerRun.finish("restarted");
+  const threadId = selectedAppId;
+  const app = snapshot.app;
   const source = (
     `(${capabilityWorkerBootstrap.toString()})(${MAX_RENDER_HTML_BYTES},${MAX_RENDER_CSS_BYTES});\n`
-    + `${snapshot.app.javascript}\n`
+    + `${app.javascript}\n`
   );
   const url = URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
   const worker = new Worker(url);
   URL.revokeObjectURL(url);
   const run = {
     worker,
+    threadId,
+    data: app.data,
+    revision: app.revision,
     state: "starting",
     event: pendingEvent,
     count: 0,
@@ -488,7 +526,10 @@ async function runCapabilityWorker(pendingEvent = null) {
 }
 
 async function handleWorkerMessage(run, message) {
-  if (workerRun !== run || !message || typeof message !== "object") return;
+  if (
+    workerRun !== run || selectedAppId !== run.threadId || selectedAppArchived
+    || !message || typeof message !== "object"
+  ) return;
   const now = performance.now();
   if (now - run.windowStarted >= 1000) {
     run.windowStarted = now;
@@ -500,7 +541,7 @@ async function handleWorkerMessage(run, message) {
   }
   if (message.type === "ready" && run.state === "starting") {
     run.state = "initializing";
-    run.worker.postMessage({ type: "init", data: snapshot.app.data, load: !run.event });
+    run.worker.postMessage({ type: "init", data: run.data, load: !run.event });
     return;
   }
   if (message.type === "initialization-error" && run.state === "initializing") {
@@ -540,7 +581,7 @@ async function handleWorkerMessage(run, message) {
       || textEncoder.encode(message.message).length > MAX_AGENT_MESSAGE_BYTES
     ) return;
     run.agentRequested = true;
-    void sendMessage(message.message.trim());
+    void sendMessage(message.message.trim(), run.threadId);
     return;
   }
   if (message.type === "data-action") await handleWorkerDataAction(run, message);
@@ -564,17 +605,20 @@ async function handleWorkerDataAction(run, message) {
   run.mutations += 1;
   const body = {
     action: message.action,
-    expected_revision: snapshot.app.revision,
+    expected_revision: run.revision,
     path: message.path,
   };
   if (message.action !== "delete") body.value = message.value;
   try {
-    const response = await api("POST", "/runtime/actions", body);
-    if (workerRun !== run) {
-      await refreshSnapshot();
-      return;
-    }
+    const response = await api(
+      "POST",
+      `/apps/${encodeURIComponent(run.threadId)}/runtime/actions`,
+      body,
+    );
+    if (workerRun !== run || selectedAppId !== run.threadId) return;
     snapshot.app = response.app;
+    run.data = response.app.data;
+    run.revision = response.app.revision;
     renderedRevision = response.app.revision;
     $("revision-label").textContent = `Revision ${response.app.revision}`;
     run.mutationPending = false;
@@ -582,7 +626,7 @@ async function handleWorkerDataAction(run, message) {
   } catch (_error) {
     if (workerRun !== run) return;
     run.worker.postMessage({ type: "data-result", request_id: message.request_id, ok: false });
-    await refreshSnapshot();
+    await refreshSelectedApp(run.threadId);
   }
 }
 
@@ -605,9 +649,10 @@ function showRuntimeStatus(message, level = "info") {
 }
 
 function openChat() {
+  if (!selectedAppId) return;
   $("chat-drawer").hidden = false;
   $("open-chat").setAttribute("aria-expanded", "true");
-  $("message").focus();
+  if (!selectedAppArchived) $("message").focus();
 }
 
 function closeChat() {
@@ -622,15 +667,16 @@ function showChatStatus(message, error = false) {
   status.hidden = !message;
 }
 
-async function sendMessage(forcedMessage = null) {
+async function sendMessage(forcedMessage = null, targetAppId = null) {
   const fromGeneratedApp = forcedMessage !== null;
+  const threadId = targetAppId || selectedAppId;
   const message = (forcedMessage || $("message").value).trim();
-  if (!message) return;
-  if (messageBusy) {
+  if (!message || !threadId || threadId !== selectedAppId || selectedAppArchived) return;
+  if (messageBusyApps.has(threadId)) {
     if (fromGeneratedApp) showRuntimeStatus("Agent is already starting");
     return;
   }
-  messageBusy = true;
+  messageBusyApps.add(threadId);
   const body = { content: message };
   if (!snapshot.session) {
     body.agent_runtime = $("runtime").value;
@@ -641,35 +687,42 @@ async function sendMessage(forcedMessage = null) {
   showChatStatus("Starting agent…");
   if (fromGeneratedApp) showRuntimeStatus("Starting agent…");
   try {
-    await api("POST", fromGeneratedApp ? "/runtime/agent-requests" : "/messages", body);
-    if (!fromGeneratedApp) $("message").value = "";
-    await refreshSnapshot();
+    const resource = fromGeneratedApp ? "runtime/agent-requests" : "messages";
+    await api("POST", `/apps/${encodeURIComponent(threadId)}/${resource}`, body);
+    if (!fromGeneratedApp && selectedAppId === threadId) $("message").value = "";
+    await refreshSelectedApp(threadId);
+    if (selectedAppId !== threadId) return;
     showChatStatus("");
     if (fromGeneratedApp) showRuntimeStatus("Agent started", "success");
   } catch (error) {
+    if (selectedAppId !== threadId) return;
     showChatStatus(error.message || "Could not start the agent", true);
     if (fromGeneratedApp) showRuntimeStatus("Could not start the agent", "error");
   } finally {
-    messageBusy = false;
-    $("send-message").disabled = false;
+    messageBusyApps.delete(threadId);
+    if (selectedAppId === threadId) setSessionOptions();
   }
 }
 
 function renderChat() {
   const history = $("chat-history");
+  const turns = $("chat-turns");
   const nearBottom = history.scrollHeight - history.scrollTop - history.clientHeight < 48;
-  const ordered = snapshot.tasks.slice().sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  const ordered = conversationTasks();
+  renderHistoryLoader();
   if (!ordered.length) {
     renderedChatTurns.clear();
-    history.replaceChildren();
+    turns.replaceChildren();
     const empty = document.createElement("p");
     empty.className = "chat-empty";
-    empty.textContent = "Describe the personal app you want. The agent can build its UI, behavior, and data, then keep changing it here.";
-    history.append(empty);
+    empty.textContent = selectedAppArchived
+      ? "This archived app has no conversation yet."
+      : "Describe the app you want. The agent can build its UI, behavior, and data, then keep changing it here.";
+    turns.append(empty);
     syncAgentSettings(snapshot.session);
     return;
   }
-  if (history.firstElementChild?.classList.contains("chat-empty")) history.replaceChildren();
+  if (turns.firstElementChild?.classList.contains("chat-empty")) turns.replaceChildren();
   const messagesByTask = new Map();
   for (const event of conversationEvents) {
     if (event.event_type !== "task.message" || typeof event.task_id !== "string") continue;
@@ -679,30 +732,91 @@ function renderChat() {
   ordered.forEach((task, index) => {
     const messages = messagesByTask.get(task.task_id) || [];
     const key = JSON.stringify([task, messages]);
-    const current = history.children[index];
+    const current = turns.children[index];
     if (!current || current.dataset.taskId !== task.task_id) {
-      history.insertBefore(renderChatTurn(task, messages), current || null);
+      turns.insertBefore(renderChatTurn(task, messages), current || null);
     } else if (renderedChatTurns.get(task.task_id) !== key) {
-      history.replaceChild(renderChatTurn(task, messages), current);
+      turns.replaceChild(renderChatTurn(task, messages), current);
     }
     renderedChatTurns.set(task.task_id, key);
   });
-  while (history.children.length > ordered.length) {
-    history.lastElementChild.remove();
+  while (turns.children.length > ordered.length) {
+    turns.lastElementChild.remove();
   }
   const visibleTaskIds = new Set(ordered.map(task => task.task_id));
   for (const taskId of renderedChatTurns.keys()) {
     if (!visibleTaskIds.has(taskId)) renderedChatTurns.delete(taskId);
   }
   syncAgentSettings(snapshot.session);
-  if (nearBottom) history.scrollTop = history.scrollHeight;
+  if (restoredChatScrollTop !== null) {
+    history.scrollTop = restoredChatScrollTop;
+    lastChatScrollTop = restoredChatScrollTop;
+    restoredChatScrollTop = null;
+  } else if (nearBottom) {
+    history.scrollTop = history.scrollHeight;
+    lastChatScrollTop = history.scrollTop;
+  }
+}
+
+function conversationTasks() {
+  const byId = new Map(
+    snapshot.tasks.map(task => [
+      task.task_id,
+      { ...task, first_event_seq: null, retained_task: true, has_event_message: false },
+    ]),
+  );
+  for (const event of conversationEvents) {
+    if (typeof event.task_id !== "string") continue;
+    let task = byId.get(event.task_id);
+    if (!task) {
+      task = {
+        task_id: event.task_id,
+        input_message: "",
+        output_message: "",
+        error_message: "",
+        status: "unknown",
+        created_at: event.timestamp || event.created_at || "",
+        first_event_seq: event.seq,
+        retained_task: false,
+        has_event_message: false,
+      };
+      byId.set(event.task_id, task);
+    } else if (task.first_event_seq === null || event.seq < task.first_event_seq) {
+      task.first_event_seq = event.seq;
+    }
+    const payload = event.payload || {};
+    if (event.event_type === "task.message") task.has_event_message = true;
+    if (
+      event.event_type === "task.message"
+      && payload.source === "user"
+      && typeof payload.message === "string"
+      && !task.input_message
+    ) {
+      task.input_message = payload.message;
+    }
+    if (event.event_type === "task.started") task.status = "running";
+    if (event.event_type === "task.completed") task.status = "completed";
+    if (event.event_type === "task.cancelled") task.status = "cancelled";
+    if (event.event_type === "task.failed") {
+      task.status = "failed";
+      if (typeof payload.error_message === "string") task.error_message = payload.error_message;
+    }
+  }
+  return Array.from(byId.values())
+    .filter(task => task.retained_task || task.has_event_message)
+    .sort((left, right) => {
+      const timeOrder = String(left.created_at).localeCompare(String(right.created_at));
+      if (timeOrder) return timeOrder;
+      return (left.first_event_seq ?? Number.MAX_SAFE_INTEGER)
+        - (right.first_event_seq ?? Number.MAX_SAFE_INTEGER);
+    });
 }
 
 function renderChatTurn(task, messages) {
   const turn = document.createElement("article");
   turn.className = "chat-turn";
   turn.dataset.taskId = task.task_id || "";
-  appendChatMessage(turn, "chat-user", task.input_message || "");
+  if (task.input_message) appendChatMessage(turn, "chat-user", task.input_message);
   let inputEchoSkipped = false;
   let lastAgentText = null;
   for (const event of messages) {
@@ -726,13 +840,19 @@ function renderChatTurn(task, messages) {
   const meta = document.createElement("div");
   meta.className = "chat-task-meta";
   meta.append(document.createTextNode(`${task.status || "unknown"} · ${task.task_id || "task"}`));
-  if (task.status === "queued" || task.status === "running") {
+  if (!selectedAppArchived && (task.status === "queued" || task.status === "running")) {
+    const threadId = selectedAppId;
     const stop = document.createElement("button");
     stop.className = task.status === "running" ? "danger ghost" : "ghost";
     stop.textContent = task.status === "running" ? "Stop" : "Cancel";
     stop.addEventListener("click", async () => {
-      await api("POST", `/tasks/${encodeURIComponent(task.task_id)}/${task.status === "running" ? "kill" : "cancel"}`, {});
-      await refreshSnapshot();
+      if (!threadId || selectedAppId !== threadId) return;
+      await api(
+        "POST",
+        `/apps/${encodeURIComponent(threadId)}/tasks/${encodeURIComponent(task.task_id)}/${task.status === "running" ? "kill" : "cancel"}`,
+        {},
+      );
+      await refreshSelectedApp(threadId);
     });
     meta.append(stop);
   }
@@ -747,17 +867,117 @@ function appendChatMessage(turn, className, text) {
   turn.append(message);
 }
 
-async function drainConversationEvents() {
-  for (;;) {
-    const response = await api("GET", `/conversation/events?since=${conversationEventsSeq}`);
+function mergeConversationEvents(events) {
+  const bySeq = new Map(conversationEvents.map(event => [event.seq, event]));
+  for (const event of events) bySeq.set(event.seq, event);
+  conversationEvents = Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
+}
+
+async function refreshConversationEvents(threadId, refreshSequence) {
+  if (!conversationEventsInitialized) {
+    const response = await api(
+      "GET",
+      `/apps/${encodeURIComponent(threadId)}/conversation/events`,
+    );
+    if (selectedAppId !== threadId || selectedRefreshSequence !== refreshSequence) return;
     const events = response.events || [];
-    const fresh = events.filter(event => event.seq > conversationEventsSeq);
+    mergeConversationEvents(events);
+    if (events.length) {
+      conversationEventsOldestSeq = events[0].seq;
+      conversationEventsNewestSeq = events[events.length - 1].seq;
+    }
+    let oldestPage = events;
+    for (
+      let page = 1;
+      page < INITIAL_CONVERSATION_EVENT_PAGES
+      && oldestPage.length === CONVERSATION_EVENTS_PAGE
+      && conversationEventsOldestSeq !== null;
+      page += 1
+    ) {
+      const before = conversationEventsOldestSeq;
+      const olderResponse = await api(
+        "GET",
+        `/apps/${encodeURIComponent(threadId)}/conversation/events?before=${before}`,
+      );
+      if (selectedAppId !== threadId || selectedRefreshSequence !== refreshSequence) return;
+      oldestPage = (olderResponse.events || []).filter(event => event.seq < before);
+      if (oldestPage.length) {
+        mergeConversationEvents(oldestPage);
+        conversationEventsOldestSeq = oldestPage[0].seq;
+      }
+    }
+    hasOlderConversationEvents = oldestPage.length === CONVERSATION_EVENTS_PAGE;
+    conversationEventsInitialized = true;
+    renderHistoryLoader();
+    return;
+  }
+  for (;;) {
+    const since = conversationEventsNewestSeq;
+    const response = await api(
+      "GET",
+      `/apps/${encodeURIComponent(threadId)}/conversation/events?since=${since}`,
+    );
+    if (selectedAppId !== threadId || selectedRefreshSequence !== refreshSequence) return;
+    const events = response.events || [];
+    const fresh = events.filter(event => event.seq > since);
     if (fresh.length) {
-      conversationEvents.push(...fresh);
-      conversationEventsSeq = fresh[fresh.length - 1].seq;
+      mergeConversationEvents(fresh);
+      conversationEventsNewestSeq = fresh[fresh.length - 1].seq;
+      if (conversationEventsOldestSeq === null) conversationEventsOldestSeq = fresh[0].seq;
     }
     if (fresh.length < CONVERSATION_EVENTS_PAGE) return;
   }
+}
+
+async function loadOlderConversationEvents() {
+  if (
+    !selectedAppId
+    || !conversationEventsInitialized
+    || !hasOlderConversationEvents
+    || loadingOlderConversationEvents
+    || conversationEventsOldestSeq === null
+  ) return;
+  const threadId = selectedAppId;
+  const before = conversationEventsOldestSeq;
+  loadingOlderConversationEvents = true;
+  renderHistoryLoader();
+  try {
+    const response = await api(
+      "GET",
+      `/apps/${encodeURIComponent(threadId)}/conversation/events?before=${before}`,
+    );
+    if (selectedAppId !== threadId || conversationEventsOldestSeq !== before) return;
+    const older = (response.events || []).filter(event => event.seq < before);
+    const history = $("chat-history");
+    const previousHeight = history.scrollHeight;
+    const previousTop = history.scrollTop;
+    if (older.length) {
+      mergeConversationEvents(older);
+      conversationEventsOldestSeq = older[0].seq;
+    }
+    hasOlderConversationEvents = older.length === CONVERSATION_EVENTS_PAGE;
+    renderChat();
+    history.scrollTop = previousTop + (history.scrollHeight - previousHeight);
+    lastChatScrollTop = history.scrollTop;
+  } finally {
+    if (selectedAppId === threadId) {
+      loadingOlderConversationEvents = false;
+      renderHistoryLoader();
+    }
+  }
+}
+
+function renderHistoryLoader() {
+  const loader = $("history-loader");
+  loader.hidden = !selectedAppId || !hasOlderConversationEvents;
+  loader.dataset.oldestSeq = conversationEventsOldestSeq === null
+    ? ""
+    : String(conversationEventsOldestSeq);
+  const button = $("load-earlier");
+  button.disabled = loadingOlderConversationEvents;
+  button.textContent = loadingOlderConversationEvents
+    ? "Loading earlier messages…"
+    : "Load earlier messages";
 }
 
 function setSessionOptions() {
@@ -791,9 +1011,12 @@ function setSessionOptions() {
   }
   $("agent-settings").classList.toggle("locked", locked);
   $("agent-settings-help-text").textContent = locked
-    ? "Agent, Model, and Level are fixed for this session and cannot be changed in this app version."
-    : "Choose Agent, Model, and Level before your first message. After that, they are fixed and cannot be changed in this app version.";
-  $("send-message").disabled = !locked && (!modelSelect.value || !effortSelect.value);
+    ? "Agent, Model, and Level are fixed for this app."
+    : "Choose Agent, Model, and Level before the first message. They are fixed for this app afterward.";
+  $("send-message").disabled = (
+    !selectedAppId || messageBusyApps.has(selectedAppId) || selectedAppArchived
+    || (!locked && (!modelSelect.value || !effortSelect.value))
+  );
 }
 
 function setRuntimeOptions() {
@@ -821,64 +1044,313 @@ function syncAgentSettings(task) {
   setSessionOptions();
 }
 
-async function refreshSnapshot() {
-  if (pollBusy) return;
-  pollBusy = true;
-  try {
-    const [stateResponse, conversationResponse] = await Promise.all([
-      api("GET", "/state"),
-      api("GET", "/conversation"),
-    ]);
-    const next = {
-      app: stateResponse.app,
-      tasks: conversationResponse.tasks || [],
-      session: conversationResponse.session || null,
-    };
-    await drainConversationEvents();
-    if (snapshot.app && next.app.revision < snapshot.app.revision) next.app = snapshot.app;
-    snapshot = next;
-    if (next.app.revision !== renderedRevision) {
-      renderedRevision = next.app.revision;
-      // The label follows what exists, not the counter: reset clears the app
-      // while the revision keeps counting up.
-      if (next.app.html || next.app.css || next.app.javascript) {
-        $("revision-label").textContent = `Revision ${next.app.revision}`;
-        renderGenerated(next.app.html, next.app.css);
-        runCapabilityWorker();
-      } else {
-        $("revision-label").textContent = "Empty app";
-        clearGenerated();
-      }
+function runtimeLabel(value) {
+  return { codex: "Codex", claude_code: "Claude Code", hermes: "Hermes" }[value] || value || "No session";
+}
+
+function relativeTime(value) {
+  const timestamp = Date.parse(value || "");
+  if (!Number.isFinite(timestamp)) return "just now";
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d ago`;
+  return new Date(timestamp).toLocaleDateString();
+}
+
+function renderApps() {
+  const key = JSON.stringify([selectedAppId, showingArchivedApps, apps]);
+  if (key === renderedAppsKey) return;
+  renderedAppsKey = key;
+  const list = $("apps");
+  list.replaceChildren();
+  if (!apps.length) {
+    const empty = document.createElement("div");
+    empty.className = "sidebar-empty";
+    empty.textContent = showingArchivedApps ? "No archived apps." : "No apps yet.";
+    list.append(empty);
+    return;
+  }
+  for (const app of apps) {
+    const item = document.createElement("button");
+    item.className = `app-item${app.thread_id === selectedAppId ? " selected" : ""}`;
+    item.dataset.appId = app.thread_id;
+
+    const name = document.createElement("span");
+    name.className = "app-name";
+    const label = document.createElement("span");
+    label.textContent = app.name;
+    name.append(label);
+    if ((app.active_tasks || []).length) {
+      const dot = document.createElement("span");
+      dot.className = "app-dot";
+      name.append(dot);
     }
-    renderChat();
-    syncEmptyState();
-  } catch (_error) {
-    showRuntimeStatus("Builder backend unavailable", "error");
-  } finally {
-    pollBusy = false;
+
+    const session = document.createElement("span");
+    session.className = "app-meta";
+    session.textContent = app.session
+      ? `${runtimeLabel(app.session.agent_runtime)} · ${app.session.model}`
+      : "No agent session";
+
+    const details = document.createElement("span");
+    details.className = "app-meta";
+    details.textContent = `Revision ${app.revision} · ${relativeTime(app.last_used_at)}`;
+    item.append(name, session, details);
+    list.append(item);
   }
 }
 
-async function resetApp() {
-  if (!confirm("Start over? This deletes the generated app, its data, and the chat history, and begins a new builder conversation.")) return;
-  const button = $("reset-app");
+function syncWorkspaceControls() {
+  const hasApp = selectedAppId !== null;
+  $("app-title").textContent = hasApp
+    ? selectedAppName || selectedAppId
+    : showingArchivedApps ? "Archived apps" : "Select an app";
+  $("rename-app").hidden = !hasApp;
+  $("archive-app").hidden = !hasApp;
+  $("archive-app").textContent = selectedAppArchived ? "Unarchive" : "Archive";
+  $("open-chat").hidden = !hasApp;
+  $("agent-settings").hidden = !hasApp;
+  $("chat-composer").hidden = !hasApp || selectedAppArchived;
+  $("chat-subtitle").textContent = selectedAppArchived
+    ? "Read-only while this app is archived"
+    : "Build, edit, or ask about this app";
+  $("generated-host").classList.toggle("readonly", selectedAppArchived);
+  $("new-app").hidden = showingArchivedApps;
+  $("archived-toggle").textContent = showingArchivedApps ? "Show active" : "Show archived";
+  if (!hasApp) $("revision-label").textContent = "";
+  setSessionOptions();
+  syncEmptyState();
+}
+
+function stopCapabilityWorker() {
+  if (workerRun) workerRun.finish("workspace-switched");
+}
+
+function saveSelectedConversationView() {
+  if (!selectedAppId) return;
+  conversationViewStates.set(selectedAppId, {
+    tasks: snapshot.tasks,
+    session: snapshot.session,
+    events: conversationEvents,
+    oldestSeq: conversationEventsOldestSeq,
+    newestSeq: conversationEventsNewestSeq,
+    initialized: conversationEventsInitialized,
+    hasOlder: hasOlderConversationEvents,
+    scrollTop: $("chat-history").scrollTop,
+  });
+}
+
+function restoreConversationView(app) {
+  const state = conversationViewStates.get(app.thread_id);
+  if (!state) {
+    snapshot = { app: null, tasks: [], session: app.session || null };
+    conversationEvents = [];
+    conversationEventsOldestSeq = null;
+    conversationEventsNewestSeq = 0;
+    conversationEventsInitialized = false;
+    hasOlderConversationEvents = false;
+    lastChatScrollTop = 0;
+    restoredChatScrollTop = null;
+  } else {
+    snapshot = {
+      app: null,
+      tasks: state.tasks,
+      session: app.session || state.session || null,
+    };
+    conversationEvents = state.events;
+    conversationEventsOldestSeq = state.oldestSeq;
+    conversationEventsNewestSeq = state.newestSeq;
+    conversationEventsInitialized = state.initialized;
+    hasOlderConversationEvents = state.hasOlder;
+    lastChatScrollTop = state.scrollTop;
+    restoredChatScrollTop = state.scrollTop;
+  }
+  loadingOlderConversationEvents = false;
+  renderHistoryLoader();
+}
+
+function clearSelectedApp() {
+  saveSelectedConversationView();
+  stopCapabilityWorker();
+  selectedRefreshSequence += 1;
+  selectedAppId = null;
+  selectedAppName = null;
+  selectedAppArchived = false;
+  snapshot = { app: null, tasks: [], session: null };
+  conversationEvents = [];
+  conversationEventsOldestSeq = null;
+  conversationEventsNewestSeq = 0;
+  conversationEventsInitialized = false;
+  hasOlderConversationEvents = false;
+  loadingOlderConversationEvents = false;
+  lastChatScrollTop = 0;
+  restoredChatScrollTop = null;
+  renderedChatTurns.clear();
+  renderedRevision = -1;
+  establishedSession = null;
+  establishedSessionKey = "";
+  clearGenerated();
+  closeChat();
+  renderChat();
+  renderApps();
+  syncWorkspaceControls();
+}
+
+async function showApp(app) {
+  saveSelectedConversationView();
+  stopCapabilityWorker();
+  selectedRefreshSequence += 1;
+  selectedAppId = app.thread_id;
+  selectedAppName = app.name;
+  selectedAppArchived = Boolean(app.archived);
+  restoreConversationView(app);
+  renderedChatTurns.clear();
+  renderedRevision = -1;
+  establishedSession = null;
+  establishedSessionKey = "";
+  clearGenerated();
+  closeChat();
+  renderChat();
+  renderApps();
+  syncWorkspaceControls();
+  setSidebarOpen(false);
+  await refreshSelectedApp(app.thread_id);
+}
+
+async function refreshSelectedApp(threadId = selectedAppId) {
+  if (!threadId || threadId !== selectedAppId) return;
+  const refreshSequence = ++selectedRefreshSequence;
+  const [stateResponse, conversationResponse] = await Promise.all([
+    api("GET", `/apps/${encodeURIComponent(threadId)}/state`),
+    api("GET", `/apps/${encodeURIComponent(threadId)}/conversation`),
+  ]);
+  if (threadId !== selectedAppId || selectedRefreshSequence !== refreshSequence) return;
+  const listedSession = apps.find(app => app.thread_id === threadId)?.session || null;
+  const next = {
+    app: stateResponse.app,
+    tasks: conversationResponse.tasks || [],
+    // A fixed host session outlives retained task history. The app index reads
+    // it from the host thread summary, so an empty conversation page must not
+    // make an established workspace look configurable again.
+    session: conversationResponse.session || listedSession || snapshot.session || null,
+  };
+  await refreshConversationEvents(threadId, refreshSequence);
+  if (threadId !== selectedAppId || selectedRefreshSequence !== refreshSequence) return;
+  if (snapshot.app && next.app.revision < snapshot.app.revision) next.app = snapshot.app;
+  snapshot = next;
+  if (next.app.revision !== renderedRevision) {
+    stopCapabilityWorker();
+    renderedRevision = next.app.revision;
+    if (next.app.html || next.app.css || next.app.javascript) {
+      $("revision-label").textContent = `Revision ${next.app.revision}`;
+      renderGenerated(next.app.html, next.app.css);
+      if (!selectedAppArchived) runCapabilityWorker();
+    } else {
+      $("revision-label").textContent = "Empty app";
+      clearGenerated();
+    }
+  }
+  renderChat();
+  syncAgentSettings(snapshot.session);
+  syncWorkspaceControls();
+}
+
+async function refresh() {
+  const refreshSequence = ++appsRefreshSequence;
+  const archivedView = showingArchivedApps;
+  try {
+    const response = await api("GET", archivedView ? "/apps?archived=true" : "/apps");
+    if (
+      refreshSequence !== appsRefreshSequence
+      || archivedView !== showingArchivedApps
+    ) return;
+    apps = response.apps || [];
+    const selected = apps.find(app => app.thread_id === selectedAppId);
+    if (selected) {
+      selectedAppName = selected.name;
+      selectedAppArchived = Boolean(selected.archived);
+    } else if (selectedAppId) {
+      clearSelectedApp();
+    }
+    renderApps();
+    syncWorkspaceControls();
+    if (selectedAppId) await refreshSelectedApp(selectedAppId);
+  } catch (_error) {
+    if (refreshSequence === appsRefreshSequence) {
+      showRuntimeStatus("Agentic Web App backend unavailable", "error");
+    }
+  }
+}
+
+async function createApp() {
+  const button = $("new-app");
   button.disabled = true;
   try {
-    await api("POST", "/reset");
-    // The new thread numbers its events from the start, so the chat cursor
-    // resets with it; renderedRevision forces a re-render of the empty app.
-    conversationEvents = [];
-    conversationEventsSeq = 0;
-    renderedRevision = -1;
-    snapshot = { app: null, tasks: [], session: null };
-    closeChat();
-    await refreshSnapshot();
-    showRuntimeStatus("Started over. Describe the app you want.", "info");
+    const response = await api("POST", "/apps", {});
+    showingArchivedApps = false;
+    await refresh();
+    const app = apps.find(candidate => candidate.thread_id === response.app.thread_id) || response.app;
+    await showApp(app);
   } catch (error) {
-    showRuntimeStatus(error.message || "Start over failed", "error");
+    showRuntimeStatus(error.message || "Could not create app", "error");
   } finally {
     button.disabled = false;
   }
+}
+
+async function renameSelectedApp() {
+  if (!selectedAppId) return;
+  const threadId = selectedAppId;
+  const requestedName = prompt("Rename app (max 100 characters):", selectedAppName || threadId);
+  if (requestedName === null) return;
+  const name = requestedName.trim();
+  if (!name) {
+    showRuntimeStatus("App name cannot be empty", "error");
+    return;
+  }
+  const response = await api(
+    "PUT",
+    `/apps/${encodeURIComponent(threadId)}/name`,
+    { name },
+  );
+  apps = apps.map(app => app.thread_id === threadId ? { ...app, name: response.app.name } : app);
+  if (selectedAppId === threadId) selectedAppName = response.app.name;
+  renderedAppsKey = "";
+  renderApps();
+  syncWorkspaceControls();
+}
+
+async function setSelectedAppArchived() {
+  if (!selectedAppId) return;
+  const threadId = selectedAppId;
+  const action = selectedAppArchived ? "unarchive" : "archive";
+  await api("POST", `/apps/${encodeURIComponent(threadId)}/${action}`, {});
+  if (selectedAppId === threadId) clearSelectedApp();
+  await refresh();
+}
+
+async function toggleArchivedApps() {
+  showingArchivedApps = !showingArchivedApps;
+  clearSelectedApp();
+  await refresh();
+}
+
+// Must match the drawer breakpoint in the stylesheet.
+const drawerMedia = window.matchMedia("(max-width: 720px)");
+
+function setSidebarOpen(open, restoreFocus = false) {
+  const mobile = drawerMedia.matches;
+  const isOpen = mobile && open;
+  const pane = document.querySelector(".app-pane");
+  $("builder-shell").classList.toggle("sidebar-open", isOpen);
+  pane.inert = mobile && !isOpen;
+  document.querySelector(".workspace-main").inert = isOpen;
+  $("sidebar-backdrop").hidden = !isOpen;
+  $("sidebar-open").setAttribute("aria-expanded", String(isOpen));
+  if (isOpen) $("sidebar-close").focus();
+  else if (restoreFocus && mobile) $("sidebar-open").focus();
 }
 
 async function initialize() {
@@ -894,16 +1366,50 @@ async function initialize() {
   } catch (_error) {
     showRuntimeStatus("Agent settings are unavailable", "error");
   }
-  await refreshSnapshot();
-  setInterval(refreshSnapshot, 3000);
+  setSidebarOpen(false);
+  clearSelectedApp();
+  await refresh();
+  setInterval(refresh, 3000);
 }
 
+document.addEventListener("click", event => {
+  const item = event.target.closest && event.target.closest(".app-item");
+  if (!item) return;
+  const app = apps.find(candidate => candidate.thread_id === item.dataset.appId);
+  if (app) void showApp(app).catch(error => showRuntimeStatus(error.message, "error"));
+});
+$("new-app").addEventListener("click", () => createApp());
+$("archived-toggle").addEventListener("click", () => toggleArchivedApps());
+$("rename-app").addEventListener("click", () => renameSelectedApp().catch(error => showRuntimeStatus(error.message, "error")));
+$("archive-app").addEventListener("click", () => setSelectedAppArchived().catch(error => showRuntimeStatus(error.message, "error")));
 $("open-chat").addEventListener("click", () => $("chat-drawer").hidden ? openChat() : closeChat());
-$("empty-open-chat").addEventListener("click", openChat);
+$("empty-primary").addEventListener("click", () => {
+  if (!selectedAppId) {
+    if (showingArchivedApps) void toggleArchivedApps();
+    else void createApp();
+  } else if (selectedAppArchived) {
+    void setSelectedAppArchived().catch(error => showRuntimeStatus(error.message, "error"));
+  } else {
+    openChat();
+  }
+});
 $("close-chat").addEventListener("click", closeChat);
-$("reset-app").addEventListener("click", resetApp);
+$("sidebar-open").addEventListener("click", () => setSidebarOpen(true));
+$("sidebar-close").addEventListener("click", () => setSidebarOpen(false, true));
+$("sidebar-backdrop").addEventListener("click", () => setSidebarOpen(false, true));
+drawerMedia.addEventListener("change", () => setSidebarOpen(false));
 $("runtime").addEventListener("change", setSessionOptions);
 $("model").addEventListener("change", setSessionOptions);
+$("load-earlier").addEventListener("click", () => {
+  loadOlderConversationEvents().catch(error => showChatStatus(error.message, true));
+});
+$("chat-history").addEventListener("scroll", () => {
+  const history = $("chat-history");
+  const movedUp = history.scrollTop < lastChatScrollTop;
+  lastChatScrollTop = history.scrollTop;
+  if (!movedUp || history.scrollTop > 160) return;
+  loadOlderConversationEvents().catch(error => showChatStatus(error.message, true));
+}, { passive: true });
 $("send-message").addEventListener("click", () => sendMessage());
 $("message").addEventListener("keydown", event => {
   if (event.key === "Enter" && !event.shiftKey) {

@@ -2,17 +2,8 @@
   "host_slot": 4,
   "title": "Virality Machine",
   "release_stage": "beta",
-  "agent": {
-    "instructions": "agent.md",
-    "api": true
-  },
-  "backend": {
-    "entrypoint": "backend.py"
-  },
+  "deprecated": true,
   "database": {
     "migrations": "migrations"
-  },
-  "ui": {
-    "path": "ui"
   }
 }
