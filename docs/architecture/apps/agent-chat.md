@@ -7,9 +7,9 @@ agent runtime, and the app's job is organizing those threads, not changing how
 tasks run.
 
 The admin shell hardwires Agent Chat as the host's main interface: the home
-tab opens with a "Begin chat" navigator and the app sits directly below Home
-in the navigation. Its manifest still declares the required
-`release_stage: "stable"`; the hero placement is the shell's one special case.
+tab opens with a "Begin chat" navigator. In the sidebar, Agent Chat is an
+ordinary entry in the Apps section based on its required
+`release_stage: "stable"` declaration.
 
 ## What The App Owns
 
@@ -79,22 +79,31 @@ first message) or appends a task to an existing one:
   so its running tasks omit the Steer control; the host also rejects a direct
   Hermes steer request. The composer queues later input as a new task on the
   same thread, which runs after the current task finishes.
-- `GET /threads/<thread_id>/events` initially returns only the newest event
-  page, in chronological display order. Reaching the top loads older pages
-  with `before=<oldest_seq>` and preserves the visible scroll anchor; a
-  **Load earlier messages** control is also available when the first page is
-  shorter than the viewport. Live updates continue forward from
-  `since=<newest_seq>`. This makes a long thread useful after one bounded
-  request instead of draining its complete history before first paint, while
-  still making every retained event reachable. The stream shows every
+- `GET /threads/<thread_id>/events` returns six events at a time, in
+  chronological display order. On first view the UI preloads up to three
+  pages (18 events) so the history is normally scrollable immediately without
+  one oversized bridge response. Reaching the top loads older pages with
+  `before=<oldest_seq>` and preserves the visible scroll anchor; a **Load
+  earlier messages** control remains available while older history exists.
+  Live updates continue forward from `since=<newest_seq>`. This makes a long
+  thread useful after a small bounded set of requests instead of draining its
+  complete history before first paint, while still making every retained
+  event reachable. The stream shows every
   message of every loaded task, not just the prompt and final answer. Claude
   Code stream-json content blocks, Codex app-server ThreadItems, and Hermes
   tool-call hook events are normalized into provider-independent activity
   records for reasoning, plans, commands and output, file changes, tool calls,
   searches, sub-agents, images, waits, and context state. Started/completed
-  snapshots fold into one expandable card. Mid-task operator steering still
-  renders inline. The UI polls once per second while any task is active and
-  every five seconds while idle.
+  snapshots fold into one expandable card. An activity with no completed
+  snapshot is labeled **Started** without animation: the event proves it
+  began, but does not prove it is still running after a turn is killed.
+  Mid-task operator steering still renders inline. The UI polls once per
+  second while any task is active and every five seconds while idle.
+- Switching threads keeps each visited thread's loaded event window, cursors,
+  tasks, and reading position in browser memory. Returning to the thread
+  restores that view immediately before live polling resumes. The cache lasts
+  only for the current app-frame lifetime; reloading the page starts from the
+  bounded initial history again.
 - The event page is deliberately small (six events), with up to 120 KiB of
   message/activity text per event, so it remains below the app bridge's fixed
   1 MiB response ceiling. Paging drains every event rather than skipping a

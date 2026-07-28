@@ -21,6 +21,10 @@ RELEASED_APP_SLOTS = {
     "software_builder": 5,
     "personal_web_app_builder": 6,
 }
+ACTIVE_APP_IDS = {"agent_chat", "personal_web_app_builder"}
+DEPRECATED_APP_IDS = set(RELEASED_APP_SLOTS) - ACTIVE_APP_IDS
+
+
 class AppPlatformTests(unittest.TestCase):
     def test_installed_agent_chat_manifest_derives_host_owned_names(self) -> None:
         apps = app_platform.installed_apps()
@@ -46,49 +50,33 @@ class AppPlatformTests(unittest.TestCase):
         self.assertEqual(allocation.gid, 48000)
         self.assertEqual(allocation.port_offset, 0)
 
-    def test_installed_mission_pursuit_manifest_owns_its_agent_protocol(self) -> None:
-        apps = {app.id: app for app in app_platform.installed_apps()}
-        mission = apps["mission_pursuit"]
-
-        self.assertTrue(mission.agent_api)
-        self.assertIn("You are the resident agent of Mission Pursuit", mission.agent_instructions)
-        self.assertIn('"path": "/agent/actions"', mission.agent_instructions)
-        self.assertIn('"type":"artifact_interaction"', mission.agent_instructions)
-        self.assertIn('"type": "button"', mission.agent_instructions)
-
-    def test_installed_app_migrations_are_well_formed(self) -> None:
-        for app in app_platform.installed_apps():
+    def test_app_package_migrations_are_well_formed(self) -> None:
+        for app in app_platform.migration_apps():
             with self.subTest(app_id=app.id):
                 self.assertTrue(migrate.load_migrations(app.migrations_dir))
 
-    def test_workspace_kit_ui_has_no_agent_controlled_browser_capability_sink(self) -> None:
-        forbidden = (
-            "window.open", "location.href", "location.assign", "location.replace",
-            "document.location", "document.write", "eval(", "new Function",
-            "fetch(", "XMLHttpRequest", "WebSocket", "EventSource",
-            'createElement("script")', 'createElement("iframe")',
-        )
-        canonical_renderer = app_platform.APP_ROOT / "workspace_kit" / "ui" / "view_blocks.js"
-        canonical_source = canonical_renderer.read_text()
-        self.assertIn("div.textContent", canonical_source)
-        for sink in forbidden:
-            self.assertNotIn(sink, canonical_source, f"shared renderer exposes browser sink {sink}")
-        checked = 0
-        for app in app_platform.installed_apps():
-            ui = app.ui_dir
-            index = (ui / "index.html").read_text()
-            if "/workspace-kit/view_blocks.js" not in index:
-                continue
-            with self.subTest(app_id=app.id):
-                source = "\n".join(path.read_text() for path in sorted(ui.glob("*.js")))
-                for sink in forbidden:
-                    self.assertNotIn(sink, source, f"{app.id} exposes browser sink {sink}")
-                self.assertIsNone(re.search(r"<a(?:\s|>)", index, re.I))
-                self.assertIn("/workspace-kit/view_blocks.css", index)
-                checked += 1
-        # Agent Chat and Personal Web App Builder are independent products;
-        # the other released apps use the shared Workspace Kit renderer.
-        self.assertEqual(checked, len(RELEASED_APP_SLOTS) - 2)
+    def test_deprecated_packages_reserve_identity_without_a_runtime_contract(self) -> None:
+        installed = {app.id: app for app in app_platform.installed_apps()}
+        packages = {app.id: app for app in app_platform.migration_apps()}
+
+        self.assertEqual(set(installed), ACTIVE_APP_IDS)
+        self.assertEqual(set(packages), set(RELEASED_APP_SLOTS))
+        for app_id in DEPRECATED_APP_IDS:
+            with self.subTest(app_id=app_id):
+                app = packages[app_id]
+                self.assertIsInstance(app, app_platform.DeprecatedAppManifest)
+                self.assertTrue(app.deprecated)
+                self.assertIsNone(app_platform.app_by_id(app_id))
+                self.assertEqual(app_platform.migration_app_by_id(app_id), app)
+                self.assertFalse(hasattr(app, "backend_entrypoint"))
+                self.assertFalse(hasattr(app, "ui_dir"))
+                self.assertFalse(hasattr(app, "agent_instructions"))
+                self.assertEqual(
+                    [migration.version for migration in migrate.load_migrations(app.migrations_dir)],
+                    [1, 2],
+                )
+
+        self.assertFalse((app_platform.APP_ROOT / "workspace_kit").exists())
 
     def test_personal_web_app_builder_alone_opts_into_capability_workers(self) -> None:
         apps = {app.id: app for app in app_platform.installed_apps()}
@@ -126,7 +114,7 @@ class AppPlatformTests(unittest.TestCase):
             self.assertEqual(len({app.linux_user for app in apps.values()}), 3)
 
     def test_installed_apps_have_unique_host_owned_names(self) -> None:
-        apps = app_platform.installed_apps()
+        apps = app_platform.migration_apps()
 
         self.assertGreaterEqual(len(apps), 1)
         self.assertEqual(len({app.id for app in apps}), len(apps))
@@ -137,7 +125,7 @@ class AppPlatformTests(unittest.TestCase):
         self.assertEqual(len({app.port for app in apps}), len(apps))
 
     def test_app_identity_and_allocations_come_from_each_package(self) -> None:
-        apps = app_platform.installed_apps()
+        apps = app_platform.migration_apps()
 
         for app in apps:
             with self.subTest(app_id=app.id):
@@ -147,7 +135,7 @@ class AppPlatformTests(unittest.TestCase):
                 self.assertEqual(app.port, APP_PORT_BASE + app.allocation.port_offset)
 
     def test_released_apps_and_slots_do_not_change(self) -> None:
-        apps = {app.id: app for app in app_platform.installed_apps()}
+        apps = {app.id: app for app in app_platform.migration_apps()}
 
         self.assertEqual(set(apps), set(RELEASED_APP_SLOTS))
         self.assertEqual(
@@ -161,6 +149,10 @@ class AppPlatformTests(unittest.TestCase):
                 "virality_machine": "beta",
                 "software_builder": "beta",
             },
+        )
+        self.assertEqual(
+            {app_id for app_id, app in apps.items() if app.deprecated},
+            DEPRECATED_APP_IDS,
         )
         for app_id, host_slot in RELEASED_APP_SLOTS.items():
             with self.subTest(app_id=app_id):

@@ -46,14 +46,6 @@ UI_ASSETS = {
     "/admin_ui.css": (RUNTIME_DIR / "admin_ui.css", "text/css; charset=utf-8"),
     "/favicon.ico": (RUNTIME_DIR / "admin_favicon.svg", "image/svg+xml"),
     "/favicon.svg": (RUNTIME_DIR / "admin_favicon.svg", "image/svg+xml"),
-    "/workspace-kit/view_blocks.css": (
-        app_platform.APP_ROOT / "workspace_kit" / "ui" / "view_blocks.css",
-        "text/css; charset=utf-8",
-    ),
-    "/workspace-kit/view_blocks.js": (
-        app_platform.APP_ROOT / "workspace_kit" / "ui" / "view_blocks.js",
-        "application/javascript; charset=utf-8",
-    ),
 }
 UI_ASSETS.update({
     f"/admin_ui/{module.name}": (module, "application/javascript; charset=utf-8")

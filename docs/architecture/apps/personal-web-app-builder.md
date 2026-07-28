@@ -1,16 +1,15 @@
-# Personal Web App Builder
+# Agentic Web App
 
-Personal Web App Builder is an installed app for creating one durable personal
-web app through conversation. The agent owns the generated interface and its
-structured data model. The human sees the generated app as the primary surface
-and opens a compact, dismissible agent chat to build, change, or ask questions
-about it.
+Agentic Web App is an installed app for creating multiple durable web apps
+through conversation. Each app is an isolated workspace with its own generated
+interface, structured data model, and permanent agent thread. The human selects
+an app from an Agent Chat-style sidebar and opens a compact, dismissible agent
+chat to build, change, or ask questions about it.
 
-This product is independent of Mission Pursuit and Workspace Kit. It has no
-mission, goal, measurement, schedule, artifact, memory, tool inventory, or
-background pursuit state. Its complete durable domain is one app bundle, one
-JSON document, one fixed agent chat configuration, and references to that
-chat's host tasks.
+This product has no mission, goal, measurement, schedule, artifact, memory,
+tool inventory, or background pursuit state. Its complete durable domain is a
+set of independent app workspaces. Each contains one app bundle, one
+JSON document, one fixed agent chat configuration, and one host thread.
 
 ## Product Contract
 
@@ -47,8 +46,8 @@ many request classes, but browser navigation directives are not a complete,
 portable JavaScript execution boundary.
 
 A dedicated worker has no `window`, `document`, anchors, forms, media elements,
-top-level browsing context, cookies, or DOM storage. Personal Web App Builder
-adds four reinforcing layers:
+top-level browsing context, cookies, or DOM storage. Agentic Web App adds four
+reinforcing layers:
 
 1. The app iframe remains opaque-origin and sandboxed. Its CSP keeps
    `connect-src 'none'`, `frame-src 'none'`, `form-action 'none'`, no inline
@@ -175,7 +174,7 @@ markup. The trusted frame ignores requests sent during worker initialization,
 accepts at most one request per event turn, and bounds the encoded message.
 
 The generated-app user action is the authorization to start the task. The frame
-immediately sends the bounded message to the fixed builder thread. An existing
+immediately sends the bounded message to the selected app's fixed thread. An existing
 chat reuses its session configuration. The first task uses the runtime, model,
 and effort selected in the trusted app bar, even when the chat drawer is
 closed. The app stores that configuration independently of visible task
@@ -186,13 +185,13 @@ status reports whether the task started.
 Generated JavaScript cannot synthesize the initial trusted user event, choose a
 backend route, choose session configuration, or call the parent bridge. An
 accepted `app.askAgent` instruction has the same authority as the human typing
-that instruction in builder chat. The task runs with the builder agent's normal
+that instruction in Agent chat. The task runs with the app agent's normal
 tools and egress, subject to the host's network policy and approval controls.
 Those host controls are the security boundary; the real-event gate, one-request
 limit, and message-size cap only constrain how the task starts. `app.askAgent`
 grants direct task-start authority from a real app interaction, not general host
-API or browser network authority. Human chat uses the fixed `/messages` route
-and generated interaction callbacks use the fixed
+API or browser network authority. Human chat uses the workspace-scoped
+`/messages` route and generated interaction callbacks use its
 `/runtime/agent-requests` route. The backend prepends `Requested by user:` or
 `Requested by app:` to the task input. This trusted first line gives the agent
 and chat history durable provenance without creating a second thread or
@@ -200,69 +199,51 @@ changing task authority.
 
 ## Backend State And Routes
 
-The app schema stores only explicit columns for `revision`, `html`, `css`,
-`javascript`, `data_json`, `thread_seq`, and `updated_at`. `data_json` is opaque
-only because its schema is genuinely authored by the agent for the personal app.
-The backend parses and validates it as a JSON object on every write. The host is
-the sole authority for the app-scoped builder thread, its tasks, provider
-session, runtime, model, and effort. The app does not duplicate task references
-or session configuration in its own database; `thread_seq` names which builder
-thread is current, and nothing else about it.
+The app schema has one `web_apps` row per workspace. Its immutable `thread_id`
+is both the workspace identity and the host thread identity. The row also holds
+the editable name, archive flag, revision, HTML, CSS, JavaScript, JSON data,
+and timestamps. `data_json` is opaque only because its shape is authored by the
+agent; the backend still parses and validates it as a JSON object on every
+write. The host remains authoritative for tasks and session configuration.
 
-Browser routes provide session options, separate state and conversation reads,
-separate human and generated-app message creation, task stop controls, and
-typed runtime data actions. Both message routes create tasks on the one
-`builder` thread. The conversation read asks the host for that thread's newest
-20 tasks, derives the UI's fixed session display from the newest task, and
-bounds each message before it crosses the app-backend proxy. The first UI
-message supplies runtime, model, and effort; later messages omit them. The host
-remains authoritative for whether the thread is new and whether supplied
-configuration matches it. An empty retained history is simply first-run state.
-Retained chat growth cannot make the builder surface unavailable.
+The active and archived indexes join these rows with the host's bulk thread
+summaries to show current agent settings, last use, and queued/running status.
+Selection is deliberately browser-local, like Agent Chat: a reload returns to
+the app list instead of adding a server-side preference row.
 
-The chat also reads the fixed thread's sequenced event stream. It accumulates
-events forward from the last seen sequence and renders each `task.message`
-inline, including interim agent messages while a task is still running. The
-opening user event is already represented by the task's user bubble and is
-not repeated; a final stored output is rendered only when it is not already
-the stream's last agent message. Event reads use pages of five and clip text to
-the conversation's 12 KiB encoded-message bound before the app-backend proxy,
-so one page stays below that hop's response cap. Polls patch only turns whose
-task or event content changed, preserving the reader's scroll position
-elsewhere.
+Creating an app inserts a clean workspace and reserves a stable `app-N` thread
+ID. There is no reset or thread-rotation operation. Starting fresh means
+creating another app, which avoids destroying state and keeps the one-app,
+one-thread invariant easy to understand. Renaming changes only display text.
+Archiving hides a workspace from the active index without deleting its bundle,
+data, conversation, or thread; unarchiving restores the same workspace.
 
-Start over is a browser route. It stops anything still queued or running on the
-current builder thread, clears the generated bundle and its data, and moves the
-app to the next builder thread, named `builder`, `builder-2`, and so on from
-`thread_seq`. Work is stopped first because a task left on the discarded thread
-would spend a turn on output that is thrown away, in a conversation the operator
-can no longer see. The thread summary carries every active task, so the stop
-covers all of them rather than a page of recent history, and a task that cannot
-be stopped aborts the reset before any state is cleared: the operator retries
-against the builder they still have. Both go together because a thread's session configuration
-is fixed for its lifetime: the runtime, model, and effort chosen for the first
-message cannot be changed, so returning to first-run state means a new thread
-rather than a reconfigured one. That also makes Start over the way out of a
-builder whose thread can no longer run work, such as one whose model left the
-session option matrix. The revision counter keeps counting up across a reset
-rather than returning to zero, so an in-flight writer's `expected_revision` can
-never match a revision it read before the reset. The agent namespace does not
-expose the route, and the agent proxy marker is checked against the current
-builder thread, so a task still running on a discarded thread is locked out of
-the app's state. Reset, message creation, and every agent route take one
-process-wide lock, and the agent's thread is re-checked inside it: the app is a
-single operator's workspace, so serializing the few operations that can race
-the reset costs nothing and replaces a race check in every statement. Without
-that, a revoked agent could pass the request-boundary check, block on the
-reset's row lock, and act on the app the reset had just created — a revision
-check does not close it, because the post-reset revision is predictable — and a
-message already in flight could be left queued on the discarded thread.
+Archived browser surfaces are read-only. They may display the generated bundle
+and conversation, but cannot send messages, run interactive mutations, or call
+`app.askAgent`. An agent task that was already running when archive won the
+workspace lock may finish and apply its revision-checked result. This mirrors
+Agent Chat's archive semantics: archive controls discoverability and new user
+work rather than revoking an already-issued task.
+
+Every browser state, conversation, event, message, runtime-action, and task-stop
+route includes the workspace ID. Task cancel and kill first verify that the
+host task belongs to that workspace. Agent routes use the kernel-attributed
+thread directly to resolve exactly one workspace; an unknown thread cannot read
+or mutate any other app.
+
+The UI captures the selected workspace ID before every asynchronous request.
+A response is applied only if that workspace is still selected. Switching
+workspaces terminates the current capability worker, and every worker request
+remains pinned to the workspace that created it. Per-workspace locks serialize
+archive and message/runtime mutations while allowing independent apps to make
+progress concurrently.
 
 Keeping state and conversation separate prevents a maximum generated bundle
-from consuming the chat history's response budget. Browser routes require the
-host's app proxy marker. Agent routes are limited to reading state and applying
-one typed action. They require the kernel-attributed app proxy marker and the
-fixed `builder` app thread. Neither route namespace can call the other.
+from consuming the chat history's response budget. Conversation reads retain
+the newest 20 tasks and page sequenced events five at a time with 12 KiB
+message bounds. Browser routes require the host app proxy marker. Agent routes
+are limited to state reads and typed revision-checked actions and require both
+the kernel-attributed app marker and thread.
 
 All agent writes require `expected_revision`. `replace_app` changes HTML, CSS,
 JavaScript, and data atomically. `replace_ui` keeps data unchanged.

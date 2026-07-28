@@ -12,7 +12,12 @@ let threadEventsInitialized = false;
 let hasOlderThreadEvents = false;
 let loadingOlderThreadEvents = false;
 let lastChatScrollTop = 0;
+let restoredChatScrollTop = null;
+// Keep each opened thread's loaded window and reading position for the
+// lifetime of this app frame. A browser reload intentionally starts fresh.
+const threadViewStates = new Map();
 const EVENTS_PAGE = 6;
+const INITIAL_EVENT_PAGES = 3;
 const ACTIVE_REFRESH_MS = 1000;
 const IDLE_REFRESH_MS = 5000;
 let selectedThreadId = null;
@@ -357,16 +362,17 @@ async function removeAttachment(selectionId) {
 }
 
 async function showThread(threadId, name, runtime, model, effort, archived) {
+  saveSelectedThreadView();
   selectedThreadId = threadId;
   selectedThreadName = name;
   selectedThreadRuntime = runtime;
   selectedThreadModel = model;
   selectedThreadEffort = effort;
   selectedThreadArchived = archived;
-  tasks = [];
-  resetThreadEvents();
+  restoreThreadView(threadId);
   updateComposer();
   renderThreads();
+  renderThreadHistory();
   await refreshSelectedThread();
 }
 
@@ -387,6 +393,39 @@ async function refreshSelectedThread() {
   renderThreadHistory();
 }
 
+function saveSelectedThreadView() {
+  if (!selectedThreadId) return;
+  const scroller = $("chat-scroll");
+  threadViewStates.set(selectedThreadId, {
+    tasks,
+    events: threadEvents,
+    oldestSeq: threadEventsOldestSeq,
+    newestSeq: threadEventsNewestSeq,
+    initialized: threadEventsInitialized,
+    hasOlder: hasOlderThreadEvents,
+    scrollTop: scroller ? scroller.scrollTop : lastChatScrollTop,
+  });
+}
+
+function restoreThreadView(threadId) {
+  const state = threadViewStates.get(threadId);
+  if (!state) {
+    tasks = [];
+    resetThreadEvents();
+    return;
+  }
+  tasks = state.tasks;
+  threadEvents = state.events;
+  threadEventsOldestSeq = state.oldestSeq;
+  threadEventsNewestSeq = state.newestSeq;
+  threadEventsInitialized = state.initialized;
+  hasOlderThreadEvents = state.hasOlder;
+  loadingOlderThreadEvents = false;
+  lastChatScrollTop = state.scrollTop;
+  restoredChatScrollTop = state.scrollTop;
+  renderHistoryLoader();
+}
+
 function resetThreadEvents() {
   threadEvents = [];
   threadEventsOldestSeq = null;
@@ -395,6 +434,7 @@ function resetThreadEvents() {
   hasOlderThreadEvents = false;
   loadingOlderThreadEvents = false;
   lastChatScrollTop = 0;
+  restoredChatScrollTop = null;
   renderHistoryLoader();
 }
 
@@ -410,8 +450,10 @@ function mergeThreadEvents(events) {
 
 async function refreshThreadEvents(threadId) {
   if (!threadEventsInitialized) {
-    // No cursor means "latest page"; opening a long thread therefore paints
-    // its useful tail after one bounded request instead of draining history.
+    // No cursor means "latest page". Prefetch three bounded pages so a first
+    // view normally has enough history to scroll without making the operator
+    // click the top loader, while every individual response stays below the
+    // app bridge's fixed size ceiling.
     const response = await api(
       "GET",
       `/threads/${encodeURIComponent(threadId)}/events`,
@@ -423,7 +465,27 @@ async function refreshThreadEvents(threadId) {
       threadEventsOldestSeq = events[0].seq;
       threadEventsNewestSeq = events[events.length - 1].seq;
     }
-    hasOlderThreadEvents = events.length === EVENTS_PAGE;
+    let oldestPage = events;
+    for (
+      let page = 1;
+      page < INITIAL_EVENT_PAGES
+      && oldestPage.length === EVENTS_PAGE
+      && threadEventsOldestSeq !== null;
+      page += 1
+    ) {
+      const before = threadEventsOldestSeq;
+      const olderResponse = await api(
+        "GET",
+        `/threads/${encodeURIComponent(threadId)}/events?before=${before}`,
+      );
+      if (threadId !== selectedThreadId) return;
+      oldestPage = (olderResponse.events || []).filter(event => event.seq < before);
+      if (oldestPage.length) {
+        mergeThreadEvents(oldestPage);
+        threadEventsOldestSeq = oldestPage[0].seq;
+      }
+    }
+    hasOlderThreadEvents = oldestPage.length === EVENTS_PAGE;
     threadEventsInitialized = true;
     renderHistoryLoader();
     return;
@@ -485,8 +547,10 @@ async function loadOlderThreadEvents() {
     renderThreadHistory();
     scroller.scrollTop = previousTop + (scroller.scrollHeight - previousHeight);
   } finally {
-    loadingOlderThreadEvents = false;
-    if (threadId === selectedThreadId) renderHistoryLoader();
+    if (threadId === selectedThreadId) {
+      loadingOlderThreadEvents = false;
+      renderHistoryLoader();
+    }
   }
 }
 
@@ -571,9 +635,12 @@ function renderThreadHistory() {
   }
   // Instant jump when landing in a thread; smooth glide when the operator
   // just sent a message; stick to the bottom while reading there.
-  if (switched) scroller.scrollTop = scroller.scrollHeight;
+  if (switched && restoredChatScrollTop !== null) {
+    scroller.scrollTop = restoredChatScrollTop;
+  } else if (switched) scroller.scrollTop = scroller.scrollHeight;
   else if (forceScrollBottom) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
   else if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+  restoredChatScrollTop = null;
   forceScrollBottom = false;
 }
 
@@ -612,7 +679,7 @@ function renderActivity(value, openActivities) {
         <span class="activity-kind">${presentation.label}</span>
       </span>
       ${status}
-      ${phase === "started" ? `<span class="activity-phase">Running</span>` : ""}`;
+      ${phase === "started" ? `<span class="activity-phase">Started</span>` : ""}`;
   const cardClass = `activity-card activity-${esc(kind)} ${phase}`;
   const label = `${presentation.label}: ${String(value.title || "Agent activity")}`;
   if (!body) {
@@ -805,6 +872,7 @@ async function renameSelectedThread() {
 }
 
 function clearSelectedThread() {
+  saveSelectedThreadView();
   selectedThreadId = null;
   selectedThreadName = null;
   selectedThreadRuntime = null;

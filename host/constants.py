@@ -20,6 +20,18 @@ ADMIN_API_PORT = 7443
 MAX_REQUEST_BODY_BYTES = 1024 * 1024
 PROXY_PORT = 7445
 APP_PORT_BASE = 7450
+# Agent preview ports: a fixed loopback TCP range the agent may bind its own
+# HTTP servers on (dev servers, test harnesses, UIs it is building) and — the
+# only carve-out from its loopback egress drop — connect to, so it can test
+# what it serves. An operator views a preview from their own browser via an SSH
+# local forward (ssh -L); nothing is exposed on a public interface and the
+# admin console never renders this content. Kept at 8000 — the classic dev
+# server default — well clear of the 7xxx platform block (admin 7443, proxy
+# 7445, installed apps APP_PORT_BASE + 0..MAX_INSTALLED_APPS-1 = 7450-7549) so
+# the ranges can never collide even if the app block grows; test_deploy asserts
+# the disjointness. See docs/architecture/agent-preview-ports.md.
+AGENT_PREVIEW_PORT_BASE = 8000
+AGENT_PREVIEW_PORT_COUNT = 16
 
 # Unix socket endpoints. Each socket is served by exactly one runtime service
 # package (see host/runtime/__init__.py); the default paths live here so the

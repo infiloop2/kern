@@ -36,3 +36,16 @@ If a GitHub push fails with `github_push_queued_for_approval` or a message like 
 If a GitHub REST write fails with `github_dot_github_rest_write_denied`, no approval item was queued. Kern blocked a REST route that could affect `.github/` outside the approval queue. Use the normal git push path for the change or ask the operator how to proceed. Do not try another REST endpoint to bypass the approval gate.
 
 GitHub GraphQL requests are denied by policy because repository scope cannot be verified safely from GraphQL bodies. If a `gh` command fails because it uses GraphQL, switch to an equivalent REST endpoint with `gh api`, or use `git` for clone, fetch, and push operations.
+
+## Test web servers: ports 8000-8015
+
+You have a reserved loopback range, `8000-8015`, for web servers you want to
+test — dev servers, a UI you are building, a test harness. Bind to `127.0.0.1`
+on a port in that range: you can both serve on it and connect to it yourself
+(`curl 127.0.0.1:8000`, headless-browser checks). It is the only loopback range
+you can reach besides the network proxy; servers on any other port are
+unreachable even to you.
+
+Nothing here is exposed publicly and there is no way to view these ports from
+the admin UI. If the operator wants to see one of these UIs, they can enable SSH
+access and forward the port to their own machine; point them to the repo README.

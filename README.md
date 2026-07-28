@@ -322,6 +322,38 @@ When an SSH endpoint is configured, Kern keeps EC2 security-group ingress
 for TCP 22 and installs the key for `kern-operator`. If SSH is omitted,
 the final host closes EC2 SSH ingress after bootstrap.
 
+### Viewing an Agent Preview Server
+
+The agent can run web servers — a dev server, a UI it is building, a test
+harness — on a reserved loopback port range, `8000-8015`. Nothing on this range
+is exposed publicly, and it is not shown in the admin UI. To view one, forward
+its port to your own machine over SSH (this needs SSH operator access enabled,
+above) and open it in your browser:
+
+```bash
+ssh -i ~/.ssh/kern_operator \
+  -L 8000:127.0.0.1:8000 \
+  kern-operator@<public-dns>
+```
+
+Then open **`http://preview.localhost:8000`** (matching the port you forwarded).
+
+Use the `preview.localhost` hostname, not `localhost` or `127.0.0.1`. A preview
+server serves agent-authored content, and browser cookies are scoped by hostname
+regardless of port — so if you browse a preview on the same hostname you use for
+the admin UI (`http://127.0.0.1:7443` in the tunnel above), your admin session
+cookie would be sent to it. `preview.localhost` resolves to loopback in modern
+browsers and is a distinct hostname, so no admin cookie is ever in scope. As with
+any untrusted web page, do not enter credentials into a preview.
+
+If your browser does not resolve `*.localhost` (some Safari builds), bind a
+dedicated loopback address instead and open that:
+
+```bash
+ssh -i ~/.ssh/kern_operator -L 127.0.0.9:8000:127.0.0.1:8000 kern-operator@<public-dns>
+# then open http://127.0.0.9:8000  (on macOS, first: sudo ifconfig lo0 alias 127.0.0.9 up)
+```
+
 ### Cloudflare Tunnel Operator Access
 
 The recommended walkthrough above covers Cloudflare setup from a new account.

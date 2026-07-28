@@ -82,14 +82,14 @@ class PlaywrightBrowserTests(unittest.TestCase):
 
     def test_target_returns_the_matching_app_frame(self) -> None:
         frame = MagicMock()
-        frame.url = "http://127.0.0.1:3010/v1/apps/mission_pursuit/ui/index.html"
+        frame.url = "http://127.0.0.1:3010/v1/apps/sample_app/ui/index.html"
         frame.evaluate.return_value = "ready"
         browser = object.__new__(ChromeBrowser)
         browser._page = MagicMock()
         browser._page.frames = [MagicMock(), frame]
         browser._page.frames[0].url = "http://127.0.0.1:3010/"
 
-        target = browser.target("/v1/apps/mission_pursuit/ui/index.html")
+        target = browser.target("/v1/apps/sample_app/ui/index.html")
 
         self.assertIsInstance(target, BrowserTarget)
         self.assertEqual(target.evaluate("document.readyState"), "ready")

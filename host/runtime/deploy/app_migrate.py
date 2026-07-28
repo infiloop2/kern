@@ -1,4 +1,4 @@
-"""Migration runner for installed app schemas.
+"""Migration runner for active and deprecated app schemas.
 
 Core host migrations create the host-owned ``app_schema_migrations`` table.
 Bootstrap drives the one migration path: ``pending``, then per version
@@ -17,7 +17,7 @@ from host.runtime.deploy import migrate
 
 
 def pending(app_id: str) -> list[int]:
-    app = app_platform.app_by_id(app_id)
+    app = app_platform.migration_app_by_id(app_id)
     if app is None:
         raise migrate.MigrationError(f"unknown app: {app_id}")
     migrations = migrate.load_migrations(app.migrations_dir)
@@ -57,8 +57,8 @@ def applied_versions(cur: Any, app_id: str) -> dict[int, str]:
     return {int(version): str(name) for version, name in cur.fetchall()}
 
 
-def _migration_by_version(app_id: str, version: int) -> tuple[app_platform.AppManifest, migrate.Migration]:
-    app = app_platform.app_by_id(app_id)
+def _migration_by_version(app_id: str, version: int) -> tuple[app_platform.AppPackage, migrate.Migration]:
+    app = app_platform.migration_app_by_id(app_id)
     if app is None:
         raise migrate.MigrationError(f"unknown app: {app_id}")
     for migration in migrate.load_migrations(app.migrations_dir):

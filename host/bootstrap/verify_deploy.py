@@ -152,9 +152,9 @@ def _run(argv: list[str]) -> "subprocess.CompletedProcess[str]":
 
 
 def expected_accounts() -> dict[str, int]:
-    """Pinned core accounts plus the per-app accounts derived from host_slot."""
+    """Pinned core accounts plus migration-capable app package accounts."""
     accounts = dict(SERVICE_ACCOUNTS)
-    for app in app_platform.installed_apps():
+    for app in app_platform.migration_apps():
         accounts[app.linux_user] = app.allocation.uid
     return accounts
 

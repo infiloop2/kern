@@ -33,11 +33,11 @@ def completed(returncode: int, stdout: str = "", stderr: str = "") -> "subproces
 
 
 class ExpectedAccountsTests(unittest.TestCase):
-    def test_includes_pinned_core_accounts_and_installed_apps(self) -> None:
+    def test_includes_pinned_core_accounts_and_migration_app_packages(self) -> None:
         accounts = verify_deploy.expected_accounts()
         for name, uid in SERVICE_ACCOUNTS.items():
             self.assertEqual(accounts[name], uid)
-        apps = app_platform.installed_apps()
+        apps = app_platform.migration_apps()
         self.assertGreaterEqual(len(apps), 1)
         for app in apps:
             self.assertEqual(accounts[app.linux_user], app.allocation.uid)

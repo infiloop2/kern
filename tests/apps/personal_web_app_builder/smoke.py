@@ -1,9 +1,10 @@
-"""Personal Web App Builder mock backend and browser security smoke checks."""
+"""Agentic Web App mock backend and browser security smoke checks."""
 
 from __future__ import annotations
 
 import copy
 from datetime import datetime, timezone
+from html import escape
 from http import HTTPStatus
 import json
 import re
@@ -33,9 +34,7 @@ DEFAULT_SESSION = {
     "model": "gpt-5.6-terra",
     "effort": "high",
 }
-
-
-def _app_markup(count: int) -> str:
+def _app_markup(count: int, title: str = "Weekly focus") -> str:
     return f"""
       <div class="sanitizer-probe containment-probe">
         <img src="https://browser-leak.invalid/image?secret=html">
@@ -63,7 +62,7 @@ def _app_markup(count: int) -> str:
       <form action="https://browser-leak.invalid/form?secret=form">
         <main class="dashboard">
           <p class="eyebrow">Personal dashboard</p>
-          <h1>Weekly focus</h1>
+          <h1>{escape(title)}</h1>
           <div class="metric"><strong data-count>{count}</strong><span>open priorities</span></div>
           <label><input type="checkbox" data-action="toggle-review"> Reviewed</label>
           <div class="dashboard-actions">
@@ -86,8 +85,8 @@ def _empty_app() -> dict[str, Any]:
     }
 
 
-def _built_app() -> dict[str, Any]:
-    html = _app_markup(2)
+def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
+    html = _app_markup(2, title)
     css = """
       @import url(https://browser-leak.invalid/style?secret=css);
       :h\\6fst { position:fixed!important; inset:0!important; z-index:2147483647!important; }
@@ -143,40 +142,15 @@ def _built_app() -> dict[str, Any]:
     }
 
 
-def _completed_task_fixture() -> dict[str, Any]:
-    return {
-        "task_id": "task_builder_1",
-        "thread_id": builder_backend.THREAD_BASE_ID,
-        "input_message": "Requested by user:\nBuild a small weekly focus dashboard.",
-        "output_message": "Built the dashboard with durable priorities and an Add priority interaction.",
-        "error_message": "",
-        "status": "completed",
-        "agent_runtime": "codex",
-        "model": "gpt-5.6-terra",
-        "effort": "high",
-        "created_at": "2026-07-22T10:00:00Z",
-        "updated_at": "2026-07-22T10:00:04Z",
-        "started_at": "2026-07-22T10:00:01Z",
-        "completed_at": "2026-07-22T10:00:04Z",
-    }
-
-
-APP: dict[str, Any] = {}
-TASKS: list[dict[str, Any]] = []
-EVENTS: list[dict[str, Any]] = []
-HOST_THREAD_SESSION: dict[str, str] | None = None
-THREAD_SEQ = 1
+WORKSPACES: dict[str, dict[str, Any]] = {}
+NEXT_TASK_SEQUENCE = 1
 
 
 def reset_mock_state() -> None:
-    global HOST_THREAD_SESSION, THREAD_SEQ
+    global NEXT_TASK_SEQUENCE
     with MOCK_LOCK:
-        THREAD_SEQ = 1
-        APP.clear()
-        APP.update(_empty_app())
-        TASKS.clear()
-        EVENTS.clear()
-        HOST_THREAD_SESSION = None
+        WORKSPACES.clear()
+        NEXT_TASK_SEQUENCE = 1
         TASK_DEADLINES.clear()
 
 
@@ -207,10 +181,22 @@ def _route_app_api(
         return {"session_options": public_session_options()}
     with MOCK_LOCK:
         _progress_tasks()
-        if method == "GET" and relative == "state":
-            return {"app": copy.deepcopy(APP)}
-        if method == "GET" and relative == "conversation":
-            tasks = _conversation_tasks()
+        if method == "GET" and relative == "apps":
+            return _list_apps(query or {})
+        if method == "POST" and relative == "apps":
+            return {"app": _create_app()}
+        app_match = re.fullmatch(r"apps/([^/]+)/(.*)", relative)
+        if not app_match:
+            raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "app not found")
+        thread_id = _path_segment(app_match.group(1))
+        workspace = WORKSPACES.get(thread_id)
+        if workspace is None:
+            raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "app not found")
+        resource = app_match.group(2)
+        if method == "GET" and resource == "state":
+            return {"app": copy.deepcopy(workspace["app"])}
+        if method == "GET" and resource == "conversation":
+            tasks = _conversation_tasks(workspace)
             return {
                 "tasks": tasks,
                 "session": (
@@ -222,49 +208,129 @@ def _route_app_api(
                     if tasks else None
                 ),
             }
-        if method == "GET" and relative == "conversation/events":
-            return _conversation_events(query or {})
-        if method == "POST" and relative == "reset":
-            return _reset_app()
-        if method == "POST" and relative == "runtime/actions":
-            return _runtime_action(body)
-        if method == "POST" and relative == "messages":
-            return _create_message(body, requested_by="user")
-        if method == "POST" and relative == "runtime/agent-requests":
-            return _create_message(body, requested_by="app")
-        task_match = re.fullmatch(r"tasks/([^/]+)/(cancel|kill)", relative)
+        if method == "GET" and resource == "conversation/events":
+            return _conversation_events(workspace, query or {})
+        if method == "PUT" and resource == "name":
+            return {"app": _rename_app(workspace, body)}
+        if method == "POST" and resource in {"archive", "unarchive"}:
+            return {"app": _set_archived(workspace, resource == "archive")}
+        task_match = re.fullmatch(r"tasks/([^/]+)/(cancel|kill)", resource)
         if method == "POST" and task_match:
-            return _stop_task(task_match.group(1), task_match.group(2))
+            return _stop_task(workspace, task_match.group(1), task_match.group(2))
+        if workspace["archived"]:
+            raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "app not found")
+        if method == "POST" and resource == "runtime/actions":
+            return _runtime_action(workspace, body)
+        if method == "POST" and resource == "messages":
+            return _create_message(workspace, body, requested_by="user")
+        if method == "POST" and resource == "runtime/agent-requests":
+            return _create_message(workspace, body, requested_by="app")
     raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "route not found")
 
 
-def _reset_app() -> dict[str, Any]:
-    """Mirror the backend: clear the bundle and move to a new builder thread.
+def _list_apps(query: dict[str, list[str]]) -> dict[str, Any]:
+    unexpected = sorted(set(query) - {"archived"})
+    if unexpected:
+        raise builder_backend.AppError(
+            HTTPStatus.BAD_REQUEST,
+            f"unexpected app query fields: {', '.join(unexpected)}",
+        )
+    archived_values = query.get("archived") or []
+    if len(archived_values) > 1 or (
+        archived_values and archived_values[0] not in {"true", "false"}
+    ):
+        raise builder_backend.AppError(
+            HTTPStatus.BAD_REQUEST,
+            "archived must be true or false",
+        )
+    archived = bool(archived_values and archived_values[0] == "true")
+    apps = [
+        _app_summary(workspace)
+        for workspace in WORKSPACES.values()
+        if workspace["archived"] is archived
+    ]
+    apps.sort(key=lambda app: str(app["last_used_at"]), reverse=True)
+    return {"apps": apps}
 
-    The conversation goes with the thread, so the app returns to first run.
-    The revision keeps counting up rather than returning to zero.
-    """
-    global HOST_THREAD_SESSION, THREAD_SEQ
-    # The real backend stops anything still queued or running first; the mock
-    # has no worker, so clearing the list is the same end state.
-    THREAD_SEQ += 1
-    HOST_THREAD_SESSION = None
-    TASKS.clear()
-    EVENTS.clear()
-    APP.update({
-        "revision": APP["revision"] + 1,
-        "html": "",
-        "css": "",
-        "javascript": "",
-        "data": {},
-        "updated_at": _now(),
-    })
-    thread_id = builder_backend.THREAD_BASE_ID if THREAD_SEQ <= 1 else f"{builder_backend.THREAD_BASE_ID}-{THREAD_SEQ}"
-    return {"app": copy.deepcopy(APP), "thread_id": thread_id}
+
+def _app_summary(workspace: dict[str, Any]) -> dict[str, Any]:
+    active = [
+        {"task_id": task["task_id"], "status": task["status"]}
+        for task in workspace["tasks"]
+        if task["status"] in {"queued", "running"}
+    ]
+    last_used_at = max(
+        [
+            workspace["app"]["updated_at"],
+            *[str(task["updated_at"]) for task in workspace["tasks"]],
+        ]
+    )
+    return {
+        "thread_id": workspace["thread_id"],
+        "name": workspace["name"],
+        "archived": workspace["archived"],
+        "revision": workspace["app"]["revision"],
+        "created_at": workspace["created_at"],
+        "updated_at": workspace["app"]["updated_at"],
+        "last_used_at": last_used_at,
+        "session": copy.deepcopy(workspace["session"]),
+        "active_tasks": active,
+    }
 
 
-def _conversation_tasks() -> list[dict[str, Any]]:
-    tasks = sorted(TASKS, key=lambda task: (task["updated_at"], task["task_id"]), reverse=True)
+def _create_app() -> dict[str, Any]:
+    numbers = [
+        int(match.group(1))
+        for thread_id in WORKSPACES
+        if (match := builder_backend.THREAD_NAME_RE.fullmatch(thread_id))
+        is not None
+    ]
+    thread_id = f"app-{max(numbers, default=0) + 1}"
+    now = _now()
+    app = _empty_app()
+    app["updated_at"] = now
+    workspace = {
+        "thread_id": thread_id,
+        "name": thread_id,
+        "archived": False,
+        "created_at": now,
+        "app": app,
+        "tasks": [],
+        "events": [],
+        "session": None,
+    }
+    WORKSPACES[thread_id] = workspace
+    return _app_summary(workspace)
+
+
+def _rename_app(
+    workspace: dict[str, Any], body: Any
+) -> dict[str, Any]:
+    request = builder_backend._required_object(body, "rename request")
+    builder_backend._require_keys(request, {"name"}, required={"name"})
+    name = builder_backend._required_text(request.get("name"), "name")
+    if len(name) > builder_backend.MAX_APP_NAME_CHARS:
+        raise builder_backend.AppError(
+            HTTPStatus.BAD_REQUEST,
+            f"name must be at most {builder_backend.MAX_APP_NAME_CHARS} characters",
+        )
+    workspace["name"] = name
+    return _app_summary(workspace)
+
+
+def _set_archived(
+    workspace: dict[str, Any], archived: bool
+) -> dict[str, Any]:
+    workspace["archived"] = archived
+    return _app_summary(workspace)
+
+
+def _conversation_tasks(workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    tasks = sorted(
+        workspace["tasks"],
+        key=lambda task: (task["updated_at"], task["task_id"]),
+        reverse=True,
+    )
     tasks = copy.deepcopy(tasks[: builder_backend.CONVERSATION_TASK_LIMIT])
     for task in tasks:
         for field in ("input_message", "output_message", "error_message"):
@@ -274,29 +340,46 @@ def _conversation_tasks() -> list[dict[str, Any]]:
     return tasks
 
 
-def _conversation_events(query: dict[str, list[str]]) -> dict[str, Any]:
-    unexpected = sorted(set(query) - {"since"})
+def _conversation_events(
+    workspace: dict[str, Any], query: dict[str, list[str]]
+) -> dict[str, Any]:
+    unexpected = sorted(set(query) - {"since", "before"})
     if unexpected:
         raise builder_backend.AppError(
             HTTPStatus.BAD_REQUEST,
             f"unexpected conversation event query fields: {', '.join(unexpected)}",
         )
     since_values = query.get("since") or []
-    if len(since_values) > 1:
-        raise builder_backend.AppError(HTTPStatus.BAD_REQUEST, "since must be provided once")
-    since = 0
-    if since_values:
-        if not since_values[0].isdigit():
+    before_values = query.get("before") or []
+    if since_values and before_values:
+        raise builder_backend.AppError(
+            HTTPStatus.BAD_REQUEST, "since and before cannot be combined"
+        )
+    for name, values in (("since", since_values), ("before", before_values)):
+        if len(values) > 1:
             raise builder_backend.AppError(
                 HTTPStatus.BAD_REQUEST,
-                "since must be a non-negative integer",
+                f"{name} must be provided once",
             )
+        if values and not values[0].isdigit():
+            raise builder_backend.AppError(
+                HTTPStatus.BAD_REQUEST,
+                f"{name} must be a non-negative integer",
+            )
+    if since_values:
         since = int(since_values[0])
-    events = copy.deepcopy(
-        [event for event in EVENTS if event["seq"] > since][
-            :CONVERSATION_EVENTS_PAGE
+        page = [
+            event for event in workspace["events"] if event["seq"] > since
+        ][:CONVERSATION_EVENTS_PAGE]
+    else:
+        before = int(before_values[0]) if before_values else None
+        eligible = [
+            event
+            for event in workspace["events"]
+            if before is None or event["seq"] < before
         ]
-    )
+        page = eligible[-CONVERSATION_EVENTS_PAGE:]
+    events = copy.deepcopy(page)
     for event in events:
         payload = event.get("payload")
         if isinstance(payload, dict) and isinstance(payload.get("message"), str):
@@ -313,7 +396,9 @@ def _clip_message(value: str) -> str:
     return encoded[: maximum - len(suffix)].decode(errors="ignore") + "…"
 
 
-def _runtime_action(body: Any) -> dict[str, Any]:
+def _runtime_action(
+    workspace: dict[str, Any], body: Any
+) -> dict[str, Any]:
     action = builder_backend._required_object(body, "runtime action")
     name = builder_backend._required_text(action.get("action"), "action")
     allowed = {"action", "expected_revision", "path"}
@@ -325,27 +410,32 @@ def _runtime_action(body: Any) -> dict[str, Any]:
     if name not in {"set", "delete", "append"}:
         raise builder_backend.AppError(HTTPStatus.UNPROCESSABLE_ENTITY, "unsupported runtime action")
     revision = builder_backend._required_revision(action.get("expected_revision"))
-    if revision != APP["revision"]:
+    app = workspace["app"]
+    if revision != app["revision"]:
         raise builder_backend.AppError(HTTPStatus.CONFLICT, "app state changed; reload and retry")
     path = builder_backend._validated_path(action.get("path"))
     updated = builder_backend._mutate_data(
-        copy.deepcopy(APP["data"]), name, path, action.get("value")
+        copy.deepcopy(app["data"]), name, path, action.get("value")
     )
     builder_backend._validated_data(updated)
     candidate = {
-        **APP,
+        **app,
         "revision": revision + 1,
         "data": updated,
         "updated_at": _now(),
     }
     builder_backend._require_state_response_fits(candidate)
-    APP.clear()
-    APP.update(candidate)
-    return {"app": copy.deepcopy(APP)}
+    workspace["app"] = candidate
+    return {"app": copy.deepcopy(candidate)}
 
 
-def _create_message(body: Any, *, requested_by: str) -> dict[str, Any]:
-    global HOST_THREAD_SESSION
+def _create_message(
+    workspace: dict[str, Any],
+    body: Any,
+    *,
+    requested_by: str,
+) -> dict[str, Any]:
+    global NEXT_TASK_SEQUENCE
     request = builder_backend._required_object(body, "message request")
     config_fields = ("agent_runtime", "model", "effort")
     builder_backend._require_keys(
@@ -376,30 +466,34 @@ def _create_message(body: Any, *, requested_by: str) -> dict[str, Any]:
             raise builder_backend.AppError(HTTPStatus.BAD_REQUEST, error)
         assert isinstance(model, str) and isinstance(effort, str)
         requested = {"agent_runtime": runtime, "model": model, "effort": effort}
-    if HOST_THREAD_SESSION is not None:
-        if requested is not None and requested != HOST_THREAD_SESSION:
+    session = workspace["session"]
+    if session is not None:
+        if requested is not None and requested != session:
             raise builder_backend.AppError(
                 HTTPStatus.CONFLICT,
                 "agent_runtime, model, and effort must match the existing thread configuration",
             )
-        runtime = HOST_THREAD_SESSION["agent_runtime"]
-        model = HOST_THREAD_SESSION["model"]
-        effort = HOST_THREAD_SESSION["effort"]
+        runtime = session["agent_runtime"]
+        model = session["model"]
+        effort = session["effort"]
     else:
         if requested is None:
             raise builder_backend.AppError(
                 HTTPStatus.BAD_REQUEST,
                 "agent_runtime, model, and effort are required for the first message",
             )
-        HOST_THREAD_SESSION = requested
+        workspace["session"] = requested
         runtime = requested["agent_runtime"]
         model = requested["model"]
         effort = requested["effort"]
     now = _now()
-    status = "queued" if any(task["status"] == "running" for task in TASKS) else "running"
+    tasks = workspace["tasks"]
+    status = "queued" if any(
+        task["status"] == "running" for task in tasks
+    ) else "running"
     task = {
-        "task_id": f"task_builder_{len(TASKS) + 1}",
-        "thread_id": builder_backend.THREAD_BASE_ID,
+        "task_id": f"task_mock_{NEXT_TASK_SEQUENCE}",
+        "thread_id": workspace["thread_id"],
         "input_message": input_message,
         "output_message": "",
         "error_message": "",
@@ -410,17 +504,27 @@ def _create_message(body: Any, *, requested_by: str) -> dict[str, Any]:
         "created_at": now,
         "updated_at": now,
     }
+    NEXT_TASK_SEQUENCE += 1
     if status == "running":
-        _start_task(task)
-    TASKS.append(task)
+        _start_task(workspace, task)
+    tasks.append(task)
     return copy.deepcopy(task)
 
 
-def _stop_task(encoded_task_id: str, action: str) -> dict[str, Any]:
-    task_id = unquote(encoded_task_id)
-    if not task_id or "/" in task_id or "\\" in task_id:
-        raise builder_backend.AppError(HTTPStatus.BAD_REQUEST, "invalid path segment")
-    task = next((candidate for candidate in TASKS if candidate["task_id"] == task_id), None)
+def _stop_task(
+    workspace: dict[str, Any],
+    encoded_task_id: str,
+    action: str,
+) -> dict[str, Any]:
+    task_id = _path_segment(encoded_task_id)
+    task = next(
+        (
+            candidate
+            for candidate in workspace["tasks"]
+            if candidate["task_id"] == task_id
+        ),
+        None,
+    )
     if task is None:
         raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "task not found")
     expected_status = "queued" if action == "cancel" else "running"
@@ -430,80 +534,121 @@ def _stop_task(encoded_task_id: str, action: str) -> dict[str, Any]:
     now = _now()
     task.update({"status": "cancelled", "updated_at": now, "completed_at": now})
     TASK_DEADLINES.pop(task_id, None)
-    _start_next_task()
+    _start_next_task(workspace)
     return {"status": "accepted"}
 
 
 def _progress_tasks() -> None:
     now_monotonic = time.monotonic()
-    for task in TASKS:
-        deadline = TASK_DEADLINES.get(task["task_id"])
-        if task["status"] != "running" or deadline is None or now_monotonic < deadline:
-            continue
-        now = _now()
-        output_message = (
-            "Built the dashboard with durable priorities and interactive controls."
-            if APP["revision"] == 0
-            else (
-                "Reviewed the current structured data and refreshed the dashboard analysis."
-                if task["input_message"] == APP_AGENT_INPUT
-                else "Updated the personal app from this request."
+    for workspace in WORKSPACES.values():
+        app = workspace["app"]
+        for task in workspace["tasks"]:
+            deadline = TASK_DEADLINES.get(task["task_id"])
+            if (
+                task["status"] != "running"
+                or deadline is None
+                or now_monotonic < deadline
+            ):
+                continue
+            now = _now()
+            has_bundle = bool(app["html"] or app["css"] or app["javascript"])
+            output_message = (
+                "Built the dashboard with durable priorities and interactive controls."
+                if not has_bundle
+                else (
+                    "Reviewed the current structured data and refreshed the dashboard analysis."
+                    if task["input_message"] == APP_AGENT_INPUT
+                    else "Updated the web app from this request."
+                )
             )
-        )
-        task.update({
-            "status": "completed",
-            "updated_at": now,
-            "completed_at": now,
-            "output_message": output_message,
-        })
-        _append_task_message(task, output_message, "agent")
-        TASK_DEADLINES.pop(task["task_id"], None)
-        if APP["revision"] == 0:
-            APP.clear()
-            APP.update(_built_app())
-            APP["updated_at"] = now
-        elif task["input_message"] == APP_AGENT_INPUT:
-            APP["data"] = {
-                **APP["data"],
-                "analysis": "Two priorities remain open; review the security item before shipping.",
-            }
-            APP["revision"] += 1
-            APP["updated_at"] = now
-        else:
-            APP["revision"] += 1
-            APP["updated_at"] = now
-    _start_next_task()
+            task.update({
+                "status": "completed",
+                "updated_at": now,
+                "completed_at": now,
+                "output_message": output_message,
+            })
+            _append_task_message(
+                workspace, task, output_message, "agent"
+            )
+            TASK_DEADLINES.pop(task["task_id"], None)
+            if not has_bundle:
+                title = (
+                    "Weekly focus"
+                    if builder_backend.THREAD_NAME_RE.fullmatch(
+                        workspace["name"]
+                    )
+                    else workspace["name"]
+                )
+                built = _built_app(title)
+                built["updated_at"] = now
+                workspace["app"] = built
+                app = built
+            elif task["input_message"] == APP_AGENT_INPUT:
+                app["data"] = {
+                    **app["data"],
+                    "analysis": "Two priorities remain open; review the security item before shipping.",
+                }
+                app["revision"] += 1
+                app["updated_at"] = now
+            else:
+                app["revision"] += 1
+                app["updated_at"] = now
+        _start_next_task(workspace)
 
 
-def _start_next_task() -> None:
-    if any(task["status"] == "running" for task in TASKS):
+def _start_next_task(workspace: dict[str, Any]) -> None:
+    tasks = workspace["tasks"]
+    if any(task["status"] == "running" for task in tasks):
         return
-    queued = next((task for task in TASKS if task["status"] == "queued"), None)
+    queued = next(
+        (task for task in tasks if task["status"] == "queued"),
+        None,
+    )
     if queued is None:
         return
-    _start_task(queued)
+    _start_task(workspace, queued)
 
 
-def _start_task(task: dict[str, Any]) -> None:
+def _start_task(workspace: dict[str, Any], task: dict[str, Any]) -> None:
     now = _now()
     task.update({"status": "running", "updated_at": now, "started_at": now})
     TASK_DEADLINES[task["task_id"]] = time.monotonic() + MOCK_TASK_SECONDS
-    _append_task_message(task, task["input_message"], "user")
-    _append_task_message(task, INTERIM_AGENT_MESSAGE, "agent")
+    _append_task_message(
+        workspace, task, task["input_message"], "user"
+    )
+    _append_task_message(
+        workspace, task, INTERIM_AGENT_MESSAGE, "agent"
+    )
 
 
-def _append_task_message(task: dict[str, Any], message: str, source: str) -> None:
-    seq = EVENTS[-1]["seq"] + 1 if EVENTS else 1
-    EVENTS.append(
+def _append_task_message(
+    workspace: dict[str, Any],
+    task: dict[str, Any],
+    message: str,
+    source: str,
+) -> None:
+    events = workspace["events"]
+    seq = events[-1]["seq"] + 1 if events else 1
+    events.append(
         {
             "seq": seq,
             "timestamp": _now(),
-            "event_id": f"event_{seq}",
+            "event_id": f"event_{workspace['thread_id']}_{seq}",
             "event_type": "task.message",
             "task_id": task["task_id"],
             "payload": {"message": message, "source": source},
         }
     )
+
+
+def _path_segment(value: str) -> str:
+    decoded = unquote(value)
+    if not decoded or "/" in decoded or "\\" in decoded:
+        raise builder_backend.AppError(
+            HTTPStatus.BAD_REQUEST,
+            "invalid path segment",
+        )
+    return decoded
 
 
 def _now() -> str:
@@ -515,12 +660,15 @@ def desktop_smoke(page: Any) -> None:
 
     leaked: list[str] = []
     page.on("request", lambda request: leaked.append(request.url) if "browser-leak.invalid" in request.url else None)
-    page.locator("#stable-app-tabs").get_by_role("button", name="Personal Web App Builder", exact=True).click()
+    page.locator("#stable-app-tabs").get_by_role("button", name="Agentic Web App", exact=True).click()
     expect(page.locator("#panel-app-personal_web_app_builder")).to_be_visible()
-    frame = page.frame_locator('iframe[title="Personal Web App Builder"]')
+    frame = page.frame_locator('iframe[title="Agentic Web App"]')
 
-    expect(frame.locator(".builder-title")).to_have_text("Personal Web App Builder")
+    expect(frame.locator("#app-title")).to_have_text("Select an app")
     expect(frame.locator(".builder-bar")).to_be_visible()
+    expect(frame.locator("#first-run-how")).to_be_hidden()
+    frame.locator("#new-app").click()
+    expect(frame.locator("#app-title")).to_have_text("app-1")
     expect(frame.locator("#first-run-how")).to_be_visible()
     expect(frame.locator("#first-run-guidance")).to_be_visible()
     expect(frame.get_by_text("Build it through Agent chat", exact=True)).to_be_visible()
@@ -537,8 +685,8 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#effort-fixed")).to_be_hidden()
     frame.locator("#agent-settings-help").hover()
     expect(frame.locator("#agent-settings-help-text")).to_be_visible()
-    expect(frame.locator("#agent-settings-help-text")).to_contain_text("before your first message")
-    expect(frame.locator("#agent-settings-help-text")).to_contain_text("cannot be changed in this app version")
+    expect(frame.locator("#agent-settings-help-text")).to_contain_text("before the first message")
+    expect(frame.locator("#agent-settings-help-text")).to_contain_text("fixed for this app afterward")
     frame.get_by_role("button", name="Start building", exact=True).click()
     expect(frame.locator("#chat-drawer")).to_be_visible()
     frame.locator("#message").fill("Build a small weekly focus dashboard.")
@@ -558,8 +706,7 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#effort-fixed")).to_have_text("High")
     frame.locator("#agent-settings-help").hover()
     expect(frame.locator("#agent-settings-help-text")).to_be_visible()
-    expect(frame.locator("#agent-settings-help-text")).to_contain_text("fixed for this session")
-    expect(frame.locator("#agent-settings-help-text")).to_contain_text("cannot be changed in this app version")
+    expect(frame.locator("#agent-settings-help-text")).to_contain_text("fixed for this app")
     expect(frame.locator("#first-run-guidance")).to_be_hidden()
     expect(frame.locator("#chat-drawer select")).to_have_count(0)
     expect(frame.locator("#runtime-status")).to_have_text("Oversized render rejected")
@@ -620,8 +767,10 @@ def desktop_smoke(page: Any) -> None:
     page.reload()
     expect(page.locator("#app")).to_be_visible()
     page.locator("#stable-app-tabs").get_by_role(
-        "button", name="Personal Web App Builder", exact=True
+        "button", name="Agentic Web App", exact=True
     ).click()
+    expect(frame.locator("#app-title")).to_have_text("Select an app")
+    frame.get_by_role("button", name="app-1", exact=False).click()
     expect(frame.locator(".metric strong")).to_have_text("3")
 
     frame.get_by_role("button", name="Agent chat", exact=True).click()
@@ -644,17 +793,52 @@ def desktop_smoke(page: Any) -> None:
     if leaked:
         raise AssertionError(f"generated interaction caused browser requests: {leaked}")
 
-    # Start over stays available on a built app; the mobile pass runs it, so
-    # this pass leaves the dashboard standing for it.
-    expect(frame.get_by_role("button", name="Start over", exact=True)).to_be_enabled()
+    page.once("dialog", lambda dialog: dialog.accept("Weekly focus"))
+    frame.get_by_role("button", name="Rename app", exact=True).click()
+    expect(frame.locator("#app-title")).to_have_text("Weekly focus")
+
+    # A second workspace has a separate thread, bundle, data revision, and
+    # conversation. Building and switching it must not disturb the first app.
+    frame.locator("#new-app").click()
+    expect(frame.locator("#app-title")).to_have_text("app-2")
+    expect(frame.locator(".dashboard")).to_have_count(0)
+    expect(frame.locator("#revision-label")).to_have_text("Empty app")
+    page.once("dialog", lambda dialog: dialog.accept("Scratch app"))
+    frame.get_by_role("button", name="Rename app", exact=True).click()
+    frame.get_by_role("button", name="Start building", exact=True).click()
+    frame.locator("#message").fill("Build a separate scratch dashboard.")
+    frame.get_by_role("button", name="Send message", exact=True).click()
+    expect(frame.locator(".dashboard")).to_be_visible(timeout=8_000)
+    expect(frame.locator(".dashboard h1")).to_have_text("Scratch app")
+    frame.get_by_role("button", name="Close agent chat", exact=True).click()
+    expect(frame.locator(".metric strong")).to_have_text("2")
+
+    frame.locator(".app-item", has_text="Weekly focus").click()
+    expect(frame.locator(".metric strong")).to_have_text("3")
+    frame.get_by_role("button", name="Agent chat", exact=True).click()
+    expect(frame.locator("#chat-history")).not_to_contain_text(
+        "separate scratch dashboard"
+    )
+    frame.get_by_role("button", name="Close agent chat", exact=True).click()
+
+    frame.locator(".app-item", has_text="Scratch app").click()
+    expect(frame.locator(".metric strong")).to_have_text("2")
+    frame.get_by_role("button", name="Agent chat", exact=True).click()
+    expect(frame.locator("#chat-history")).to_contain_text(
+        "separate scratch dashboard"
+    )
+    frame.get_by_role("button", name="Close agent chat", exact=True).click()
+    frame.locator(".app-item", has_text="Weekly focus").click()
 
 
 def mobile_smoke(page: Any) -> None:
     from playwright.sync_api import expect
 
     page.locator("#mobile-nav-toggle").click()
-    page.locator("#stable-app-tabs").get_by_role("button", name="Personal Web App Builder", exact=True).click()
-    frame = page.frame_locator('iframe[title="Personal Web App Builder"]')
+    page.locator("#stable-app-tabs").get_by_role("button", name="Agentic Web App", exact=True).click()
+    frame = page.frame_locator('iframe[title="Agentic Web App"]')
+    frame.get_by_role("button", name="Show app list", exact=True).click()
+    frame.get_by_role("button", name="Weekly focus", exact=False).click()
     expect(frame.locator(".dashboard")).to_be_visible()
     expect(frame.locator("#runtime")).to_be_hidden()
     expect(frame.locator("#model")).to_be_hidden()
@@ -670,20 +854,15 @@ def mobile_smoke(page: Any) -> None:
         "() => document.documentElement.scrollWidth - document.documentElement.clientWidth"
     )
     if overflow > 1:
-        raise AssertionError(f"Personal Web App Builder overflows horizontally by {overflow}px")
+        raise AssertionError(f"Agentic Web App overflows horizontally by {overflow}px")
 
-    # Start over discards the generated app and its conversation together: the
-    # builder continues in a new host thread, so the app returns to first run.
-    # That is the way out of a builder whose thread can no longer run work.
-    page.once("dialog", lambda dialog: dialog.accept())
-    frame.get_by_role("button", name="Start over", exact=True).click()
-    expect(frame.locator("#empty-state")).to_be_visible()
-    expect(frame.locator("#first-run-how")).to_be_visible()
-    expect(frame.locator("#revision-label")).to_have_text("Empty app")
-    expect(frame.locator(".dashboard")).to_have_count(0)
-    # The new thread has no fixed configuration yet, so the selectors return.
-    expect(frame.locator("#runtime")).to_be_visible()
-    expect(frame.locator("#runtime-fixed")).to_be_hidden()
-    frame.get_by_role("button", name="Agent chat", exact=True).click()
-    expect(frame.locator("#chat-history")).not_to_contain_text("Built the dashboard")
-    frame.get_by_role("button", name="Close agent chat", exact=True).click()
+    # Archiving hides the workspace without deleting its bundle or thread.
+    frame.get_by_role("button", name="Archive", exact=True).click()
+    expect(frame.locator("#app-title")).to_have_text("Select an app")
+    frame.get_by_role("button", name="Show app list", exact=True).click()
+    frame.get_by_role("button", name="Show archived", exact=True).click()
+    frame.get_by_role("button", name="Weekly focus", exact=False).click()
+    expect(frame.locator(".dashboard")).to_be_visible()
+    expect(frame.locator("#generated-host")).to_have_class(re.compile(r"\breadonly\b"))
+    frame.get_by_role("button", name="Unarchive", exact=True).click()
+    expect(frame.locator("#app-title")).to_have_text("Archived apps")

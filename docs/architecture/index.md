@@ -19,18 +19,14 @@ so operators and contributors can jump to the trust boundary they need.
 | [Runtime harness dependencies](harness-dependencies.md) | Codex and Claude Code interfaces, auth files, request shapes, and upgrade review points. |
 | [Admin API architecture](admin-api.md) | Local API security, task orchestration, and maintenance. |
 | [Apps](apps/apps.md) | App services, storage and migrations, embedded admin UI surfaces, and app security boundaries. |
-| [Workspace Kit](apps/workspace-kit.md) | Shared resident-workspace state, actions, run lifecycle, bounds, authentication, and verification. |
 | [App: Agent Chat](apps/agent-chat.md) | The threaded chat app: thread index, task references, and its display-only agent surface. |
-| [App: Mission Pursuit](apps/mission-pursuit.md) | The agent-furnished workspace app: action protocol, scheduling, artifacts, memory, and its structured agent boundary. |
-| [App: Alpha Seeker](apps/alpha-seeker.md) | The financial-research workspace: read-only IBKR and Polymarket monitoring, watchlists, and a scheduled market brief. |
-| [App: Social Marketer](apps/social-marketer.md) | The marketing workspace: campaign planning, a drafts table, and approval-gated publishing to X and LinkedIn. |
-| [App: Virality Machine](apps/virality-machine.md) | The short-form-video workspace: Runway generation, a render-job queue, storyboards, and approval-gated Instagram publishing. |
-| [App: Software Builder](apps/software-builder.md) | The GitHub workspace: creates, reviews, and advances pull requests in connected repositories. |
+| [App: Agentic Web App](apps/personal-web-app-builder.md) | Multiple isolated agent-built web-app workspaces and preview surfaces. |
 | [Agent App API](apps/agent-app-api.md) | The `app_api` tool: kernel-attributed agent → app backend calls through the dedicated agent-app service. |
 | [Network controls](network-controls.md) | nftables, typed integration guards (AI providers, GitHub, packages, custom domains), agent introspection, and fail-closed behavior. |
 | [GitHub write-path controls](github-write-path-controls.md) | The implemented `.github` push-inspection, quarantine, approval, replay, and failure model. |
 | [Tools](tools/README.md) | Bundled tool framework: the host-neutral tool contract, this host's integration, approvals, and the bundled tool packages. |
 | [Local sockets](local-sockets.md) | Peer-credentialed Unix-domain sockets (tools, agent-app, app-backend, Postgres) and their trust boundaries. |
+| [Agent preview ports](agent-preview-ports.md) | The loopback port range the agent may serve HTTP on and test against, and the operator's SSH-forward path to view it. |
 | [IAM policy notes](iam-policy.md) | Why each deploy IAM statement exists and why its scope is constrained. |
 
 ## Overview
