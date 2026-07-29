@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Agentic Web App</title>
 <link rel="stylesheet" href="/admin_ui.css">
+<link rel="stylesheet" href="/v1/apps/agent_chat/ui/rich_text.css">
 <link rel="stylesheet" href="personal_web_app_builder.css">
 </head>
 <body>
@@ -39,30 +40,27 @@
         </div>
         <span id="revision-label" class="revision-label"></span>
       </div>
-      <div id="agent-settings" class="agent-settings" aria-label="App agent settings" hidden>
+      <div id="agent-settings" class="agent-settings" aria-label="App agent settings"
+        aria-describedby="agent-settings-idle-note" hidden>
         <label>
           <span>Agent</span>
           <select id="runtime" aria-label="App agent"></select>
-          <span id="runtime-fixed" class="agent-setting-value" hidden></span>
         </label>
         <label>
           <span>Model</span>
           <select id="model" aria-label="App model"></select>
-          <span id="model-fixed" class="agent-setting-value" hidden></span>
         </label>
         <label>
           <span>Level</span>
           <select id="effort" aria-label="App effort level"></select>
-          <span id="effort-fixed" class="agent-setting-value" hidden></span>
         </label>
-        <span class="agent-settings-help">
-          <button id="agent-settings-help" class="agent-settings-help-button" aria-label="About app agent settings" aria-describedby="agent-settings-help-text">
-            <svg viewBox="0 0 20 20" aria-hidden="true">
-              <circle cx="10" cy="10" r="7.25" fill="none" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M10 9.1v4.1M10 6.7h.01" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-            </svg>
-          </button>
-          <span id="agent-settings-help-text" class="agent-settings-help-text" role="tooltip">Choose Agent, Model, and Level before the first message. They are fixed for this app afterward.</span>
+        <span id="agent-settings-idle-note" class="agent-settings-note" role="tooltip">
+          Agent settings can only be changed while the agent is idle. Stop this
+          app's agent first if you want to change them.
+        </span>
+        <span id="agent-session-change-warning" class="agent-settings-note change" role="status" hidden>
+          Changing Agent, Model, or Level starts a new agent session. Some older
+          context may be omitted, and provider cache reads will be invalidated.
         </span>
       </div>
       <div class="builder-actions">
@@ -90,10 +88,6 @@
             <span>Interact with the interface the agent builds. Each app keeps its own code, data, and conversation.</span>
           </li>
         </ol>
-        <div id="first-run-guidance" class="first-run-guidance" role="note" hidden>
-          <strong>Choose your agent settings before you start</strong>
-          <span>Agent, Model, and Level are fixed when you send this app's first message.</span>
-        </div>
         <button id="empty-primary" class="primary">New app</button>
       </div>
       <div id="generated-host" class="generated-host" hidden></div>
@@ -117,7 +111,15 @@
       </div>
       <footer class="chat-composer" id="chat-composer">
         <div id="chat-status" class="chat-status" hidden></div>
+        <div id="composer-running" class="composer-running" hidden>
+          <span>Agent is working</span>
+          <button id="stop-turn" class="danger ghost">Stop</button>
+        </div>
+        <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
         <div class="composer-row">
+          <button id="attach-file" class="attach-button" aria-label="Attach files" title="Attach up to 10 files (25 MiB each)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.2 10.8 4.7-4.7a2.4 2.4 0 0 1 3.4 3.4l-6.2 6.2a4 4 0 0 1-5.7-5.7l6.4-6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          </button>
           <textarea id="message" rows="1" placeholder="Describe the app or ask about its data"></textarea>
           <button id="send-message" class="send-button" aria-label="Send message" title="Send">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15.5v-11m0 0L5.5 9M10 4.5 14.5 9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -128,6 +130,7 @@
   </section>
 </div>
 
+<script src="/v1/apps/agent_chat/ui/rich_text.js"></script>
 <script src="personal_web_app_builder.js"></script>
 </body>
 </html>

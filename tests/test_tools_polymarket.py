@@ -211,14 +211,43 @@ class PolymarketToolTests(unittest.TestCase):
         self.assertIsInstance(result, ActionFailed)
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
-            self.assertIn("prices-history", url)
-            self.assertIn("interval=1w", url)
-            return {"history": [{"t": 1751000000, "p": 0.31}, {"t": "bad", "p": 0.32}]}
+            self.assertEqual(method, "POST")
+            self.assertIn("batch-prices-history", url)
+            self.assertEqual(
+                kwargs["body"],
+                {"markets": ["1234"], "interval": "1w", "fidelity": 60},
+            )
+            return {
+                "history": {
+                    "1234": [
+                        {"t": 1751000000, "p": 0.31},
+                        {"t": "bad", "p": 0.32},
+                    ]
+                }
+            }
 
         with patch.object(polymarket, "json_request", fake_json_request):
             result = PolymarketTool().execute("price_history", {"token_id": "1234", "interval": "1w"}, FakeHostAPI())
         assert isinstance(result, ActionExecuted)
         self.assertEqual(result.result["history"], [{"t": 1751000000, "p": 0.31}])
+
+    def test_price_history_ignores_points_for_other_tokens(self) -> None:
+        with patch.object(
+            polymarket,
+            "json_request",
+            return_value={
+                "history": {
+                    "5678": [{"t": 1751000000, "p": 0.8}],
+                }
+            },
+        ):
+            result = PolymarketTool().execute(
+                "price_history",
+                {"token_id": "1234"},
+                FakeHostAPI(),
+            )
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["history"], [])
 
     def test_rate_limit_maps_to_specific_error(self) -> None:
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:

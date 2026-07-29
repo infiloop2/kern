@@ -4,13 +4,13 @@
 | --- | --- | --- |
 | `kern-operator` | Human SSH login. | Full passwordless sudo, and therefore intentionally equivalent to root once logged in. |
 | `kern-admin` | Runs the admin API; owns admin state (the `kern_admin` database role, full access). | sudo for exactly fifteen root helpers (below). No internet egress at all. |
-| `kern-tools` | Runs the bundled tool packages in the dedicated tools service; owns the agent-facing tools socket. | No sudo. Postgres role scoped to the five tool tables plus read access to `secret_keys`. DNS and outbound HTTPS (443) for tool third-party APIs. |
+| `kern-tools` | Runs the bundled tool packages in the dedicated tools service; owns the agent-facing tools socket. | No sudo. Postgres role scoped to the five tool tables plus read access to `secret_keys`. DNS and outbound HTTPS (443) for tool third-party APIs; explicitly blocked from the loopback admin listener. |
 | `kern-agent-network` | Runs the network-introspection service and owns its agent-facing socket. | No sudo, secrets, or egress. Postgres role has SELECT-only access to network policy and decision-log tables. |
 | `kern-agent-app` | Runs the agent-app service; owns the agent-facing app API socket and proxies attributed `app_api` calls to app backends. | No sudo, database access, secrets, or egress. Its only network reach is opening loopback connections to installed app backend ports (the one uid besides `kern-admin` nftables allows there). |
-| `kern-proxy` | Runs the policy proxy; owns proxy TLS and Git quarantine files. | No sudo. A narrow Postgres role reads enforcement inputs and the working token/key, inserts network and pending-push records, and prunes network events. Only nftables-approved DNS and TCP 80/443 egress. |
+| `kern-proxy` | Runs the policy proxy; owns proxy TLS and Git quarantine files. | No sudo. A narrow Postgres role reads enforcement inputs and the working token/key, inserts network and pending-push records, and prunes network events. Only nftables-approved DNS and TCP 80/443 egress; explicitly blocked from the loopback admin listener. |
 | `kern-agent` | Runs Codex, Claude Code, and Hermes runtime processes. | None. No sudo, no database role, no direct network off the host. Its only loopback egress is the policy-proxy port and its own preview range `8000-8015` (its own HTTP servers). That range is default-deny — only the agent and the operator's SSH forward are allowed, both directions dropped for everyone else — so no other principal reaches a preview server or answers a connection the agent opened. See [agent-preview-ports.md](agent-preview-ports.md). |
 | Per-app account | Runs one installed app backend and owns that app's derived Postgres schema, `app_<app_id>`. | No sudo. Its matching Postgres role is confined to the app schema and has no host-table grants. It may answer established admin reverse-proxy connections on its assigned loopback port and call allowlisted host routes over the peer-authenticated app socket, but cannot initiate arbitrary TCP loopback or external connections. |
-| `cloudflared` | Runs the optional Cloudflare Tunnel connector. | No sudo, no database role. Only nftables-approved DNS, TCP 443, and TCP/UDP 7844 egress. |
+| `cloudflared` | Runs the optional Cloudflare Tunnel connector. | No sudo, no database role. Only nftables-approved DNS, TCP 443, and TCP/UDP 7844 egress; one of the four trusted uids allowed to connect to the loopback admin listener. |
 | `postgres` | Runs the admin-state Postgres. | Database superuser over the local socket; no sudo, no network egress. |
 
 The service accounts use fixed numeric IDs: `kern-admin` is
@@ -64,7 +64,7 @@ the root volume as root-owned code.
   prompt over stdin, and uses the same dummy AWS and agent-slice boundary.
 - `stop-agent-thread` — SIGKILLs and stops the transient
   `kern-agent-thread-<thread_id>.scope` cgroup and clears any failed
-  remnant, so a killed turn frees its thread's scope name. It validates the
+  remnant, so a stopped turn frees its thread's scope name. It validates the
   thread id against the same pattern the launch helpers enforce and touches
   only that one unit.
 - `read-aws-account` — receives the Bedrock key pair from the admin

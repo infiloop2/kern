@@ -488,6 +488,7 @@ StartLimitIntervalSec=0
 Type=notify
 User=postgres
 ExecStart=$PG_BIN/postgres -D $PGDATA_DIR
+ExecStopPost=/usr/bin/env PYTHONPATH=/opt/kern-host /usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-postgres
 Restart=always
 RestartSec=3
 TimeoutStartSec=300
@@ -965,6 +966,16 @@ $(cat /tmp/kern_cloudflare_rules)
     meta skuid "kern-tools" tcp dport 443 accept
     udp dport 53 meta skuid != 0 drop
     tcp dport 53 meta skuid != 0 drop
+    # The admin listener is loopback-only, but loopback alone is not an
+    # identity boundary: an egress-capable local service could otherwise forge
+    # Cloudflare's forwarding headers and spread login attempts across fake
+    # source buckets. Only the two operator transports plus the trusted admin
+    # and root accounts may originate a connection to the control plane.
+    oif lo tcp dport @ADMIN_PORT@ meta skuid 0 accept
+    oif lo tcp dport @ADMIN_PORT@ meta skuid "kern-admin" accept
+    oif lo tcp dport @ADMIN_PORT@ meta skuid "kern-operator" accept
+    oif lo tcp dport @ADMIN_PORT@ meta skuid "cloudflared" accept
+    oif lo tcp dport @ADMIN_PORT@ drop
     oif lo tcp dport @PROXY_PORT@ meta skuid "kern-agent" accept
 @AGENT_PREVIEW_NFTABLES_RULES@
     oif lo meta skuid "kern-agent" drop
@@ -1045,6 +1056,7 @@ User=kern-proxy
 UMask=0077
 Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.network_proxy.service
+ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-network-proxy
 Restart=always
 RestartSec=3
 
@@ -1071,6 +1083,7 @@ RuntimeDirectory=kern-tools
 RuntimeDirectoryMode=0755
 Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.tools.service
+ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-tools
 Restart=always
 RestartSec=3
 
@@ -1095,6 +1108,7 @@ RuntimeDirectory=kern-agent-network
 RuntimeDirectoryMode=0755
 Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.agent_network.service
+ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-agent-network
 Restart=always
 RestartSec=3
 
@@ -1123,6 +1137,7 @@ RuntimeDirectory=kern-agent-app
 RuntimeDirectoryMode=0755
 Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.agent_app.service
+ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-agent-app
 Restart=always
 RestartSec=3
 
@@ -1150,6 +1165,28 @@ Environment=PYTHONPATH=/opt/kern-host
 Environment=HOME=/mnt/kern-admin/admin-home
 WorkingDirectory=/mnt/kern-admin/admin-home
 ExecStart=/usr/bin/python3 -m host.runtime.admin_api.service
+ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-admin-api
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/systemd/system/kern-host-errors.service <<'UNIT'
+[Unit]
+Description=Kern Host Error Journal Collector
+After=systemd-journald.service
+Wants=kern-postgres.service
+StartLimitIntervalSec=0
+
+[Service]
+User=kern-admin
+SupplementaryGroups=systemd-journal
+UMask=0077
+Environment=PYTHONPATH=/opt/kern-host
+ExecStart=/usr/bin/python3 -m host.runtime.host_errors.collector
+ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-host-errors
 Restart=always
 RestartSec=3
 
@@ -1170,6 +1207,7 @@ StartLimitIntervalSec=0
 [Service]
 User=cloudflared
 ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run --token-file /etc/kern/cloudflared.token
+ExecStopPost=/usr/bin/env PYTHONPATH=/opt/kern-host /usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-cloudflared
 Restart=always
 RestartSec=5
 
@@ -1182,6 +1220,7 @@ fi
 start_services() {
 systemctl daemon-reload
 systemctl enable --now kern-network-proxy.service
+systemctl enable --now kern-host-errors.service
 systemctl enable --now kern-tools.service
 systemctl enable --now kern-agent-network.service
 systemctl enable --now kern-agent-app.service

@@ -69,7 +69,7 @@ flowchart LR
     tools -->|"third-party tool APIs"| outside_services
 
     admin -->|"reverse proxy to assigned loopback ports"| apps
-    apps -->|"app-backend.sock task/thread allowlist, peer uid"| admin
+    apps -->|"app-backend.sock thread-route allowlist, peer uid"| admin
 
     agent -->|"app_api via agent-app.sock, cgroup thread attribution"| agentapp
     agentapp -->|"reverse proxy to owning app's /agent/ routes"| apps

@@ -50,10 +50,21 @@ export function loadParentDirectory() {
 async function readAgentFile(path) {
   try {
     fileMessage("");
-    if (/\.(mp4|mov)$/i.test(path)) {
+    const isVideo = /\.(mp4|mov)$/i.test(path);
+    const isImage = /\.(jpe?g|png|webp)$/i.test(path);
+    if (isVideo || isImage) {
       const blob = await apiBlob(`/v1/agent-files/content?path=${encodeURIComponent(path)}`);
-      if (!blob.type.startsWith("video/")) throw new Error("file is not a supported video");
-      renderFileVideo(path, blob);
+      if (isVideo) {
+        if (!["video/mp4", "video/quicktime"].includes(blob.type)) {
+          throw new Error("file is not a supported video");
+        }
+        renderFileVideo(path, blob);
+      } else {
+        if (!["image/jpeg", "image/png", "image/webp"].includes(blob.type)) {
+          throw new Error("file is not a supported image");
+        }
+        renderFileImage(path, blob);
+      }
       return;
     }
     const response = await api("GET", `/v1/agent-files/read?path=${encodeURIComponent(path)}`);
@@ -126,10 +137,7 @@ function fileRow(name, path, type, sizeBytes) {
 }
 
 function renderFileContent(file) {
-  if (activeFileUrl) URL.revokeObjectURL(activeFileUrl);
-  activeFileUrl = null;
-  $("file-video").hidden = true;
-  $("file-video").removeAttribute("src");
+  resetFileMedia();
   $("file-content").hidden = false;
   const truncated = file.truncated ? " (truncated)" : "";
   $("file-viewer-title").textContent = `${file.path || ""}${truncated}`;
@@ -137,13 +145,36 @@ function renderFileContent(file) {
 }
 
 function renderFileVideo(path, blob) {
-  if (activeFileUrl) URL.revokeObjectURL(activeFileUrl);
+  resetFileMedia();
   activeFileUrl = URL.createObjectURL(blob);
   $("file-viewer-title").textContent = path;
   $("file-content").hidden = true;
   const video = $("file-video");
   video.src = activeFileUrl;
   video.hidden = false;
+}
+
+function renderFileImage(path, blob) {
+  resetFileMedia();
+  activeFileUrl = URL.createObjectURL(blob);
+  $("file-viewer-title").textContent = path;
+  $("file-content").hidden = true;
+  const image = $("file-image");
+  image.src = activeFileUrl;
+  image.alt = path;
+  image.hidden = false;
+}
+
+function resetFileMedia() {
+  if (activeFileUrl) URL.revokeObjectURL(activeFileUrl);
+  activeFileUrl = null;
+  const video = $("file-video");
+  video.hidden = true;
+  video.removeAttribute("src");
+  const image = $("file-image");
+  image.hidden = true;
+  image.removeAttribute("src");
+  image.alt = "";
 }
 
 export function goToFilePath() {

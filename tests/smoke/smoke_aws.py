@@ -11,23 +11,23 @@ login-dependent runtime checks live in ``tests/stage/stage_aws.py``.
     nftables, systemd, the proxy CA)
   - the admin API answering over the SSH tunnel (health, network policy)
   - the real admin UI in headless Chrome: login, app navigation, Mission
-    Pursuit popovers and settings, first-message task creation, and the clear
-    pre-provider-login failure shown back in the workspace
-  - admin API contract edge cases over the tunnel: auth rejection, the task
-    lifecycle and its 4xx responses,
+    Pursuit popovers and settings, first-message turn creation, and the clear
+    pre-provider-login rejection shown back in the workspace
+  - admin API contract edge cases over the tunnel: auth rejection, the
+    thread-message admission contract and its 4xx responses,
     policy validation (including managed OpenAI and Claude provider schema),
     and event pagination
-  - concurrency on the real host: parallel task creation, a same-key
+  - concurrency on the real host: parallel message admissions, a same-key
     concurrent policy replaces, and parallel proxy traffic
     with consistent event sequencing
-  - state transaction edge cases on the real host: racing cancels of one task
-    resolve to exactly one winner, racing updates apply last-writer-wins (and
-    never tear), an update racing a cancel cannot resurrect the task, and
-    parallel writers never duplicate an event seq
+  - state transaction edge cases on the real host: racing first messages on
+    one thread are all rejected whole-cloth (a rejected admission leaves no
+    thread row and no events), racing stops answer cleanly, and parallel
+    writers never duplicate an event seq
   - network enforcement on the real host: the agent reaches an allowed domain
     only through the proxy, a denied path is blocked, direct external egress is
-    dropped by nftables, and non-proxy loopback access to the admin API is
-    blocked
+    dropped by nftables, and the admin listener admits only the Cloudflare,
+    SSH-operator, admin-service, and root identities
   - deploy-time config schema on the real host: agent_runtime, agent_type,
     operator connection details and network_controls are absent from persisted runtime
     config; first boot creates an empty runtime network policy, with no
@@ -83,7 +83,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import calendar
 import hashlib
 import json
 import os
@@ -98,6 +97,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -115,7 +115,16 @@ ACCESS_KEY_ENV = "AWS_ACCESS_KEY_ID"
 SECRET_KEY_ENV = "AWS_SECRET_ACCESS_KEY"
 
 HEALTH_TIMEOUT = 600  # bootstrap installs packages; allow time before the API answers
-MESSAGE_LIMIT = 50_000  # mirrors the admin API's input_message cap
+MESSAGE_LIMIT = 50_000  # mirrors the admin API's message cap
+# Public thread events that explicitly settle running work. Successful
+# completion has no event and is observed through the thread's idle status.
+TURN_TERMINAL_STATUSES = {
+    "thread.error": "failed",
+    "thread.stopped": "cancelled",
+}
+# The per-thread fence while a previous turn's process closes; senders retry it.
+THREAD_BUSY_MARKER = "agent is finishing"
+RUNTIME_INACTIVE_MARKER = "messages run only while it is active"
 SMOKE_RUNTIMES = ("codex", "claude_code", "hermes")
 SMOKE_OAUTH_RUNTIMES = ("codex", "claude_code")
 SMOKE_MANAGED_PROVIDERS = {"openai": True, "claude": True, "bedrock": True}
@@ -270,11 +279,11 @@ def main(argv: list[str] | None = None) -> int:
         smoke.check_host_config_schema()
         smoke.check_ui_page()
         smoke.check_admin_auth()
+        smoke.check_app_backends_without_providers()
         smoke.check_initial_disabled_provider_deploy()
         smoke.check_network_policy()
         smoke.check_policy_validation_and_concurrency()
-        smoke.check_task_lifecycle()
-        smoke.check_task_pagination()
+        smoke.check_turn_admission_contract()
         smoke.check_admin_concurrency()
         smoke.check_state_transactions()
         smoke.check_event_pagination()
@@ -298,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
 
 class AwsSmoke:
     # Host-side thread ids are the API thread ids verbatim; the stage harness
-    # overrides this with its per-run prefix (see StageAwsSmoke.task_body).
+    # sets a per-run prefix that api_thread_id applies to every thread route.
     thread_prefix = ""
 
     def __init__(self) -> None:
@@ -312,34 +321,73 @@ class AwsSmoke:
         self.tunnel_open = False
         self.passed = 0
         self.total = 0
-        self.parallel_task_ids: dict[str, str] = {}  # completed parallel task id -> its token
         self.parallel_threads: dict[str, tuple[str, str]] = {}  # runtime -> (thread id, token)
 
     @property
     def managed_domains(self) -> tuple[str, ...]:
         return SMOKE_MANAGED_DOMAINS
 
-    def task_body(
+    def api_thread_id(self, thread_id: str) -> str:
+        """The host-side thread id for a harness thread name."""
+        return self.thread_prefix + thread_id
+
+    def message_body(
         self,
-        input_message: str,
-        thread_id: str,
+        message: str,
         *,
         runtime: str | None = None,
         model: str | None = None,
         effort: str | None = None,
     ) -> dict:
+        """A first-message body: the full session config a new thread requires."""
         selected_runtime = runtime or self.agent_runtime
         selected_model = model or SMOKE_RUNTIME_MODELS[selected_runtime]
         return {
-            "input_message": input_message,
-            "thread_id": thread_id,
+            "message": message,
             "agent_runtime": selected_runtime,
             "model": selected_model,
             "effort": effort or "high",
         }
 
-    def follow_up_body(self, input_message: str, thread_id: str) -> dict:
-        return {"input_message": input_message, "thread_id": thread_id}
+    def follow_up_body(self, message: str) -> dict:
+        """A config-less body: an existing thread derives its stored config."""
+        return {"message": message}
+
+    def send_message(
+        self,
+        thread_id: str,
+        message: str,
+        *,
+        runtime: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> dict:
+        """POST a thread's first message (full session config) and return the
+        response ({"status": "accepted", "thread": {...}})."""
+        return self._post_message(
+            thread_id, self.message_body(message, runtime=runtime, model=model, effort=effort)
+        )
+
+    def send_follow_up(self, thread_id: str, message: str) -> dict:
+        """POST a config-less message: steers the running turn or starts a new
+        turn on the thread's stored session config."""
+        return self._post_message(thread_id, self.follow_up_body(message))
+
+    def _post_message(self, thread_id: str, body: dict, *, timeout: float = 60) -> dict:
+        """POST /messages, retrying the transient per-thread fence while a
+        previous turn's process finishes closing (there is no queue, so the
+        host answers 409 and callers retry)."""
+        deadline = time.time() + timeout
+        while True:
+            try:
+                return self._api(
+                    "POST", f"/v1/threads/{self.api_thread_id(thread_id)}/messages", body
+                )
+            except AssertionError as exc:
+                if THREAD_BUSY_MARKER in str(exc) and time.time() < deadline:
+                    time.sleep(2)
+                    continue
+                raise
 
     def runtime_status_record(self, status_response: dict, runtime: str | None = None) -> dict:
         runtime = runtime or self.agent_runtime
@@ -592,6 +640,10 @@ class AwsSmoke:
             runtime: self.runtime_status_record(last["agent_runtime"], runtime)["status"]
             for runtime in SMOKE_RUNTIMES
         }
+        for runtime in SMOKE_RUNTIMES:
+            record = self.runtime_status_record(last["agent_runtime"], runtime)
+            if not isinstance(record.get("active_thread_ids"), list) or "active_task_ids" in record:
+                raise AssertionError(f"health runtime record should carry active_thread_ids only: {record}")
         self._ok(
             "healthy; "
             + ", ".join(f"{runtime} runtime {status}" for runtime, status in runtime_states.items())
@@ -933,15 +985,15 @@ class AwsSmoke:
             '<script type="module" src="/admin_ui/app.js"></script>',
             "<h2>Sessions</h2>",
             "/v1/threads",
-            "/v1/threads/${encodeURIComponent(selectedThreadId)}/tasks",
-            "/v1/tasks/${encodeURIComponent(taskId)}/events",
+            "/v1/threads/${encodeURIComponent(threadId)}/events",
             "showThread",
-            "showTaskEvents",
+            "refreshSelectedThread",
+            "loadEarlierThreadEvents",
             'data-action="show-thread"',
-            'data-action="show-task-events"',
+            'data-action="load-earlier-thread-events"',
             "button[data-action]",
-            "TASK_EVENT_PAGE_BATCH",
-            "loadMoreTaskEvents",
+            "EVENT_PAGE_LIMIT",
+            "active_thread_ids",
             'id="panel-home"',
             'id="panel-agent"',
             'id="panel-processes"',
@@ -1057,7 +1109,10 @@ class AwsSmoke:
         for removed in (
             "onclick=",
             "oninput=",
-            "/v1/tasks/finished",
+            "/v1/tasks",
+            "task_id",
+            "active_task_ids",
+            "showTaskEvents",
             "loadFinishedTasks",
             "loadAllTaskEvents",
             "retained_task_count",
@@ -1071,7 +1126,7 @@ class AwsSmoke:
             "Network policy replaced",
         ):
             if removed in page:
-                raise AssertionError(f"UI page still contains removed finished-task path {removed!r}")
+                raise AssertionError(f"UI page still contains removed task-era fragment {removed!r}")
         self._ok("static UI page served unauthenticated; thread history and network policy controls present; API routes still require auth")
 
     @staticmethod
@@ -1115,14 +1170,14 @@ class AwsSmoke:
         auth = f"Cookie: tc_admin_session={self._admin_cookie()}\r\nX-Kern-Csrf: 1\r\n".encode()
         malformed = self._raw_local_http(
             ADMIN_PORT,
-            b"POST /v1/tasks HTTP/1.1\r\n"
+            b"POST /v1/threads/smoke-auth/messages HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
             + auth
             + b"Content-Length: nope\r\n\r\n",
         )
         huge = self._raw_local_http(
             ADMIN_PORT,
-            b"POST /v1/tasks HTTP/1.1\r\n"
+            b"POST /v1/threads/smoke-auth/messages HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
             + auth
             + b"Content-Length: 1048577\r\n\r\n",
@@ -1132,6 +1187,115 @@ class AwsSmoke:
         if b"413" not in huge or b"request body too large" not in huge:
             raise AssertionError(f"admin API huge Content-Length was not rejected cleanly: {huge[:300]!r}")
         self._ok("401 without/with wrong credentials; UI served unauthenticated; malformed admin bodies fail closed")
+
+    def check_app_backends_without_providers(self) -> None:
+        """Exercise both stable app backends without requiring provider login."""
+        self._step("stable app backends work before provider login")
+        apps = self._api("GET", "/v1/apps").get("apps")
+        if not isinstance(apps, list):
+            raise AssertionError(f"app catalog has the wrong shape: {apps}")
+        active_ids = {
+            app.get("id")
+            for app in apps
+            if isinstance(app, dict) and app.get("deprecated") is not True
+        }
+        expected_ids = {"agent_chat", "personal_web_app_builder"}
+        if not expected_ids.issubset(active_ids):
+            raise AssertionError(
+                f"stable apps are missing from the app catalog: {active_ids}"
+            )
+
+        for app_id in sorted(expected_ids):
+            options = self._api(
+                "GET", f"/v1/apps/{app_id}/api/session-options"
+            ).get("session_options")
+            if not isinstance(options, dict) or set(options) != set(SMOKE_RUNTIMES):
+                raise AssertionError(
+                    f"{app_id} returned invalid session options: {options}"
+                )
+
+        agent_threads = self._api(
+            "GET", "/v1/apps/agent_chat/api/threads"
+        ).get("threads")
+        archived_agent_threads = self._api(
+            "GET", "/v1/apps/agent_chat/api/threads?archived=true"
+        ).get("threads")
+        if agent_threads != [] or archived_agent_threads != []:
+            raise AssertionError(
+                "fresh Agent Chat should have no current or archived threads: "
+                f"{agent_threads}, {archived_agent_threads}"
+            )
+
+        base = "/v1/apps/personal_web_app_builder/api"
+        created = self._api("POST", f"{base}/apps").get("app")
+        if not isinstance(created, dict) or not isinstance(created.get("thread_id"), str):
+            raise AssertionError(f"App Builder returned invalid created app: {created}")
+        app_id = created["thread_id"]
+        encoded_id = quote(app_id, safe="")
+        try:
+            state = self._api("GET", f"{base}/apps/{encoded_id}/state").get("app")
+            if not isinstance(state, dict) or state.get("revision") != 0:
+                raise AssertionError(f"new App Builder state is invalid: {state}")
+            if any(state.get(field) for field in ("html", "css", "javascript")):
+                raise AssertionError(f"new App Builder UI should be empty: {state}")
+            if state.get("data") != {}:
+                raise AssertionError(f"new App Builder data should be empty: {state}")
+
+            conversation = self._api(
+                "GET", f"{base}/apps/{encoded_id}/conversation"
+            )
+            if conversation != {"session": None, "status": "idle"}:
+                raise AssertionError(
+                    f"new App Builder conversation is invalid: {conversation}"
+                )
+            events = self._api(
+                "GET", f"{base}/apps/{encoded_id}/conversation/events"
+            ).get("events")
+            if events != []:
+                raise AssertionError(
+                    f"new App Builder conversation should be empty: {events}"
+                )
+
+            renamed = self._api(
+                "PUT",
+                f"{base}/apps/{encoded_id}/name",
+                {"name": "Provider-free smoke app"},
+            ).get("app")
+            if not isinstance(renamed, dict) or renamed.get("name") != "Provider-free smoke app":
+                raise AssertionError(f"App Builder rename failed: {renamed}")
+
+            listed = self._api("GET", f"{base}/apps").get("apps")
+            if not any(
+                isinstance(app, dict)
+                and app.get("thread_id") == app_id
+                and app.get("name") == "Provider-free smoke app"
+                for app in (listed or [])
+            ):
+                raise AssertionError(f"App Builder list omitted renamed app: {listed}")
+
+            archived = self._api(
+                "POST", f"{base}/apps/{encoded_id}/archive"
+            ).get("app")
+            if not isinstance(archived, dict) or archived.get("archived") is not True:
+                raise AssertionError(f"App Builder archive failed: {archived}")
+            archived_list = self._api(
+                "GET", f"{base}/apps?archived=true"
+            ).get("apps")
+            if not any(
+                isinstance(app, dict) and app.get("thread_id") == app_id
+                for app in (archived_list or [])
+            ):
+                raise AssertionError(
+                    f"App Builder archived list omitted app: {archived_list}"
+                )
+        finally:
+            # Keep smoke repeatable if an assertion fails after app creation.
+            self._api_status("POST", f"{base}/apps/{encoded_id}/archive")
+
+        self._ok(
+            "Agent Chat options/history and App Builder create, state, rename, "
+            "list, archive, and history paths worked without inference"
+        )
 
     def check_policy_validation_and_concurrency(self) -> None:
         self._step("policy validation and concurrent replaces")
@@ -1312,25 +1476,24 @@ class AwsSmoke:
             f"asymmetric provider activation checked; {len(succeeded)}/4 concurrent replaces applied, rest 409, status active"
         )
 
-    def check_task_lifecycle(self) -> None:
-        self._step("task fail-fast lifecycle and 4xx contract")
-        task = self._api("POST", "/v1/tasks", self.task_body("lifecycle check (smoke)", "smoke-lifecycle"))
-        task_id = task["task_id"]
-        if task["status"] != "queued":
-            raise AssertionError(f"new task is {task['status']}, expected queued")
-        # Runtime status is not a claim condition: pre-login, a worker claims
-        # the queued task immediately and fails it with the runtime status as
-        # the error, so queued work never parks behind a missing login.
-        failed = self._wait_for_task_status(task_id, "failed", timeout=60)
-        if failed["status"] != "failed":
-            raise AssertionError(f"pre-login task ended {failed['status']}, expected fail-fast failure: {failed}")
-        if "tasks run only while it is active" not in failed.get("error_message", ""):
-            raise AssertionError(f"fail-fast error should name the runtime status: {failed}")
+    def check_turn_admission_contract(self) -> None:
+        """There is no queue: pre-login, a first message is rejected outright
+        with the runtime status in the error, the rejection rolls back
+        whole-cloth (no thread row, no events), and the message/thread
+        validation 400s and 404s hold on the thread-only surface."""
+        self._step("thread message admission and 4xx contract (pre-login)")
+        status, body = self._api_status(
+            "POST", "/v1/threads/smoke-lifecycle/messages",
+            self.message_body("lifecycle check (smoke)"),
+        )
+        if status != 409:
+            raise AssertionError(f"pre-login message returned {status}, expected 409: {body}")
+        if RUNTIME_INACTIVE_MARKER not in self._error_message(body):
+            raise AssertionError(f"admission error should name the runtime status: {body}")
 
-        # Exercise every runtime through the real API, PostgreSQL session
-        # constraint, worker claim, and fail-fast path. Hermes cannot
-        # run a paid turn in credential-free smoke, but its task rows and
-        # runtime dispatch must still work on a freshly migrated host.
+        # Exercise every runtime (and every Bedrock model) through the real
+        # admission path. Hermes cannot run a paid turn in credential-free
+        # smoke, but its runtime dispatch must reject cleanly per model.
         for runtime in (item for item in SMOKE_RUNTIMES if item != self.agent_runtime):
             models = (
                 SMOKE_BEDROCK_MODELS
@@ -1338,283 +1501,170 @@ class AwsSmoke:
                 else (SMOKE_RUNTIME_MODELS[runtime],)
             )
             for model in models:
-                runtime_task = self._api(
+                thread_id = f"smoke-lifecycle-{runtime}-{model.replace('.', '-').replace(':', '-')}"
+                status, body = self._api_status(
                     "POST",
-                    "/v1/tasks",
-                    self.task_body(
-                        f"{runtime} {model} lifecycle check (smoke)",
-                        f"smoke-lifecycle-{runtime}-{model.replace('.', '-').replace(':', '-')}",
-                        runtime=runtime,
-                        model=model,
+                    f"/v1/threads/{thread_id}/messages",
+                    self.message_body(
+                        f"{runtime} {model} lifecycle check (smoke)", runtime=runtime, model=model
                     ),
                 )
-                if runtime_task.get("model") != model:
-                    raise AssertionError(f"{runtime} task did not retain {model}: {runtime_task}")
-                runtime_failed = self._wait_for_task_status(
-                    runtime_task["task_id"], "failed", timeout=60
-                )
-                if "tasks run only while it is active" not in runtime_failed.get(
-                    "error_message", ""
-                ):
+                if status != 409 or RUNTIME_INACTIVE_MARKER not in self._error_message(body):
                     raise AssertionError(
-                        f"{runtime} {model} did not fail cleanly before login: "
-                        f"{runtime_failed}"
+                        f"{runtime} {model} did not reject cleanly before login: {status} {body}"
                     )
 
-        status, _ = self._api_status("GET", "/v1/tasks/task_999999")
+        status, _ = self._api_status("GET", "/v1/threads/thread_999999")
         if status != 404:
-            raise AssertionError(f"unknown task returned {status}, expected 404")
+            raise AssertionError(f"unknown thread returned {status}, expected 404")
+        status, _ = self._api_status("POST", "/v1/threads/thread_999999/stop")
+        if status != 404:
+            raise AssertionError(f"stopping an unknown thread returned {status}, expected 404")
 
-        # Message validation runs before the status gate, so the 400 contract
-        # holds even on a terminal task.
-        status, _ = self._api_status("PUT", f"/v1/tasks/{task_id}", {"input_message": ""})
-        if status != 400:
-            raise AssertionError(f"empty input_message returned {status}, expected 400")
-        status, _ = self._api_status(
-            "PUT", f"/v1/tasks/{task_id}", {"input_message": "x" * (MESSAGE_LIMIT + 1)}
-        )
-        if status != 400:
-            raise AssertionError(f"oversized input_message returned {status}, expected 400")
-        # Every transition off a terminal task is a clean 409.
-        status, _ = self._api_status(
-            "PUT", f"/v1/tasks/{task_id}", {"input_message": "lifecycle check, updated (smoke)"}
-        )
-        if status != 409:
-            raise AssertionError(f"updating a failed task returned {status}, expected 409")
-        status, _ = self._api_status(
-            "POST", f"/v1/tasks/{task_id}/steer", {"steer_message": "steer (smoke)"}
-        )
-        if status != 409:
-            raise AssertionError(f"steering a failed task returned {status}, expected 409")
-        status, _ = self._api_status("POST", f"/v1/tasks/{task_id}/kill")
-        if status != 409:
-            raise AssertionError(f"killing a failed task returned {status}, expected 409")
-        status, _ = self._api_status("POST", f"/v1/tasks/{task_id}/cancel")
-        if status != 409:
-            raise AssertionError(f"cancelling a failed task returned {status}, expected 409")
-        status, _ = self._api_status("POST", "/v1/tasks/task_999999/kill")
-        if status != 404:
-            raise AssertionError(f"killing an unknown task returned {status}, expected 404")
+        # Message and config validation run before the admission gate, so the
+        # 400 contract holds even while the runtime is not active.
         for label, bad_body in (
-            ("no-runtime", {"input_message": "missing runtime (smoke)", "thread_id": "smoke-bad-runtime"}),
-            ("bad-runtime", {"input_message": "bad runtime (smoke)", "thread_id": "smoke-bad-runtime", "agent_runtime": "bad"}),
-            ("no-thread", {"input_message": "missing thread (smoke)", "agent_runtime": self.agent_runtime}),
-            ("bad-thread", {"input_message": "bad thread (smoke)", "thread_id": "not valid!", "agent_runtime": self.agent_runtime}),
+            ("empty-message", self.message_body("x") | {"message": ""}),
+            ("oversized-message", self.message_body("x") | {"message": "x" * (MESSAGE_LIMIT + 1)}),
+            ("no-config", self.follow_up_body("missing config (smoke)")),
+            ("bad-runtime", self.message_body("bad runtime (smoke)") | {"agent_runtime": "bad"}),
+            ("partial-config", {"message": "partial config (smoke)", "agent_runtime": self.agent_runtime}),
         ):
-            status, _ = self._api_status("POST", "/v1/tasks", bad_body)
+            status, _ = self._api_status("POST", "/v1/threads/smoke-bad-config/messages", bad_body)
             if status != 400:
-                raise AssertionError(f"create with {label} returned {status}, expected 400")
-
-        events = self._api("GET", f"/v1/tasks/{task_id}/events?since=0")["events"]
-        if [event["event_type"] for event in events] != [
-            "task.started",
-            "task.message",
-            "task.failed",
-        ]:
-            raise AssertionError(
-                f"fail-fast should emit started/message/failed exactly, got: {events}"
-            )
-        if any(event["task_id"] != task_id for event in events):
-            raise AssertionError("per-task events leaked another task's events")
-
-        thread = self._api("GET", "/v1/threads")["threads"]
-        matching = [item for item in thread if item["thread_id"] == "smoke-lifecycle"]
-        if len(matching) != 1:
-            raise AssertionError(f"lifecycle thread missing from /v1/threads: {thread}")
-        if matching[0]["agent_runtime"] != self.agent_runtime:
-            raise AssertionError(f"lifecycle thread runtime mismatch: {matching[0]}")
-        if matching[0].get("task_count") != 1:
-            raise AssertionError(f"lifecycle thread task_count mismatch: {matching[0]}")
-        if "retained_task_count" in matching[0] or "continuable" in matching[0]:
-            raise AssertionError(f"thread response contains removed fields: {matching[0]}")
-
-        thread_tasks = self._api("GET", "/v1/threads/smoke-lifecycle/tasks")["tasks"]
-        if [item["task_id"] for item in thread_tasks] != [task_id]:
-            raise AssertionError(f"thread task list did not return the lifecycle task only: {thread_tasks}")
-        if thread_tasks[0]["status"] != "failed":
-            raise AssertionError(f"thread task list did not retain failed task status: {thread_tasks}")
-
-        # An existing thread derives its session config; supplying agent_runtime
-        # (or model/effort) is rejected outright, so the wrong-runtime case never
-        # reaches a runtime-mismatch check. task_body deliberately carries those
-        # fields here to prove they are refused.
+                raise AssertionError(f"message with {label} returned {status}, expected 400")
+        # An invalid thread id shape never reaches a handler.
         status, _ = self._api_status(
-            "POST",
-            "/v1/tasks",
-            self.task_body("session fields on existing thread (smoke)", "smoke-lifecycle", runtime="claude_code"),
+            "POST", "/v1/threads/not.valid/messages", self.message_body("bad thread (smoke)")
         )
-        if status != 400:
-            raise AssertionError(
-                f"supplying session fields to an existing thread returned {status}, expected 400"
-            )
-        status, _ = self._api_status("GET", "/v1/tasks/finished")
         if status != 404:
-            raise AssertionError(f"removed finished-task endpoint returned {status}, expected 404")
-        self._ok(
-            "all three pre-login runtimes passed real task insertion, "
-            "Hermes accepted all three Bedrock models, and every task "
-            "failed fast; "
-            "validation 400s and terminal 409s honored; "
-            "events scoped; thread list/task history covered"
-        )
+            raise AssertionError(f"invalid thread id returned {status}, expected 404")
+        status, _ = self._api_status("GET", "/v1/threads/smoke-lifecycle?verbose=1")
+        if status != 400:
+            raise AssertionError(f"thread detail with query params returned {status}, expected 400")
+        status, _ = self._api_status("GET", "/v1/threads/smoke-lifecycle/events?since=0&before=9")
+        if status != 400:
+            raise AssertionError(f"combining since and before returned {status}, expected 400")
 
-    def check_task_pagination(self) -> None:
-        """The active-task list holds queued and running work only: pre-login,
-        every created task drains via fail-fast, thread histories retain the
-        failed tasks, and cursor paging over whatever is in flight stays
-        bounded and duplicate-free."""
-        self._step("task list drain and cursor paging (7 fail-fast tasks)")
-        created = [
-            self._api(
-                "POST",
-                "/v1/tasks",
-                self.task_body(f"pagination filler {index} (smoke)", f"smoke-page-{index}"),
-            )["task_id"]
-            for index in range(7)
-        ]
-        seen: list[str] = []
-        cursor = None
-        while True:
-            path = "/v1/tasks" if cursor is None else f"/v1/tasks?last_seen_task_id={cursor}"
-            page = self._api("GET", path)["tasks"]
-            if not page:
-                break
-            if len(page) > 5:
-                raise AssertionError(f"task page holds {len(page)} tasks, expected at most 5")
-            seen.extend(task["task_id"] for task in page)
-            if len(seen) > 100:
-                raise AssertionError(f"cursor paging did not terminate: {seen}")
-            cursor = page[-1]["task_id"]
-        if len(seen) != len(set(seen)):
-            raise AssertionError(f"pagination returned duplicates: {seen}")
-        for task_id in created:
-            final = self._wait_for_task(task_id, timeout=60)
-            if final["status"] != "failed":
-                raise AssertionError(f"pre-login filler {task_id} ended {final['status']}, expected failed")
-        remaining = {item["task_id"] for item in self._active_tasks()} & set(created)
-        if remaining:
-            raise AssertionError(f"failed tasks still listed as active: {remaining}")
-        for index, task_id in enumerate(created):
-            history = self._api("GET", f"/v1/threads/smoke-page-{index}/tasks")["tasks"]
-            if [item["task_id"] for item in history] != [task_id]:
-                raise AssertionError(f"thread smoke-page-{index} history mismatch: {history}")
-        self._ok("7 tasks drained via fail-fast; paging duplicate-free; thread histories retained")
+        # The rejected admissions rolled back whole-cloth: no thread row and
+        # no retained turn events.
+        listed = {item["thread_id"] for item in self._api("GET", "/v1/threads")["threads"]}
+        leaked = {thread_id for thread_id in listed if "smoke-lifecycle" in thread_id}
+        if leaked:
+            raise AssertionError(f"rejected admissions left thread rows behind: {leaked}")
+        status, _ = self._api_status("GET", "/v1/threads/smoke-lifecycle")
+        if status != 404:
+            raise AssertionError(f"rejected thread should stay unknown, got {status}")
+        events = self._api("GET", "/v1/threads/smoke-lifecycle/events?since=0")["events"]
+        if events:
+            raise AssertionError(f"rejected admission left turn events behind: {events}")
+
+        # The task API is gone from the admin surface.
+        for method, path in (
+            ("GET", "/v1/tasks"),
+            ("POST", "/v1/tasks"),
+            ("GET", "/v1/tasks/task_999999"),
+            ("GET", "/v1/tasks/finished"),
+            ("GET", "/v1/threads/smoke-lifecycle/tasks"),
+        ):
+            status, _ = self._api_status(method, path)
+            if status != 404:
+                raise AssertionError(f"removed task route {method} {path} returned {status}, expected 404")
+
+        # Runtime status carries live thread ids, never task ids.
+        record = self.runtime_status_record(self._api("GET", "/v1/agent-runtime/status"))
+        if record.get("active_thread_ids") != [] or "active_task_ids" in record:
+            raise AssertionError(f"runtime status should report empty active_thread_ids: {record}")
+        self._ok(
+            "all three pre-login runtimes rejected messages with the runtime status, "
+            "Hermes rejected all three Bedrock models, rejections left no thread state; "
+            "validation 400s and unknown-thread 404s honored; task routes gone"
+        )
 
     def check_admin_concurrency(self) -> None:
-        self._step("concurrent task creation with interleaved health reads")
-        # Every create must land exactly once with a unique id, interleaved
-        # with health reads that must never block or fail. The tasks fail
-        # fast pre-login, so consistency is checked per task and against the
-        # thread histories rather than the (draining) active list.
+        self._step("concurrent message admissions with interleaved health reads")
+        # Pre-login, every admission is rejected with a clean 409 (never a
+        # 5xx), interleaved with health reads that must never block or fail,
+        # and no rejected admission may leave a thread row behind.
         creates = 8
 
         def create_or_health(index: int) -> tuple[int, dict]:
             if index >= creates:
                 return self._api_status("GET", "/v1/health")
             return self._api_status(
-                "POST", "/v1/tasks",
-                self.task_body(f"concurrent create {index} (smoke)", f"smoke-cc-{index}"),
+                "POST", f"/v1/threads/smoke-cc-{index}/messages",
+                self.message_body(f"concurrent admission {index} (smoke)"),
             )
 
         results = self._parallel(creates + 3, create_or_health)
-        created_ids = []
         for index, (status, body) in enumerate(results):
-            if status != 200:
-                raise AssertionError(f"concurrent request {index} returned {status}: {body}")
-            if index < creates:
-                created_ids.append(body["task_id"])
-        if len(set(created_ids)) != creates:
-            raise AssertionError(f"concurrent creates produced duplicate task ids: {created_ids}")
-
-        for index, task_id in enumerate(sorted(created_ids)):
-            if self._wait_for_task(task_id, timeout=60)["status"] != "failed":
-                raise AssertionError(f"concurrent create {task_id} did not drain via fail-fast")
-        for index in range(creates):
-            history = self._api("GET", f"/v1/threads/smoke-cc-{index}/tasks")["tasks"]
-            if len(history) != 1 or history[0]["status"] != "failed":
-                raise AssertionError(f"thread smoke-cc-{index} history mismatch: {history}")
-        self._ok(f"{creates} parallel creates unique, every task landed exactly once")
+            if index >= creates:
+                if status != 200:
+                    raise AssertionError(f"concurrent health read {index} returned {status}: {body}")
+            elif status != 409 or RUNTIME_INACTIVE_MARKER not in self._error_message(body):
+                raise AssertionError(f"concurrent admission {index} returned {status}: {body}")
+        listed = {item["thread_id"] for item in self._api("GET", "/v1/threads")["threads"]}
+        leaked = {thread_id for thread_id in listed if "smoke-cc-" in thread_id}
+        if leaked:
+            raise AssertionError(f"rejected concurrent admissions left thread rows: {leaked}")
+        self._ok(f"{creates} parallel admissions rejected cleanly; health reads never blocked")
 
     def check_state_transactions(self) -> None:
         """Edge cases of the admin-state read-modify-write transaction under
-        real concurrency: check-then-act atomicity for terminal transitions
-        (exactly one racing cancel wins), racing field updates that must be
-        last-writer-wins (never merged or torn), reads that stay fast and
-        consistent mid-storm, and event seqs that stay unique across parallel
+        real concurrency: racing admissions on one thread all roll back
+        whole-cloth (no thread row, no events — check-then-act shares the
+        message's transaction), racing stops answer cleanly, reads stay fast
+        and consistent mid-storm, and event seqs stay unique across parallel
         writers."""
-        self._step("state transaction edge cases (atomic terminal transitions, racing writes, seq uniqueness)")
+        self._step("state transaction edge cases (atomic admission rollback, racing stops, seq uniqueness)")
 
-        # 1. Concurrent cancels racing the fail-fast worker over one task. The
-        # status check and the terminal write share one transaction, so AT
-        # MOST one cancel can win (the worker may fail the task first); a
-        # lost-update regression would let several racers see QUEUED and all
-        # "win". The task must end terminal either way.
-        _, target = self._api_status(
-            "POST", "/v1/tasks",
-            self.task_body("cancel race target (smoke)", "smoke-tx-cancel"),
+        # 1. Concurrent first messages racing over ONE thread pre-login. The
+        # admission check and the thread/event writes share one transaction,
+        # so every racer sees the clean 409 and the rollback leaves no
+        # partial thread state a later racer (or reader) could observe.
+        sends = self._parallel(
+            6,
+            lambda i: self._api_status(
+                "POST", "/v1/threads/smoke-tx-send/messages",
+                self.message_body("admission race (smoke)"),
+            ),
         )
-        cancel_id = target["task_id"]
-        cancels = self._parallel(
-            6, lambda i: self._api_status("POST", f"/v1/tasks/{cancel_id}/cancel")
+        statuses = sorted(status for status, _ in sends)
+        if any(status != 409 for status in statuses):
+            raise AssertionError(f"racing admissions must all yield 409, got {statuses}")
+        status, _ = self._api_status("GET", "/v1/threads/smoke-tx-send")
+        if status != 404:
+            raise AssertionError(f"racing admissions left a thread row behind ({status})")
+        events = self._api("GET", "/v1/threads/smoke-tx-send/events?since=0")["events"]
+        if events:
+            raise AssertionError(f"racing admissions left turn events behind: {events}")
+
+        # 2. Concurrent stops on a thread that does not exist: every racer
+        # sees the clean 404 (never a 5xx or a phantom accepted stop).
+        stops = self._parallel(
+            5, lambda i: self._api_status("POST", "/v1/threads/smoke-tx-stop/stop")
         )
-        statuses = sorted(status for status, _ in cancels)
-        if statuses.count(200) > 1 or any(status not in (200, 409) for status in statuses):
-            raise AssertionError(f"concurrent cancels must yield at most one 200 and the rest 409, got {statuses}")
-        final_status = self._wait_for_task(cancel_id, timeout=60)["status"]
-        if final_status not in {"cancelled", "failed"}:
-            raise AssertionError(f"cancel race target ended {final_status}, expected a terminal status")
-
-        # 2. Racing updates to one task, interleaved with reads, while the
-        # fail-fast worker races them all. Every write must apply atomically:
-        # each racer sees 200 or a clean 409 (never a 5xx), the reads never
-        # block or fail, and the final message is exactly one sent value or
-        # the original — never a torn or merged value.
-        _, target = self._api_status(
-            "POST", "/v1/tasks",
-            self.task_body("update race target (smoke)", "smoke-tx-update"),
-        )
-        update_id = target["task_id"]
-        updaters = 6
-        candidates = {f"update racer {index} (smoke)" for index in range(updaters)}
-        candidates.add("update race target (smoke)")
-
-        def update_or_read(index: int) -> tuple[int, dict]:
-            if index >= updaters:
-                return self._api_status("GET", f"/v1/tasks/{update_id}" if index % 2 else "/v1/health")
-            return self._api_status(
-                "PUT", f"/v1/tasks/{update_id}",
-                {"input_message": f"update racer {index} (smoke)"},
-            )
-
-        results = self._parallel(updaters + 4, update_or_read)
-        for index, (status, body) in enumerate(results):
-            expected = (200, 409) if index < updaters else (200,)
-            if status not in expected:
-                raise AssertionError(f"update/read storm request {index} returned {status}: {body}")
-        final = self._api("GET", f"/v1/tasks/{update_id}")
-        if final["input_message"] not in candidates:
-            raise AssertionError(f"racing updates produced a value no racer sent: {final['input_message']!r}")
-
-        # 3. Terminal statuses are sticky: once the task is terminal, further
-        # cancels and updates are clean 409s and the status never changes.
-        first_terminal = self._wait_for_task(update_id, timeout=60)["status"]
-        if first_terminal not in {"cancelled", "failed"}:
-            raise AssertionError(f"update race target ended {first_terminal}, expected a terminal status")
-
-        def update_or_cancel(index: int) -> tuple[int, dict]:
-            if index == 0:
-                return self._api_status("POST", f"/v1/tasks/{update_id}/cancel")
-            return self._api_status(
-                "PUT", f"/v1/tasks/{update_id}",
-                {"input_message": f"post-terminal racer {index} (smoke)"},
-            )
-
-        mixed = self._parallel(5, update_or_cancel)
-        bad = [status for status, _ in mixed if status != 409]
+        bad = [status for status, _ in stops if status != 404]
         if bad:
-            raise AssertionError(f"post-terminal transitions returned non-409 statuses: {bad}")
-        if self._api("GET", f"/v1/tasks/{update_id}")["status"] != first_terminal:
-            raise AssertionError("terminal status did not stick under racing writes")
+            raise AssertionError(f"racing stops on an unknown thread returned {bad}, expected 404s")
+
+        # 3. Mixed messages, stops, and reads racing over one thread: writers
+        # see their contract status and the reads never block or fail.
+        def message_stop_or_read(index: int) -> tuple[int, dict]:
+            if index % 3 == 0:
+                return self._api_status("GET", "/v1/health")
+            if index % 3 == 1:
+                return self._api_status(
+                    "POST", "/v1/threads/smoke-tx-mixed/messages",
+                    self.message_body(f"mixed racer {index} (smoke)"),
+                )
+            return self._api_status("POST", "/v1/threads/smoke-tx-mixed/stop")
+
+        mixed = self._parallel(9, message_stop_or_read)
+        for index, (status, body) in enumerate(mixed):
+            expected = (200,) if index % 3 == 0 else (409,) if index % 3 == 1 else (404,)
+            if status not in expected:
+                raise AssertionError(f"mixed storm request {index} returned {status}: {body}")
 
         # 4. Parallel writers allocated event seqs through the transaction, so
         # the agent event log must hold no duplicate seq anywhere.
@@ -1623,13 +1673,15 @@ class AwsSmoke:
             duplicates = sorted({seq for seq in seqs if seqs.count(seq) > 1})
             raise AssertionError(f"agent event log has duplicate seqs after the storms: {duplicates}")
 
-        self._ok("terminal transition won at most once, writes atomic, terminal sticky, event seqs unique")
+        self._ok("admission rollback atomic, racing stops clean, mixed storm consistent, event seqs unique")
 
     def check_event_pagination(self) -> None:
         self._step("agent event pagination (newest-first cursor pages, strict seq ordering)")
+        # Rejected admissions roll back their events, so the pre-login log
+        # holds only agent_runtime.* transitions from the policy toggles.
         events = self._agent_events()
-        if len(events) < 6:
-            raise AssertionError(f"expected the earlier checks to leave >5 events, found {len(events)}")
+        if len(events) < 4:
+            raise AssertionError(f"expected the earlier checks to leave >3 events, found {len(events)}")
         seqs = [int(event["seq"]) for event in events]
         if sorted(seqs) != seqs or len(set(seqs)) != len(seqs):
             raise AssertionError(f"event seqs are not strictly increasing/unique: {seqs}")
@@ -1649,6 +1701,27 @@ class AwsSmoke:
             f"{agent} curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 --max-time 5 "
             f"http://127.0.0.1:{ADMIN_PORT}/v1/health || true"
         )
+        # Loopback is not an identity boundary by itself. Exercise the admin
+        # listener's complete uid boundary on real nftables here, in the
+        # opt-in billable smoke rather than adding probes to every user deploy
+        # and upgrade. Allowed identities reach the unauthenticated 401 gate;
+        # egress-capable service identities receive no connection at all.
+        def admin_probe(user: str) -> str:
+            return self._ssh_code(
+                f"sudo -u {user} curl -s -o /dev/null -w '%{{http_code}}' "
+                f"--connect-timeout 2 --max-time 5 http://127.0.0.1:{ADMIN_PORT}/v1/health || true"
+            )
+
+        admin_uid_results = {
+            "kern-operator": self._ssh_code(
+                f"curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 --max-time 5 "
+                f"http://127.0.0.1:{ADMIN_PORT}/v1/health || true"
+            ),
+            "kern-admin": admin_probe("kern-admin"),
+            "cloudflared": admin_probe("cloudflared"),
+            "kern-tools": admin_probe("kern-tools"),
+            "kern-proxy": admin_probe("kern-proxy"),
+        }
         # The preview-port carve-out and its boundary, exercised on the live
         # host's firewall in one orchestrated command (run as kern-operator, who
         # has sudo). A kern-agent HTTP server serves a known file on the base
@@ -1699,6 +1772,18 @@ class AwsSmoke:
             raise AssertionError(
                 f"agent reached loopback admin API directly ({loopback_admin}); nftables should allow only the proxy port"
             )
+        for user in ("kern-operator", "kern-admin", "cloudflared"):
+            if admin_uid_results[user] != "401":
+                raise AssertionError(
+                    f"{user} did not reach the admin login gate "
+                    f"(got {admin_uid_results[user]!r}, expected 401)"
+                )
+        for user in ("kern-tools", "kern-proxy"):
+            if admin_uid_results[user] not in ("", "000"):
+                raise AssertionError(
+                    f"{user} reached the admin listener ({admin_uid_results[user]}); "
+                    "the per-service loopback boundary is not effective"
+                )
         if preview_self != "200":
             raise AssertionError(
                 f"agent could not serve and reach its own preview port {preview_port} "
@@ -2728,11 +2813,11 @@ class AwsSmoke:
         for runtime in SMOKE_RUNTIMES:
             statuses[runtime] = self._wait_for_runtime_status({"active"}, runtime=runtime, timeout=120)
         if statuses != {runtime: "active" for runtime in SMOKE_RUNTIMES}:
-            raise AssertionError(f"all three runtimes should be active before mixed tasks: {statuses}")
+            raise AssertionError(f"all three runtimes should be active before mixed turns: {statuses}")
         accounts = {runtime: self._agent_account(runtime) for runtime in SMOKE_RUNTIMES}
         for runtime, account in accounts.items():
             if account.get("status") != "active" or not account.get("account_id"):
-                raise AssertionError(f"{runtime} account should be active before mixed tasks: {account}")
+                raise AssertionError(f"{runtime} account should be active before mixed turns: {account}")
             self._assert_provider_metadata(runtime, account)
         bedrock_keys = self._ssh_code(
             "sudo -u postgres psql -tA -d kern_admin -c "
@@ -2743,32 +2828,29 @@ class AwsSmoke:
         self._assert_provider_account_anchors(live_pins=True)
         self._ok("Codex, Claude Code, and Hermes are active together with account metadata available")
 
-    def check_runtime_deactivation_stops_running_tasks(self) -> None:
-        self._step("runtime deactivation closes active tasks for all three harnesses")
+    def check_runtime_deactivation_stops_running_turns(self) -> None:
+        self._step("runtime deactivation closes running turns for all three harnesses")
         specs = [
             ("codex", "smoke-deactivate-codex", "CODEX_SHOULD_NOT_FINISH"),
             ("claude_code", "smoke-deactivate-claude", "CLAUDE_SHOULD_NOT_FINISH"),
             ("hermes", "smoke-deactivate-hermes", "HERMES_SHOULD_NOT_FINISH"),
         ]
-        tasks = {}
+        turns: dict[str, tuple[str, int]] = {}
         for runtime, thread_id, token in specs:
-            task = self._api(
-                "POST",
-                "/v1/tasks",
-                self.task_body(
-                    (
-                        "Use the terminal tool to run `sleep 300` now. Only after that command exits, "
-                        f"reply with exactly the word {token} and nothing else."
-                    ),
-                    thread_id,
-                    runtime=runtime,
+            baseline = self._latest_thread_event_seq(thread_id)
+            started = self.send_message(
+                thread_id,
+                (
+                    "Use the terminal tool to run `sleep 300` now. Only after that command exits, "
+                    f"reply with exactly the word {token} and nothing else."
                 ),
+                runtime=runtime,
             )
-            tasks[task["task_id"]] = runtime
-        for task_id, runtime in tasks.items():
-            current = self._wait_for_task_status(task_id, "running", timeout=180)
-            if current["status"] != "running":
-                raise AssertionError(f"{runtime} deactivation target never started: {current}")
+            if started.get("status") != "accepted":
+                raise AssertionError(f"{runtime} deactivation target was not started: {started}")
+            turns[thread_id] = (runtime, baseline)
+        for thread_id, (runtime, baseline) in turns.items():
+            self._wait_for_turn_activity(thread_id, since=baseline, timeout=180)
 
         self._api("PUT", "/v1/network/policy", {"network_integrations": {}})
         for runtime in SMOKE_RUNTIMES:
@@ -2785,10 +2867,10 @@ class AwsSmoke:
                 "Bedrock deactivation must preserve the one validated credential row: "
                 f"{bedrock_rows}"
             )
-        for task_id, runtime in tasks.items():
-            done = self._wait_for_task(task_id, timeout=90)
+        for thread_id, (runtime, baseline) in turns.items():
+            done = self._wait_for_turn(thread_id, since=baseline, timeout=90)
             if done["status"] != "failed":
-                raise AssertionError(f"{runtime} running task was not failed by deactivation: {done}")
+                raise AssertionError(f"{runtime} running turn was not failed by deactivation: {done}")
             if "deactivated" not in (done.get("error_message") or ""):
                 raise AssertionError(f"{runtime} failed with unexpected deactivation reason: {done}")
 
@@ -2806,13 +2888,13 @@ class AwsSmoke:
             raise AssertionError(
                 f"Bedrock reactivation did not retain the validated credential: {bedrock_rows}"
             )
-        self._ok("disabling providers failed running tasks, closed all three runtimes, and each recovered after re-enable")
+        self._ok("disabling providers failed running turns, closed all three runtimes, and each recovered after re-enable")
 
     def check_agent_parallelism(self) -> None:
-        """Mixed-runtime parallelism on the live host: three Codex tasks and
-        three Claude Code tasks run at the same time through independent
-        per-runtime pools, then all are steered to completion."""
-        self._step("mixed OAuth harness parallelism: 3 Codex + 3 Claude tasks")
+        """Mixed-runtime parallelism on the live host: three Codex turns and
+        three Claude Code turns run at the same time through independent
+        per-runtime admission caps, then all are steered to completion."""
+        self._step("mixed OAuth harness parallelism: 3 Codex + 3 Claude turns")
         specs = [
             ("codex", "smoke-codex-par-a", "CODEX_ALPHA"),
             ("claude_code", "smoke-claude-par-a", "CLAUDE_ALPHA"),
@@ -2821,21 +2903,21 @@ class AwsSmoke:
             ("codex", "smoke-codex-par-c", "CODEX_CHARLIE"),
             ("claude_code", "smoke-claude-par-c", "CLAUDE_CHARLIE"),
         ]
-        created: dict[str, tuple[str, str, str]] = {}
+        # api thread id -> (runtime, harness thread id, token, event baseline)
+        created: dict[str, tuple[str, str, str, int]] = {}
         for runtime, thread_id, token in specs:
-            task = self._api(
-                "POST",
-                "/v1/tasks",
-                self.task_body(
-                    (
-                        "Do not finish yet. Wait for a follow-up instruction. "
-                        f"When you receive it, reply with exactly the word {token} and nothing else."
-                    ),
-                    thread_id,
-                    runtime=runtime,
+            baseline = self._latest_thread_event_seq(thread_id)
+            started = self.send_message(
+                thread_id,
+                (
+                    "Do not finish yet. Wait for a follow-up instruction. "
+                    f"When you receive it, reply with exactly the word {token} and nothing else."
                 ),
+                runtime=runtime,
             )
-            created[task["task_id"]] = (runtime, thread_id, token)
+            if started.get("status") != "accepted":
+                raise AssertionError(f"{runtime} parallel turn on {thread_id} was not started: {started}")
+            created[self.api_thread_id(thread_id)] = (runtime, thread_id, token, baseline)
         print(f"  created {', '.join(sorted(created))}", flush=True)
 
         max_running_total = 0
@@ -2843,23 +2925,22 @@ class AwsSmoke:
         all_running_seen = False
         deadline = time.time() + 300
         while time.time() < deadline:
-            active = {t["task_id"]: t["status"] for t in self._active_tasks() if t["task_id"] in created}
-            running = {task_id for task_id, status in active.items() if status == "running"}
+            running = self._running_thread_ids() & set(created)
             max_running_total = max(max_running_total, len(running))
             runtime_status = self._api("GET", "/v1/agent-runtime/status")
             active_by_runtime = {}
             for runtime in SMOKE_OAUTH_RUNTIMES:
-                active_task_ids = [
-                    task_id
-                    for task_id in self.runtime_status_record(runtime_status, runtime).get("active_task_ids", [])
-                    if task_id in created
+                active_thread_ids = [
+                    thread_id
+                    for thread_id in self.runtime_status_record(runtime_status, runtime).get("active_thread_ids", [])
+                    if thread_id in created
                 ]
-                active_by_runtime[runtime] = active_task_ids
-                max_running_by_runtime[runtime] = max(max_running_by_runtime[runtime], len(active_task_ids))
-                if len(active_task_ids) > 3:
-                    raise AssertionError(f"more than 3 {runtime} tasks reported running: {runtime_status}")
+                active_by_runtime[runtime] = active_thread_ids
+                max_running_by_runtime[runtime] = max(max_running_by_runtime[runtime], len(active_thread_ids))
+                if len(active_thread_ids) > 3:
+                    raise AssertionError(f"more than 3 {runtime} turns reported running: {runtime_status}")
             if sum(len(ids) for ids in active_by_runtime.values()) > 6:
-                raise AssertionError(f"more than 6 mixed tasks reported running: {runtime_status}")
+                raise AssertionError(f"more than 6 mixed turns reported running: {runtime_status}")
             if all(len(active_by_runtime[runtime]) == 3 for runtime in SMOKE_OAUTH_RUNTIMES):
                 all_running_seen = True
                 break
@@ -2868,54 +2949,31 @@ class AwsSmoke:
         if not all_running_seen:
             snapshot = self._api("GET", "/v1/agent-runtime/status")
             raise AssertionError(
-                "all six mixed runtime tasks never ran together; "
+                "all six mixed runtime turns never ran together; "
                 f"max total={max_running_total}, max by runtime={max_running_by_runtime}, last={snapshot}"
             )
 
-        for task_id, (_, _, token) in sorted(created.items()):
-            self._api(
-                "POST",
-                f"/v1/tasks/{task_id}/steer",
-                {"steer_message": f"Now reply with exactly the word {token} and nothing else."},
+        for _, (_, thread_id, token, _) in sorted(created.items()):
+            steered = self.send_follow_up(
+                thread_id, f"Now reply with exactly the word {token} and nothing else."
             )
+            if steered.get("status") != "accepted":
+                raise AssertionError(f"steer on running thread {thread_id} was not delivered: {steered}")
 
-        for task_id, (runtime, _, token) in created.items():
-            done = self._wait_for_task(task_id, timeout=300)
+        for api_id, (runtime, thread_id, token, baseline) in created.items():
+            done = self._wait_for_turn(thread_id, since=baseline, timeout=300)
             if done["status"] != "completed":
-                raise AssertionError(f"mixed {runtime} task {task_id} ended {done['status']}: {self._task_failure_detail(task_id)}")
+                raise AssertionError(
+                    f"mixed {runtime} turn on {api_id} ended {done['status']}: "
+                    f"{self._thread_failure_detail(thread_id)}"
+                )
             if token not in (done.get("output_message") or "").upper():
-                raise AssertionError(f"mixed {runtime} task {task_id} answered {done.get('output_message')!r}, expected {token}")
+                raise AssertionError(f"mixed {runtime} turn on {api_id} answered {done.get('output_message')!r}, expected {token}")
 
-        intervals: dict[str, tuple[float, float]] = {}
-        by_runtime_intervals: dict[str, list[tuple[float, float]]] = {
-            runtime: [] for runtime in SMOKE_OAUTH_RUNTIMES
-        }
-        for task_id, (runtime, _, _) in created.items():
-            events = self._task_events(task_id)
-            started = next((e["timestamp"] for e in events if e["event_type"] == "task.started"), None)
-            completed = next((e["timestamp"] for e in events if e["event_type"] == "task.completed"), None)
-            if started is None or completed is None:
-                raise AssertionError(f"missing task.started/task.completed events for {task_id}: {events}")
-            interval = (self._epoch(started), self._epoch(completed))
-            intervals[task_id] = interval
-            by_runtime_intervals[runtime].append(interval)
-        peak = self._max_concurrency(list(intervals.values()))
-        runtime_peaks = {
-            runtime: self._max_concurrency(runtime_intervals)
-            for runtime, runtime_intervals in by_runtime_intervals.items()
-        }
-        if peak != 6:
-            raise AssertionError(f"mixed task peak concurrency should be 6, got {peak}: {intervals}")
-        for runtime, runtime_peak in runtime_peaks.items():
-            if runtime_peak != 3:
-                raise AssertionError(f"{runtime} peak concurrency should be 3, got {runtime_peak}: {intervals}")
         print(
-            "  peak concurrency from event intervals: "
-            f"total={peak}, codex={runtime_peaks['codex']}, claude_code={runtime_peaks['claude_code']} "
-            f"(live max total seen: {max_running_total})",
+            "  live thread state reached total=6, codex=3, claude_code=3",
             flush=True,
         )
-        self.parallel_task_ids = {task_id: token for task_id, (_, _, token) in created.items()}
         self.parallel_threads = {
             runtime: (thread_id, token)
             for runtime, thread_id, token in specs
@@ -2923,103 +2981,94 @@ class AwsSmoke:
         }
 
         for runtime, (thread_id, token) in self.parallel_threads.items():
-            task = self._api(
-                "POST",
-                "/v1/tasks",
-                self.follow_up_body(
-                    (
-                        "Earlier in this conversation you replied with a single uppercase token. "
-                        "Reply with exactly that token again and nothing else."
-                    ),
-                    thread_id,
+            baseline = self._latest_thread_event_seq(thread_id)
+            follow_up = self.send_follow_up(
+                thread_id,
+                (
+                    "Earlier in this conversation you replied with a single uppercase token. "
+                    "Reply with exactly that token again and nothing else."
                 ),
             )
-            done = self._wait_for_task(task["task_id"], timeout=240)
+            if follow_up.get("status") != "accepted":
+                raise AssertionError(f"{runtime} follow-up on idle {thread_id} was not started: {follow_up}")
+            done = self._wait_for_turn(thread_id, since=baseline, timeout=240)
             if done["status"] != "completed":
                 raise AssertionError(
-                    f"{runtime} follow-up task ended {done['status']}: {self._task_failure_detail(task['task_id'])}"
+                    f"{runtime} follow-up turn ended {done['status']}: {self._thread_failure_detail(thread_id)}"
                 )
             if token not in (done.get("output_message") or "").upper():
-                raise AssertionError(f"{runtime} thread context lost across tasks: {done.get('output_message')!r}")
+                raise AssertionError(f"{runtime} thread context lost across turns: {done.get('output_message')!r}")
 
-        self._ok("6 mixed OAuth tasks ran together at 3 per runtime; both kept thread context")
+        self._ok("6 mixed OAuth turns ran together at 3 per runtime; both kept thread context")
 
     def check_agent_steering(self) -> None:
-        """Mid-turn steering through the admin API: a steer sent while the task
-        is running must redirect the turn (the host delivers pending steers
-        before reading the next runtime message)."""
-        self._step(f"{self.agent_runtime} steering: redirect a running task mid-turn")
-        slow = self._api(
-            "POST",
-            "/v1/tasks",
-            self.task_body(
-                "Use the terminal tool to run `sleep 20`, then write a 300-word essay about bananas.",
-                f"smoke-steer-{self.agent_runtime}",
-            ),
+        """Mid-turn steering through the admin API: a second message posted
+        while the turn is running must be synchronously acknowledged and
+        delivered as a steer."""
+        self._step(f"{self.agent_runtime} steering: redirect a running turn mid-turn")
+        thread_id = f"smoke-steer-{self.agent_runtime}"
+        baseline = self._latest_thread_event_seq(thread_id)
+        slow = self.send_message(
+            thread_id,
+            "Use the terminal tool to run `sleep 20`, then write a 300-word essay about bananas.",
         )
-        task_id = slow["task_id"]
-        current = self._wait_for_task_status(task_id, "running", timeout=120)
-        if current["status"] != "running":
-            raise AssertionError(f"steer target never started (status {current['status']})")
-        self._api(
-            "POST",
-            f"/v1/tasks/{task_id}/steer",
-            {"steer_message": "Task update: stop the essay and reply with exactly the word STEERED."},
+        if slow.get("status") != "accepted":
+            raise AssertionError(f"steer target was not started: {slow}")
+        self._wait_for_turn_activity(thread_id, since=baseline, timeout=120)
+        steered = self.send_follow_up(
+            thread_id, "Task update: stop the essay and reply with exactly the word STEERED."
         )
-        done = self._wait_for_task(task_id, timeout=240)
+        if steered.get("status") != "accepted":
+            raise AssertionError(f"message on the running thread was not delivered as a steer: {steered}")
+        done = self._wait_for_turn(thread_id, since=baseline, timeout=240)
         if done["status"] != "completed":
-            raise AssertionError(f"steered task ended {done['status']}: {self._task_failure_detail(task_id)}")
+            raise AssertionError(f"steered turn ended {done['status']}: {self._thread_failure_detail(thread_id)}")
         if "STEERED" not in (done.get("output_message") or "").upper():
             raise AssertionError(f"steer did not take effect, output: {done.get('output_message')!r}")
         self._ok(f"{self.agent_runtime} steer redirected the running turn")
 
     def check_agent_kill_and_thread_survival(self, *, expect_steering_denied: bool = False) -> None:
-        """Kill a running task (its runtime process is terminated mid-turn), then
-        run another task on the same thread: the kill must not corrupt the
-        persisted runtime thread/session. A runtime without mid-turn steering
-        can prove that API boundary against the same running task."""
-        self._step(f"{self.agent_runtime} kill: cancel a running task, then reuse its thread")
-        slow = self._api(
-            "POST",
-            "/v1/tasks",
-            self.task_body(
-                "Use the terminal tool to run `sleep 300`, then write a 500-word essay about bananas.",
-                f"smoke-kill-{self.agent_runtime}",
-            ),
+        """Stop a running turn (its runtime process is terminated mid-turn),
+        then send another message on the same thread: the stop must not corrupt
+        the persisted runtime thread/session. A runtime without mid-turn
+        steering can prove that API boundary against the same running turn."""
+        self._step(f"{self.agent_runtime} stop: cancel a running turn, then reuse its thread")
+        thread_id = f"smoke-kill-{self.agent_runtime}"
+        baseline = self._latest_thread_event_seq(thread_id)
+        slow = self.send_message(
+            thread_id,
+            "Use the terminal tool to run `sleep 300`, then write a 500-word essay about bananas.",
         )
-        slow_id = slow["task_id"]
-        current = self._wait_for_task_status(slow_id, "running", timeout=120)
-        if current["status"] != "running":
-            raise AssertionError(f"slow task never started (status {current['status']}); cannot test kill")
+        if slow.get("status") != "accepted":
+            raise AssertionError(f"slow turn was not started ({slow}); cannot test stop")
+        self._wait_for_turn_activity(thread_id, since=baseline, timeout=120)
         if expect_steering_denied:
             status, body = self._api_status(
                 "POST",
-                f"/v1/tasks/{slow_id}/steer",
-                {"steer_message": "change direction"},
+                f"/v1/threads/{self.api_thread_id(thread_id)}/messages",
+                self.follow_up_body("change direction"),
             )
-            expected_error = (
-                "Hermes tasks do not support steering; create a new task on the same thread_id"
-            )
-            error = body.get("error")
-            message = error.get("message", "") if isinstance(error, dict) else str(error or "")
-            if status != 409 or message != expected_error:
+            expected_error = "Hermes cannot accept another message while running; wait for it to finish"
+            if status != 409 or self._error_message(body) != expected_error:
                 raise AssertionError(f"unsupported steering returned {status}: {body}")
         start = time.time()
-        status, body = self._api_status("POST", f"/v1/tasks/{slow_id}/kill")
+        status, body = self._api_status(
+            "POST", f"/v1/threads/{self.api_thread_id(thread_id)}/stop"
+        )
         if status != 200 or body.get("status") != "accepted":
-            raise AssertionError(f"kill returned {status}: {body}")
-        killed = self._wait_for_task(slow_id, timeout=60)
+            raise AssertionError(f"stop returned {status}: {body}")
+        killed = self._wait_for_turn(thread_id, since=baseline, timeout=60)
         if killed["status"] != "cancelled":
-            raise AssertionError(f"killed task ended {killed['status']}, expected cancelled")
-        print(f"  kill settled in {time.time() - start:.1f}s", flush=True)
+            raise AssertionError(f"stopped turn ended {killed['status']}, expected cancelled")
+        print(f"  stop settled in {time.time() - start:.1f}s", flush=True)
 
-        # The kill must also free the thread's transient scope on the host:
+        # The stop must also free the thread's transient scope on the host:
         # close() stops kern-agent-thread-<id>.scope through the root
         # stop-agent-thread helper (SIGKILLing any process the runtime left in
         # the cgroup, such as the sleep above) and reset-failed clears any
-        # failed remnant, so systemd forgets the unit entirely. The task is
+        # failed remnant, so systemd forgets the unit entirely. The turn is
         # marked cancelled before that close completes, so poll briefly. This
-        # pins the mechanism the follow-up task below depends on.
+        # pins the mechanism the follow-up turn below depends on.
         scope_unit = f"kern-agent-thread-{self.thread_prefix}smoke-kill-{self.agent_runtime}.scope"
         deadline = time.time() + 30
         while True:
@@ -3030,29 +3079,27 @@ class AwsSmoke:
                 break
             if time.time() > deadline:
                 raise AssertionError(
-                    f"killed thread scope {scope_unit} still known to systemd: {load_state!r}"
+                    f"stopped thread scope {scope_unit} still known to systemd: {load_state!r}"
                 )
             time.sleep(1)
 
-        follow = self._api(
-            "POST",
-            "/v1/tasks",
-            self.follow_up_body(
-                "Stop the essay. Reply with exactly the word SURVIVED and nothing else.",
-                f"smoke-kill-{self.agent_runtime}",
-            ),
+        follow_baseline = self._latest_thread_event_seq(thread_id)
+        follow = self.send_follow_up(
+            thread_id, "Stop the essay. Reply with exactly the word SURVIVED and nothing else."
         )
-        done = self._wait_for_task(follow["task_id"], timeout=240)
+        if follow.get("status") != "accepted":
+            raise AssertionError(f"follow-up on the stopped thread was not started: {follow}")
+        done = self._wait_for_turn(thread_id, since=follow_baseline, timeout=240)
         if done["status"] != "completed":
             raise AssertionError(
-                f"follow-up on the killed thread ended {done['status']}: {self._task_failure_detail(follow['task_id'])}"
+                f"follow-up on the stopped thread ended {done['status']}: {self._thread_failure_detail(thread_id)}"
             )
         if "SURVIVED" not in (done.get("output_message") or "").upper():
-            raise AssertionError(f"follow-up on killed thread answered {done.get('output_message')!r}")
+            raise AssertionError(f"follow-up on stopped thread answered {done.get('output_message')!r}")
         steering = " and rejected unsupported steering" if expect_steering_denied else ""
         self._ok(
-            f"{self.agent_runtime} kill cancelled the running task{steering}; "
-            "a later task resumed the same thread"
+            f"{self.agent_runtime} stop cancelled the running turn{steering}; "
+            "a later turn resumed the same thread"
         )
 
     def check_agent_thread_recall(self) -> None:
@@ -3063,21 +3110,20 @@ class AwsSmoke:
         if not self.parallel_threads:
             raise AssertionError("no completed parallel threads recorded; recall check must run after parallelism")
         for runtime, (thread_id, token) in self.parallel_threads.items():
-            task = self._api(
-                "POST",
-                "/v1/tasks",
-                self.follow_up_body(
-                    (
-                        "Earlier in this conversation you replied with a single uppercase word. "
-                        "Reply with exactly that word again and nothing else."
-                    ),
-                    thread_id,
+            baseline = self._latest_thread_event_seq(thread_id)
+            recall = self.send_follow_up(
+                thread_id,
+                (
+                    "Earlier in this conversation you replied with a single uppercase word. "
+                    "Reply with exactly that word again and nothing else."
                 ),
             )
-            done = self._wait_for_task(task["task_id"], timeout=240)
+            if recall.get("status") != "accepted":
+                raise AssertionError(f"{runtime} recall on {thread_id} was not started: {recall}")
+            done = self._wait_for_turn(thread_id, since=baseline, timeout=240)
             if done["status"] != "completed":
                 raise AssertionError(
-                    f"{runtime} recall on {thread_id} ended {done['status']}: {self._task_failure_detail(task['task_id'])}"
+                    f"{runtime} recall on {thread_id} ended {done['status']}: {self._thread_failure_detail(thread_id)}"
                 )
             if token not in (done.get("output_message") or "").upper():
                 raise AssertionError(f"{runtime} {thread_id} lost its context: {done.get('output_message')!r}")
@@ -3085,13 +3131,12 @@ class AwsSmoke:
 
     def check_reboot_recovery(self) -> None:
         """POST /v1/host-runtime/reboot, then prove the host comes back with
-        everything intact: the admin API and proxy restart enabled, task
+        everything intact: the admin API and proxy restart enabled, turn
         history and the thread map survive on the EBS volume, provider login
-        persists, and a post-reboot task resumes a pre-reboot thread."""
+        persists, and a post-reboot turn resumes a pre-reboot thread."""
         self._step("host reboot: services, state, login, and threads survive")
-        finished_id = next(iter(self.parallel_task_ids), None)
-        if finished_id is None:
-            raise AssertionError("no completed parallel task recorded; reboot check must run after parallelism")
+        if not self.parallel_threads:
+            raise AssertionError("no completed parallel threads recorded; reboot check must run after parallelism")
         status, body = self._api_status("POST", "/v1/host-runtime/reboot")
         if status != 200 or body.get("status") != "accepted":
             raise AssertionError(f"reboot returned {status}: {body}")
@@ -3117,10 +3162,17 @@ class AwsSmoke:
         if not health or health["network_controls"]["status"] != "active":
             raise AssertionError(f"host did not come back healthy after reboot (last health: {health})")
 
-        # Pre-reboot history survived on disk.
-        survivor = self._api("GET", f"/v1/tasks/{finished_id}")
-        if survivor["status"] != "completed":
-            raise AssertionError(f"completed task changed across reboot: {survivor}")
+        # Pre-reboot history survived on disk: the parallel threads keep their
+        # rows (idle, no phantom running work) and their retained messages.
+        for runtime, (thread_id, _) in self.parallel_threads.items():
+            survivor = self._api(
+                "GET", f"/v1/threads/{self.api_thread_id(thread_id)}"
+            )["thread"]
+            if survivor.get("status") != "idle":
+                raise AssertionError(f"{runtime} thread changed across reboot: {survivor}")
+            events = self._thread_events(thread_id)
+            if not any(event["event_type"] == "thread.message" for event in events):
+                raise AssertionError(f"{runtime} thread lost its message history across reboot")
 
         # All provider credentials persisted: every runtime re-derives active
         # without a new login or credential connection.
@@ -3138,21 +3190,20 @@ class AwsSmoke:
 
         # And pre-reboot threads resume with their context for both runtimes.
         for runtime, (thread_id, token) in self.parallel_threads.items():
-            recall = self._api(
-                "POST",
-                "/v1/tasks",
-                self.follow_up_body(
-                    (
-                        "Earlier in this conversation you replied with a single uppercase token. "
-                        "Reply with exactly that token again and nothing else."
-                    ),
-                    thread_id,
+            baseline = self._latest_thread_event_seq(thread_id)
+            recall = self.send_follow_up(
+                thread_id,
+                (
+                    "Earlier in this conversation you replied with a single uppercase token. "
+                    "Reply with exactly that token again and nothing else."
                 ),
             )
-            done = self._wait_for_task(recall["task_id"], timeout=300)
+            if recall.get("status") != "accepted":
+                raise AssertionError(f"{runtime} post-reboot recall was not started: {recall}")
+            done = self._wait_for_turn(thread_id, since=baseline, timeout=300)
             if done["status"] != "completed":
                 raise AssertionError(
-                    f"{runtime} post-reboot recall ended {done['status']}: {self._task_failure_detail(recall['task_id'])}"
+                    f"{runtime} post-reboot recall ended {done['status']}: {self._thread_failure_detail(thread_id)}"
                 )
             if token not in (done.get("output_message") or "").upper():
                 raise AssertionError(f"{runtime} thread context lost across reboot: {done.get('output_message')!r}")
@@ -3246,7 +3297,7 @@ class AwsSmoke:
             "sudo -u kern-proxy psql -tA -d kern_admin -c 'SELECT count(*) >= 0 FROM network_events' && "
             "sudo -u kern-proxy psql -tA -d kern_admin -c 'SELECT count(*) >= 0 FROM bedrock_credentials' && "
             "sudo -u kern-proxy bash -c '! psql -tA -d kern_admin -c \"UPDATE bedrock_credentials SET access_key_id = access_key_id\" 2>/dev/null' && "
-            "sudo -u kern-proxy bash -c '! psql -tA -d kern_admin -c \"SELECT count(*) FROM tasks\" 2>/dev/null' && "
+            "sudo -u kern-proxy bash -c '! psql -tA -d kern_admin -c \"SELECT count(*) FROM thread_sessions\" 2>/dev/null' && "
             "sudo -u kern-proxy bash -c '! psql -tA -d kern_admin -c \"SELECT agent_name FROM config\" 2>/dev/null' && "
             "echo ok"
         ).strip().splitlines()
@@ -3376,17 +3427,18 @@ class AwsSmoke:
                 raise AssertionError(f"parallel request failed: {result}") from result
         return results
 
-    def _active_tasks(self) -> list[dict]:
-        """Drain the paged GET /v1/tasks list (active tasks only)."""
-        tasks: list[dict] = []
-        last: str | None = None
-        while True:
-            query = f"?last_seen_task_id={last}" if last else ""
-            page = self._api("GET", f"/v1/tasks{query}")["tasks"]
-            if not page:
-                return tasks
-            tasks.extend(page)
-            last = page[-1]["task_id"]
+    def _running_thread_ids(self) -> set[str]:
+        """API-side ids of threads with a live turn, from the thread list."""
+        return {
+            thread["thread_id"]
+            for thread in self._api("GET", "/v1/threads")["threads"]
+            if thread.get("status") == "running"
+        }
+
+    @staticmethod
+    def _error_message(body: object) -> str:
+        error = body.get("error") if isinstance(body, dict) else None
+        return error.get("message", "") if isinstance(error, dict) else str(error or "")
 
     def _network_events(self, since: int = 0) -> list[dict]:
         """Drain `/v1/network/events` cursor pages into events after ``since``."""
@@ -3519,63 +3571,102 @@ LEFT JOIN proxy_provider_pins USING (provider)
                 flush=True,
             )
 
-    def _task_failure_detail(self, task_id: str) -> str:
-        """Failure context for assertions: the task's error_message plus its
-        last few events (which carry agent messages and failure payloads)."""
-        task = self._api("GET", f"/v1/tasks/{task_id}")
-        tail = "; ".join(
-            f"{event['event_type']}: {event['payload'].get('error_message') or event['payload'].get('message', '')}"
-            for event in self._task_events(task_id)[-4:]
-        )
-        return f"error_message={task.get('error_message')!r}; recent events: {tail or '<none>'}"
+    def _thread_failure_detail(self, thread_id: str) -> str:
+        """Failure context for assertions: the thread's last few events (which
+        carry agent messages and failure payloads)."""
+        try:
+            tail = "; ".join(
+                f"{event['event_type']}: {event['payload'].get('error_message') or event['payload'].get('message', '')}"
+                for event in self._thread_events(thread_id)[-4:]
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort debug output
+            return f"<could not read thread events: {type(exc).__name__}: {exc}>"
+        return f"recent events: {tail or '<none>'}"
 
-    @staticmethod
-    def _max_concurrency(intervals: list[tuple[float, float]]) -> int:
-        """Peak number of simultaneously open [start, end] intervals. At equal
-        timestamps ends are processed before starts, so a serialized handoff
-        at second granularity does not count as overlap."""
-        points: list[tuple[float, int]] = []
-        for start, end in intervals:
-            points.append((start, 1))
-            points.append((end, -1))
-        points.sort(key=lambda point: (point[0], point[1]))
-        current = peak = 0
-        for _, delta in points:
-            current += delta
-            peak = max(peak, current)
-        return peak
-
-    def _task_events(self, task_id: str) -> list[dict]:
+    def _thread_events(self, thread_id: str, since: int = 0) -> list[dict]:
+        """Drain the thread's events after ``since``, oldest-first."""
         events: list[dict] = []
-        cursor = 0
+        cursor = since
         while True:
-            page = self._api("GET", f"/v1/tasks/{task_id}/events?since={cursor}")["events"]
+            page = self._api(
+                "GET",
+                f"/v1/threads/{self.api_thread_id(thread_id)}/events?since={cursor}",
+            )["events"]
             if not page:
                 return events
             events.extend(page)
             cursor = max(int(event["seq"]) for event in page)
 
-    @staticmethod
-    def _epoch(timestamp: str) -> float:
-        return calendar.timegm(time.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ"))
+    def _latest_thread_event_seq(self, thread_id: str) -> int:
+        """The baseline seq before a send, used to isolate later events."""
+        return max((int(event["seq"]) for event in self._thread_events(thread_id)), default=0)
 
-    def _wait_for_task_status(self, task_id: str, wanted: str, *, timeout: float) -> dict:
-        """Wait until the task reaches ``wanted`` or any terminal status."""
+    @staticmethod
+    def _turn_result(events: list[dict], thread_status: str = "running") -> dict | None:
+        """Fold new events and durable thread status into a terminal result.
+
+        Errors and stops are explicit events. Successful work is complete when
+        the thread is idle; ``output_message`` is its latest agent message.
+        """
+        output: str | None = None
+        for event in events:
+            payload = event.get("payload") or {}
+            if event.get("event_type") == "thread.message" and payload.get("source") == "agent":
+                output = payload.get("message")
+            terminal = TURN_TERMINAL_STATUSES.get(event.get("event_type"))
+            if terminal is not None:
+                return {
+                    "status": terminal,
+                    "output_message": output,
+                    "error_message": payload.get("error_message"),
+                }
+        if thread_status == "idle":
+            return {
+                "status": "completed",
+                "output_message": output,
+                "error_message": None,
+            }
+        return None
+
+    def _wait_for_turn(self, thread_id: str, *, timeout: float, since: int = 0) -> dict:
+        """Wait until the turn whose events land after ``since`` finishes and
+        return {"status", "output_message", "error_message"}."""
         deadline = time.time() + timeout
         while True:
-            task = self._api("GET", f"/v1/tasks/{task_id}")
-            if task["status"] == wanted or task["status"] in {"completed", "failed", "cancelled"}:
-                return task
+            thread_status = self._api(
+                "GET", f"/v1/threads/{self.api_thread_id(thread_id)}"
+            )["thread"]["status"]
+            result = self._turn_result(
+                self._thread_events(thread_id, since=since),
+                thread_status,
+            )
+            if result is not None:
+                return result
             if time.time() >= deadline:
-                return task
+                raise AssertionError(
+                    f"turn on thread {thread_id} did not finish within {timeout}s; "
+                    f"{self._thread_failure_detail(thread_id)}"
+                )
             time.sleep(2)
 
-    def _wait_for_task(self, task_id: str, *, timeout: float) -> dict:
+    def _wait_for_turn_activity(self, thread_id: str, *, since: int, timeout: float) -> None:
+        """Wait until the running turn shows agent activity, so mid-turn
+        steering/stop checks exercise a genuinely running runtime process."""
         deadline = time.time() + timeout
         while True:
-            task = self._api("GET", f"/v1/tasks/{task_id}")
-            if task["status"] in {"completed", "failed", "cancelled"} or time.time() >= deadline:
-                return task
+            thread_status = self._api(
+                "GET", f"/v1/threads/{self.api_thread_id(thread_id)}"
+            )["thread"]["status"]
+            events = self._thread_events(thread_id, since=since)
+            if any(event.get("event_type") == "thread.activity" for event in events):
+                return
+            result = self._turn_result(events, thread_status)
+            if result is not None:
+                raise AssertionError(
+                    f"turn on thread {thread_id} finished before showing activity: {result}"
+                )
+            if time.time() >= deadline:
+                raise AssertionError(f"turn on thread {thread_id} showed no activity within {timeout}s")
             time.sleep(2)
 
     def _wait_for_runtime_status(self, wanted: set[str], *, timeout: float, runtime: str | None = None) -> str:

@@ -1,10 +1,12 @@
 """Peer-authenticated admin API surface for app backends.
 
-App backends reach host task/thread routes through a Unix-domain socket instead
-of the operator-facing TCP admin API. This module owns the app-backend-specific
-boundary: authenticate the peer uid as an installed app service user, verify the
-claimed app id, narrow the route surface, and translate app-visible task/thread
-ids to host-internal app-prefixed ids.
+App backends reach host thread routes through a Unix-domain socket instead of
+the operator-facing TCP admin API. This module owns the app-backend-specific
+boundary: authenticate the peer uid as an installed app service user, verify
+the claimed app id, narrow the route surface, and translate app-visible thread
+ids to host-internal app-prefixed ids. Every route is thread-scoped, so
+authorization is the mechanical prefix mapping — no per-request ownership
+lookup exists.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from urllib.parse import parse_qs, urlparse
 
 from host.constants import APP_BACKEND_ADMIN_SOCKET_PATH, MAX_REQUEST_BODY_BYTES
 from host.runtime.admin_api import service as admin_api
-from host.runtime.core import app_platform, state
+from host.runtime.core import app_platform, host_errors
 
 
 APP_BACKEND_ADMIN_SOCKET = Path(
@@ -35,13 +37,10 @@ APP_BACKEND_AUTH_HEADER = "X-Kern-App-Backend"
 APP_BACKEND_ALLOWED_ADMIN_ROUTES = (
     ("GET", "/v1/tools"),
     ("GET", "/v1/network/policy"),
-    ("POST", "/v1/tasks"),
-    ("GET", "/v1/tasks/:task_id"),
-    ("POST", "/v1/tasks/:task_id/cancel"),
-    ("POST", "/v1/tasks/:task_id/kill"),
-    ("POST", "/v1/tasks/:task_id/steer"),
     ("GET", "/v1/threads"),
-    ("GET", "/v1/threads/:thread_id/tasks"),
+    ("GET", "/v1/threads/:thread_id"),
+    ("POST", "/v1/threads/:thread_id/messages"),
+    ("POST", "/v1/threads/:thread_id/stop"),
     ("GET", "/v1/threads/:thread_id/events"),
 )
 
@@ -80,7 +79,12 @@ class Handler(BaseHTTPRequestHandler):
         except app_platform.AppError as exc:
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"message": str(exc)}})
         except Exception as exc:
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"message": str(exc)}})
+            host_errors.report_unexpected(
+                "admin_api.app_backend_request",
+                exc,
+                context={"method": method, "route": urlparse(self.path).path},
+            )
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"message": "internal server error"}})
 
     def _authenticate_app_backend_id(self) -> str:
         claimed_app_id = self.headers.get(APP_BACKEND_AUTH_HEADER, "")
@@ -160,14 +164,12 @@ def route_app_backend_request(
     body: Any,
 ) -> Any:
     _require_app_backend_route(method, path)
-    internal_path = _internal_path(app_id, method, path)
-    internal_body = _internal_body(app_id, method, path, body)
-    _require_app_task_scope(app_id, method, path)
+    internal_path = _internal_path(app_id, path)
     response = admin_api.route(
         method,
         internal_path,
         query,
-        internal_body,
+        body,
         app_backend_id=app_id,
     )
     if method == "GET" and path == "/v1/threads" and isinstance(response, dict):
@@ -218,30 +220,13 @@ def _route_pattern_matches(path: str, pattern: str) -> bool:
     )
 
 
-def _internal_path(app_id: str, method: str, path: str) -> str:
+def _internal_path(app_id: str, path: str) -> str:
     parts = path.strip("/").split("/")
-    if len(parts) == 4 and parts[:2] == ["v1", "threads"] and parts[3] in {"tasks", "events"} and method == "GET":
-        return f"/v1/threads/{_internal_thread_id(app_id, parts[2])}/{parts[3]}"
+    if len(parts) >= 3 and parts[:2] == ["v1", "threads"]:
+        rest = "/".join(parts[3:])
+        internal = f"/v1/threads/{_internal_thread_id(app_id, parts[2])}"
+        return f"{internal}/{rest}" if rest else internal
     return path
-
-
-def _internal_body(app_id: str, method: str, path: str, body: Any) -> Any:
-    if method != "POST" or path != "/v1/tasks" or not isinstance(body, dict):
-        return body
-    thread_id = body.get("thread_id")
-    if not isinstance(thread_id, str) or not admin_api.THREAD_ID_RE.fullmatch(thread_id):
-        return body
-    return {**body, "thread_id": _internal_thread_id(app_id, thread_id)}
-
-
-def _require_app_task_scope(app_id: str, method: str, path: str) -> None:
-    """Raw task ids stay global; task-id routes must prove app ownership first."""
-    parts = path.strip("/").split("/")
-    if len(parts) >= 3 and parts[:2] == ["v1", "tasks"] and method in {"GET", "POST"}:
-        task = state.get_task(parts[2])
-        if task is None:
-            raise admin_api.ApiError(HTTPStatus.NOT_FOUND, "task not found")
-        _visible_thread_id(app_id, str(task.get("thread_id", "")), status=HTTPStatus.NOT_FOUND)
 
 
 def _thread_prefix(app_id: str) -> str:
@@ -258,16 +243,15 @@ def _internal_thread_id(app_id: str, thread_id: str) -> str:
     return internal
 
 
-def _visible_thread_id(app_id: str, thread_id: str, *, status: HTTPStatus) -> str:
+def _visible_thread_id(app_id: str, thread_id: str) -> str:
     prefix = _thread_prefix(app_id)
     if not thread_id.startswith(prefix):
-        message = "task not found" if status == HTTPStatus.NOT_FOUND else "host admin returned unscoped app thread"
-        raise admin_api.ApiError(status, message)
+        raise admin_api.ApiError(HTTPStatus.BAD_GATEWAY, "host admin returned unscoped app thread")
     return thread_id.removeprefix(prefix)
 
 
 def _visible_response(app_id: str, value: Any) -> Any:
-    return _map_response(value, lambda thread_id: _visible_thread_id(app_id, thread_id, status=HTTPStatus.BAD_GATEWAY))
+    return _map_response(value, lambda thread_id: _visible_thread_id(app_id, thread_id))
 
 
 def _map_response(value: Any, thread_mapper: Callable[[str], str]) -> Any:

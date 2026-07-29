@@ -14,13 +14,44 @@ class AdminAuthTests(unittest.TestCase):
         self.addCleanup(admin_auth._sessions.clear)
         self.addCleanup(admin_auth._client_failures.clear)
 
-    def test_create_and_validate_session_refreshes_idle_clock(self) -> None:
+    def test_background_validation_does_not_refresh_idle_clock(self) -> None:
         with patch.object(admin_auth, "_now", return_value=1000.0):
             token = admin_auth.create_session()
             self.assertIsNotNone(admin_auth.validate_session(token))
-        # A use just inside the idle window keeps the session alive.
-        with patch.object(admin_auth, "_now", return_value=1000.0 + admin_auth.SESSION_IDLE_TIMEOUT_SECONDS - 1):
+        # A background request just inside the idle window validates...
+        with patch.object(
+            admin_auth,
+            "_now",
+            return_value=1000.0 + admin_auth.SESSION_IDLE_TIMEOUT_SECONDS - 1,
+        ):
             self.assertIsNotNone(admin_auth.validate_session(token))
+        # ...but does not keep an abandoned tab alive past the original clock.
+        with patch.object(
+            admin_auth,
+            "_now",
+            return_value=1000.0 + admin_auth.SESSION_IDLE_TIMEOUT_SECONDS + 1,
+        ):
+            self.assertIsNone(admin_auth.validate_session(token))
+
+    def test_operator_activity_refreshes_idle_clock(self) -> None:
+        with patch.object(admin_auth, "_now", return_value=1000.0):
+            token = admin_auth.create_session()
+        with patch.object(
+            admin_auth,
+            "_now",
+            return_value=1000.0 + admin_auth.SESSION_IDLE_TIMEOUT_SECONDS - 1,
+        ):
+            self.assertIsNotNone(admin_auth.validate_session(token, refresh_idle=True))
+        with patch.object(
+            admin_auth,
+            "_now",
+            return_value=1000.0 + (2 * admin_auth.SESSION_IDLE_TIMEOUT_SECONDS) - 2,
+        ):
+            self.assertIsNotNone(admin_auth.validate_session(token))
+
+    def test_public_admin_session_lifetimes_are_bounded(self) -> None:
+        self.assertEqual(admin_auth.SESSION_IDLE_TIMEOUT_SECONDS, 12 * 60 * 60)
+        self.assertEqual(admin_auth.SESSION_ABSOLUTE_TIMEOUT_SECONDS, 3 * 24 * 60 * 60)
 
     def test_unknown_token_is_not_a_session(self) -> None:
         self.assertIsNone(admin_auth.validate_session("not-a-real-token"))
@@ -147,18 +178,56 @@ class AdminAuthTests(unittest.TestCase):
         self.assertIn("__Host-tc_admin_session=;", admin_auth.clear_session_cookie(secure=True))
 
     def test_parse_session_token(self) -> None:
-        self.assertEqual(admin_auth.parse_session_token("a=1; __Host-tc_admin_session=xyz; b=2"), "xyz")
-        self.assertEqual(admin_auth.parse_session_token("a=1; tc_admin_session=xyz; b=2"), "xyz")
-        self.assertIsNone(admin_auth.parse_session_token("other=1"))
-        self.assertIsNone(admin_auth.parse_session_token(""))
-
-    def test_parse_prefers_host_cookie_over_a_tossed_plain_cookie(self) -> None:
-        # A sibling can toss a plain tc_admin_session on the shared parent domain,
-        # sent first by a more specific path, but never a __Host- cookie. Parsing
-        # prefers the __Host- value, so the tossed cookie cannot break the session.
         self.assertEqual(
-            admin_auth.parse_session_token("tc_admin_session=tossed; __Host-tc_admin_session=real"),
+            admin_auth.parse_session_token(
+                "a=1; __Host-tc_admin_session=xyz; b=2",
+                secure=True,
+            ),
+            "xyz",
+        )
+        self.assertEqual(
+            admin_auth.parse_session_token(
+                "a=1; tc_admin_session=xyz; b=2",
+                secure=False,
+            ),
+            "xyz",
+        )
+        self.assertIsNone(admin_auth.parse_session_token("other=1", secure=False))
+        self.assertIsNone(admin_auth.parse_session_token("", secure=True))
+
+    def test_cookie_names_are_exclusive_to_their_transport(self) -> None:
+        # A sibling can toss a plain tc_admin_session on the shared parent
+        # domain, but the public HTTPS path ignores it completely.
+        self.assertEqual(
+            admin_auth.parse_session_token(
+                "tc_admin_session=tossed; __Host-tc_admin_session=real",
+                secure=True,
+            ),
             "real",
+        )
+        self.assertIsNone(
+            admin_auth.parse_session_token("tc_admin_session=tossed", secure=True)
+        )
+        # Conversely the loopback HTTP path never accepts the public cookie.
+        self.assertIsNone(
+            admin_auth.parse_session_token(
+                "__Host-tc_admin_session=public",
+                secure=False,
+            )
+        )
+
+    def test_duplicate_expected_cookie_is_rejected(self) -> None:
+        self.assertIsNone(
+            admin_auth.parse_session_token(
+                "tc_admin_session=first; tc_admin_session=second",
+                secure=False,
+            )
+        )
+        self.assertIsNone(
+            admin_auth.parse_session_token(
+                "__Host-tc_admin_session=first; __Host-tc_admin_session=second",
+                secure=True,
+            )
         )
 
 

@@ -81,7 +81,7 @@ Manual rules also cannot set provider-specific guard configuration.
 
 ## OpenAI Integration
 
-When `network_integrations.openai.enabled` is `true`, Codex tasks can
+When `network_integrations.openai.enabled` is `true`, Codex turns can
 run after Codex OAuth login. The OpenAI integration directly enforces:
 
 ```json
@@ -105,11 +105,11 @@ Codex login status instead of accepting it in config. OpenAI data-plane
 requests are denied until that inferred account id is available;
 `auth.openai.com` stays available for login. Disabling the integration
 deactivates the Codex runtime, clears the account pin, closes live runtime
-processes, and fails running Codex tasks.
+processes, and fails running Codex turns.
 
 ## Claude Integration
 
-When `network_integrations.claude.enabled` is `true`, Claude Code tasks
+When `network_integrations.claude.enabled` is `true`, Claude Code turns
 can run after Claude OAuth login. The Claude integration directly enforces:
 
 ```json

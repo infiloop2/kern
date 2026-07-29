@@ -54,14 +54,14 @@ Important source areas and the context that runs them:
 | `host/bootstrap/helpers/` | root through exact `kern-admin` sudo rules | Launches runtimes as the agent user, reads or clears narrow agent-auth state, reads bounded agent files, reboots, and performs GitHub operations that need root egress. |
 | `host/apps/` | App users, plus bootstrap/admin readers | Contains active app manifests and runtime files, plus migration-only manifests for deprecated app identities; every package retains its stable `host_slot`. See [Apps](../architecture/apps/apps.md). |
 | `host/tools/` | `kern-tools` | Defines the host-neutral tool contract and bundled packages. Package discovery is directory-based; helper packages are explicitly excluded. |
-| `host/runtime/admin_api/service.py` | `kern-admin` | Serves `127.0.0.1:7443`, authenticates operator APIs, dispatches app/tool routes, owns task state, and starts workers and maintenance. |
+| `host/runtime/admin_api/service.py` | `kern-admin` | Serves `127.0.0.1:7443`, authenticates operator APIs, dispatches app/tool routes, owns thread state, and starts the background loops and maintenance. |
 | `host/runtime/admin_ui*` | Browser, served by admin API | Implements the native-ES-module operator UI and its static assets. |
 | `host/runtime/admin_api/errors.py` | Admin route modules | Holds the shared `ApiError` class so the `__main__` service and imported route modules map status codes consistently. |
 | `host/runtime/core/app_platform.py` | Operator/bootstrap and admin API | Validates installed app manifests and derives host-owned users, roles, schemas, routes, services, and ports. |
 | `host/runtime/deploy/app_migrate.py` | App role for SQL; admin role for records | Applies replay-safe app SQL under the app schema and records versions in host-owned state. |
 | `host/runtime/admin_api/app_api_proxy.py` | `kern-admin` | Proxies authenticated browser app requests to uid-firewalled loopback app ports without forwarding the operator's session cookie. |
-| `host/runtime/admin_api/app_backend_api.py` | `kern-admin` | Serves the peer-authenticated app-backend Unix socket and scopes allowlisted task/thread routes to the calling app. |
-| `host/runtime/admin_api/orchestrator.py` | `kern-admin` | Runs the nine task workers, runtime status/account pollers, credential convergence, and task lifecycle coordination. |
+| `host/runtime/admin_api/app_backend_api.py` | `kern-admin` | Serves the peer-authenticated app-backend Unix socket and scopes allowlisted thread routes to the calling app. |
+| `host/runtime/admin_api/orchestrator.py` | `kern-admin` | Owns turn admission and the live turn processes, plus the runtime status/account pollers and credential convergence. |
 | `host/runtime/admin_api/codex_app_server.py` | Admin adapter controlling an agent child | Implements the Codex stdio JSON-RPC protocol and runtime lifecycle. |
 | `host/runtime/admin_api/claude_code.py` | Admin adapter controlling an agent child | Implements Claude Code stream-json turns, steering, login, and status probes. |
 | `host/runtime/network_proxy/service.py` | `kern-proxy` | Serves `127.0.0.1:7445`, terminates/inspects proxied traffic, applies policy before upstream connections, and records network events. |

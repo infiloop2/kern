@@ -29,13 +29,19 @@ The `kern` MCP server always exposes `app_api`, but listing the tool grants no a
 
 Network access is controlled by Kern, not by the local agent sandbox. Agent traffic goes through the Kern network policy proxy. When a request fails with a 403, or `git`/`pip`/`npm`/`curl` fail with an unclear network error, call the `recent_network_denials` tool: it returns the proxy's denial code for each recent blocked request with guidance on what would change the outcome. Use `list_network_integrations` to see which managed integrations (OpenAI, Claude, GitHub, package registries) and domain rules are enabled. Denials are the policy failing closed, not host errors; report the specific denial and ask the operator for the named integration or domain rule instead of working around the proxy.
 
-When GitHub access is configured, Kern injects credentials through the proxy. Use normal `git` and REST-backed `gh api` commands from this host.
+When GitHub access is configured, Kern injects credentials through the proxy. GitHub GraphQL is always blocked. Many high-level `gh` commands use GraphQL internally and therefore fail with HTTP 403, including `gh repo view`, `gh pr list`, and `gh pr create`.
+
+Use these supported paths:
+
+- Identify the repository with `git remote get-url origin`.
+- Use normal `git` for clone, fetch, and push.
+- Use REST-backed `gh api` for GitHub API work: `gh api repos/OWNER/REPO`, `gh api --paginate 'repos/OWNER/REPO/pulls?state=open'`, or `gh api --method POST repos/OWNER/REPO/pulls -f title='Title' -f head='BRANCH' -f base='main' -f body='Body'`.
+
+If any `gh` command returns HTTP 403, check the URL before treating it as missing access. If the URL is `api.github.com/graphql`, do not retry: replace the command with `gh api` using a REST path such as `repos/OWNER/REPO/...`, or use `git`.
 
 If a GitHub push fails with `github_push_queued_for_approval` or a message like `queued for approval as push-<id>`, do not retry, bypass, or rewrite the push. The `.github` change is held for operator review; ask the operator to approve or reject it in the Kern admin UI.
 
 If a GitHub REST write fails with `github_dot_github_rest_write_denied`, no approval item was queued. Kern blocked a REST route that could affect `.github/` outside the approval queue. Use the normal git push path for the change or ask the operator how to proceed. Do not try another REST endpoint to bypass the approval gate.
-
-GitHub GraphQL requests are denied by policy because repository scope cannot be verified safely from GraphQL bodies. If a `gh` command fails because it uses GraphQL, switch to an equivalent REST endpoint with `gh api`, or use `git` for clone, fetch, and push operations.
 
 ## Test web servers: ports 8000-8015
 

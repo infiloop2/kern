@@ -90,10 +90,10 @@ attests the new token against the anchor and atomically replaces the pin
 with the new token hash, all while the status stays `active` throughout.
 Rotation therefore never passes through `awaiting_login`. Between the CLI
 writing a rotated token and the refresh that replaces the pin, the old pin
-denies the new token's traffic (fail closed); the scheduled recheck and the
-pre-task Claude refresh are the convergence points that close that window.
-Because the pre-task refresh converges before the turn's process spawns, a
-task never starts inside that window: rotation can only fail a turn already
+denies the new token's traffic (fail closed); the scheduled recheck and Claude
+pin convergence at turn start are the points that close that window.
+Because turn-start convergence finishes before the process spawns, a
+turn never starts inside that window: rotation can only fail a turn already
 in flight whose token expires mid-turn (its CLI refreshes and retries against
 the old pin). That failure is one-time and retryable — the next convergence
 point replaces the pin — and it is rare in practice, because the five-minute
@@ -107,17 +107,75 @@ rewrites never change the value.
 
 | Status | Meaning | Recheck cadence |
 | --- | --- | --- |
-| `deactivated` | The provider is disabled in the network policy. The proxy rejects its requests, processes close, and running tasks fail; queued tasks fail at their next claim. The operator-approved account or connected credential remains, so re-enabling can return directly to `active` with no new login. Disabling Bedrock projects `deactivated` into the Hermes runtime row and stops its process pool. | every 5 seconds (a backstop: enabling the provider refreshes immediately) |
+| `deactivated` | The provider is disabled in the network policy. The proxy rejects its requests, processes close, and running turns fail; new messages are rejected at admission. The operator-approved account or connected credential remains, so re-enabling can return directly to `active` with no new login. Disabling Bedrock projects `deactivated` into the Hermes runtime row and closes its live turn processes. | every 5 seconds (a backstop: enabling the provider refreshes immediately) |
 | `loading` | No poll has completed yet (process start). | every 5 seconds |
 | `awaiting_login` | An OAuth runtime needs operator login, or enabled Bedrock needs its credential connected. OAuth proxy enforcement state is cleared; the anchor, if any, remains. | every 5 seconds |
 | `active` | An operator-approved OAuth credential with live validation, or an enabled Bedrock provider with a synchronously validated credential row. | every 5 minutes |
-| `error` | The last OAuth check failed, or stored Bedrock state is internally inconsistent. `error_message` carries the cause. Provider errors encountered during a Bedrock task fail that task and do not change this derived status. | every 5 seconds |
+| `error` | The last OAuth check failed, or stored Bedrock state is internally inconsistent. `error_message` carries the cause. Provider errors encountered during a Bedrock turn fail that turn and do not change this derived status. | every 5 seconds |
 
-Tasks run only against an `active` runtime: a worker that claims a task while
-the runtime is anything else fails it immediately with that status as the
-error message, after re-checking the current network policy directly so a
-just-disabled provider can never start a task. Queued work never parks behind
-a missing login.
+Turns run only against an `active` runtime, and the check is fail-fast in two
+places: admission rejects a message while the runtime is anything else with a
+`409` naming that status, and the turn's own thread re-checks the current
+network policy and runtime status again before spawning the process, so a
+disable that lands between admission and launch records `thread.error` with
+that status instead of running the admitted work. Work never parks behind a missing
+login.
+
+## Per-thread execution lifecycle
+
+Provider status and execution phase are separate. Provider status answers
+whether a runtime may accept new work; each admitted thread execution has the
+private in-memory phases `STARTING`, `RUNNING`, `FINISHING`, and `CLOSED`:
+
+1. Admission commits the initial `thread.message` and the thread row's running
+   lifecycle before the execution thread starts.
+2. STARTING owns provider process creation. The adapter changes the phase to
+   RUNNING only after the initial message has reached the provider transport:
+   after `turn/start` succeeds for Codex, after the initial stream-json write
+   and flush for Claude Code, and after the Hermes stdin prompt is fully
+   written. A second message during STARTING receives a retryable `409`.
+3. RUNNING accepts provider events and, for Codex and Claude, synchronous
+   steering. A provider rejection in this phase is a terminal transport
+   failure: Kern records `thread.error` and finalizes the execution instead of
+   treating it as incomplete startup.
+4. Completion, failure, deactivation, and Stop first finalize the database
+   (`idle` plus any `thread.error` or `thread.stopped`) and then publish
+   FINISHING. Stop requests a quick interrupt and returns at that boundary.
+5. The one execution thread owns provider close and authoritative systemd
+   scope reaping. Success changes to CLOSED and removes the live fence. A send
+   during FINISHING receives a retryable `409`. A scope that cannot be proven
+   gone records a cleanup error and retains the fence; host restart is the
+   recovery because starting a replacement process would be unsafe.
+
+STARTING has a ten-second safety deadline. Provider close waits up to three
+seconds for normal exit and the privileged scope check is bounded separately,
+so ordinary FINISHING is a short process-management window rather than a
+database operation. Public APIs deliberately flatten these phases: a thread is
+`running` while its live fence exists and `idle` after CLOSED.
+
+Each adapter also publishes a provider-confirmed, non-empty resumable session
+id as soon as it is safe to reuse. The orchestrator persists that callback
+immediately against the execution's private run number, even while RUNNING.
+This makes Stop independent of a completion-time session save, prevents a
+late old process from overwriting a newer run, and ensures a failed startup
+can never replace good conversation history with an empty provider session.
+
+An operator may change an idle thread's runtime, model, and effort together on
+the next send. The configuration update, provider-session clear, durable user
+event, and new run admission share one mutation, guarded by the row's
+`run_status = 'idle'` predicate and the ordinary same-thread send lock. The
+new runtime therefore cannot race admitted or shutting-down work. It receives
+one synthetic first prompt containing the newest retained public events (at
+most 250,000 transcript characters) followed by the new user message.
+Activities serialize their complete stored payload, including expanded detail
+and output. An existing thread whose provider session id is already absent
+uses the same handoff on its next idle run even without another configuration
+change; a new thread with no retained history does not need one.
+That wrapper is not appended to the public event stream. Instead, a completed
+`thread.activity` records the old and new runtime/model/effort immediately
+before the visible user message. This is deliberately a lossy provider
+handoff: older retained events may be omitted and the old provider's hidden
+context and cache reads cannot carry across.
 
 ## Refresh triggers
 
@@ -131,13 +189,13 @@ Every trigger funnels into the same provider-connection refresh:
 | Login completion | Claude code submission refreshes directly; Codex device-login completion is observed by the next poll. |
 | Credential connect | `POST /v1/agent-runtime/bedrock-credentials` synchronously validates STS identity, atomically stores only a successful key and its metadata, then locally refreshes enabled Bedrock runtimes. |
 | Account reset | OAuth runtimes use `POST /v1/agent-runtime/reset-linked-account`; Bedrock uses `DELETE /v1/agent-runtime/bedrock-credentials`. |
-| Task claim | Claude Code only, before each task turn (see below). |
+| Turn start | Claude Code only, in the turn thread before each turn's process spawns (see below). |
 
 ## The refresh pipeline
 
 1. **Policy gate.** A runtime whose provider is disabled marks `deactivated`:
    one mutation records the status, clears any pending OAuth record, clears
-   the pin; live processes close and running tasks fail.
+   the pin; live processes close and running turns fail.
 2. **Local account read.** The provider reports its own view: Claude Code via
    `claude auth status` plus the credential-file hash, Codex via
    `account/read {"refreshToken": false}` on a short-lived app-server, and
@@ -200,7 +258,7 @@ all: STS is not called again after credential setup, and the cost display
 needs no provider read because the proxy meters token usage out of each
 Bedrock response as it happens (see the network controls doc).
 
-Pre-task Claude refreshes run this same table and stay memory-only within the
+Pre-turn Claude refreshes run this same table and stay memory-only within the
 verdict window. The operator refresh button deliberately bypasses verdict
 memory and performs the provider check immediately.
 
@@ -230,8 +288,8 @@ and the refresh is what converts its completion into an anchor, a pin, and
 
 Every OAuth live-validation verdict is remembered in process memory, keyed by the
 credential it judged, so validation generates provider traffic at most once
-per scheduled recheck regardless of how often the five-second poll or task
-claims re-enter the refresh. An explicit operator refresh bypasses this memory:
+per scheduled recheck regardless of how often the five-second poll or turn
+starts re-enter the refresh. An explicit operator refresh bypasses this memory:
 
 - An **authentication failure is final for automatic checks**: the runtime
   stays `awaiting_login` with zero background provider traffic. An explicit
@@ -241,7 +299,7 @@ claims re-enter the refresh. An explicit operator refresh bypasses this memory:
   five-minute recheck, so infrastructure failures recover on the next
   scheduled poll without a five-second retry loop.
 - A **fresh `active` verdict** (with its usage snapshot) is reused until it
-  expires, so the pre-task Claude refresh is normally memory-only.
+  expires, so Claude pin convergence at turn start is normally memory-only.
 - **Claude attestations** are memoized per token hash: a token's attested
   identity never changes, so one successful profile fetch answers every later
   recheck (including a runtime parked in account-mismatch `error`).
@@ -272,13 +330,13 @@ CLI owns. The differences, step by step:
   allowed request. Disabling is a soft product state and leaves the row intact.
   Connecting another key and region validates them from scratch and atomically
   replaces the connection and metadata.
-- **No per-task convergence.** Static keys never rotate, so like Codex the
-  cached status decides at task claim; there is no pre-task refresh.
+- **No per-turn convergence.** Static keys never rotate, so like Codex the
+  cached status decides at admission; there is no pre-turn refresh.
 - **Identity is checked at submission.** STS proves the key pair; a rejection
   returns directly from the credential request with no database change.
   `bedrock:InvokeModel*` and model access cannot be proven without a billable,
-  model-specific call, so AWS checks those on the first task turn. Any later
-  AWS rejection is the task's descriptive provider error; it does not create
+  model-specific call, so AWS checks those on the first turn. Any later
+  AWS rejection is the turn's descriptive provider error; it does not create
   stored credential health. Setup does not silently invoke a model or require
   one probe model.
 - **Cost is metered live, never polled.** The operator-facing month-to-date
@@ -296,16 +354,18 @@ existing host boundary intact: neither the admin service nor the agent gains
 internet access, the agent-facing proxy exposes no STS route, and the
 plaintext never touches disk.
 
-## The pre-task Claude refresh
+## Claude pin convergence at turn start
 
-A Claude task claimed while the cached status is `active` runs the refresh
-once more before the turn starts; a cached non-active status fails the task
-directly, with no refresh. The refresh is not an extra auth probe — the
-verdict memory answers it — but it is the repin convergence point: Claude
-Code rotates its token during normal operation, and this refresh detects the
-new hash, attests it, and republishes the pin before the turn's traffic would
-hit the proxy. Codex turns carry the account id the proxy already pins, so
-Codex has no per-task convergence and its cached status decides.
+Admission already requires `active`. Before a Claude process spawns, its turn
+worker invokes the normal refresh solely to converge a bearer token that the
+CLI may have rotated. Verdict memory normally makes this local; when the token
+did change, the refresh detects its new hash, attests it, and republishes the
+pin before turn traffic reaches the proxy. There is no separate policy/status
+decision in the worker. If the refresh itself moves the runtime out of
+`active`, the common status-transition path records `thread.error` and stops
+the admitted turn, whose worker observes that terminal flag before spawning.
+Codex carries the account id the proxy already pins, and Bedrock uses a static
+key, so neither needs per-turn convergence.
 
 ## Operator actions
 
@@ -320,7 +380,7 @@ Codex has no per-task convergence and its cached status decides.
   stored validated row.
 - **Disconnect** (`DELETE /v1/agent-runtime/bedrock-credentials`): one mutation
   deletes the credential and cached account metadata; Hermes's live processes
-  close and running tasks fail. There is no on-disk
+  close and running turns fail. There is no on-disk
   agent auth or remembered Bedrock verdict to clear. The next credential
   connect starts from scratch. The live usage counters are retained: they
   record work already done.

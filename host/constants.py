@@ -41,6 +41,10 @@ TOOLS_SOCKET_PATH = "/run/kern-tools/tools.sock"
 AGENT_APP_SOCKET_PATH = "/run/kern-agent-app/agent-app.sock"
 AGENT_NETWORK_SOCKET_PATH = "/run/kern-agent-network/agent-network.sock"
 APP_BACKEND_ADMIN_SOCKET_PATH = "/run/kern-admin-api/app-backend.sock"
+# App backends synchronously proxy sends/stops through this socket. Keep their
+# read deadline above the host's provider steer acknowledgement deadline so a
+# caller cannot time out while the host later commits the same message.
+APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS = 40
 
 # Core service accounts with pinned uids (gid always equals uid) so durable
 # EBS file owners stay meaningful across root-volume replacement. Bootstrap

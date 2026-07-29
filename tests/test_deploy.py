@@ -1849,6 +1849,17 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn('meta skuid "kern-tools" tcp dport 53 accept', bootstrap)
         self.assertIn('meta skuid "kern-tools" tcp dport 443 accept', bootstrap)
         self.assertNotIn('meta skuid "kern-admin" tcp dport 443 accept', bootstrap)
+        # Loopback is not itself trusted. The public tunnel and SSH/admin/root
+        # identities are admitted to the admin listener before every other
+        # local service is dropped, so only cloudflared can supply trustworthy
+        # Cloudflare forwarding headers.
+        admin_drop = "oif lo tcp dport 7443 drop"
+        self.assertIn("oif lo tcp dport 7443 meta skuid 0 accept", bootstrap)
+        for user in ("kern-admin", "kern-operator", "cloudflared"):
+            allow = f'oif lo tcp dport 7443 meta skuid "{user}" accept'
+            self.assertIn(allow, bootstrap)
+            self.assertLess(bootstrap.index(allow), bootstrap.index(admin_drop))
+        self.assertLess(bootstrap.index(admin_drop), bootstrap.index("oif lo accept"))
         self.assertIn("pathlib.Path('/tmp/kern_cloudflare_rules').write_text(", bootstrap)
         self.assertIn("if cloudflare_enabled else ''", bootstrap)
         self.assertIn("$(cat /tmp/kern_cloudflare_rules)", bootstrap)
@@ -1932,8 +1943,13 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("always exposes `app_api`", agent_instructions)
         self.assertIn("listing the tool grants no app access", agent_instructions)
         self.assertIn("do not guess or probe routes", agent_instructions)
-        self.assertIn("GitHub GraphQL requests are denied by policy", agent_instructions)
-        self.assertIn("equivalent REST endpoint with `gh api`", agent_instructions)
+        self.assertIn("GitHub GraphQL is always blocked", agent_instructions)
+        self.assertIn("`gh repo view`, `gh pr list`, and `gh pr create`", agent_instructions)
+        self.assertIn("`git remote get-url origin`", agent_instructions)
+        self.assertIn("`gh api repos/OWNER/REPO`", agent_instructions)
+        self.assertIn("`gh api --method POST repos/OWNER/REPO/pulls", agent_instructions)
+        self.assertIn("If any `gh` command returns HTTP 403", agent_instructions)
+        self.assertIn("REST path such as `repos/OWNER/REPO/...`", agent_instructions)
         self.assertNotIn("alternate transports", agent_instructions)
         # The agent instructions advertise the preview port range and defer the
         # operator's viewing steps to the README (kept concise, no exact SSH
@@ -1995,6 +2011,13 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.tools.service", bootstrap)
         self.assertIn("RuntimeDirectory=kern-tools\n", bootstrap)
         self.assertIn("RuntimeDirectoryMode=0755", bootstrap)
+        self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.host_errors.collector", bootstrap)
+        self.assertIn("SupplementaryGroups=systemd-journal", bootstrap)
+        self.assertIn("systemctl enable --now kern-host-errors.service", bootstrap)
+        self.assertIn(
+            "ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-admin-api",
+            bootstrap,
+        )
         self.assertIn('tools_state = admin_mount / "tools-state"', bootstrap)
         self.assertIn('recreate_directory(tools_state / "assets")', bootstrap)
         self.assertIn(
@@ -2109,10 +2132,14 @@ class DeployUnitTests(unittest.TestCase):
         stop_source = Path("host/bootstrap/helpers/stop-agent-thread.sh").read_text()
         self.assertIn('scope="kern-agent-thread-${thread_id}.scope"', stop_source)
         # SIGKILL the cgroup before stop so a child that ignores SIGTERM cannot
-        # hold the scope active past systemd's TimeoutStopSec.
+        # hold the scope active. Stop is asynchronous and the helper verifies a
+        # bounded reap instead of inheriting systemd's long default timeout.
         self.assertIn('systemctl kill --signal=KILL "${scope}"', stop_source)
-        self.assertIn('systemctl stop "${scope}"', stop_source)
+        self.assertIn('if [ "${1:-}" = "--signal-only" ]; then', stop_source)
+        self.assertIn('systemctl stop --no-block "${scope}"', stop_source)
+        self.assertIn('systemctl is-active --quiet "${scope}"', stop_source)
         self.assertIn('systemctl reset-failed "${scope}"', stop_source)
+        self.assertIn("exit 1", stop_source)
         self.assertIn('if ! [[ "${thread_id}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then', stop_source)
         for launch_helper in ("run-hermes",):
             launch_source = Path(f"host/bootstrap/helpers/{launch_helper}.sh").read_text()
@@ -2225,6 +2252,11 @@ class DeployUnitTests(unittest.TestCase):
                     f"ExecStart=/usr/bin/python3 /opt/kern-host/host/apps/{app.id}/{backend_entrypoint}",
                     bootstrap,
                 )
+                self.assertIn(
+                    "ExecStopPost=/usr/bin/python3 -m "
+                    f"host.runtime.core.host_errors_service_exit {app.service_name.removesuffix('.service')}",
+                    bootstrap,
+                )
                 self.assertIn(f"systemctl enable {app.service_name}", bootstrap)
                 self.assertIn(f"systemctl start {app.service_name}", bootstrap)
 
@@ -2258,6 +2290,11 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("Slice=kern_app.slice", bootstrap)
         self.assertIn("Environment=KERN_APP_PORT=7457", bootstrap)
         self.assertIn("ExecStart=/usr/bin/python3 /opt/kern-host/host/apps/custom_app/server.py", bootstrap)
+        self.assertIn(
+            "ExecStopPost=/usr/bin/python3 -m "
+            "host.runtime.core.host_errors_service_exit kern-app-custom_app",
+            bootstrap,
+        )
         self.assertNotIn("/opt/kern-host/host/apps/custom_app/backend.py", bootstrap)
 
     def test_rendered_bootstrap_pins_every_app_uid_in_reserved_range(self) -> None:
@@ -2653,18 +2690,54 @@ class DeployUnitTests(unittest.TestCase):
             self.assertEqual(exc.exception.code, 3)
             self.assertIn("symlinks are not supported", output.getvalue())
 
-    def test_agent_file_helper_stream_rejects_non_video_content(self) -> None:
+    def test_agent_file_helper_stream_supports_bounded_images(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             home_path = Path(home)
-            (home_path / "payload.html").write_text("<script>bad()</script>")
+            payload = b"mock-png"
+            (home_path / "frame.png").write_bytes(payload)
+            namespace = self._agent_file_helper_namespace(home_path)
+
+            output = io.BytesIO()
+            stdout = io.TextIOWrapper(output, encoding="utf-8")
+            with patch("sys.stdout", stdout):
+                namespace["stream_path"]("/frame.png")  # type: ignore[index, operator]
+                stdout.flush()
+
+            raw_header, streamed = output.getvalue().split(b"\n", 1)
+            header = json.loads(raw_header)
+            self.assertEqual(header["media_type"], "image/png")
+            self.assertEqual(header["size_bytes"], len(payload))
+            self.assertEqual(streamed, payload)
+
+    def test_agent_file_helper_stream_rejects_oversized_image(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            home_path = Path(home)
+            oversized = home_path / "huge.webp"
+            with oversized.open("wb") as handle:
+                handle.truncate(25 * 1024 * 1024 + 1)
             namespace = self._agent_file_helper_namespace(home_path)
 
             output = io.StringIO()
             with patch("sys.stdout", output), self.assertRaises(SystemExit) as exc:
-                namespace["stream_path"]("/payload.html")  # type: ignore[index, operator]
+                namespace["stream_path"]("/huge.webp")  # type: ignore[index, operator]
 
             self.assertEqual(exc.exception.code, 3)
-            self.assertIn("only MP4 or MOV", output.getvalue())
+            self.assertIn("file is larger than 26214400 bytes", output.getvalue())
+
+    def test_agent_file_helper_stream_rejects_unsupported_content(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            home_path = Path(home)
+            (home_path / "payload.svg").write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg"><script>bad()</script></svg>'
+            )
+            namespace = self._agent_file_helper_namespace(home_path)
+
+            output = io.StringIO()
+            with patch("sys.stdout", output), self.assertRaises(SystemExit) as exc:
+                namespace["stream_path"]("/payload.svg")  # type: ignore[index, operator]
+
+            self.assertEqual(exc.exception.code, 3)
+            self.assertIn("only MP4, MOV, JPEG, PNG, or WebP", output.getvalue())
 
     def _agent_file_helper_namespace(self, home_path: Path) -> dict[str, object]:
         helper = Path("host/bootstrap/helpers/read-agent-file.sh").read_text()

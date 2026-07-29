@@ -17,6 +17,14 @@ from tests.stage.stage_support import (
 )
 
 
+# The operator-facing suite that runs the Codex, Claude Code, and Hermes
+# runtime checks in one invocation (three focused suites otherwise). It is a
+# stage_aws CLI choice, not a stage_support suite: tool selection and
+# integration labels never see it.
+ALL_RUNTIMES_SUITE = "all_runtimes"
+RUNTIME_INTEGRATIONS = ("codex", "claude", "hermes")
+
+
 class StageIntegrationChecks(AwsSmoke):
     """Provider and GitHub checks layered on the shared smoke primitives."""
 
@@ -27,26 +35,13 @@ class StageIntegrationChecks(AwsSmoke):
         stage_github_repositories: list[dict]
 
         def enforcement_policy(self) -> dict: ...
-        def task_body(
-            self,
-            input_message: str,
-            thread_id: str,
-            *,
-            runtime: str | None = None,
-            model: str | None = None,
-            effort: str | None = None,
-        ) -> dict: ...
         def _tool_credential_failures(self, tool_id: str) -> list[str]: ...
 
     @staticmethod
-    def _print_agent_task(runtime: str, purpose: str, task: dict, phase: str) -> None:
-        """Print task identity and state without logging prompts or output."""
-        print(
-            f"    [agent task {phase}] runtime={runtime} purpose={purpose} "
-            f"task_id={task.get('task_id')} status={task.get('status')} "
-            f"model={task.get('model')} effort={task.get('effort')}",
-            flush=True,
-        )
+    def _print_agent_turn(runtime: str, purpose: str, phase: str, **fields: object) -> None:
+        """Print turn identity and state without logging prompts or output."""
+        detail = " ".join(f"{key}={value}" for key, value in fields.items())
+        print(f"    [agent turn {phase}] runtime={runtime} purpose={purpose} {detail}", flush=True)
 
     @staticmethod
     def _account_shape(account: dict) -> dict[str, object]:
@@ -104,7 +99,12 @@ class StageIntegrationChecks(AwsSmoke):
         """
         self._step(f"integration credential preflight (suite: {suite})")
         results: dict[str, str | None] = {}
-        for integration in _selected_integrations(suite):
+        selected = (
+            RUNTIME_INTEGRATIONS
+            if suite == ALL_RUNTIMES_SUITE
+            else _selected_integrations(suite)
+        )
+        for integration in selected:
             failures: list[str]
             if integration in {"codex", "claude", "hermes"}:
                 runtime = "claude_code" if integration == "claude" else integration
@@ -256,7 +256,7 @@ class StageIntegrationChecks(AwsSmoke):
         print(f"    [provider status] runtime={runtime} status=active", flush=True)
 
     def check_task(self) -> None:
-        self._step("Codex account guard + real web-search task")
+        self._step("Codex account guard + real web-search turn")
         # Publish the full enforcement policy (not just the provider bundle) so a
         # provider-only run keeps the GitHub integration and its write
         # repositories in the stored policy instead of erasing them.
@@ -311,37 +311,41 @@ class StageIntegrationChecks(AwsSmoke):
         )
 
         baseline_seq = max((event["seq"] for event in self._network_events()), default=0)
+        turn_baseline = self._latest_thread_event_seq("codex-web")
         prompt = "Use your web search tool to check today's date, then reply with the word DONE."
-        task = self._api(
-            "POST",
-            "/v1/tasks",
-            self.task_body(prompt, "codex-web"),
+        started = self.send_message("codex-web", prompt)
+        thread = started.get("thread") or {}
+        if started.get("status") != "accepted" or (thread.get("model"), thread.get("effort")) != (
+            CHEAP_MODELS["codex"],
+            CHEAP_EFFORT,
+        ):
+            raise AssertionError(f"Codex turn did not start with the selected session options: {started}")
+        self._print_agent_turn(
+            "codex", "web-search", "started",
+            thread_id=thread.get("thread_id"), model=thread.get("model"), effort=thread.get("effort"),
         )
-        if (task.get("model"), task.get("effort")) != (CHEAP_MODELS["codex"], CHEAP_EFFORT):
-            raise AssertionError(f"Codex task did not retain the selected session options: {task}")
-        self._print_agent_task("codex", "web-search", task, "started")
-        current = self._wait_for_task(task["task_id"], timeout=240)
-        self._print_agent_task("codex", "web-search", current, "finished")
+        current = self._wait_for_turn("codex-web", since=turn_baseline, timeout=240)
+        self._print_agent_turn("codex", "web-search", "finished", status=current["status"])
         events = self._network_events(since=baseline_seq)
         chatgpt = [event for event in events if event["host"].endswith("chatgpt.com")]
         denied = [event for event in chatgpt if event["decision"] == "denied"]
         fatal = [event for event in denied if event["path"].startswith("/backend-api/codex/responses")]
         if current["status"] != "completed":
-            raise AssertionError(f"task did not complete: {current}; denied chatgpt.com events: {denied}")
+            raise AssertionError(f"turn did not complete: {current}; denied chatgpt.com events: {denied}")
         if fatal:
             raise AssertionError(f"the guard denied agent ChatGPT turn traffic: {fatal}")
         if not any(event["decision"] == "allowed" for event in chatgpt):
-            raise AssertionError(f"no allowed chatgpt.com traffic was observed for the task: {events}")
+            raise AssertionError(f"no allowed chatgpt.com traffic was observed for the turn: {events}")
         print(
             f"    [provider network] runtime=codex chatgpt_events={len(chatgpt)} "
             f"allowed={sum(event['decision'] == 'allowed' for event in chatgpt)} "
             f"denied={len(denied)} fatal_denials={len(fatal)}",
             flush=True,
         )
-        self._ok("web search task completed; account and external URL request guards held")
+        self._ok("web search turn completed; account and external URL request guards held")
 
     def check_claude_auth_and_task(self) -> None:
-        self._step("Claude account guard + real task")
+        self._step("Claude account guard + real turn")
         # Publish the full enforcement policy (not just the provider bundle) so a
         # provider-only run keeps the GitHub integration and its write
         # repositories in the stored policy instead of erasing them.
@@ -389,31 +393,35 @@ class StageIntegrationChecks(AwsSmoke):
         )
 
         task_baseline_seq = max((event["seq"] for event in self._network_events()), default=0)
+        turn_baseline = self._latest_thread_event_seq("claude")
         prompt = "Reply with exactly the word CLAUDE_STAGE_OK and nothing else."
-        task = self._api(
-            "POST",
-            "/v1/tasks",
-            self.task_body(prompt, "claude"),
+        started = self.send_message("claude", prompt)
+        thread = started.get("thread") or {}
+        if started.get("status") != "accepted" or (thread.get("model"), thread.get("effort")) != (
+            CHEAP_MODELS["claude_code"],
+            CHEAP_EFFORT,
+        ):
+            raise AssertionError(f"Claude turn did not start with the selected session options: {started}")
+        self._print_agent_turn(
+            "claude_code", "session", "started",
+            thread_id=thread.get("thread_id"), model=thread.get("model"), effort=thread.get("effort"),
         )
-        if (task.get("model"), task.get("effort")) != (CHEAP_MODELS["claude_code"], CHEAP_EFFORT):
-            raise AssertionError(f"Claude task did not retain the selected session options: {task}")
-        self._print_agent_task("claude_code", "session", task, "started")
-        done = self._wait_for_task(task["task_id"], timeout=240)
-        self._print_agent_task("claude_code", "session", done, "finished")
+        done = self._wait_for_turn("claude", since=turn_baseline, timeout=240)
+        self._print_agent_turn("claude_code", "session", "finished", status=done["status"])
         if done["status"] != "completed":
-            raise AssertionError(f"Claude task ended {done['status']}: {self._task_failure_detail(task['task_id'])}")
+            raise AssertionError(f"Claude turn ended {done['status']}: {self._thread_failure_detail('claude')}")
         if "CLAUDE_STAGE_OK" not in (done.get("output_message") or ""):
-            raise AssertionError(f"Claude task output did not contain expected token: {done.get('output_message')!r}")
+            raise AssertionError(f"Claude turn output did not contain expected token: {done.get('output_message')!r}")
         events = self._network_events(since=task_baseline_seq)
         anthropic = [event for event in events if event["host"] == "api.anthropic.com"]
         if not any(event["decision"] == "allowed" for event in anthropic):
-            raise AssertionError(f"Claude task completed without an allowed api.anthropic.com event: {events}")
+            raise AssertionError(f"Claude turn completed without an allowed api.anthropic.com event: {events}")
         fatal = [
             event for event in anthropic
             if event["decision"] == "denied" and event["path"].startswith("/v1/messages")
         ]
         if fatal:
-            raise AssertionError(f"Claude task had denied message traffic: {fatal}")
+            raise AssertionError(f"Claude turn had denied message traffic: {fatal}")
         print(
             f"    [provider network] runtime=claude_code anthropic_events={len(anthropic)} "
             f"allowed={sum(event['decision'] == 'allowed' for event in anthropic)} "
@@ -425,25 +433,24 @@ class StageIntegrationChecks(AwsSmoke):
             "Earlier in this Claude conversation you replied with one uppercase token. "
             "Reply with exactly that token again and nothing else."
         )
-        follow_up = self._api(
-            "POST",
-            "/v1/tasks",
-            self.follow_up_body(follow_up_prompt, "claude"),
-        )
-        self._print_agent_task("claude_code", "session-follow-up", follow_up, "started")
-        follow_up_done = self._wait_for_task(follow_up["task_id"], timeout=240)
-        self._print_agent_task("claude_code", "session-follow-up", follow_up_done, "finished")
+        follow_up_baseline = self._latest_thread_event_seq("claude")
+        follow_up = self.send_follow_up("claude", follow_up_prompt)
+        if follow_up.get("status") != "accepted":
+            raise AssertionError(f"Claude follow-up was not started on the idle thread: {follow_up}")
+        self._print_agent_turn("claude_code", "session-follow-up", "started", thread_id=self.api_thread_id("claude"))
+        follow_up_done = self._wait_for_turn("claude", since=follow_up_baseline, timeout=240)
+        self._print_agent_turn("claude_code", "session-follow-up", "finished", status=follow_up_done["status"])
         if follow_up_done["status"] != "completed":
             raise AssertionError(
                 f"Claude follow-up ended {follow_up_done['status']}: "
-                f"{self._task_failure_detail(follow_up['task_id'])}"
+                f"{self._thread_failure_detail('claude')}"
             )
         if "CLAUDE_STAGE_OK" not in (follow_up_done.get("output_message") or ""):
             raise AssertionError(
                 "Claude follow-up did not resume the persisted session context: "
                 f"{follow_up_done.get('output_message')!r}"
             )
-        self._ok("Claude account guard passed; real task completed and resumed through the proxy")
+        self._ok("Claude account guard passed; real turn completed and resumed through the proxy")
 
     def check_github_write_e2e(self) -> None:
         """End-to-end exercise of the authenticated GitHub paths with a real,

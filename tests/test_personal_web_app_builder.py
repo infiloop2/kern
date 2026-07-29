@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pg_harness
 
@@ -46,11 +46,39 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('id="archive-app"', index)
         self.assertIn('id="history-loader"', index)
         self.assertIn('id="load-earlier"', index)
+        self.assertIn('id="composer-running"', index)
+        self.assertIn('id="stop-turn"', index)
+        self.assertIn('id="attach-file"', index)
+        self.assertIn('id="attachments"', index)
+        self.assertIn('id="agent-settings-idle-note"', index)
+        self.assertIn('id="agent-session-change-warning"', index)
+        self.assertNotIn('id="agent-settings-help"', index)
+        self.assertNotIn('id="first-run-guidance"', index)
+        self.assertIn(
+            ".agent-settings.active-locked:hover #agent-settings-idle-note",
+            css,
+        )
+        self.assertNotIn(
+            ".agent-settings.active-locked:hover .agent-settings-idle-note",
+            css,
+        )
+        self.assertIn('/v1/apps/agent_chat/ui/rich_text.js', index)
+        self.assertIn('/v1/apps/agent_chat/ui/rich_text.css', index)
         self.assertIn("app-dot", source)
         self.assertIn('"/apps?archived=true"', source)
         self.assertIn("selectedAppId = null", source)
         self.assertIn("INITIAL_CONVERSATION_EVENT_PAGES = 3", source)
         self.assertIn("conversationViewStates = new Map()", source)
+        self.assertIn("KernRichText.renderMarkdown(entryData.message)", source)
+        self.assertIn("stopRunningTurn()", source)
+        self.assertIn("sessionConfigurationChanged()", source)
+        self.assertIn("!fromGeneratedApp && sessionConfigurationChanged()", source)
+        self.assertIn('showChatStatus("Sending…")', source)
+        self.assertIn('showChatStatus("Stopping…")', source)
+        self.assertNotIn("Waiting for agent to start", source)
+        self.assertIn('"kern-app-upload-file"', source)
+        self.assertIn("[User-uploaded file: ${attachment.file.path}]", source)
+        self.assertNotIn("chat-task-meta", source)
         self.assertIn("/conversation/events?before=${before}", source)
         self.assertIn("loadOlderConversationEvents()", source)
         self.assertIn("refreshSequence !== appsRefreshSequence", source)
@@ -60,6 +88,10 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertNotIn("reset-app", index)
         self.assertNotIn('api("POST", "/reset")', source)
         self.assertIn("@media (max-width: 720px)", css)
+        self.assertEqual(
+            (backend.SEND_BUSY_RETRIES - 1) * backend.SEND_BUSY_RETRY_DELAY_SECONDS,
+            10,
+        )
 
     def test_generated_worker_is_pinned_to_its_workspace(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
@@ -174,9 +206,10 @@ class AgentActionValidationTests(unittest.TestCase):
 class BrowserRoutingTests(unittest.TestCase):
     def test_browser_routes_are_workspace_scoped(self) -> None:
         state = {"revision": 0}
+        idle = {"session": None, "status": "idle"}
         with (
             patch.object(backend, "load_app_state", return_value=state) as load,
-            patch.object(backend, "browser_conversation", return_value={"tasks": []}) as conversation,
+            patch.object(backend, "browser_conversation", return_value=idle) as conversation,
         ):
             self.assertEqual(
                 backend.route_browser("GET", "/apps/app-2/state", None),
@@ -184,7 +217,7 @@ class BrowserRoutingTests(unittest.TestCase):
             )
             self.assertEqual(
                 backend.route_browser("GET", "/apps/app-3/conversation", None),
-                {"tasks": []},
+                idle,
             )
         load.assert_called_once_with("app-2")
         conversation.assert_called_once_with("app-3")
@@ -192,7 +225,11 @@ class BrowserRoutingTests(unittest.TestCase):
     def test_message_routes_preserve_user_and_generated_app_provenance(self) -> None:
         with (
             patch.object(backend, "_workspace_lock", return_value=MagicMock()),
-            patch.object(backend, "create_message", return_value={"task_id": "task-1"}) as create,
+            patch.object(
+                backend,
+                "create_message",
+                return_value={"status": "accepted", "thread_id": "app-4"},
+            ) as create,
         ):
             backend.route_browser(
                 "POST",
@@ -213,19 +250,20 @@ class BrowserRoutingTests(unittest.TestCase):
             {"requested_by": "app", "thread_id": "app-4"},
         )
 
-    def test_task_action_verifies_workspace_ownership(self) -> None:
+    def test_stop_route_verifies_the_workspace_and_proxies_to_the_host(self) -> None:
         with (
-            patch.object(backend, "_require_web_app_task") as require,
+            patch.object(backend, "_require_web_app") as require,
             patch.object(backend, "call_admin_api", return_value={"status": "accepted"}) as host,
         ):
-            result = backend.route_browser(
-                "POST",
-                "/apps/app-8/tasks/task-2/kill",
-                {},
-            )
+            result = backend.route_browser("POST", "/apps/app-8/stop", {})
         self.assertEqual(result, {"status": "accepted"})
-        require.assert_called_once_with("app-8", "task-2")
-        host.assert_called_once_with("POST", "/v1/tasks/task-2/kill", {})
+        require.assert_called_once_with("app-8", include_archived=True)
+        host.assert_called_once_with("POST", "/v1/threads/app-8/stop", {})
+
+    def test_per_task_routes_are_removed(self) -> None:
+        with self.assertRaises(backend.AppError) as error:
+            backend.route_browser("POST", "/apps/app-8/tasks/task-2/kill", {})
+        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
 
     def test_agent_thread_is_resolved_to_the_exact_workspace(self) -> None:
         with (
@@ -246,27 +284,50 @@ class ConversationTests(unittest.TestCase):
     }
 
     def test_conversation_uses_the_selected_app_thread(self) -> None:
-        task = {
-            "task_id": "task-1",
-            "input_message": "Build it",
-            "status": "completed",
+        thread = {
+            "thread_id": "app-6",
+            "last_used_at": "2026-07-27T10:00:00Z",
+            "status": "running",
             **self.SESSION,
         }
         with (
             patch.object(backend, "_require_web_app"),
-            patch.object(backend, "call_admin_api", return_value={"tasks": [task]}) as host,
+            patch.object(backend, "call_admin_api", return_value={"thread": thread}) as host,
         ):
             self.assertEqual(
                 backend.browser_conversation("app-6"),
-                {"tasks": [task], "session": self.SESSION},
+                {"session": self.SESSION, "status": "running"},
             )
-        host.assert_called_once_with(
-            "GET",
-            "/v1/threads/app-6/tasks?limit=20&message_bytes=12288",
-        )
+        host.assert_called_once_with("GET", "/v1/threads/app-6")
+
+    def test_conversation_is_idle_before_the_host_thread_exists(self) -> None:
+        # The host thread appears with the first message; an unconfigured
+        # workspace reads as an idle conversation with no session yet.
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(
+                backend,
+                "call_admin_api",
+                side_effect=backend.AppError(HTTPStatus.NOT_FOUND, "thread not found"),
+            ),
+        ):
+            self.assertEqual(
+                backend.browser_conversation("app-6"),
+                {"session": None, "status": "idle"},
+            )
+
+    def test_conversation_rejects_an_invalid_host_status(self) -> None:
+        thread = {"thread_id": "app-6", "status": "queued", **self.SESSION}
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "call_admin_api", return_value={"thread": thread}),
+            self.assertRaises(backend.AppError) as error,
+        ):
+            backend.browser_conversation("app-6")
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
 
     def test_conversation_events_are_scoped_and_bounded(self) -> None:
-        events = {"events": [{"seq": 5, "event_type": "task.message"}]}
+        events = {"events": [{"seq": 5, "event_type": "thread.message"}]}
         with (
             patch.object(backend, "_require_web_app"),
             patch.object(backend, "call_admin_api", return_value=events) as host,
@@ -277,11 +338,11 @@ class ConversationTests(unittest.TestCase):
             )
         host.assert_called_once_with(
             "GET",
-            "/v1/threads/app-6/events?since=2&limit=5&message_bytes=12288",
+            "/v1/threads/app-6/events?since=2&limit=6&message_bytes=122880",
         )
 
     def test_conversation_events_open_at_tail_and_page_backward(self) -> None:
-        events = {"events": [{"seq": 5, "event_type": "task.message"}]}
+        events = {"events": [{"seq": 5, "event_type": "thread.message"}]}
         with (
             patch.object(backend, "_require_web_app"),
             patch.object(backend, "call_admin_api", return_value=events) as host,
@@ -295,14 +356,14 @@ class ConversationTests(unittest.TestCase):
             host.call_args_list[0].args,
             (
                 "GET",
-                "/v1/threads/app-6/events?limit=5&message_bytes=12288",
+                "/v1/threads/app-6/events?limit=6&message_bytes=122880",
             ),
         )
         self.assertEqual(
             host.call_args_list[1].args,
             (
                 "GET",
-                "/v1/threads/app-6/events?before=5&limit=5&message_bytes=12288",
+                "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880",
             ),
         )
 
@@ -316,27 +377,80 @@ class ConversationTests(unittest.TestCase):
             )
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
 
-    def test_message_creation_pins_the_host_task_to_the_workspace(self) -> None:
-        host_task = {"task_id": "task-2", "thread_id": "app-5", "status": "queued"}
+    def test_message_creation_starts_a_turn_on_the_workspace_thread(self) -> None:
+        send_response = {
+            "status": "accepted",
+            "thread": {"thread_id": "app-5", "status": "running", **self.SESSION},
+        }
         with (
             patch.object(backend, "_require_web_app"),
-            patch.object(backend, "call_admin_api", return_value=host_task) as host,
+            patch.object(backend, "call_admin_api", return_value=send_response) as host,
         ):
             response = backend.create_message(
                 {"content": "Build it.", **self.SESSION},
                 requested_by="user",
                 thread_id="app-5",
             )
-        self.assertEqual(response, host_task)
+        self.assertEqual(response, {"status": "accepted", "thread_id": "app-5"})
         host.assert_called_once_with(
             "POST",
-            "/v1/tasks",
+            "/v1/threads/app-5/messages",
             {
-                "input_message": "Requested by user:\nBuild it.",
-                "thread_id": "app-5",
+                "message": "Requested by user:\nBuild it.",
                 **self.SESSION,
             },
         )
+
+    def test_message_creation_retries_transient_turn_lifecycle_conflicts(self) -> None:
+        for message in (
+            "the agent is starting; retry shortly",
+            "the agent is finishing; retry shortly",
+        ):
+            with self.subTest(message=message):
+                busy = backend.AppError(HTTPStatus.CONFLICT, message)
+                with (
+                    patch.object(backend, "_require_web_app"),
+                    patch.object(
+                        backend,
+                        "call_admin_api",
+                        side_effect=(busy, busy, {"status": "accepted"}),
+                    ) as host,
+                    patch.object(backend, "SEND_BUSY_RETRY_DELAY_SECONDS", 0),
+                ):
+                    response = backend.create_message(
+                        {"content": "More."}, requested_by="user", thread_id="app-5"
+                    )
+                self.assertEqual(response, {"status": "accepted", "thread_id": "app-5"})
+                self.assertEqual(host.call_count, 3)
+
+    def test_message_creation_surfaces_a_persistently_busy_thread(self) -> None:
+        busy = backend.AppError(
+            HTTPStatus.CONFLICT,
+            "the agent is finishing; retry shortly",
+        )
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "call_admin_api", side_effect=busy) as host,
+            patch.object(backend, "SEND_BUSY_RETRY_DELAY_SECONDS", 0),
+            self.assertRaises(backend.AppError) as error,
+        ):
+            backend.create_message(
+                {"content": "More."}, requested_by="user", thread_id="app-5"
+            )
+        self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn(backend.SEND_RETRY_MARKER, error.exception.message)
+        self.assertEqual(host.call_count, backend.SEND_BUSY_RETRIES)
+
+    def test_message_creation_rejects_an_invalid_host_send_status(self) -> None:
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "call_admin_api", return_value={"status": "bogus"}),
+            self.assertRaises(backend.AppError) as error,
+        ):
+            backend.create_message(
+                {"content": "More."}, requested_by="user", thread_id="app-5"
+            )
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
 
 
 class RuntimeDataActionTests(unittest.TestCase):
@@ -406,18 +520,15 @@ class AgenticWebAppMockTests(unittest.TestCase):
     def test_mock_runs_different_workspace_threads_concurrently(self) -> None:
         first = self._create_app()
         second = self._create_app()
-        first_task = self._send(first["thread_id"], "Build the first app.")
-        second_task = self._send(second["thread_id"], "Build the second app.")
+        first_send = self._send(first["thread_id"], "Build the first app.")
+        second_send = self._send(second["thread_id"], "Build the second app.")
 
         active = builder_mock._route_app_api("GET", "apps", None)["apps"]
         self.assertEqual(
-            {
-                app["thread_id"]: app["active_tasks"][0]["status"]
-                for app in active
-            },
+            {app["thread_id"]: app["status"] for app in active},
             {"app-1": "running", "app-2": "running"},
         )
-        builder_mock.TASK_DEADLINES[first_task["task_id"]] = 0
+        builder_mock.TURN_DEADLINES["app-1"] = 0
         first_state = builder_mock._route_app_api(
             "GET", "apps/app-1/state", None
         )["app"]
@@ -426,15 +537,77 @@ class AgenticWebAppMockTests(unittest.TestCase):
         )["app"]
         self.assertEqual(first_state["revision"], 1)
         self.assertEqual(second_state["revision"], 0)
-        self.assertEqual(first_task["thread_id"], "app-1")
-        self.assertEqual(second_task["thread_id"], "app-2")
+        self.assertEqual(first_send, {"status": "accepted", "thread_id": "app-1"})
+        self.assertEqual(second_send, {"status": "accepted", "thread_id": "app-2"})
+
+    def test_mock_steers_the_running_turn_instead_of_queueing(self) -> None:
+        self._create_app()
+        self._send("app-1", "Build the first app.")
+        steered = builder_mock._route_app_api(
+            "POST", "apps/app-1/messages", {"content": "Add a chart."}
+        )
+
+        self.assertEqual(steered, {"status": "accepted", "thread_id": "app-1"})
+        conversation = builder_mock._route_app_api(
+            "GET", "apps/app-1/conversation", None
+        )
+        self.assertEqual(conversation["status"], "running")
+        events = builder_mock._route_app_api(
+            "GET", "apps/app-1/conversation/events", None
+        )["events"]
+        self.assertIn(
+            "Requested by user:\nAdd a chart.",
+            [event["payload"].get("message") for event in events],
+        )
+        self.assertEqual(
+            [event["event_type"] for event in events],
+            ["thread.message", "thread.message", "thread.message"],
+        )
+
+    def test_mock_switches_an_idle_session_and_rejects_a_running_switch(self) -> None:
+        self._create_app()
+        self._send("app-1", "Build the first app.")
+        replacement = {
+            "agent_runtime": "claude_code",
+            "model": "claude-sonnet-5",
+            "effort": "high",
+        }
+        with self.assertRaises(backend.AppError) as running:
+            builder_mock._route_app_api(
+                "POST",
+                "apps/app-1/messages",
+                {"content": "Switch too early.", **replacement},
+            )
+        self.assertEqual(running.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("only while the thread is idle", running.exception.message)
+
+        builder_mock.TURN_DEADLINES["app-1"] = 0
+        builder_mock._route_app_api("GET", "apps/app-1/state", None)
+        switched = builder_mock._route_app_api(
+            "POST",
+            "apps/app-1/messages",
+            {"content": "Continue with Claude.", **replacement},
+        )
+        self.assertEqual(switched, {"status": "accepted", "thread_id": "app-1"})
+        self.assertEqual(
+            builder_mock.WORKSPACES["app-1"]["session"],
+            replacement,
+        )
+        activities = [
+            event["payload"]["activity"]
+            for event in builder_mock.WORKSPACES["app-1"]["events"]
+            if event["event_type"] == "thread.activity"
+        ]
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0]["title"], "Agent provider changed")
+        self.assertIn("Claude Code · claude-sonnet-5 · high", activities[0]["detail"])
 
     def test_mock_keeps_data_conversations_and_sessions_per_workspace(self) -> None:
         self._create_app()
         self._create_app()
-        first_task = self._send("app-1", "Build the first app.")
+        self._send("app-1", "Build the first app.")
         self._send("app-2", "Build the second app.")
-        builder_mock.TASK_DEADLINES[first_task["task_id"]] = 0
+        builder_mock.TURN_DEADLINES["app-1"] = 0
         builder_mock._route_app_api("GET", "apps/app-1/state", None)
         changed = builder_mock._route_app_api(
             "POST",
@@ -460,15 +633,29 @@ class AgenticWebAppMockTests(unittest.TestCase):
         second_conversation = builder_mock._route_app_api(
             "GET", "apps/app-2/conversation", None
         )
-        self.assertIn("first app", first_conversation["tasks"][0]["input_message"])
-        self.assertIn("second app", second_conversation["tasks"][0]["input_message"])
+        self.assertEqual(
+            (first_conversation["status"], second_conversation["status"]),
+            ("idle", "running"),
+        )
+        first_messages = [
+            event["payload"].get("message")
+            for event in builder_mock.WORKSPACES["app-1"]["events"]
+        ]
+        second_messages = [
+            event["payload"].get("message")
+            for event in builder_mock.WORKSPACES["app-2"]["events"]
+        ]
+        self.assertTrue(any("first app" in str(message) for message in first_messages))
+        self.assertFalse(any("second app" in str(message) for message in first_messages))
+        self.assertTrue(any("second app" in str(message) for message in second_messages))
 
-        # Host session metadata remains even if retained task history is
+        # Host session metadata remains even if retained event history is
         # pruned, matching the real thread summary used by /apps.
-        builder_mock.WORKSPACES["app-1"]["tasks"].clear()
+        builder_mock.WORKSPACES["app-1"]["events"].clear()
         listed = builder_mock._route_app_api("GET", "apps", None)["apps"]
         first_summary = next(app for app in listed if app["thread_id"] == "app-1")
         self.assertEqual(first_summary["session"], builder_mock.DEFAULT_SESSION)
+        self.assertEqual(first_summary["status"], "idle")
 
     def test_mock_conversation_events_page_from_newest_then_backward(self) -> None:
         self._create_app()
@@ -478,8 +665,8 @@ class AgenticWebAppMockTests(unittest.TestCase):
                 "seq": seq,
                 "timestamp": f"2026-07-27T00:00:{seq:02d}Z",
                 "event_id": f"event_app-1_{seq}",
-                "event_type": "task.message",
-                "task_id": "task-1",
+                "event_type": "thread.message",
+                "thread_id": "app-1",
                 "payload": {"message": f"message {seq}", "source": "agent"},
             }
             for seq in range(1, 13)
@@ -493,13 +680,13 @@ class AgenticWebAppMockTests(unittest.TestCase):
             None,
             {"before": [str(newest[0]["seq"])]},
         )["events"]
-        self.assertEqual([event["seq"] for event in newest], [8, 9, 10, 11, 12])
-        self.assertEqual([event["seq"] for event in older], [3, 4, 5, 6, 7])
+        self.assertEqual([event["seq"] for event in newest], [7, 8, 9, 10, 11, 12])
+        self.assertEqual([event["seq"] for event in older], [1, 2, 3, 4, 5, 6])
 
-    def test_mock_enforces_archive_and_task_workspace_boundaries(self) -> None:
+    def test_mock_enforces_archive_and_stop_workspace_boundaries(self) -> None:
         self._create_app()
         self._create_app()
-        task = self._send("app-1", "Build it.")
+        send = self._send("app-1", "Build it.")
         builder_mock._route_app_api("POST", "apps/app-1/archive", {})
 
         with self.assertRaises(backend.AppError) as archived:
@@ -509,19 +696,33 @@ class AgenticWebAppMockTests(unittest.TestCase):
         self.assertEqual(archived.exception.status, HTTPStatus.NOT_FOUND)
 
         # Archive does not revoke work that already started.
-        builder_mock.TASK_DEADLINES[task["task_id"]] = 0
+        builder_mock.TURN_DEADLINES[send["thread_id"]] = 0
         archived_state = builder_mock._route_app_api(
             "GET", "apps/app-1/state", None
         )["app"]
         self.assertEqual(archived_state["revision"], 1)
 
-        with self.assertRaises(backend.AppError) as ownership:
-            builder_mock._route_app_api(
-                "POST",
-                f"apps/app-2/tasks/{task['task_id']}/kill",
-                {},
-            )
-        self.assertEqual(ownership.exception.status, HTTPStatus.NOT_FOUND)
+        # Stop is scoped to its own workspace thread: the other workspace has
+        # no running turn to stop.
+        with self.assertRaises(backend.AppError) as idle:
+            builder_mock._route_app_api("POST", "apps/app-2/stop", {})
+        self.assertEqual(idle.exception.status, HTTPStatus.CONFLICT)
+
+    def test_mock_stop_cancels_the_running_turn(self) -> None:
+        self._create_app()
+        self._send("app-1", "Build it.")
+        stopped = builder_mock._route_app_api("POST", "apps/app-1/stop", {})
+
+        self.assertEqual(stopped, {"status": "accepted"})
+        conversation = builder_mock._route_app_api(
+            "GET", "apps/app-1/conversation", None
+        )
+        self.assertEqual(conversation["status"], "idle")
+        events = builder_mock.WORKSPACES["app-1"]["events"]
+        self.assertEqual(events[-1]["event_type"], "thread.stopped")
+        # The cancelled turn never lands its bundle, even after its deadline.
+        state = builder_mock._route_app_api("GET", "apps/app-1/state", None)["app"]
+        self.assertEqual(state["revision"], 0)
 
 
 class AgenticWebAppDbTests(unittest.TestCase):
@@ -619,7 +820,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
                     "model": "gpt-5.6-terra",
                     "effort": "high",
                     "last_used_at": "2026-07-27T10:00:00Z",
-                    "active_tasks": [{"task_id": "task-1", "status": "running"}],
+                    "status": "running",
                 },
                 {
                     "thread_id": "app-2",
@@ -627,7 +828,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
                     "model": "claude-opus-5",
                     "effort": "high",
                     "last_used_at": "2026-07-27T09:00:00Z",
-                    "active_tasks": [],
+                    "status": "idle",
                 },
             ]
         }
@@ -636,8 +837,32 @@ class AgenticWebAppDbTests(unittest.TestCase):
             archived = backend.list_web_apps({"archived": ["true"]})["apps"]
         self.assertEqual(active[0]["thread_id"], "app-1")
         self.assertEqual(active[0]["session"]["agent_runtime"], "codex")
-        self.assertEqual(active[0]["active_tasks"], [{"task_id": "task-1", "status": "running"}])
+        self.assertEqual(active[0]["status"], "running")
         self.assertEqual(archived[0]["thread_id"], "app-2")
+        self.assertEqual(archived[0]["status"], "idle")
+
+    def test_app_index_drains_scoped_host_thread_pages(self) -> None:
+        first = {
+            "threads": [{"thread_id": "app-1"}],
+            "next_before": "next/token",
+        }
+        second = {"threads": [{"thread_id": "app-2"}]}
+        with patch.object(
+            backend,
+            "call_admin_api",
+            side_effect=(first, second),
+        ) as host:
+            self.assertEqual(
+                backend._host_thread_summaries(),
+                [{"thread_id": "app-1"}, {"thread_id": "app-2"}],
+            )
+        self.assertEqual(
+            host.call_args_list,
+            [
+                call("GET", "/v1/threads?limit=100"),
+                call("GET", "/v1/threads?limit=100&before=next%2Ftoken"),
+            ],
+        )
 
     def test_archived_apps_are_browser_read_only_but_existing_agent_can_finish(self) -> None:
         backend.create_web_app()

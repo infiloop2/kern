@@ -62,6 +62,7 @@ CORE_UNITS = (
     "kern-tools.service",
     "kern-agent-network.service",
     "kern-agent-app.service",
+    "kern-host-errors.service",
     "kern-admin-api.service",
 )
 

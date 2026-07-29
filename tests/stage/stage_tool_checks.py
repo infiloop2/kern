@@ -72,12 +72,14 @@ class StageToolChecks:
         def _ssh_code(self, command: str) -> str: ...
         def _step(self, label: str) -> None: ...
         def _ok(self, detail: str) -> None: ...
-        def _wait_for_task(self, task_id: str, timeout: int = 0) -> dict: ...
-        def _task_failure_detail(self, task_id: str) -> str: ...
-        def task_body(
+        def _latest_thread_event_seq(self, thread_id: str) -> int: ...
+        def _wait_for_turn(self, thread_id: str, *, timeout: float, since: int = 0) -> dict: ...
+        def _thread_failure_detail(self, thread_id: str) -> str: ...
+        def api_thread_id(self, thread_id: str) -> str: ...
+        def send_message(
             self,
-            input_message: str,
             thread_id: str,
+            message: str,
             *,
             runtime: str | None = None,
             model: str | None = None,
@@ -223,23 +225,24 @@ class StageToolChecks:
             "including disabled tools, exactly once in sorted order. Do not include display names, "
             "action names, Markdown, or commentary."
         )
-        task = self._api(
-            "POST",
-            "/v1/tasks",
-            self.task_body(prompt, f"mcp-catalog-{runtime}-{time.time_ns()}", runtime=runtime),
+        thread_id = f"mcp-catalog-{runtime}-{time.time_ns()}"
+        turn_baseline = self._latest_thread_event_seq(thread_id)
+        started = self.send_message(
+            thread_id, prompt, runtime=runtime, model=CHEAP_MODELS[runtime], effort=CHEAP_EFFORT
         )
+        thread = started.get("thread") or {}
         expected_session = (CHEAP_MODELS[runtime], CHEAP_EFFORT)
-        if (task.get("model"), task.get("effort")) != expected_session:
-            raise AssertionError(f"agent MCP catalog task did not use {expected_session}: {task}")
+        if started.get("status") != "accepted" or (thread.get("model"), thread.get("effort")) != expected_session:
+            raise AssertionError(f"agent MCP catalog turn did not start on {expected_session}: {started}")
         print(
-            f"    [agent task] runtime={runtime} task_id={task['task_id']} "
-            f"model={task.get('model')} effort={task.get('effort')}",
+            f"    [agent turn] runtime={runtime} thread_id={self.api_thread_id(thread_id)} "
+            f"model={thread.get('model')} effort={thread.get('effort')}",
             flush=True,
         )
-        done = self._wait_for_task(task["task_id"], timeout=240)
+        done = self._wait_for_turn(thread_id, since=turn_baseline, timeout=240)
         if done.get("status") != "completed":
             raise AssertionError(
-                f"agent MCP catalog task failed: {self._task_failure_detail(task['task_id'])}"
+                f"agent MCP catalog turn failed: {self._thread_failure_detail(thread_id)}"
             )
         actual = agent_catalog_tool_ids(done.get("output_message") or "")
         expected = tuple(sorted(BUNDLED_TOOLS))

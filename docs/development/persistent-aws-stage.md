@@ -29,11 +29,15 @@ workflow passes the generated stage SSH key path through `--ssh-key-env
 KERN_STAGE_SSH_KEY`.
 
 The stage test takes a `--suite` argument selecting which checks run: `claude`,
-`codex`, `hermes`, or `github` run that integration's checks plus the shared preamble, every
+`codex`, `hermes`, or `github` run that integration's checks plus the shared preamble,
+`all_runtimes` runs the Codex, Claude Code, and Hermes runtime checks together
+in one invocation (so the operator does not run three separate commands), every
 bundled tool id runs that one tool's live check, and `all` (the default) runs
 the complete integration matrix. Every run performs its credential preflight
 before any integration test. A focused suite fails when its selected
-integration is unavailable. `all` records each unavailable integration as
+integration is unavailable; `all_runtimes` records each unavailable runtime as
+failed but still runs the checks for the runtimes that are available. `all`
+records each unavailable integration as
 skipped, then runs every available integration independently, so a missing
 secret, unconfigured OAuth account, expired provider session, or failed live
 integration cannot hide the results for the rest.
@@ -63,29 +67,31 @@ secrets. Provider OAuth tool config and login are never supplied by stage
 secrets; both remain one-time admin-UI setup on the persistent host.
 
 After the preflight, the test resets the active network policy to the
-enforcement baseline and kills or cancels any leftover active tasks. The shared
+enforcement baseline and stops any leftover running turns. The shared
 preamble (health, admin UI, admin auth, agent file explorer) runs for every
 suite.
 
 The `all` suite covers the runtime checks omitted from fresh smoke: Codex
-account guards and real web-search task traffic, Claude bearer-token guards and
-real task traffic, Hermes credential-boundary checks and real Bedrock
-Converse traffic, mixed Codex/Claude concurrency, steering, kill and thread
+account guards and real web-search turn traffic, Claude bearer-token guards and
+real turn traffic, Hermes credential-boundary checks and real Bedrock
+Converse traffic, mixed Codex/Claude concurrency, steering, stop and thread
 survival, persisted thread recall, Bedrock disable/re-enable behavior,
 runtime deactivation behavior, host reboot
 recovery, the network event prune race, the live bundled-tool checks against
 real third-party APIs (see below), and the GitHub write
 end-to-end. Cross-runtime checks run when all three runtimes pass. A
-single-runtime suite runs only that runtime's guard, task,
-steering, and kill checks; `github` runs only the GitHub write end-to-end; and
+single-runtime suite runs only that runtime's guard, turn,
+steering, and stop checks; `all_runtimes` runs those same checks for all three
+runtimes in one invocation (without the tool, GitHub, or cross-runtime
+matrix); `github` runs only the GitHub write end-to-end; and
 a bundled tool id runs only that tool's live provider check.
 
-The live concurrency scenario uses three Codex and three Claude tasks. The
-provider-neutral orchestrator tests separately prove the same three-task cap
+The live concurrency scenario uses three Codex and three Claude turns. The
+provider-neutral orchestrator tests separately prove the same three-turn cap
 for Hermes, avoiding three additional paid Bedrock turns merely to repeat the
 scheduler invariant.
 
-All agent tasks use the least expensive exposed options: Codex uses
+All agent turns use the least expensive exposed options: Codex uses
 `gpt-5.6-luna` with `high` effort, and Claude Code uses `sonnet` with `high`
 effort; Hermes uses `qwen.qwen3-coder-next` with `high` effort.
 This includes concurrency,
@@ -105,7 +111,7 @@ the deterministic live MCP scenarios. New tool coverage belongs in the tool
 module; adding a bundled tool does not require editing suite registration.
 
 Each integration prints its start, outcome, and elapsed time. Provider checks
-print runtime state, guard outcomes, task id/model/effort/status, and allowed or
+print runtime state, guard outcomes, thread id/model/effort/status, and allowed or
 denied network-event counts. Tool checks print every MCP action with bounded,
 credential-redacted arguments, elapsed time, result status and keys, approval
 decisions, conditional-coverage counts, and the resulting audit actions. An
@@ -176,16 +182,16 @@ id needed by the next action.
 Codex and Claude Code each make one short `list_bundled_tools` agent call when
 their provider is available. That catalog call is local and has no third-party
 tool charge, but it consumes model tokens. The rest of the provider and
-cross-runtime stage tasks also consume subscription quota; their token total is
+cross-runtime stage turns also consume subscription quota; their token total is
 not fixed because steering, recall, and tool output vary. GitHub writes and
 deletes a temporary branch in the configured sandbox repository. AWS starts
 the existing stage instance for the run and stops it afterward. Dollar totals
 therefore depend on the operator's model plans, X plan, API-key plans, and EC2
 runtime; the table states the fixed request or credit units the harness controls.
 
-Hermes makes a short Bedrock task, a session-resume turn, an MCP catalog turn,
-a running task that stage kills, and a post-kill recovery turn. While the
-Hermes kill target is running, stage
+Hermes makes a short Bedrock turn, a session-resume turn, an MCP catalog turn,
+a running turn that stage stops, and a post-stop recovery turn. While the
+Hermes stop target is running, stage
 proves that steering is rejected; this denial invokes no additional model
 turn. Hermes uses Qwen
 3 Coder Next, the least expensive of the three exposed Bedrock models for short
@@ -290,12 +296,15 @@ comments, pull request branches, or temporary feature branches: stage is a
 persistent environment, so upgrades must use the stable mainline version and
 mainline migration path.
 
-The `workflow_dispatch` form takes a **suite** input (`all`, each bundled tool
+The `workflow_dispatch` form takes a **suite** input (`all`, `all_runtimes`,
+each bundled tool
 id, `claude`, `codex`, `hermes`, or `github`; default `all`) that maps to the test's
 `--suite` argument. Use a single-provider suite to exercise or debug just that
 integration, for example `github` once the GitHub credential and sandbox write
 repo are configured, `brave_search` once its key secret is set, or `codex`/`claude`
-while GitHub is still being set up. Use `hermes` to isolate the Bedrock harness.
+while GitHub is still being set up. Use `hermes` to isolate the Bedrock harness,
+or `all_runtimes` to exercise all three provider runtimes in one run without
+the tool and GitHub matrix.
 Each suite still runs its scoped
 configuration preflight first. The GitHub Actions summary ends with one row per
 integration showing credential availability, pass/fail/skip, and a concise

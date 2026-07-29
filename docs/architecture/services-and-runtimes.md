@@ -8,6 +8,7 @@
 | `kern-tools.service` | `kern-tools` | Runs the bundled tool packages and owns the agent-facing tools socket `/run/kern-tools/tools.sock` (peer-credential authenticated). The only Kern application service besides the proxy with DNS+HTTPS egress; its Postgres role is scoped to the five tool tables plus read access to the encryption key needed for tool secrets. |
 | `kern-agent-network.service` | `kern-agent-network` | Serves read-only network integration and denial introspection on `/run/kern-agent-network/agent-network.sock`. No egress; its Postgres role has SELECT-only policy and network-event grants. |
 | `kern-agent-app.service` | `kern-agent-app` | Serves the agent-facing app API socket `/run/kern-agent-app/agent-app.sock` (peer-credential authenticated, agent uid only) and proxies thread-scope-attributed `app_api` calls to app backend ports. No database access or egress. See [agent-app-api.md](apps/agent-app-api.md). |
+| `kern-host-errors.service` | `kern-admin` | Follows new structured unexpected-error records from journald and copies them best-effort into the bounded Postgres host-error log. |
 | `kern-app-<app_id>.service` | per-app account | Installed app backend on its host-assigned loopback app port, reachable only from the admin API and agent-app service uids. |
 | `kern-cloudflared.service` | `cloudflared` | Optional Cloudflare Tunnel connector for Cloudflare Tunnel operator endpoints. Installed only when `operator_connections` contains `cloudflare_tunnel`. |
 | `kern_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; `MemoryHigh=70%`/`MemoryMax=80%`/`MemorySwapMax=5G` contain a runaway agent's RAM and swap to its own cgroup; `TasksMax=4096` stops a fork bomb from exhausting kernel PIDs. |
@@ -21,10 +22,11 @@
 | `nftables` | kernel/root configured | bootstrap/systemd | Enforces inbound and per-user outbound network policy. |
 | `kern-network-proxy.service` | `kern-proxy` | systemd | Handles all agent HTTP(S)/WS(S) egress and writes network events. |
 | `kern-postgres.service` | `postgres` | systemd | Stores admin state; local Unix-socket connections only. |
-| `kern-admin-api.service` | `kern-admin` | systemd | Serves localhost API/UI, owns task state, and supervises runtime work. |
+| `kern-admin-api.service` | `kern-admin` | systemd | Serves localhost API/UI, owns thread state, and supervises runtime work. |
 | `kern-tools.service` | `kern-tools` | systemd | Executes bundled tool calls and operator-delegated OAuth/approval work; owns the peer-authenticated tools socket. |
 | `kern-agent-network.service` | `kern-agent-network` | systemd | Serves the peer-authenticated network-introspection socket from SELECT-only policy and event state, without egress. |
 | `kern-agent-app.service` | `kern-agent-app` | systemd | Attributes agent `app_api` calls to their app-prefixed thread by cgroup and proxies them to the owning app backend; owns the peer-authenticated agent-app socket. |
+| `kern-host-errors.service` | `kern-admin` | systemd | Validates tagged records from trusted Kern systemd units and stores/coalesces them for the read-only Host errors panel. |
 | `kern-app-<app_id>.service` | per-app account | systemd | Serves an installed app API on a loopback app port selected by the host. The admin API and agent-app service are the only uids allowed to open new TCP connections to that listener. |
 | `kern-cloudflared.service` | `cloudflared` | systemd | Optional Cloudflare Tunnel connector. Reads `/etc/kern/cloudflared.token` and exposes the admin API through the configured Cloudflare Tunnel hostname. |
 | `run-codex-app-server` helper | starts as root, then `kern-agent` | admin API via sudo | Starts one Codex stdio app-server process. |
@@ -38,7 +40,7 @@
 | `mint-github-app-token` helper | root | admin API via sudo | Mints installation-wide GitHub App tokens through root egress because the admin service has none; the proxy repo guard is the per-repository boundary. |
 | `audit-github-repo` helper | root | admin API via sudo | Reads GitHub repository/security facts with the working token and returns facts without storing secrets. |
 | `approve-github-push` helper | root | admin API via sudo | Replays or cleans up a push held by the `.github` approval gate using the proxy-state quarantine mirror and a working GitHub token piped on stdin. |
-| `stop-agent-thread` helper | root | admin API via sudo | Frees a thread's transient agent scope after a kill: SIGKILLs the scope's cgroup, stops the unit, and clears any failed remnant. |
+| `stop-agent-thread` helper | root | admin API via sudo | Frees a thread's transient agent scope after a stop: SIGKILLs the scope's cgroup, stops the unit, and clears any failed remnant. |
 | `reboot-host` helper | root | admin API via sudo | Requests a host reboot. |
 
 ## Thread Inventory
@@ -49,8 +51,9 @@
 | Tools socket handler threads | tools service | One per agent tool call (and per delegated operator operation), bounded by a concurrency cap; tool packages run their third-party requests on these threads. |
 | Network-introspection socket handler threads | agent-network service | One per local request, bounded by a concurrency cap; calls perform read-only policy or denial queries. |
 | Maintenance thread | admin API | Periodically prunes bounded state and event history. |
+| Journal follower | host-errors collector | Follows new trusted-unit `KERN_HOST_ERROR=1` records without a replay cursor. |
 | Runtime status poller | admin API/orchestrator | Rechecks provider health, including Hermes's Bedrock connection. |
-| Task worker threads | admin API/orchestrator | Nine total workers claim queued tasks; at most three tasks run per runtime. Each turn spawns and closes its own runtime process. |
+| Turn threads | admin API/orchestrator | One daemon thread per admitted turn; at most three turns run per runtime, and a message past that cap is rejected rather than queued. Each turn spawns and closes its own runtime process. |
 | Proxy handler threads | network proxy | One per proxied connection, capped so buffered request bodies cannot exhaust memory. |
 | Proxy certificate lock users | network proxy | Serialize per-host certificate generation so concurrent TLS CONNECTs do not race on cert files. |
 
@@ -64,7 +67,7 @@ and costs the agent nothing when the host services are idle (weights, unlike
 quotas, are work-conserving). `MemoryHigh=70%` reclaims agent pages to swap
 under pressure and `MemoryMax=80%` OOM-kills inside the agent cgroup, so a
 runaway agent process dies instead of triggering a host-wide OOM kill; the
-admin API records the failed task and the host stays up. `MemorySwapMax=5G`
+admin API records the failed turn and the host stays up. `MemorySwapMax=5G`
 keeps 1G of the 6G swapfile available to host services (systemd 249 offers no
 percentage form for swap, and bootstrap owns the swapfile size). `TasksMax=4096`
 bounds agent threads and processes so a fork bomb cannot exhaust kernel PIDs,
@@ -72,9 +75,9 @@ which would otherwise block the admin API from spawning helpers at all. Each
 scope is `BindsTo=kern-admin-api.service`: leaving the admin API's
 cgroup must not decouple lifecycles, so when the admin service stops,
 restarts, or crashes, systemd stops the scopes too and no orphaned runtime
-keeps running after its task was recovered as failed.
+keeps running after its turn was recovered as failed.
 Codex runs as stdio app-server child processes; status
-checks and login flows use short-lived servers, and each task turn runs on a
+checks and login flows use short-lived servers, and each turn runs on a
 fresh app-server that resumes its provider thread by id. The host supplies the
 session's selected model on Codex thread start/resume and its model and effort
 on every turn. Claude Code does not expose the same app-server protocol, so the
@@ -86,7 +89,7 @@ re-derive active status from the agent user's home directory.
 
 ## Reboot and restart
 
-The admin API, proxy, tools, network-introspection, Postgres, app backends,
+The admin API, proxy, tools, network-introspection, host-error collector, Postgres, app backends,
 nftables, and optional Cloudflare Tunnel service are `systemctl enable`d, so
 they resume on every boot. Postgres starts before the proxy, tools, and
 network-introspection services; those services start before the admin API; app
@@ -95,17 +98,18 @@ reloads `/etc/nftables.conf`.
 Because admin state and agent home data live on the two data EBS volumes, a
 reboot, including via `POST /v1/host-runtime/reboot`, preserves them: the proxy comes
 back immediately enforcing the last active policy (no fail-open window),
-Cloudflare Tunnel reconnects when configured, agent login and queued tasks
-survive, and the swapfile is re-enabled from `/etc/fstab`. Redeploys can
+Cloudflare Tunnel reconnects when configured, agent login and thread
+histories survive, and the swapfile is re-enabled from `/etc/fstab`. Redeploys can
 replace the root volume and runtime code while reattaching the tagged admin
 and agent volumes for the same `agent_name`.
 
-On start the admin API runs a recovery pass: a task that was `running` when the
-host went down is marked `failed` (an in-flight agent turn cannot survive a
-reboot). `queued` tasks survive the reboot, but a task claimed before its
-chosen runtime's first status poll publishes `active` fails with that
-non-active status: tasks run only against an active runtime, never park
-behind one.
+On start the admin API runs a recovery pass: each thread whose private durable
+run state is `running` is returned to `idle` and gets one `thread.error` event
+(in-flight agent work cannot survive a reboot). There is no queue to recover:
+a message sent before its
+chosen runtime's first status poll publishes `active` is rejected with that
+non-active status, and the caller retries — turns run only against an active
+runtime, never park behind one.
 
 The tools service independently marks an approval caught in `approved`
 execution as `failed` with an unknown outcome; it never repeats the

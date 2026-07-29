@@ -22,8 +22,13 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from host.constants import APP_BACKEND_ADMIN_SOCKET_PATH, LOOPBACK, MAX_REQUEST_BODY_BYTES as ADMIN_MAX_REQUEST_BODY_BYTES
-from host.runtime.core import db
+from host.constants import (
+    APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS,
+    APP_BACKEND_ADMIN_SOCKET_PATH,
+    LOOPBACK,
+    MAX_REQUEST_BODY_BYTES as ADMIN_MAX_REQUEST_BODY_BYTES,
+)
+from host.runtime.core import db, host_errors
 from host.session_options import public_session_options, recorded_session_config, session_config_error
 
 
@@ -42,20 +47,24 @@ MAX_DATA_BYTES = 256 * 1024
 MAX_STATE_RESPONSE_BYTES = 900 * 1024
 MAX_CHAT_MESSAGE_BYTES = 50_000
 MAX_APP_NAME_CHARS = 100
-CONVERSATION_TASK_LIMIT = 20
-CONVERSATION_MESSAGE_BYTES = 12 * 1024
-# json.dumps may expand each clipped byte to a six-byte \u00XX escape. Five
-# events with both typed text fields at 12 KiB therefore stay below the 1 MiB
-# app-backend response cap, including envelope headroom.
-CONVERSATION_EVENT_PAGE_LIMIT = 5
+CONVERSATION_MESSAGE_BYTES = 120 * 1024
+THREAD_LIST_PAGE = 100
+# A live turn has brief startup and shutdown windows where it cannot accept a
+# steer. The host marks those safe-to-retry conflicts explicitly.
+SEND_RETRY_MARKER = "retry shortly"
+SEND_BUSY_RETRIES = 21
+SEND_BUSY_RETRY_DELAY_SECONDS = 0.5
+# Match Agent Chat's bounded event window. message_bytes limits the already
+# JSON-encoded string size, so six 120 KiB events leave bridge headroom even
+# for text that requires escaping.
+CONVERSATION_EVENT_PAGE_LIMIT = 6
 MAX_PATH_DEPTH = 16
 MAX_PATH_KEY_BYTES = 128
 JAVASCRIPT_FORBIDDEN = re.compile(r"\bimport\b")
 # Message creation and archive changes on one workspace must not interleave.
-# Separate workspaces retain independent locks so their agents can run and
-# mutate state concurrently.
-WORKSPACE_LOCKS_GUARD = threading.Lock()
-WORKSPACE_LOCKS: dict[str, threading.Lock] = {}
+# A fixed stripe set keeps that coordination bounded while unrelated
+# workspaces normally proceed independently.
+WORKSPACE_LOCKS = tuple(threading.Lock() for _ in range(64))
 REQUEST_PREFIXES = {
     "user": "Requested by user:",
     "app": "Requested by app:",
@@ -99,9 +108,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, response)
         except AppError as exc:
             self._send_json(exc.status, {"error": {"message": exc.message}})
-        except Exception:
+        except Exception as exc:
             # App-controlled strings and internal transport details do not
             # belong in a browser or agent error response.
+            host_errors.report_unexpected(
+                "agentic_web_app.request",
+                exc,
+                context={"method": method, "route": parsed.path},
+            )
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"message": "app request failed"}})
 
     def _require_host_proxy(self) -> None:
@@ -197,16 +211,12 @@ def route_browser(
             requested_by = "app" if resource == "runtime/agent-requests" else "user"
             return create_message(body, requested_by=requested_by, thread_id=thread_id)
 
-    match = re.fullmatch(r"/apps/([^/]+)/tasks/([^/]+)/(cancel|kill)", path)
+    match = re.fullmatch(r"/apps/([^/]+)/stop", path)
     if method == "POST" and match:
-        thread_id, task_id, action = (
-            _path_segment(match.group(1)),
-            _path_segment(match.group(2)),
-            match.group(3),
-        )
-        _require_web_app_task(thread_id, task_id)
+        thread_id = _path_segment(match.group(1))
+        _require_web_app(thread_id, include_archived=True)
         return call_admin_api(
-            "POST", f"/v1/tasks/{quote(task_id, safe='')}/{action}", body
+            "POST", f"/v1/threads/{quote(thread_id, safe='')}/stop", body
         )
     raise AppError(HTTPStatus.NOT_FOUND, "route not found")
 
@@ -243,12 +253,7 @@ def list_web_apps(query: dict[str, list[str]]) -> dict[str, Any]:
         rows = cur.fetchall()
     summaries: dict[str, dict[str, Any]] = {}
     if rows:
-        response = call_admin_api("GET", "/v1/threads")
-        host_threads = response.get("threads")
-        if not isinstance(host_threads, list):
-            raise AppError(
-                HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread list"
-            )
+        host_threads = _host_thread_summaries()
         summaries = {
             summary["thread_id"]: summary
             for summary in host_threads
@@ -266,26 +271,50 @@ def list_web_apps(query: dict[str, list[str]]) -> dict[str, Any]:
     return {"apps": apps}
 
 
+def _host_thread_summaries() -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    before: str | None = None
+    seen_cursors: set[str] = set()
+    while True:
+        path = f"/v1/threads?limit={THREAD_LIST_PAGE}"
+        if before is not None:
+            path += f"&before={quote(before, safe='')}"
+        response = call_admin_api("GET", path)
+        page = response.get("threads")
+        if not isinstance(page, list) or not all(isinstance(item, dict) for item in page):
+            raise AppError(
+                HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread list"
+            )
+        summaries.extend(page)
+        next_before = response.get("next_before")
+        if next_before is None:
+            return summaries
+        if (
+            not isinstance(next_before, str)
+            or not next_before
+            or next_before in seen_cursors
+        ):
+            raise AppError(
+                HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread cursor"
+            )
+        seen_cursors.add(next_before)
+        before = next_before
+
+
 def _web_app_summary(
     row: tuple[Any, ...], host_summary: dict[str, Any] | None
 ) -> dict[str, Any]:
-    active_tasks: list[dict[str, str]] = []
     session: dict[str, str] | None = None
+    status = "idle"
     last_used_at = row[5]
     if host_summary is not None:
-        active = host_summary.get("active_tasks")
-        if not isinstance(active, list):
+        host_status = host_summary.get("status")
+        if host_status not in {"idle", "running"}:
             raise AppError(
                 HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread summary"
             )
-        active_tasks = [
-            {"task_id": task["task_id"], "status": task["status"]}
-            for task in active
-            if isinstance(task, dict)
-            and isinstance(task.get("task_id"), str)
-            and isinstance(task.get("status"), str)
-        ]
-        session = _task_session_config(host_summary)
+        status = host_status
+        session = _thread_session_config(host_summary)
         last_used_at = str(host_summary.get("last_used_at") or row[5])
     return {
         "thread_id": row[0],
@@ -296,7 +325,7 @@ def _web_app_summary(
         "updated_at": row[5],
         "last_used_at": last_used_at,
         "session": session,
-        "active_tasks": active_tasks,
+        "status": status,
     }
 
 
@@ -382,30 +411,28 @@ def _require_web_app(
 
 
 def _workspace_lock(thread_id: str) -> threading.Lock:
-    with WORKSPACE_LOCKS_GUARD:
-        return WORKSPACE_LOCKS.setdefault(thread_id, threading.Lock())
-
-
-def _require_web_app_task(thread_id: str, task_id: str) -> None:
-    _require_web_app(thread_id, include_archived=True)
-    task = call_admin_api("GET", f"/v1/tasks/{quote(task_id, safe='')}")
-    if task.get("thread_id") != thread_id:
-        raise AppError(HTTPStatus.NOT_FOUND, "task not found")
+    return WORKSPACE_LOCKS[hash(thread_id) % len(WORKSPACE_LOCKS)]
 
 
 def browser_conversation(thread_id: str) -> dict[str, Any]:
+    """The workspace's agent session and live status. The conversation
+    contents themselves come from the thread event stream."""
     _require_web_app(thread_id, include_archived=True)
-    response = call_admin_api(
-        "GET",
-        f"/v1/threads/{quote(thread_id, safe='')}/tasks"
-        f"?limit={CONVERSATION_TASK_LIMIT}&message_bytes={CONVERSATION_MESSAGE_BYTES}",
-    )
-    host_tasks = response.get("tasks")
-    if not isinstance(host_tasks, list) or not all(isinstance(task, dict) for task in host_tasks):
-        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid task list")
-    tasks: list[dict[str, Any]] = host_tasks
-    session = _task_session_config(tasks[0]) if tasks else None
-    return {"tasks": tasks, "session": session}
+    try:
+        response = call_admin_api("GET", f"/v1/threads/{quote(thread_id, safe='')}")
+    except AppError as exc:
+        if exc.status == HTTPStatus.NOT_FOUND:
+            # The host thread appears with the workspace's first message; an
+            # unconfigured workspace is simply idle with no session yet.
+            return {"session": None, "status": "idle"}
+        raise
+    thread = response.get("thread")
+    if not isinstance(thread, dict):
+        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread")
+    status = thread.get("status")
+    if status not in {"idle", "running"}:
+        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread")
+    return {"session": _thread_session_config(thread), "status": status}
 
 
 def browser_conversation_events(
@@ -460,7 +487,7 @@ def create_message(
         MAX_CHAT_MESSAGE_BYTES - len(f"{prefix}\n".encode()),
     )
     input_message = f"{prefix}\n{content}"
-    host_request: dict[str, Any] = {"input_message": input_message, "thread_id": thread_id}
+    host_request: dict[str, Any] = {"message": input_message}
     config_fields = ("agent_runtime", "model", "effort")
     supplied = [field for field in config_fields if field in request]
     if supplied:
@@ -474,12 +501,24 @@ def create_message(
             raise AppError(HTTPStatus.BAD_REQUEST, error)
         assert isinstance(model, str) and isinstance(effort, str)
         host_request.update({"agent_runtime": runtime, "model": model, "effort": effort})
-    response = call_admin_api("POST", "/v1/tasks", host_request)
-    task_id = _response_text(response.get("task_id"), "task_id")
-    if _response_text(response.get("thread_id"), "thread_id") != thread_id:
-        _stop_orphan(task_id)
-        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned mismatched task reference")
-    return response
+    response = _send_with_busy_retry(thread_id, host_request)
+    status = response.get("status")
+    if status != "accepted":
+        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid send status")
+    return {"status": status, "thread_id": thread_id}
+
+
+def _send_with_busy_retry(thread_id: str, host_request: dict[str, Any]) -> dict[str, Any]:
+    path = f"/v1/threads/{quote(thread_id, safe='')}/messages"
+    for attempt in range(SEND_BUSY_RETRIES):
+        try:
+            return call_admin_api("POST", path, host_request)
+        except AppError as exc:
+            transient = exc.status == HTTPStatus.CONFLICT and SEND_RETRY_MARKER in exc.message
+            if not transient or attempt == SEND_BUSY_RETRIES - 1:
+                raise
+            time.sleep(SEND_BUSY_RETRY_DELAY_SECONDS)
+    raise AppError(HTTPStatus.CONFLICT, "the thread stayed busy while sending; retry the message")
 
 
 def load_app_state(thread_id: str) -> dict[str, Any]:
@@ -731,38 +770,19 @@ def _child(parent: Any, segment: str | int) -> Any:
     raise AppError(HTTPStatus.UNPROCESSABLE_ENTITY, "data path does not exist")
 
 
-def _task_session_config(task: dict[str, Any]) -> dict[str, str]:
-    """Read back the session configuration the host recorded for a task.
+def _thread_session_config(thread: dict[str, Any]) -> dict[str, str]:
+    """Read back the session configuration the host recorded for a thread.
 
     Read path (`host.session_options`): the recorded model may predate the
     current matrix, so a retained conversation stays readable even though the
-    host refuses to run further tasks on its thread. The matrix check belongs
+    host refuses to run further turns on its thread. The matrix check belongs
     on the send path.
     """
-    config = recorded_session_config(task)
+    config = recorded_session_config(thread)
     if config is None:
-        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid task configuration")
+        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread configuration")
     runtime, model, effort = config
     return {"agent_runtime": runtime, "model": model, "effort": effort}
-
-
-def _stop_task(task_id: str) -> None:
-    """Cancel a queued task, or kill one a worker already claimed."""
-    for action in ("cancel", "kill"):
-        try:
-            call_admin_api("POST", f"/v1/tasks/{quote(task_id, safe='')}/{action}", {})
-            return
-        except Exception:
-            continue
-    raise AppError(HTTPStatus.BAD_GATEWAY, "could not stop the builder's active work; try again")
-
-
-def _stop_orphan(task_id: str) -> None:
-    """Best effort: the caller is already failing and owns that error."""
-    try:
-        _stop_task(task_id)
-    except AppError:
-        return
 
 
 def _required_object(value: Any, label: str) -> dict[str, Any]:
@@ -794,12 +814,6 @@ def _bounded_required_text(value: Any, label: str, limit: int) -> str:
     if len(text.encode()) > limit:
         raise AppError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, f"{label} exceeds {limit} bytes")
     return text
-
-
-def _response_text(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise AppError(HTTPStatus.BAD_GATEWAY, f"host admin returned invalid {label}")
-    return value
 
 
 def _required_revision(value: Any) -> int:
@@ -842,7 +856,10 @@ def call_admin_api(method: str, path: str, body: Any = None) -> dict[str, Any]:
     headers = {"X-Kern-App-Backend": APP_ID}
     if encoded is not None:
         headers["Content-Type"] = "application/json"
-    conn = _UnixHTTPConnection(ADMIN_API_SOCKET, timeout=10)
+    conn = _UnixHTTPConnection(
+        ADMIN_API_SOCKET,
+        timeout=APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS,
+    )
     try:
         conn.request(method, path, body=encoded, headers=headers)
         response = conn.getresponse()

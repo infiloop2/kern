@@ -27,7 +27,7 @@ Cloudflare Tunnel and authenticated with the admin login: the password is posted
 to `/v1/login`, which returns an `HttpOnly` session cookie used for every later
 request. It is lower authority than the
 operator plane and is meant for normal host operation after deploy. It can
-create, steer, cancel, and inspect agent tasks; inspect agent files and
+send, steer, stop, and inspect agent threads; inspect agent files and
 processes; read agent, network, and tool audit events; manage runtime network
 policy and the GitHub credential/approval queue; start provider login flows
 and read provider account summaries; configure, connect, enable, and approve

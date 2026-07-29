@@ -1,18 +1,39 @@
-// Read-only agent session view: thread list, thread history with task cards,
-// and per-task event tailing.
+// Read-only agent session view: thread list plus the selected thread's turn
+// event log, paged from the thread event stream.
 
 import { api } from "./api.js";
 import { $, badge, esc, formatDateTime, runtimeLabel, setHtml } from "./helpers.js";
 
-const TASK_EVENT_PAGE_BATCH = 10;
+const EVENT_PAGE_LIMIT = 100;
+const THREAD_LIST_PAGE_LIMIT = 100;
 
-let threads = [], threadTasks = [];
+let threads = [];
 let selectedThreadId = null, selectedThreadRuntime = null;
-let expandedTaskEvents = new Map();
+let threadEvents = [];
+let threadEventsOldestSeq = null;
+let threadEventsNewestSeq = 0;
+let threadEventsInitialized = false;
+let hasOlderThreadEvents = false;
+let earlierThreadEventsRequest = null;
 
 export async function loadThreads() {
-  const listed = await api("GET", "/v1/threads");
-  threads = listed.threads || [];
+  const loaded = [];
+  const seenBefore = new Set();
+  let before = null;
+  while (true) {
+    const query = new URLSearchParams({ limit: String(THREAD_LIST_PAGE_LIMIT) });
+    if (before !== null) query.set("before", before);
+    const listed = await api("GET", `/v1/threads?${query}`);
+    loaded.push(...(listed.threads || []));
+    const nextBefore = typeof listed.next_before === "string" && listed.next_before
+      ? listed.next_before
+      : null;
+    if (nextBefore === null) break;
+    if (seenBefore.has(nextBefore)) throw new Error("thread list pagination returned a repeated cursor");
+    seenBefore.add(nextBefore);
+    before = nextBefore;
+  }
+  threads = loaded;
   renderThreads();
 }
 
@@ -25,28 +46,88 @@ function renderThreads() {
     <button class="thread-item${thread.thread_id === selectedThreadId ? " selected" : ""}"
             data-action="show-thread" data-thread-id="${esc(thread.thread_id)}" data-runtime="${esc(thread.agent_runtime)}">
       <span class="thread-name">${esc(thread.thread_id)}</span>
-      <span class="thread-meta">${esc(runtimeLabel(thread.agent_runtime))} &middot; ${esc(thread.task_count)} task${thread.task_count === 1 ? "" : "s"}
-        ${(thread.active_tasks || []).map(task => badge(task.status)).join(" ")}</span>
+      <span class="thread-meta">${esc(runtimeLabel(thread.agent_runtime))}
+        ${thread.status === "running" ? badge(thread.status) : ""}</span>
       <span class="thread-meta">${esc(formatDateTime(thread.last_used_at))}</span>
     </button>`).join(""));
 }
 
 export async function showThread(threadId, agentRuntime) {
-  if (threadId !== selectedThreadId) clearTaskEventsDetail();
+  if (threadId !== selectedThreadId) resetThreadEvents();
   selectedThreadId = threadId;
   selectedThreadRuntime = agentRuntime;
   renderThreads();
   await refreshSelectedThread();
 }
 
+function resetThreadEvents() {
+  threadEvents = [];
+  threadEventsOldestSeq = null;
+  threadEventsNewestSeq = 0;
+  threadEventsInitialized = false;
+  hasOlderThreadEvents = false;
+  earlierThreadEventsRequest = null;
+}
+
+function mergeThreadEvents(events) {
+  const bySeq = new Map(threadEvents.map(event => [event.seq, event]));
+  for (const event of events) bySeq.set(event.seq, event);
+  threadEvents = Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
+  if (threadEvents.length) {
+    threadEventsOldestSeq = threadEvents[0].seq;
+    threadEventsNewestSeq = threadEvents[threadEvents.length - 1].seq;
+  }
+}
+
 export async function refreshSelectedThread() {
   if (selectedThreadId === null) { renderThreadHistory(); return; }
-  const response = await api(
-    "GET",
-    `/v1/threads/${encodeURIComponent(selectedThreadId)}/tasks`
-  );
-  threadTasks = response.tasks || [];
+  const threadId = selectedThreadId;
+  if (!threadEventsInitialized) {
+    // No cursor means "latest page"; earlier history loads on demand.
+    const response = await api(
+      "GET", `/v1/threads/${encodeURIComponent(threadId)}/events`
+    );
+    if (threadId !== selectedThreadId) return;
+    const events = response.events || [];
+    mergeThreadEvents(events);
+    hasOlderThreadEvents = events.length === EVENT_PAGE_LIMIT;
+    threadEventsInitialized = true;
+  } else {
+    const response = await api(
+      "GET",
+      `/v1/threads/${encodeURIComponent(threadId)}/events?since=${threadEventsNewestSeq}`
+    );
+    if (threadId !== selectedThreadId) return;
+    mergeThreadEvents((response.events || []).filter(event => event.seq > threadEventsNewestSeq));
+  }
   renderThreadHistory();
+}
+
+export async function loadEarlierThreadEvents() {
+  if (
+    selectedThreadId === null
+    || !threadEventsInitialized
+    || !hasOlderThreadEvents
+    || threadEventsOldestSeq === null
+    || earlierThreadEventsRequest !== null
+  ) return;
+  const threadId = selectedThreadId;
+  const before = threadEventsOldestSeq;
+  const request = { threadId, before };
+  earlierThreadEventsRequest = request;
+  try {
+    const response = await api(
+      "GET",
+      `/v1/threads/${encodeURIComponent(threadId)}/events?before=${before}`
+    );
+    if (threadId !== selectedThreadId) return;
+    const older = (response.events || []).filter(event => event.seq < before);
+    mergeThreadEvents(older);
+    hasOlderThreadEvents = older.length === EVENT_PAGE_LIMIT;
+    renderThreadHistory();
+  } finally {
+    if (earlierThreadEventsRequest === request) earlierThreadEventsRequest = null;
+  }
 }
 
 export function renderThreadHistory() {
@@ -55,105 +136,32 @@ export function renderThreadHistory() {
       <div class="thread-head">
         <span class="thread-title">Agent session log</span>
       </div>
-      <div class="empty-state thread-empty">Select a session to inspect retained tasks and events.</div>`);
+      <div class="empty-state thread-empty">Select a session to inspect its retained turn events.</div>`);
     return;
   }
-  // The backend returns tasks newest-first (state.tasks_for_thread orders by
-  // updated_at DESC, number DESC), so render them in response order.
-  const ordered = threadTasks;
+  const thread = threads.find(item => item.thread_id === selectedThreadId);
   setHtml($("thread-detail"), `
     <div class="thread-head">
       <span class="thread-title">${esc(selectedThreadId)}</span>
       <span class="muted">${esc(runtimeLabel(selectedThreadRuntime))}</span>
+      ${thread && thread.status === "running" ? badge(thread.status) : ""}
     </div>
-    ${ordered.length ? ordered.map(renderTaskCard).join("")
-      : `<div class="empty-state thread-empty">No retained tasks for this session yet.</div>`}`);
+    ${hasOlderThreadEvents ? `<div class="actions"><button class="ghost sm" data-action="load-earlier-thread-events">Load earlier events</button></div>` : ""}
+    ${threadEvents.length ? threadEventsHtml()
+      : `<div class="empty-state thread-empty">No retained events for this session yet.</div>`}`);
 }
 
-function renderTaskCard(task) {
-  const eventState = expandedTaskEvents.get(task.task_id);
-  const expanded = Boolean(eventState);
-  const actions = `<button class="ghost sm" data-action="show-task-events" data-task-id="${esc(task.task_id)}" aria-expanded="${expanded}">${expanded ? "Hide events" : "Events"}</button>`;
-  return `
-    <div class="task-card">
-      <div class="task-head">
-        <span class="mono muted">${esc(task.task_id)}</span>
-        ${badge(task.status)}
-        <span class="muted time">${esc(formatDateTime(task.created_at))}</span>
-        <span class="task-actions">${actions}</span>
-      </div>
-      <div class="msg user"><pre>${esc(task.input_message)}</pre></div>
-      ${task.output_message ? `<div class="msg agent"><pre>${esc(task.output_message)}</pre></div>` : ""}
-      ${task.error_message ? `<div class="msg error"><pre>${esc(task.error_message)}</pre></div>` : ""}
-      ${eventState ? `<div class="task-events-inline">${taskEventsHtml(task, eventState)}</div>` : ""}
-    </div>`;
-}
-
-async function loadTaskEventBatch(taskId, eventState) {
-  for (let page = 0; page < TASK_EVENT_PAGE_BATCH; page += 1) {
-    const response = await api(
-      "GET",
-      `/v1/tasks/${encodeURIComponent(taskId)}/events` +
-        (eventState.since === null ? "" : "?since=" + eventState.since)
-    );
-    if (!response.events.length) return false;
-    for (const event of response.events) {
-      eventState.events.push(event);
-      eventState.since = event.seq;
-    }
-  }
-  return true;
-}
-
-export async function showTaskEvents(taskId) {
-  if (expandedTaskEvents.has(taskId)) {
-    expandedTaskEvents.delete(taskId);
-    renderThreadHistory();
-    return;
-  }
-  await refreshTaskEvents(taskId);
-}
-
-async function refreshTaskEvents(taskId) {
-  if (selectedThreadId !== null) await refreshSelectedThread();
-  const eventState = { events: [], since: null, hasMore: false };
-  expandedTaskEvents.set(taskId, eventState);
-  eventState.hasMore = await loadTaskEventBatch(taskId, eventState);
-  renderTaskEventsDetail();
-}
-
-export async function loadMoreTaskEvents(taskId) {
-  const eventState = expandedTaskEvents.get(taskId);
-  if (!eventState) {
-    await showTaskEvents(taskId);
-    return;
-  }
-  eventState.hasMore = await loadTaskEventBatch(taskId, eventState);
-  renderTaskEventsDetail();
-}
-
-function renderTaskEventsDetail() {
-  renderThreadHistory();
-  $("task-events-detail").innerHTML = "";
-}
-
-function taskEventsHtml(task, eventState) {
+function threadEventsHtml() {
   return `
     <div class="table-scroll"><table>
       <tr><th>seq</th><th>time</th><th>type</th><th>source</th><th>payload</th></tr>
-      ${eventState.events.length ? eventState.events.map(event => `
+      ${threadEvents.map(event => `
         <tr>
           <td>${esc(event.seq)}</td>
           <td class="muted time">${esc(formatDateTime(event.timestamp))}</td>
           <td>${esc(event.event_type)}</td>
           <td>${esc(event.payload.source || "")}</td>
           <td><pre>${esc(event.payload.message || event.payload.error_message || JSON.stringify(event.payload))}</pre></td>
-        </tr>`).join("") : `<tr><td colspan="5" class="muted">No retained events for this task.</td></tr>`}
-    </table></div>
-    ${eventState.hasMore ? `<div class="actions"><button data-action="load-more-task-events" data-task-id="${esc(task.task_id)}">Load more events</button></div>` : ""}`;
-}
-
-function clearTaskEventsDetail() {
-  expandedTaskEvents = new Map();
-  $("task-events-detail").innerHTML = "";
+        </tr>`).join("")}
+    </table></div>`;
 }

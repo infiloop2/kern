@@ -103,11 +103,11 @@ class AppManifest(AppPackage):
     backend_entrypoint: Path
     ui_dir: Path
     # Static app-owned behavior and protocol guidance. The host attaches this
-    # at the runtime instruction boundary for every task created by the app;
-    # current user input and app state remain separate task content.
+    # at the runtime instruction boundary for every turn created by the app;
+    # current user input and app state remain separate message content.
     agent_instructions: str
     # Opt-in agent-facing backend API: when true, agents working this app's
-    # tasks get the app_api tool, proxied to the backend's /agent/ routes by
+    # turns get the app_api tool, proxied to the backend's /agent/ routes by
     # the kern-agent-app service (docs/architecture/apps/agent-app-api.md).
     agent_api: bool = False
     # Opt-in for an app that executes untrusted computation in a blob-backed

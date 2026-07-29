@@ -3,22 +3,24 @@
 // data-action buttons to feature handlers. Feature code lives in the sibling
 // modules; this file is the only place that wires them together.
 
-import { api, apiUpload, login as apiLogin, logout as apiLogout, setUnauthorizedHandler } from "./api.js";
+import {
+  api, apiUpload, login as apiLogin, logout as apiLogout, setUnauthorizedHandler,
+} from "./api.js";
 import { $, notice } from "./helpers.js";
 import {
   collapseRuntimeOverview, completeClaudeLogin, refreshHealth, refreshProviderAccounts,
   refreshProviderUsage, rebootHost, startLogin, toggleRuntimeOverview,
 } from "./health.js";
 import {
-  loadMoreTaskEvents, loadThreads, refreshSelectedThread,
-  renderThreadHistory, showTaskEvents, showThread,
+  loadEarlierThreadEvents, loadThreads, refreshSelectedThread,
+  renderThreadHistory, showThread,
 } from "./threads.js";
 import {
   ensureFilesLoaded, goToFilePath, loadParentDirectory, openAgentPath,
   refreshFiles,
 } from "./files.js";
 import { refreshAgentProcesses } from "./processes.js";
-import { agentLog, netLog, toolLog, toggleNetDeniedFilter } from "./logs.js";
+import { agentLog, hostErrorLog, netLog, toolLog, toggleNetDeniedFilter } from "./logs.js";
 import {
   addDomainRule, addGithubRepo, approveGithubPush, closeIntegrationInfo, deleteGithubCredential,
   loadPolicy, openProvider, recheckGithubAudit, rejectGithubPush, removeDomainRule,
@@ -38,7 +40,7 @@ import {
 let activeTab = "home";
 let installedApps = [];
 const appFrames = new Map();
-const staticTabs = ["home", "agent", "processes", "agent-log", "files", "network", "connection-guide", "net-log", "tool-log"];
+const staticTabs = ["home", "agent", "processes", "agent-log", "files", "network", "connection-guide", "net-log", "tool-log", "host-errors"];
 const HERO_APP_ID = "agent_chat";
 const HERO_CTA = "Begin chat";
 const MOBILE_NAV_QUERY = "(max-width: 860px)";
@@ -124,6 +126,7 @@ function showLogin() {
   setMobileNavOpen(false);
   document.body.classList.remove("connection-guide-open");
   document.body.classList.remove("app-tab-open");
+  document.body.classList.remove("viewport-panel-open");
   $("login").hidden = false;
   $("app").hidden = true;
   $("logout-button").hidden = true;
@@ -138,9 +141,11 @@ function showTab(name) {
   activeTab = name;
   const connectionGuideOpen = name === "connection-guide";
   const appTabOpen = name.startsWith("app:");
-  if (connectionGuideOpen || appTabOpen) window.scrollTo(0, 0);
+  const viewportPanelOpen = connectionGuideOpen || appTabOpen;
+  if (viewportPanelOpen) window.scrollTo(0, 0);
   document.body.classList.toggle("connection-guide-open", connectionGuideOpen);
   document.body.classList.toggle("app-tab-open", appTabOpen);
+  document.body.classList.toggle("viewport-panel-open", viewportPanelOpen);
   for (const tabName of staticTabs) {
     $(`tab-${tabName}`).classList.toggle("active-tab", tabName === name);
     $(`panel-${tabName}`).hidden = tabName !== name;
@@ -163,6 +168,8 @@ async function refreshVisibleTab(name) {
     await netLog.showFirstPage();
   } else if (name === "tool-log") {
     await toolLog.showFirstPage();
+  } else if (name === "host-errors") {
+    await hostErrorLog.showFirstPage();
   } else if (name === "processes") {
     await refreshAgentProcesses();
   } else if (name === "files") {
@@ -191,6 +198,7 @@ async function tick() {
   if (activeTab === "files") await refreshOrSkip(refreshFiles);
   if (activeTab === "network") await refreshOrSkip(refreshExpandedToolApprovals);
   if (activeTab === "tool-log" && toolLog.page === 1) await refreshOrSkip(() => toolLog.showFirstPage());
+  if (activeTab === "host-errors" && hostErrorLog.page === 1) await refreshOrSkip(() => hostErrorLog.showFirstPage());
 }
 
 async function refreshOrSkip(work) {
@@ -592,7 +600,6 @@ document.addEventListener("click", event => {
   const button = target.closest("button[data-action]");
   if (!button) return;
   const { action } = button.dataset;
-  const taskId = button.dataset.taskId;
   const threadId = button.dataset.threadId;
   const runtime = button.dataset.runtime;
   const path = button.dataset.path;
@@ -612,8 +619,7 @@ document.addEventListener("click", event => {
     "toggle-runtime-overview": () => toggleRuntimeOverview(),
     "reboot-host": () => rebootHost(),
     "show-thread": () => showThread(threadId, runtime),
-    "show-task-events": () => showTaskEvents(taskId),
-    "load-more-task-events": () => loadMoreTaskEvents(taskId),
+    "load-earlier-thread-events": () => loadEarlierThreadEvents(),
     "file-up": () => loadParentDirectory(),
     "file-go": () => goToFilePath(),
     "open-file-path": () => openAgentPath(path, fileType),
@@ -640,6 +646,7 @@ document.addEventListener("click", event => {
     "net-page": () => netLog.showPage(button.dataset.page).catch(() => {}),
     "agent-page": () => agentLog.showPage(button.dataset.page).catch(() => {}),
     "tool-page": () => toolLog.showPage(button.dataset.page).catch(() => {}),
+    "host-error-page": () => hostErrorLog.showPage(button.dataset.page).catch(() => {}),
     "approve-github-push": () => approveGithubPush(button.dataset.id),
     "reject-github-push": () => rejectGithubPush(button.dataset.id),
     "enable-tool": () => setToolEnabled(button.dataset.tool, true),

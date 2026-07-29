@@ -14,12 +14,19 @@ import json
 from typing import Any
 from urllib.parse import urlencode
 
-from host.constants import LOOPBACK, MAX_REQUEST_BODY_BYTES
+from host.constants import (
+    APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS,
+    LOOPBACK,
+    MAX_REQUEST_BODY_BYTES,
+)
 from host.runtime.core import app_platform
 from host.runtime.admin_api.errors import ApiError
 
 
-APP_API_PROXY_TIMEOUT_SECONDS = 10
+# This outer browser-to-app hop contains the app backend's synchronous host
+# call. Its deadline must outlive that inner call, which in turn outlives the
+# provider acknowledgement deadline.
+APP_API_PROXY_TIMEOUT_SECONDS = APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS + 10
 
 
 def route_app_request(

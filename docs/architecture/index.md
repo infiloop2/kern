@@ -11,15 +11,16 @@ so operators and contributors can jump to the trust boundary they need.
 | [Architecture diagram](diagram.md) | One-page host capability map covering operator access, service users, storage, and egress boundaries. |
 | [Deployment and upgrades](deployment.md) | EC2 provisioning, upgrade/recovery behavior, drive lifecycle, and secret handling. |
 | [Admin state storage and migrations](admin-state-storage.md) | The local Postgres database: schema, access control, and schema migrations. |
+| [Host error diagnostics](host-errors.md) | Best-effort structured unexpected-service failures, PostgreSQL retention, and the read-only operator panel. |
 | [Control planes](control-planes.md) | Operator-plane and admin-plane responsibilities and authority. |
 | [Privilege boundaries](privilege-boundaries.md) | Linux users, fixed sudo helpers, and root-owned helper pattern. |
 | [Filesystem layout](filesystem.md) | Trusted root paths, durable volumes, and per-service ownership. |
 | [Services and runtimes](services-and-runtimes.md) | systemd units, process inventory, threads, Codex, and Claude runtime model. |
 | [Agent provider lifecycle](agent-provider-lifecycle.md) | Runtime status lifecycle, refresh triggers, live credential validation, account anchoring, proxy pinning, and operator recovery. |
 | [Runtime harness dependencies](harness-dependencies.md) | Codex and Claude Code interfaces, auth files, request shapes, and upgrade review points. |
-| [Admin API architecture](admin-api.md) | Local API security, task orchestration, and maintenance. |
+| [Admin API architecture](admin-api.md) | Local API security, turn orchestration, and maintenance. |
 | [Apps](apps/apps.md) | App services, storage and migrations, embedded admin UI surfaces, and app security boundaries. |
-| [App: Agent Chat](apps/agent-chat.md) | The threaded chat app: thread index, task references, and its display-only agent surface. |
+| [App: Agent Chat](apps/agent-chat.md) | The threaded chat app: thread index, event stream views, and its display-only agent surface. |
 | [App: Agentic Web App](apps/personal-web-app-builder.md) | Multiple isolated agent-built web-app workspaces and preview surfaces. |
 | [Agent App API](apps/agent-app-api.md) | The `app_api` tool: kernel-attributed agent → app backend calls through the dedicated agent-app service. |
 | [Network controls](network-controls.md) | nftables, typed integration guards (AI providers, GitHub, packages, custom domains), agent introspection, and fail-closed behavior. |
@@ -32,7 +33,7 @@ so operators and contributors can jump to the trust boundary they need.
 ## Overview
 
 Kern runs Codex, Claude Code, and Hermes runtimes on an AWS EC2 instance behind
-fail-closed network controls. Each task chooses its runtime harness, such as
+fail-closed network controls. Each thread chooses its runtime harness, such as
 Codex or Claude Code. The host is long-lived in normal operation; the EC2
 instance and its root EBS volume carry the
 `kern-host-agent-name=<agent_name>` tag so that deploy can find,

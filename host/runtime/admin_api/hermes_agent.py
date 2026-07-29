@@ -8,8 +8,8 @@ terminal/file/bundled-tools toolsets with the host MCP shim connected, and
 reported/resumed session ids. The launcher pins the provider and environment;
 this adapter supplies only the prompt, model, and session selection.
 
-Hermes has no mid-turn steering channel in this mode. Each API task maps to
-exactly one Hermes process and model turn; later input starts a new task on
+Hermes has no mid-turn steering channel in this mode. Each API turn maps to
+exactly one Hermes process and model turn; later input starts a new turn on
 the same thread and resumes its stored Hermes session. The provider's
 credential surface (operator paste and STS attestation) is owned by
 ``host.runtime.admin_api.bedrock_credentials``.
@@ -33,6 +33,7 @@ AGENT_CWD = "/mnt/kern-agent/agent-home"
 # Bounded by Hermes's own agent.max_turns; the wait is generous because one
 # prompt can run many tool-using turns.
 TURN_TIMEOUT_SECONDS = 45 * 60
+PROCESS_EXIT_TIMEOUT_SECONDS = 3
 # The captured id re-enters the CLI as the --resume value, so it must never
 # look like a flag: require a leading alphanumeric.
 SESSION_ID_RE = re.compile(r"^session_id:\s*([A-Za-z0-9][\S]*)\s*$", re.MULTILINE)
@@ -70,10 +71,18 @@ class HermesSession:
     single-shot and sessions are persisted on disk under the agent home.
     """
 
-    def __init__(self, command: list[str] | None = None, thread_id: str | None = None) -> None:
+    def __init__(
+        self,
+        command: list[str] | None = None,
+        thread_id: str | None = None,
+        on_ready: Callable[[], bool] | None = None,
+        on_session_id: Callable[[str], None] | None = None,
+    ) -> None:
         self._command = command or DEFAULT_COMMAND
         self._thread_id = thread_id
-        # The orchestrator sets this only for an app-created task; delivered
+        self._on_ready = on_ready
+        self._on_session_id = on_session_id
+        # The orchestrator sets this only for an app-created turn; delivered
         # as an ephemeral system-prompt addition so it stays distinct from the
         # user message.
         self.app_instructions: str | None = None
@@ -108,18 +117,35 @@ class HermesSession:
             except OSError:
                 pass
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=PROCESS_EXIT_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 pass
         # Last resort after the launcher signal above: a killed turn leaves the
         # runtime's own descendants (a shell still in a long command) in this
         # thread's systemd scope, keeping the scope's cgroup — and its name —
-        # alive so the next task on this thread cannot recreate it. It runs as
+        # alive so the next turn on this thread cannot recreate it. It runs as
         # root, so it frees the scope even when the signal above could not, and
         # close() returns only once the whole cgroup is gone; a clean exit
         # already emptied it, so this is then a no-op. The orchestrator fences
         # the thread on exactly this contract.
         thread_scope.stop_thread_scope(self._thread_id, self._command, DEFAULT_COMMAND)
+
+    def interrupt(self) -> None:
+        """Interrupt a turn without waiting for process/scope teardown."""
+        with self._lock:
+            self._closed = True
+            proc = self._proc
+            if proc is not None and proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        thread_scope.interrupt_thread_scope(self._thread_id, self._command, DEFAULT_COMMAND)
 
     def run(
         self,
@@ -127,14 +153,12 @@ class HermesSession:
         session_id: str | None,
         model: str,
         effort: str,
-        steer_messages: Callable[[], list[str]],
         on_message: Callable[[str | dict[str, Any]], None],
-        steer_delivered: Callable[[str], None],
     ) -> tuple[str, str]:
         # Hermes exposes no mid-turn steering channel. The API rejects steers
-        # before they reach this shared runtime contract, so one task always
+        # before they reach this shared runtime contract, so one turn always
         # remains one process and one model turn.
-        del effort, steer_messages, steer_delivered
+        del effort
         from host.runtime.core import state
 
         region = state.read_bedrock_region()
@@ -209,6 +233,9 @@ class HermesSession:
         answer = _answer_text(stdout)
         if not answer:
             raise HermesAgentError("Hermes returned no answer text")
+        self.last_known_session_id = new_session_id
+        if self._on_session_id is not None:
+            self._on_session_id(new_session_id)
         return new_session_id, answer
 
     def _stream_process(
@@ -234,6 +261,7 @@ class HermesSession:
         deadlock the turn."""
         stderr_parts: list[str] = []
         lines: queue.Queue[str | None] = queue.Queue()
+        ready_errors: list[Exception] = []
 
         def pump_stdout() -> None:
             try:
@@ -268,8 +296,11 @@ class HermesSession:
                 assert proc.stdin is not None
                 proc.stdin.write(prompt)
                 proc.stdin.close()
-            except (OSError, ValueError):
-                pass
+                if self._on_ready is not None and not self._on_ready():
+                    ready_errors.append(HermesAgentError("Hermes execution stopped during startup"))
+                    self.interrupt()
+            except Exception as exc:  # callback failures must reach the execution owner
+                ready_errors.append(exc)
 
         stderr_thread = threading.Thread(target=pump_stderr, daemon=True)
         for target in (pump_stdout, pump_stdin):
@@ -300,6 +331,8 @@ class HermesSession:
             # are ready.
             proc.wait(timeout=max(0.0, deadline - time.monotonic()))
             stderr_thread.join(timeout=5)
+            if ready_errors:
+                raise ready_errors[0]
         finally:
             # communicate() used to own pipe teardown; do it here so a normal
             # or timed-out turn never leaks the stdio descriptors.
@@ -318,18 +351,14 @@ def run_turn(
     session_id: str | None,
     model: str,
     effort: str,
-    steer_messages: Callable[[], list[str]],
     on_message: Callable[[str | dict[str, Any]], None],
-    steer_delivered: Callable[[str], None],
 ) -> tuple[str, str]:
     return server.run(
         input_message,
         session_id,
         model,
         effort,
-        steer_messages,
         on_message,
-        steer_delivered,
     )
 
 

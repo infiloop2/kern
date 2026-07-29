@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from host.runtime.admin_api import claude_code, thread_scope
 
@@ -296,6 +298,77 @@ class ClaudeCodeTests(unittest.TestCase):
             [*thread_scope.STOP_COMMAND, "stage-1-smoke-kill-claude"],
         )
 
+    def test_close_stops_the_scope_when_the_cli_outlives_stdin_eof(self) -> None:
+        # Claude Code keeps running after stdin EOF while it still has live
+        # background subagents, and the production launcher runs as root, so the
+        # unprivileged kill fails with EPERM. close() must not wait on that
+        # process's pipes: the reader threads hold each buffer's lock across
+        # their blocking read, so closing a pipe from this thread would block
+        # until the CLI happens to write to it — forever, for a silent stderr.
+        # A close that never returns leaves the orchestrator's thread fence up
+        # for good (every later message on that thread stays queued) and never
+        # reaches the scope teardown that is the only real kill.
+        script = r"""
+import sys, time
+for line in sys.stdin:
+    pass
+time.sleep(120)
+"""
+        session = claude_code.ClaudeCodeSession(
+            command=claude_code.DEFAULT_COMMAND, thread_id="stage-1-outlives-eof"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        session._proc = proc
+        assert proc.stdout is not None and proc.stderr is not None
+        threading.Thread(target=session._read_stdout, args=(proc.stdout,), daemon=True).start()
+        threading.Thread(target=session._read_stderr, args=(proc.stderr,), daemon=True).start()
+
+        returned = threading.Event()
+        with patch.object(thread_scope.subprocess, "run") as run, patch.object(
+            proc, "kill", side_effect=PermissionError(1, "Operation not permitted")
+        ):
+            closer = threading.Thread(
+                target=lambda: (session.close(), returned.set()), daemon=True
+            )
+            closer.start()
+            # Two five-second waits around the denied kill, and nothing more.
+            self.assertTrue(returned.wait(timeout=30), "close() blocked on the agent's pipes")
+            closer.join(timeout=5)
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            [*thread_scope.STOP_COMMAND, "stage-1-outlives-eof"],
+        )
+
+    def test_close_stops_the_scope_even_when_the_shutdown_raises(self) -> None:
+        # The scope teardown frees the thread, so a surprise from the process
+        # handle must not skip it and wedge the thread permanently.
+        session = claude_code.ClaudeCodeSession(
+            command=claude_code.DEFAULT_COMMAND, thread_id="stage-1-raising-close"
+        )
+        session._proc = SimpleNamespace(  # type: ignore[assignment]
+            stdin=None,
+            stdout=None,
+            stderr=None,
+            wait=Mock(side_effect=RuntimeError("handle is gone")),
+        )
+        with patch.object(thread_scope.subprocess, "run") as run:
+            with self.assertRaises(RuntimeError):
+                session.close()
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            [*thread_scope.STOP_COMMAND, "stage-1-raising-close"],
+        )
+
     def test_close_does_not_stop_a_scope_for_a_test_command_or_threadless_turn(self) -> None:
         for session in (
             claude_code.ClaudeCodeSession(command=["/bin/echo"], thread_id="sample_app__ws-3"),
@@ -304,6 +377,23 @@ class ClaudeCodeTests(unittest.TestCase):
             with patch.object(thread_scope.subprocess, "run") as run:
                 session.close()
             run.assert_not_called()
+
+    def test_run_after_close_rejects_before_spawning_the_cli(self) -> None:
+        session = claude_code.ClaudeCodeSession(command=["/bin/echo"])
+        session.close()
+        with (
+            patch("host.runtime.core.state.read_claude_web_search", return_value=False),
+            patch.object(claude_code.subprocess, "Popen") as popen,
+            self.assertRaisesRegex(claude_code.ClaudeCodeError, "turn was closed"),
+        ):
+            session.run(
+                "must not run",
+                None,
+                "claude-sonnet-5",
+                "high",
+                lambda _message: None,
+            )
+        popen.assert_not_called()
 
     def test_read_claude_account_reads_helper_json(self) -> None:
         command = [
@@ -716,7 +806,7 @@ class ClaudeCodeTests(unittest.TestCase):
 
     def test_run_turn_waits_for_result_after_delivered_steer(self) -> None:
         script = r"""
-import json, sys
+import json, sys, time
 
 session_id = "session-1"
 for index, line in enumerate(sys.stdin, start=1):
@@ -727,6 +817,8 @@ for index, line in enumerate(sys.stdin, start=1):
         "session_id": session_id,
         "message": {"content": [{"type": "text", "text": text}]},
     }), flush=True)
+    if index == 1:
+        time.sleep(0.5)
     print(json.dumps({
         "type": "result",
         "subtype": "success",
@@ -735,36 +827,39 @@ for index, line in enumerate(sys.stdin, start=1):
     }), flush=True)
 """
         original_cwd = claude_code.AGENT_CWD
-        pending = ["steer"]
-        delivered: list[str] = []
+        first_message = threading.Event()
+        result: list[tuple[str, str]] = []
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 claude_code.AGENT_CWD = tmp
                 server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
-                server.start()
-                session_id, output = claude_code.run_turn(
-                    server,
-                    "initial",
-                    None,
-                    "claude-opus-5",
-                    "high",
-                    lambda: [pending.pop(0)] if pending else [],
-                    lambda _message: None,
-                    delivered.append,
+                worker = threading.Thread(
+                    target=lambda: result.append(
+                        claude_code.run_turn(
+                            server,
+                            "initial",
+                            None,
+                            "claude-opus-5",
+                            "high",
+                            lambda _message: first_message.set(),
+                        )
+                    )
                 )
+                worker.start()
+                self.assertTrue(first_message.wait(timeout=10))
+                server.steer("steer")
+                worker.join(timeout=10)
         finally:
             claude_code.AGENT_CWD = original_cwd
+        self.assertEqual(len(result), 1)
+        session_id, output = result[0]
         self.assertEqual(session_id, "session-1")
-        self.assertEqual(delivered, ["steer"])
         self.assertEqual(output, "STEERED")
 
     def test_run_turn_delivers_a_steer_that_arrives_right_as_the_result_is_processed(self) -> None:
-        # Regression test for a lost-wakeup race: run()'s loop only checked
-        # for a pending steer at the top of each iteration. A steer written to
-        # the pending queue in the gap between that check and the terminal
-        # result being processed used to be silently orphaned — accepted by
-        # the caller, but never sent to the CLI, since close() tears the
-        # process down right after and nothing ever reads the queue again.
+        # The completion callback is the final atomic boundary with the host's
+        # delivery lock. A direct steer observed there keeps the CLI open for
+        # its result instead of letting the just-completed turn close it.
         script = r"""
 import json, sys
 
@@ -784,25 +879,15 @@ for index, line in enumerate(sys.stdin, start=1):
     }), flush=True)
 """
         original_cwd = claude_code.AGENT_CWD
-        pending: list[str] = []
-        delivered: list[str] = []
         calls = 0
 
-        def steer_messages() -> list[str]:
+        def finish_turn(_session_id: str, _output: str) -> int:
             nonlocal calls
             calls += 1
-            # The third check is the one made right before close() would
-            # otherwise fire (after the top-of-loop checks before the initial
-            # assistant message and before the terminal result): simulate the
-            # steer landing exactly there, too late for the earlier checks to
-            # have seen it.
-            if calls == 3 and not pending and not delivered:
-                pending.append("late steer")
-            return list(pending)
-
-        def steer_delivered(message: str) -> None:
-            delivered.append(message)
-            pending.remove(message)
+            if calls == 1:
+                server.steer("late steer")
+                return server.take_delivered_steers()
+            return 0
 
         try:
             with tempfile.TemporaryDirectory() as tmp:
@@ -815,13 +900,11 @@ for index, line in enumerate(sys.stdin, start=1):
                     None,
                     "claude-opus-5",
                     "high",
-                    steer_messages,
                     lambda _message: None,
-                    steer_delivered,
+                    finish_turn,
                 )
         finally:
             claude_code.AGENT_CWD = original_cwd
-        self.assertEqual(delivered, ["late steer"])
         self.assertEqual(session_id, "session-1")
         self.assertEqual(output, "STEERED")
 
@@ -834,6 +917,11 @@ for index, line in enumerate(sys.stdin, start=1):
 import json, sys
 
 json.loads(sys.stdin.readline())  # initial message
+print(json.dumps({
+    "type": "assistant",
+    "session_id": "session-1",
+    "message": {"content": [{"type": "text", "text": "READY"}]},
+}), flush=True)
 json.loads(sys.stdin.readline())  # steer, injected mid-turn
 print(json.dumps({
     "type": "assistant",
@@ -849,28 +937,34 @@ print(json.dumps({
 sys.stdin.readline()  # stay alive like the real CLI until stdin EOF
 """
         original_cwd = claude_code.AGENT_CWD
-        pending = ["steer"]
-        delivered: list[str] = []
+        ready = threading.Event()
+        result: list[tuple[str, str]] = []
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 claude_code.AGENT_CWD = tmp
                 server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
-                server.start()
                 with patch.object(claude_code, "STEER_SETTLE_TIMEOUT_SECONDS", 0.3):
-                    session_id, output = claude_code.run_turn(
-                        server,
-                        "initial",
-                        None,
-                        "claude-opus-5",
-                        "high",
-                        lambda: [pending.pop(0)] if pending else [],
-                        lambda _message: None,
-                        delivered.append,
+                    worker = threading.Thread(
+                        target=lambda: result.append(
+                            claude_code.run_turn(
+                                server,
+                                "initial",
+                                None,
+                                "claude-opus-5",
+                                "high",
+                                lambda _message: ready.set(),
+                            )
+                        )
                     )
+                    worker.start()
+                    self.assertTrue(ready.wait(timeout=10))
+                    server.steer("steer")
+                    worker.join(timeout=10)
         finally:
             claude_code.AGENT_CWD = original_cwd
+        self.assertEqual(len(result), 1)
+        session_id, output = result[0]
         self.assertEqual(session_id, "session-1")
-        self.assertEqual(delivered, ["steer"])
         self.assertEqual(output, "STEERED")
 
     def test_run_turn_discards_stale_messages_from_previous_process(self) -> None:
@@ -902,8 +996,6 @@ print(json.dumps({
                     None,
                     "claude-opus-5",
                     "high",
-                    lambda: [],
-                    lambda _message: None,
                     lambda _message: None,
                 )
         finally:
@@ -934,7 +1026,13 @@ time.sleep(30)
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
+                ready = threading.Event()
+                accepted_sessions: list[str] = []
+                server = claude_code.ClaudeCodeSession(
+                    [sys.executable, "-u", "-c", script],
+                    on_ready=lambda: (ready.set() or True),
+                    on_session_id=accepted_sessions.append,
+                )
                 server.start()
                 self.assertIsNone(server.last_known_session_id)
 
@@ -946,9 +1044,7 @@ time.sleep(30)
                             None,
                             "claude-opus-5",
                             "high",
-                            lambda: [],
                             lambda _message: received.set(),
-                            lambda _message: None,
                         )
                     except BaseException as exc:  # noqa: BLE001 - captured for the assertion below
                         errors.append(exc)
@@ -956,6 +1052,8 @@ time.sleep(30)
                 worker = threading.Thread(target=run_it)
                 worker.start()
                 self.assertTrue(received.wait(timeout=10))
+                self.assertTrue(ready.is_set())
+                self.assertEqual(accepted_sessions, ["mid-turn-session"])
                 server.close()  # the kill path: tear the process down mid-turn
                 worker.join(timeout=10)
         finally:
@@ -963,6 +1061,53 @@ time.sleep(30)
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], claude_code.ClaudeCodeError)
         self.assertEqual(server.last_known_session_id, "mid-turn-session")
+
+    def test_init_session_is_not_published_until_the_message_has_activity(self) -> None:
+        script = r"""
+import json, sys
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "system",
+    "subtype": "init",
+    "session_id": "empty-init-session",
+}), flush=True)
+print(json.dumps({
+    "type": "assistant",
+    "session_id": "accepted-session",
+    "message": {"content": [{"type": "text", "text": "done"}]},
+}), flush=True)
+print(json.dumps({
+    "type": "result",
+    "subtype": "success",
+    "session_id": "accepted-session",
+    "result": "done",
+}), flush=True)
+"""
+        original_cwd = claude_code.AGENT_CWD
+        accepted_sessions: list[str] = []
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude_code.AGENT_CWD = tmp
+                server = claude_code.ClaudeCodeSession(
+                    [sys.executable, "-u", "-c", script],
+                    on_ready=lambda: True,
+                    on_session_id=accepted_sessions.append,
+                )
+                session_id, output = claude_code.run_turn(
+                    server,
+                    "initial",
+                    None,
+                    "claude-opus-5",
+                    "high",
+                    lambda _message: None,
+                )
+        finally:
+            claude_code.AGENT_CWD = original_cwd
+
+        self.assertEqual((session_id, output), ("accepted-session", "done"))
+        self.assertNotIn("empty-init-session", accepted_sessions)
+        self.assertTrue(accepted_sessions)
+        self.assertEqual(set(accepted_sessions), {"accepted-session"})
 
     def test_default_turn_helper_does_not_require_admin_access_to_agent_home(self) -> None:
         script = r"""
@@ -989,8 +1134,6 @@ print(json.dumps({
                     None,
                     "claude-opus-5",
                     "high",
-                    lambda: [],
-                    lambda _message: None,
                     lambda _message: None,
                 )
         finally:
@@ -1029,8 +1172,6 @@ print(json.dumps({
                         None,
                         "claude-fable-5",
                         "ultracode",
-                        lambda: [],
-                        lambda _message: None,
                         lambda _message: None,
                     )
                 argv = json.loads(argv_path.read_text())
@@ -1083,7 +1224,7 @@ print(json.dumps({
                     with patch("host.runtime.core.state.read_claude_web_search", return_value=web_search):
                         claude_code.run_turn(
                             claude_code.ClaudeCodeSession(command), "initial", None, "claude-opus-5", "high",
-                            lambda: [], lambda _message: None, lambda _message: None,
+                            lambda _message: None,
                         )
                     argv = json.loads(argv_path.read_text())
                     # The decision leads the Claude flags so the launcher can
@@ -1128,9 +1269,7 @@ print(json.dumps({
                     None,
                     "claude-opus-5",
                     "high",
-                    lambda: [],
                     lambda _message: None,
-                    lambda _steer: None,
                 )
         finally:
             claude_code.AGENT_CWD = original_cwd

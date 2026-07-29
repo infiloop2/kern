@@ -46,7 +46,10 @@
         compacted.push(event);
         continue;
       }
-      const key = `${String(event.task_id || "")}\u0000${String(activityId)}`;
+      // The host scopes provider ids to their private execution before
+      // returning them, so one flat thread stream can safely merge snapshots
+      // by activity_id without public lifecycle boundaries.
+      const key = String(activityId);
       const existingIndex = activityIndexes.get(key);
       if (existingIndex === undefined) {
         const output = Object.prototype.hasOwnProperty.call(current, "output")

@@ -31,7 +31,7 @@ def clean_text(value: Any) -> str:
         return ""
     # PostgreSQL JSONB rejects \u0000, and provider JSON can contain lone
     # surrogates even though they cannot be encoded as UTF-8. Keep the event
-    # readable instead of letting malformed progress fail the whole task.
+    # readable instead of letting malformed progress fail the whole turn.
     return (
         text.replace("\x00", "\\0")
         .encode("utf-8", errors="replace")

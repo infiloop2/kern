@@ -1,27 +1,30 @@
-"""Agent runtime orchestration: the worker pool that runs queued tasks and the
-background poller that keeps the cached runtime status fresh. The admin API
-delegates here; nothing in this module speaks HTTP.
+"""Agent runtime orchestration: admission and execution of live turns, plus
+the background poller that keeps the cached runtime status fresh. The admin
+API delegates here; route handlers translate the raised ApiErrors.
 
-Concurrency model: each runtime has its own ``WORKER_COUNT_PER_RUNTIME`` claim
-cap, and up to ``WORKER_COUNT`` total tasks can run at once across runtimes.
-Every task turn runs on a fresh runtime process: Codex turns resume their
-provider thread by id on a new app-server; Claude Code and Hermes turns resume
-by recorded session id. Tasks on the same user thread are serialized,
-while tasks on different threads run in parallel.
+Concurrency model: there is no queue. A message for an idle thread starts a
+turn immediately when its runtime has capacity (``TURN_LIMIT_PER_RUNTIME``
+concurrent turns per runtime) and is rejected otherwise; a message for a
+thread with a live turn is synchronously delivered into that turn as a steer
+and recorded only after the provider transport acknowledges it. Every turn
+runs on a fresh runtime process: Codex turns resume their provider thread by
+id on a new app-server; Claude Code and Hermes turns resume by recorded
+session id. Turns on the same user thread are serialized by the live-turn
+fence, while turns on different threads run in parallel.
 
 How the synchronization fits together:
 
-- Two locks. The mutation lock (private to state.py, entered through
-  ``state.mutation()``) guards every admin-state write cycle; reads are
-  lock-free queries. ``_LIVE_LOCK`` guards ``_LIVE``, the registry of live
-  runtime processes. The only place both are held is ``_claim_next_task``, and
-  the nesting order there — the mutation lock, then _LIVE_LOCK — is the one
-  legal order; no code path acquires them the other way around, so they cannot
-  deadlock. Slow work (starting a runtime process, running a turn, closing a
-  process) always happens with neither lock held. ``_REFRESH_LOCKS`` sits
-  outside this pair: it serializes ``refresh_runtime_status`` per runtime, is
-  deliberately held across slow provider probes, and is never acquired while
-  holding (or by) anything else.
+- ``state.mutation()`` guards each durable check-and-write cycle.
+  ``_LIVE_LOCK`` guards only the small in-memory registry of admitted
+  executions. Each execution's ``delivery_lock`` orders steering, provider
+  callbacks, stop, and durable lifecycle finalization for that one thread.
+  Those paths take the delivery lock before a mutation; admission never takes
+  a delivery lock, and no path takes ``_LIVE_LOCK`` while holding one. Starting,
+  running, interrupting, and closing provider processes happen outside these
+  locks.
+  ``_REFRESH_LOCKS`` sits outside this set: it serializes
+  ``refresh_runtime_status`` per runtime, is deliberately held across slow
+  provider probes, and is never acquired while holding (or by) anything else.
 - Provider account trust is anchored in the database, not in locks: the
   stored provider account row is the operator-approved anchor. It is written
   only inside the refresh commit mutation (first capture requires an
@@ -35,32 +38,34 @@ How the synchronization fits together:
   probed token hash differs from the anchored one, the account uuid comes
   from api.anthropic.com for that token (via the root helper), so
   agent-writable metadata is never what gets anchored.
-- ``WORKER_WAKE`` is advisory, never load-bearing. One ``Event`` is shared by
-  all workers, so worker A can consume a wakeup meant for worker B; every wait
-  therefore uses a 5s timeout and re-checks the queue from scratch.
-  Correctness never depends on a wakeup arriving — wakeups only reduce
-  latency.
-- A user thread is *unavailable* for claiming while a task on it is RUNNING
-  in state, or while it has a ``_LIVE`` entry — its turn process is running,
-  or a previous process for it is still shutting down (an entry outlives its
-  task until the close completes). Both are checked in one place, under both
-  locks, in ``_claim_next_task``; together they guarantee at most one live
-  process per user thread.
-- Cross-thread mutation of a running turn happens only through
-  the runtime process ``close()`` method (the kill path). The worker that owns
-  the turn then observes the dead process as an error; it never needs to be
-  signalled directly.
+- A user thread is busy while it has a ``_LIVE`` entry. Its private execution
+  phase is ``STARTING``, ``RUNNING``, ``FINISHING``, or ``CLOSED``. Admission
+  publishes the entry after its database commit and the owning execution
+  thread removes it only after process teardown succeeds. Messages during the
+  short STARTING/FINISHING windows receive a retryable conflict rather than
+  being queued.
+- A steer is accepted only in RUNNING. Provider acknowledgement happens before
+  the user-message commit, so a failed post-ack commit is deliberately
+  ambiguous and a caller retry may duplicate the steer. A provider rejection
+  after RUNNING is a terminal transport failure, not a startup retry.
+- Stop and normal completion finalize the database first, move to FINISHING,
+  and request a non-blocking interrupt when needed. The one execution thread
+  owns bounded close/reap and moves to CLOSED. A cleanup failure retains the
+  live fence so a new process can never race a surviving old scope.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
+from functools import partial
+from http import HTTPStatus
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from host.config import AGENT_RUNTIMES
-from host.runtime.core import app_platform, network_policy, state
+from host.runtime.core import app_platform, host_errors, network_policy, state
 from host.runtime.admin_api import (
     agent_activity,
     bedrock_credentials,
@@ -69,8 +74,8 @@ from host.runtime.admin_api import (
     github_credential,
     github_repo_audit,
     hermes_agent,
-    task_status,
 )
+from host.runtime.admin_api.errors import ApiError
 from host.runtime.core.state import (
     read_claude_account,
     read_openai_account,
@@ -79,19 +84,18 @@ from host.runtime.core.state import (
     save_openai_account,
     utc_now,
 )
-from host.runtime.admin_api.task_status import COMPLETED, FAILED, RUNNING
 
-WORKER_COUNT_PER_RUNTIME = 3
-# Every runtime owns an independent three-turn pool. The total grows with the
-# runtime inventory so adding a harness cannot take capacity from its peers.
-WORKER_COUNT = WORKER_COUNT_PER_RUNTIME * len(AGENT_RUNTIMES)
+# Every runtime owns an independent three-turn pool, so one busy runtime
+# cannot take capacity from its peers. A message that would exceed the cap is
+# rejected at admission; callers retry.
+TURN_LIMIT_PER_RUNTIME = 3
+EXECUTION_START_TIMEOUT_SECONDS = 10.0
 RUNTIME_RECHECK_SECONDS = 300  # re-verify an active agent login this often (it can expire)
 RUNTIME_PENDING_RECHECK_SECONDS = 5  # poll more often while loading / awaiting login
-# Live Claude probe results younger than this are reused, so the pre-task
-# refresh and the five-second non-active poll stay local; under
-# RUNTIME_RECHECK_SECONDS so the scheduled five-minute recheck always probes.
+# Live Claude probe results younger than this are reused by the five-second
+# non-active poll; under RUNTIME_RECHECK_SECONDS so the scheduled five-minute
+# recheck always probes.
 CLAUDE_LIVE_PROBE_RETRY_SECONDS = 240
-WORKER_WAKE = threading.Event()
 _MANAGED_PROVIDER_BY_RUNTIME = {
     "codex": "openai",
     "claude_code": "claude",
@@ -104,23 +108,38 @@ OAUTH_RUNTIMES = ("codex", "claude_code")
 DEACTIVATED_REASON = "agent runtime deactivated because its managed network provider is disabled"
 
 
+class ExecutionPhase(str, Enum):
+    STARTING = "starting"
+    RUNNING = "running"
+    FINISHING = "finishing"
+    CLOSED = "closed"
+
+
 @dataclass
 class _Turn:
-    """One live runtime process, registered at claim and removed only after
-    its close completes (``closing`` marks the close owner)."""
+    """One live execution from durable admission through process teardown."""
 
-    server: Any
     runtime_type: str
     thread_id: str
-    task_id: str
-    closing: bool = False
-    close_lock: threading.Lock = field(default_factory=threading.Lock)
-    close_succeeded: bool = False
+    model: str
+    effort: str
+    # Durable storage-only scope for this execution. It is attached to thread
+    # events so reused provider activity ids cannot collide across processes.
+    run_number: int
+    phase: ExecutionPhase = ExecutionPhase.STARTING
+    # The runtime adapter is published before it starts. Its own lifecycle
+    # lock makes ``interrupt`` safe before, during, or after process spawn.
+    server: Any = None
+    # Steer delivery, provider callbacks, stop, and lifecycle transitions
+    # share this lock. Slow process work always happens outside it.
+    delivery_lock: threading.Lock = field(default_factory=threading.Lock)
+    # The adapter publishes only a provider-confirmed, non-empty resumable id.
+    provider_session_id: str | None = None
+    startup_timer: threading.Timer | None = None
 
 
-# runtime/thread key -> live turn process. An entry exists from task claim
-# until the process close completes, so the claim rule can serialize per-user
-# thread work through it.
+# runtime/thread key -> live turn. An entry exists from admission until the
+# process close completes, so per-user-thread serialization runs through it.
 _LIVE: dict[str, _Turn] = {}
 _LIVE_LOCK = threading.Lock()
 # Cached provider status, in process memory on purpose: it is derived health,
@@ -186,21 +205,27 @@ def _set_runtime_status(runtime_type: str, status: str, error_message: str | Non
     return previous
 
 
+def _publish_runtime_status(
+    runtime_type: str,
+    status: str,
+    error_message: str | None = None,
+) -> None:
+    _set_runtime_status(runtime_type, status, error_message)
+
+
 def agent_runtime_status() -> dict[str, Any]:
     # Reads only cached, in-memory status — never spawns an agent process — so
     # the request path (and /v1/health) is always fast. A background thread
     # keeps the status fresh.
     statuses = all_runtime_status_records()
-    running = state.running_tasks()
+    with _LIVE_LOCK:
+        live = [(turn.runtime_type, turn.thread_id) for turn in _LIVE.values()]
     runtimes = []
     for runtime_type in sorted(AGENT_RUNTIMES):
         record = statuses.get(runtime_type, {})
         status = str(record.get("status", "loading"))
-        active = sorted(
-            (task["task_id"] for task in running if task["agent_runtime"] == runtime_type),
-            key=_task_number,
-        )
-        response = {"type": runtime_type, "status": status, "active_task_ids": active}
+        active = sorted(thread_id for live_runtime, thread_id in live if live_runtime == runtime_type)
+        response = {"type": runtime_type, "status": status, "active_thread_ids": active}
         error_message = record.get("error_message")
         if status == "error" and error_message:
             response["error_message"] = error_message
@@ -229,6 +254,11 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
         else:
             status, error_message, account = provider.account_status()
     except Exception as exc:
+        host_errors.report_unexpected(
+            "orchestrator.runtime_status",
+            exc,
+            context={"agent_runtime": runtime_type},
+        )
         status, error_message, account = "error", f"unexpected error checking {runtime_type}: {exc!r}", None
     if runtime_type == "claude_code" and status == "active" and isinstance(account, dict):
         status, error_message, account = _live_claude_status(account, force_probe=force_provider_probe)
@@ -243,14 +273,16 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
     if runtime_type == "claude_code" and status == "active" and account_value:
         attested, attest_error = _claude_attestation(account_value)
     deactivated = False
+    became_nonactive = False
     codex_login_to_close: str | None = None
-    with state.mutation() as cur:
+    after_commit: list[Callable[[], None]] = []
+    with state.mutation(after_commit=after_commit) as cur:
         if not _runtime_network_enabled(runtime_type):
             # The one policy re-check, inside the mutation: a policy disable
             # that landed while the slow probe ran must not be overwritten by
             # the probe's stale result. The deactivated status, the OAuth
             # clear, and the pin clear commit in this same transaction.
-            _mark_runtime_deactivated_in(cur, runtime_type)
+            _mark_runtime_deactivated_in(cur, after_commit, runtime_type)
             deactivated = True
         else:
             if status == "active" and runtime_type in OAUTH_RUNTIMES:
@@ -265,9 +297,12 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
                     status, error_message, account_value = "awaiting_login", None, None
                 except ProviderAccountTrustError as exc:
                     status, error_message, account_value = "error", str(exc), None
-            previous = _set_runtime_status(
-                runtime_type, status, error_message if status == "error" and error_message else None
+            previous = runtime_status(runtime_type)
+            cached_error = error_message if status == "error" and error_message else None
+            after_commit.append(
+                partial(_publish_runtime_status, runtime_type, status, cached_error)
             )
+            became_nonactive = previous == "active" and status != "active"
             if status == "active":
                 # The device code is spent (or moot) once the account is active.
                 # Without this, a later session expiry would resurface the stale
@@ -301,6 +336,14 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
     if deactivated:
         deactivate_runtime(runtime_type, DEACTIVATED_REASON)
         return "deactivated"
+    if became_nonactive:
+        label = RUNTIME_LABELS.get(runtime_type, runtime_type)
+        reason = (
+            f"{label} runtime became unavailable: {error_message}"
+            if status == "error" and error_message
+            else f"{label} runtime became {status}"
+        )
+        _stop_runtime_processes(runtime_type, reason)
     if status == "active":
         # The login flow (first login or reauth) has landed, so its parked
         # device-login server is done. Close the one for this login id, scoped so
@@ -386,7 +429,7 @@ def _live_claude_status(
 
     Each probe's verdict is memoized per token hash (_CLAUDE_LIVE_PROBE), so
     the probe itself runs at most once per CLAUDE_LIVE_PROBE_RETRY_SECONDS:
-    pre-task refreshes and the five-second non-active poll reuse the verdict
+    turn-start refreshes and the five-second non-active poll reuse the verdict
     instead of generating provider traffic. An explicit operator refresh
     bypasses the memo. An awaiting_login verdict never expires on automatic
     checks; the token is rejected, and recovery is an operator login, account
@@ -792,14 +835,20 @@ def _stamp_usage_checked_at(account: dict[str, Any] | None, usage_key: str, chec
 
 
 def _mark_runtime_deactivated(runtime_type: str) -> str:
-    with state.mutation() as cur:
-        _mark_runtime_deactivated_in(cur, runtime_type)
+    after_commit: list[Callable[[], None]] = []
+    with state.mutation(after_commit=after_commit) as cur:
+        _mark_runtime_deactivated_in(cur, after_commit, runtime_type)
     deactivate_runtime(runtime_type, DEACTIVATED_REASON)
     return "deactivated"
 
 
-def _mark_runtime_deactivated_in(cur: Any, runtime_type: str) -> None:
-    previous = _set_runtime_status(runtime_type, "deactivated")
+def _mark_runtime_deactivated_in(
+    cur: Any,
+    after_commit: list[Callable[[], None]],
+    runtime_type: str,
+) -> None:
+    previous = runtime_status(runtime_type)
+    after_commit.append(partial(_publish_runtime_status, runtime_type, "deactivated"))
     _clear_oauth_login_in(cur, runtime_type)
     if runtime_type in OAUTH_RUNTIMES:
         _sync_runtime_proxy_pin_in(cur, runtime_type, None)
@@ -828,7 +877,7 @@ def reconcile_runtime_status_after_policy_change() -> None:
     """Synchronize cached runtime state after a policy update.
 
     Disabled runtimes are deactivated synchronously because that fails running
-    tasks and closes their processes; deactivation never probes, so it skips
+    turns and closes their processes; deactivation never probes, so it skips
     the provider-connection refresh serialization rather than wait out an in-flight
     slow probe (which re-checks the policy inside its own commit anyway).
     Enabled runtimes are refreshed in the background: a policy change may have
@@ -850,14 +899,19 @@ def _refresh_runtimes(runtime_types: tuple[str, ...]) -> None:
     for runtime_type in runtime_types:
         try:
             refresh_runtime_status(runtime_type)
-        except Exception:
+        except Exception as exc:
+            host_errors.report_unexpected(
+                "orchestrator.initial_runtime_refresh",
+                exc,
+                context={"agent_runtime": runtime_type},
+            )
             continue
 
 
 def deactivate_runtime(runtime_type: str, reason: str) -> None:
     """Stop every live process for a non-active runtime and fail its in-flight
-    tasks. Queued tasks need no handling here: the next claim fails each one
-    with the runtime's non-active status."""
+    turns. New messages need no handling here: admission rejects them with the
+    runtime's non-active status."""
     _stop_runtime_processes(runtime_type, reason)
 
 
@@ -866,7 +920,7 @@ def reset_linked_account(runtime_type: str) -> None:
 
     One mutation clears the trusted account anchor, its proxy pin, and any
     pending OAuth approval; a best-effort close of a parked login flow
-    follows. Live runtime processes are closed and running tasks are failed
+    follows. Live runtime processes are closed and running turns are failed
     so no process from the old linked account keeps executing while the caller
     clears local auth files and refreshes status. A device login parked at
     the same instant is torn down with everything else (starting a login
@@ -887,9 +941,10 @@ def reset_linked_account(runtime_type: str) -> None:
 
 
 def _reset_linked_account_in_state(runtime_type: str) -> None:
-    with state.mutation() as cur:
+    after_commit: list[Callable[[], None]] = []
+    with state.mutation(after_commit=after_commit) as cur:
         next_status = "awaiting_login" if _runtime_network_enabled(runtime_type) else "deactivated"
-        _set_runtime_status(runtime_type, next_status)
+        after_commit.append(partial(_publish_runtime_status, runtime_type, next_status))
         _clear_oauth_login_in(cur, runtime_type)
         if runtime_type == "claude_code":
             save_claude_account(None, cur)
@@ -902,14 +957,14 @@ def _reset_linked_account_in_state(runtime_type: str) -> None:
 def disconnect_bedrock_connection() -> None:
     """Disconnect the AWS connection and stop Hermes work."""
     with _BEDROCK_CONNECTION_LOCK:
-        with state.mutation() as cur:
+        after_commit: list[Callable[[], None]] = []
+        with state.mutation(after_commit=after_commit) as cur:
             save_bedrock_account(None, cur)
             state.delete_bedrock_credential(cur)
             cur.execute("SELECT 1 FROM managed_integrations WHERE integration = 'bedrock'")
             enabled = cur.fetchone() is not None
             next_status = "awaiting_login" if enabled else "deactivated"
-            error_message = None
-            _set_runtime_status("hermes", next_status, error_message)
+            after_commit.append(partial(_publish_runtime_status, "hermes", next_status))
             state.append_agent_event(
                 cur,
                 "agent_runtime.linked_account_reset",
@@ -936,16 +991,24 @@ def _close_login_flow(runtime_type: str) -> None:
 
 
 def _stop_runtime_processes(runtime_type: str, reason: str) -> None:
-    with state.mutation() as cur:
-        for task_id in state.fail_running_tasks(cur, reason, runtime=runtime_type):
-            state.append_agent_event(cur, "task.failed", task_id, {"error_message": reason})
+    interrupted: list[Any] = []
     with _LIVE_LOCK:
         turns = [turn for turn in _LIVE.values() if turn.runtime_type == runtime_type]
     for turn in turns:
-        # The owning worker releases the fence after it observes the stopped
-        # process and persists any provider session id learned mid-turn.
-        _close_turn(_live_key(turn.runtime_type, turn.thread_id), turn.server, release=False)
-    WORKER_WAKE.set()
+        after_commit: list[Callable[[], None]] = []
+        with turn.delivery_lock, state.mutation(after_commit=after_commit) as cur:
+            if turn.phase not in (ExecutionPhase.STARTING, ExecutionPhase.RUNNING):
+                continue
+            _record_turn_finished(
+                cur,
+                after_commit,
+                turn,
+                error_message=reason,
+            )
+            if turn.server is not None:
+                interrupted.append(turn.server)
+    for server in interrupted:
+        _interrupt_turn(server)
 
 
 def runtime_status_loop() -> None:
@@ -960,19 +1023,20 @@ def runtime_status_loop() -> None:
                 status = refresh_runtime_status(runtime_type)
                 delay = RUNTIME_RECHECK_SECONDS if status == "active" else RUNTIME_PENDING_RECHECK_SECONDS
                 next_check_at[runtime_type] = time.monotonic() + delay
-        except Exception:
+        except Exception as exc:
             # Keep the loop alive; retry soon because the failed refresh did
             # not update that runtime's cached state.
+            host_errors.report_unexpected("orchestrator.runtime_status_loop", exc)
             time.sleep(RUNTIME_PENDING_RECHECK_SECONDS)
             continue
         sleep_for = min(max(0.0, due - time.monotonic()) for due in next_check_at.values())
         time.sleep(min(max(sleep_for, 0.1), RUNTIME_PENDING_RECHECK_SECONDS))
 
 
-def start_workers() -> None:
-    # Converge GitHub credentials before any worker can claim a task: after a
+def start_background_loops() -> None:
+    # Converge GitHub credentials before any turn can be admitted: after a
     # restart the persisted App installation token may already be expired, and
-    # a task's first git/gh call must not run against a stale token file.
+    # a turn's first git/gh call must not run against a stale token file.
     # This blocks startup by at most one mint (~1s) and does not hold up the
     # other runtimes.
     try:
@@ -983,8 +1047,6 @@ def start_workers() -> None:
         # not even run (the database briefly unavailable during startup), so
         # the refresh loop retries quickly rather than waiting a full cycle.
         converged = False
-    for _ in range(WORKER_COUNT):
-        threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=runtime_status_loop, daemon=True).start()
     threading.Thread(target=github_credential_refresh_loop, args=(converged,), daemon=True).start()
 
@@ -997,10 +1059,10 @@ def github_credential_refresh_loop(converged: bool) -> None:
     # Converge the installed token file every cycle: App installation tokens
     # live one hour and are re-minted inside the refresh margin, and any
     # earlier failure (mint, install, disable-time removal) is retried here.
-    # The initial convergence ran synchronously in start_workers before any
-    # worker could claim a task; while a convergence attempt cannot run at
-    # all (the database unavailable), retry on the short interval so workers
-    # are not claiming tasks against stale credential files for a full cycle.
+    # The initial convergence ran synchronously in start_background_loops
+    # before any turn could be admitted; while a convergence attempt cannot
+    # run at all (the database unavailable), retry on the short interval so
+    # turns are not admitted against stale credential files for a full cycle.
     while True:
         time.sleep(GITHUB_CREDENTIAL_REFRESH_CHECK_SECONDS if converged else GITHUB_CREDENTIAL_RETRY_SECONDS)
         try:
@@ -1011,374 +1073,521 @@ def github_credential_refresh_loop(converged: bool) -> None:
             converged = False
 
 
-def worker_loop() -> None:
-    # All workers share WORKER_WAKE, so this worker may consume a wakeup meant
-    # for another (clear() after a single wait). That is fine by design: the
-    # 5s timeout re-checks the queue regardless, so a lost wakeup costs at
-    # most 5s of latency, never a stuck task.
-    while True:
-        WORKER_WAKE.wait(timeout=5)
-        WORKER_WAKE.clear()
-        try:
-            run_next_task()
-        except Exception:
-            # run_next_task fails its claimed task internally; anything that
-            # still escapes (e.g. state file I/O errors) must not kill the
-            # worker thread — back off briefly and keep serving the queue.
-            time.sleep(2)
+def live_thread_ids() -> set[str]:
+    """Threads with an admitted execution that is not fully closed."""
+    with _LIVE_LOCK:
+        return {turn.thread_id for turn in _LIVE.values()}
 
 
-def run_next_task() -> None:
-    claimed = _claim_next_task()
-    if claimed is None:
+def _retryable_phase_error(phase: ExecutionPhase) -> ApiError:
+    if phase == ExecutionPhase.STARTING:
+        return ApiError(
+            HTTPStatus.CONFLICT,
+            "the agent is starting; retry shortly",
+        )
+    return ApiError(
+        HTTPStatus.CONFLICT,
+        "the agent is finishing; retry shortly",
+    )
+
+
+def admit_turn(
+    cur: Any,
+    after_commit: list[Callable[[], None]],
+    thread_id: str,
+    runtime_type: str,
+    model: str,
+    effort: str,
+    message: str,
+    *,
+    pre_message_activity: dict[str, Any] | None = None,
+) -> _Turn:
+    """Admit one new turn inside the caller's mutation.
+
+    The service checks synchronous steering before entering this path and
+    serializes sends per thread. Publishing through ``after_commit`` keeps the
+    live fence and the initial durable events atomic from other senders'
+    perspective.
+    """
+    label = RUNTIME_LABELS.get(runtime_type, runtime_type)
+    with _LIVE_LOCK:
+        existing = next((t for t in _LIVE.values() if t.thread_id == thread_id), None)
+        if existing is not None:
+            raise _retryable_phase_error(existing.phase)
+        if not _runtime_network_enabled(runtime_type):
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                f"{label} runtime is deactivated; enable its provider under Internet Access and Tools",
+            )
+        status = runtime_status(runtime_type)
+        if status != "active":
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                f"{label} runtime is {status}; messages run only while it is active",
+            )
+        live = sum(1 for t in _LIVE.values() if t.runtime_type == runtime_type)
+        if live >= TURN_LIMIT_PER_RUNTIME:
+            raise ApiError(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                f"{label} runtime is already running {TURN_LIMIT_PER_RUNTIME} concurrent threads; retry when one finishes",
+            )
+        run_number = state.start_thread_run(cur, thread_id)
+        turn = _Turn(runtime_type, thread_id, model, effort, run_number)
+        # Other admissions cannot interleave because the mutation lock is
+        # still held when this callback registers the live fence.
+        after_commit.append(partial(_publish_turn, turn))
+    if pre_message_activity is not None:
+        state.append_agent_event(
+            cur,
+            "thread.activity",
+            thread_id,
+            {"activity": pre_message_activity},
+            run_number=run_number,
+        )
+    state.append_agent_event(
+        cur,
+        "thread.message",
+        thread_id,
+        {"message": message, "source": "user"},
+        run_number=run_number,
+    )
+    return turn
+
+
+def steer_live_turn(thread_id: str, runtime_type: str, message: str) -> bool:
+    """Synchronously steer a live turn, returning False when it is idle.
+
+    Provider acknowledgement happens before the durable user event. A database
+    failure after acknowledgement is returned to the caller with no event; a
+    retry may therefore deliver the same message twice by explicit design.
+    """
+    key = _live_key(runtime_type, thread_id)
+    with _LIVE_LOCK:
+        turn = _LIVE.get(key)
+    if turn is None:
+        return False
+    failure: ApiError | None = None
+    server_to_interrupt: Any = None
+    with turn.delivery_lock:
+        if turn.phase != ExecutionPhase.RUNNING:
+            raise _retryable_phase_error(turn.phase)
+        if runtime_type == "hermes":
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "Hermes cannot accept another message while running; wait for it to finish",
+            )
+        server = turn.server
+        if server is None:
+            detail = "runtime entered running state without a provider transport"
+            after_commit: list[Callable[[], None]] = []
+            with state.mutation(after_commit=after_commit) as cur:
+                _record_turn_finished(cur, after_commit, turn, error_message=detail)
+            failure = ApiError(HTTPStatus.BAD_GATEWAY, detail)
+        else:
+            try:
+                server.steer(message)
+            except (codex_app_server.CodexAppServerError, claude_code.ClaudeCodeError) as exc:
+                # Once the adapter has declared RUNNING, "not ready" is no
+                # longer a transient phase. It is a provider/transport failure
+                # and owns the normal durable error -> FINISHING path.
+                detail = str(exc)
+                label = RUNTIME_LABELS.get(runtime_type, runtime_type)
+                after_commit = []
+                with state.mutation(after_commit=after_commit) as cur:
+                    _record_turn_finished(
+                        cur,
+                        after_commit,
+                        turn,
+                        error_message=f"{label} rejected the message: {detail}",
+                    )
+                server_to_interrupt = server
+                failure = ApiError(
+                    HTTPStatus.BAD_GATEWAY,
+                    f"{label} rejected the message: {detail}",
+                )
+            else:
+                with state.mutation() as cur:
+                    state.touch_thread_session(cur, thread_id, utc_now())
+                    state.append_agent_event(
+                        cur,
+                        "thread.message",
+                        thread_id,
+                        {"message": message, "source": "user"},
+                        run_number=turn.run_number,
+                    )
+    if server_to_interrupt is not None:
+        _interrupt_turn(server_to_interrupt)
+    if failure is not None:
+        raise failure
+    return True
+
+
+def _publish_turn(turn: _Turn) -> None:
+    with _LIVE_LOCK:
+        _LIVE[_live_key(turn.runtime_type, turn.thread_id)] = turn
+
+
+def _mark_finishing(turn: _Turn, provider_session_id: str | None = None) -> None:
+    """Publish FINISHING only after the durable lifecycle commit."""
+    turn.phase = ExecutionPhase.FINISHING
+    if provider_session_id:
+        turn.provider_session_id = provider_session_id
+    if turn.startup_timer is not None:
+        turn.startup_timer.cancel()
+
+
+def _publish_provider_session(turn: _Turn, provider_session_id: str) -> None:
+    turn.provider_session_id = provider_session_id
+
+
+def _normalized_provider_session_id(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _provider_session_accepted(turn: _Turn, provider_session_id: str) -> None:
+    """Persist a non-empty provider-confirmed resume id when it is learned."""
+    accepted_session_id = _normalized_provider_session_id(provider_session_id)
+    if accepted_session_id is None:
+        raise ValueError("provider reported an empty session id")
+    provider_session_id = accepted_session_id
+    with turn.delivery_lock:
+        if turn.phase == ExecutionPhase.CLOSED or turn.provider_session_id == provider_session_id:
+            return
+        after_commit: list[Callable[[], None]] = []
+        with state.mutation(after_commit=after_commit) as cur:
+            state.save_thread_provider_session(
+                cur,
+                turn.thread_id,
+                turn.run_number,
+                provider_session_id,
+            )
+            after_commit.append(
+                partial(_publish_provider_session, turn, provider_session_id)
+            )
+
+
+def _provider_ready(turn: _Turn) -> bool:
+    """Move STARTING to RUNNING once the initial message is accepted."""
+    with turn.delivery_lock:
+        if turn.phase != ExecutionPhase.STARTING:
+            return False
+        turn.phase = ExecutionPhase.RUNNING
+        if turn.startup_timer is not None:
+            turn.startup_timer.cancel()
+        return True
+
+
+def launch_turn(turn: _Turn, input_message: str, provider_session_id: str | None) -> None:
+    """Run an admitted turn on its own thread. Called after the admitting
+    mutation commits, so its user message and durable running state exist
+    before the worker starts."""
+    worker = threading.Thread(
+        target=_run_turn, args=(turn, input_message, provider_session_id), daemon=True
+    )
+    try:
+        worker.start()
+    except Exception as exc:
+        # Admission is already durable. Terminate that lifecycle synchronously
+        # and release its capacity instead of leaving an unowned live fence.
+        _finish_turn(turn, error_message=f"could not start turn worker: {exc}")
+        _close_turn(turn, None)
         return
-    task_id, runtime_type, thread_id, input_message, model, effort, provider_session_id = claimed
+    timer = threading.Timer(
+        EXECUTION_START_TIMEOUT_SECONDS,
+        _starting_timed_out,
+        args=(turn,),
+    )
+    timer.daemon = True
+    with turn.delivery_lock:
+        if turn.phase == ExecutionPhase.STARTING:
+            turn.startup_timer = timer
+            timer.start()
+
+
+def _starting_timed_out(turn: _Turn) -> None:
+    server: Any = None
+    with turn.delivery_lock:
+        if turn.phase != ExecutionPhase.STARTING:
+            return
+        after_commit: list[Callable[[], None]] = []
+        with state.mutation(after_commit=after_commit) as cur:
+            _record_turn_finished(
+                cur,
+                after_commit,
+                turn,
+                error_message="agent startup timed out",
+            )
+        server = turn.server
+    if server is not None:
+        _interrupt_turn(server)
+
+
+def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) -> None:
+    runtime_type = turn.runtime_type
+    thread_id = turn.thread_id
     provider = _provider_module(runtime_type)
 
-    def steers() -> list[str]:
-        return state.task_steers(task_id)
-
-    def steer_delivered(message: str) -> None:
-        # Drop a delivered steer from the task's pending queue. Its content is
-        # already preserved as a task.message event, so nothing is lost, and
-        # the queue stays bounded: task_steers holds only undelivered steers.
-        with state.mutation() as cur:
-            state.pop_task_steer(cur, task_id, message)
-
     def on_agent_message(message: str | dict[str, Any]) -> None:
+        event_type: str
+        payload: dict[str, Any]
+        refresh_recency = False
         if isinstance(message, dict):
             activity = agent_activity.normalize_record(message)
             if activity is None:
                 return
-            state.record_agent_event("task.activity", task_id, {"activity": activity})
+            event_type = "thread.activity"
+            payload = {"activity": activity}
         elif isinstance(message, str):
             text = agent_activity.clean_text(message)
-            if text:
-                state.record_agent_event("task.message", task_id, {"message": text, "source": "agent"})
+            if not text:
+                return
+            event_type = "thread.message"
+            payload = {"message": text, "source": "agent"}
+            refresh_recency = True
+        else:
+            return
+        # Provider callbacks can still arrive while a stop/deactivation is
+        # tearing the process down. Commit the event before the terminal
+        # boundary or, if termination won the lock, discard it.
+        with turn.delivery_lock:
+            if turn.phase != ExecutionPhase.RUNNING:
+                return
+            with state.mutation() as cur:
+                if refresh_recency:
+                    state.touch_thread_session(cur, thread_id, utc_now())
+                state.append_agent_event(
+                    cur,
+                    event_type,
+                    thread_id,
+                    payload,
+                    run_number=turn.run_number,
+                )
 
-    def finish_claude_turn(provider_session_id: str, output: str) -> list[str]:
-        """Atomically choose between delivering pending steers and finishing.
+    def finish_claude_turn(provider_session_id: str, output: str) -> int:
+        """Atomically choose between a just-delivered steer and completion."""
+        del output  # the final text already streamed as a thread.message event
+        with turn.delivery_lock:
+            # The Claude driver normally consumes this counter in its event
+            # loop. Checking it once more under the delivery lock closes the
+            # final steer-vs-completion boundary without storing any message.
+            delivered = server.take_delivered_steers()
+            if delivered:
+                return delivered
+            after_commit: list[Callable[[], None]] = []
+            with state.mutation(after_commit=after_commit) as cur:
+                if turn.phase != ExecutionPhase.RUNNING:
+                    return 0
+                _record_turn_finished(
+                    cur,
+                    after_commit,
+                    turn,
+                    provider_session_id=provider_session_id,
+                )
+            return 0
 
-        ``steer_task`` uses the same mutation lock. A steer therefore either
-        commits before this transaction and is returned to Claude, or observes
-        the completed task afterwards and is rejected.
-        """
-        with state.mutation() as cur:
-            task = state.get_task(task_id, cur)
-            if task is None or task["status"] != RUNNING:
-                return []
-            pending = state.task_steers(task_id, cur)
-            if pending:
-                return pending
-            _finish_running_task(
-                cur,
-                task,
-                COMPLETED,
-                output=output,
-                runtime_type=runtime_type,
-                thread_id=thread_id,
-                provider_session_id=provider_session_id,
-            )
-            return []
-
-    # Everything from here is inside one try: the task was claimed (marked
-    # RUNNING) above, so ANY exception — including a failure to create or
-    # start the server — must fail the task. An exception that escaped to
-    # worker_loop instead would leave the task RUNNING forever with no worker
-    # attached.
+    # Everything from here is inside one try: the turn was admitted (its
+    # events recorded) already, so ANY exception — including a failure to
+    # create or start the server — must fail the turn; otherwise its thread
+    # would stay fenced with no terminal event.
     server: Any = None
     try:
-        # A non-active runtime fails the task here, loudly and immediately —
-        # queued work never parks behind a missing login, and a cached
-        # non-active status fails without any provider work (a refresh could
-        # only delay the failure behind a slow status helper, or resurrect a
-        # task the fail-fast contract says fails). The current network policy
-        # is checked directly, so a task never starts against a provider
-        # whose disable has not reached the cached status yet. A cached-active
-        # Claude task still runs the refresh: memory-only in steady state,
-        # and the repin convergence point when the CLI rotated the token
-        # since the last poll, so routine rotation never fails a task at the
-        # proxy. Codex needs no per-task convergence.
-        if not _runtime_network_enabled(runtime_type):
-            status = "deactivated"
-        else:
-            status = runtime_status(runtime_type)
-            if status == "active" and runtime_type == "claude_code":
-                status = refresh_runtime_status(runtime_type)
-        if status != "active":
-            label = RUNTIME_LABELS.get(runtime_type, runtime_type)
-            raise RuntimeError(f"{label} runtime is {status}; tasks run only while it is active")
-        # Register the (unstarted) process entry before start(), so a kill can
-        # close the server mid-boot. The thread's RUNNING task keeps it
-        # unavailable to other claims until this entry exists; a kill arriving
-        # before it finds no entry, and the post-start status re-check below
-        # abandons the turn instead.
-        server = _new_agent_server(runtime_type, thread_id)
+        # Claude's CLI rotates its bearer token independently. Converge the
+        # proxy pin before its process starts; if the refresh makes the
+        # runtime non-active, that transition stops this turn.
+        if runtime_type == "claude_code":
+            refresh_runtime_status(runtime_type)
+            with turn.delivery_lock:
+                active = turn.phase == ExecutionPhase.STARTING
+            if not active:
+                return
+        with turn.delivery_lock:
+            if turn.phase != ExecutionPhase.STARTING:
+                return
+        server = _new_agent_server(
+            runtime_type,
+            thread_id,
+            partial(_provider_ready, turn),
+            partial(_provider_session_accepted, turn),
+        )
         # App instructions come from the host-validated manifest associated
-        # with this app-scoped thread, never from task request content. Runtime
+        # with this app-scoped thread, never from message content. Runtime
         # adapters deliver them at their developer/system instruction boundary.
         server.app_instructions = _app_instructions(thread_id)
-        with _LIVE_LOCK:
-            _LIVE[_live_key(runtime_type, thread_id)] = _Turn(server, runtime_type, thread_id, task_id)
+        # Publish before start so Stop can call the adapter's non-blocking,
+        # start-safe interrupt. Each adapter prevents a process spawn after
+        # interrupt has won its own lifecycle lock.
+        with turn.delivery_lock:
+            if turn.phase != ExecutionPhase.STARTING:
+                return
+            turn.server = server
         server.start()
-        # If a kill cancelled this task while the server was starting, abandon
-        # it rather than running a full turn the operator thinks was stopped.
-        current = state.get_task(task_id)
-        if current is None or current["status"] != RUNNING:
-            return
+        with turn.delivery_lock:
+            if turn.phase not in (ExecutionPhase.STARTING, ExecutionPhase.RUNNING):
+                return
         if runtime_type == "claude_code":
-            new_provider_session_id, output = provider.run_turn(
+            new_provider_session_id, _output = provider.run_turn(
                 server,
                 input_message,
                 provider_session_id,
-                model,
-                effort,
-                steers,
+                turn.model,
+                turn.effort,
                 on_agent_message,
-                steer_delivered,
                 finish_claude_turn,
             )
         else:
-            new_provider_session_id, output = provider.run_turn(
+            new_provider_session_id, _output = provider.run_turn(
                 server,
                 input_message,
                 provider_session_id,
-                model,
-                effort,
-                steers,
+                turn.model,
+                turn.effort,
                 on_agent_message,
-                steer_delivered,
             )
-        _finish_task(
-            task_id,
-            COMPLETED,
-            output=output,
-            runtime_type=runtime_type,
-            thread_id=thread_id,
-            provider_session_id=new_provider_session_id,
-        )
+        _finish_turn(turn, provider_session_id=new_provider_session_id)
     except Exception as exc:
-        # A killed task dies here too (close_task_server tears down the
-        # process, and the worker blocked in run_turn surfaces it as an
-        # error). The provider may have already reported a session_id before
-        # dying — read whatever it last saw so a killed turn's session isn't
-        # silently dropped; _finish_task persists it even though this task's
-        # own status update below is a no-op (kill_task already set CANCELLED).
+        # The callback is the primary persistence path. The attribute is only
+        # a defensive fallback for an adapter exception at the exact boundary
+        # where it learned the id but its callback did not return.
         last_session_id = getattr(server, "last_known_session_id", None) if server is not None else None
-        _finish_task(
-            task_id,
-            FAILED,
-            error_message=str(exc),
-            runtime_type=runtime_type,
-            thread_id=thread_id,
-            provider_session_id=last_session_id,
-        )
+        _finish_turn(turn, error_message=str(exc), provider_session_id=last_session_id)
     finally:
-        if server is not None:
-            _close_turn(_live_key(runtime_type, thread_id), server)
-        WORKER_WAKE.set()
+        _close_turn(turn, server)
 
 
-def _claim_next_task() -> tuple[str, str, str, str, str, str, str | None] | None:
-    """Atomically claim the first runnable queued task. Returns
-    (task_id, runtime_type, thread_id, input_message, model, effort,
-    provider session/thread id or None)."""
-    with state.mutation() as cur:
-        running = state.running_tasks(cur)
-        if len(running) >= WORKER_COUNT:
-            return None
-        running_by_runtime: dict[str, int] = {}
-        for task in running:
-            runtime_type = task["agent_runtime"]
-            running_by_runtime[runtime_type] = running_by_runtime.get(runtime_type, 0) + 1
-        running_threads = {_live_key(task["agent_runtime"], task["thread_id"]) for task in running}
-        # A thread is unavailable while a task on it is RUNNING (state) or
-        # while it still has a live process entry (a finished task's worker
-        # that has not closed its process yet — status goes terminal in
-        # _finish_task BEFORE the finally closes — or a close still in
-        # flight). Checking both here, under both locks, is what guarantees
-        # at most one live process per user thread.
-        with _LIVE_LOCK:
-            if len(_LIVE) >= WORKER_COUNT:
-                return None
-            live_by_runtime: dict[str, int] = {}
-            for turn in _LIVE.values():
-                live_by_runtime[turn.runtime_type] = live_by_runtime.get(turn.runtime_type, 0) + 1
-            unavailable = running_threads | set(_LIVE)
-        # Queued tasks come back in claim order without their messages; only
-        # the claimed task's input is fetched. Runtime status is not a claim
-        # condition: a task claimed against a non-active runtime fails
-        # immediately in the worker with that status as its error, instead of
-        # parking queued work behind a login nobody may notice is missing.
-        claimable = next(
-            (
-                t for t in state.queued_tasks_brief(cur)
-                if running_by_runtime.get(t["agent_runtime"], 0) < WORKER_COUNT_PER_RUNTIME
-                and live_by_runtime.get(t["agent_runtime"], 0) < WORKER_COUNT_PER_RUNTIME
-                and _live_key(t["agent_runtime"], t["thread_id"]) not in unavailable
-            ),
-            None,
-        )
-        if claimable is None:
-            return None
-        claimed = state.get_task(claimable["task_id"], cur)
-        if claimed is None or claimed["status"] != "queued":
-            return None
-        runtime_type = claimed["agent_runtime"]
-        task_status.set_status(claimed, RUNNING, now=utc_now())
-        state.save_task(cur, claimed)
-        state.append_agent_event(cur, "task.started", claimed["task_id"], {})
+def stop_thread_turn(thread_id: str) -> bool:
+    """Stop the thread's live turn (the operator/app stop path). Returns False
+    when the thread has no stoppable turn. The thread.stopped event and the
+    lifecycle state commit in one mutation. The adapter is interrupted without
+    waiting for teardown; the owning execution thread closes the process and
+    removes the live fence."""
+    with _LIVE_LOCK:
+        turn = next((t for t in _LIVE.values() if t.thread_id == thread_id), None)
+    if turn is None:
+        return False
+    after_commit: list[Callable[[], None]] = []
+    with turn.delivery_lock, state.mutation(after_commit=after_commit) as cur:
+        if turn.phase not in (ExecutionPhase.STARTING, ExecutionPhase.RUNNING):
+            return False
+        state.finish_thread_run(cur, thread_id, turn.run_number)
         state.append_agent_event(
             cur,
-            "task.message",
-            claimed["task_id"],
-            {"message": claimed["input_message"], "source": "user"},
+            "thread.stopped",
+            thread_id,
+            {},
+            run_number=turn.run_number,
         )
-        session = state.thread_session(cur, runtime_type, claimed["thread_id"])
-        provider_session_id = session["provider_session_id"] if session else None
-        return (
-            claimed["task_id"],
-            runtime_type,
-            claimed["thread_id"],
-            claimed["input_message"],
-            claimed["model"],
-            claimed["effort"],
-            provider_session_id,
-        )
+        after_commit.append(partial(_mark_finishing, turn))
+        server = turn.server
+    if server is not None:
+        _interrupt_turn(server)
+    return True
 
 
-def close_task_server(task_id: str) -> None:
-    """Kill the runtime process running ``task_id`` (the kill-task path). The
-    worker blocked in run_turn surfaces the dead server as an error and finds
-    the task already cancelled, so the cancellation sticks."""
-    with _LIVE_LOCK:
-        turn = next((t for t in _LIVE.values() if t.task_id == task_id), None)
-    if turn is not None:
-        # Do not make the thread claimable here. The owning worker must first
-        # observe the stopped process and persist its last-known provider
-        # session id; its finally block releases the fence afterwards.
-        _close_turn(_live_key(turn.runtime_type, turn.thread_id), turn.server, release=False)
+def _interrupt_turn(server: Any) -> None:
+    """Request prompt process interruption without waiting for teardown."""
+    try:
+        server.interrupt()
+    except Exception:
+        # The execution thread owns bounded close/verification and records a
+        # cleanup error if the process cannot be reaped.
+        pass
 
 
-def _close_turn(key: str, server: Any, *, release: bool = True) -> None:
-    """Close a turn's runtime process and free its thread. The kill path and
-    the worker's finally can both get here for the same turn; exactly one owns
-    the close and the others wait for its result. External stop paths pass
-    ``release=False`` so only the worker can remove the entry, after its
-    completion/error handling has persisted any mid-turn provider session id.
-    The close itself runs outside _LIVE_LOCK: shutdown can take seconds and
-    must not block claiming."""
-    with _LIVE_LOCK:
-        turn = _LIVE.get(key)
-        if turn is None or turn.server is not server:
+def _close_turn(turn: _Turn, server: Any) -> None:
+    """Close the provider and release the live fence from its owning thread."""
+    key = _live_key(turn.runtime_type, turn.thread_id)
+    if turn.startup_timer is not None:
+        turn.startup_timer.cancel()
+    if server is not None:
+        try:
+            server.close()
+        except Exception as exc:
+            with turn.delivery_lock:
+                if turn.phase != ExecutionPhase.CLOSED:
+                    with state.mutation() as cur:
+                        state.append_agent_event(
+                            cur,
+                            "thread.error",
+                            turn.thread_id,
+                            {"error_message": f"agent process cleanup failed: {exc}"},
+                            run_number=turn.run_number,
+                        )
+            # Never run a new same-thread process while the old scope may live.
             return
-    # The per-turn lock is held across the slow close on purpose: it blocks
-    # only another closer for this process, never claims or unrelated turns.
-    with turn.close_lock:
-        if not turn.closing:
-            turn.closing = True
-            try:
-                server.close()
-            except Exception:
-                # Keep the entry fenced: we cannot safely claim same-thread
-                # work while the old process may live.
-                return
-            turn.close_succeeded = True
-        if not release or not turn.close_succeeded:
-            return
+    with turn.delivery_lock:
+        turn.phase = ExecutionPhase.CLOSED
     with _LIVE_LOCK:
         if _LIVE.get(key) is turn:
             del _LIVE[key]
-    WORKER_WAKE.set()  # tasks queued on this thread are claimable again
 
 
-def _finish_task(
-    task_id: str,
-    status: str,
+def _record_turn_finished(
+    cur: Any,
+    after_commit: list[Callable[[], None]],
+    turn: _Turn,
     *,
-    output: str | None = None,
-    error_message: str | None = None,
-    runtime_type: str,
-    thread_id: str,
     provider_session_id: str | None = None,
+    error_message: str | None = None,
 ) -> None:
-    with state.mutation() as cur:
-        task = state.get_task(task_id, cur)
-        if task is None:
-            return
-        if task["status"] != RUNNING:
-            if task["status"] == COMPLETED:
-                # Claude's atomic finish callback already persisted the full
-                # successful result before run_turn returned.
-                return
-            # killed while the turn was in flight: kill_task already recorded
-            # a terminal status, so leave it alone here. Still persist whatever
-            # session_id the provider handed back before it died —
-            # otherwise the thread's next task can't resume the CLI session
-            # the killed turn was using and silently starts over (worst case:
-            # the killed turn was the thread's first, so there is no earlier
-            # session to fall back to at all).
-            if provider_session_id:
-                state.save_thread_session(
+    """Finalize durable lifecycle state before process teardown begins."""
+    accepted_session_id = (
+        _normalized_provider_session_id(provider_session_id)
+        or _normalized_provider_session_id(turn.provider_session_id)
+    )
+    if accepted_session_id and accepted_session_id != turn.provider_session_id:
+        state.save_thread_provider_session(
+            cur,
+            turn.thread_id,
+            turn.run_number,
+            accepted_session_id,
+        )
+    state.touch_thread_session(cur, turn.thread_id, utc_now())
+    if error_message is not None:
+        state.append_agent_event(
+            cur,
+            "thread.error",
+            turn.thread_id,
+            {"error_message": error_message},
+            run_number=turn.run_number,
+        )
+    state.finish_thread_run(cur, turn.thread_id, turn.run_number)
+    after_commit.append(partial(_mark_finishing, turn, accepted_session_id))
+
+
+def _finish_turn(
+    turn: _Turn,
+    *,
+    provider_session_id: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    provider_session_id = _normalized_provider_session_id(provider_session_id)
+    after_commit: list[Callable[[], None]] = []
+    with turn.delivery_lock, state.mutation(after_commit=after_commit) as cur:
+        if turn.phase in (ExecutionPhase.FINISHING, ExecutionPhase.CLOSED):
+            # Defensive fallback only: adapters normally persist immediately
+            # through their accepted-session callback.
+            if (
+                provider_session_id
+                and turn.phase == ExecutionPhase.FINISHING
+                and provider_session_id != turn.provider_session_id
+            ):
+                state.save_thread_provider_session(
                     cur,
-                    runtime_type,
-                    thread_id,
+                    turn.thread_id,
+                    turn.run_number,
                     provider_session_id,
-                    utc_now(),
-                    task["model"],
-                    task["effort"],
+                )
+                after_commit.append(
+                    partial(_publish_provider_session, turn, provider_session_id)
                 )
             return
-        _finish_running_task(
+        _record_turn_finished(
             cur,
-            task,
-            status,
-            output=output,
-            error_message=error_message,
-            runtime_type=runtime_type,
-            thread_id=thread_id,
+            after_commit,
+            turn,
             provider_session_id=provider_session_id,
+            error_message=error_message,
         )
-
-
-def _finish_running_task(
-    cur: Any,
-    task: dict[str, Any],
-    status: str,
-    *,
-    output: str | None = None,
-    error_message: str | None = None,
-    runtime_type: str,
-    thread_id: str,
-    provider_session_id: str | None = None,
-) -> None:
-    """Persist the terminal state for a task already verified as RUNNING."""
-    task_id = task["task_id"]
-    task_status.set_status(task, status, now=utc_now())
-    if status == COMPLETED:
-        task["output_message"] = output
-        state.save_task(cur, task)
-        state.save_thread_session(
-            cur,
-            runtime_type,
-            thread_id,
-            provider_session_id,
-            utc_now(),
-            task["model"],
-            task["effort"],
-        )
-        state.append_agent_event(cur, "task.completed", task_id, {})
-    else:
-        task["error_message"] = error_message
-        state.save_task(cur, task)
-        state.append_agent_event(cur, "task.failed", task_id, {"error_message": error_message})
-
-
-def _task_number(task_id: str) -> int:
-    try:
-        return int(str(task_id).rsplit("_", 1)[-1])
-    except ValueError:
-        return 0
 
 
 def _provider_module(runtime_type: str | None = None) -> Any:
@@ -1403,17 +1612,34 @@ def _app_instructions(thread_id: str) -> str | None:
     return app_thread[0].agent_instructions if app_thread is not None else None
 
 
-def _new_agent_server(runtime_type: str, thread_id: str) -> Any:
-    # Every task turn runs inside a scope named after its host thread. App
+def _new_agent_server(
+    runtime_type: str,
+    thread_id: str,
+    on_ready: Callable[[], bool],
+    on_session_id: Callable[[str], None],
+) -> Any:
+    # Every turn runs inside a scope named after its host thread. App
     # threads carry the host-reserved `<app_id>__` prefix, so the agent-app
     # service derives ownership directly from kernel-owned cgroup state.
     # Turns on one thread are serialized, and --collect removes the scope
     # before the same unit name can be used by its next turn.
     if runtime_type == "claude_code":
-        return claude_code.ClaudeCodeSession(thread_id=thread_id)
+        return claude_code.ClaudeCodeSession(
+            thread_id=thread_id,
+            on_ready=on_ready,
+            on_session_id=on_session_id,
+        )
     if runtime_type == "hermes":
-        return hermes_agent.HermesSession(thread_id=thread_id)
-    return codex_app_server.CodexAppServer(thread_id=thread_id)
+        return hermes_agent.HermesSession(
+            thread_id=thread_id,
+            on_ready=on_ready,
+            on_session_id=on_session_id,
+        )
+    return codex_app_server.CodexAppServer(
+        thread_id=thread_id,
+        on_ready=on_ready,
+        on_session_id=on_session_id,
+    )
 
 
 def _live_key(runtime_type: str, thread_id: Any) -> str:

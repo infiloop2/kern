@@ -289,6 +289,7 @@ def _render_app_bootstrap(template: str) -> str:
                 f"Environment=KERN_APP_ADMIN_API_SOCKET={APP_BACKEND_ADMIN_SOCKET_PATH}",
                 f"WorkingDirectory=/opt/kern-host/host/apps/{app.id}",
                 f"ExecStart=/usr/bin/python3 /opt/kern-host/host/apps/{app.id}/{backend_entrypoint}",
+                f"ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit {app.service_name.removesuffix('.service')}",
                 "Restart=always",
                 "RestartSec=3",
                 "",

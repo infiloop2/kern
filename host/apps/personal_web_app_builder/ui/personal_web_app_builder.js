@@ -13,8 +13,16 @@ const MAX_EVENT_FIELDS = 64;
 const MAX_EVENT_FIELD_BYTES = 8192;
 const MAX_EVENT_PAYLOAD_BYTES = 64 * 1024;
 const MAX_DATA_VALUE_BYTES = 256 * 1024;
-const CONVERSATION_EVENTS_PAGE = 5;
+const CONVERSATION_EVENTS_PAGE = 6;
 const INITIAL_CONVERSATION_EVENT_PAGES = 3;
+const VIEW_STATE_LIMIT = 50;
+const ATTACHMENT_LIMIT = 10;
+const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+const APP_API_TIMEOUT_MS = 12000;
+// The outer browser-to-app proxy can wait 50s for a synchronous provider
+// acknowledgement. Sends and Stop must outlive that hop or a retry can
+// duplicate a message the host accepted after the frame gave up.
+const AGENT_DELIVERY_TIMEOUT_MS = 60 * 1000;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const pendingApi = new Map();
@@ -26,7 +34,7 @@ let selectedAppId = null;
 let selectedAppName = null;
 let selectedAppArchived = false;
 let renderedAppsKey = "";
-let snapshot = { app: null, tasks: [], session: null };
+let snapshot = { app: null, session: null, status: "idle" };
 let conversationEvents = [];
 let conversationEventsOldestSeq = null;
 let conversationEventsNewestSeq = 0;
@@ -36,7 +44,7 @@ let loadingOlderConversationEvents = false;
 let lastChatScrollTop = 0;
 let restoredChatScrollTop = null;
 const conversationViewStates = new Map();
-const renderedChatTurns = new Map();
+const renderedChatEntries = new Map();
 let renderedRevision = -1;
 let generatedRoot = null;
 let workerRun = null;
@@ -45,20 +53,30 @@ const messageBusyApps = new Set();
 let selectedRefreshSequence = 0;
 let establishedSession = null;
 let establishedSessionKey = "";
+let pendingAttachments = [];
+const attachmentActivities = new Map();
 
 const $ = id => document.getElementById(id);
 
 window.addEventListener("message", event => {
   const message = event.data;
-  if (event.source !== parent || !message || message.type !== "kern-app-api-result") return;
+  if (
+    event.source !== parent
+    || !message
+    || ![
+      "kern-app-api-result",
+      "kern-app-copy-text-result",
+      "kern-app-upload-file-result",
+    ].includes(message.type)
+  ) return;
   const pending = pendingApi.get(message.request_id);
   if (!pending) return;
   pendingApi.delete(message.request_id);
-  if (message.ok) pending.resolve(message.body);
+  if (message.ok) pending.resolve(message.cancelled ? null : message.body);
   else pending.reject(new Error(message.error || "App request failed"));
 });
 
-function api(method, path, body) {
+function api(method, path, body, timeoutMs = APP_API_TIMEOUT_MS) {
   const requestId = `pwa-${Date.now()}-${++requestCounter}`;
   return new Promise((resolve, reject) => {
     pendingApi.set(requestId, { resolve, reject });
@@ -73,7 +91,43 @@ function api(method, path, body) {
       if (!pendingApi.has(requestId)) return;
       pendingApi.delete(requestId);
       reject(new Error("App request timed out"));
-    }, 12000);
+    }, timeoutMs);
+  });
+}
+
+function requestHostCopy(text) {
+  const requestId = `pwa-copy-${Date.now()}-${++requestCounter}`;
+  return new Promise((resolve, reject) => {
+    pendingApi.set(requestId, { resolve, reject });
+    parent.postMessage({
+      type: "kern-app-copy-text",
+      request_id: requestId,
+      text,
+    }, "*");
+    setTimeout(() => {
+      if (!pendingApi.has(requestId)) return;
+      pendingApi.delete(requestId);
+      reject(new Error("Copy timed out"));
+    }, 10000);
+  });
+}
+
+function requestFileUpload(action, selectionId, maximumFiles) {
+  const requestId = `pwa-file-${Date.now()}-${++requestCounter}`;
+  return new Promise((resolve, reject) => {
+    pendingApi.set(requestId, { resolve, reject });
+    parent.postMessage({
+      type: "kern-app-upload-file",
+      request_id: requestId,
+      action,
+      ...(selectionId ? { selection_id: selectionId } : {}),
+      ...(maximumFiles ? { max_files: maximumFiles } : {}),
+    }, "*");
+    setTimeout(() => {
+      if (!pendingApi.has(requestId)) return;
+      pendingApi.delete(requestId);
+      reject(new Error("File operation timed out"));
+    }, 5 * 60 * 1000);
   });
 }
 
@@ -408,7 +462,6 @@ function syncEmptyState() {
   const hasApp = selectedAppId !== null;
   if (!hasApp) {
     $("first-run-how").hidden = true;
-    $("first-run-guidance").hidden = true;
     $("empty-title").textContent = showingArchivedApps ? "Archived apps" : "Select an app";
     $("empty-description").textContent = showingArchivedApps
       ? "Choose an archived app to view it, or return to active apps."
@@ -418,7 +471,6 @@ function syncEmptyState() {
   }
   const firstRun = !snapshot.session;
   $("first-run-how").hidden = !firstRun;
-  $("first-run-guidance").hidden = !firstRun;
   $("empty-title").textContent = selectedAppArchived
     ? "This app is archived"
     : firstRun ? "Build this app" : "Your app will appear here";
@@ -667,85 +719,260 @@ function showChatStatus(message, error = false) {
   status.hidden = !message;
 }
 
+function renderAttachments() {
+  const container = $("attachments");
+  const currentActivity = attachmentActivities.get(selectedAppId) || null;
+  container.replaceChildren();
+  for (const attachment of pendingAttachments) {
+    const tooLarge = attachment.size_bytes > ATTACHMENT_MAX_BYTES;
+    const chip = document.createElement("div");
+    chip.className = `attachment${tooLarge ? " invalid" : ""}`;
+    const name = document.createElement("span");
+    name.className = "attachment-name";
+    name.title = attachment.original_name;
+    name.textContent = attachment.original_name;
+    chip.append(name);
+    if (tooLarge) {
+      const error = document.createElement("span");
+      error.className = "attachment-error";
+      error.textContent = "25 MiB max";
+      chip.append(error);
+    }
+    const remove = document.createElement("button");
+    remove.className = "attachment-clear";
+    remove.dataset.removeAttachment = attachment.selection_id;
+    remove.ariaLabel = `Remove ${attachment.original_name}`;
+    remove.title = `Remove ${attachment.original_name}`;
+    remove.disabled = currentActivity !== null;
+    remove.textContent = "×";
+    chip.append(remove);
+    container.append(chip);
+  }
+  if (currentActivity !== null) {
+    const activity = document.createElement("div");
+    activity.className = "attachment activity";
+    activity.textContent = currentActivity;
+    container.append(activity);
+  }
+  container.hidden = currentActivity === null && !pendingAttachments.length;
+  setSessionOptions();
+}
+
+function setAttachmentActivity(threadId, activity) {
+  if (activity === null) attachmentActivities.delete(threadId);
+  else attachmentActivities.set(threadId, activity);
+  renderAttachments();
+}
+
+async function attachFile() {
+  const threadId = selectedAppId;
+  const remaining = ATTACHMENT_LIMIT - pendingAttachments.length;
+  if (
+    !threadId
+    || remaining <= 0
+    || selectedAppArchived
+    || messageBusyApps.has(threadId)
+  ) return;
+  showChatStatus("");
+  setAttachmentActivity(threadId, "Selecting file…");
+  try {
+    const response = await requestFileUpload("select", null, remaining);
+    if (response === null) return;
+    if (!Array.isArray(response.selections) || !response.selections.length) {
+      throw new Error("File selection returned an invalid response");
+    }
+    for (const selection of response.selections) {
+      if (
+        typeof selection.selection_id !== "string"
+        || typeof selection.original_name !== "string"
+        || typeof selection.size_bytes !== "number"
+      ) {
+        throw new Error("File selection returned an invalid response");
+      }
+    }
+    if (selectedAppId !== threadId) {
+      for (const selection of response.selections) {
+        void requestFileUpload("discard", selection.selection_id).catch(() => {});
+      }
+      return;
+    }
+    if (pendingAttachments.length + response.selections.length > ATTACHMENT_LIMIT) {
+      throw new Error(`You can attach up to ${ATTACHMENT_LIMIT} files.`);
+    }
+    pendingAttachments.push(...response.selections);
+  } finally {
+    setAttachmentActivity(threadId, null);
+  }
+}
+
+async function removeAttachment(selectionId) {
+  const index = pendingAttachments.findIndex(
+    attachment => attachment.selection_id === selectionId,
+  );
+  if (index < 0) return;
+  const [attachment] = pendingAttachments.splice(index, 1);
+  renderAttachments();
+  if (!attachment.file) await requestFileUpload("discard", attachment.selection_id);
+}
+
+function clearPendingAttachments() {
+  // A send captures the current array before switching apps. Leave its
+  // selections alive so that in-flight upload can finish for the app it was
+  // submitted from; the new app still starts with a fresh array below.
+  if (!selectedAppId || !messageBusyApps.has(selectedAppId)) {
+    for (const attachment of pendingAttachments) {
+      if (!attachment.file) {
+        void requestFileUpload("discard", attachment.selection_id).catch(() => {});
+      }
+    }
+  }
+  pendingAttachments = [];
+  if (selectedAppId) attachmentActivities.delete(selectedAppId);
+  renderAttachments();
+}
+
 async function sendMessage(forcedMessage = null, targetAppId = null) {
   const fromGeneratedApp = forcedMessage !== null;
   const threadId = targetAppId || selectedAppId;
   const message = (forcedMessage || $("message").value).trim();
-  if (!message || !threadId || threadId !== selectedAppId || selectedAppArchived) return;
+  const attachments = fromGeneratedApp ? [] : pendingAttachments;
+  if (
+    (!message && !attachments.length)
+    || !threadId
+    || threadId !== selectedAppId
+    || selectedAppArchived
+  ) return;
   if (messageBusyApps.has(threadId)) {
     if (fromGeneratedApp) showRuntimeStatus("Agent is already starting");
     return;
   }
   messageBusyApps.add(threadId);
-  const body = { content: message };
-  if (!snapshot.session) {
-    body.agent_runtime = $("runtime").value;
-    body.model = $("model").value;
-    body.effort = $("effort").value;
-  }
+  setSessionOptions();
   $("send-message").disabled = true;
-  showChatStatus("Starting agent…");
-  if (fromGeneratedApp) showRuntimeStatus("Starting agent…");
+  showChatStatus("Sending…");
+  if (fromGeneratedApp) showRuntimeStatus("Sending to agent…");
   try {
+    for (const [index, attachment] of attachments.entries()) {
+      if (attachment.file) continue;
+      setAttachmentActivity(
+        threadId,
+        `Uploading ${index + 1} of ${attachments.length}…`,
+      );
+      const response = await requestFileUpload("upload", attachment.selection_id);
+      if (
+        !response.file
+        || typeof response.file.path !== "string"
+        || typeof response.file.name !== "string"
+      ) {
+        throw new Error("File upload returned an invalid response");
+      }
+      attachment.file = response.file;
+    }
+    setAttachmentActivity(threadId, null);
+    const fileReferences = attachments
+      .map(attachment => `[User-uploaded file: ${attachment.file.path}]`)
+      .join("\n");
+    const content = attachments.length
+      ? `${message || (attachments.length === 1
+        ? "Please review the uploaded file."
+        : "Please review the uploaded files.")}\n\n${fileReferences}`
+      : message;
+    const body = { content };
+    if (
+      !snapshot.session
+      || (!fromGeneratedApp && sessionConfigurationChanged())
+    ) {
+      body.agent_runtime = $("runtime").value;
+      body.model = $("model").value;
+      body.effort = $("effort").value;
+    }
     const resource = fromGeneratedApp ? "runtime/agent-requests" : "messages";
-    await api("POST", `/apps/${encodeURIComponent(threadId)}/${resource}`, body);
-    if (!fromGeneratedApp && selectedAppId === threadId) $("message").value = "";
+    await api(
+      "POST",
+      `/apps/${encodeURIComponent(threadId)}/${resource}`,
+      body,
+      AGENT_DELIVERY_TIMEOUT_MS,
+    );
+    if (!fromGeneratedApp && selectedAppId === threadId) {
+      $("message").value = "";
+      pendingAttachments = [];
+      renderAttachments();
+    }
     await refreshSelectedApp(threadId);
     if (selectedAppId !== threadId) return;
     showChatStatus("");
-    if (fromGeneratedApp) showRuntimeStatus("Agent started", "success");
+    if (fromGeneratedApp) showRuntimeStatus("Sent to agent", "success");
   } catch (error) {
-    if (selectedAppId !== threadId) return;
-    showChatStatus(error.message || "Could not start the agent", true);
-    if (fromGeneratedApp) showRuntimeStatus("Could not start the agent", "error");
+    setAttachmentActivity(threadId, null);
+    if (selectedAppId !== threadId) {
+      for (const attachment of attachments) {
+        if (!attachment.file) {
+          void requestFileUpload("discard", attachment.selection_id).catch(() => {});
+        }
+      }
+      return;
+    }
+    showChatStatus(error.message || "Could not send to the agent", true);
+    if (fromGeneratedApp) showRuntimeStatus("Could not send to the agent", "error");
   } finally {
     messageBusyApps.delete(threadId);
     if (selectedAppId === threadId) setSessionOptions();
   }
 }
 
+async function stopRunningTurn() {
+  const threadId = selectedAppId;
+  if (!threadId || snapshot.status !== "running" || selectedAppArchived) return;
+  if (!confirm("Stop the agent?")) return;
+  showChatStatus("Stopping…");
+  try {
+    await api(
+      "POST",
+      `/apps/${encodeURIComponent(threadId)}/stop`,
+      {},
+      AGENT_DELIVERY_TIMEOUT_MS,
+    );
+  } finally {
+    if (selectedAppId === threadId) showChatStatus("");
+  }
+  await refreshSelectedApp(threadId);
+}
+
 function renderChat() {
   const history = $("chat-history");
-  const turns = $("chat-turns");
+  const entries = $("chat-turns");
   const nearBottom = history.scrollHeight - history.scrollTop - history.clientHeight < 48;
-  const ordered = conversationTasks();
+  const ordered = conversationEntries();
   renderHistoryLoader();
   if (!ordered.length) {
-    renderedChatTurns.clear();
-    turns.replaceChildren();
+    renderedChatEntries.clear();
+    entries.replaceChildren();
     const empty = document.createElement("p");
     empty.className = "chat-empty";
     empty.textContent = selectedAppArchived
       ? "This archived app has no conversation yet."
       : "Describe the app you want. The agent can build its UI, behavior, and data, then keep changing it here.";
-    turns.append(empty);
+    entries.append(empty);
     syncAgentSettings(snapshot.session);
     return;
   }
-  if (turns.firstElementChild?.classList.contains("chat-empty")) turns.replaceChildren();
-  const messagesByTask = new Map();
-  for (const event of conversationEvents) {
-    if (event.event_type !== "task.message" || typeof event.task_id !== "string") continue;
-    if (!messagesByTask.has(event.task_id)) messagesByTask.set(event.task_id, []);
-    messagesByTask.get(event.task_id).push(event);
-  }
-  ordered.forEach((task, index) => {
-    const messages = messagesByTask.get(task.task_id) || [];
-    const key = JSON.stringify([task, messages]);
-    const current = turns.children[index];
-    if (!current || current.dataset.taskId !== task.task_id) {
-      turns.insertBefore(renderChatTurn(task, messages), current || null);
-    } else if (renderedChatTurns.get(task.task_id) !== key) {
-      turns.replaceChild(renderChatTurn(task, messages), current);
+  if (entries.firstElementChild?.classList.contains("chat-empty")) entries.replaceChildren();
+  ordered.forEach((entry, index) => {
+    const renderedKey = JSON.stringify(entry);
+    const current = entries.children[index];
+    if (!current || current.dataset.entryId !== entry.key) {
+      entries.insertBefore(renderChatEntry(entry), current || null);
+    } else if (renderedChatEntries.get(entry.key) !== renderedKey) {
+      entries.replaceChild(renderChatEntry(entry), current);
     }
-    renderedChatTurns.set(task.task_id, key);
+    renderedChatEntries.set(entry.key, renderedKey);
   });
-  while (turns.children.length > ordered.length) {
-    turns.lastElementChild.remove();
+  while (entries.children.length > ordered.length) {
+    entries.lastElementChild.remove();
   }
-  const visibleTaskIds = new Set(ordered.map(task => task.task_id));
-  for (const taskId of renderedChatTurns.keys()) {
-    if (!visibleTaskIds.has(taskId)) renderedChatTurns.delete(taskId);
+  const visibleEntryKeys = new Set(ordered.map(entry => entry.key));
+  for (const entryKey of renderedChatEntries.keys()) {
+    if (!visibleEntryKeys.has(entryKey)) renderedChatEntries.delete(entryKey);
   }
   syncAgentSettings(snapshot.session);
   if (restoredChatScrollTop !== null) {
@@ -758,118 +985,59 @@ function renderChat() {
   }
 }
 
-function conversationTasks() {
-  const byId = new Map(
-    snapshot.tasks.map(task => [
-      task.task_id,
-      { ...task, first_event_seq: null, retained_task: true, has_event_message: false },
-    ]),
-  );
+function conversationEntries() {
+  const entries = [];
   for (const event of conversationEvents) {
-    if (typeof event.task_id !== "string") continue;
-    let task = byId.get(event.task_id);
-    if (!task) {
-      task = {
-        task_id: event.task_id,
-        input_message: "",
-        output_message: "",
-        error_message: "",
-        status: "unknown",
-        created_at: event.timestamp || event.created_at || "",
-        first_event_seq: event.seq,
-        retained_task: false,
-        has_event_message: false,
-      };
-      byId.set(event.task_id, task);
-    } else if (task.first_event_seq === null || event.seq < task.first_event_seq) {
-      task.first_event_seq = event.seq;
-    }
     const payload = event.payload || {};
-    if (event.event_type === "task.message") task.has_event_message = true;
-    if (
-      event.event_type === "task.message"
-      && payload.source === "user"
+    if (event.event_type === "thread.error") {
+      entries.push({
+        key: `event-${event.seq}`,
+        kind: "error",
+        message: payload.error_message || "The agent stopped because of an error.",
+      });
+    } else if (event.event_type === "thread.stopped") {
+      entries.push({
+        key: `event-${event.seq}`,
+        kind: "stopped",
+        message: "Agent stopped",
+      });
+    } else if (
+      event.event_type === "thread.message"
       && typeof payload.message === "string"
-      && !task.input_message
+      && payload.message
     ) {
-      task.input_message = payload.message;
-    }
-    if (event.event_type === "task.started") task.status = "running";
-    if (event.event_type === "task.completed") task.status = "completed";
-    if (event.event_type === "task.cancelled") task.status = "cancelled";
-    if (event.event_type === "task.failed") {
-      task.status = "failed";
-      if (typeof payload.error_message === "string") task.error_message = payload.error_message;
+      entries.push({
+        key: `event-${event.seq}`,
+        kind: payload.source === "user" ? "user" : "agent",
+        message: payload.message,
+      });
     }
   }
-  return Array.from(byId.values())
-    .filter(task => task.retained_task || task.has_event_message)
-    .sort((left, right) => {
-      const timeOrder = String(left.created_at).localeCompare(String(right.created_at));
-      if (timeOrder) return timeOrder;
-      return (left.first_event_seq ?? Number.MAX_SAFE_INTEGER)
-        - (right.first_event_seq ?? Number.MAX_SAFE_INTEGER);
-    });
+  return entries;
 }
 
-function renderChatTurn(task, messages) {
-  const turn = document.createElement("article");
-  turn.className = "chat-turn";
-  turn.dataset.taskId = task.task_id || "";
-  if (task.input_message) appendChatMessage(turn, "chat-user", task.input_message);
-  let inputEchoSkipped = false;
-  let lastAgentText = null;
-  for (const event of messages) {
-    const text = event.payload && event.payload.message;
-    if (typeof text !== "string" || !text) continue;
-    if (event.payload.source === "user") {
-      if (!inputEchoSkipped && text === task.input_message) {
-        inputEchoSkipped = true;
-        continue;
-      }
-      appendChatMessage(turn, "chat-user", text);
-    } else {
-      appendChatMessage(turn, "chat-agent", text);
-      lastAgentText = text;
-    }
+function renderChatEntry(entryData) {
+  const entry = document.createElement("article");
+  entry.className = `chat-entry chat-${entryData.kind}`;
+  entry.dataset.entryId = entryData.key;
+  if (entryData.kind === "agent") {
+    entry.classList.add("md-content");
+    entry.innerHTML = KernRichText.renderMarkdown(entryData.message);
+  } else {
+    entry.textContent = entryData.message;
   }
-  if (task.output_message && task.output_message !== lastAgentText) {
-    appendChatMessage(turn, "chat-agent", task.output_message);
-  }
-  if (task.error_message) appendChatMessage(turn, "chat-error", task.error_message);
-  const meta = document.createElement("div");
-  meta.className = "chat-task-meta";
-  meta.append(document.createTextNode(`${task.status || "unknown"} · ${task.task_id || "task"}`));
-  if (!selectedAppArchived && (task.status === "queued" || task.status === "running")) {
-    const threadId = selectedAppId;
-    const stop = document.createElement("button");
-    stop.className = task.status === "running" ? "danger ghost" : "ghost";
-    stop.textContent = task.status === "running" ? "Stop" : "Cancel";
-    stop.addEventListener("click", async () => {
-      if (!threadId || selectedAppId !== threadId) return;
-      await api(
-        "POST",
-        `/apps/${encodeURIComponent(threadId)}/tasks/${encodeURIComponent(task.task_id)}/${task.status === "running" ? "kill" : "cancel"}`,
-        {},
-      );
-      await refreshSelectedApp(threadId);
-    });
-    meta.append(stop);
-  }
-  turn.append(meta);
-  return turn;
+  return entry;
 }
 
-function appendChatMessage(turn, className, text) {
-  const message = document.createElement("div");
-  message.className = className;
-  message.textContent = text;
-  turn.append(message);
-}
 
 function mergeConversationEvents(events) {
   const bySeq = new Map(conversationEvents.map(event => [event.seq, event]));
-  for (const event of events) bySeq.set(event.seq, event);
+  // This compact conversation renders only lifecycle and text messages.
+  // Tool/activity deltas are intentionally omitted instead of accumulating
+  // an unbounded stream the UI never displays.
+  for (const event of events) {
+    if (event.event_type !== "thread.activity") bySeq.set(event.seq, event);
+  }
   conversationEvents = Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
 }
 
@@ -980,48 +1148,103 @@ function renderHistoryLoader() {
     : "Load earlier messages";
 }
 
-function setSessionOptions() {
-  const runtimeSelect = $("runtime");
-  const modelSelect = $("model");
-  const effortSelect = $("effort");
-  const runtime = establishedSession?.agent_runtime || runtimeSelect.value;
-  runtimeSelect.value = runtime;
-  const models = sessionOptions[runtime] || {};
-  const currentModel = establishedSession?.model || modelSelect.value;
-  const modelValues = Object.keys(models);
-  if (establishedSession && currentModel && !modelValues.includes(currentModel)) modelValues.push(currentModel);
-  modelSelect.replaceChildren(...modelValues.map(value => new Option(value, value)));
-  if (modelValues.includes(currentModel)) modelSelect.value = currentModel;
-  const efforts = [...(models[modelSelect.value] || [])];
-  const currentEffort = establishedSession?.effort || effortSelect.value;
-  if (establishedSession && currentEffort && !efforts.includes(currentEffort)) efforts.push(currentEffort);
-  effortSelect.replaceChildren(...efforts.map(value => new Option(value, value)));
-  if (efforts.includes(currentEffort)) effortSelect.value = currentEffort;
-  const locked = Boolean(establishedSession);
-  const settingRows = [
-    [runtimeSelect, $("runtime-fixed"), runtimeSelect.selectedOptions[0]?.textContent || runtimeSelect.value],
-    [modelSelect, $("model-fixed"), modelSelect.selectedOptions[0]?.textContent || modelSelect.value],
-    [effortSelect, $("effort-fixed"), effortSelect.value ? `${effortSelect.value[0].toUpperCase()}${effortSelect.value.slice(1)}` : ""],
-  ];
-  for (const [select, value, text] of settingRows) {
-    select.disabled = locked;
-    select.hidden = locked;
-    value.hidden = !locked;
-    value.textContent = text;
-  }
-  $("agent-settings").classList.toggle("locked", locked);
-  $("agent-settings-help-text").textContent = locked
-    ? "Agent, Model, and Level are fixed for this app."
-    : "Choose Agent, Model, and Level before the first message. They are fixed for this app afterward.";
-  $("send-message").disabled = (
-    !selectedAppId || messageBusyApps.has(selectedAppId) || selectedAppArchived
-    || (!locked && (!modelSelect.value || !effortSelect.value))
+function sessionConfigurationChanged() {
+  return Boolean(establishedSession) && (
+    $("runtime").value !== establishedSession.agent_runtime
+    || $("model").value !== establishedSession.model
+    || $("effort").value !== establishedSession.effort
   );
 }
 
-function setRuntimeOptions() {
+function setSessionOptions(preferredModel = null, preferredEffort = null) {
+  const runtimeSelect = $("runtime");
+  const modelSelect = $("model");
+  const effortSelect = $("effort");
+  const running = snapshot.status === "running";
+  if (running && establishedSession) {
+    setRuntimeOptions(establishedSession.agent_runtime);
+    preferredModel = establishedSession.model;
+    preferredEffort = establishedSession.effort;
+  }
+  const runtime = runtimeSelect.value;
+  const models = sessionOptions[runtime] || {};
+  const modelValues = Object.keys(models);
+  const preservingRecordedSession = (
+    establishedSession && runtime === establishedSession.agent_runtime
+  );
+  if (
+    preservingRecordedSession
+    && establishedSession.model
+    && !modelValues.includes(establishedSession.model)
+  ) {
+    modelValues.push(establishedSession.model);
+  }
+  const currentModel = preferredModel || modelSelect.value;
+  modelSelect.replaceChildren(...modelValues.map(value => new Option(value, value)));
+  modelSelect.value = modelValues.includes(currentModel)
+    ? currentModel
+    : modelValues[0] || "";
+  const efforts = [...(models[modelSelect.value] || [])];
+  if (
+    preservingRecordedSession
+    && modelSelect.value === establishedSession.model
+    && establishedSession.effort
+    && !efforts.includes(establishedSession.effort)
+  ) {
+    efforts.push(establishedSession.effort);
+  }
+  const currentEffort = preferredEffort || effortSelect.value;
+  effortSelect.replaceChildren(...efforts.map(value => new Option(value, value)));
+  effortSelect.value = efforts.includes(currentEffort)
+    ? currentEffort
+    : efforts[0] || "";
+  const activeSettingsLock = running || messageBusyApps.has(selectedAppId);
+  const settingsLocked = activeSettingsLock || selectedAppArchived;
+  runtimeSelect.disabled = settingsLocked;
+  modelSelect.disabled = settingsLocked || !modelSelect.value;
+  effortSelect.disabled = settingsLocked || !effortSelect.value;
+  $("agent-settings").classList.toggle("active-locked", activeSettingsLock);
+  if (!activeSettingsLock) {
+    $("agent-settings").classList.remove("show-lock-note");
+  }
+  $("agent-session-change-warning").hidden = (
+    settingsLocked
+    || selectedAppArchived
+    || !sessionConfigurationChanged()
+  );
+  const activeBlock = running && establishedSession?.agent_runtime === "hermes";
+  const hasOversizedAttachment = pendingAttachments.some(
+    attachment => attachment.size_bytes > ATTACHMENT_MAX_BYTES,
+  );
+  const attachmentBusy = attachmentActivities.has(selectedAppId);
+  $("composer-running").hidden = !running;
+  $("message").disabled = activeBlock;
+  $("message").placeholder = running
+    ? activeBlock
+      ? "Hermes does not support follow-ups while running"
+      : "Send another message"
+    : "Describe the app or ask about its data";
+  $("send-message").disabled = (
+    !selectedAppId || messageBusyApps.has(selectedAppId) || selectedAppArchived
+    || activeBlock
+    || attachmentBusy
+    || hasOversizedAttachment
+    || !modelSelect.value
+    || !effortSelect.value
+  );
+  $("attach-file").disabled = (
+    !selectedAppId
+    || messageBusyApps.has(selectedAppId)
+    || selectedAppArchived
+    || activeBlock
+    || attachmentBusy
+    || pendingAttachments.length >= ATTACHMENT_LIMIT
+  );
+}
+
+function setRuntimeOptions(preferredRuntime = null) {
   const labels = { codex: "Codex", claude_code: "Claude Code", hermes: "Hermes" };
-  const current = establishedSession?.agent_runtime || $("runtime").value;
+  const current = preferredRuntime || $("runtime").value;
   const runtimes = Object.keys(sessionOptions);
   if (current && !runtimes.includes(current)) runtimes.push(current);
   $("runtime").replaceChildren(...runtimes.map(
@@ -1040,8 +1263,8 @@ function syncAgentSettings(task) {
   if (key === establishedSessionKey) return;
   establishedSession = next;
   establishedSessionKey = key;
-  setRuntimeOptions();
-  setSessionOptions();
+  setRuntimeOptions(next?.agent_runtime || null);
+  setSessionOptions(next?.model || null, next?.effort || null);
 }
 
 function runtimeLabel(value) {
@@ -1082,7 +1305,7 @@ function renderApps() {
     const label = document.createElement("span");
     label.textContent = app.name;
     name.append(label);
-    if ((app.active_tasks || []).length) {
+    if (app.status === "running") {
       const dot = document.createElement("span");
       dot.className = "app-dot";
       name.append(dot);
@@ -1130,9 +1353,11 @@ function stopCapabilityWorker() {
 
 function saveSelectedConversationView() {
   if (!selectedAppId) return;
+  // Refresh insertion order so the oldest unvisited app is evicted first.
+  conversationViewStates.delete(selectedAppId);
   conversationViewStates.set(selectedAppId, {
-    tasks: snapshot.tasks,
     session: snapshot.session,
+    status: snapshot.status,
     events: conversationEvents,
     oldestSeq: conversationEventsOldestSeq,
     newestSeq: conversationEventsNewestSeq,
@@ -1140,12 +1365,15 @@ function saveSelectedConversationView() {
     hasOlder: hasOlderConversationEvents,
     scrollTop: $("chat-history").scrollTop,
   });
+  if (conversationViewStates.size > VIEW_STATE_LIMIT) {
+    conversationViewStates.delete(conversationViewStates.keys().next().value);
+  }
 }
 
 function restoreConversationView(app) {
   const state = conversationViewStates.get(app.thread_id);
   if (!state) {
-    snapshot = { app: null, tasks: [], session: app.session || null };
+    snapshot = { app: null, session: app.session || null, status: app.status || "idle" };
     conversationEvents = [];
     conversationEventsOldestSeq = null;
     conversationEventsNewestSeq = 0;
@@ -1156,8 +1384,8 @@ function restoreConversationView(app) {
   } else {
     snapshot = {
       app: null,
-      tasks: state.tasks,
       session: app.session || state.session || null,
+      status: app.status || state.status || "idle",
     };
     conversationEvents = state.events;
     conversationEventsOldestSeq = state.oldestSeq;
@@ -1173,12 +1401,13 @@ function restoreConversationView(app) {
 
 function clearSelectedApp() {
   saveSelectedConversationView();
+  clearPendingAttachments();
   stopCapabilityWorker();
   selectedRefreshSequence += 1;
   selectedAppId = null;
   selectedAppName = null;
   selectedAppArchived = false;
-  snapshot = { app: null, tasks: [], session: null };
+  snapshot = { app: null, session: null, status: "idle" };
   conversationEvents = [];
   conversationEventsOldestSeq = null;
   conversationEventsNewestSeq = 0;
@@ -1187,7 +1416,7 @@ function clearSelectedApp() {
   loadingOlderConversationEvents = false;
   lastChatScrollTop = 0;
   restoredChatScrollTop = null;
-  renderedChatTurns.clear();
+  renderedChatEntries.clear();
   renderedRevision = -1;
   establishedSession = null;
   establishedSessionKey = "";
@@ -1200,13 +1429,14 @@ function clearSelectedApp() {
 
 async function showApp(app) {
   saveSelectedConversationView();
+  if (selectedAppId !== app.thread_id) clearPendingAttachments();
   stopCapabilityWorker();
   selectedRefreshSequence += 1;
   selectedAppId = app.thread_id;
   selectedAppName = app.name;
   selectedAppArchived = Boolean(app.archived);
   restoreConversationView(app);
-  renderedChatTurns.clear();
+  renderedChatEntries.clear();
   renderedRevision = -1;
   establishedSession = null;
   establishedSessionKey = "";
@@ -1230,11 +1460,11 @@ async function refreshSelectedApp(threadId = selectedAppId) {
   const listedSession = apps.find(app => app.thread_id === threadId)?.session || null;
   const next = {
     app: stateResponse.app,
-    tasks: conversationResponse.tasks || [],
-    // A fixed host session outlives retained task history. The app index reads
-    // it from the host thread summary, so an empty conversation page must not
-    // make an established workspace look configurable again.
+    // A fixed host session outlives retained history. The app index reads it
+    // from the host thread summary, so an empty conversation response must
+    // not make an established workspace look configurable again.
     session: conversationResponse.session || listedSession || snapshot.session || null,
+    status: conversationResponse.status || "idle",
   };
   await refreshConversationEvents(threadId, refreshSequence);
   if (threadId !== selectedAppId || selectedRefreshSequence !== refreshSequence) return;
@@ -1373,6 +1603,30 @@ async function initialize() {
 }
 
 document.addEventListener("click", event => {
+  const linkButton = event.target.closest && event.target.closest(".md-copy-link");
+  if (linkButton) {
+    requestHostCopy(linkButton.dataset.copyHref || "").then(() => {
+      linkButton.textContent = "Copied";
+      setTimeout(() => { linkButton.textContent = linkButton.dataset.copyHref || ""; }, 1200);
+    }).catch(error => showChatStatus(error.message, true));
+    return;
+  }
+  const copyButton = event.target.closest && event.target.closest(".md-copy");
+  if (copyButton) {
+    const code = copyButton.closest(".md-code")?.querySelector("code")?.textContent || "";
+    requestHostCopy(code).then(() => {
+      copyButton.textContent = "Copied";
+      setTimeout(() => { copyButton.textContent = "Copy"; }, 1200);
+    }).catch(error => showChatStatus(error.message, true));
+    return;
+  }
+  const removeAttachmentButton = event.target.closest
+    && event.target.closest("button[data-remove-attachment]");
+  if (removeAttachmentButton) {
+    removeAttachment(removeAttachmentButton.dataset.removeAttachment)
+      .catch(error => showChatStatus(error.message, true));
+    return;
+  }
   const item = event.target.closest && event.target.closest(".app-item");
   if (!item) return;
   const app = apps.find(candidate => candidate.thread_id === item.dataset.appId);
@@ -1398,8 +1652,17 @@ $("sidebar-open").addEventListener("click", () => setSidebarOpen(true));
 $("sidebar-close").addEventListener("click", () => setSidebarOpen(false, true));
 $("sidebar-backdrop").addEventListener("click", () => setSidebarOpen(false, true));
 drawerMedia.addEventListener("change", () => setSidebarOpen(false));
-$("runtime").addEventListener("change", setSessionOptions);
-$("model").addEventListener("change", setSessionOptions);
+$("runtime").addEventListener("change", () => setSessionOptions());
+$("model").addEventListener("change", () => setSessionOptions($("model").value));
+$("effort").addEventListener("change", () => setSessionOptions());
+$("agent-settings").addEventListener("mouseenter", () => {
+  if ($("agent-settings").classList.contains("active-locked")) {
+    $("agent-settings").classList.add("show-lock-note");
+  }
+});
+$("agent-settings").addEventListener("mouseleave", () => {
+  $("agent-settings").classList.remove("show-lock-note");
+});
 $("load-earlier").addEventListener("click", () => {
   loadOlderConversationEvents().catch(error => showChatStatus(error.message, true));
 });
@@ -1411,6 +1674,12 @@ $("chat-history").addEventListener("scroll", () => {
   loadOlderConversationEvents().catch(error => showChatStatus(error.message, true));
 }, { passive: true });
 $("send-message").addEventListener("click", () => sendMessage());
+$("attach-file").addEventListener("click", () => {
+  attachFile().catch(error => showChatStatus(error.message, true));
+});
+$("stop-turn").addEventListener("click", () => {
+  stopRunningTurn().catch(error => showChatStatus(error.message, true));
+});
 $("message").addEventListener("keydown", event => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -8,7 +11,8 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from host.runtime.admin_api import thread_scope
+from host.constants import APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS
+from host.runtime.admin_api import app_api_proxy, thread_scope
 from host.runtime.admin_api import codex_app_server as codex_app_server_module
 from host.runtime.admin_api.codex_app_server import (
     CodexAppServer,
@@ -388,6 +392,34 @@ def parked_server() -> Any:
 
 
 class CodexAppServerTests(unittest.TestCase):
+    def test_steer_ack_deadline_precedes_app_backend_deadline(self) -> None:
+        self.assertLess(
+            codex_app_server_module.CODEX_STEER_TIMEOUT_SECONDS,
+            APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS,
+        )
+        self.assertLess(
+            APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS,
+            app_api_proxy.APP_API_PROXY_TIMEOUT_SECONDS,
+        )
+        repo_root = Path(__file__).resolve().parents[1]
+        frame_sources = (
+            repo_root / "host/apps/agent_chat/ui/agent_chat.js",
+            repo_root / "host/apps/personal_web_app_builder/ui/personal_web_app_builder.js",
+        )
+        for source_path in frame_sources:
+            source = source_path.read_text()
+            match = re.search(
+                r"const AGENT_DELIVERY_TIMEOUT_MS = ([0-9]+) \* 1000;",
+                source,
+            )
+            self.assertIsNotNone(match, source_path)
+            assert match is not None
+            self.assertGreater(
+                int(match.group(1)) * 1000,
+                app_api_proxy.APP_API_PROXY_TIMEOUT_SECONDS * 1000,
+            )
+            self.assertGreaterEqual(source.count("AGENT_DELIVERY_TIMEOUT_MS"), 3)
+
     def setUp(self) -> None:
         # The live-validation verdict is a process-global memo; isolate tests.
         codex_app_server_module.clear_live_validation_failure()
@@ -449,6 +481,48 @@ class CodexAppServerTests(unittest.TestCase):
         self.assertEqual(
             run.call_args.args[0],
             [*thread_scope.STOP_COMMAND, "stage-1-smoke-kill-codex"],
+        )
+
+    def test_close_stops_the_scope_when_the_app_server_outlives_stdin_eof(self) -> None:
+        # The production launcher runs as root, so the unprivileged kill fails
+        # with EPERM and a process that ignored stdin EOF is still alive here.
+        # close() must not touch its pipes: the reader threads hold each
+        # buffer's lock across their blocking read, so closing from this thread
+        # would block until that process next writes — never, for a silent
+        # stderr — and a close that never returns leaves the orchestrator's
+        # thread fence up for good and never reaches the real kill below.
+        script = "import sys, time\nfor line in sys.stdin:\n    pass\ntime.sleep(120)\n"
+        server = codex_app_server_module.CodexAppServer(
+            command=codex_app_server_module.DEFAULT_COMMAND, thread_id="stage-1-outlives-eof"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        server._proc = proc
+        assert proc.stdout is not None and proc.stderr is not None
+        threading.Thread(target=server._read_stdout, args=(proc.stdout,), daemon=True).start()
+        threading.Thread(target=server._read_stderr, args=(proc.stderr,), daemon=True).start()
+
+        returned = threading.Event()
+        with patch.object(thread_scope.subprocess, "run") as run, patch.object(
+            proc, "kill", side_effect=PermissionError(1, "Operation not permitted")
+        ):
+            closer = threading.Thread(
+                target=lambda: (server.close(), returned.set()), daemon=True
+            )
+            closer.start()
+            self.assertTrue(returned.wait(timeout=30), "close() blocked on the app-server's pipes")
+            closer.join(timeout=5)
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            [*thread_scope.STOP_COMMAND, "stage-1-outlives-eof"],
         )
 
     def test_close_does_not_stop_a_scope_for_a_test_command_or_threadless_turn(self) -> None:
@@ -953,9 +1027,7 @@ class CodexAppServerTests(unittest.TestCase):
                 None,
                 "gpt-5.6-sol",
                 "ultra",
-                lambda: [],
                 messages.append,
-                lambda _m: None,
             )
 
         self.assertEqual(thread_id, "thread_1")
@@ -988,14 +1060,27 @@ for line in sys.stdin:
         send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
         time.sleep(30)
 """
-        server = CodexAppServer([sys.executable, "-u", "-c", script])
+        ready = threading.Event()
+        accepted_sessions: list[str] = []
+        server = CodexAppServer(
+            [sys.executable, "-u", "-c", script],
+            on_ready=lambda: (ready.set() or True),
+            on_session_id=accepted_sessions.append,
+        )
         server.start()
         self.assertIsNone(server.last_known_session_id)
         errors: list[BaseException] = []
 
         def run_it() -> None:
             try:
-                run_turn(server, "do the task", None, "gpt-5.6-sol", "ultra", lambda: [], lambda _m: None, lambda _m: None)
+                run_turn(
+                    server,
+                    "do the task",
+                    None,
+                    "gpt-5.6-sol",
+                    "ultra",
+                    lambda _m: None,
+                )
             except BaseException as exc:  # noqa: BLE001 - captured for the assertion below
                 errors.append(exc)
 
@@ -1005,6 +1090,8 @@ for line in sys.stdin:
         while server.last_known_session_id is None and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertEqual(server.last_known_session_id, "thread_1")
+        self.assertTrue(ready.is_set())
+        self.assertEqual(accepted_sessions, ["thread_1"])
         server.close()  # the kill path: tear the process down mid-turn
         worker.join(timeout=10)
         self.assertEqual(len(errors), 1)
@@ -1185,9 +1272,7 @@ for line in sys.stdin:
                 None,
                 "gpt-5.6-sol",
                 "high",
-                lambda: [],
                 events.append,
-                lambda _message: None,
             )
 
         activity = [event for event in events if isinstance(event, dict)]
@@ -1212,9 +1297,7 @@ for line in sys.stdin:
                 None,
                 "gpt-5.6-sol",
                 "high",
-                lambda: [],
                 events.append,
-                lambda _message: None,
             )
 
         activity = [event for event in events if isinstance(event, dict)]
@@ -1263,15 +1346,51 @@ for line in sys.stdin:
                 "thread_existing",
                 "gpt-5.6-sol",
                 "ultra",
-                lambda: [],
-                lambda _m: None,
                 lambda _m: None,
             )
 
         self.assertEqual(thread_id, "thread_existing")
         self.assertEqual(output, "Final answer")
 
-    def test_run_turn_returns_unflushed_deltas_on_completion(self) -> None:
+    def test_a_turn_that_never_started_does_not_publish_its_empty_thread(self) -> None:
+        # A resume that falls back to thread/start holds a brand new, empty
+        # conversation. The orchestrator persists last_known_session_id when a
+        # turn dies, so publishing that id before turn/start is accepted would
+        # let a rate limit replace the thread's real history with an empty one.
+        calls: list[str] = []
+        accepted_sessions: list[str] = []
+
+        class ResumeFallbackServer:
+            app_instructions = None
+            last_known_session_id: str | None = None
+            _on_ready = None
+            _on_session_id = accepted_sessions.append
+
+            def call(self, method: str, params: dict[str, Any], timeout: float = 60.0) -> dict[str, Any]:
+                calls.append(method)
+                if method == "thread/start":
+                    return {"thread": {"id": "thread_empty"}}
+                raise codex_app_server_module.CodexAppServerError(
+                    "thread not found" if method == "thread/resume" else "usage limit reached"
+                )
+
+        server = ResumeFallbackServer()
+        with self.assertRaises(codex_app_server_module.CodexAppServerError):
+            run_turn(
+                server,  # type: ignore[arg-type]
+                "continue",
+                "thread_with_history",
+                "gpt-5.6-sol",
+                "high",
+                lambda _m: None,
+            )
+
+        self.assertEqual(calls, ["thread/resume", "thread/start", "turn/start"])
+        self.assertIsNone(server.last_known_session_id)
+        self.assertEqual(accepted_sessions, [])
+
+    def test_run_turn_emits_unflushed_deltas_on_completion(self) -> None:
+        messages: list[str] = []
         with CodexAppServer([sys.executable, "-u", "-c", FAKE_DELTA_ONLY_SERVER]) as server:
             _, output = run_turn(
                 server,
@@ -1279,36 +1398,26 @@ for line in sys.stdin:
                 None,
                 "gpt-5.6-terra",
                 "high",
-                lambda: [],
-                lambda _m: None,
-                lambda _m: None,
+                messages.append,
             )
+        self.assertEqual(messages, ["partial answer"])
         self.assertEqual(output, "partial answer")
 
-    def test_run_turn_retries_a_steer_that_raced_turn_startup(self) -> None:
-        # "no active turn to steer" right after turn/start is transient; the
-        # steer stays in the pending queue and is retried on the next loop
-        # pass, not failed — and it is consumed exactly once, on delivery.
-        pending = ["redirect"]
+    def test_synchronous_steer_surfaces_a_startup_race_for_caller_retry(self) -> None:
         with CodexAppServer([sys.executable, "-u", "-c", FAKE_STEER_RETRY_SERVER]) as server:
-            _, output = run_turn(
-                server, "do the task", None, "gpt-5.6-terra", "high",
-                lambda: list(pending), lambda _m: None, pending.remove,
-            )
-        self.assertEqual(output, "STEERED")
-        self.assertEqual(pending, [])
+            server.set_active_turn("thread_1", "turn_1")
+            with self.assertRaisesRegex(CodexAppServerError, "no active turn"):
+                server.steer("redirect")
+            # No host mailbox retries automatically. The caller's explicit
+            # retry receives the provider acknowledgement.
+            server.steer("redirect")
 
-    def test_run_turn_surfaces_a_non_transient_steer_error(self) -> None:
-        pending = ["redirect"]
+    def test_synchronous_steer_surfaces_a_provider_rejection(self) -> None:
         with CodexAppServer([sys.executable, "-u", "-c", FAKE_STEER_REJECT_SERVER]) as server:
+            server.set_active_turn("thread_1", "turn_1")
             with self.assertRaises(CodexAppServerError) as error:
-                run_turn(
-                    server, "do the task", None, "gpt-5.6-terra", "high",
-                    lambda: list(pending), lambda _m: None, pending.remove,
-                )
+                server.steer("redirect")
         self.assertIn("malformed input", str(error.exception))
-        # The rejected steer was never delivered, so it was never consumed.
-        self.assertEqual(pending, ["redirect"])
 
 
 if __name__ == "__main__":

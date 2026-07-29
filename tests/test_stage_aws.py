@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from http import HTTPStatus
 import os
 from pathlib import Path
@@ -13,10 +14,12 @@ from unittest.mock import patch
 
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
 from tests.stage.stage_tool_checks import _result_shape, _safe_arguments
-from tests.stage.stage_aws import StageAwsSmoke
+from tests.stage.stage_aws import STAGE_SUITE_CHOICES, StageAwsSmoke
+from tests.stage.stage_integration_checks import ALL_RUNTIMES_SUITE
 from tests.stage.stage_support import (
     CHEAP_EFFORT,
     CHEAP_MODELS,
+    CHECK_LABELS,
     CredentialUnavailable,
     STAGE_BEDROCK_ENV,
     STAGE_GITHUB_APP_ENV,
@@ -25,6 +28,7 @@ from tests.stage.stage_support import (
     agent_catalog_tool_ids as _agent_catalog_tool_ids,
     bedrock_credential_from_env as _bedrock_credential_from_env,
     github_app_config_from_env as _github_app_config_from_env,
+    integration_label as _integration_label,
     record_check as _record_check,
     selected_integrations as _selected_integrations,
     write_action_summary as _write_action_summary,
@@ -32,6 +36,42 @@ from tests.stage.stage_support import (
 
 
 class StageOrchestrationTests(unittest.TestCase):
+    def test_app_stage_wait_uses_flat_events_and_durable_status(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        statuses = iter(("running", "idle"))
+
+        def fake_api(method: str, path: str, body: dict | None = None) -> dict:
+            self.assertEqual(method, "GET")
+            if path == "/app/status":
+                return {
+                    "threads": [
+                        {"thread_id": "thread-1", "status": next(statuses)}
+                    ]
+                }
+            if path == "/app/events":
+                return {
+                    "events": [
+                        {
+                            "event_type": "thread.message",
+                            "payload": {"source": "agent", "message": "done"},
+                        }
+                    ]
+                }
+            raise AssertionError((method, path, body))
+
+        with (
+            patch.object(stage, "_api", side_effect=fake_api),
+            patch("tests.stage.stage_aws.time.sleep"),
+        ):
+            events = stage._wait_for_app_thread_idle(
+                status_path="/app/status",
+                events_path="/app/events",
+                thread_id="thread-1",
+                list_key="threads",
+                timeout=5,
+            )
+        self.assertEqual(events[0]["event_type"], "thread.message")
+
     def test_stage_harness_import_does_not_require_playwright(self) -> None:
         script = """
 import builtins
@@ -60,6 +100,52 @@ import tests.stage.stage_aws
         self.assertEqual(selected[:4], ("codex", "claude", "hermes", "github"))
         self.assertEqual(selected[4:], TOOL_SUITES)
         self.assertEqual(set(TOOL_SUITES), set(BUNDLED_TOOLS))
+
+    def test_all_runtimes_suite_is_offered_and_selects_the_three_runtimes(self) -> None:
+        self.assertIn(ALL_RUNTIMES_SUITE, STAGE_SUITE_CHOICES)
+        self.assertEqual(STAGE_SUITE_CHOICES[0], "all")
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        stage.total = 0
+        stage.passed = 0
+        stage.bedrock_secret_error = None
+        with patch.object(
+            stage,
+            "_wait_for_runtime_status",
+            side_effect=["active", "active", "active"],
+        ) as wait:
+            availability = stage.integration_availability(ALL_RUNTIMES_SUITE)
+        self.assertEqual(list(availability), ["codex", "claude", "hermes"])
+        self.assertTrue(all(reason is None for reason in availability.values()))
+        self.assertEqual(
+            [call.kwargs["runtime"] for call in wait.call_args_list],
+            ["codex", "claude_code", "hermes"],
+        )
+
+    def test_all_runtimes_bedrock_autoconfiguration_targets_hermes(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        stage.total = 0
+        stage.passed = 0
+        stage.stage_bedrock_credential = ("AKIASTAGE", "stage-secret")
+        stage.bedrock_secret_error = None
+
+        def fake_api(method: str, path: str, body: dict | None = None) -> dict:
+            if (method, path) == ("POST", "/v1/agent-runtime/bedrock-credentials"):
+                return {"status": "accepted"}
+            if (method, path) == ("GET", "/v1/network/policy"):
+                return {"network_controls": {"network_integrations": {}}}
+            if (method, path) == ("PUT", "/v1/network/policy"):
+                return {}
+            raise AssertionError((method, path, body))
+
+        with (
+            patch.object(stage, "_api", side_effect=fake_api),
+            patch.object(stage, "_wait_for_runtime_status", return_value="active") as wait,
+        ):
+            stage.autoconfigure_bedrock(ALL_RUNTIMES_SUITE)
+        self.assertEqual(
+            [call.kwargs["runtime"] for call in wait.call_args_list],
+            ["hermes"],
+        )
 
     def test_agent_catalog_parser_requires_unique_string_tool_ids(self) -> None:
         output = '```json\n{"tools":["twitter","gmail"]}\n```'
@@ -347,7 +433,7 @@ import tests.stage.stage_aws
             )
         )
 
-    def test_stage_task_body_always_defaults_to_the_cheapest_model_and_effort(self) -> None:
+    def test_stage_message_body_always_defaults_to_the_cheapest_model_and_effort(self) -> None:
         self.assertEqual(
             CHEAP_MODELS,
             {
@@ -360,9 +446,9 @@ import tests.stage.stage_aws
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
         stage.thread_prefix = "stage-test-"
         stage.agent_runtime = "codex"
-        codex = stage.task_body("test", "codex")
-        claude = stage.task_body("test", "claude", runtime="claude_code")
-        hermes = stage.task_body("test", "hermes", runtime="hermes")
+        codex = stage.message_body("test")
+        claude = stage.message_body("test", runtime="claude_code")
+        hermes = stage.message_body("test", runtime="hermes")
         self.assertEqual((codex["model"], codex["effort"]), (CHEAP_MODELS["codex"], CHEAP_EFFORT))
         self.assertEqual(
             (claude["model"], claude["effort"]),
@@ -372,24 +458,47 @@ import tests.stage.stage_aws
             (hermes["model"], hermes["effort"]),
             (CHEAP_MODELS["hermes"], CHEAP_EFFORT),
         )
+        # The message body carries no thread id; the per-run prefix lands on
+        # the thread route through api_thread_id.
+        self.assertEqual(codex["message"], "test")
+        self.assertNotIn("thread_id", codex)
+        self.assertEqual(stage.api_thread_id("codex"), "stage-test-codex")
 
-    def test_hermes_stage_reuses_kill_task_to_prove_nested_steering_denial(self) -> None:
+    def test_stage_session_switch_prefers_an_available_provider_then_an_alternate_model(
+        self,
+    ) -> None:
+        self.assertEqual(
+            StageAwsSmoke._replacement_session_config(
+                "codex",
+                ("codex", "claude_code"),
+            ),
+            ("claude_code", CHEAP_MODELS["claude_code"], CHEAP_EFFORT),
+        )
+
+        runtime, model, effort = StageAwsSmoke._replacement_session_config(
+            "codex",
+            ("codex",),
+        )
+        self.assertEqual(runtime, "codex")
+        self.assertNotEqual(model, CHEAP_MODELS["codex"])
+        self.assertEqual(effort, CHEAP_EFFORT)
+
+    def test_hermes_stage_reuses_stopped_turn_to_prove_nested_steering_denial(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
         stage.total = 0
         stage.passed = 0
         stage.agent_runtime = "hermes"
         expected_error = (
-            "Hermes tasks do not support steering; create a new task on the same thread_id"
+            "Hermes cannot accept another message while running; wait for it to finish"
         )
         with (
-            patch.object(stage, "task_body", return_value={"input_message": "slow"}),
-            patch.object(stage, "follow_up_body", return_value={"input_message": "follow"}),
+            patch.object(stage, "_latest_thread_event_seq", return_value=0),
             patch.object(
                 stage,
-                "_api",
-                side_effect=[{"task_id": "task_1"}, {"task_id": "task_2"}],
+                "send_message",
+                return_value={"status": "accepted", "thread": {"thread_id": "smoke-kill-hermes"}},
             ),
-            patch.object(stage, "_wait_for_task_status", return_value={"status": "running"}),
+            patch.object(stage, "_wait_for_turn_activity"),
             patch.object(
                 stage,
                 "_api_status",
@@ -400,21 +509,58 @@ import tests.stage.stage_aws
             ) as api_status,
             patch.object(
                 stage,
-                "_wait_for_task",
+                "_wait_for_turn",
                 side_effect=[
-                    {"status": "cancelled"},
-                    {"status": "completed", "output_message": "SURVIVED"},
+                    {"status": "cancelled", "output_message": None, "error_message": None},
+                    {"status": "completed", "output_message": "SURVIVED", "error_message": None},
                 ],
             ),
+            patch.object(stage, "send_follow_up", return_value={"status": "accepted"}),
             patch.object(stage, "_ssh_code", return_value="not-found") as ssh_code,
         ):
             stage.check_agent_kill_and_thread_survival(expect_steering_denied=True)
 
-        self.assertEqual(api_status.call_args_list[0].args[1], "/v1/tasks/task_1/steer")
-        self.assertEqual(api_status.call_args_list[1].args[1], "/v1/tasks/task_1/kill")
-        # The kill check asserts the thread's scope unit is gone from systemd.
+        self.assertEqual(
+            api_status.call_args_list[0].args[1], "/v1/threads/smoke-kill-hermes/messages"
+        )
+        self.assertEqual(
+            api_status.call_args_list[1].args[1], "/v1/threads/smoke-kill-hermes/stop"
+        )
+        # The stop check asserts the thread's scope unit is gone from systemd.
         self.assertIn("kern-agent-thread-smoke-kill-hermes.scope", ssh_code.call_args.args[0])
         self.assertEqual((stage.passed, stage.total), (1, 1))
+
+    def test_every_recorded_check_name_has_an_explicit_label(self) -> None:
+        """A check name with no label used to raise KeyError out of record_check.
+
+        The label is resolved before record_check's try block, so an unlabelled
+        name aborted the entire stage run instead of failing one integration.
+        """
+        source = Path(__file__).resolve().parents[1] / "tests" / "stage" / "stage_aws.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        recorded = {
+            call.args[1].value
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "_record_check"
+            and len(call.args) > 1
+            and isinstance(call.args[1], ast.Constant)
+            and isinstance(call.args[1].value, str)
+        }
+        self.assertIn("thread_admin_api", recorded)
+        self.assertIn("thread_session_switch", recorded)
+        self.assertIn("stable_apps", recorded)
+        unlabelled = sorted(
+            name for name in recorded if name not in CHECK_LABELS and name not in BUNDLED_TOOLS
+        )
+        self.assertEqual(unlabelled, [], f"stage checks missing a display label: {unlabelled}")
+
+    def test_unknown_check_name_is_labelled_instead_of_raising(self) -> None:
+        self.assertEqual(_integration_label("some_future_check"), "Some future check")
+        report = StageReport("all")
+        self.assertTrue(_record_check(report, "some_future_check", lambda: None, "ok"))
+        self.assertIn("| Some future check | available | passed | ok |", report.markdown())
 
     def test_report_distinguishes_failure_from_unavailable_skip(self) -> None:
         report = StageReport("all")

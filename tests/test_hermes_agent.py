@@ -30,11 +30,9 @@ class HermesSessionTests(unittest.TestCase):
         script: str,
         *,
         session_id: str | None = None,
-        pending: list[str] | None = None,
         app_instructions: str | None = None,
         input_message: str = "initial",
     ) -> tuple[str, str, list[str], list[str]]:
-        pending = pending if pending is not None else []
         delivered: list[str] = []
         streamed: list[str] = []
         original_cwd = hermes_agent.AGENT_CWD
@@ -53,9 +51,7 @@ class HermesSessionTests(unittest.TestCase):
                         session_id,
                         "deepseek.v3.2",
                         "high",
-                        lambda: [pending.pop(0)] if pending else [],
                         streamed.append,
-                        delivered.append,
                     )
         finally:
             hermes_agent.AGENT_CWD = original_cwd
@@ -72,18 +68,41 @@ class HermesSessionTests(unittest.TestCase):
         self.assertNotIn("--resume", payload["args"])
         self.assertEqual(len(streamed), 1)
 
+    def test_ready_and_session_callbacks_mark_acceptance_and_resumability(self) -> None:
+        ready = threading.Event()
+        accepted_sessions: list[str] = []
+        original_cwd = hermes_agent.AGENT_CWD
+        from host.runtime.core import state
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                hermes_agent.AGENT_CWD = tmp
+                server = hermes_agent.HermesSession(
+                    [sys.executable, "-u", "-c", CHAT_SCRIPT],
+                    on_ready=lambda: (ready.set() or True),
+                    on_session_id=accepted_sessions.append,
+                )
+                with patch.object(state, "read_bedrock_region", return_value="us-east-1"):
+                    session_id, _output = hermes_agent.run_turn(
+                        server,
+                        "initial",
+                        None,
+                        "deepseek.v3.2",
+                        "high",
+                        lambda _message: None,
+                    )
+        finally:
+            hermes_agent.AGENT_CWD = original_cwd
+
+        self.assertTrue(ready.is_set())
+        self.assertEqual(session_id, "hermes-session-1")
+        self.assertEqual(accepted_sessions, ["hermes-session-1"])
+
     def test_run_resumes_the_stored_session(self) -> None:
         session_id, output, _delivered, _streamed = self.run_turn(CHAT_SCRIPT, session_id="hermes-session-7")
         self.assertEqual(session_id, "hermes-session-7")
         payload = json.loads(output)
         self.assertEqual(payload["args"][payload["args"].index("--resume") + 1], "hermes-session-7")
-
-    def test_run_does_not_poll_or_deliver_steers(self) -> None:
-        _sid, output, delivered, streamed = self.run_turn(CHAT_SCRIPT, pending=["steer one"])
-        self.assertEqual(delivered, [])
-        self.assertEqual(len(streamed), 1)
-        payload = json.loads(output)
-        self.assertEqual(payload["prompt"], "initial")
 
     def test_app_instructions_prefix_only_the_new_session_prompt(self) -> None:
         _sid, output, _delivered, _streamed = self.run_turn(CHAT_SCRIPT, app_instructions="Be the app.")
@@ -120,7 +139,7 @@ class HermesSessionTests(unittest.TestCase):
             with self.assertRaisesRegex(hermes_agent.HermesAgentError, "no configured region"):
                 server.run(
                     "go", None, "deepseek.v3.2", "high",
-                    lambda: [], lambda _m: None, lambda _m: None,
+                    lambda _m: None,
                 )
 
     def test_killed_turn_still_exposes_the_last_known_session_id(self) -> None:
@@ -155,8 +174,6 @@ time.sleep(30)
                                 None,
                                 "deepseek.v3.2",
                                 "high",
-                                lambda: [],
-                                lambda _m: None,
                                 lambda _m: None,
                             )
                     except BaseException as exc:  # noqa: BLE001 - captured for the assertion below

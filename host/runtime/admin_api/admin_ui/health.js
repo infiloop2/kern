@@ -182,7 +182,7 @@ function applyOverviewExpanded() {
 
 function runtimeRunningCount() {
   return latestRuntimes.reduce(
-    (total, runtime) => total + (Array.isArray(runtime.active_task_ids) ? runtime.active_task_ids.length : 0),
+    (total, runtime) => total + (Array.isArray(runtime.active_thread_ids) ? runtime.active_thread_ids.length : 0),
     0,
   );
 }
@@ -204,7 +204,7 @@ function renderRuntimeOverview() {
   const running = runtimeRunningCount();
   const summaryText = running ? `${running} running` : "All idle";
   const summaryLabel = running
-    ? `${running} agent task${running === 1 ? "" : "s"} running`
+    ? `${running} agent turn${running === 1 ? "" : "s"} running`
     : "All agent runtimes idle";
   setHtml(container, `
     <button class="runtime-overview-toggle" data-action="toggle-runtime-overview" aria-expanded="${overviewExpanded}" aria-controls="runtime-overview-panel" aria-label="Agent usage: ${esc(summaryLabel)}. Show per-runtime status and usage">
@@ -223,14 +223,14 @@ function renderRuntimeOverview() {
 }
 
 // The shared top-bar box for one runtime: a status dot, the runtime label and
-// its live process status, a usage readout on the right, and a running-task
+// its live process status, a usage readout on the right, and a running-turn
 // corner badge. `usageHtml` and `usageSummaryText` are the only things that
 // differ between a subscription runtime (quota rings) and a Bedrock runtime (a
 // month-to-date cost estimate).
 function runtimeSummaryCard(runtime, usageHtml, usageSummaryText, extraClass) {
   const meta = RUNTIME_PROVIDERS[runtime];
   const record = latestRuntimes.find(entry => entry.type === runtime) || { status: "loading" };
-  const running = Array.isArray(record.active_task_ids) ? record.active_task_ids.length : 0;
+  const running = Array.isArray(record.active_thread_ids) ? record.active_thread_ids.length : 0;
   const statusText = String(record.status || "loading").replaceAll("_", " ");
   const runningLabel = running ? `; ${running} running` : "";
   // The running count is a corner badge rather than inline text so a long
@@ -369,7 +369,7 @@ function usageRing(label, window) {
   const value = window.usedPercent;
   const available = value !== undefined && value !== null && Number.isFinite(Number(value));
   const percent = available ? Number(clampPercent(value)) : 0;
-  const display = available ? `${Math.round(percent)}%` : "--";
+  const display = available ? `${Math.round(percent)}` : "--";
   const countdown = resetCountdown(window.resetsAt);
   const resetDescription = countdown === "due" ? "; reset due" : countdown ? `; resets in ${countdown}` : "";
   const title = available ? `${label}: ${percent}% used${resetDescription}` : `${label}: usage unavailable`;
@@ -378,10 +378,10 @@ function usageRing(label, window) {
   // (and with it the top bar) keeps a constant height.
   return `
     <span class="usage-ring${available ? thresholdClass : " unavailable"}">
-      <svg viewBox="0 0 36 36" role="img" aria-label="${esc(title)}">
-        <circle class="usage-ring-track" cx="18" cy="18" r="15.5" pathLength="100"></circle>
-        <circle class="usage-ring-value" cx="18" cy="18" r="15.5" pathLength="100" stroke-dasharray="${percent} 100"></circle>
-        <text x="18" y="18">${esc(display)}</text>
+      <svg viewBox="0 0 20 20" role="img" aria-label="${esc(title)}">
+        <circle class="usage-ring-track" cx="10" cy="10" r="8.5" pathLength="100"></circle>
+        <circle class="usage-ring-value" cx="10" cy="10" r="8.5" pathLength="100" stroke-dasharray="${percent} 100"></circle>
+        <text x="10" y="10">${esc(display)}</text>
       </svg>
       <span class="usage-window">${esc(label)}${countdown ? ` · ${countdown}` : ""}</span>
     </span>`;

@@ -35,32 +35,19 @@ from host.runtime.core.state import (
 )
 
 
-def make_task(number: int, status: str = "queued", thread_id: str = "t1") -> dict[str, object]:
-    return {
-        "task_id": f"task_{number}",
-        "status": status,
-        "agent_runtime": "codex",
-        "model": "gpt-5.6-terra",
-        "effort": "high",
-        "thread_id": thread_id,
-        "input_message": f"task {number}",
-        "steer_messages": [],
-        "created_at": "2026-06-08T00:00:00Z",
-        "updated_at": f"2026-06-08T00:00:{number % 60:02d}Z",
-    }
-
-
-def insert_task(cur: Any, task: dict[str, object]) -> None:
+def seed_thread(
+    cur: Any,
+    thread_id: str,
+    *,
+    runtime: str = "codex",
+    provider_session_id: str | None = None,
+    last_used_at: str | None = "2026-06-08T00:00:00Z",
+    model: str = "gpt-5.6-terra",
+    effort: str = "high",
+) -> None:
     state.save_thread_session(
-        cur,
-        str(task["agent_runtime"]),
-        str(task["thread_id"]),
-        None,
-        str(task["updated_at"]),
-        str(task["model"]),
-        str(task["effort"]),
+        cur, runtime, thread_id, provider_session_id, last_used_at, model, effort
     )
-    state.insert_task(cur, task)
 
 
 class StateStorageTests(unittest.TestCase):
@@ -74,26 +61,23 @@ class StateStorageTests(unittest.TestCase):
 
     def test_mutation_persists_on_normal_exit_and_rolls_back_on_exception(self) -> None:
         with state.mutation() as cur:
-            insert_task(cur, make_task(1))
+            seed_thread(cur, "t1")
         with self.assertRaises(RuntimeError):
             with state.mutation() as cur:
-                task = state.get_task("task_1", cur)
-                assert task is not None
-                task["status"] = "running"
-                state.save_task(cur, task)
-                state.append_agent_event(cur, "task.started", "task_1", {})
+                seed_thread(cur, "t2")
+                state.append_agent_event(cur, "thread.message", "t2", {"message": "x", "source": "user"})
                 raise RuntimeError("abort the transaction")
-        # The status write and the event both rolled back together.
-        task = state.get_task("task_1")
-        assert task is not None
-        self.assertEqual(task["status"], "queued")
+        # The session write and the event both rolled back together, while the
+        # committed thread survives.
+        self.assertIsNone(state.thread_session_config("t2"))
+        self.assertIsNotNone(state.thread_session_config("t1"))
         self.assertEqual(read_agent_events(), [])
 
     def test_activity_event_escapes_nul_before_jsonb_persistence(self) -> None:
         with state.mutation() as cur:
             state.append_agent_event(
                 cur,
-                "task.activity",
+                "thread.activity",
                 None,
                 {
                     "activity": {
@@ -111,22 +95,67 @@ class StateStorageTests(unittest.TestCase):
             r"before\0after",
         )
 
-    def test_task_rows_round_trip(self) -> None:
+    def test_thread_summaries_report_the_canonical_session_rows(self) -> None:
         with state.mutation() as cur:
-            task = make_task(1)
-            task["steer_messages"] = ["steer me"]
-            insert_task(cur, task)
-        loaded = state.get_task("task_1")
-        assert loaded is not None
-        self.assertEqual(loaded["input_message"], "task 1")
-        self.assertEqual(loaded["steer_messages"], ["steer me"])
-        self.assertIsNone(loaded["output_message"])
-        self.assertEqual([t["task_id"] for t in state.active_tasks()], ["task_1"])
+            seed_thread(cur, "t1", last_used_at="2026-06-08T00:00:01Z")
+            seed_thread(
+                cur,
+                "t2",
+                runtime="claude_code",
+                model="claude-fable-5",
+                effort="max",
+                provider_session_id="sess-2",
+                last_used_at=None,
+            )
+        summaries = {
+            row["thread_id"]: row
+            for row in state.page_thread_summaries(None, 100)
+        }
+        self.assertEqual(set(summaries), {"t1", "t2"})
+        # Exactly the session configuration: no provider session id, no status
+        # (live status is in-process orchestrator state), no counts.
+        self.assertEqual(
+            summaries["t1"],
+            {
+                "thread_id": "t1",
+                "agent_runtime": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "high",
+                "last_used_at": "2026-06-08T00:00:01Z",
+                "status": "idle",
+            },
+        )
+        # A never-used thread reads as an empty last_used_at, not None.
+        self.assertEqual(summaries["t2"]["last_used_at"], "")
+        self.assertEqual(summaries["t2"]["agent_runtime"], "claude_code")
+
+    def test_thread_summary_pages_use_stable_sort_key_and_prefix_scope(self) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "agent_chat__one", last_used_at="2026-06-08T00:00:02Z")
+            seed_thread(cur, "agent_chat__two", last_used_at="2026-06-08T00:00:02Z")
+            seed_thread(cur, "other_app__newer", last_used_at="2026-06-08T00:00:03Z")
+
+        first = state.page_thread_summaries(
+            None,
+            1,
+            thread_prefix="agent_chat__",
+        )
+        self.assertEqual([row["thread_id"] for row in first], ["agent_chat__two"])
+        cursor = (
+            first[-1]["last_used_at"],
+            first[-1]["thread_id"],
+        )
+        second = state.page_thread_summaries(
+            cursor,
+            1,
+            thread_prefix="agent_chat__",
+        )
+        self.assertEqual([row["thread_id"] for row in second], ["agent_chat__one"])
 
     def test_every_session_option_satisfies_the_thread_constraint(self) -> None:
         # The thread_sessions_options_check constraint must track the
         # operator-facing option matrix exactly: a combination the API offers
-        # that the constraint rejects fails the first task on that thread.
+        # that the constraint rejects fails the first turn on that thread.
         from host.session_options import SESSION_OPTIONS
 
         with state.mutation() as cur:
@@ -166,24 +195,136 @@ class StateStorageTests(unittest.TestCase):
                 "high",
             )
 
+        # The cursor argument is optional and last: helpers inside a mutation
+        # pass theirs, plain readers omit it.
         with state.mutation() as cur:
-            config = state.thread_session_config(cur, "fixed-thread")
+            config = state.thread_session_config("fixed-thread", cur)
         assert config is not None
         self.assertEqual((config["model"], config["effort"]), ("gpt-5.6-terra", "high"))
+        self.assertEqual(state.thread_session_config("fixed-thread"), config)
 
-    def test_task_number_allocation_is_dense_and_rolls_back(self) -> None:
+    def test_idle_thread_session_can_rotate_and_running_thread_cannot(self) -> None:
         with state.mutation() as cur:
-            self.assertEqual(state.allocate_task_number(cur), 1)
-        with self.assertRaises(RuntimeError):
-            with state.mutation() as cur:
-                self.assertEqual(state.allocate_task_number(cur), 2)
-                raise RuntimeError("abort: the number must be reusable")
+            seed_thread(cur, "chat", provider_session_id="codex-session")
+            state.rotate_thread_session(
+                cur,
+                "chat",
+                "claude_code",
+                "claude-opus-5",
+                "max",
+                "2026-06-08T00:00:09Z",
+            )
+
+        config = state.thread_session_config("chat")
+        assert config is not None
+        self.assertEqual(config["agent_runtime"], "claude_code")
+        self.assertEqual(config["model"], "claude-opus-5")
+        self.assertEqual(config["effort"], "max")
+        self.assertIsNone(config["provider_session_id"])
+        self.assertEqual(config["last_used_at"], "2026-06-08T00:00:09Z")
+
         with state.mutation() as cur:
-            self.assertEqual(state.allocate_task_number(cur), 2)
+            state.start_thread_run(cur, "chat")
+        with self.assertRaisesRegex(ValueError, "running or does not exist"), state.mutation() as cur:
+            state.rotate_thread_session(
+                cur,
+                "chat",
+                "codex",
+                "gpt-5.6-terra",
+                "high",
+                "2026-06-08T00:00:10Z",
+            )
+        self.assertEqual(state.thread_session_config("chat")["agent_runtime"], "claude_code")
+
+    def test_recent_thread_handoff_events_include_expanded_activity_in_a_bounded_suffix(
+        self,
+    ) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "chat")
+            state.append_agent_event(
+                cur, "thread.message", "chat", {"message": "oldest", "source": "user"}
+            )
+            state.append_agent_event(
+                cur,
+                "thread.activity",
+                "chat",
+                {
+                    "activity": {
+                        "provider": "codex",
+                        "activity_id": "command-1",
+                        "kind": "command",
+                        "phase": "completed",
+                        "title": "Inspect files",
+                        "detail": "d" * 250,
+                        "output": "full output",
+                    }
+                },
+            )
+            state.append_agent_event(
+                cur, "thread.message", "chat", {"message": "newest", "source": "agent"}
+            )
+            events = state.recent_thread_handoff_events(
+                cur,
+                "chat",
+                character_limit=200,
+            )
+
+        self.assertEqual(
+            [event["event_type"] for event in events],
+            ["thread.activity", "thread.message"],
+        )
+        activity = events[0]["payload"]["activity"]
+        self.assertEqual(activity["detail"], "d" * 250)
+        self.assertEqual(activity["output"], "full output")
+
+    def test_provider_session_callback_updates_only_its_matching_run(self) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "chat", provider_session_id="existing-session")
+            first_run = state.start_thread_run(cur, "chat")
+            state.save_thread_provider_session(
+                cur,
+                "chat",
+                first_run,
+                "accepted-session",
+            )
+            state.finish_thread_run(cur, "chat", first_run)
+
+        self.assertEqual(
+            state.thread_session_config("chat")["provider_session_id"],
+            "accepted-session",
+        )
+        with self.assertRaises(ValueError), state.mutation() as cur:
+            state.save_thread_provider_session(cur, "chat", first_run + 1, "late-session")
+        self.assertEqual(
+            state.thread_session_config("chat")["provider_session_id"],
+            "accepted-session",
+        )
+
+    def test_provider_session_callback_rejects_an_empty_id(self) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "chat", provider_session_id="existing-session")
+            run_number = state.start_thread_run(cur, "chat")
+        with self.assertRaisesRegex(ValueError, "must not be empty"), state.mutation() as cur:
+            state.save_thread_provider_session(cur, "chat", run_number, "")
+        self.assertEqual(
+            state.thread_session_config("chat")["provider_session_id"],
+            "existing-session",
+        )
 
     def test_concurrent_mutations_never_lose_increments(self) -> None:
         # The mutation lock must span each whole read-modify-write cycle:
         # interleaved cycles would drop increments. 8 threads x 25 must land.
+        def bump(cur: Any) -> int:
+            cur.execute("SELECT value FROM counters WHERE name = 'test_counter'")
+            row = cur.fetchone()
+            value = (int(row[0]) if row else 0) + 1
+            cur.execute(
+                "INSERT INTO counters (name, value) VALUES ('test_counter', %s)"
+                " ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
+                (value,),
+            )
+            return value
+
         threads, per_thread = 8, 25
         barrier = threading.Barrier(threads)
         errors: list[BaseException] = []
@@ -193,7 +334,7 @@ class StateStorageTests(unittest.TestCase):
                 barrier.wait(timeout=10)
                 for _ in range(per_thread):
                     with state.mutation() as cur:
-                        state.allocate_task_number(cur)
+                        bump(cur)
             except BaseException as exc:  # noqa: BLE001 - surfaced below
                 errors.append(exc)
 
@@ -204,7 +345,7 @@ class StateStorageTests(unittest.TestCase):
             worker.join(timeout=60)
         self.assertEqual(errors, [])
         with state.mutation() as cur:
-            self.assertEqual(state.allocate_task_number(cur), threads * per_thread + 1)
+            self.assertEqual(bump(cur), threads * per_thread + 1)
 
     def test_reads_inside_a_mutation_see_committed_state_and_do_not_deadlock(self) -> None:
         # Helpers called from inside a mutation may take read-only snapshots
@@ -275,12 +416,12 @@ class StateStorageTests(unittest.TestCase):
         with state.mutation() as cur:
             state.append_agent_event(
                 cur,
-                "task.activity",
-                "task_1",
+                "thread.activity",
+                "t1",
                 {"activity": {"activity_id": "command-1", "kind": "command", "output": "done"}},
             )
             for index in range(8):
-                state.append_agent_event(cur, "task.message", "task_1" if index % 2 else None, {"message": f"m{index}", "source": "user"})
+                state.append_agent_event(cur, "thread.message", "t1" if index % 2 else None, {"message": f"m{index}", "source": "user"})
         page = state.page_agent_events_before(None, limit=5)
         self.assertEqual(len(page), 5)
         seqs = [event["seq"] for event in page]
@@ -288,22 +429,19 @@ class StateStorageTests(unittest.TestCase):
         older = state.page_agent_events_before(seqs[-1], limit=5)
         self.assertTrue(older)
         self.assertTrue(all(event["seq"] < seqs[-1] for event in older))
-        task_page = state.page_task_events("task_1", None)
-        self.assertTrue(all(event["task_id"] == "task_1" for event in task_page))
-        activity = next(event for event in task_page if event["event_type"] == "task.activity")
+        thread_page = state.page_thread_events("t1", None, 100)
+        self.assertTrue(all(event["thread_id"] == "t1" for event in thread_page))
+        activity = next(event for event in thread_page if event["event_type"] == "thread.activity")
         self.assertEqual(activity["payload"]["activity"]["output"], "done")
 
     def test_thread_events_open_at_latest_and_page_in_both_directions(self) -> None:
         with state.mutation() as cur:
-            insert_task(cur, make_task(1, thread_id="chat"))
-            insert_task(cur, make_task(2, thread_id="chat"))
-            insert_task(cur, make_task(3, thread_id="other"))
-            state.append_agent_event(cur, "task.message", "task_1", {"message": "a", "source": "user"})
-            state.append_agent_event(cur, "task.message", "task_2", {"message": "b", "source": "agent"})
-            state.append_agent_event(cur, "task.message", "task_3", {"message": "c", "source": "agent"})
-            state.append_agent_event(cur, "task.message", "task_1", {"message": "d", "source": "agent"})
+            state.append_agent_event(cur, "thread.message", "chat", {"message": "a", "source": "user"})
+            state.append_agent_event(cur, "thread.message", "chat", {"message": "b", "source": "agent"})
+            state.append_agent_event(cur, "thread.message", "other", {"message": "c", "source": "agent"})
+            state.append_agent_event(cur, "thread.message", "chat", {"message": "d", "source": "agent"})
         all_events = state.page_thread_events("chat", None, 100)
-        # Both of the thread's tasks, chronological, and never the other thread's.
+        # All of the thread's events, chronological, and never the other thread's.
         self.assertEqual([event["payload"]["message"] for event in all_events], ["a", "b", "d"])
         seqs = [event["seq"] for event in all_events]
         self.assertEqual(seqs, sorted(seqs))
@@ -317,32 +455,79 @@ class StateStorageTests(unittest.TestCase):
         rest = state.page_thread_events("chat", seqs[0], 100)
         self.assertEqual([event["payload"]["message"] for event in rest], ["b", "d"])
 
-    def test_prune_keeps_the_newest_finished_tasks_and_sessions(self) -> None:
+    def test_recover_interrupted_thread_runs_returns_them_to_idle(self) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "done")
+            seed_thread(cur, "open")
+            done_run = state.start_thread_run(cur, "done")
+            state.finish_thread_run(cur, "done", done_run)
+            open_run = state.start_thread_run(cur, "open")
+        with state.mutation() as cur:
+            self.assertEqual(
+                state.recover_interrupted_thread_runs(cur),
+                [("open", open_run)],
+            )
+        self.assertEqual(state.thread_session_config("done")["status"], "idle")
+        self.assertEqual(state.thread_session_config("open")["status"], "idle")
+        with state.mutation() as cur:
+            self.assertEqual(state.recover_interrupted_thread_runs(cur), [])
+
+    def test_activity_ids_are_scoped_by_private_run_number(self) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "chat")
+            first = state.start_thread_run(cur, "chat")
+            state.append_agent_event(
+                cur,
+                "thread.activity",
+                "chat",
+                {"activity": {"activity_id": "command-1"}},
+                run_number=first,
+            )
+            state.finish_thread_run(cur, "chat", first)
+            second = state.start_thread_run(cur, "chat")
+            state.append_agent_event(
+                cur,
+                "thread.activity",
+                "chat",
+                {"activity": {"activity_id": "command-1"}},
+                run_number=second,
+            )
+        activity_ids = [
+            event["payload"]["activity"]["activity_id"]
+            for event in read_agent_events()
+        ]
+        self.assertEqual(activity_ids, [f"{first}:command-1", f"{second}:command-1"])
+
+    def test_prune_thread_sessions_keeps_event_referenced_and_newest_threads(self) -> None:
         with state.mutation() as cur:
             for number in range(1, 8):
-                insert_task(cur, make_task(number, status="completed", thread_id=f"t{number}"))
-            insert_task(cur, make_task(8, status="queued", thread_id="t8"))
-            for number in range(1, 8):
-                state.save_thread_session(
+                seed_thread(
                     cur,
-                    "codex",
                     f"t{number}",
-                    f"ct_{number}",
-                    f"2026-06-08T00:00:{number:02d}Z",
-                    "gpt-5.6-terra",
-                    "high",
+                    provider_session_id=f"ct_{number}",
+                    last_used_at=f"2026-06-08T00:00:{number:02d}Z",
                 )
+            seed_thread(cur, "c1", runtime="claude_code", model="claude-fable-5", effort="high")
+            # t1 is the least recently used, but its retained events keep the
+            # canonical row so its history stays listed.
+            state.append_agent_event(cur, "thread.message", "t1", {"message": "keep", "source": "user"})
         with state.mutation() as cur:
-            state.prune_finished_tasks(cur, 3)
             state.prune_thread_sessions(cur, "codex", 3)
-        remaining = {task["task_id"] for task in [t for t in state.active_tasks()]}
-        self.assertEqual(remaining, {"task_8"})  # active tasks always survive
-        kept = {task["task_id"] for task in state.tasks_for_thread("t7", 10)}
-        self.assertEqual(kept, {"task_7"})  # among the newest three finished
-        self.assertIsNone(state.get_task("task_1"))
+        remaining = {
+            row["thread_id"] for row in state.page_thread_summaries(None, 100)
+        }
+        # The event-referenced thread, the three newest unreferenced ones, and
+        # the other runtime's thread all survive.
+        self.assertEqual(remaining, {"t1", "t5", "t6", "t7", "c1"})
+        # Once event retention drops a thread's last event, the ordinary LRU
+        # cap applies to it again.
         with state.mutation() as cur:
-            self.assertIsNone(state.thread_session(cur, "codex", "t1"))
-            self.assertIsNotNone(state.thread_session(cur, "codex", "t7"))
+            cur.execute("DELETE FROM agent_events WHERE thread_id = 't1'")
+            state.prune_thread_sessions(cur, "codex", 3)
+        remaining = {
+            row["thread_id"] for row in state.page_thread_summaries(None, 100)
+        }
+        self.assertEqual(remaining, {"t5", "t6", "t7", "c1"})
 
     def test_event_logs_prune_to_the_newest_cap(self) -> None:
         # Retention is a primary-key range delete below MAX(seq) - cap: cheap
@@ -350,7 +535,7 @@ class StateStorageTests(unittest.TestCase):
         # here with small ones.
         with state.mutation() as cur:
             for index in range(8):
-                state.append_agent_event(cur, "task.message", None, {"message": f"m{index}", "source": "user"})
+                state.append_agent_event(cur, "thread.message", None, {"message": f"m{index}", "source": "user"})
         with patch.object(state, "MAX_EVENTS", 5), state.mutation() as cur:
             state.prune_agent_events(cur)
         seqs = [event["seq"] for event in read_agent_events()]
@@ -837,6 +1022,99 @@ class BedrockUsageCounterTests(unittest.TestCase):
         self.assertEqual(row["input_tokens"], 100)
         self.assertEqual(len(state.read_bedrock_usage("1970-01-01")), 1)
         self.assertEqual(state.read_bedrock_usage("1970-01-01")[0]["requests"], 8)
+
+
+class HostErrorStorageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        pg_harness.reset_database()
+
+    @staticmethod
+    def event(*, service: str = "kern-admin-api") -> dict[str, object]:
+        return {
+            "service": service,
+            "component": "admin_api.request",
+            "kind": "unexpected_exception",
+            "exception_type": "RuntimeError",
+            "summary": "request handler escaped",
+            "traceback": 'File "host/runtime/admin_api/service.py", line 1, in handle',
+            "context": {"method": "GET", "route": "/v1/status"},
+            "fingerprint": "a" * 64,
+            "host_version": "1.3.3",
+            "boot_id": "boot-1",
+            "pid": 4321,
+        }
+
+    def test_ingest_coalesces_brief_repeats_and_rotates_ordering(self) -> None:
+        first_usec = 1_800_000_000_000_000
+        first = state.ingest_host_error(first_usec, self.event())
+        other = state.ingest_host_error(
+            first_usec + 5_000_000,
+            self.event(service="kern-tools"),
+        )
+        repeated = state.ingest_host_error(
+            first_usec + 10_000_000, self.event()
+        )
+
+        self.assertEqual(repeated, first)
+        self.assertGreater(other, first)
+        detail = state.host_error(first)
+        assert detail is not None
+        self.assertEqual(detail["occurrence_count"], 2)
+        self.assertEqual(detail["context"]["route"], "/v1/status")
+        self.assertEqual(detail["fingerprint"], "a" * 64)
+        page = state.page_host_errors_before(None)
+        self.assertEqual([row["id"] for row in page], [first, other])
+        self.assertGreater(page[0]["seq"], page[1]["seq"])
+
+        later = state.ingest_host_error(
+            first_usec + 80_000_000, self.event()
+        )
+        self.assertNotEqual(later, first)
+        page = state.page_host_errors_before(None)
+        self.assertEqual([row["id"] for row in page], [later, first, other])
+        self.assertNotIn("traceback", page[0])
+        self.assertNotIn("context", page[0])
+
+    def test_service_filter(self) -> None:
+        seen_usec = 1_800_000_000_000_000
+        state.ingest_host_error(seen_usec, self.event())
+        state.ingest_host_error(
+            seen_usec + 1_000_000, self.event(service="kern-tools")
+        )
+        filtered = state.page_host_errors_before(None, service="kern-tools")
+        self.assertEqual([row["service"] for row in filtered], ["kern-tools"])
+        self.assertEqual(len(state.page_host_errors_before(None)), 2)
+
+    def test_coalesced_sequence_rotation_does_not_consume_retention_slots(self) -> None:
+        seen_usec = 1_800_000_000_000_000
+        with (
+            patch.object(state, "HOST_ERROR_LIMIT", 2),
+            patch.object(state, "HOST_ERROR_PRUNE_EVERY", 1),
+        ):
+            state.ingest_host_error(seen_usec, self.event())
+            state.ingest_host_error(
+                seen_usec + 1_000_000,
+                self.event(service="kern-tools"),
+            )
+            for repeat in range(2, 7):
+                state.ingest_host_error(
+                    seen_usec + repeat * 1_000_000,
+                    self.event(),
+                )
+
+            rows = state.page_host_errors_before(None)
+            self.assertEqual({row["service"] for row in rows}, {"kern-admin-api", "kern-tools"})
+            repeated = next(row for row in rows if row["service"] == "kern-admin-api")
+            self.assertEqual(repeated["occurrence_count"], 6)
+
+            state.ingest_host_error(
+                seen_usec + 7_000_000,
+                self.event(service="kern-agent-network"),
+            )
+            self.assertEqual(
+                [row["service"] for row in state.page_host_errors_before(None)],
+                ["kern-agent-network", "kern-admin-api"],
+            )
 
 
 if __name__ == "__main__":

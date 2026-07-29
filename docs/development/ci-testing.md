@@ -67,12 +67,13 @@ For admin UI development, run the single-page UI against a deterministic local
 mock backend instead of a deployed host:
 
 ```bash
-python3 tests/smoke-ui/run_admin_ui_mock.py --port 3100
+python3 tests/smoke-ui/run_admin_ui_mock.py --port 8000 --demo
 ```
 
-Open `http://127.0.0.1:3100/` and log in with password `dev`. The port is an
-argument so multiple developers or agents can choose non-conflicting localhost
-ports.
+Open `http://127.0.0.1:8000/` and log in with password `dev`. Demo mode starts
+Codex, Claude Code, and Hermes active with representative usage values so the
+runtime toolbar is useful for visual inspection. The port is an argument so
+multiple developers or agents can choose non-conflicting localhost ports.
 
 The mock backend serves `host/runtime/admin_ui.html` and implements the `/v1/*`
 routes the UI uses with in-memory data. It is for UI wiring and interaction
@@ -98,7 +99,7 @@ python3 tests/smoke-ui/admin_ui_smoke.py --port 3100
 ```
 
 The smoke starts the mock server, opens Chromium, and exercises the core
-operator flows across task/session views, network and GitHub controls, files,
+operator flows across thread/session views, network and GitHub controls, files,
 processes, bundled tools and approvals, audit logs, and installed app surfaces
 at desktop and mobile dimensions. CI installs Playwright and
 Chromium during the Docker image build, then runs this smoke through

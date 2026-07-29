@@ -25,7 +25,7 @@ MAX_LIMIT = 100
 MAX_QUERY_CHARS = 200
 MAX_TEXT_CHARS = 1_500
 POLYMARKET_READ_POLICY = (
-    "Read-only. Sends only the listed query parameters to Polymarket's public "
+    "Read-only. Sends only the listed request parameters to Polymarket's public "
     "market-data APIs (the APIs are unauthenticated, so there is no account identity or "
     "credential to send) and returns public market data into active model context. Runs directly with no "
     "approval."
@@ -117,7 +117,7 @@ MANIFEST = ToolManifest(
         ),
     ),
     protections=(
-        "All actions use unauthenticated public market-data GET endpoints. The package has no wallet, private key, token, order, approval, or trading action.",
+        "All actions use unauthenticated public read-only market-data endpoints. The package has no wallet, private key, token, order, approval, or trading action.",
         "Queries, pagination, result sizes, order-book depth, and history points are bounded; provider payloads are normalized before entering model context.",
         PARAM_GUARD_PROTECTION,
     ),
@@ -135,7 +135,7 @@ MANIFEST = ToolManifest(
             DataSummaryCard(
                 title="What leaves this host",
                 description=(
-                    "Only public query parameters: listing and search keywords, market ids or slugs, outcome token ids, sort, "
+                    "Only public request parameters: listing and search keywords, market ids or slugs, outcome token ids, sort, "
                     "pagination, and interval values, plus standard web request metadata. There is no account, wallet, or "
                     "credential to send, and nothing else on this host is sent. Free-text query values first pass the host "
                     "parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent."
@@ -238,6 +238,17 @@ def _clob_request(path: str, params: dict[str, str], *, what: str) -> JSONObject
         "GET",
         f"{CLOB_API_BASE_URL}{path}?{encode_query(params)}",
         headers=POLYMARKET_REQUEST_HEADERS,
+        failure_message=f"Polymarket {what} request failed.",
+        invalid_response_message=f"Polymarket {what} returned an invalid response.",
+    )
+
+
+def _clob_json_request(path: str, body: JSONObject, *, what: str) -> JSONObject:
+    return json_request(
+        "POST",
+        f"{CLOB_API_BASE_URL}{path}",
+        headers=POLYMARKET_REQUEST_HEADERS,
+        body=body,
         failure_message=f"Polymarket {what} request failed.",
         invalid_response_message=f"Polymarket {what} returned an invalid response.",
     )
@@ -442,8 +453,20 @@ def _price_history(tool_input: JSONObject) -> JSONObject:
     interval = _string_field(tool_input, "interval", max_chars=10) or "1d"
     if interval not in {"1h", "6h", "1d", "1w", "1m", "max"}:
         raise ToolInputValidationError("Polymarket tool_input.interval is not a supported interval.")
-    response = _clob_request("/prices-history", {"market": token_id, "interval": interval, "fidelity": "60"}, what="price history")
-    history_raw = response.get("history")
+    # Polymarket's single-market GET endpoint can stall for otherwise healthy
+    # active tokens. Its public batch endpoint serves the same data through a
+    # separate bounded read path; keep this action to exactly one token.
+    response = _clob_json_request(
+        "/batch-prices-history",
+        {"markets": [token_id], "interval": interval, "fidelity": 60},
+        what="price history",
+    )
+    history_by_market = response.get("history")
+    history_raw = (
+        history_by_market.get(token_id)
+        if isinstance(history_by_market, dict)
+        else None
+    )
     points: list[JSONValue] = []
     if isinstance(history_raw, list):
         for point in history_raw[-200:]:
