@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
+import http.client
 import io
 from http import HTTPStatus
-from http.server import ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import socket
+import socketserver
 import tempfile
 import threading
 import time
@@ -40,13 +42,100 @@ from host.runtime.core.state import (
     save_claude_account,
     save_openai_account,
 )
-from state_seed import load_state, save_state
-
 
 def save_approved_openai_account(account_id: str, **extra: Any) -> None:
     save_openai_account(
         {"account_id": account_id, "operator_approval": orchestrator.OPENAI_OPERATOR_APPROVAL, **extra}
     )
+
+
+# One offered (model, effort) pair per runtime for tests that do not care
+# which configuration a thread runs.
+DEFAULT_SESSION_OPTIONS = {
+    "codex": ("gpt-5.6-terra", "high"),
+    "claude_code": ("claude-opus-5", "high"),
+    "hermes": ("deepseek.v3.2", "high"),
+}
+
+
+def set_runtime_statuses(**statuses: str) -> None:
+    """Replace the cached in-memory runtime status records. They are process
+    globals, so tests reset them instead of leaking status across cases; a
+    runtime left unset reads back as "loading"."""
+    with orchestrator._RUNTIME_STATUS_LOCK:
+        orchestrator._RUNTIME_STATUSES.clear()
+        for runtime_type, status in statuses.items():
+            orchestrator._RUNTIME_STATUSES[runtime_type] = {"status": status}
+
+
+def save_oauth_login(key: str, record: dict[str, Any] | None) -> None:
+    with state.mutation() as cur:
+        state.set_oauth_login(cur, key, record)
+
+
+def seed_thread_session(
+    thread_id: str,
+    agent_runtime: str = "codex",
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+    provider_session_id: str | None = None,
+    last_used_at: str | None = "2026-06-08T00:00:00Z",
+) -> None:
+    default_model, default_effort = DEFAULT_SESSION_OPTIONS[agent_runtime]
+    with state.mutation() as cur:
+        state.save_thread_session(
+            cur,
+            agent_runtime,
+            thread_id,
+            provider_session_id,
+            last_used_at,
+            model or default_model,
+            effort or default_effort,
+        )
+
+
+def register_live_turn(
+    thread_id: str,
+    runtime_type: str = "codex",
+    *,
+    server: Any = None,
+) -> "orchestrator._Turn":
+    """Register a fake live turn, the in-memory shape a launched turn leaves
+    behind, without spawning any runtime process. Callers rely on setUp
+    clearing orchestrator._LIVE between cases."""
+    model, effort = DEFAULT_SESSION_OPTIONS[runtime_type]
+    config = state.thread_session_config(thread_id)
+    if config is None:
+        seed_thread_session(thread_id, runtime_type, model=model, effort=effort)
+    with state.mutation() as cur:
+        run_number = state.start_thread_run(cur, thread_id)
+    turn = orchestrator._Turn(runtime_type, thread_id, model, effort, run_number)
+    turn.server = server
+    turn.phase = orchestrator.ExecutionPhase.RUNNING
+    with orchestrator._LIVE_LOCK:
+        orchestrator._LIVE[orchestrator._live_key(runtime_type, thread_id)] = turn
+    return turn
+
+
+class RecordingSteerServer:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def steer(self, message: str) -> None:
+        self.messages.append(message)
+
+    def interrupt(self) -> None:
+        return
+
+
+def attach_recording_steer_server(
+    turn: "orchestrator._Turn",
+    _message: str,
+    _provider_session_id: str | None,
+) -> None:
+    turn.server = RecordingSteerServer()
+    turn.phase = orchestrator.ExecutionPhase.RUNNING
 
 
 # The zeroed live-usage payload every accounts read carries when Bedrock has
@@ -79,13 +168,103 @@ def _add_session_auth(request: "urllib.request.Request", token: str) -> None:
         request.add_header(name, value)
 
 
+# The agent's loopback TCP egress is firewalled on Kern hosts, so the test
+# admin server listens on a Unix socket and requests reach it through a
+# urllib opener that dials that socket. The HTTP request/response layer under
+# test (auth headers, cookies, raw request bytes) is unchanged.
+ADMIN_TEST_ORIGIN = "http://kern-admin.test"
+
+
+class UnixSocketHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+    def get_request(self):  # type: ignore[override]
+        request, _ = super().get_request()
+        # BaseHTTPRequestHandler (and the login throttle's client key) expect
+        # a TCP-shaped (host, port) peer address.
+        return request, ("127.0.0.1", 0)
+
+
+class _UnixSocketHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: str, host: str, timeout: Any = None) -> None:
+        super().__init__(host)
+        self._socket_path = socket_path
+        self._timeout_value = timeout
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        if isinstance(self._timeout_value, (int, float)):
+            self.sock.settimeout(self._timeout_value)
+        self.sock.connect(self._socket_path)
+
+
+class _UnixSocketHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, socket_path: str) -> None:
+        super().__init__()
+        self._socket_path = socket_path
+
+    def http_open(self, req: Any) -> Any:
+        def connection(host: str, timeout: Any = None) -> _UnixSocketHTTPConnection:
+            return _UnixSocketHTTPConnection(self._socket_path, host, timeout=timeout)
+
+        return self.do_open(connection, req)
+
+
+def start_admin_http_server(test: unittest.TestCase) -> str:
+    """Serve admin_api.Handler for one test case and route urllib to it.
+
+    Returns the base URL test requests should target."""
+    socket_dir = tempfile.TemporaryDirectory()
+    test.addCleanup(socket_dir.cleanup)
+    socket_path = str(Path(socket_dir.name) / "admin-api.sock")
+    server = UnixSocketHTTPServer(socket_path, admin_api.Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    test.addCleanup(server.server_close)
+    test.addCleanup(server.shutdown)
+    urllib.request.install_opener(urllib.request.build_opener(_UnixSocketHTTPHandler(socket_path)))
+    test.addCleanup(urllib.request.install_opener, urllib.request.build_opener())
+    test.admin_socket_path = socket_path  # type: ignore[attr-defined]
+    return ADMIN_TEST_ORIGIN
+
+
+def raw_admin_request(socket_path: str, request: bytes) -> bytes:
+    """One raw HTTP exchange against the test admin server."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(5)
+        sock.connect(socket_path)
+        try:
+            sock.sendall(request)
+            sock.shutdown(socket.SHUT_WR)
+        except (BrokenPipeError, ConnectionResetError):
+            # The server may reject and close before the whole request lands
+            # (e.g. an oversized body); its buffered response is still readable.
+            pass
+        chunks: list[bytes] = []
+        while chunk := sock.recv(65536):
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+
 class AdminUiStaticTests(unittest.TestCase):
     def test_database_free_admin_ui_contract(self) -> None:
         # The database-backed integration-test class is skipped when local PostgreSQL is
         # unavailable, but this method reads static assets only. Run the same
         # assertions here so exact UI-copy and domain-list contracts are always
         # exercised before CI.
-        AdminApiIntegrationTests.test_admin_ui_has_thread_task_event_smoke_path(self)
+        AdminApiIntegrationTests.test_admin_ui_has_thread_event_smoke_path(self)
+
+    def test_session_activity_is_centralized_and_excludes_background_polls(self) -> None:
+        runtime = Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui"
+        api = (runtime / "api.js").read_text()
+        app = (runtime / "app.js").read_text()
+        self.assertIn('const SESSION_ACTIVITY_HEADER = "X-Kern-Session-Activity"', api)
+        self.assertIn("Date.now() - lastOperatorActivityAt <= RECENT_OPERATOR_ACTIVITY_MS", api)
+        self.assertIn('"pointerdown"', api)
+        self.assertIn('"keydown"', api)
+        self.assertIn('"touchstart"', api)
+        self.assertIn("if (event && !event.isTrusted) return;", api)
+        self.assertNotIn("setInterval", api)
+        self.assertNotIn("markSessionActivity", app)
 
     def test_agent_chat_uses_one_backend_authoritative_composer(self) -> None:
         script = (
@@ -94,8 +273,29 @@ class AdminUiStaticTests(unittest.TestCase):
         stylesheet = (
             Path(__file__).parents[1] / "host/apps/agent_chat/ui/agent_chat.css"
         ).read_text()
-        self.assertIn('api("POST", "/messages", request)', script)
-        self.assertIn('["task.message", "task.activity"]', script)
+        self.assertIn(
+            'api("POST", "/messages", request, AGENT_DELIVERY_TIMEOUT_MS)',
+            script,
+        )
+        self.assertIn(
+            '["thread.message", "thread.activity", "thread.error", "thread.stopped"]',
+            script,
+        )
+        self.assertIn('let showingActivity = true;', script)
+        self.assertIn('classList.toggle("activity-hidden", !showingActivity)', script)
+        self.assertIn('id="activity-toggle"', (
+            Path(__file__).parents[1] / "host/apps/agent_chat/ui/index.html"
+        ).read_text())
+        self.assertIn(".chat-app.activity-hidden .activity-card", stylesheet)
+        self.assertIn(
+            'button.activity-switch[aria-checked="true"] .activity-switch-track',
+            stylesheet,
+        )
+        self.assertIn("background: var(--ok);", stylesheet)
+        self.assertIn(
+            "background: color-mix(in srgb, var(--ok) 82%, white);",
+            stylesheet,
+        )
         self.assertNotIn("hydrateCompletePrompts", script)
         self.assertNotIn("completePromptByTask", script)
         self.assertNotIn('"task.created"', script)
@@ -281,19 +481,26 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn(".usage-ring.usage-warning .usage-ring-value { stroke: var(--usage-warn); }", css)
         self.assertIn(".usage-ring.usage-critical .usage-ring-value { stroke: var(--usage-critical); }", css)
 
-    def test_runtime_usage_hover_magnifier_is_desktop_only_and_click_through(self) -> None:
-        css = (
-            Path(__file__).parents[1]
-            / "host/runtime/admin_api/admin_ui.css"
-        ).read_text()
+    def test_runtime_usage_is_legible_without_hover_magnification(self) -> None:
+        runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
+        css = (runtime / "admin_ui.css").read_text()
+        health_js = (runtime / "admin_ui" / "health.js").read_text()
 
+        self.assertNotIn("button.runtime-summary:hover > .runtime-usage", css)
+        self.assertNotIn("transform: scale(1.5);", css)
+        self.assertIn('viewBox="0 0 20 20"', health_js)
+        self.assertIn("font-size: 0.56rem;", css)
+        self.assertIn("font-weight: 650;", css)
+        self.assertIn("stroke-width: 1.25;", css)
+        self.assertIn(".usage-window { font-size: 0.44rem;", css)
         self.assertIn(
-            "@media (min-width: 861px) and (hover: hover) and (pointer: fine)",
+            ".runtime-overview.expanded .runtime-stat-value { font-size: 0.64rem; }",
             css,
         )
-        self.assertIn("button.runtime-summary:hover > .runtime-usage", css)
-        self.assertIn("pointer-events: none;", css)
-        self.assertIn("transform: scale(1.42);", css)
+        self.assertIn(
+            ".runtime-overview.expanded .runtime-stat-label { font-size: 0.5rem; }",
+            css,
+        )
 
     def test_provider_usage_rings_show_compact_reset_countdowns(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
@@ -305,6 +512,8 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn("resets_at_text", health_js)
         # The countdown shares the single window-label line under the ring so
         # the top bar keeps a constant height.
+        self.assertIn('const display = available ? `${Math.round(percent)}` : "--";', health_js)
+        self.assertNotIn('`${Math.round(percent)}%`', health_js)
         self.assertIn('${esc(label)}${countdown ? ` · ${countdown}` : ""}', health_js)
         self.assertNotIn("usage-reset", health_js)
         self.assertNotIn(".usage-reset {", css)
@@ -337,7 +546,7 @@ class AdminUiStaticTests(unittest.TestCase):
         favicon_src = '/favicon.svg'
         self.assertIn(f'<img class="brand-mark" width="30" height="30" src="{favicon_src}" alt="">', html)
         self.assertIn(f'<img class="login-mark" width="44" height="44" src="{favicon_src}" alt="">', html)
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 9)
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 10)
         self.assertIn('/favicon.svg', html)
         self.assertIn('/favicon.ico', html)
         self.assertIn('/admin_ui.css', html)
@@ -351,6 +560,8 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("position: fixed", css)
         self.assertIn('id="tab-processes"', html)
         self.assertIn('id="processes"', html)
+        self.assertIn('id="file-image" class="file-image" alt="" hidden', html)
+        self.assertIn("img-src 'self' data: blob:", admin_api.SECURITY_HEADERS["Content-Security-Policy"])
         self.assertIn('id="sidebar-apps" class="sidebar-section" hidden', html)
         self.assertIn('id="sidebar-stable-apps"', html)
         self.assertIn('<div class="sidebar-section-title">Apps</div>', html)
@@ -375,6 +586,8 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn(".innerHTML", files_js)
         self.assertIn("button.textContent", files_js)
         self.assertIn("video.src = activeFileUrl", files_js)
+        self.assertIn("image.src = activeFileUrl", files_js)
+        self.assertIn('["image/jpeg", "image/png", "image/webp"]', files_js)
         self.assertNotIn("window.open", files_js)
         self.assertNotIn("location.", files_js)
 
@@ -403,17 +616,14 @@ class AdminUiStaticTests(unittest.TestCase):
 
         self.assertEqual(error.exception.status, HTTPStatus.UNAUTHORIZED)
 
-    def test_app_backend_route_allowlist_starts_with_task_routes(self) -> None:
+    def test_app_backend_route_allowlist_is_thread_scoped(self) -> None:
         allowed = [
-            ("POST", "/v1/tasks"),
             ("GET", "/v1/tools"),
             ("GET", "/v1/network/policy"),
-            ("GET", "/v1/tasks/task_1"),
-            ("POST", "/v1/tasks/task_1/cancel"),
-            ("POST", "/v1/tasks/task_1/kill"),
-            ("POST", "/v1/tasks/task_1/steer"),
             ("GET", "/v1/threads"),
-            ("GET", "/v1/threads/thread_1/tasks"),
+            ("GET", "/v1/threads/thread_1"),
+            ("POST", "/v1/threads/thread_1/messages"),
+            ("POST", "/v1/threads/thread_1/stop"),
             ("GET", "/v1/threads/thread_1/events"),
         ]
 
@@ -421,10 +631,16 @@ class AdminUiStaticTests(unittest.TestCase):
             with self.subTest(method=method, path=path):
                 app_backend_admin_api._require_app_backend_route(method, path)
 
-    def test_app_backend_route_allowlist_rejects_host_admin_routes(self) -> None:
+    def test_app_backend_route_allowlist_rejects_host_admin_and_removed_task_routes(self) -> None:
         denied = [
+            ("POST", "/v1/tasks"),
             ("GET", "/v1/tasks"),
+            ("GET", "/v1/tasks/task_1"),
             ("PUT", "/v1/tasks/task_1"),
+            ("POST", "/v1/tasks/task_1/cancel"),
+            ("POST", "/v1/tasks/task_1/kill"),
+            ("POST", "/v1/tasks/task_1/steer"),
+            ("GET", "/v1/threads/thread_1/tasks"),
             ("GET", "/v1/health"),
             ("PUT", "/v1/network/policy"),
             ("GET", "/v1/agent-files"),
@@ -442,48 +658,63 @@ class AdminUiStaticTests(unittest.TestCase):
                 self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
 
     def test_app_backend_prefixes_thread_ids_and_strips_responses(self) -> None:
-        body = app_backend_admin_api._internal_body(
-            "agent_chat",
-            "POST",
-            "/v1/tasks",
-            {"input_message": "x", "thread_id": "chat", "agent_runtime": "codex"},
-        )
-        self.assertEqual(body["thread_id"], "agent_chat__chat")
-        self.assertEqual(
-            app_backend_admin_api._internal_path("agent_chat", "GET", "/v1/threads/chat/tasks"),
-            "/v1/threads/agent_chat__chat/tasks",
-        )
+        for visible, internal in (
+            ("/v1/threads/chat", "/v1/threads/agent_chat__chat"),
+            ("/v1/threads/chat/messages", "/v1/threads/agent_chat__chat/messages"),
+            ("/v1/threads/chat/stop", "/v1/threads/agent_chat__chat/stop"),
+            ("/v1/threads/chat/events", "/v1/threads/agent_chat__chat/events"),
+        ):
+            with self.subTest(path=visible):
+                self.assertEqual(
+                    app_backend_admin_api._internal_path("agent_chat", visible), internal
+                )
 
         response = app_backend_admin_api._visible_response(
             "agent_chat",
-            {"tasks": [{"task_id": "task_1", "thread_id": "agent_chat__chat"}]},
+            {"thread": {"thread_id": "agent_chat__chat", "status": "running"}},
         )
-        self.assertEqual(response["tasks"][0]["task_id"], "task_1")
-        self.assertEqual(response["tasks"][0]["thread_id"], "chat")
+        self.assertEqual(response["thread"]["thread_id"], "chat")
+        self.assertEqual(response["thread"]["status"], "running")
 
-    def test_app_backend_thread_task_listing_uses_app_prefixed_thread_path(self) -> None:
+    def test_app_backend_thread_detail_and_stop_use_app_prefixed_thread_path(self) -> None:
         with patch(
             "host.runtime.admin_api.app_backend_api.admin_api.route",
-            return_value={"tasks": [{"task_id": "task_1", "thread_id": "agent_chat__chat"}]},
+            return_value={"thread": {"thread_id": "agent_chat__chat", "status": "idle"}},
         ) as route:
-            query = {"limit": ["20"], "message_bytes": ["12288"]}
             response = app_backend_admin_api.route_app_backend_request(
-                "agent_chat", "GET", "/v1/threads/chat/tasks", query, None
+                "agent_chat", "GET", "/v1/threads/chat", {}, None
             )
 
         route.assert_called_once_with(
             "GET",
-            "/v1/threads/agent_chat__chat/tasks",
-            query,
+            "/v1/threads/agent_chat__chat",
+            {},
             None,
             app_backend_id="agent_chat",
         )
-        self.assertEqual(response["tasks"], [{"task_id": "task_1", "thread_id": "chat"}])
+        self.assertEqual(response["thread"], {"thread_id": "chat", "status": "idle"})
+
+        with patch(
+            "host.runtime.admin_api.app_backend_api.admin_api.route",
+            return_value={"status": "accepted"},
+        ) as stop_route:
+            response = app_backend_admin_api.route_app_backend_request(
+                "agent_chat", "POST", "/v1/threads/chat/stop", {}, None
+            )
+
+        stop_route.assert_called_once_with(
+            "POST",
+            "/v1/threads/agent_chat__chat/stop",
+            {},
+            None,
+            app_backend_id="agent_chat",
+        )
+        self.assertEqual(response, {"status": "accepted"})
 
     def test_app_backend_thread_events_use_app_prefixed_thread_path(self) -> None:
         with patch(
             "host.runtime.admin_api.app_backend_api.admin_api.route",
-            return_value={"events": [{"seq": 4, "task_id": "task_1", "event_type": "task.message"}]},
+            return_value={"events": [{"seq": 4, "thread_id": "agent_chat__chat", "event_type": "thread.message"}]},
         ) as route:
             response = app_backend_admin_api.route_app_backend_request(
                 "agent_chat", "GET", "/v1/threads/chat/events", {"since": ["2"]}, None
@@ -493,14 +724,15 @@ class AdminUiStaticTests(unittest.TestCase):
             "GET", "/v1/threads/agent_chat__chat/events", {"since": ["2"]}, None, app_backend_id="agent_chat"
         )
         self.assertEqual(response["events"][0]["seq"], 4)
+        self.assertEqual(response["events"][0]["thread_id"], "chat")
 
     def test_thread_events_bound_page_and_message_bytes_before_app_proxying(self) -> None:
         message_bytes = 12 * 1024
         events = [
             {
                 "seq": seq,
-                "task_id": "task_1",
-                "event_type": "task.message",
+                "thread_id": "thread_1",
+                "event_type": "thread.message",
                 "payload": {
                     "message": "\x01" * (message_bytes + 1),
                     "error_message": "\x01" * (message_bytes + 1),
@@ -521,6 +753,7 @@ class AdminUiStaticTests(unittest.TestCase):
                     "limit": ["5"],
                     "message_bytes": [str(message_bytes)],
                 },
+                None,
             )
 
         page.assert_called_once_with("thread_1", 2, 5, before=None)
@@ -543,6 +776,7 @@ class AdminUiStaticTests(unittest.TestCase):
                     "GET",
                     "/v1/threads/thread_1/events",
                     {"before": ["42"], "limit": ["5"]},
+                    None,
                 ),
                 {"events": []},
             )
@@ -553,6 +787,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread_1/events",
                 {"since": ["2"], "before": ["42"]},
+                None,
             )
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
 
@@ -560,8 +795,8 @@ class AdminUiStaticTests(unittest.TestCase):
         message_bytes = 120 * 1024
         events = [{
             "seq": 1,
-            "task_id": "task_1",
-            "event_type": "task.activity",
+            "thread_id": "thread_1",
+            "event_type": "thread.activity",
             "payload": {
                 "activity": {
                     "activity_id": "command-1",
@@ -581,6 +816,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread_1/events",
                 {"limit": ["1"], "message_bytes": [str(message_bytes)]},
+                None,
             )
 
         activity = response["events"][0]["payload"]["activity"]
@@ -594,8 +830,8 @@ class AdminUiStaticTests(unittest.TestCase):
         events = [
             {
                 "seq": seq,
-                "task_id": "task_1",
-                "event_type": "task.activity",
+                "thread_id": "thread_1",
+                "event_type": "thread.activity",
                 "payload": {
                     "activity": {
                         "provider": "codex",
@@ -619,6 +855,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread_1/events",
                 {"limit": ["6"], "message_bytes": [str(message_bytes)]},
+                None,
             )
 
         self.assertEqual(len(response["events"]), 6)
@@ -632,8 +869,8 @@ class AdminUiStaticTests(unittest.TestCase):
         events = [
             {
                 "seq": seq,
-                "task_id": "task_1",
-                "event_type": "task.message",
+                "thread_id": "thread_1",
+                "event_type": "thread.message",
                 "payload": {"message": "\x01" * message_bytes, "source": "agent"},
             }
             for seq in range(8)
@@ -646,6 +883,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread_1/events",
                 {"limit": ["8"], "message_bytes": [str(message_bytes)]},
+                None,
             )
 
         self.assertEqual(len(response["events"]), 8)
@@ -660,8 +898,8 @@ class AdminUiStaticTests(unittest.TestCase):
         events = [
             {
                 "seq": seq,
-                "task_id": "task_1",
-                "event_type": "task.message",
+                "thread_id": "thread_1",
+                "event_type": "thread.message",
                 "payload": {"message": "😀" * message_bytes, "source": "agent"},
             }
             for seq in range(8)
@@ -674,6 +912,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread_1/events",
                 {"limit": ["8"], "message_bytes": [str(message_bytes)]},
+                None,
             )
 
         self.assertTrue(all(
@@ -687,9 +926,9 @@ class AdminUiStaticTests(unittest.TestCase):
             "host.runtime.admin_api.app_backend_api.admin_api.route",
             return_value={
                 "threads": [
-                    {"thread_id": "agent_chat__chat", "task_count": 2},
-                    {"thread_id": "other_app__notes", "task_count": 1},
-                    {"thread_id": "agent_chat__docs", "task_count": 5},
+                    {"thread_id": "agent_chat__chat", "status": "running"},
+                    {"thread_id": "other_app__notes", "status": "idle"},
+                    {"thread_id": "agent_chat__docs", "status": "idle"},
                 ]
             },
         ) as route:
@@ -701,62 +940,19 @@ class AdminUiStaticTests(unittest.TestCase):
         # Only this app's threads survive, and the prefix is stripped from each.
         self.assertEqual(
             response["threads"],
-            [{"thread_id": "chat", "task_count": 2}, {"thread_id": "docs", "task_count": 5}],
+            [{"thread_id": "chat", "status": "running"}, {"thread_id": "docs", "status": "idle"}],
         )
 
     def test_app_backend_visible_response_rejects_unscoped_thread_ids(self) -> None:
         with self.assertRaises(admin_api.ApiError) as error:
             app_backend_admin_api._visible_response(
                 "agent_chat",
-                {"tasks": [{"task_id": "task_2", "thread_id": "other_app__chat"}]},
+                {"threads": [{"thread_id": "other_app__chat"}]},
             )
 
         self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
 
-    def test_app_backend_task_scope_rejects_other_thread_prefixes(self) -> None:
-        with (
-            patch("host.runtime.admin_api.app_backend_api.state.get_task", return_value={"thread_id": "other_app__chat"}),
-            self.assertRaises(admin_api.ApiError) as error,
-        ):
-            app_backend_admin_api._require_app_task_scope("agent_chat", "GET", "/v1/tasks/task_1")
-
-        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
-
-    def test_app_backend_task_routes_scope_raw_task_ids_before_forwarding(self) -> None:
-        with (
-            patch("host.runtime.admin_api.app_backend_api.state.get_task", return_value={"thread_id": "agent_chat__chat"}),
-            patch(
-                "host.runtime.admin_api.app_backend_api.admin_api.route",
-                return_value={"task_id": "task_1", "thread_id": "agent_chat__chat"},
-            ) as route,
-        ):
-            response = app_backend_admin_api.route_app_backend_request(
-                "agent_chat", "GET", "/v1/tasks/task_1", {}, None
-            )
-
-        route.assert_called_once_with("GET", "/v1/tasks/task_1", {}, None, app_backend_id="agent_chat")
-        self.assertEqual(response, {"task_id": "task_1", "thread_id": "chat"})
-
-    def test_host_task_ids_stay_raw_for_app_threads(self) -> None:
-        task = {
-            "task_id": "task_1",
-            "status": "queued",
-            "agent_runtime": "codex",
-            "model": "gpt-5.6-terra",
-            "effort": "high",
-            "thread_id": "agent_chat__chat",
-            "input_message": "x",
-            "created_at": "2026-06-08T00:00:00Z",
-            "updated_at": "2026-06-08T00:00:00Z",
-        }
-        with patch("host.runtime.admin_api.service.state.get_task", return_value=task) as get_task:
-            response = admin_api.get_task("task_1")
-
-        get_task.assert_called_once_with("task_1")
-        self.assertEqual(response["task_id"], "task_1")
-        self.assertEqual(response["thread_id"], "agent_chat__chat")
-
-    def test_admin_task_create_rejects_app_reserved_thread_prefixes(self) -> None:
+    def test_admin_messages_reject_app_reserved_thread_prefixes(self) -> None:
         with self.assertRaises(admin_api.ApiError) as error:
             admin_api._validate_thread_id_not_reserved_by_app("agent_chat__chat", None)
 
@@ -770,11 +966,11 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_app_bridge_marker_cannot_leave_the_apps_own_api(self) -> None:
         # A bridge-tagged request is scoped server-side before any dispatch:
-        # another app's API, host task routes, and the network policy are all
+        # another app's API, host thread routes, and the network policy are all
         # 403 with nothing executed.
         for path in (
             "/v1/apps/agent_chat/api/health",
-            "/v1/tasks",
+            "/v1/threads",
             "/v1/network/policy",
         ):
             with self.subTest(path=path):
@@ -795,21 +991,10 @@ class AgentFileUploadHttpTests(unittest.TestCase):
         admin_api.admin_auth._sessions.clear()
         self.session_token = admin_api.admin_auth.create_session()
         self.addCleanup(admin_api.admin_auth._sessions.clear)
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), admin_api.Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
-        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.base_url = start_admin_http_server(self)
 
     def raw_request(self, request: bytes) -> bytes:
-        with socket.create_connection(("127.0.0.1", self.server.server_address[1]), timeout=5) as sock:
-            sock.sendall(request)
-            sock.shutdown(socket.SHUT_WR)
-            chunks: list[bytes] = []
-            while chunk := sock.recv(65536):
-                chunks.append(chunk)
-            return b"".join(chunks)
+        return raw_admin_request(self.admin_socket_path, request)
 
     def test_upload_streams_to_the_fixed_helper(self) -> None:
         class RecordingStdin(io.BytesIO):
@@ -855,29 +1040,29 @@ class AgentFileUploadHttpTests(unittest.TestCase):
 
     def test_upload_requires_auth_and_rejects_invalid_requests_before_starting_helper(self) -> None:
         payload = b"bytes"
-        unauthenticated = urllib.request.Request(
-            f"{self.base_url}/v1/agent-files/upload?filename=photo.png",
-            data=payload,
-            method="POST",
+        unauthenticated = self.raw_request(
+            b"POST /v1/agent-files/upload?filename=photo.png HTTP/1.1\r\n"
+            b"Host: kern-admin.test\r\n"
+            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+            + payload
         )
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(unauthenticated, timeout=5)
-        self.assertEqual(error.exception.code, 401)
+        self.assertIn(b" 401 ", unauthenticated)
 
         with patch("host.runtime.admin_api.service.subprocess.Popen") as popen:
             for path in (
                 "/v1/agent-files/upload?filename=..%2Fphoto.png",
                 "/v1/agent-files/upload?filename=photo.png&extra=1",
             ):
-                with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as error:
-                    request = urllib.request.Request(
-                        f"{self.base_url}{path}",
-                        data=payload,
-                        method="POST",
-                        headers=_session_headers(self.session_token),
+                with self.subTest(path=path):
+                    response = self.raw_request(
+                        f"POST {path} HTTP/1.1\r\n".encode()
+                        + b"Host: kern-admin.test\r\n"
+                        + f"Cookie: tc_admin_session={self.session_token}\r\n".encode()
+                        + b"X-Kern-Csrf: 1\r\n"
+                        + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                        + payload
                     )
-                    urllib.request.urlopen(request, timeout=5)
-                self.assertEqual(error.exception.code, 400)
+                    self.assertIn(b" 400 ", response)
             popen.assert_not_called()
 
     def test_upload_cap_and_app_bridge_scope_are_enforced_before_body_read(self) -> None:
@@ -1055,30 +1240,29 @@ class AdminApiIntegrationTests(unittest.TestCase):
             {"network_integrations": {"openai": {"enabled": True}}},
             "2026-06-08T00:00:00Z",
         )
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "active"
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "deactivated"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="deactivated")
+        # Live turns are process-global orchestrator state; never leak a fake
+        # or admitted turn from one case into the next.
+        with orchestrator._LIVE_LOCK:
+            orchestrator._LIVE.clear()
+        self.addCleanup(orchestrator._LIVE.clear)
         self.reconcile_patch = patch(
             "host.runtime.admin_api.service.orchestrator.reconcile_runtime_status_after_policy_change"
         )
         self.mock_reconcile = self.reconcile_patch.start()
         self.addCleanup(self.reconcile_patch.stop)
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), admin_api.Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
-        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.base_url = start_admin_http_server(self)
 
     def request(self, method: str, path: str, body: object | None = None, auth: bool = True):
-        if method == "POST" and path == "/v1/tasks" and isinstance(body, dict):
+        if method == "POST" and path.endswith("/messages") and isinstance(body, dict):
             body = dict(body)
-            if "model" not in body and "effort" not in body:
-                if body.get("agent_runtime") == "claude_code":
-                    body.update({"model": "claude-opus-5", "effort": "high"})
-                elif body.get("agent_runtime") == "codex":
-                    body.update({"model": "gpt-5.6-terra", "effort": "high"})
+            if (
+                body.get("agent_runtime") in DEFAULT_SESSION_OPTIONS
+                and "model" not in body
+                and "effort" not in body
+            ):
+                model, effort = DEFAULT_SESSION_OPTIONS[body["agent_runtime"]]
+                body.update({"model": model, "effort": effort})
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(f"{self.base_url}{path}", data=data, method=method)
         if auth:
@@ -1089,16 +1273,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             return response.status, json.loads(response.read())
 
     def raw_request(self, request: bytes) -> bytes:
-        with socket.create_connection(("127.0.0.1", self.server.server_address[1]), timeout=5) as sock:
-            sock.sendall(request)
-            sock.shutdown(socket.SHUT_WR)
-            chunks: list[bytes] = []
-            while True:
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            return b"".join(chunks)
+        return raw_admin_request(self.admin_socket_path, request)
 
     def health(self, proxy_alive: bool = True):
         with (
@@ -1188,16 +1363,38 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def session_token_from_headers(self, headers) -> str | None:
         for value in headers.get_all("Set-Cookie") or []:
-            token = admin_api.admin_auth.parse_session_token(value)
+            token = admin_api.admin_auth.parse_session_token(
+                value,
+                secure=value.startswith(
+                    f"{admin_api.admin_auth.HOST_SESSION_COOKIE_NAME}="
+                ),
+            )
             if token:
                 return token
         return None
 
-    def cookie_request(self, method: str, path: str, token: str, *, csrf: bool = True):
+    def cookie_request(
+        self,
+        method: str,
+        path: str,
+        token: str,
+        *,
+        csrf: bool = True,
+        cookie_name: str | None = None,
+        session_activity: bool = False,
+        forwarded_proto: str | None = None,
+    ):
         request = urllib.request.Request(f"{self.base_url}{path}", method=method)
-        request.add_header("Cookie", f"{admin_api.admin_auth.SESSION_COOKIE_NAME}={token}")
+        request.add_header(
+            "Cookie",
+            f"{cookie_name or admin_api.admin_auth.SESSION_COOKIE_NAME}={token}",
+        )
         if csrf:
             request.add_header(admin_api.admin_auth.CSRF_HEADER_NAME, "1")
+        if session_activity:
+            request.add_header(admin_api.admin_auth.SESSION_ACTIVITY_HEADER_NAME, "1")
+        if forwarded_proto is not None:
+            request.add_header("X-Forwarded-Proto", forwarded_proto)
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
                 return response.status, json.loads(response.read())
@@ -1226,6 +1423,72 @@ class AdminApiIntegrationTests(unittest.TestCase):
         status, body = self.cookie_request("GET", "/v1/apps", token, csrf=False)
         self.assertEqual(status, 403)
 
+    def test_session_cookie_name_is_bound_to_its_transport(self) -> None:
+        token = admin_api.admin_auth.create_session()
+        # The public tunnel accepts only the un-tossable __Host- cookie.
+        status, _ = self.cookie_request(
+            "GET",
+            "/v1/apps",
+            token,
+            cookie_name=admin_api.admin_auth.HOST_SESSION_COOKIE_NAME,
+            forwarded_proto="https",
+        )
+        self.assertEqual(status, 200)
+        status, _ = self.cookie_request(
+            "GET",
+            "/v1/apps",
+            token,
+            cookie_name=admin_api.admin_auth.SESSION_COOKIE_NAME,
+            forwarded_proto="https",
+        )
+        self.assertEqual(status, 401)
+        # The plain loopback transport never accepts the public cookie.
+        status, _ = self.cookie_request(
+            "GET",
+            "/v1/apps",
+            token,
+            cookie_name=admin_api.admin_auth.HOST_SESSION_COOKIE_NAME,
+        )
+        self.assertEqual(status, 401)
+
+    def test_background_requests_do_not_keep_an_idle_session_alive(self) -> None:
+        admin_api.admin_auth._sessions.clear()
+        start = 1000.0
+        with patch.object(admin_api.admin_auth, "_now", return_value=start):
+            token = admin_api.admin_auth.create_session()
+        with patch.object(
+            admin_api.admin_auth,
+            "_now",
+            return_value=start + admin_api.admin_auth.SESSION_IDLE_TIMEOUT_SECONDS - 1,
+        ):
+            status, _ = self.cookie_request("GET", "/v1/apps", token)
+            self.assertEqual(status, 200)
+        with patch.object(
+            admin_api.admin_auth,
+            "_now",
+            return_value=start + admin_api.admin_auth.SESSION_IDLE_TIMEOUT_SECONDS + 1,
+        ):
+            status, _ = self.cookie_request("GET", "/v1/apps", token)
+            self.assertEqual(status, 401)
+
+    def test_recent_operator_activity_refreshes_the_idle_session(self) -> None:
+        admin_api.admin_auth._sessions.clear()
+        start = 2000.0
+        idle = admin_api.admin_auth.SESSION_IDLE_TIMEOUT_SECONDS
+        with patch.object(admin_api.admin_auth, "_now", return_value=start):
+            token = admin_api.admin_auth.create_session()
+        with patch.object(admin_api.admin_auth, "_now", return_value=start + idle - 1):
+            status, _ = self.cookie_request(
+                "GET",
+                "/v1/apps",
+                token,
+                session_activity=True,
+            )
+            self.assertEqual(status, 200)
+        with patch.object(admin_api.admin_auth, "_now", return_value=start + (2 * idle) - 2):
+            status, _ = self.cookie_request("GET", "/v1/apps", token)
+            self.assertEqual(status, 200)
+
     def test_login_rejects_a_wrong_password_without_a_cookie(self) -> None:
         status, headers, body = self.login("not-the-password")
         self.assertEqual(status, 401)
@@ -1247,9 +1510,16 @@ class AdminApiIntegrationTests(unittest.TestCase):
         for _ in range(admin_api.admin_auth.MAX_FAILURES_PER_CLIENT):
             status, _, _ = self.login("wrong")
             self.assertEqual(status, 401)
-        status, headers, body = self.login("admin-secret")
-        self.assertEqual(status, 429)
-        self.assertIsNone(self.session_token_from_headers(headers))
+        data = json.dumps({"password": "admin-secret"}).encode()
+        blocked = self.raw_request(
+            b"POST /v1/login HTTP/1.1\r\n"
+            b"Host: kern-admin.test\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(data)}\r\n\r\n".encode()
+            + data
+        )
+        self.assertIn(b" 429 ", blocked)
+        self.assertNotIn(b"Set-Cookie:", blocked)
 
     def test_a_correct_login_within_the_budget_succeeds_and_clears_the_streak(self) -> None:
         # Wrong attempts short of the limit, then the correct password (still
@@ -1303,13 +1573,17 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn(b" 403 ", duplicate)
 
     def test_login_rejects_oversized_and_malformed_bodies(self) -> None:
-        oversized = urllib.request.Request(
-            f"{self.base_url}/v1/login", data=b'{"password":"' + b"x" * 5000 + b'"}', method="POST"
+        # Raw bytes: the server rejects on Content-Length and may close before
+        # the whole body lands, which urllib surfaces as a send error instead
+        # of the buffered 413 response.
+        data = b'{"password":"' + b"x" * 5000 + b'"}'
+        oversized = self.raw_request(
+            b"POST /v1/login HTTP/1.1\r\nHost: kern-admin.test\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(data)}\r\n\r\n".encode()
+            + data
         )
-        oversized.add_header("Content-Type", "application/json")
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(oversized, timeout=5)
-        self.assertEqual(error.exception.code, 413)
+        self.assertIn(b" 413 ", oversized)
         # A well-formed but wrong-shape body is a failed attempt, not a 200.
         status, headers, _ = self.login("admin-secret")  # correct baseline works
         self.assertEqual(status, 200)
@@ -1343,119 +1617,134 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn(b" 301 ", response)
         self.assertIn(b"Location: https://kern.example.com/", response)
 
-    def test_app_backend_task_threads_are_internally_app_prefixed(self) -> None:
-        task = self.app_backend_request(
-            "POST",
-            "/v1/tasks",
-            {
-                "input_message": "from app",
-                "thread_id": "chat",
-                "agent_runtime": "codex",
-                "model": "gpt-5.6-terra",
-                "effort": "high",
-            },
+    def test_app_backend_message_threads_are_internally_app_prefixed(self) -> None:
+        with patch.object(
+            orchestrator, "launch_turn", side_effect=attach_recording_steer_server
+        ):
+            started = self.app_backend_request(
+                "POST",
+                "/v1/threads/chat/messages",
+                {
+                    "message": "from app",
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-terra",
+                    "effort": "high",
+                },
+            )
+
+            self.assertEqual(started["status"], "accepted")
+            self.assertEqual(started["thread"]["thread_id"], "chat")
+            self.assertEqual(started["thread"]["status"], "running")
+            stored = state.thread_session_config("agent_chat__chat")
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(stored["agent_runtime"], "codex")
+            self.assertIsNone(state.thread_session_config("chat"))
+
+            # A host-visible thread of the same visible name is a different
+            # thread entirely; the app's bulk listing never shows it.
+            self.request(
+                "POST",
+                "/v1/threads/chat/messages",
+                {"message": "host-visible chat", "agent_runtime": "codex"},
+            )
+
+        # Ownership is applied before pagination: the newer host-global
+        # thread must not consume this app's one-row page.
+        listed = app_backend_admin_api.route_app_backend_request(
+            "agent_chat",
+            "GET",
+            "/v1/threads",
+            {"limit": ["1"]},
+            None,
         )
+        self.assertEqual([item["thread_id"] for item in listed["threads"]], ["chat"])
 
-        self.assertEqual(task["thread_id"], "chat")
-        stored = state.get_task(task["task_id"])
-        self.assertIsNotNone(stored)
-        assert stored is not None
-        self.assertEqual(stored["thread_id"], "agent_chat__chat")
+        detail = self.app_backend_request("GET", "/v1/threads/chat")
+        self.assertEqual(detail["thread"]["thread_id"], "chat")
+        self.assertEqual(detail["thread"]["agent_runtime"], "codex")
 
-        _, host_visible_thread_task = self.request(
-            "POST",
-            "/v1/tasks",
-            {"input_message": "host-visible chat", "thread_id": "chat", "agent_runtime": "codex"},
-        )
-
-        listed = self.app_backend_request("GET", "/v1/threads/chat/tasks")
+        events = self.app_backend_request("GET", "/v1/threads/chat/events")
         self.assertEqual(
-            [(item["task_id"], item["thread_id"]) for item in listed["tasks"]],
-            [(task["task_id"], "chat")],
+            [(event["event_type"], event["thread_id"]) for event in events["events"]],
+            [("thread.message", "chat")],
         )
-        self.assertNotIn(
-            host_visible_thread_task["task_id"],
-            {item["task_id"] for item in listed["tasks"]},
-        )
+        self.assertEqual(events["events"][0]["payload"]["message"], "from app")
 
-        app_task = self.app_backend_request("GET", f"/v1/tasks/{task['task_id']}")
-        self.assertEqual(app_task["task_id"], task["task_id"])
-        self.assertEqual(app_task["thread_id"], "chat")
+        _, host_thread = self.request("GET", "/v1/threads/agent_chat__chat")
+        self.assertEqual(host_thread["thread"]["thread_id"], "agent_chat__chat")
 
-        _, host_listed = self.request("GET", "/v1/threads/agent_chat__chat/tasks")
-        self.assertEqual(host_listed["tasks"][0]["task_id"], task["task_id"])
-        self.assertEqual(host_listed["tasks"][0]["thread_id"], "agent_chat__chat")
-
-        _, host_task = self.request("GET", f"/v1/tasks/{task['task_id']}")
-        self.assertEqual(host_task["task_id"], task["task_id"])
-        self.assertEqual(host_task["thread_id"], "agent_chat__chat")
-
-    def test_app_backend_repeated_task_create_makes_another_task(self) -> None:
+    def test_app_backend_repeated_message_steers_the_running_turn(self) -> None:
         request = {
-            "input_message": "from app",
-            "thread_id": "repeated-create",
+            "message": "from app",
             "agent_runtime": "codex",
             "model": "gpt-5.6-terra",
             "effort": "high",
         }
-        first = self.app_backend_request("POST", "/v1/tasks", request)
-        repeated = self.app_backend_request("POST", "/v1/tasks", request)
+        with patch.object(
+            orchestrator, "launch_turn", side_effect=attach_recording_steer_server
+        ):
+            first = self.app_backend_request("POST", "/v1/threads/repeated-send/messages", request)
+            repeated = self.app_backend_request("POST", "/v1/threads/repeated-send/messages", request)
 
-        self.assertNotEqual(repeated["task_id"], first["task_id"])
-        self.assertEqual(len(state.tasks_for_thread("agent_chat__repeated-create", 10)), 2)
+        self.assertEqual(first["status"], "accepted")
+        self.assertEqual(repeated["status"], "accepted")
+        self.assertEqual(repeated["thread"]["thread_id"], "repeated-send")
+        turn = orchestrator._LIVE["codex:agent_chat__repeated-send"]
+        self.assertEqual(turn.server.messages, ["from app"])
 
     def test_app_backend_repeated_steer_appends_again(self) -> None:
-        task = self.app_backend_request(
-            "POST",
-            "/v1/tasks",
-            {
-                "input_message": "from app",
-                "thread_id": "durable-steer",
-                "agent_runtime": "codex",
-                "model": "gpt-5.6-terra",
-                "effort": "high",
-            },
-        )
-        with state.mutation() as cur:
-            stored = state.get_task(task["task_id"], cur)
-            assert stored is not None
-            stored["status"] = "running"
-            state.save_task(cur, stored)
+        with patch.object(
+            orchestrator, "launch_turn", side_effect=attach_recording_steer_server
+        ):
+            self.app_backend_request(
+                "POST",
+                "/v1/threads/durable-steer/messages",
+                {
+                    "message": "from app",
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-terra",
+                    "effort": "high",
+                },
+            )
+            first = self.app_backend_request(
+                "POST", "/v1/threads/durable-steer/messages", {"message": "nudge"}
+            )
+            repeated = self.app_backend_request(
+                "POST", "/v1/threads/durable-steer/messages", {"message": "nudge"}
+            )
 
-        first = self.app_backend_request(
-            "POST",
-            f"/v1/tasks/{task['task_id']}/steer",
-            {"steer_message": "nudge"},
-        )
-        repeated = self.app_backend_request(
-            "POST",
-            f"/v1/tasks/{task['task_id']}/steer",
-            {"steer_message": "nudge"},
-        )
-
+        self.assertEqual(first["status"], "accepted")
         self.assertEqual(first, repeated)
-        self.assertEqual(state.task_steers(task["task_id"]), ["nudge", "nudge"])
-
-    def test_app_backend_task_lookup_rejects_unscoped_task_ids(self) -> None:
-        _, outside = self.request(
-            "POST",
-            "/v1/tasks",
-            {"input_message": "outside app", "thread_id": "outside", "agent_runtime": "codex"},
+        turn = orchestrator._LIVE["codex:agent_chat__durable-steer"]
+        self.assertEqual(turn.server.messages, ["nudge", "nudge"])
+        events = self.app_backend_request("GET", "/v1/threads/durable-steer/events")
+        self.assertEqual(
+            [event["event_type"] for event in events["events"]],
+            ["thread.message", "thread.message", "thread.message"],
         )
 
-        with self.assertRaises(admin_api.ApiError) as error:
-            self.app_backend_request("GET", f"/v1/tasks/{outside['task_id']}")
-
-        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
+    def test_app_backend_task_routes_are_forbidden(self) -> None:
+        for method, path in (
+            ("POST", "/v1/tasks"),
+            ("GET", "/v1/tasks/task_1"),
+            ("POST", "/v1/tasks/task_1/steer"),
+            ("POST", "/v1/tasks/task_1/cancel"),
+            ("POST", "/v1/tasks/task_1/kill"),
+            ("GET", "/v1/threads/chat/tasks"),
+        ):
+            with self.subTest(method=method, path=path):
+                with self.assertRaises(admin_api.ApiError) as error:
+                    self.app_backend_request(method, path)
+                self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
 
     def test_app_backend_thread_id_limit_includes_hidden_prefix(self) -> None:
         with self.assertRaises(admin_api.ApiError) as error:
             self.app_backend_request(
                 "POST",
-                "/v1/tasks",
+                f"/v1/threads/{'a' * 64}/messages",
                 {
-                    "input_message": "too long",
-                    "thread_id": "a" * 64,
+                    "message": "too long",
                     "agent_runtime": "codex",
                     "model": "gpt-5.6-terra",
                     "effort": "high",
@@ -1496,6 +1785,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         for asset_name, content_type, expected in (
             ("agent_chat.css", "text/css", ".chat-app"),
             ("agent_chat.js", "application/javascript", "kern-app-api"),
+            ("rich_text.css", "text/css", ".md-content"),
+            ("rich_text.js", "application/javascript", "renderMarkdown"),
         ):
             request = urllib.request.Request(f"{self.base_url}/v1/apps/agent_chat/ui/{asset_name}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -1585,13 +1876,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def test_malformed_or_huge_content_length_returns_4xx(self) -> None:
         invalid = self.raw_request(
-            b"POST /v1/tasks HTTP/1.1\r\n"
+            b"POST /v1/threads/t1/messages HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
             + f"Cookie: tc_admin_session={self.session_token}\r\nX-Kern-Csrf: 1\r\n".encode()
             + b"Content-Length: nope\r\n\r\n"
         )
         huge = self.raw_request(
-            b"POST /v1/tasks HTTP/1.1\r\n"
+            b"POST /v1/threads/t1/messages HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
             + f"Cookie: tc_admin_session={self.session_token}\r\nX-Kern-Csrf: 1\r\n".encode()
             + b"Content-Length: 1048577\r\n\r\n"
@@ -1610,9 +1901,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
     def test_health_never_spawns_codex(self) -> None:
         # The health/status path must read cached state only — a hanging Codex
         # app-server must never be able to block it.
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "loading"
-        save_state(state)
+        set_runtime_statuses(codex="loading", claude_code="deactivated")
         with patch(
             "host.runtime.admin_api.orchestrator.codex_app_server.account_status",
             side_effect=AssertionError("health must not call Codex"),
@@ -1621,9 +1910,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(self.runtime(body)["status"], "loading")
 
     def test_runtime_status_loop_refreshes_cached_status(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "loading"
-        save_state(state)
+        set_runtime_statuses(codex="loading", claude_code="deactivated")
         with patch(
             "host.runtime.admin_api.orchestrator.codex_app_server.account_status",
             return_value=("awaiting_login", None, None),
@@ -1653,15 +1940,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def test_disabled_provider_runtime_is_deactivated_without_cli_check(self) -> None:
         save_claude_account({"account_id": "acct_smoke", "access_token_sha256": "f" * 64})
-        state = load_state()
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "active"
-        state["agent_runtime_statuses"]["claude_code"]["error_message"] = "old failure"
-        state["claude_oauth"] = {
+        set_runtime_statuses(codex="active")
+        with orchestrator._RUNTIME_STATUS_LOCK:
+            orchestrator._RUNTIME_STATUSES["claude_code"] = {"status": "active", "error_message": "old failure"}
+        save_oauth_login("claude", {
             "status": "awaiting_code",
             "login_url": "https://claude.com/cai/oauth/authorize",
             "expires_at": "2099-06-08T00:10:00Z",
-        }
-        save_state(state)
+        })
 
         with patch(
             "host.runtime.admin_api.orchestrator.claude_code.account_status",
@@ -1669,10 +1955,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         ):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "deactivated")
 
-        state = load_state()
-        self.assertEqual(state["agent_runtime_statuses"]["claude_code"]["status"], "deactivated")
-        self.assertNotIn("error_message", state["agent_runtime_statuses"]["claude_code"])
-        self.assertIsNone(state["claude_oauth"])
+        self.assertEqual(orchestrator.runtime_status_record("claude_code"), {"status": "deactivated"})
+        self.assertIsNone(state.oauth_login("claude"))
         self.assertEqual(read_claude_account(), {"account_id": "acct_smoke", "access_token_sha256": "f" * 64})
         _, body = self.request("GET", "/v1/agent-runtime/status")
         self.assertNotIn("error_message", self.runtime({"agent_runtime": body}, "claude_code"))
@@ -1797,7 +2081,40 @@ class AdminApiIntegrationTests(unittest.TestCase):
             ["stream", "/workspace/reel.mp4"],
         )
 
-    def test_agent_file_content_rejects_non_video_helper_output(self) -> None:
+    def test_agent_file_content_streams_authenticated_image(self) -> None:
+        payload = b"mock-png-bytes"
+        process = MagicMock()
+        process.stdout = io.BytesIO(
+            json.dumps({
+                "path": "/workspace/screenshot.png",
+                "size_bytes": len(payload),
+                "media_type": "image/png",
+            }).encode() + b"\n" + payload
+        )
+        process.stderr = io.BytesIO()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/agent-files/content?path=%2Fworkspace%2Fscreenshot.png"
+        )
+        _add_session_auth(request, self.session_token)
+        with (
+            patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process) as popen,
+            urllib.request.urlopen(request, timeout=5) as response,
+        ):
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers["Content-Type"], "image/png")
+            self.assertEqual(response.read(), payload)
+            for name, value in admin_api.UNTRUSTED_FILE_SECURITY_HEADERS.items():
+                self.assertEqual(response.headers[name], value)
+
+        self.assertEqual(
+            popen.call_args.args[0][-2:],
+            ["stream", "/workspace/screenshot.png"],
+        )
+
+    def test_agent_file_content_rejects_mismatched_helper_media_type(self) -> None:
         process = MagicMock()
         process.stdout = io.BytesIO(
             json.dumps({
@@ -1817,14 +2134,34 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 500)
         self.assertIn("invalid metadata", error.exception.read().decode())
 
-    def test_agent_file_content_rejects_non_video_path_before_helper(self) -> None:
+    def test_agent_file_content_rejects_unsupported_path_before_helper(self) -> None:
         with patch("host.runtime.admin_api.service.subprocess.Popen") as popen:
             with self.assertRaises(urllib.error.HTTPError) as error:
-                self.request("GET", "/v1/agent-files/content?path=%2Fworkspace%2Fpayload.html")
+                self.request("GET", "/v1/agent-files/content?path=%2Fworkspace%2Fpayload.svg")
 
         self.assertEqual(error.exception.code, 400)
-        self.assertIn("only MP4 or MOV", error.exception.read().decode())
+        self.assertIn("only MP4, MOV, JPEG, PNG, or WebP", error.exception.read().decode())
         popen.assert_not_called()
+
+    def test_agent_file_content_rejects_oversized_image_metadata(self) -> None:
+        process = MagicMock()
+        process.stdout = io.BytesIO(
+            json.dumps({
+                "path": "/workspace/huge.png",
+                "size_bytes": admin_api.AGENT_FILE_IMAGE_STREAM_MAX_BYTES + 1,
+                "media_type": "image/png",
+            }).encode() + b"\n"
+        )
+        process.stderr = io.BytesIO()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+
+        with patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request("GET", "/v1/agent-files/content?path=%2Fworkspace%2Fhuge.png")
+
+        self.assertEqual(error.exception.code, 500)
+        self.assertIn("invalid metadata", error.exception.read().decode())
 
     def test_agent_file_helper_errors_map_to_http_status(self) -> None:
         def missing(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -1848,62 +2185,172 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 504)
         self.assertIn("root helper could not be terminated", error.exception.read().decode())
 
-    def test_task_create_list_update_cancel_and_events(self) -> None:
-        status, task = self.request("POST", "/v1/tasks", {"input_message": "first task", "thread_id": "t1", "agent_runtime": "codex"})
+    def test_message_starts_turn_and_records_thread_events(self) -> None:
+        with patch.object(orchestrator, "launch_turn") as launch:
+            status, body = self.request(
+                "POST",
+                "/v1/threads/t1/messages",
+                {"message": "first turn", "agent_runtime": "codex"},
+            )
+
         self.assertEqual(status, 200)
-        self.assertEqual(task["status"], "queued")
-        self.assertEqual(task["agent_runtime"], "codex")
-        task_id = task["task_id"]
+        self.assertEqual(body["status"], "accepted")
+        self.assertEqual(body["thread"]["thread_id"], "t1")
+        self.assertEqual(body["thread"]["agent_runtime"], "codex")
+        self.assertEqual(body["thread"]["status"], "running")
+        launch.assert_called_once()
+        turn = launch.call_args.args[0]
+        self.assertEqual((turn.runtime_type, turn.thread_id), ("codex", "t1"))
+        self.assertEqual(launch.call_args.args[1], "first turn")
 
-        _, listed = self.request("GET", "/v1/tasks")
-        self.assertEqual(listed["tasks"][0]["queue_position"], 1)
-        self.assertEqual(listed["tasks"][0]["input_message"], "first task")
-        self.assertEqual(listed["tasks"][0]["thread_id"], "t1")
+        _, events = self.request("GET", "/v1/threads/t1/events")
+        self.assertEqual(
+            [(event["event_type"], event["thread_id"]) for event in events["events"]],
+            [("thread.message", "t1")],
+        )
+        self.assertEqual(events["events"][0]["payload"], {"message": "first turn", "source": "user"})
 
-        _, updated = self.request("PUT", f"/v1/tasks/{task_id}", {"input_message": "updated task"})
-        self.assertEqual(updated["input_message"], "updated task")
+        _, listed = self.request("GET", "/v1/threads")
+        self.assertEqual(listed["threads"][0]["thread_id"], "t1")
+        self.assertEqual(listed["threads"][0]["status"], "running")
 
-        _, events = self.request("GET", f"/v1/tasks/{task_id}/events")
-        self.assertEqual(events["events"], [])
-
-        _, cancel = self.request("POST", f"/v1/tasks/{task_id}/cancel")
-        self.assertEqual(cancel["status"], "accepted")
-        _, cancelled = self.request("GET", f"/v1/tasks/{task_id}")
-        self.assertEqual(cancelled["status"], "cancelled")
-        _, events = self.request("GET", f"/v1/tasks/{task_id}/events")
+    def test_message_steers_running_turn_without_a_host_mailbox(self) -> None:
+        with patch.object(
+            orchestrator, "launch_turn", side_effect=attach_recording_steer_server
+        ):
+            self.request(
+                "POST", "/v1/threads/t1/messages", {"message": "start", "agent_runtime": "codex"}
+            )
+            _, first = self.request("POST", "/v1/threads/t1/messages", {"message": "s1"})
+            _, second = self.request("POST", "/v1/threads/t1/messages", {"message": "s2"})
+            _, third = self.request("POST", "/v1/threads/t1/messages", {"message": "s3"})
+        self.assertEqual(first["status"], "accepted")
+        self.assertEqual(second["status"], "accepted")
+        self.assertEqual(third["status"], "accepted")
+        turn = orchestrator._LIVE["codex:t1"]
+        self.assertEqual(turn.server.messages, ["s1", "s2", "s3"])
+        _, events = self.request("GET", "/v1/threads/t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["task.cancelled"],
+            ["thread.message", "thread.message", "thread.message", "thread.message"],
         )
 
-    def test_task_create_validates_and_returns_session_options(self) -> None:
-        status, codex = self.request(
-            "POST",
-            "/v1/tasks",
-            {
-                "input_message": "codex task",
-                "thread_id": "codex-options",
-                "agent_runtime": "codex",
-                "model": "gpt-5.6-luna",
-                "effort": "max",
-            },
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual((codex["model"], codex["effort"]), ("gpt-5.6-luna", "max"))
+    def test_message_rejected_while_thread_finishes_previous_turn(self) -> None:
+        seed_thread_session("t1")
+        turn = register_live_turn("t1")
+        turn.phase = orchestrator.ExecutionPhase.FINISHING
 
-        status, claude = self.request(
-            "POST",
-            "/v1/tasks",
-            {
-                "input_message": "claude task",
-                "thread_id": "claude-options",
-                "agent_runtime": "claude_code",
-                "model": "claude-fable-5",
-                "effort": "ultracode",
-            },
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request("POST", "/v1/threads/t1/messages", {"message": "retry"})
+
+        self.assertEqual(error.exception.code, 409)
+        self.assertIn("agent is finishing; retry shortly", error.exception.read().decode())
+
+    def test_message_rejected_while_runtime_is_not_active(self) -> None:
+        set_runtime_statuses(codex="awaiting_login", claude_code="deactivated")
+
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request(
+                "POST", "/v1/threads/t1/messages", {"message": "hello", "agent_runtime": "codex"}
+            )
+        self.assertEqual(error.exception.code, 409)
+        self.assertIn(
+            "Codex runtime is awaiting_login; messages run only while it is active",
+            error.exception.read().decode(),
         )
-        self.assertEqual(status, 200)
-        self.assertEqual((claude["model"], claude["effort"]), ("claude-fable-5", "ultracode"))
+
+        # A runtime whose managed provider is disabled rejects with the policy
+        # pointer instead of a bare status.
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request(
+                "POST", "/v1/threads/t2/messages", {"message": "hello", "agent_runtime": "claude_code"}
+            )
+        self.assertEqual(error.exception.code, 409)
+        self.assertIn(
+            "Claude Code runtime is deactivated; enable its provider",
+            error.exception.read().decode(),
+        )
+
+        # The rejected messages created no thread.
+        self.assertIsNone(state.thread_session_config("t1"))
+        self.assertIsNone(state.thread_session_config("t2"))
+
+    def test_fourth_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
+        save_policy(
+            {"network_integrations": {"openai": {"enabled": True}, "claude": {"enabled": True}}},
+            "2026-06-08T00:00:00Z",
+        )
+        set_runtime_statuses(codex="active", claude_code="active")
+        with patch.object(
+            orchestrator, "launch_turn", side_effect=attach_recording_steer_server
+        ):
+            for thread_id in ("t1", "t2", "t3"):
+                _, body = self.request(
+                    "POST",
+                    f"/v1/threads/{thread_id}/messages",
+                    {"message": "go", "agent_runtime": "codex"},
+                )
+                self.assertEqual(body["status"], "accepted")
+
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(
+                    "POST", "/v1/threads/t4/messages", {"message": "go", "agent_runtime": "codex"}
+                )
+            self.assertEqual(error.exception.code, 429)
+            self.assertIn(
+                "already running 3 concurrent threads; retry when one finishes",
+                error.exception.read().decode(),
+            )
+            # The rejection rolled everything back: no thread, no events.
+            self.assertIsNone(state.thread_session_config("t4"))
+            _, events = self.request("GET", "/v1/threads/t4/events")
+            self.assertEqual(events["events"], [])
+
+            # Capacity is per runtime: Claude Code still has its own pool.
+            _, claude = self.request(
+                "POST", "/v1/threads/c1/messages", {"message": "go", "agent_runtime": "claude_code"}
+            )
+            self.assertEqual(claude["status"], "accepted")
+
+    def test_message_validates_and_returns_session_options(self) -> None:
+        save_policy(
+            {"network_integrations": {"openai": {"enabled": True}, "claude": {"enabled": True}}},
+            "2026-06-08T00:00:00Z",
+        )
+        set_runtime_statuses(codex="active", claude_code="active")
+        with patch.object(
+            orchestrator, "launch_turn", side_effect=attach_recording_steer_server
+        ):
+            status, codex = self.request(
+                "POST",
+                "/v1/threads/codex-options/messages",
+                {
+                    "message": "codex turn",
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-luna",
+                    "effort": "max",
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                (codex["thread"]["model"], codex["thread"]["effort"]), ("gpt-5.6-luna", "max")
+            )
+
+            status, claude = self.request(
+                "POST",
+                "/v1/threads/claude-options/messages",
+                {
+                    "message": "claude turn",
+                    "agent_runtime": "claude_code",
+                    "model": "claude-fable-5",
+                    "effort": "ultracode",
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                (claude["thread"]["model"], claude["thread"]["effort"]),
+                ("claude-fable-5", "ultracode"),
+            )
 
         invalid = [
             {"model": "gpt-5.6-luna", "effort": "ultra"},
@@ -1916,91 +2363,234 @@ class AdminApiIntegrationTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
                 self.request(
                     "POST",
-                    "/v1/tasks",
-                    {
-                        "input_message": "invalid",
-                        "thread_id": f"invalid-options-{index}",
-                        "agent_runtime": "codex",
-                        **fields,
-                    },
+                    f"/v1/threads/invalid-options-{index}/messages",
+                    {"message": "invalid", "agent_runtime": "codex", **fields},
                 )
             self.assertEqual(error.exception.code, 400)
 
-    def test_task_follow_up_accepts_omitted_or_matching_session_configuration(self) -> None:
+    def test_follow_up_accepts_omitted_or_matching_configuration_and_locks_live_changes(
+        self,
+    ) -> None:
         body = {
-            "input_message": "first",
-            "thread_id": "fixed-options",
+            "message": "first",
             "agent_runtime": "codex",
             "model": "gpt-5.6-terra",
             "effort": "high",
         }
-        self.request("POST", "/v1/tasks", body)
+        path = "/v1/threads/fixed-options/messages"
+        with patch.object(
+            orchestrator, "launch_turn", side_effect=attach_recording_steer_server
+        ):
+            self.request("POST", path, body)
 
-        _, repeated = self.request(
-            "POST",
-            "/v1/tasks",
-            {**body, "input_message": "matching repeat"},
-        )
-        self.assertEqual(
-            (repeated["agent_runtime"], repeated["model"], repeated["effort"]),
-            (body["agent_runtime"], body["model"], body["effort"]),
-        )
+            _, repeated = self.request("POST", path, {**body, "message": "matching repeat"})
+            self.assertEqual(repeated["status"], "accepted")
+            thread = repeated["thread"]
+            self.assertEqual(
+                (thread["agent_runtime"], thread["model"], thread["effort"]),
+                (body["agent_runtime"], body["model"], body["effort"]),
+            )
 
-        for index, fields in enumerate(
-            (
+            for fields in (
                 {"model": "gpt-5.6-sol", "effort": "high"},
                 {"model": "gpt-5.6-terra", "effort": "max"},
-            )
-        ):
-            with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
+            ):
+                with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
+                    self.request("POST", path, {**body, "message": "conflict", **fields})
+                self.assertEqual(error.exception.code, 409)
+                self.assertIn(
+                    "can change only while the thread is idle", error.exception.read().decode()
+                )
+
+            with self.assertRaises(urllib.error.HTTPError) as partial_error:
                 self.request(
-                    "POST",
-                    "/v1/tasks",
-                    {**body, "input_message": "conflict", **fields},
-            )
-            self.assertEqual(error.exception.code, 400)
-            self.assertIn("must match the existing thread configuration", error.exception.read().decode())
+                    "POST", path, {"message": "partial conflict", "model": "gpt-5.6-terra"}
+                )
+            self.assertEqual(partial_error.exception.code, 400)
+            self.assertIn("must be provided together", partial_error.exception.read().decode())
 
-        with self.assertRaises(urllib.error.HTTPError) as partial_error:
-            self.request(
-                "POST",
-                "/v1/tasks",
-                {
-                    "input_message": "partial conflict",
-                    "thread_id": body["thread_id"],
-                    "model": "gpt-5.6-terra",
-                },
-            )
-        self.assertEqual(partial_error.exception.code, 400)
-        self.assertIn(
-            "must be provided together",
-            partial_error.exception.read().decode(),
-        )
-
-        _, follow_up = self.request(
-            "POST",
-            "/v1/tasks",
-            {"input_message": "follow up", "thread_id": body["thread_id"]},
-        )
+            _, follow_up = self.request("POST", path, {"message": "follow up"})
+        self.assertEqual(follow_up["status"], "accepted")
+        thread = follow_up["thread"]
         self.assertEqual(
-            (follow_up["agent_runtime"], follow_up["model"], follow_up["effort"]),
+            (thread["agent_runtime"], thread["model"], thread["effort"]),
             (body["agent_runtime"], body["model"], body["effort"]),
         )
 
-    def test_thread_on_a_superseded_model_runs_no_further_tasks(self) -> None:
-        # A thread's configuration is fixed for its lifetime, so one whose
-        # configuration left the option matrix cannot run another task. The row
-        # and its history stay readable; the next task starts a new thread.
+    def test_idle_configuration_change_rotates_provider_and_hands_off_history(self) -> None:
+        save_policy(
+            {
+                "network_integrations": {
+                    "openai": {"enabled": True},
+                    "claude": {"enabled": True},
+                }
+            },
+            "2026-06-08T00:00:00Z",
+        )
+        set_runtime_statuses(codex="active", claude_code="active")
+        seed_thread_session(
+            "switchable",
+            "codex",
+            model="gpt-5.6-terra",
+            effort="high",
+            provider_session_id="old-provider-session",
+        )
         with state.mutation() as cur:
-            state.save_thread_session(
+            state.append_agent_event(
                 cur,
-                "claude_code",
-                "legacy-alias-thread",
-                None,
-                "2026-06-08T00:00:01Z",
-                "opus",
-                "high",
+                "thread.message",
+                "switchable",
+                {"message": "original question", "source": "user"},
             )
+            state.append_agent_event(
+                cur,
+                "thread.message",
+                "switchable",
+                {"message": "original answer", "source": "agent"},
+            )
+            state.append_agent_event(
+                cur,
+                "thread.activity",
+                "switchable",
+                {
+                    "activity": {
+                        "provider": "codex",
+                        "activity_id": "command-1",
+                        "kind": "command",
+                        "phase": "completed",
+                        "title": "Inspect repository",
+                        "detail": "command context",
+                        "output": "complete command output",
+                    }
+                },
+            )
+
+        with patch.object(orchestrator, "launch_turn") as launch:
+            _, accepted = self.request(
+                "POST",
+                "/v1/threads/switchable/messages",
+                {
+                    "message": "continue here",
+                    "agent_runtime": "claude_code",
+                    "model": "claude-opus-5",
+                    "effort": "max",
+                },
+            )
+
+        config = state.thread_session_config("switchable")
+        assert config is not None
+        self.assertEqual(
+            (config["agent_runtime"], config["model"], config["effort"]),
+            ("claude_code", "claude-opus-5", "max"),
+        )
+        self.assertIsNone(config["provider_session_id"])
+        launched_turn, launch_message, provider_session_id = launch.call_args.args
+        self.assertEqual(launched_turn.runtime_type, "claude_code")
+        self.assertIsNone(provider_session_id)
+        self.assertIn("new agent session continuing", launch_message)
+        self.assertIn("User:\noriginal question", launch_message)
+        self.assertIn("Agent:\noriginal answer", launch_message)
+        self.assertIn("Agent activity (expanded)", launch_message)
+        self.assertIn('"detail": "command context"', launch_message)
+        self.assertIn('"output": "complete command output"', launch_message)
+        self.assertIn("CURRENT USER MESSAGE ---\ncontinue here", launch_message)
+        _, events = self.request("GET", "/v1/threads/switchable/events?since=0")
+        self.assertEqual(
+            [event["event_type"] for event in events["events"]],
+            [
+                "thread.message",
+                "thread.message",
+                "thread.activity",
+                "thread.activity",
+                "thread.message",
+            ],
+        )
+        change = events["events"][3]["payload"]["activity"]
+        self.assertEqual(change["title"], "Agent provider changed")
+        self.assertEqual(change["kind"], "status")
+        self.assertEqual(change["phase"], "completed")
+        self.assertIn("Codex · gpt-5.6-terra · high", change["detail"])
+        self.assertIn("Claude Code · claude-opus-5 · max", change["detail"])
+        visible_messages = [
+            event["payload"]["message"]
+            for event in events["events"]
+            if event["event_type"] == "thread.message"
+        ]
+        self.assertEqual(
+            visible_messages,
+            ["original question", "original answer", "continue here"],
+        )
+        self.assertEqual(accepted["thread"]["agent_runtime"], "claude_code")
+
+    def test_session_handoff_keeps_newest_history_with_a_250k_character_cap(self) -> None:
+        history = [
+            {
+                "event_type": "thread.message",
+                "payload": {"source": "user", "message": "a" * 150_000},
+            },
+            {
+                "event_type": "thread.message",
+                "payload": {"source": "agent", "message": "b" * 150_000},
+            },
+        ]
+
+        handoff = admin_api._session_handoff_message(history, "next")
+        transcript = handoff.split(
+            "--- RETAINED THREAD TRANSCRIPT ---\n", 1
+        )[1].split("\n--- END RETAINED THREAD TRANSCRIPT ---", 1)[0]
+
+        self.assertLessEqual(
+            len(transcript),
+            admin_api.THREAD_HANDOFF_CHARACTER_LIMIT + 100,
+        )
+        self.assertLess(transcript.count("a"), 150_000)
+        self.assertEqual(transcript.count("b"), 150_000)
+        self.assertIn("Older retained thread events were omitted", transcript)
+
+    def test_missing_provider_session_replays_retained_history_without_a_config_change(
+        self,
+    ) -> None:
+        seed_thread_session(
+            "missing-provider-session",
+            "codex",
+            provider_session_id=None,
+        )
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur,
+                "thread.message",
+                "missing-provider-session",
+                {"message": "work already attempted", "source": "user"},
+            )
+
+        with patch.object(orchestrator, "launch_turn") as launch:
+            self.request(
+                "POST",
+                "/v1/threads/missing-provider-session/messages",
+                {"message": "retry with context"},
+            )
+
+        _turn, launch_message, provider_session_id = launch.call_args.args
+        self.assertIsNone(provider_session_id)
+        self.assertIn("User:\nwork already attempted", launch_message)
+        self.assertIn("CURRENT USER MESSAGE ---\nretry with context", launch_message)
+        _, events = self.request(
+            "GET",
+            "/v1/threads/missing-provider-session/events?since=0",
+        )
+        self.assertEqual(
+            [event["event_type"] for event in events["events"]],
+            ["thread.message", "thread.message"],
+        )
+
+    def test_thread_on_a_superseded_model_can_switch_to_an_offered_model(self) -> None:
+        seed_thread_session(
+            "legacy-alias-thread",
+            "claude_code",
+            model="opus",
+            effort="high",
+            last_used_at="2026-06-08T00:00:01Z",
+        )
 
         for fields in (
             {},
@@ -2009,26 +2599,40 @@ class AdminApiIntegrationTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
                 self.request(
                     "POST",
-                    "/v1/tasks",
-                    {"input_message": "follow up", "thread_id": "legacy-alias-thread", **fields},
+                    "/v1/threads/legacy-alias-thread/messages",
+                    {"message": "follow up", **fields},
                 )
             self.assertEqual(error.exception.code, 409)
             self.assertIn("no longer offered", error.exception.read().decode())
 
-        # The thread stays in the listing rather than disappearing with its
-        # tasks, and starting a fresh thread on a superseded model is refused
-        # by the option matrix itself.
+        with patch.object(orchestrator, "launch_turn"):
+            _, switched = self.request(
+                "POST",
+                "/v1/threads/legacy-alias-thread/messages",
+                {
+                    "message": "continue on a current model",
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-terra",
+                    "effort": "high",
+                },
+            )
+        self.assertEqual(switched["thread"]["agent_runtime"], "codex")
+        self.assertEqual(switched["thread"]["model"], "gpt-5.6-terra")
+
+        # The same thread stays in the listing on its replacement
+        # configuration, and a superseded model is still refused for new
+        # threads.
         _, threads = self.request("GET", "/v1/threads")
         listed = {thread["thread_id"]: thread for thread in threads["threads"]}
-        self.assertEqual(listed["legacy-alias-thread"]["model"], "opus")
+        self.assertEqual(listed["legacy-alias-thread"]["model"], "gpt-5.6-terra")
+        self.assertEqual(listed["legacy-alias-thread"]["status"], "running")
 
         with self.assertRaises(urllib.error.HTTPError) as new_thread_error:
             self.request(
                 "POST",
-                "/v1/tasks",
+                "/v1/threads/new-alias-thread/messages",
                 {
-                    "input_message": "new thread",
-                    "thread_id": "new-alias-thread",
+                    "message": "new thread",
                     "agent_runtime": "claude_code",
                     "model": "opus",
                     "effort": "high",
@@ -2037,211 +2641,288 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(new_thread_error.exception.code, 400)
         self.assertIn("model must be one of", new_thread_error.exception.read().decode())
 
-    def test_task_without_session_options_requires_an_existing_thread(self) -> None:
+    def test_message_without_session_options_requires_an_existing_thread(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request(
-                "POST",
-                "/v1/tasks",
-                {"input_message": "first", "thread_id": "unknown-options"},
-            )
+            self.request("POST", "/v1/threads/unknown-options/messages", {"message": "first"})
 
         self.assertEqual(error.exception.code, 400)
         self.assertIn("required when starting a new thread", error.exception.read().decode())
 
-    def test_task_session_options_must_be_provided_together(self) -> None:
+    def test_message_session_options_must_be_provided_together(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.request(
                 "POST",
-                "/v1/tasks",
-                {
-                    "input_message": "first",
-                    "thread_id": "partial-options",
-                    "agent_runtime": "codex",
-                    "model": "gpt-5.6-terra",
-                },
+                "/v1/threads/partial-options/messages",
+                {"message": "first", "agent_runtime": "codex", "model": "gpt-5.6-terra"},
             )
 
         self.assertEqual(error.exception.code, 400)
         self.assertIn("must be provided together", error.exception.read().decode())
 
-    def test_thread_list_combines_runtime_sessions_and_current_tasks(self) -> None:
-        state = load_state()
-        state["tasks"] = [
-            {
-                "task_id": "task_1",
-                "status": "completed",
-                "agent_runtime": "codex",
-                "thread_id": "t1",
-                "input_message": "done 1",
-                "steer_messages": [],
-                "created_at": "2026-06-08T00:00:00Z",
-                "updated_at": "2026-06-08T00:00:01Z",
-            },
-            {
-                "task_id": "task_2",
-                "status": "queued",
-                "agent_runtime": "codex",
-                "thread_id": "t2",
-                "input_message": "live",
-                "steer_messages": [],
-                "created_at": "2026-06-08T00:00:02Z",
-                "updated_at": "2026-06-08T00:00:04Z",
-            },
-        ]
-        state["codex_threads"] = {"t1": {"codex_thread_id": "codex-t1", "last_used_at": "2026-06-08T00:00:03Z"}}
-        state["claude_sessions"] = {"t3": {"session_id": "claude-t3", "last_used_at": "2026-06-08T00:00:05Z"}}
-        save_state(state)
+    def test_hermes_thread_rejects_steering_without_recording_it(self) -> None:
+        seed_thread_session("hermes-thread", "hermes")
+        register_live_turn("hermes-thread", "hermes")
+        _, before = self.request("GET", "/v1/threads/hermes-thread/events")
+
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request(
+                "POST", "/v1/threads/hermes-thread/messages", {"message": "change direction"}
+            )
+
+        self.assertEqual(error.exception.code, HTTPStatus.CONFLICT)
+        self.assertIn(
+            "Hermes cannot accept another message while running; wait for it to finish",
+            error.exception.read().decode(),
+        )
+        _, after = self.request("GET", "/v1/threads/hermes-thread/events")
+        self.assertEqual(after["events"], before["events"])
+
+    def test_thread_list_reports_configuration_recency_and_live_status(self) -> None:
+        seed_thread_session(
+            "t1", "codex", provider_session_id="codex-t1", last_used_at="2026-06-08T00:00:03Z"
+        )
+        seed_thread_session("t2", "codex", last_used_at="2026-06-08T00:00:04Z")
+        seed_thread_session(
+            "t3", "claude_code", provider_session_id="claude-t3", last_used_at="2026-06-08T00:00:05Z"
+        )
+        register_live_turn("t2")
 
         _, body = self.request("GET", "/v1/threads")
 
         self.assertEqual(
-            [(thread["thread_id"], thread["agent_runtime"]) for thread in body["threads"]],
-            [("t3", "claude_code"), ("t2", "codex"), ("t1", "codex")],
+            [(thread["thread_id"], thread["agent_runtime"], thread["status"]) for thread in body["threads"]],
+            [("t3", "claude_code", "idle"), ("t2", "codex", "running"), ("t1", "codex", "idle")],
         )
-        self.assertEqual(body["threads"][0]["task_count"], 0)
-        self.assertEqual(body["threads"][1]["active_tasks"], [{"task_id": "task_2", "status": "queued"}])
         self.assertEqual(body["threads"][2]["last_used_at"], "2026-06-08T00:00:03Z")
-        self.assertEqual(body["threads"][2]["task_count"], 1)
-        self.assertNotIn("retained_task_count", body["threads"][2])
-
-    def test_thread_task_list_returns_retained_tasks_for_selected_thread(self) -> None:
-        state = load_state()
-        state["tasks"] = [
-            {
-                "task_id": "task_1",
-                "status": "completed",
-                "agent_runtime": "codex",
-                "thread_id": "shared",
-                "input_message": "codex old " * 10,
-                "steer_messages": [],
-                "created_at": "2026-06-08T00:00:00Z",
-                "updated_at": "2026-06-08T00:00:07Z",
-            },
-            {
-                "task_id": "task_2",
-                "status": "completed",
-                "agent_runtime": "codex",
-                "thread_id": "shared",
-                "input_message": "codex new",
-                "output_message": "done",
-                "steer_messages": [],
-                "created_at": "2026-06-08T00:00:02Z",
-                "updated_at": "2026-06-08T00:00:03Z",
-            },
-            {
-                "task_id": "task_3",
-                "status": "failed",
-                "agent_runtime": "codex",
-                "thread_id": "other",
-                "input_message": "other",
-                "error_message": "failed",
-                "steer_messages": [],
-                "created_at": "2026-06-08T00:00:04Z",
-                "updated_at": "2026-06-08T00:00:05Z",
-            },
-        ]
-        save_state(state)
-
-        _, body = self.request("GET", "/v1/threads/shared/tasks")
-        self.assertEqual([task["task_id"] for task in body["tasks"]], ["task_1", "task_2"])
-        self.assertEqual(body["tasks"][1]["output_message"], "done")
-        _, bounded = self.request("GET", "/v1/threads/shared/tasks?limit=1&message_bytes=32")
-        self.assertEqual([task["task_id"] for task in bounded["tasks"]], ["task_1"])
-        self.assertLessEqual(len(bounded["tasks"][0]["input_message"].encode()), 32)
-        self.assertTrue(bounded["tasks"][0]["input_message"].endswith("… (truncated)"))
-
-    def test_create_task_rejects_conflicting_configuration_for_existing_threads(self) -> None:
-        state = load_state()
-        state["tasks"] = [
-            {
-                "task_id": "task_1",
-                "status": "completed",
-                "agent_runtime": "codex",
-                "thread_id": "used-by-task",
-                "input_message": "done",
-                "steer_messages": [],
-                "created_at": "2026-06-08T00:00:00Z",
-                "updated_at": "2026-06-08T00:00:01Z",
-            }
-        ]
-        state["claude_sessions"] = {
-            "used-by-session": {"session_id": "claude-session", "last_used_at": "2026-06-08T00:00:02Z"}
-        }
-        save_state(state)
-
-        with self.assertRaises(urllib.error.HTTPError) as task_error:
-            self.request(
-                "POST",
-                "/v1/tasks",
-                {"input_message": "bad", "thread_id": "used-by-task", "agent_runtime": "claude_code"},
-            )
-        self.assertEqual(task_error.exception.code, 400)
-
-        with self.assertRaises(urllib.error.HTTPError) as session_error:
-            self.request(
-                "POST",
-                "/v1/tasks",
-                {"input_message": "bad", "thread_id": "used-by-session", "agent_runtime": "codex"},
-            )
-        self.assertEqual(session_error.exception.code, 400)
-
-        _, accepted = self.request(
-            "POST",
-            "/v1/tasks",
-            {"input_message": "ok", "thread_id": "used-by-task"},
+        self.assertEqual(
+            set(body["threads"][0]),
+            {"thread_id", "agent_runtime", "model", "effort", "last_used_at", "status"},
         )
-        self.assertEqual(accepted["thread_id"], "used-by-task")
 
-        with self.assertRaises(urllib.error.HTTPError) as old_route_error:
-            self.request("GET", "/v1/tasks/finished")
-        self.assertEqual(old_route_error.exception.code, 404)
+    def test_thread_list_is_bounded_and_pages_with_an_opaque_cursor(self) -> None:
+        seed_thread_session("t1", "codex", last_used_at="2026-06-08T00:00:01Z")
+        seed_thread_session("t2", "codex", last_used_at="2026-06-08T00:00:02Z")
+        seed_thread_session("t3", "codex", last_used_at="2026-06-08T00:00:03Z")
 
-    def test_task_event_history_can_be_paged_for_selected_task(self) -> None:
+        _, first = self.request("GET", "/v1/threads?limit=2")
+        self.assertEqual(
+            [thread["thread_id"] for thread in first["threads"]],
+            ["t3", "t2"],
+        )
+        self.assertIsInstance(first.get("next_before"), str)
+
+        cursor = urllib.parse.quote(first["next_before"], safe="")
+        _, second = self.request("GET", f"/v1/threads?limit=2&before={cursor}")
+        self.assertEqual(
+            [thread["thread_id"] for thread in second["threads"]],
+            ["t1"],
+        )
+        self.assertNotIn("next_before", second)
+
+        for path in (
+            "/v1/threads?limit=101",
+            "/v1/threads?before=not-a-cursor",
+            "/v1/threads?offset=1",
+        ):
+            with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as error:
+                self.request("GET", path)
+            self.assertEqual(error.exception.code, HTTPStatus.BAD_REQUEST)
+
+    def test_thread_list_cursor_uses_thread_id_as_the_equal_timestamp_tiebreaker(self) -> None:
+        timestamp = "2026-06-08T00:00:03Z"
+        seed_thread_session("same-a", "codex", last_used_at=timestamp)
+        seed_thread_session("same-b", "claude_code", last_used_at=timestamp)
+
+        _, first = self.request("GET", "/v1/threads?limit=1")
+        self.assertEqual(
+            [thread["thread_id"] for thread in first["threads"]],
+            ["same-b"],
+        )
+        cursor = first["next_before"]
+        decoded = json.loads(
+            base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        )
+        self.assertEqual(decoded, [timestamp, "same-b"])
+
+        _, second = self.request(
+            "GET",
+            f"/v1/threads?limit=1&before={urllib.parse.quote(cursor, safe='')}",
+        )
+        self.assertEqual(
+            [thread["thread_id"] for thread in second["threads"]],
+            ["same-a"],
+        )
+
+    def test_thread_detail_returns_thread_or_404_and_rejects_query_params(self) -> None:
+        seed_thread_session("t1", "codex", last_used_at="2026-06-08T00:00:03Z")
+
+        _, body = self.request("GET", "/v1/threads/t1")
+        self.assertEqual(
+            body["thread"],
+            {
+                "thread_id": "t1",
+                "agent_runtime": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "high",
+                "last_used_at": "2026-06-08T00:00:03Z",
+                "status": "idle",
+            },
+        )
+
+        with self.assertRaises(urllib.error.HTTPError) as missing:
+            self.request("GET", "/v1/threads/missing")
+        self.assertEqual(missing.exception.code, 404)
+        self.assertIn("thread not found", missing.exception.read().decode())
+
+        with self.assertRaises(urllib.error.HTTPError) as query_error:
+            self.request("GET", "/v1/threads/t1?limit=5")
+        self.assertEqual(query_error.exception.code, 400)
+        self.assertIn("does not accept query parameters", query_error.exception.read().decode())
+
+    def test_stop_ends_running_turn_and_late_finish_does_not_resurrect_it(self) -> None:
+        with patch.object(orchestrator, "launch_turn"):
+            self.request(
+                "POST", "/v1/threads/t1/messages", {"message": "long turn", "agent_runtime": "codex"}
+            )
+        turn = orchestrator._LIVE["codex:t1"]
+        turn.server = MagicMock()
+
+        _, body = self.request("POST", "/v1/threads/t1/stop")
+
+        self.assertEqual(body["status"], "accepted")
+        turn.server.interrupt.assert_called_once_with()
+        self.assertEqual(turn.phase, orchestrator.ExecutionPhase.FINISHING)
+        _, events = self.request("GET", "/v1/threads/t1/events")
+        self.assertEqual(
+            [event["event_type"] for event in events["events"]],
+            ["thread.message", "thread.stopped"],
+        )
+
+        # The thread stays fenced until the owning turn thread releases it, so
+        # a new message is rejected with a retry hint rather than queued.
+        self.assertIn("t1", orchestrator.live_thread_ids())
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request("POST", "/v1/threads/t1/messages", {"message": "again"})
+        self.assertEqual(error.exception.code, 409)
+        self.assertIn("agent is finishing", error.exception.read().decode())
+
+        # The turn thread observing the dead process later must not resurrect
+        # the stopped turn, but the session id it learned mid-turn is persisted
+        # so the thread's next turn can resume it.
+        orchestrator._finish_turn(turn, provider_session_id="sess-9")
+        _, events = self.request("GET", "/v1/threads/t1/events")
+        self.assertEqual(
+            [event["event_type"] for event in events["events"]],
+            ["thread.message", "thread.stopped"],
+        )
+        config = state.thread_session_config("t1")
+        self.assertIsNotNone(config)
+        assert config is not None
+        self.assertEqual(config["provider_session_id"], "sess-9")
+
+    def test_stop_rejects_threads_without_a_stoppable_turn(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError) as missing:
+            self.request("POST", "/v1/threads/unknown-thread/stop")
+        self.assertEqual(missing.exception.code, 404)
+        self.assertIn("thread not found", missing.exception.read().decode())
+
+        seed_thread_session("idle-thread")
+        with self.assertRaises(urllib.error.HTTPError) as idle:
+            self.request("POST", "/v1/threads/idle-thread/stop")
+        self.assertEqual(idle.exception.code, 409)
+        self.assertIn("the thread has no running work", idle.exception.read().decode())
+
+        # A turn already finishing (its process still closing) is not
+        # stoppable again.
+        turn = register_live_turn("idle-thread")
+        turn.phase = orchestrator.ExecutionPhase.FINISHING
+        with self.assertRaises(urllib.error.HTTPError) as finishing:
+            self.request("POST", "/v1/threads/idle-thread/stop")
+        self.assertEqual(finishing.exception.code, 409)
+
+    def test_thread_event_history_can_be_paged_for_selected_thread(self) -> None:
+        seed_thread_session("t1", "codex", last_used_at="2026-06-08T00:00:01Z")
         with state.mutation() as cur:
-            state.save_thread_session(
-                cur,
-                "codex",
-                "t1",
-                None,
-                "2026-06-08T00:00:01Z",
-                "gpt-5.6-terra",
-                "high",
-            )
-            state.insert_task(
-                cur,
-                {
-                    "task_id": "task_1",
-                    "status": "completed",
-                    "agent_runtime": "codex",
-                    "model": "gpt-5.6-terra",
-                    "effort": "high",
-                    "thread_id": "t1",
-                    "input_message": "done",
-                    "output_message": "ok",
-                    "steer_messages": [],
-                    "created_at": "2026-06-08T00:00:00Z",
-                    "updated_at": "2026-06-08T00:00:01Z",
-                },
-            )
-            state.append_agent_event(cur, "task.started", "task_1", {})
-            state.append_agent_event(cur, "task.message", "task_1", {"message": "done", "source": "user"})
-            state.append_agent_event(cur, "task.message", "task_1", {"message": "working", "source": "agent"})
-            state.append_agent_event(cur, "task.message", "task_1", {"message": "ok", "source": "agent"})
-            state.append_agent_event(cur, "task.completed", "task_1", {})
+            state.append_agent_event(cur, "thread.message", "t1", {"message": "done", "source": "user"})
+            state.append_agent_event(cur, "thread.message", "t1", {"message": "working", "source": "agent"})
+            state.append_agent_event(cur, "thread.message", "t1", {"message": "ok", "source": "agent"})
+            state.append_agent_event(cur, "thread.error", "t1", {"error_message": "retryable"})
+            state.append_agent_event(cur, "thread.stopped", "t1", {})
 
-        _, first = self.request("GET", "/v1/tasks/task_1/events")
+        _, first = self.request("GET", "/v1/threads/t1/events")
         self.assertEqual(len(first["events"]), 5)
         self.assertEqual([event["event_type"] for event in first["events"]], [
-            "task.started",
-            "task.message",
-            "task.message",
-            "task.message",
-            "task.completed",
+            "thread.message",
+            "thread.message",
+            "thread.message",
+            "thread.error",
+            "thread.stopped",
         ])
-        _, second = self.request("GET", f"/v1/tasks/task_1/events?since={first['events'][-1]['seq']}")
+        self.assertTrue(all(event["thread_id"] == "t1" for event in first["events"]))
+        _, second = self.request("GET", f"/v1/threads/t1/events?since={first['events'][-1]['seq']}")
         self.assertEqual(second["events"], [])
 
-    def test_admin_ui_has_thread_task_event_smoke_path(self) -> None:
+    def test_runtime_status_and_health_report_active_thread_ids(self) -> None:
+        register_live_turn("t2")
+        register_live_turn("t1")
+        register_live_turn("c1", "claude_code")
+
+        _, body = self.request("GET", "/v1/agent-runtime/status")
+        by_type = {runtime["type"]: runtime for runtime in body["runtimes"]}
+        self.assertEqual(by_type["codex"]["active_thread_ids"], ["t1", "t2"])
+        self.assertEqual(by_type["claude_code"]["active_thread_ids"], ["c1"])
+        self.assertEqual(by_type["hermes"]["active_thread_ids"], [])
+
+        _, health = self.health()
+        self.assertEqual(self.runtime(health)["active_thread_ids"], ["t1", "t2"])
+
+    def test_task_routes_are_removed(self) -> None:
+        for method, path in (
+            ("POST", "/v1/tasks"),
+            ("GET", "/v1/tasks"),
+            ("GET", "/v1/tasks/finished"),
+            ("GET", "/v1/tasks/task_1"),
+            ("PUT", "/v1/tasks/task_1"),
+            ("GET", "/v1/tasks/task_1/events"),
+            ("POST", "/v1/tasks/task_1/steer"),
+            ("POST", "/v1/tasks/task_1/cancel"),
+            ("POST", "/v1/tasks/task_1/kill"),
+            ("GET", "/v1/threads/t1/tasks"),
+        ):
+            with self.subTest(method=method, path=path):
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    self.request(
+                        method, path, {"input_message": "x"} if method != "GET" else None
+                    )
+                self.assertEqual(error.exception.code, 404)
+
+    def test_message_rejects_partial_configuration_for_existing_threads(self) -> None:
+        seed_thread_session("used-by-codex", "codex", last_used_at="2026-06-08T00:00:01Z")
+        seed_thread_session("used-by-claude", "claude_code", last_used_at="2026-06-08T00:00:02Z")
+
+        with self.assertRaises(urllib.error.HTTPError) as codex_error:
+            self.request(
+                "POST",
+                "/v1/threads/used-by-codex/messages",
+                {"message": "bad", "model": "gpt-5.6-sol"},
+            )
+        self.assertEqual(codex_error.exception.code, 400)
+
+        with self.assertRaises(urllib.error.HTTPError) as claude_error:
+            self.request(
+                "POST",
+                "/v1/threads/used-by-claude/messages",
+                {"message": "bad", "effort": "max"},
+            )
+        self.assertEqual(claude_error.exception.code, 400)
+
+        with patch.object(orchestrator, "launch_turn"):
+            _, accepted = self.request(
+                "POST", "/v1/threads/used-by-codex/messages", {"message": "ok"}
+            )
+        self.assertEqual(accepted["thread"]["thread_id"], "used-by-codex")
+
+    def test_admin_ui_has_thread_event_smoke_path(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
         html = (runtime / "admin_ui.html").read_text()
         ui = "\n".join(
@@ -2259,8 +2940,17 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('<img class="brand-mark" width="30" height="30" src="/favicon.svg" alt="">', html)
         self.assertIn('<img class="login-mark" width="44" height="44" src="/favicon.svg" alt="">', html)
         self.assertIn("admin_favicon.svg", api)
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 9)
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 10)
         self.assertIn('id="tab-processes"', html)
+        self.assertIn('id="tab-host-errors"', html)
+        self.assertLess(html.index('id="tab-tool-log"'), html.index('id="tab-host-errors"'))
+        self.assertIn("should be investigated by a Kern developer, newest first", html)
+        self.assertIn('id="host-error-pager"', html)
+        self.assertIn('endpoint: "/v1/host-errors"', ui)
+        self.assertIn('"host-error-page": () => hostErrorLog.showPage(button.dataset.page)', ui)
+        self.assertNotIn('data-action="resolve-host-error"', ui)
+        self.assertNotIn('data-action="dismiss-host-error"', ui)
+        self.assertNotIn('data-action="report-host-error"', ui)
         self.assertIn("/v1/agent-processes", ui)
         self.assertIn("refreshAgentProcesses", ui)
         self.assertIn(".tab-button svg { display: block; height: 19px; width: 19px; }", ui)
@@ -2300,23 +2990,26 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("usageRing", ui)
         self.assertIn("/v1/agent-runtime/refresh", ui)
         self.assertIn("/v1/threads", ui)
-        self.assertIn("/v1/threads/${encodeURIComponent(selectedThreadId)}/tasks", ui)
-        self.assertIn("/v1/tasks/${encodeURIComponent(taskId)}/events", ui)
-        self.assertIn("thread.task_count", ui)
-        self.assertIn("TASK_EVENT_PAGE_BATCH", ui)
-        self.assertIn("loadTaskEventBatch", ui)
-        self.assertIn("loadMoreTaskEvents", ui)
-        self.assertIn("refreshTaskEvents", ui)
-        self.assertIn("task-events-inline", ui)
-        self.assertIn("expandedTaskEvents", ui)
+        self.assertIn("THREAD_LIST_PAGE_LIMIT", ui)
+        self.assertIn("listed.next_before", ui)
+        self.assertIn("seenBefore.has(nextBefore)", ui)
+        self.assertIn("/v1/threads/${encodeURIComponent(threadId)}/events", ui)
+        self.assertIn("events?since=${threadEventsNewestSeq}", ui)
+        self.assertIn("events?before=${before}", ui)
+        self.assertIn("earlierThreadEventsRequest !== null", ui)
+        self.assertIn("event.seq < before", ui)
+        self.assertIn('data-action="load-earlier-thread-events"', ui)
         self.assertIn("renderThreadHistory", ui)
-        self.assertIn("function taskEventsHtml(task, eventState)", ui)
+        self.assertIn("function threadEventsHtml()", ui)
+        self.assertIn('thread.status === "running"', ui)
+        self.assertIn("active_thread_ids", ui)
+        self.assertIn("runtime-running-badge", ui)
         self.assertIn("Agent session log", html)
         self.assertNotIn("Agent thread log", html)
         self.assertLess(html.index("Agent workspace"), html.index("Agent session log"))
         self.assertLess(html.index("Agent session log"), html.index("Agent audit log"))
         self.assertIn('data-action="show-thread"', ui)
-        self.assertIn('data-action="show-task-events"', ui)
+        self.assertNotIn('data-action="show-task-events"', ui)
         self.assertNotIn('data-action="refresh-task"', ui)
         self.assertNotIn('data-action="refresh-task-events"', ui)
         self.assertNotIn('data-action="new-thread"', ui)
@@ -2451,29 +3144,41 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("Exact network boundary", ui)
         self.assertIn("guide-assets", api)
         self.assertIn("removeDomainRule", ui)
-        self.assertNotIn("loadAllTaskEvents", ui)
-        self.assertNotIn("/v1/tasks/finished", ui)
-        self.assertNotIn("loadFinishedTasks", ui)
-        self.assertNotIn("retained_task_count", ui)
+        self.assertNotIn("/v1/tasks", ui)
+        self.assertNotIn("task_count", ui)
         self.assertNotIn("ssh_port_opened", ui)
 
-    def test_task_create_requires_valid_agent_runtime(self) -> None:
-        for index, body in enumerate(
-            (
-                {"input_message": "hello", "thread_id": "t1"},
-                {"input_message": "hello", "thread_id": "t1", "agent_runtime": "bad"},
-            )
+    def test_message_requires_valid_message_agent_runtime_and_thread_id(self) -> None:
+        for body in (
+            None,
+            {},
+            {"message": ""},
+            {"message": 42},
+            {"message": "x" * (admin_api.MESSAGE_LIMIT + 1)},
+            {"message": "hello", "agent_runtime": "bad", "model": "x", "effort": "high"},
         ):
             with self.subTest(body=body), self.assertRaises(urllib.error.HTTPError) as error:
-                self.request("POST", "/v1/tasks", body)
+                self.request("POST", "/v1/threads/t1/messages", body)
             self.assertEqual(error.exception.code, 400)
 
-        _, body = self.request(
-            "POST",
-            "/v1/tasks",
-            {"input_message": "hello", "thread_id": "t1", "agent_runtime": "claude_code"},
-        )
-        self.assertEqual(body["agent_runtime"], "claude_code")
+        # Thread ids are path components; a malformed one never reaches the
+        # message handler.
+        for bad in ("x" * 65, quote("has space")):
+            with self.subTest(thread_id=bad), self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(
+                    "POST",
+                    f"/v1/threads/{bad}/messages",
+                    {"message": "hello", "agent_runtime": "codex"},
+                )
+            self.assertEqual(error.exception.code, 404)
+
+        with patch.object(orchestrator, "launch_turn"):
+            _, body = self.request(
+                "POST",
+                "/v1/threads/Chat_01-a/messages",
+                {"message": "hello", "agent_runtime": "codex"},
+            )
+        self.assertEqual(body["thread"]["thread_id"], "Chat_01-a")
 
     def test_network_policy_replace_and_events(self) -> None:
         body = {
@@ -3215,89 +3920,18 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(error.exception.status, HTTPStatus.INTERNAL_SERVER_ERROR)
         self.assertEqual(error.exception.message, "sudo: not allowed")
 
-    def test_task_queue_is_capped(self) -> None:
-        # Queued tasks are never pruned, so the queue is the one task input
-        # that could grow state.json without bound; creates beyond the cap 409.
-        with patch.object(admin_api, "QUEUED_TASK_LIMIT", 2):
-            self.request("POST", "/v1/tasks", {"input_message": "a", "thread_id": "q1", "agent_runtime": "codex"})
-            self.request("POST", "/v1/tasks", {"input_message": "b", "thread_id": "q2", "agent_runtime": "codex"})
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                self.request("POST", "/v1/tasks", {"input_message": "c", "thread_id": "q3", "agent_runtime": "codex"})
-            self.assertEqual(error.exception.code, 409)
-            # Cancelling a queued task frees a slot.
-            self.request("POST", "/v1/tasks/task_1/cancel")
-            _, body = self.request("POST", "/v1/tasks", {"input_message": "c", "thread_id": "q3", "agent_runtime": "codex"})
-        self.assertEqual(body["status"], "queued")
-
-    def test_pending_steers_are_capped(self) -> None:
-        state = load_state()
-        state["tasks"] = [{
-            "task_id": "task_1", "status": "running", "agent_runtime": "codex", "thread_id": "t1",
-            "input_message": "x", "steer_messages": [],
-            "created_at": "t", "updated_at": "t",
-        }]
-        save_state(state)
-        with patch.object(admin_api, "PENDING_STEER_LIMIT", 2):
-            self.request("POST", "/v1/tasks/task_1/steer", {"steer_message": "s1"})
-            self.request("POST", "/v1/tasks/task_1/steer", {"steer_message": "s2"})
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                self.request("POST", "/v1/tasks/task_1/steer", {"steer_message": "s3"})
-            self.assertEqual(error.exception.code, 409)
-            # The queue drains as the worker delivers; a slot frees up.
-            state = load_state()
-            state["tasks"][0]["steer_messages"].pop(0)
-            save_state(state)
-            _, body = self.request("POST", "/v1/tasks/task_1/steer", {"steer_message": "s3"})
-        self.assertEqual(body["status"], "accepted")
-        self.assertEqual(load_state()["tasks"][0]["steer_messages"], ["s2", "s3"])
-
-    def test_running_hermes_task_rejects_steering_without_recording_it(self) -> None:
-        _, task = self.request(
-            "POST",
-            "/v1/tasks",
-            {
-                "input_message": "initial",
-                "thread_id": "hermes-thread",
-                "agent_runtime": "hermes",
-                "model": "deepseek.v3.2",
-                "effort": "high",
-            },
-        )
-        with state.mutation() as cur:
-            stored = state.get_task(task["task_id"], cur)
-            assert stored is not None
-            stored["status"] = "running"
-            state.save_task(cur, stored)
-
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request(
-                "POST",
-                f"/v1/tasks/{task['task_id']}/steer",
-                {"steer_message": "change direction"},
-            )
-
-        self.assertEqual(error.exception.code, HTTPStatus.CONFLICT)
-        self.assertIn(
-            "Hermes tasks do not support steering; create a new task on the same thread_id",
-            error.exception.read().decode(),
-        )
-        self.assertEqual(state.task_steers(task["task_id"]), [])
-        self.assertEqual(state.page_task_events(task["task_id"], None), [])
-
     def test_login_completion_clears_device_login_record(self) -> None:
         # Once the account goes active the device code is spent; keeping the
         # record would replay a dead code if the session later expires back to
         # awaiting_login.
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "awaiting_login"
-        state["codex_oauth"] = {
+        set_runtime_statuses(codex="awaiting_login", claude_code="deactivated")
+        save_oauth_login("codex", {
             "status": "awaiting_login",
             "device_code": "X",
             "login_id": "l1",
             "login_url": "https://auth.openai.com/device",
             "expires_at": "2099-06-08T00:10:00Z",
-        }
-        save_state(state)
+        })
         with (
             patch(
                 "host.runtime.admin_api.orchestrator.codex_app_server.read_completed_device_login_account_id",
@@ -3309,14 +3943,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(orchestrator.refresh_runtime_status("codex"), "active")
-        self.assertIsNone(load_state().get("codex_oauth"))
+        self.assertIsNone(state.oauth_login("codex"))
         self.assertEqual(read_openai_account().get("account_id"), "acct_smoke")
         self.assertEqual(read_proxy_openai_account_id(), "acct_smoke")
 
     def test_runtime_expiry_clears_openai_proxy_pin_only(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "active"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="deactivated")
         save_approved_openai_account("acct_smoke")
 
         with patch(
@@ -3335,9 +3967,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             },
             "2026-06-08T00:00:01Z",
         )
-        state = load_state()
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "active"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="active")
         save_claude_account({"account_id": "acct_smoke", "access_token_sha256": "f" * 64})
 
         with patch(
@@ -3359,9 +3989,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             },
             "2026-06-08T00:00:01Z",
         )
-        state = load_state()
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "active"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="active")
         save_attested_claude_account(
             "acct_smoke", organization_id="org_smoke", access_token_sha256="0" * 64
         )
@@ -3393,9 +4021,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             },
             "2026-06-08T00:00:01Z",
         )
-        state = load_state()
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "active"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="active")
         save_attested_claude_account("acct_operator", access_token_sha256="0" * 64)
 
         with (
@@ -3420,10 +4046,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("account changed", record["error_message"])
 
     def test_agent_accounts_keep_linked_identity_while_not_active(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "error"
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "awaiting_login"
-        save_state(state)
+        set_runtime_statuses(codex="error", claude_code="awaiting_login")
         save_approved_openai_account("acct_smoke", email="codex@example.com", plan_type="pro")
         save_attested_claude_account("acct_claude", email="claude@example.com", access_token_sha256="0" * 64)
 
@@ -3460,9 +4083,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
 
     def test_agent_accounts_hide_legacy_openai_identity_without_operator_approval(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "awaiting_login"
-        save_state(state)
+        set_runtime_statuses(codex="awaiting_login", claude_code="deactivated")
         save_openai_account({"account_id": "acct_legacy", "email": "legacy@example.com"})
 
         _, body = self.request("GET", "/v1/agent-runtime/account")
@@ -3470,9 +4091,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(body["accounts"][0], {"agent_runtime": "codex", "provider": "openai", "status": "awaiting_login"})
 
     def test_agent_accounts_hide_legacy_claude_identity_without_attestation(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "awaiting_login"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="awaiting_login")
         save_claude_account(
             {"account_id": "acct_legacy", "email": "legacy@example.com", "access_token_sha256": "0" * 64}
         )
@@ -3484,10 +4103,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
 
     def test_agent_accounts_return_provider_records(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "active"
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "awaiting_login"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="awaiting_login")
         save_approved_openai_account(
             "acct_smoke",
             email="codex@example.com",
@@ -3547,9 +4163,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
     def test_agent_accounts_expose_stored_codex_usage(self) -> None:
         # The runtime adapter sanitizes usage at capture and every active
         # refresh rewrites the row, so the API exposes the stored shape as is.
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "active"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="deactivated")
         save_approved_openai_account(
             "acct_smoke",
             plan_type="pro",
@@ -3601,10 +4215,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
 
     def test_agent_accounts_return_active_claude_metadata(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "deactivated"
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "active"
-        save_state(state)
+        set_runtime_statuses(codex="deactivated", claude_code="active")
         save_attested_claude_account(
             "acct_smoke",
             organization_id="org_smoke",
@@ -3653,9 +4264,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
 
     def test_agent_accounts_return_partial_claude_usage_metadata(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "active"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="active")
         save_attested_claude_account(
             "acct_smoke",
             claude_usage={
@@ -3750,9 +4359,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, HTTPStatus.BAD_REQUEST)
 
     def test_agent_account_endpoint_rejects_runtime_filter(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "active"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="deactivated")
         save_approved_openai_account("acct_smoke")
 
         with self.assertRaises(urllib.error.HTTPError) as error:
@@ -3761,9 +4368,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, HTTPStatus.BAD_REQUEST)
 
     def test_current_codex_oauth_login_rejects_active_runtime(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "active"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="deactivated")
 
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.request("GET", "/v1/agent-runtime/codex-oauth-login")
@@ -3772,10 +4377,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def test_oauth_start_rejects_disabled_provider_before_spawning_helper(self) -> None:
         save_policy({"network_integrations": {}}, "t")
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "awaiting_login"
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "awaiting_login"
-        save_state(state)
+        set_runtime_statuses(codex="awaiting_login", claude_code="awaiting_login")
 
         with (
             patch(
@@ -3794,22 +4396,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def test_current_oauth_rejects_disabled_provider_even_with_stale_oauth_state(self) -> None:
         save_policy({"network_integrations": {}}, "t")
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "awaiting_login"
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "awaiting_login"
-        state["codex_oauth"] = {
+        set_runtime_statuses(codex="awaiting_login", claude_code="awaiting_login")
+        save_oauth_login("codex", {
             "status": "awaiting_login",
             "device_code": "CODE",
             "login_id": "login-1",
             "login_url": "https://auth.openai.com/device",
             "expires_at": "2099-06-08T00:10:00Z",
-        }
-        state["claude_oauth"] = {
+        })
+        save_oauth_login("claude", {
             "status": "awaiting_code",
             "login_url": "https://claude.com/cai/oauth/authorize",
             "expires_at": "2099-06-08T00:10:00Z",
-        }
-        save_state(state)
+        })
 
         for path in ("/v1/agent-runtime/codex-oauth-login", "/v1/agent-runtime/claude-oauth-login"):
             with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as error:
@@ -3817,9 +4416,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 409)
 
     def test_codex_oauth_start_closes_helper_if_provider_is_disabled_before_state_save(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "awaiting_login"
-        save_state(state)
+        set_runtime_statuses(codex="awaiting_login", claude_code="deactivated")
         login = admin_api.codex_app_server.CodexLogin(
             login_id="login-1",
             verification_url="https://example.com/device",
@@ -3836,7 +4433,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
         close_login.assert_called_once()
-        self.assertIsNone(load_state().get("codex_oauth"))
+        self.assertIsNone(state.oauth_login("codex"))
 
     def test_claude_oauth_complete_rejects_disabled_provider_before_touching_helper(self) -> None:
         save_policy({"network_integrations": {}}, "t")
@@ -3859,19 +4456,18 @@ class AdminApiIntegrationTests(unittest.TestCase):
             },
             "2026-06-08T00:00:00Z",
         )
-        snapshot = load_state()
-        snapshot["agent_runtime_statuses"]["claude_code"]["status"] = "awaiting_login"
-        snapshot["claude_oauth"] = {
+        set_runtime_statuses(codex="active", claude_code="awaiting_login")
+        save_oauth_login("claude", {
             "status": "awaiting_code",
             "login_url": "https://claude.com/cai/oauth/authorize",
             "expires_at": "2099-06-08T00:10:00Z",
-        }
-        save_state(snapshot)
+        })
 
         def refresh(runtime_type: str) -> str:
             self.assertEqual(runtime_type, "claude_code")
-            oauth = load_state()["claude_oauth"]
+            oauth = state.oauth_login("claude")
             self.assertIsNotNone(oauth)
+            assert oauth is not None
             self.assertEqual(oauth["status"], "completed")
             # The approval is bound to the token the login wrote: first
             # capture requires attesting this exact hash.
@@ -3892,21 +4488,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         complete.assert_called_once_with("browser-code")
         refresh_status.assert_called_once_with("claude_code")
-        self.assertIsNone(load_state()["claude_oauth"])
+        self.assertIsNone(state.oauth_login("claude"))
 
     def test_claude_oauth_complete_clears_pending_login_after_non_active_refresh(self) -> None:
         save_policy(
             {"network_integrations": {"claude": {"enabled": True}}},
             "2026-06-08T00:00:00Z",
         )
-        snapshot = load_state()
-        snapshot["agent_runtime_statuses"]["claude_code"]["status"] = "awaiting_login"
-        snapshot["claude_oauth"] = {
+        set_runtime_statuses(codex="active", claude_code="awaiting_login")
+        save_oauth_login("claude", {
             "status": "awaiting_code",
             "login_url": "https://claude.com/cai/oauth/authorize",
             "expires_at": "2099-06-08T00:10:00Z",
-        }
-        save_state(snapshot)
+        })
 
         with (
             patch("host.runtime.admin_api.service.claude_code.complete_oauth_login") as complete,
@@ -3920,7 +4514,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         complete.assert_called_once_with("browser-code")
         refresh_status.assert_called_once_with("claude_code")
-        self.assertIsNone(load_state()["claude_oauth"])
+        self.assertIsNone(state.oauth_login("claude"))
 
     def test_connect_bedrock_credentials_validates_and_refreshes(self) -> None:
         save_policy(
@@ -4121,16 +4715,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
             {"network_integrations": {"openai": {"enabled": True}}},
             "2026-06-08T00:00:00Z",
         )
-        snapshot = load_state()
-        snapshot["agent_runtime_statuses"]["codex"]["status"] = "error"
-        snapshot["codex_oauth"] = {
+        set_runtime_statuses(codex="error", claude_code="deactivated")
+        save_oauth_login("codex", {
             "status": "awaiting_login",
             "device_code": "CODE",
             "login_id": "login-1",
             "login_url": "https://auth.openai.com/device",
             "expires_at": "2099-06-08T00:10:00Z",
-        }
-        save_state(snapshot)
+        })
         save_approved_openai_account("acct_old")
         state.save_proxy_openai_account_id("acct_old")
 
@@ -4159,7 +4751,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         refresh_status.assert_called_once_with("codex")
         self.assertEqual(orchestrator.runtime_status("codex"), "awaiting_login")
-        self.assertIsNone(load_state()["codex_oauth"])
+        self.assertIsNone(state.oauth_login("codex"))
         self.assertIsNone(read_openai_account().get("account_id"))
         self.assertIsNone(read_proxy_openai_account_id())
 
@@ -4168,9 +4760,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             {"network_integrations": {"claude": {"enabled": True}}},
             "2026-06-08T00:00:00Z",
         )
-        snapshot = load_state()
-        snapshot["agent_runtime_statuses"]["claude_code"]["status"] = "active"
-        save_state(snapshot)
+        set_runtime_statuses(codex="active", claude_code="active")
         save_claude_account({"account_id": "acct_old", "access_token_sha256": "f" * 64})
         state.save_proxy_claude_account({"account_id": "acct_old", "access_token_sha256": "f" * 64})
 
@@ -4212,34 +4802,21 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 admin_api.reset_linked_account(body)
             self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
 
-    def test_reset_linked_account_kills_running_tasks_and_clears_auth(self) -> None:
+    def test_reset_linked_account_stops_running_turns_and_clears_auth(self) -> None:
         save_policy(
             {"network_integrations": {"openai": {"enabled": True}}},
             "2026-06-08T00:00:00Z",
         )
-        snapshot = load_state()
-        snapshot["agent_runtime_statuses"]["codex"]["status"] = "active"
-        snapshot["codex_oauth"] = {
+        set_runtime_statuses(codex="active", claude_code="deactivated")
+        save_oauth_login("codex", {
             "status": "awaiting_login",
             "device_code": "CODE",
             "login_id": "login-1",
             "login_url": "https://auth.openai.com/device",
             "expires_at": "2099-06-08T00:10:00Z",
-        }
-        snapshot["tasks"] = [
-            {
-                "task_id": "task_1",
-                "status": "running",
-                "agent_runtime": "codex",
-                "thread_id": "chat",
-                "input_message": "hello",
-                "steer_messages": [],
-                "created_at": "2026-06-08T00:00:00Z",
-                "updated_at": "2026-06-08T00:00:00Z",
-            }
-        ]
-        snapshot["next_task_number"] = 2
-        save_state(snapshot)
+        })
+        seed_thread_session("chat")
+        turn = register_live_turn("chat", server=MagicMock())
         save_approved_openai_account("acct_old")
         state.save_proxy_openai_account_id("acct_old")
 
@@ -4256,11 +4833,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.assertEqual(admin_api.reset_linked_account({"agent_runtime": "codex"}), {"status": "accepted"})
 
         refresh_status.assert_called_once_with("codex")
-        snapshot = load_state()
-        self.assertEqual(snapshot["tasks"][0]["status"], "failed")
+        # The live turn was stopped and failed with the reset reason; the
+        # owning turn thread keeps the fence until it observes the close.
+        self.assertEqual(turn.phase, orchestrator.ExecutionPhase.FINISHING)
+        turn.server.interrupt.assert_called_once_with()
+        _, events = self.request("GET", "/v1/threads/chat/events")
+        self.assertEqual([event["event_type"] for event in events["events"]], ["thread.error"])
+        self.assertIn(
+            "linked provider account was reset by the operator",
+            events["events"][0]["payload"]["error_message"],
+        )
         self.assertIsNone(read_openai_account().get("account_id"))
         self.assertIsNone(read_proxy_openai_account_id())
-        self.assertIsNone(snapshot["codex_oauth"])
+        self.assertIsNone(state.oauth_login("codex"))
 
     def test_reset_linked_account_helper_failure_leaves_anchor_cleared_and_refreshes(self) -> None:
         save_policy(
@@ -4296,9 +4881,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
     def test_codex_oauth_start_allowed_while_runtime_error(self) -> None:
         # Error states (changed account, malformed local credentials) are
         # recovered by logging in again, so the gate admits them.
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "error"
-        save_state(state)
+        set_runtime_statuses(codex="error", claude_code="deactivated")
         login = admin_api.codex_app_server.CodexLogin(
             login_id="login-1",
             verification_url="https://example.com/device",
@@ -4311,9 +4894,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(response["device_code"], "CODE-1")
 
     def test_codex_oauth_start_reuses_existing_login(self) -> None:
-        state = load_state()
-        state["agent_runtime_statuses"]["codex"]["status"] = "awaiting_login"
-        save_state(state)
+        set_runtime_statuses(codex="awaiting_login", claude_code="deactivated")
         login = admin_api.codex_app_server.CodexLogin(
             login_id="login-1",
             verification_url="https://example.com/device",
@@ -4332,9 +4913,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             {"network_integrations": {"claude": {"enabled": True}}},
             "2026-06-08T00:00:01Z",
         )
-        state = load_state()
-        state["agent_runtime_statuses"]["claude_code"]["status"] = "awaiting_login"
-        save_state(state)
+        set_runtime_statuses(codex="active", claude_code="awaiting_login")
         login = admin_api.claude_code.ClaudeLogin(login_url="https://claude.com/cai/oauth/authorize?code=true")
 
         with patch("host.runtime.admin_api.service.claude_code.start_oauth_login", return_value=login) as start:
@@ -4345,60 +4924,49 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(first["status"], "awaiting_code")
         self.assertEqual(start.call_count, 1)
 
-    def test_prune_state_trims_finished_tasks_and_thread_maps(self) -> None:
-        # The production caps are six figures now; the trimming behavior is
-        # pinned with small patched limits so the test stays fast.
-        state = load_state()
-        finished_limit, map_limit = 8, 6
-        # One queued task plus many finished ones beyond the history limit.
-        finished = [
-            {"task_id": f"task_{n}", "status": "completed", "agent_runtime": "codex",
-             "thread_id": f"t{n}", "input_message": "x",
-             "steer_messages": [], "created_at": "2026-06-07T00:00:00Z",
-             "updated_at": "2026-06-07T00:00:00Z"}
-            for n in range(1, finished_limit + 6)
-        ]
-        queued = {"task_id": "task_9000", "status": "queued", "agent_runtime": "codex",
-                  "thread_id": "t9000", "input_message": "live",
-                  "steer_messages": [], "created_at": "2026-06-07T00:00:00Z",
-                  "updated_at": "2026-06-07T00:00:00Z"}
-        state["tasks"] = finished + [queued]
-        with patch.object(
-            admin_api, "FINISHED_TASK_LIMIT", finished_limit
-        ), patch.object(admin_api, "THREAD_MAP_LIMIT", map_limit):
-            state["codex_threads"] = {
-                f"codex-chat-{n}": {"codex_thread_id": f"thread_{n}", "last_used_at": f"2026-06-08T{n // 60:02d}:{n % 60:02d}:00Z"}
-                for n in range(map_limit + 5)
-            }
-            state["claude_sessions"] = {
-                f"claude-chat-{n}": {"session_id": f"session_{n}", "last_used_at": f"2026-06-09T{n // 60:02d}:{n % 60:02d}:00Z"}
-                for n in range(map_limit + 5)
-            }
-            save_state(state)
+    def test_prune_state_caps_thread_maps_but_keeps_event_referenced_threads(self) -> None:
+        # The production cap is six figures; the trimming behavior is pinned
+        # with a small patched limit so the test stays fast.
+        map_limit = 6
+        with state.mutation() as cur:
+            for n in range(map_limit + 5):
+                state.save_thread_session(
+                    cur, "codex", f"codex-chat-{n}", f"thread_{n}",
+                    f"2026-06-08T{n // 60:02d}:{n % 60:02d}:00Z", "gpt-5.6-terra", "high",
+                )
+                state.save_thread_session(
+                    cur, "claude_code", f"claude-chat-{n}", f"session_{n}",
+                    f"2026-06-09T{n // 60:02d}:{n % 60:02d}:00Z", "claude-opus-5", "high",
+                )
+            # The oldest codex thread still has retained events, so its
+            # canonical row must survive the LRU cap.
+            state.append_agent_event(
+                cur,
+                "thread.message",
+                "codex-chat-0",
+                {"message": "retained", "source": "user"},
+            )
 
+        with patch.object(admin_api, "THREAD_MAP_LIMIT", map_limit):
             admin_api.prune_state()
 
-        pruned = load_state()
         # The oldest unreferenced mappings are dropped and the most recently
-        # used kept. Canonical rows referenced by retained tasks do not consume
-        # that allowance.
-        codex_history = {key for key in pruned["codex_threads"] if key.startswith("codex-chat-")}
-        self.assertEqual(len(codex_history), map_limit)
-        self.assertNotIn("codex-chat-0", codex_history)
-        self.assertIn(f"codex-chat-{map_limit + 4}", codex_history)
-        claude_history = {
-            key for key in pruned["claude_sessions"] if key.startswith("claude-chat-")
+        # used kept, per runtime; event-referenced rows do not consume that
+        # allowance.
+        remaining = {
+            thread["thread_id"]
+            for thread in state.page_thread_summaries(None, 100)
         }
-        self.assertEqual(len(claude_history), map_limit)
-        self.assertNotIn("claude-chat-0", claude_history)
-        self.assertIn(f"claude-chat-{map_limit + 4}", claude_history)
-        statuses = [t["status"] for t in pruned["tasks"]]
-        self.assertIn("queued", statuses)  # active task always kept
-        self.assertEqual(statuses.count("completed"), finished_limit)
-        # Oldest finished tasks dropped, newest kept.
-        kept_ids = {t["task_id"] for t in pruned["tasks"]}
-        self.assertNotIn("task_1", kept_ids)
-        self.assertIn(f"task_{finished_limit + 5}", kept_ids)
+        codex_history = {t for t in remaining if t.startswith("codex-chat-")}
+        claude_history = {t for t in remaining if t.startswith("claude-chat-")}
+        self.assertEqual(
+            codex_history,
+            {"codex-chat-0", *(f"codex-chat-{n}" for n in range(5, map_limit + 5))},
+        )
+        self.assertEqual(
+            claude_history,
+            {f"claude-chat-{n}" for n in range(5, map_limit + 5)},
+        )
 
     def test_network_events_are_read_from_the_database_with_cursor_paging(self) -> None:
         # Network events live in the database now (the proxy writes them under
@@ -4438,16 +5006,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def test_agent_events_use_the_same_newest_first_cursor_paging(self) -> None:
         # The agent audit log pages exactly like the network audit log: one
-        # newest-first cursor with no filter (task-scoped tailing has its own
-        # since-based endpoint under /v1/tasks/{id}/events).
+        # newest-first cursor with no filter (thread-scoped tailing has its own
+        # since-based endpoint under /v1/threads/{id}/events).
         with state.mutation() as cur:
             for index in range(120):
-                state.append_agent_event(cur, "task.message", "task_1", {"message": f"m{index}"})
+                state.append_agent_event(cur, "thread.message", "t1", {"message": f"m{index}"})
 
         _, body = self.request("GET", "/v1/events")
         seqs = [event["seq"] for event in body["events"]]
         self.assertEqual(len(seqs), 100)
         self.assertEqual(seqs, sorted(seqs, reverse=True))
+        # Global events carry the thread key, not a task id.
+        self.assertEqual(body["events"][0]["thread_id"], "t1")
+        self.assertNotIn("task_id", body["events"][0])
 
         _, older = self.request("GET", f"/v1/events?before={seqs[-1]}")
         older_seqs = [event["seq"] for event in older["events"]]
@@ -4505,133 +5076,37 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(body["updated_at"], "2026-06-08T00:00:03Z")
 
-    def test_kill_cancels_running_task_and_worker_does_not_resurrect_it(self) -> None:
-        state = load_state()
-        state["tasks"] = [
-            {
-                "task_id": "task_1",
-                "status": "running",
-                "agent_runtime": "codex",
-                "thread_id": "t1",
-                "input_message": "long task",
-                "steer_messages": [],
-                "created_at": "2026-06-08T00:00:00Z",
-                "updated_at": "2026-06-08T00:00:00Z",
-            }
-        ]
-        save_state(state)
-
-        with patch("host.runtime.admin_api.service.orchestrator.close_task_server") as close:
-            _, body = self.request("POST", "/v1/tasks/task_1/kill")
-        self.assertEqual(body["status"], "accepted")
-        close.assert_called_once_with("task_1")
-        _, task = self.request("GET", "/v1/tasks/task_1")
-        self.assertEqual(task["status"], "cancelled")
-
-        # The in-flight worker finishing later must not flip the cancelled task.
-        orchestrator._finish_task(
-            "task_1",
-            "completed",
-            output="late result",
-            runtime_type="codex",
-            thread_id="t1",
-            provider_session_id="thread_9",
-        )
-        _, task = self.request("GET", "/v1/tasks/task_1")
-        self.assertEqual(task["status"], "cancelled")
-        self.assertNotIn("output_message", task)
-
-    def test_kill_rejects_tasks_that_are_not_running(self) -> None:
-        _, queued = self.request("POST", "/v1/tasks", {"input_message": "waiting", "thread_id": "t1", "agent_runtime": "codex"})
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request("POST", f"/v1/tasks/{queued['task_id']}/kill")
-        self.assertEqual(error.exception.code, 409)
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request("POST", "/v1/tasks/task_999999/kill")
-        self.assertEqual(error.exception.code, 404)
-
-    def test_create_task_requires_a_valid_thread_id(self) -> None:
-        for index, bad in enumerate((None, "", "has space", "bad/slash", "x" * 65)):
-            body: dict[str, object] = {"input_message": "hello"}
-            if bad is not None:
-                body["thread_id"] = bad
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                self.request("POST", "/v1/tasks", body)
-            self.assertEqual(error.exception.code, 400)
-        _, task = self.request(
-            "POST", "/v1/tasks", {"input_message": "hello", "thread_id": "Chat_01-a", "agent_runtime": "codex"}
-        )
-        self.assertEqual(task["thread_id"], "Chat_01-a")
-
-    def test_initialize_state_fails_tasks_orphaned_by_a_restart(self) -> None:
-        state = load_state()
-        state["tasks"] = [
-            {
-                "task_id": "task_1",
-                "status": "running",
-                "agent_runtime": "codex",
-                "thread_id": "t1",
-                "input_message": "interrupted task",
-                "steer_messages": [],
-                "created_at": "2026-06-08T00:00:00Z",
-                "updated_at": "2026-06-08T00:00:00Z",
-            }
-        ]
-        save_state(state)
-
-        admin_api.initialize_state()
-
-        _, task = self.request("GET", "/v1/tasks/task_1")
-        self.assertEqual(task["status"], "failed")
-        self.assertIn("restarted while the task was running", task["error_message"])
-
-    def test_initialize_state_fails_queued_tasks_a_release_can_no_longer_run(self) -> None:
-        # The option matrix ships with the release, so an upgrade can retire the
-        # configuration a queued task was waiting under. Claiming it would run a
-        # model the operator never chose, and its thread can never run again.
+    def test_initialize_state_fails_turns_orphaned_by_a_restart(self) -> None:
+        seed_thread_session("t1")
+        seed_thread_session("t2")
         with state.mutation() as cur:
-            state.save_thread_session(
-                cur, "claude_code", "superseded", None, "2026-06-08T00:00:01Z", "opus", "high"
-            )
-            state.insert_task(
+            run_number = state.start_thread_run(cur, "t1")
+            state.append_agent_event(
                 cur,
-                {
-                    "task_id": "task_1",
-                    "status": "queued",
-                    "agent_runtime": "claude_code",
-                    "model": "opus",
-                    "effort": "high",
-                    "thread_id": "superseded",
-                    "input_message": "queued before the upgrade",
-                    "created_at": "2026-06-08T00:00:00Z",
-                    "updated_at": "2026-06-08T00:00:00Z",
-                },
-            )
-            state.save_thread_session(
-                cur, "claude_code", "offered", None, "2026-06-08T00:00:01Z", "claude-opus-5", "high"
-            )
-            state.insert_task(
-                cur,
-                {
-                    "task_id": "task_2",
-                    "status": "queued",
-                    "agent_runtime": "claude_code",
-                    "model": "claude-opus-5",
-                    "effort": "high",
-                    "thread_id": "offered",
-                    "input_message": "still runnable",
-                    "created_at": "2026-06-08T00:00:00Z",
-                    "updated_at": "2026-06-08T00:00:00Z",
-                },
+                "thread.message",
+                "t1",
+                {"message": "interrupted turn", "source": "user"},
+                run_number=run_number,
             )
 
         admin_api.initialize_state()
 
-        _, superseded = self.request("GET", "/v1/tasks/task_1")
-        self.assertEqual(superseded["status"], "failed")
-        self.assertIn("no longer offered", superseded["error_message"])
-        _, offered = self.request("GET", "/v1/tasks/task_2")
-        self.assertEqual(offered["status"], "queued")
+        _, open_events = self.request("GET", "/v1/threads/t1/events")
+        self.assertEqual(
+            [event["event_type"] for event in open_events["events"]],
+            ["thread.message", "thread.error"],
+        )
+        self.assertIn(
+            "restarted while the thread was running",
+            open_events["events"][-1]["payload"]["error_message"],
+        )
+        # A thread whose newest turn already ended is left alone.
+        _, closed_events = self.request("GET", "/v1/threads/t2/events")
+        self.assertEqual(
+            [event["event_type"] for event in closed_events["events"]],
+            [],
+        )
+        self.assertEqual(state.thread_session_config("t1")["status"], "idle")
 
     def test_event_seq_commits_atomically_with_the_event(self) -> None:
         # Event seqs come from a database serial: unique and increasing, and
@@ -4639,38 +5114,27 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # seq can never appear twice in the log — duplicate seqs would break
         # cursor-based event pagination.
         with state.mutation() as cur:
-            first = state.append_agent_event(cur, "task.message", "task_1", {"message": "hello"})
+            first = state.append_agent_event(cur, "thread.message", "t1", {"message": "hello"})
         with self.assertRaises(RuntimeError):
             with state.mutation() as cur:
-                state.append_agent_event(cur, "task.message", "task_1", {"message": "aborted"})
+                state.append_agent_event(cur, "thread.message", "t1", {"message": "aborted"})
                 raise RuntimeError("abort after allocating a seq")
         with state.mutation() as cur:
-            second = state.append_agent_event(cur, "task.message", "task_1", {"message": "again"})
+            second = state.append_agent_event(cur, "thread.message", "t1", {"message": "again"})
 
         self.assertGreater(second, first)
         _, body = self.request("GET", "/v1/events")
         self.assertEqual([event["seq"] for event in body["events"]], [second, first])
 
     def test_second_instance_fails_on_bind_before_touching_live_state(self) -> None:
-        state = load_state()
-        state["tasks"] = [
-            {
-                "task_id": "task_1",
-                "status": "running",
-                "agent_runtime": "codex",
-                "thread_id": "t1",
-                "input_message": "live task",
-                "steer_messages": [],
-                "created_at": "2026-06-08T00:00:00Z",
-                "updated_at": "2026-06-08T00:00:00Z",
-            }
-        ]
-        save_state(state)
+        seed_thread_session("t1")
+        with state.mutation() as cur:
+            state.start_thread_run(cur, "t1")
 
         # The port bind is the single-instance gate: a second instance must die
-        # there without failing the live instance's running task. The service
-        # never runs migrations (that is bootstrap's job), so a stray start
-        # also cannot move the schema under the live instance.
+        # there before restart recovery could fail the live instance's open
+        # turn. The service never runs migrations (that is bootstrap's job), so
+        # a stray start also cannot move the schema under the live instance.
         with patch(
             "host.runtime.admin_api.service.BoundedThreadingHTTPServer",
             side_effect=OSError("address already in use"),
@@ -4678,8 +5142,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 admin_api.main()
 
-        persisted = load_state()
-        self.assertEqual(persisted["tasks"][0]["status"], "running")
+        _, events = self.request("GET", "/v1/threads/t1/events")
+        self.assertEqual(events["events"], [])
 
 
 
@@ -4695,12 +5159,7 @@ class ToolRoutesTests(unittest.TestCase):
         admin_api.admin_auth._sessions.clear()
         self.session_token = admin_api.admin_auth.create_session()
         self.addCleanup(admin_api.admin_auth._sessions.clear)
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), admin_api.Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
-        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.base_url = start_admin_http_server(self)
         # The operator delegation routes (connect complete/disconnect, approval
         # decide) forward to the kern-tools service socket, so stand one up
         # in-process (same DB and BUNDLED_TOOLS) and point the admin API at it.
@@ -4991,6 +5450,61 @@ class ToolRoutesTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as error:
                 self.request("GET", "/v1/tools/events/999999")
             self.assertEqual(error.exception.code, 404)
+
+    def test_host_errors_endpoint_is_read_only_and_lazy_loads_details(self) -> None:
+        event = {
+            "service": "kern-admin-api",
+            "component": "orchestrator.execution",
+            "kind": "unexpected_exception",
+            "exception_type": "RuntimeError",
+            "summary": "thread session missing",
+            "traceback": 'File "host/runtime/admin_api/orchestrator.py", line 1, in execute',
+            "context": {"thread_id": "thread_1"},
+            "fingerprint": "a" * 64,
+            "host_version": "1.3.3",
+            "boot_id": "boot-1",
+            "pid": 1234,
+        }
+        first = state.ingest_host_error(1_800_000_000_000_000, event)
+        tools_event = dict(event, service="kern-tools", fingerprint="b" * 64)
+        second = state.ingest_host_error(
+            1_800_000_001_000_000, tools_event
+        )
+
+        status, body = self.request("GET", "/v1/host-errors?limit=1")
+        self.assertEqual(status, 200)
+        self.assertEqual([row["seq"] for row in body["events"]], [second])
+        self.assertNotIn("traceback", body["events"][0])
+        self.assertNotIn("context", body["events"][0])
+
+        _, filtered = self.request("GET", "/v1/host-errors?service=kern-admin-api")
+        self.assertEqual([row["seq"] for row in filtered["events"]], [first])
+        _, detail = self.request("GET", f"/v1/host-errors/{first}")
+        self.assertEqual(detail["error"]["traceback"], event["traceback"])
+        self.assertEqual(detail["error"]["context"], {"thread_id": "thread_1"})
+        self.assertEqual(detail["error"]["id"], first)
+
+        # Coalescing moves the row back to the top of seq-based paging without
+        # invalidating a detail link rendered before the repeat arrived.
+        repeated = state.ingest_host_error(
+            1_800_000_010_000_000, event
+        )
+        self.assertEqual(repeated, first)
+        _, repeated_detail = self.request("GET", f"/v1/host-errors/{first}")
+        self.assertEqual(repeated_detail["error"]["occurrence_count"], 2)
+
+        with self.assertRaises(urllib.error.HTTPError) as invalid:
+            self.request("GET", "/v1/host-errors?bogus=1")
+        self.assertEqual(invalid.exception.code, HTTPStatus.BAD_REQUEST)
+        with self.assertRaises(urllib.error.HTTPError) as invalid_service:
+            self.request("GET", "/v1/host-errors?service=not%20a%20unit")
+        self.assertEqual(invalid_service.exception.code, HTTPStatus.BAD_REQUEST)
+        with self.assertRaises(urllib.error.HTTPError) as missing:
+            self.request("GET", "/v1/host-errors/999999")
+        self.assertEqual(missing.exception.code, HTTPStatus.NOT_FOUND)
+        with self.assertRaises(urllib.error.HTTPError) as write:
+            self.request("POST", f"/v1/host-errors/{first}")
+        self.assertEqual(write.exception.code, HTTPStatus.NOT_FOUND)
 
     def test_oauth_callback_serves_the_ui_shell(self) -> None:
         request = urllib.request.Request(f"{self.base_url}/oauth/callback?code=x&state=y")

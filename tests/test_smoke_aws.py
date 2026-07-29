@@ -8,8 +8,9 @@ import unittest
 from unittest.mock import patch
 
 from host.runtime.tools.tools_host import BUNDLED_TOOLS, validate_against_schema
-from tests.smoke.smoke_aws import SMOKE_TOOL_CALLS, AwsSmoke
-from tests.stage.stage_aws import StageAwsSmoke, _required_env_path
+from tests.smoke.smoke_aws import SMOKE_RUNTIMES, SMOKE_TOOL_CALLS, AwsSmoke
+from tests.stage.stage_aws import STAGE_SUITE_CHOICES, StageAwsSmoke, _required_env_path
+from tests.stage.stage_integration_checks import ALL_RUNTIMES_SUITE
 from tests.stage.stage_support import (
     STAGE_SUITES,
     TOOL_SUITES,
@@ -19,6 +20,83 @@ from tests.stage.stage_support import (
 
 
 class AwsSmokeTeardownTests(unittest.TestCase):
+    def test_fresh_smoke_exercises_the_admin_listener_uid_boundary(self) -> None:
+        source = Path(__file__).with_name("smoke").joinpath("smoke_aws.py").read_text()
+        self.assertIn('admin_uid_results = {', source)
+        for user in ("kern-operator", "kern-admin", "cloudflared", "kern-tools", "kern-proxy"):
+            self.assertIn(f'"{user}"', source)
+        self.assertIn('for user in ("kern-operator", "kern-admin", "cloudflared"):', source)
+        self.assertIn('for user in ("kern-tools", "kern-proxy"):', source)
+
+    def test_provider_free_app_smoke_covers_both_stable_backends(self) -> None:
+        smoke = AwsSmoke()
+        smoke.total = 0
+        smoke.passed = 0
+        builder_base = "/v1/apps/personal_web_app_builder/api"
+
+        def fake_api(method: str, path: str, body: dict | None = None) -> dict:
+            if (method, path) == ("GET", "/v1/apps"):
+                return {
+                    "apps": [
+                        {"id": "agent_chat"},
+                        {"id": "personal_web_app_builder"},
+                    ]
+                }
+            if method == "GET" and path.endswith("/session-options"):
+                return {"session_options": {runtime: {} for runtime in SMOKE_RUNTIMES}}
+            if method == "GET" and path.startswith("/v1/apps/agent_chat/api/threads"):
+                return {"threads": []}
+            if (method, path) == ("POST", f"{builder_base}/apps"):
+                return {"app": {"thread_id": "app-1"}}
+            if (method, path) == ("GET", f"{builder_base}/apps/app-1/state"):
+                return {
+                    "app": {
+                        "revision": 0,
+                        "html": "",
+                        "css": "",
+                        "javascript": "",
+                        "data": {},
+                    }
+                }
+            if (method, path) == (
+                "GET",
+                f"{builder_base}/apps/app-1/conversation",
+            ):
+                return {"session": None, "status": "idle"}
+            if (method, path) == (
+                "GET",
+                f"{builder_base}/apps/app-1/conversation/events",
+            ):
+                return {"events": []}
+            if (method, path) == ("PUT", f"{builder_base}/apps/app-1/name"):
+                self.assertEqual(body, {"name": "Provider-free smoke app"})
+                return {"app": {"thread_id": "app-1", "name": body["name"]}}
+            if (method, path) == ("GET", f"{builder_base}/apps"):
+                return {
+                    "apps": [
+                        {
+                            "thread_id": "app-1",
+                            "name": "Provider-free smoke app",
+                        }
+                    ]
+                }
+            if (method, path) == ("POST", f"{builder_base}/apps/app-1/archive"):
+                return {"app": {"thread_id": "app-1", "archived": True}}
+            if (method, path) == ("GET", f"{builder_base}/apps?archived=true"):
+                return {"apps": [{"thread_id": "app-1", "archived": True}]}
+            raise AssertionError((method, path, body))
+
+        with (
+            patch.object(smoke, "_api", side_effect=fake_api),
+            patch.object(smoke, "_api_status", return_value=(200, {})) as status,
+        ):
+            smoke.check_app_backends_without_providers()
+
+        self.assertEqual(smoke.passed, 1)
+        status.assert_called_once_with(
+            "POST", f"{builder_base}/apps/app-1/archive"
+        )
+
     def test_precredential_bedrock_probe_runs_real_hermes_launcher(self) -> None:
         smoke = AwsSmoke()
         smoke.total = 0
@@ -177,6 +255,88 @@ class AwsSmokeTeardownTests(unittest.TestCase):
         self.assertTrue(security_group_deleted)
 
 
+class ThreadTurnHelperTests(unittest.TestCase):
+    def test_wait_for_turn_reads_terminal_event_and_agent_output(self) -> None:
+        smoke = AwsSmoke()
+        events = [
+            {"seq": 2, "event_type": "thread.message", "payload": {"message": "prompt", "source": "user"}},
+            {"seq": 3, "event_type": "thread.message", "payload": {"message": "DONE", "source": "agent"}},
+        ]
+        with (
+            patch.object(smoke, "_thread_events", return_value=events) as reader,
+            patch.object(smoke, "_api", return_value={"thread": {"status": "idle"}}),
+        ):
+            done = smoke._wait_for_turn("smoke-turn", timeout=5, since=0)
+        self.assertEqual(
+            done, {"status": "completed", "output_message": "DONE", "error_message": None}
+        )
+        self.assertEqual(reader.call_args.kwargs.get("since"), 0)
+
+    def test_wait_for_turn_surfaces_failure_and_cancellation(self) -> None:
+        smoke = AwsSmoke()
+        failed = [
+            {"seq": 2, "event_type": "thread.error", "payload": {"error_message": "boom"}},
+        ]
+        with (
+            patch.object(smoke, "_thread_events", return_value=failed),
+            patch.object(smoke, "_api", return_value={"thread": {"status": "idle"}}),
+        ):
+            done = smoke._wait_for_turn("smoke-turn", timeout=5)
+        self.assertEqual(done, {"status": "failed", "output_message": None, "error_message": "boom"})
+        cancelled = [
+            {"seq": 2, "event_type": "thread.stopped", "payload": {}},
+        ]
+        with (
+            patch.object(smoke, "_thread_events", return_value=cancelled),
+            patch.object(smoke, "_api", return_value={"thread": {"status": "idle"}}),
+        ):
+            done = smoke._wait_for_turn("smoke-turn", timeout=5)
+        self.assertEqual(done["status"], "cancelled")
+        # A running thread with no explicit terminal event is not a result.
+        self.assertIsNone(smoke._turn_result([], "running"))
+
+    def test_post_message_retries_only_the_thread_close_fence(self) -> None:
+        smoke = AwsSmoke()
+        smoke.thread_prefix = "stage-test-"
+        fence = AssertionError(
+            "POST /v1/threads/stage-test-smoke-fence/messages returned HTTP 409: "
+            "{'error': {'message': 'the agent is finishing; retry shortly'}}"
+        )
+        with (
+            patch.object(smoke, "_api", side_effect=[fence, {"status": "accepted"}]) as api,
+            patch("tests.smoke.smoke_aws.time.sleep"),
+        ):
+            response = smoke.send_follow_up("smoke-fence", "again")
+        self.assertEqual(response, {"status": "accepted"})
+        self.assertEqual(api.call_count, 2)
+        self.assertEqual(api.call_args.args[1], "/v1/threads/stage-test-smoke-fence/messages")
+        self.assertEqual(api.call_args.args[2], {"message": "again"})
+
+        hermes = AssertionError(
+            "POST /v1/threads/stage-test-smoke-fence/messages returned HTTP 409: "
+            "{'error': {'message': 'Hermes cannot accept another message while running; wait for it to finish'}}"
+        )
+        with patch.object(smoke, "_api", side_effect=hermes) as api:
+            with self.assertRaisesRegex(AssertionError, "cannot accept another message"):
+                smoke.send_message("smoke-fence", "again")
+        self.assertEqual(api.call_count, 1)
+
+    def test_message_body_carries_full_config_and_follow_up_none(self) -> None:
+        smoke = AwsSmoke()
+        body = smoke.message_body("hello", runtime="claude_code")
+        self.assertEqual(
+            body,
+            {
+                "message": "hello",
+                "agent_runtime": "claude_code",
+                "model": "claude-opus-5",
+                "effort": "high",
+            },
+        )
+        self.assertEqual(smoke.follow_up_body("again"), {"message": "again"})
+        self.assertEqual(smoke.api_thread_id("smoke-x"), "smoke-x")
+
+
 class StageAwsSmokeTests(unittest.TestCase):
     def test_stage_rejects_non_stage_result_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -282,8 +442,15 @@ class StageAwsSmokeTests(unittest.TestCase):
             StageAwsSmoke.suite_runtimes("all"),
             ("codex", "claude_code", "hermes"),
         )
+        self.assertEqual(
+            StageAwsSmoke.suite_runtimes(ALL_RUNTIMES_SUITE),
+            ("codex", "claude_code", "hermes"),
+        )
+        self.assertIn(ALL_RUNTIMES_SUITE, STAGE_SUITE_CHOICES)
+        self.assertNotIn(ALL_RUNTIMES_SUITE, TOOL_SUITES)
         self.assertTrue(set(TOOL_SUITES).issubset(STAGE_SUITES))
         self.assertEqual(suite_tools("all"), TOOL_SUITES)
+        self.assertEqual(suite_tools(ALL_RUNTIMES_SUITE), ())
         self.assertEqual(suite_tools("linkedin"), ("linkedin",))
         self.assertEqual(suite_tools("github"), ())
 

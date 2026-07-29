@@ -15,27 +15,14 @@ ApiErrorFactory = Callable[[HTTPStatus, str], Exception]
 HostApi = Callable[[str, str, dict[str, list[str]], Any], dict[str, Any]]
 AGENT_CHAT_EVENT_PAGE = 6
 # Agent Chat surfaces a curated set of the host's seeded threads, a lived-in mix
-# of runtimes and task states: a shipped infra fix (codex, two completed turns),
+# of runtimes and turn states: a shipped infra fix (codex, two completed turns),
 # a design audit with a failed deploy (claude_code), an active incident (codex,
-# running), a cancelled dependency audit (codex), and a queued docs cleanup
+# running), a cancelled dependency audit (codex), and a finished docs cleanup
 # (claude_code). The app-facing thread id must equal the host thread id, since
-# tasks and archive routes query the host by it directly.
+# event and archive routes query the host by it directly.
 AGENT_CHAT_THREADS: dict[str, dict[str, Any]] = {
     thread_id: {"thread_id": thread_id, "name": thread_id, "archived": False}
     for thread_id in ("website-redesign", "thread-1", "thread-2", "thread-3")
-}
-AGENT_CHAT_TASK_IDS: dict[str, str] = {
-    "task_3": "website-redesign",
-    "task_4": "website-redesign",
-    "task_8": "thread-1",
-    "task_9": "thread-1",
-    "task_10": "thread-1",
-    "task_11": "thread-1",
-    "task_12": "thread-1",
-    "task_13": "thread-2",
-    "task_14": "thread-2",
-    "task_15": "thread-3",
-    "task_16": "thread-3",
 }
 
 
@@ -52,13 +39,6 @@ def route_app_api(
     if method == "GET" and relative == "threads":
         archived = (query.get("archived") or ["false"])[0] == "true"
         return {"threads": _list_threads(host_api, archived=archived)}
-    match = re.fullmatch(r"threads/([^/]+)/tasks", relative)
-    if method == "GET" and match:
-        thread_id = match.group(1)
-        _require_agent_chat_thread(thread_id, api_error, include_archived=True)
-        known = {task_id for task_id, known_thread_id in AGENT_CHAT_TASK_IDS.items() if known_thread_id == thread_id}
-        tasks = host_api("GET", f"/v1/threads/{thread_id}/tasks", {}, None)["tasks"]
-        return {"tasks": [task for task in tasks if task["task_id"] in known]}
     match = re.fullmatch(r"threads/([^/]+)/events", relative)
     if method == "GET" and match:
         thread_id = match.group(1)
@@ -86,59 +66,30 @@ def route_app_api(
         AGENT_CHAT_THREADS[thread_id]["name"] = name
         return {"thread": dict(AGENT_CHAT_THREADS[thread_id])}
     if method == "POST" and relative == "messages":
-        if (
-            isinstance(body, dict)
-            and body.get("thread_id") in AGENT_CHAT_THREADS
-            and any(field in body for field in ("agent_runtime", "model", "effort"))
-        ):
-            raise api_error(HTTPStatus.BAD_REQUEST, "follow-up must use the stored session configuration")
         if isinstance(body, dict) and body.get("thread_id") in AGENT_CHAT_THREADS:
             thread_id = body["thread_id"]
             _require_agent_chat_thread(thread_id, api_error)
-            known = {
-                task_id
-                for task_id, known_thread_id in AGENT_CHAT_TASK_IDS.items()
-                if known_thread_id == thread_id
-            }
-            tasks = host_api("GET", f"/v1/threads/{thread_id}/tasks", {}, None)["tasks"]
-            running = [
-                task for task in tasks
-                if task["task_id"] in known and task["status"] == "running"
-            ]
-            if running:
-                task_id = running[-1]["task_id"]
-                host_api(
-                    "POST",
-                    f"/v1/tasks/{task_id}/steer",
-                    {},
-                    {"steer_message": body.get("input_message", "")},
-                )
-                return {"action": "steered", "task_id": task_id, "thread_id": thread_id}
-            if any(
-                task["task_id"] in known and task["status"] == "queued"
-                for task in tasks
-            ):
-                raise api_error(HTTPStatus.CONFLICT, "the task is starting")
-        if isinstance(body, dict) and "thread_id" not in body:
+        elif isinstance(body, dict) and "thread_id" not in body:
             # Mirror the real backend: no thread_id means a new thread with
             # the next successive generated name.
-            body = {**body, "thread_id": _generate_thread_id()}
-        task = host_api("POST", "/v1/tasks", {}, body)
-        thread_id = task["thread_id"]
-        AGENT_CHAT_THREADS[thread_id] = {
-            "thread_id": thread_id,
-            "name": thread_id,
-            "archived": False,
-        }
-        AGENT_CHAT_TASK_IDS[task["task_id"]] = thread_id
-        return {**task, "action": "created"}
-    match = re.fullmatch(r"tasks/([^/]+)/(cancel|kill)", relative)
+            thread_id = _generate_thread_id()
+        else:
+            raise api_error(HTTPStatus.NOT_FOUND, "thread not found")
+        host_request: dict[str, Any] = {"message": body.get("input_message", "")}
+        for field in ("agent_runtime", "model", "effort"):
+            if field in body:
+                host_request[field] = body[field]
+        response = host_api("POST", f"/v1/threads/{thread_id}/messages", {}, host_request)
+        AGENT_CHAT_THREADS.setdefault(
+            thread_id,
+            {"thread_id": thread_id, "name": thread_id, "archived": False},
+        )
+        return {"action": response["status"], "thread_id": thread_id}
+    match = re.fullmatch(r"threads/([^/]+)/stop", relative)
     if method == "POST" and match:
-        task_id, action = match.groups()
-        if task_id not in AGENT_CHAT_TASK_IDS:
-            raise api_error(HTTPStatus.NOT_FOUND, "task not found")
-        _require_agent_chat_thread(AGENT_CHAT_TASK_IDS[task_id], api_error)
-        return host_api(method, f"/v1/tasks/{task_id}/{action}", {}, body)
+        thread_id = match.group(1)
+        _require_agent_chat_thread(thread_id, api_error, include_archived=True)
+        return host_api("POST", f"/v1/threads/{thread_id}/stop", {}, body)
     raise api_error(HTTPStatus.NOT_FOUND, "mock app route not found")
 
 
@@ -162,12 +113,22 @@ def desktop_smoke(page: Any) -> None:
 
     expect(frame.locator(".app-frame-title")).to_have_text("Agent Chat")
     expect(frame.locator("#status")).to_be_hidden()
-    # A lived-in list: several threads across runtimes and task states.
+    # A lived-in list: several threads across runtimes and turn states.
     expect(frame.locator("#threads")).to_contain_text("website-redesign")
     expect(frame.locator("#threads")).to_contain_text("thread-1")
 
     frame.locator("#threads .thread-item", has_text="website-redesign").click()
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
+    expect(frame.get_by_role("switch", name="Activity", exact=True)).to_be_visible()
+    expect(frame.locator("#new-task-runtime")).to_have_value("claude_code")
+    expect(frame.locator("#new-task-runtime")).to_be_enabled()
+    frame.locator("#new-task-model").select_option("claude-fable-5")
+    expect(frame.locator("#session-change-warning")).to_be_visible()
+    expect(frame.locator("#session-change-warning")).to_contain_text(
+        "provider cache reads will be invalidated"
+    )
+    frame.locator("#new-task-model").select_option("claude-opus-5")
+    expect(frame.locator("#session-change-warning")).to_be_hidden()
     page.once("dialog", lambda dialog: dialog.accept("Website refresh"))
     frame.get_by_role("button", name="Rename thread", exact=True).click()
     expect(frame.locator(".thread-title")).to_have_text("Website refresh")
@@ -177,8 +138,11 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
     _load_older_history(frame, expected_turns=2)
     expect(frame.locator("#thread-detail")).to_contain_text("Push the responsive fixes")
-    expect(frame.locator("#thread-detail")).to_contain_text("failed")
-    expect(frame.locator("#thread-detail .turn").nth(0)).to_contain_text("Audit the marketing site")
+    expect(frame.locator("#thread-detail")).to_contain_text(
+        "network access to deploy.acme.dev denied by policy"
+    )
+    expect(frame.locator("#thread-detail .status")).to_have_count(0)
+    expect(frame.locator("#thread-detail .thread-entry").nth(0)).to_contain_text("Audit the marketing site")
 
     frame.get_by_role("button", name="New thread").click()
     expect(frame.locator(".thread-title")).to_have_text("New thread")
@@ -243,7 +207,6 @@ def desktop_smoke(page: Any) -> None:
         "[User-uploaded file: user-files/20260722T120000.000000Z_brief.pdf]"
     )
     expect(frame.locator("#thread-detail")).not_to_contain_text("notes.txt")
-    expect(frame.locator("#thread-detail")).to_contain_text("task_")
     with tempfile.TemporaryDirectory() as temporary_directory:
         oversized = Path(temporary_directory) / "oversized.bin"
         with oversized.open("wb") as file:
@@ -326,8 +289,10 @@ def mobile_smoke(page: Any) -> None:
     _assert_thread_view_memory(frame)
     _assert_rich_activity_stream(frame)
     _assert_mobile_composer_ergonomics(frame)
-    _assert_mobile_steering(frame)
+    _assert_mobile_keyboard_viewport_recovery(page, frame)
+    _assert_mobile_running_message(frame)
     _assert_mobile_send_flow(frame)
+    _assert_long_message_has_no_horizontal_overflow(frame)
 
 
 def _assert_initial_tail(frame: Any) -> None:
@@ -387,42 +352,37 @@ def _load_older_history(frame: Any, *, expected_turns: int) -> None:
             }"""
         )
     expect(button).to_be_hidden()
-    expect(frame.locator("#thread-detail .turn")).to_have_count(expected_turns)
+    entry_count = frame.locator("#thread-detail .thread-entry").count()
+    if entry_count < expected_turns:
+        raise AssertionError(
+            f"fully loaded history has only {entry_count} entries; expected at least {expected_turns}"
+        )
 
 
 def _assert_full_message_stream(frame: Any) -> None:
-    """A finished task renders its whole message stream inline, not just
-    prompt and final answer: interim agent progress and mid-task operator
-    steering both appear, the steering marked as a follow-up nudge."""
+    """The flat thread renders every message in chronological order."""
     from playwright.sync_api import expect
 
-    flash_turn = frame.locator("#thread-detail .turn", has_text="Fix the flash")
+    history = frame.locator("#thread-detail")
     # Interim agent progress from the seeded stream.
-    expect(flash_turn).to_contain_text("Reproduced the flash with CPU throttling")
-    # The mid-task steer renders as a follow-up bubble on the user's side.
-    steer = flash_turn.locator(".turn-user .steer-bubble", has_text="scrollbar matches")
-    expect(steer).to_have_count(1)
-    repeated_steer = flash_turn.locator(
-        ".turn-user .steer-bubble",
+    expect(history).to_contain_text("Reproduced the flash with CPU throttling")
+    expect(history.locator(".thread-user", has_text="scrollbar matches")).to_have_count(1)
+    # Identical accepted messages remain distinct chronological entries; the
+    # flat renderer must not deduplicate a later live message against the
+    # original request.
+    expect(history.locator(
+        ".thread-user",
         has_text="The toggle still flashes light theme for a frame on a cold load. Fix the flash.",
-    )
-    expect(repeated_steer).to_have_count(1)
-    # The opening prompt is a plain bubble, not a steer bubble.
-    opening = flash_turn.locator(
-        ".turn-user .bubble:not(.steer-bubble)",
-        has_text="Fix the flash",
-    )
-    expect(opening).to_have_count(1)
-    expect(opening).not_to_have_class(re.compile(r"steer-bubble"))
+    )).to_have_count(2)
     # The final answer still lands after the interim stream.
-    expect(flash_turn).to_contain_text("no flash in 20 cold loads")
+    expect(history).to_contain_text("no flash in 20 cold loads")
 
 
 def _assert_rich_activity_stream(frame: Any) -> None:
     """Every provider-neutral activity kind receives its distinct rich card."""
     from playwright.sync_api import expect
 
-    flash_turn = frame.locator("#thread-detail .turn", has_text="Fix the flash")
+    history = frame.locator("#thread-detail")
     expected = {
         "reasoning": ("Reasoning", "Reasoning"),
         "plan": ("Fix first-paint ordering", "Plan"),
@@ -436,21 +396,44 @@ def _assert_rich_activity_stream(frame: Any) -> None:
         "status": ("Browser session initialized", "Status"),
     }
     for kind, (title, label) in expected.items():
-        card = flash_turn.locator(f".activity-{kind}", has_text=title)
+        card = history.locator(f".activity-{kind}", has_text=title)
         expect(card).to_have_count(1)
         expect(card.locator(".activity-kind")).to_have_text(label)
-    command = flash_turn.locator(".activity-command", has_text="npm test")
+    command = history.locator(".activity-command", has_text="npm test")
     command.locator("summary").click()
     expect(command).to_contain_text("Terminal output")
     expect(command).to_contain_text("6 passed")
     expect(command.locator(".activity-status")).to_have_text("exit 0")
-    expect(flash_turn.locator(".activity-status", has_text="completed")).to_have_count(0)
-    failed = flash_turn.locator(".activity-status.failed")
+    expect(history.locator(".activity-status", has_text="completed")).to_have_count(0)
+    failed = history.locator(".activity-status.failed")
     expect(failed).to_have_count(1)
     expect(failed).to_have_text("failed")
     expect(
-        flash_turn.locator(".activity-card.activity-static", has_text="Browser session initialized")
+        history.locator(".activity-card.activity-static", has_text="Browser session initialized")
     ).to_have_count(1)
+    _assert_activity_visibility_toggle(frame, history)
+
+
+def _assert_activity_visibility_toggle(frame: Any, turn: Any) -> None:
+    """The header control hides only activity and accurately names its action."""
+    from playwright.sync_api import expect
+
+    cards = turn.locator(".activity-card")
+    card_count = cards.count()
+    if card_count < 1:
+        raise AssertionError("activity visibility toggle has no seeded cards to exercise")
+    toggle = frame.get_by_role("switch", name="Activity", exact=True)
+    expect(toggle).to_have_attribute("aria-checked", "true")
+    toggle.click()
+    expect(toggle).to_have_attribute("aria-checked", "false")
+    expect(toggle).to_have_attribute("title", "Show agent activity")
+    expect(turn.locator(".activity-card:visible")).to_have_count(0)
+    # Conversation messages remain visible; this is not a whole-turn filter.
+    expect(turn.get_by_text("no flash in 20 cold loads", exact=False)).to_be_visible()
+    toggle.click()
+    expect(toggle).to_have_attribute("aria-checked", "true")
+    expect(toggle).to_have_attribute("title", "Hide agent activity")
+    expect(turn.locator(".activity-card:visible")).to_have_count(card_count)
 
 
 def _assert_mobile_chat_scrolling(page: Any, frame: Any) -> None:
@@ -459,7 +442,8 @@ def _assert_mobile_chat_scrolling(page: Any, frame: Any) -> None:
     from playwright.sync_api import expect
 
     scroller = frame.locator("#chat-scroll")
-    expect(frame.locator("#thread-detail .turn")).to_have_count(5)
+    if frame.locator("#thread-detail .thread-entry").count() < 5:
+        raise AssertionError("thread-1 did not render enough flat history entries")
     metrics = scroller.evaluate(
         "element => [element.scrollHeight, element.clientHeight, element.scrollTop]"
     )
@@ -468,20 +452,20 @@ def _assert_mobile_chat_scrolling(page: Any, frame: Any) -> None:
         raise AssertionError(
             f"seeded thread-1 is not long enough to exercise scrolling: {metrics}"
         )
-    # The whole history is reachable: jump to the top and read the first turn.
+    # The whole history is reachable: jump to the top and read the first entry.
     scroller.evaluate("element => { element.scrollTop = 0; }")
-    expect(frame.locator("#thread-detail .turn").nth(0)).to_be_in_viewport()
-    # Park mid-history, mark the first rendered turn, and sit through a full
+    expect(frame.locator("#thread-detail .thread-entry").nth(0)).to_be_in_viewport()
+    # Park mid-history, mark the first rendered entry, and sit through a full
     # 5-second poll: the scroll position must hold and the DOM node must be
     # the same object (an innerHTML rebuild would kill touch momentum).
     scroller.evaluate("element => { element.scrollTop = Math.floor(element.scrollHeight / 2); }")
     parked = scroller.evaluate("element => element.scrollTop")
-    frame.locator("#thread-detail .turn").nth(0).evaluate("element => { element.dataset.smokeProbe = 'kept'; }")
+    frame.locator("#thread-detail .thread-entry").nth(0).evaluate("element => { element.dataset.smokeProbe = 'kept'; }")
     page.wait_for_timeout(6000)
     after = scroller.evaluate("element => element.scrollTop")
     if after != parked:
         raise AssertionError(f"a background poll moved the reading position: {parked} -> {after}")
-    probe = frame.locator("#thread-detail .turn").nth(0).evaluate("element => element.dataset.smokeProbe")
+    probe = frame.locator("#thread-detail .thread-entry").nth(0).evaluate("element => element.dataset.smokeProbe")
     if probe != "kept":
         raise AssertionError("a background poll rebuilt the chat history DOM while reading")
 
@@ -500,7 +484,8 @@ def _assert_thread_view_memory(frame: Any) -> None:
     frame.get_by_role("button", name="Show thread list").click()
     frame.locator("#threads .thread-item", has_text="thread-1").click()
     expect(frame.locator(".thread-title")).to_have_text("thread-1")
-    expect(frame.locator("#thread-detail .turn")).to_have_count(5)
+    if frame.locator("#thread-detail .thread-entry").count() < 5:
+        raise AssertionError("restored thread lost its loaded history entries")
     expect(frame.get_by_role("button", name="Load earlier messages")).to_be_hidden()
     restored_scroll_top = scroller.evaluate("element => element.scrollTop")
     if abs(restored_scroll_top - previous_scroll_top) > 1:
@@ -531,21 +516,158 @@ def _assert_mobile_composer_ergonomics(frame: Any) -> None:
         raise AssertionError("composer is clipped below the app frame viewport")
 
 
-def _assert_mobile_steering(frame: Any) -> None:
-    """The one main composer steers the seeded running task."""
+def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
+    """The host shell follows a contracting mobile viewport and fully recovers.
+
+    iOS keeps ``vh`` tied to the large viewport while the software keyboard
+    reduces ``dvh``. Exercise modern and compact iPhone dimensions and pin the
+    critical CSS override so the host cannot retain its large-viewport minimum
+    and pan the focused app iframe underneath the usage toolbar.
+    """
+    from playwright.sync_api import expect
+
+    body = page.locator("body")
+    expect(body).to_have_class(re.compile(r"\bviewport-panel-open\b"))
+    expect(body).to_have_css("display", "grid")
+    expect(body).to_have_css("min-height", "0px")
+    _assert_mobile_usage_overlay_over_app(page)
+    composer = frame.locator("#new-task")
+    for width, full_height, keyboard_height in (
+        (390, 844, 500),
+        (375, 667, 360),
+    ):
+        page.set_viewport_size({"width": width, "height": full_height})
+        composer.focus()
+        composer.fill("keyboard viewport probe")
+        page.set_viewport_size({"width": width, "height": keyboard_height})
+        _assert_mobile_app_owns_viewport(page, frame, f"{width}x{full_height} keyboard")
+
+        composer.evaluate("element => element.blur()")
+        page.set_viewport_size({"width": width, "height": full_height})
+        _assert_mobile_app_owns_viewport(page, frame, f"{width}x{full_height} restored")
+
+    composer.fill("")
+    page.set_viewport_size({"width": 390, "height": 844})
+
+    # Leaving a viewport-owned app tears the shell mode down; reopening the
+    # same lazy-loaded iframe establishes it again without retaining keyboard
+    # geometry or placing the app beneath the toolbar.
+    page.locator("#mobile-nav-toggle").click()
+    page.get_by_role("button", name="Home", exact=True).click()
+    expect(body).not_to_have_class(re.compile(r"\bviewport-panel-open\b"))
+    expect(page.locator("#panel-home")).to_be_visible()
+    page.locator("#home-hero").get_by_role("button", name="Begin chat", exact=True).click()
+    expect(body).to_have_class(re.compile(r"\bviewport-panel-open\b"))
+    _assert_mobile_app_owns_viewport(page, frame, "390x844 app reopened")
+
+
+def _assert_mobile_usage_overlay_over_app(page: Any) -> None:
+    """The host usage panel still floats over an app without reflowing it."""
+    from playwright.sync_api import expect
+
+    iframe = page.locator('iframe[title="Agent Chat"]')
+    iframe_before = iframe.bounding_box()
+    overview_toggle = page.locator(".runtime-overview-toggle")
+    expect(overview_toggle).to_have_attribute("aria-expanded", "false")
+    with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
+        overview_toggle.click()
+    expect(overview_toggle).to_have_attribute("aria-expanded", "true")
+    panel = page.locator("#runtime-overview .runtime-overview-panel")
+    expect(panel).to_be_visible()
+    expect(panel).to_have_css("position", "absolute")
+    iframe_expanded = iframe.bounding_box()
+    if not iframe_before or not iframe_expanded:
+        raise AssertionError("Agent Chat iframe disappeared while opening the usage overlay")
+    if (
+        abs(iframe_expanded["y"] - iframe_before["y"]) > 1
+        or abs(iframe_expanded["height"] - iframe_before["height"]) > 1
+    ):
+        raise AssertionError(
+            "opening the usage overlay reflowed Agent Chat: "
+            f"before={iframe_before}, expanded={iframe_expanded}"
+        )
+
+    overview_toggle.click()
+    expect(overview_toggle).to_have_attribute("aria-expanded", "false")
+    expect(panel).to_be_hidden()
+    iframe_collapsed = iframe.bounding_box()
+    if not iframe_collapsed or (
+        abs(iframe_collapsed["y"] - iframe_before["y"]) > 1
+        or abs(iframe_collapsed["height"] - iframe_before["height"]) > 1
+    ):
+        raise AssertionError(
+            "closing the usage overlay changed Agent Chat geometry: "
+            f"before={iframe_before}, collapsed={iframe_collapsed}"
+        )
+
+
+def _assert_mobile_app_owns_viewport(page: Any, frame: Any, label: str) -> None:
+    metrics = page.evaluate(
+        """() => {
+          const rect = element => {
+            const box = element.getBoundingClientRect();
+            return {top: box.top, bottom: box.bottom, height: box.height};
+          };
+          return {
+            viewportHeight: window.innerHeight,
+            scrollY: window.scrollY,
+            documentOverflow:
+              document.documentElement.scrollHeight - document.documentElement.clientHeight,
+            body: rect(document.body),
+            topbar: rect(document.querySelector(".topbar")),
+            app: rect(document.querySelector("#app")),
+            iframe: rect(document.querySelector('iframe[title="Agent Chat"]')),
+          };
+        }"""
+    )
+    viewport_height = metrics["viewportHeight"]
+    if abs(metrics["body"]["height"] - viewport_height) > 1:
+        raise AssertionError(f"{label}: host body does not match the viewport: {metrics}")
+    if abs(metrics["body"]["top"]) > 1 or metrics["body"]["bottom"] > viewport_height + 1:
+        raise AssertionError(f"{label}: host body shifted outside the viewport: {metrics}")
+    if metrics["scrollY"] > 1 or metrics["documentOverflow"] > 1:
+        raise AssertionError(f"{label}: outer host page became scrollable: {metrics}")
+    if metrics["app"]["top"] < metrics["topbar"]["bottom"] - 1:
+        raise AssertionError(f"{label}: host usage toolbar overlaps the app: {metrics}")
+    if metrics["iframe"]["bottom"] > viewport_height + 1:
+        raise AssertionError(f"{label}: Agent Chat iframe extends below the viewport: {metrics}")
+
+    iframe_box = page.locator('iframe[title="Agent Chat"]').bounding_box()
+    drawer_button_box = frame.get_by_role("button", name="Show thread list").bounding_box()
+    if not iframe_box or not drawer_button_box:
+        raise AssertionError(f"{label}: Agent Chat frame or drawer trigger is not visible")
+    iframe_top = iframe_box["y"]
+    iframe_bottom = iframe_top + iframe_box["height"]
+    button_top = drawer_button_box["y"]
+    button_bottom = button_top + drawer_button_box["height"]
+    if button_top < iframe_top - 1 or button_bottom > iframe_bottom + 1:
+        raise AssertionError(
+            f"{label}: thread drawer trigger is clipped by the host toolbar: "
+            f"iframe={iframe_box}, button={drawer_button_box}"
+        )
+
+
+def _assert_mobile_running_message(frame: Any) -> None:
+    """The one composer sends another message into running work."""
     from playwright.sync_api import expect
 
     frame.get_by_role("button", name="Show thread list").click()
     frame.locator("#threads .thread-item", has_text="thread-2").click()
     expect(frame.locator("#thread-detail")).to_contain_text("Tighten the intro")
-    running_turn = frame.locator("#thread-detail .turn", has_text="Tighten the intro")
-    expect(running_turn.locator(".status")).to_have_text("running")
+    history = frame.locator("#thread-detail")
+    expect(history.locator(".status")).to_have_count(0)
     expect(frame.locator(".task-steer-input")).to_have_count(0)
-    expect(running_turn.get_by_role("button", name="Stop")).to_have_count(0)
+    expect(history.get_by_role("button", name="Stop")).to_have_count(0)
     expect(frame.locator("#composer-running")).to_be_visible()
     expect(frame.locator("#composer-running")).to_contain_text("Agent is working")
     expect(frame.locator("#composer-running").get_by_role("button", name="Stop")).to_be_visible()
-    live_command = running_turn.locator(
+    expect(frame.locator("#new-task-runtime")).to_be_disabled()
+    frame.locator("#composer-options").hover()
+    expect(frame.locator("#session-options-note")).to_be_visible()
+    expect(frame.locator("#session-options-note")).to_contain_text(
+        "Stop this thread first"
+    )
+    live_command = history.locator(
         ".activity-command.started",
         has_text="python word_count.py",
     )
@@ -562,14 +684,14 @@ def _assert_mobile_steering(frame: Any) -> None:
     composer = frame.locator("#new-task")
     expect(composer).to_have_attribute(
         "placeholder",
-        "Send a follow-up to steer the running task",
+        "Send another message",
     )
     composer.fill("keep the beta tester thank-you")
     composer.press("Enter")
     expect(composer).to_have_value("")
     expect(
-        running_turn.locator(
-            ".turn-user .steer-bubble",
+        history.locator(
+            ".thread-user",
             has_text="keep the beta tester thank-you",
         )
     ).to_have_count(1)
@@ -588,7 +710,7 @@ def _assert_mobile_send_flow(frame: Any) -> None:
     frame.get_by_role("button", name="Send").click()
     expect(frame.locator(".thread-title")).to_have_text(re.compile(r"^thread-[0-9]+$"))
     expect(frame.locator("#thread-detail")).to_contain_text("mobile smoke: check the deploy status")
-    sent_bubble = frame.locator("#thread-detail .turn-user").last
+    sent_bubble = frame.locator("#thread-detail .thread-user").last
     expect(sent_bubble).to_be_in_viewport()
     frame.get_by_role("button", name="Archive", exact=True).click()
     expect(frame.locator(".thread-title")).to_have_text("New thread")
@@ -604,24 +726,37 @@ def _generate_thread_id() -> str:
 
 
 def _list_threads(host_api: HostApi, *, archived: bool = False) -> list[dict[str, Any]]:
-    """Mirror the real backend: one bulk host summaries call, shown only for
-    threads in the requested archive state with recorded tasks, with count and active ids taken
-    from the app's own recorded tasks (never the host's raw totals)."""
-    recorded: dict[str, set[str]] = {}
-    for task_id, thread_id in AGENT_CHAT_TASK_IDS.items():
-        thread = AGENT_CHAT_THREADS.get(thread_id)
-        if thread is not None and thread["archived"] == archived:
-            recorded.setdefault(thread_id, set()).add(task_id)
-    summaries = host_api("GET", "/v1/threads", {}, None)["threads"]
+    """Mirror the real backend's paged host-summary join.
+
+    The host contributes session config and live status; the app contributes
+    names, archive state, and the ownership set.
+    """
+    recorded = {
+        thread_id: thread
+        for thread_id, thread in AGENT_CHAT_THREADS.items()
+        if thread["archived"] == archived
+    }
+    summaries = []
+    seen_before: set[str] = set()
+    before: str | None = None
+    while True:
+        query = {"limit": ["100"]}
+        if before is not None:
+            query["before"] = [before]
+        page = host_api("GET", "/v1/threads", query, None)
+        summaries.extend(page.get("threads") or [])
+        next_before = page.get("next_before")
+        if not isinstance(next_before, str) or not next_before:
+            break
+        if next_before in seen_before:
+            raise AssertionError("thread list pagination returned a repeated cursor")
+        seen_before.add(next_before)
+        before = next_before
     threads = [
         {
             **summary,
-            "name": AGENT_CHAT_THREADS[summary["thread_id"]]["name"],
+            "name": recorded[summary["thread_id"]]["name"],
             "archived": archived,
-            "task_count": len(recorded[summary["thread_id"]]),
-            "active_tasks": [
-                task for task in summary["active_tasks"] if task["task_id"] in recorded[summary["thread_id"]]
-            ],
         }
         for summary in summaries
         if summary["thread_id"] in recorded
@@ -662,3 +797,36 @@ def _assert_frame_no_horizontal_overflow(frame: Any, label: str) -> None:
     )
     if overflow > 1:
         raise AssertionError(f"{label} frame overflows horizontally by {overflow}px")
+
+
+def _assert_long_message_has_no_horizontal_overflow(frame: Any) -> None:
+    """Assistant messages, including long inline values, wrap in the chat pane."""
+    message = (
+        "I’m keeping the guidance exactly where it is under Tools, but making it operational: "
+        "name the common GraphQL-backed commands, show REST replacements, and tell the agent "
+        "how to derive the repository without `gh repo view`. The shim will add the same hint "
+        "only when it detects a failed `/graphql` request, preserving normal `gh` output and "
+        "exit codes.\n\n"
+        f"Long inline value: `{'x' * 1_024}`."
+    )
+    frame.locator("#thread-detail").evaluate(
+        """(element, content) => {
+          const turn = document.createElement("article");
+          turn.className = "thread-entry";
+          const rendered = document.createElement("div");
+          rendered.className = "thread-agent md-content";
+          rendered.innerHTML = window.KernRichText.renderMarkdown(content);
+          turn.append(rendered);
+          element.append(turn);
+        }""",
+        message,
+    )
+    overflow = frame.locator("#chat-scroll").evaluate(
+        "element => element.scrollWidth - element.clientWidth"
+    )
+    if overflow > 1:
+        raise AssertionError(
+            "agent_chat long assistant message is clipped by the chat pane "
+            f"by {overflow}px"
+        )
+    _assert_frame_no_horizontal_overflow(frame, "agent_chat long assistant message")

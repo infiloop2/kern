@@ -7,31 +7,22 @@ from typing import TYPE_CHECKING
 
 from host.constants import PROXY_PORT
 from tests.smoke.smoke_aws import SMOKE_BEDROCK_REGION, AwsSmoke
+from tests.stage.stage_integration_checks import ALL_RUNTIMES_SUITE
 from tests.stage.stage_support import CHEAP_MODELS, RUNTIME_LABELS
 
 
 class StageBedrockChecks(AwsSmoke):
-    """Bedrock setup, credential-boundary, task, and lifecycle checks."""
+    """Bedrock setup, credential-boundary, turn, and lifecycle checks."""
 
     if TYPE_CHECKING:
         stage_bedrock_credential: tuple[str, str] | None
 
         def enforcement_policy(self) -> dict: ...
-        def task_body(
-            self,
-            input_message: str,
-            thread_id: str,
-            *,
-            runtime: str | None = None,
-            model: str | None = None,
-            effort: str | None = None,
-        ) -> dict: ...
-        def follow_up_body(self, input_message: str, thread_id: str) -> dict: ...
         def require_runtime_active(self, runtime: str) -> None: ...
 
     def autoconfigure_bedrock(self, suite: str) -> None:
         """Validate one CI credential and enable the provider."""
-        selected = ("hermes",) if suite in {"all", "hermes"} else ()
+        selected = ("hermes",) if suite in {"all", ALL_RUNTIMES_SUITE, "hermes"} else ()
         if not selected or self.stage_bedrock_credential is None:
             return
 
@@ -80,7 +71,7 @@ class StageBedrockChecks(AwsSmoke):
             raise AssertionError(f"Bedrock check selected non-Bedrock runtime {runtime!r}")
         label = RUNTIME_LABELS[runtime]
         region = SMOKE_BEDROCK_REGION
-        self._step(f"{label} credential boundary + real AWS Bedrock task")
+        self._step(f"{label} credential boundary + real AWS Bedrock turn")
         self._api("PUT", "/v1/network/policy", self.enforcement_policy())
         self.require_runtime_active(runtime)
 
@@ -143,25 +134,24 @@ class StageBedrockChecks(AwsSmoke):
 
         token = f"{runtime.upper()}_STAGE_OK"
         model = CHEAP_MODELS[runtime]
+        thread_id = f"{runtime}-bedrock"
         baseline_seq = max((event["seq"] for event in self._network_events()), default=0)
-        task = self._api(
-            "POST",
-            "/v1/tasks",
-            self.task_body(
-                f"Reply with exactly the word {token} and nothing else.",
-                f"{runtime}-bedrock",
-                model=model,
-            ),
+        turn_baseline = self._latest_thread_event_seq(thread_id)
+        started = self.send_message(
+            thread_id,
+            f"Reply with exactly the word {token} and nothing else.",
+            model=model,
         )
-        if (task.get("model"), task.get("effort")) != (model, "high"):
-            raise AssertionError(f"{label} task did not retain selected options: {task}")
-        done = self._wait_for_task(task["task_id"], timeout=300)
+        thread = started.get("thread") or {}
+        if started.get("status") != "accepted" or (thread.get("model"), thread.get("effort")) != (model, "high"):
+            raise AssertionError(f"{label} turn did not start with the selected options: {started}")
+        done = self._wait_for_turn(thread_id, since=turn_baseline, timeout=300)
         if done["status"] != "completed":
             raise AssertionError(
-                f"{label} task ended {done['status']}: {self._task_failure_detail(task['task_id'])}"
+                f"{label} turn ended {done['status']}: {self._thread_failure_detail(thread_id)}"
             )
         if token not in (done.get("output_message") or "").upper():
-            raise AssertionError(f"{label} task output omitted {token}: {done.get('output_message')!r}")
+            raise AssertionError(f"{label} turn output omitted {token}: {done.get('output_message')!r}")
 
         bedrock_events = [
             event
@@ -174,7 +164,7 @@ class StageBedrockChecks(AwsSmoke):
         # GET /v1/models) on the Bedrock runtime host. Only POST
         # .../converse[-stream] is an invocation route, so the guard fails a
         # bare catalog probe closed on the route check; that
-        # network_policy_denied is correct and the Converse task still
+        # network_policy_denied is correct and the Converse turn still
         # completes. Tolerate only that exact benign probe: the guard emits
         # more specific reasons before the route check (for example
         # bedrock_query_auth_denied for presigned query auth), so require the
@@ -191,36 +181,35 @@ class StageBedrockChecks(AwsSmoke):
             )
         ]
         if not allowed or unexpected:
-            raise AssertionError(f"{label} task Bedrock traffic was not cleanly allowed: {bedrock_events}")
+            raise AssertionError(f"{label} turn Bedrock traffic was not cleanly allowed: {bedrock_events}")
         if not any(event["path"].endswith(("/converse", "/converse-stream")) for event in allowed):
-            raise AssertionError(f"{label} task used no Bedrock Converse path: {allowed}")
+            raise AssertionError(f"{label} turn used no Bedrock Converse path: {allowed}")
 
-        follow_up = self._api(
-            "POST",
-            "/v1/tasks",
-            self.follow_up_body(
-                "Reply again with the exact uppercase word from your previous answer and nothing else.",
-                f"{runtime}-bedrock",
-            ),
+        follow_up_baseline = self._latest_thread_event_seq(thread_id)
+        follow_up = self.send_follow_up(
+            thread_id,
+            "Reply again with the exact uppercase word from your previous answer and nothing else.",
         )
-        follow_up_done = self._wait_for_task(follow_up["task_id"], timeout=300)
+        if follow_up.get("status") != "accepted":
+            raise AssertionError(f"{label} follow-up was not started on the idle thread: {follow_up}")
+        follow_up_done = self._wait_for_turn(thread_id, since=follow_up_baseline, timeout=300)
         if follow_up_done["status"] != "completed" or token not in (
             follow_up_done.get("output_message") or ""
         ).upper():
             raise AssertionError(
                 f"{label} did not resume its provider session: {follow_up_done}; "
-                f"{self._task_failure_detail(follow_up['task_id'])}"
+                f"{self._thread_failure_detail(thread_id)}"
             )
 
         # Live usage metering, proven against real Bedrock responses: the two
-        # completed tasks must have advanced this runtime's own counters, and
+        # completed turns must have advanced this runtime's own counters, and
         # metering (not just request counting) must have parsed real response
         # shapes.
         live_usage = self._agent_account(runtime).get("bedrock_usage", {})
         for counter in ("requests", "metered_requests", "input_tokens", "output_tokens"):
             if live_usage.get(counter, 0) <= baseline_usage.get(counter, 0):
                 raise AssertionError(
-                    f"{label} live usage counter {counter!r} did not advance across a real task: "
+                    f"{label} live usage counter {counter!r} did not advance across a real turn: "
                     f"{baseline_usage} -> {live_usage}"
                 )
         if live_usage.get("month_to_date", 0) <= baseline_usage.get("month_to_date", 0):

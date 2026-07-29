@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -23,9 +24,10 @@ from urllib.parse import quote
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from host.session_options import public_session_options
 from tests.smoke.smoke_aws import SMOKE_RUNTIMES
 from tests.stage.stage_bedrock_checks import StageBedrockChecks
-from tests.stage.stage_integration_checks import StageIntegrationChecks
+from tests.stage.stage_integration_checks import ALL_RUNTIMES_SUITE, StageIntegrationChecks
 from tests.stage.stage_tool_checks import StageToolChecks
 from tests.stage.stage_support import (
     CHEAP_EFFORT,
@@ -42,6 +44,10 @@ from tests.stage.stage_support import (
     suite_tools,
     write_action_summary as _write_action_summary,
 )
+
+# The operator-selectable suites: everything stage_support knows, plus the
+# all_runtimes convenience suite that runs the three runtime suites at once.
+STAGE_SUITE_CHOICES = (STAGE_SUITES[0], ALL_RUNTIMES_SUITE, *STAGE_SUITES[1:])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,14 +70,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--suite",
-        choices=STAGE_SUITES,
+        choices=STAGE_SUITE_CHOICES,
         default="all",
         help=(
             "Which test suite to run. 'claude', 'codex', 'hermes', or 'github' run that integration's "
-            "checks only (plus the shared preamble); each bundled tool id runs that tool's "
+            "checks only (plus the shared preamble); 'all_runtimes' runs the Codex, Claude Code, AND "
+            "Hermes runtime checks in one invocation; each bundled tool id runs that tool's "
             "live check; 'all' (default) checks credentials for every integration first, "
             "skips unavailable integrations, and runs every available integration "
-            "independently. A focused suite still fails when its required credential is absent."
+            "independently. A focused suite still fails when its required credential is absent "
+            "('all_runtimes' fails when any of the three runtimes is unavailable, but still runs "
+            "the available ones)."
         ),
     )
     args = parser.parse_args(argv)
@@ -94,14 +103,19 @@ def main(argv: list[str] | None = None) -> int:
         stage.autoconfigure_tools(selected_tools)
         availability = stage.integration_availability(suite)
         unavailable = {name: reason for name, reason in availability.items() if reason is not None}
-        if suite != "all" and unavailable:
-            reason = next(iter(unavailable.values()))
-            assert reason is not None
-            report.add(_integration_label(suite), "unavailable", "failed", reason)
-            raise AssertionError(reason)
-        for integration, reason in unavailable.items():
-            assert reason is not None
-            report.add(_integration_label(integration), "unavailable", "skipped", reason)
+        if suite != "all":
+            # Focused suites stay strict: an unavailable integration is a
+            # failure. all_runtimes records each unavailable runtime as failed
+            # but still runs the available runtimes' checks below.
+            for integration, reason in unavailable.items():
+                assert reason is not None
+                report.add(_integration_label(integration), "unavailable", "failed", reason)
+            if unavailable and suite != ALL_RUNTIMES_SUITE:
+                raise AssertionError(next(iter(unavailable.values())))
+        else:
+            for integration, reason in unavailable.items():
+                assert reason is not None
+                report.add(_integration_label(integration), "unavailable", "skipped", reason)
 
         ready_runtimes = tuple(
             runtime
@@ -146,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
                 stage.check_agent_steering()
                 stage.check_agent_kill_and_thread_survival()
 
-            if _record_check(report, "codex", check_codex, "guards, MCP catalog, tasks, steering, and kill recovery"):
+            if _record_check(report, "codex", check_codex, "guards, MCP catalog, turns, steering, and stop recovery"):
                 passed_runtimes.append("codex")
         if availability.get("claude") is None and "claude" in availability:
             def check_claude() -> None:
@@ -156,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                 stage.check_agent_steering()
                 stage.check_agent_kill_and_thread_survival()
 
-            if _record_check(report, "claude", check_claude, "guards, MCP catalog, tasks, steering, and kill recovery"):
+            if _record_check(report, "claude", check_claude, "guards, MCP catalog, turns, steering, and stop recovery"):
                 passed_runtimes.append("claude_code")
         if availability.get("hermes") is None and "hermes" in availability:
             def check_hermes() -> None:
@@ -169,9 +183,35 @@ def main(argv: list[str] | None = None) -> int:
                 report,
                 "hermes",
                 check_hermes,
-                "credential boundary, real task, MCP catalog, session resume, steering denial, and kill recovery",
+                "credential boundary, real turn, MCP catalog, session resume, steering denial, and stop recovery",
             ):
                 passed_runtimes.append("hermes")
+
+        if passed_runtimes:
+            _record_check(
+                report,
+                "thread_admin_api",
+                stage.check_thread_admin_api_contract,
+                "flat events, pagination, validation, and stop behavior",
+            )
+            _record_check(
+                report,
+                "thread_session_switch",
+                lambda: stage.check_idle_session_switch_handoff(
+                    tuple(passed_runtimes)
+                ),
+                (
+                    "cross-provider switch with expanded activity handoff"
+                    if len(passed_runtimes) > 1
+                    else "same-provider model switch with expanded activity handoff"
+                ),
+            )
+            _record_check(
+                report,
+                "stable_apps",
+                lambda: stage.check_stable_app_basics(passed_runtimes[0]),
+                "Agent Chat messaging and App Builder generation through the cheapest configured model",
+            )
 
         if suite == "all":
             if "hermes" in passed_runtimes:
@@ -195,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
                     stage.check_all_runtimes_active()
                     stage.check_agent_parallelism()
                     stage.check_agent_thread_recall()
-                    stage.check_runtime_deactivation_stops_running_tasks()
+                    stage.check_runtime_deactivation_stops_running_turns()
                     stage.check_reboot_recovery()
 
                 _record_check(
@@ -291,26 +331,513 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
         github["write_repositories"] = ordered
         return policy
 
-    def task_body(
+    def message_body(
         self,
-        input_message: str,
-        thread_id: str,
+        message: str,
         *,
         runtime: str | None = None,
         model: str | None = None,
         effort: str | None = None,
     ) -> dict:
         selected_runtime = runtime or self.agent_runtime
-        return super().task_body(
-            input_message,
-            self.thread_prefix + thread_id,
+        return super().message_body(
+            message,
             runtime=selected_runtime,
             model=model or CHEAP_MODELS[selected_runtime],
             effort=effort or CHEAP_EFFORT,
         )
 
-    def follow_up_body(self, input_message: str, thread_id: str) -> dict:
-        return super().follow_up_body(input_message, self.thread_prefix + thread_id)
+    def check_thread_admin_api_contract(self) -> None:
+        """Pin thread-only API edge cases against the real stage host.
+
+        Runtime checks above already exercise live concurrency, synchronous
+        steering, stop/fence cleanup, and ordinary session resume. This adds
+        deterministic history, status, pagination, and rejection checks.
+        """
+        self._step("thread admin API: flat history, pagination, and edge cases")
+
+        first_page = self._api("GET", "/v1/threads?limit=1")
+        first_threads = first_page.get("threads")
+        if not isinstance(first_threads, list) or len(first_threads) != 1:
+            raise AssertionError(f"thread limit=1 returned an invalid page: {first_page}")
+        cursor = first_page.get("next_before")
+        if not isinstance(cursor, str) or not cursor:
+            raise AssertionError(f"thread keyset page omitted next_before: {first_page}")
+        second_page = self._api(
+            "GET", f"/v1/threads?limit=1&before={quote(cursor, safe='')}"
+        )
+        second_threads = second_page.get("threads")
+        if not isinstance(second_threads, list) or len(second_threads) != 1:
+            raise AssertionError(f"second thread keyset page is invalid: {second_page}")
+        if first_threads[0].get("thread_id") == second_threads[0].get("thread_id"):
+            raise AssertionError(f"thread keyset pages overlap: {first_page}, {second_page}")
+
+        status, body = self._api_status("GET", "/v1/threads?before=not-a-cursor")
+        if status != 400 or "valid thread list cursor" not in self._error_message(body):
+            raise AssertionError(f"invalid thread cursor returned {status}: {body}")
+
+        recent = self._api("GET", "/v1/threads?limit=100").get("threads") or []
+        candidates = [
+            thread
+            for thread in recent
+            if isinstance(thread, dict)
+            and str(thread.get("thread_id") or "").startswith(self.thread_prefix)
+            and thread.get("status") == "idle"
+        ]
+        if not candidates:
+            raise AssertionError(f"stage checks left no recent idle thread: {recent}")
+        thread = candidates[0]
+        thread_id = str(thread["thread_id"])
+        encoded_id = quote(thread_id, safe="")
+
+        detail = self._api("GET", f"/v1/threads/{encoded_id}")["thread"]
+        if detail != thread:
+            raise AssertionError(f"thread detail differs from list entry: {thread}, {detail}")
+
+        all_events = self._api(
+            "GET", f"/v1/threads/{encoded_id}/events?limit=100"
+        ).get("events") or []
+        if not all_events:
+            raise AssertionError(f"stage thread has no retained events: {thread}")
+        public_types = {
+            "thread.message",
+            "thread.activity",
+            "thread.error",
+            "thread.stopped",
+        }
+        unexpected = sorted(
+            {
+                str(event.get("event_type"))
+                for event in all_events
+                if event.get("event_type") not in public_types
+            }
+        )
+        if unexpected:
+            raise AssertionError(f"thread history exposed non-public lifecycle events: {unexpected}")
+
+        latest = self._api(
+            "GET", f"/v1/threads/{encoded_id}/events?limit=1"
+        ).get("events") or []
+        if len(latest) != 1 or latest[0]["seq"] != all_events[-1]["seq"]:
+            raise AssertionError(f"latest event page is inconsistent: {all_events}, {latest}")
+        if len(all_events) > 1:
+            older = self._api(
+                "GET",
+                f"/v1/threads/{encoded_id}/events?limit=1&before={latest[0]['seq']}",
+            ).get("events") or []
+            if len(older) != 1 or int(older[0]["seq"]) >= int(latest[0]["seq"]):
+                raise AssertionError(f"older event page is inconsistent: {latest}, {older}")
+        caught_up = self._api(
+            "GET",
+            f"/v1/threads/{encoded_id}/events?since={all_events[-1]['seq']}&limit=1",
+        )
+        if caught_up.get("events") != []:
+            raise AssertionError(f"caught-up since cursor returned events: {caught_up}")
+        status, body = self._api_status(
+            "GET",
+            f"/v1/threads/{encoded_id}/events?since=0&before={all_events[-1]['seq']}",
+        )
+        if status != 400 or "cannot be combined" not in self._error_message(body):
+            raise AssertionError(f"mixed event cursors returned {status}: {body}")
+
+        before_events = list(all_events)
+        status, body = self._api_status(
+            "POST",
+            f"/v1/threads/{encoded_id}/messages",
+            {"message": "must be rejected", "model": thread["model"]},
+        )
+        if status != 400 or "must be provided together" not in self._error_message(body):
+            raise AssertionError(f"partial session config returned {status}: {body}")
+        after_events = self._api(
+            "GET", f"/v1/threads/{encoded_id}/events?limit=100"
+        ).get("events") or []
+        if after_events != before_events:
+            raise AssertionError("rejected message mutated thread history")
+
+        status, body = self._api_status("POST", f"/v1/threads/{encoded_id}/stop")
+        if status != 409 or self._error_message(body) != "the thread has no running work":
+            raise AssertionError(f"idle stop returned {status}: {body}")
+        missing = quote(f"{self.thread_prefix}definitely-missing", safe="")
+        status, body = self._api_status("POST", f"/v1/threads/{missing}/stop")
+        if status != 404 or self._error_message(body) != "thread not found":
+            raise AssertionError(f"unknown stop returned {status}: {body}")
+
+        self._ok(
+            "thread API exposed only four public event types; status, pagination, "
+            "validation, and stop errors were consistent"
+        )
+
+    def check_idle_session_switch_handoff(
+        self,
+        available_runtimes: tuple[str, ...],
+    ) -> None:
+        if not available_runtimes:
+            raise AssertionError("session switch stage check requires an active runtime")
+        source_runtime = available_runtimes[0]
+        source_model = CHEAP_MODELS[source_runtime]
+        source_effort = CHEAP_EFFORT
+        target_runtime, target_model, target_effort = self._replacement_session_config(
+            source_runtime,
+            available_runtimes,
+        )
+        thread_name = "session-switch-handoff"
+        thread_id = self.api_thread_id(thread_name)
+        encoded_id = quote(thread_id, safe="")
+
+        started = self._api(
+            "POST",
+            f"/v1/threads/{encoded_id}/messages",
+            self.message_body(
+                (
+                    "Use the terminal exactly once to run `cat /proc/sys/kernel/random/uuid`. "
+                    "After the command finishes, reply exactly "
+                    "STAGE_SWITCH_SOURCE_READY and nothing else."
+                ),
+                runtime=source_runtime,
+                model=source_model,
+                effort=source_effort,
+            ),
+        )
+        if started.get("status") != "accepted":
+            raise AssertionError(f"source session was not accepted: {started}")
+        source_done = self._wait_for_turn(thread_name, timeout=240)
+        if source_done.get("status") != "completed":
+            raise AssertionError(
+                f"source session failed: {self._thread_failure_detail(thread_name)}"
+            )
+
+        source_events = self._thread_events(thread_name)
+        uuid_pattern = re.compile(
+            r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+            r"[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+            re.IGNORECASE,
+        )
+        activity_uuid = None
+        source_activity_seq = None
+        for event in source_events:
+            if event.get("event_type") != "thread.activity":
+                continue
+            activity = (event.get("payload") or {}).get("activity") or {}
+            output = activity.get("output")
+            match = uuid_pattern.search(output) if isinstance(output, str) else None
+            if match:
+                activity_uuid = match.group(0)
+                source_activity_seq = int(event["seq"])
+                break
+        if activity_uuid is None or source_activity_seq is None:
+            raise AssertionError(
+                f"source turn retained no UUID-bearing expanded activity: {source_events}"
+            )
+        agent_messages = [
+            str((event.get("payload") or {}).get("message") or "")
+            for event in source_events
+            if event.get("event_type") == "thread.message"
+            and (event.get("payload") or {}).get("source") == "agent"
+        ]
+        if any(activity_uuid in message for message in agent_messages):
+            raise AssertionError(
+                "source agent copied the UUID into a message, so activity-only handoff was not isolated"
+            )
+
+        baseline = max(int(event["seq"]) for event in source_events)
+        switched = self._api(
+            "POST",
+            f"/v1/threads/{encoded_id}/messages",
+            {
+                "message": (
+                    "Do not use tools. Repeat the UUID you see in the earlier activity."
+                ),
+                "agent_runtime": target_runtime,
+                "model": target_model,
+                "effort": target_effort,
+            },
+        )
+        switched_thread = switched.get("thread") or {}
+        if switched.get("status") != "accepted" or (
+            switched_thread.get("thread_id"),
+            switched_thread.get("agent_runtime"),
+            switched_thread.get("model"),
+            switched_thread.get("effort"),
+        ) != (thread_id, target_runtime, target_model, target_effort):
+            raise AssertionError(f"replacement session returned an invalid response: {switched}")
+
+        replacement_done = self._wait_for_turn(
+            thread_name,
+            since=baseline,
+            timeout=240,
+        )
+        if replacement_done.get("status") != "completed":
+            raise AssertionError(
+                f"replacement session failed: {self._thread_failure_detail(thread_name)}"
+            )
+        if activity_uuid.lower() not in str(
+            replacement_done.get("output_message") or ""
+        ).lower():
+            raise AssertionError(
+                "replacement provider did not recover the UUID from expanded activity: "
+                f"{replacement_done.get('output_message')!r}"
+            )
+
+        replacement_events = self._thread_events(thread_name, since=baseline)
+        changes = [
+            (event.get("payload") or {}).get("activity") or {}
+            for event in replacement_events
+            if event.get("event_type") == "thread.activity"
+            and str(((event.get("payload") or {}).get("activity") or {}).get("activity_id", ""))
+            .endswith(":session-change")
+        ]
+        if len(changes) != 1:
+            raise AssertionError(
+                f"replacement recorded {len(changes)} session-change activities: {replacement_events}"
+            )
+        change = changes[0]
+        expected_title = (
+            "Agent provider changed"
+            if source_runtime != target_runtime
+            else "Agent session changed"
+        )
+        if change.get("title") != expected_title or target_model not in str(
+            change.get("detail") or ""
+        ):
+            raise AssertionError(f"session-change activity is incomplete: {change}")
+
+        final_events = self._thread_events(thread_name)
+        if not any(int(event["seq"]) == source_activity_seq for event in final_events):
+            raise AssertionError("provider replacement lost the source activity history")
+
+    @staticmethod
+    def _replacement_session_config(
+        source_runtime: str,
+        available_runtimes: tuple[str, ...],
+    ) -> tuple[str, str, str]:
+        target_runtime = next(
+            (runtime for runtime in available_runtimes if runtime != source_runtime),
+            source_runtime,
+        )
+        if target_runtime != source_runtime:
+            return target_runtime, CHEAP_MODELS[target_runtime], CHEAP_EFFORT
+
+        options = public_session_options().get(source_runtime) or {}
+        for model, efforts in options.items():
+            if model != CHEAP_MODELS[source_runtime] and CHEAP_EFFORT in efforts:
+                return source_runtime, model, CHEAP_EFFORT
+        for model, efforts in options.items():
+            for effort in efforts:
+                candidate = (source_runtime, model, effort)
+                if candidate != (
+                    source_runtime,
+                    CHEAP_MODELS[source_runtime],
+                    CHEAP_EFFORT,
+                ):
+                    return candidate
+        raise AssertionError(
+            f"{source_runtime} has no alternate offered session configuration"
+        )
+
+    def check_stable_app_basics(self, runtime: str) -> None:
+        """Run one small real-inference flow through each stable app backend."""
+        model = CHEAP_MODELS[runtime]
+        self._step(
+            f"stable app basics with {runtime} ({model}, {CHEAP_EFFORT})"
+        )
+        public_types = {
+            "thread.message",
+            "thread.activity",
+            "thread.error",
+            "thread.stopped",
+        }
+
+        agent_base = "/v1/apps/agent_chat/api"
+        agent_result = self._api(
+            "POST",
+            f"{agent_base}/messages",
+            {
+                "input_message": (
+                    "Reply with exactly STAGE_AGENT_CHAT_OK. Do not use tools."
+                ),
+                "agent_runtime": runtime,
+                "model": model,
+                "effort": CHEAP_EFFORT,
+            },
+        )
+        agent_thread = agent_result.get("thread_id")
+        if (
+            agent_result.get("action") != "accepted"
+            or not isinstance(agent_thread, str)
+            or not agent_thread
+        ):
+            raise AssertionError(
+                f"Agent Chat did not accept its stage message: {agent_result}"
+            )
+        encoded_agent_thread = quote(agent_thread, safe="")
+        try:
+            agent_events = self._wait_for_app_thread_idle(
+                status_path=f"{agent_base}/threads",
+                events_path=f"{agent_base}/threads/{encoded_agent_thread}/events",
+                thread_id=agent_thread,
+                list_key="threads",
+                timeout=240,
+            )
+            agent_types = {event.get("event_type") for event in agent_events}
+            if not agent_types.issubset(public_types):
+                raise AssertionError(
+                    f"Agent Chat exposed non-public event types: {agent_events}"
+                )
+            agent_messages = [
+                str((event.get("payload") or {}).get("message") or "")
+                for event in agent_events
+                if event.get("event_type") == "thread.message"
+                and (event.get("payload") or {}).get("source") == "agent"
+            ]
+            if not any("STAGE_AGENT_CHAT_OK" in message for message in agent_messages):
+                raise AssertionError(
+                    f"Agent Chat did not retain the expected reply: {agent_events}"
+                )
+        finally:
+            self._api_status(
+                "POST", f"{agent_base}/threads/{encoded_agent_thread}/archive"
+            )
+
+        builder_base = "/v1/apps/personal_web_app_builder/api"
+        created = self._api("POST", f"{builder_base}/apps").get("app")
+        builder_thread = (
+            created.get("thread_id") if isinstance(created, dict) else None
+        )
+        if not isinstance(builder_thread, str) or not builder_thread:
+            raise AssertionError(f"App Builder did not create a workspace: {created}")
+        encoded_builder_thread = quote(builder_thread, safe="")
+        try:
+            sent = self._api(
+                "POST",
+                f"{builder_base}/apps/{encoded_builder_thread}/messages",
+                {
+                    "content": (
+                        "Create the smallest possible app whose visible heading is "
+                        "STAGE_APP_BUILDER_OK. Keep the UI and data minimal."
+                    ),
+                    "agent_runtime": runtime,
+                    "model": model,
+                    "effort": CHEAP_EFFORT,
+                },
+            )
+            if sent.get("status") != "accepted":
+                raise AssertionError(
+                    f"App Builder did not accept its stage message: {sent}"
+                )
+            builder_events = self._wait_for_app_thread_idle(
+                status_path=(
+                    f"{builder_base}/apps/{encoded_builder_thread}/conversation"
+                ),
+                events_path=(
+                    f"{builder_base}/apps/{encoded_builder_thread}/conversation/events"
+                ),
+                thread_id=builder_thread,
+                list_key=None,
+                timeout=300,
+            )
+            builder_types = {event.get("event_type") for event in builder_events}
+            if not builder_types.issubset(public_types):
+                raise AssertionError(
+                    f"App Builder exposed non-public event types: {builder_events}"
+                )
+            if any(
+                event.get("event_type") in {"thread.error", "thread.stopped"}
+                for event in builder_events
+            ):
+                raise AssertionError(
+                    f"App Builder agent did not complete successfully: {builder_events}"
+                )
+            state = self._api(
+                "GET", f"{builder_base}/apps/{encoded_builder_thread}/state"
+            ).get("app")
+            if not isinstance(state, dict) or int(state.get("revision") or 0) < 1:
+                raise AssertionError(
+                    f"App Builder agent did not revise app state: {state}"
+                )
+            generated = " ".join(
+                str(state.get(field) or "")
+                for field in ("html", "css", "javascript")
+            ) + json.dumps(state.get("data") or {}, sort_keys=True)
+            if "STAGE_APP_BUILDER_OK" not in generated:
+                raise AssertionError(
+                    f"App Builder output omitted the requested heading: {state}"
+                )
+        finally:
+            self._api_status(
+                "POST",
+                f"{builder_base}/apps/{encoded_builder_thread}/archive",
+            )
+
+        self._ok(
+            "Agent Chat retained a real reply and App Builder used its agent API "
+            "to generate and persist a minimal app"
+        )
+
+    def _wait_for_app_thread_idle(
+        self,
+        *,
+        status_path: str,
+        events_path: str,
+        thread_id: str,
+        list_key: str | None,
+        timeout: float,
+    ) -> list[dict]:
+        deadline = time.time() + timeout
+        while True:
+            status_response = self._api("GET", status_path)
+            if list_key is None:
+                status = status_response.get("status")
+            else:
+                rows = status_response.get(list_key)
+                if not isinstance(rows, list):
+                    raise AssertionError(
+                        f"app status list has the wrong shape: {status_response}"
+                    )
+                row = next(
+                    (
+                        item
+                        for item in rows
+                        if isinstance(item, dict)
+                        and item.get("thread_id") == thread_id
+                    ),
+                    None,
+                )
+                if row is None:
+                    raise AssertionError(
+                        f"app status list omitted thread {thread_id}: {rows}"
+                    )
+                status = row.get("status")
+            events = self._api("GET", events_path).get("events")
+            if not isinstance(events, list) or not all(
+                isinstance(event, dict) for event in events
+            ):
+                raise AssertionError(
+                    f"app event stream has the wrong shape: {events}"
+                )
+            terminal = next(
+                (
+                    event
+                    for event in events
+                    if event.get("event_type")
+                    in {"thread.error", "thread.stopped"}
+                ),
+                None,
+            )
+            if terminal is not None:
+                raise AssertionError(
+                    f"app thread {thread_id} terminated unsuccessfully: {terminal}"
+                )
+            if status == "idle":
+                return events
+            if status != "running":
+                raise AssertionError(
+                    f"app thread {thread_id} returned invalid status {status!r}"
+                )
+            if time.time() >= deadline:
+                raise AssertionError(
+                    f"app thread {thread_id} did not become idle within {timeout}s"
+                )
+            time.sleep(2)
 
     def close_tunnel(self) -> None:
         if self.tunnel_open and self.result:
@@ -354,25 +881,23 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
                 repo for repo in (github.get("write_repositories") or []) if isinstance(repo, dict)
             ]
         self._api("PUT", "/v1/network/policy", self.enforcement_policy())
+        # Stop any leftover running turn (there is no queue to drain); the
+        # thread stays fenced briefly while its process closes, so poll until
+        # nothing is live.
         deadline = time.time() + 90
         while time.time() < deadline:
-            active = self._active_tasks()
-            if not active:
+            running = sorted(self._running_thread_ids())
+            if not running:
                 break
-            for task in active:
-                task_id = task["task_id"]
-                status = task["status"]
-                if status == "running":
-                    code, _ = self._api_status("POST", f"/v1/tasks/{task_id}/kill")
-                elif status == "queued":
-                    code, _ = self._api_status("POST", f"/v1/tasks/{task_id}/cancel")
-                else:
-                    continue
+            for thread_id in running:
+                code, _ = self._api_status("POST", f"/v1/threads/{thread_id}/stop")
                 if code not in {200, 202, 409, 404}:
-                    raise AssertionError(f"baseline cleanup of {task_id} in {status} returned {code}")
+                    raise AssertionError(f"baseline stop of running thread {thread_id} returned {code}")
             time.sleep(3)
         else:
-            raise AssertionError(f"stage still has active tasks after cleanup: {self._active_tasks()}")
+            raise AssertionError(
+                f"stage still has running turns after cleanup: {sorted(self._running_thread_ids())}"
+            )
         for runtime in runtimes:
             self.require_runtime_active(runtime)
         if any(runtime in {"codex", "claude_code"} for runtime in runtimes):
@@ -382,12 +907,13 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
             if runtimes
             else "no provider runtime required for this suite"
         )
-        self._ok(f"policy reset, active tasks cleared, {active_note}")
+        self._ok(f"policy reset, running turns cleared, {active_note}")
 
     @staticmethod
     def suite_runtimes(suite: str) -> tuple[str, ...]:
         """Provider runtimes the selected suite exercises (and therefore needs
-        available). 'github' and tool suites need none; 'all' needs all three."""
+        available). 'github' and tool suites need none; 'all' and
+        'all_runtimes' need all three."""
         if suite == "codex":
             return ("codex",)
         if suite == "claude":

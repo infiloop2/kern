@@ -309,7 +309,7 @@ proxy-readable `bedrock_credentials` row, stored only after synchronous
 identity validation. The proxy checks
 enablement before decrypting and re-signing; disabling is a soft product state
 and does not copy or delete credential data. Later AWS failures pass back as
-ordinary task errors and do not mutate credential state.
+ordinary turn errors and do not mutate credential state.
 
 On the Bedrock hosts the proxy also meters usage out of the responses it
 relays. Hermes signs with a fixed routing key id, so an allowed invocation

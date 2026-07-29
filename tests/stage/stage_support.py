@@ -29,6 +29,21 @@ RUNTIME_LABELS = {
     "hermes": "Hermes",
 }
 
+# Display names for every check record_check runs, including the grouped
+# checks that are not credential-backed integrations. Bundled tools are
+# labelled from their manifest instead of being repeated here.
+CHECK_LABELS = {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "github": "GitHub",
+    "hermes": "Hermes",
+    "bedrock": "AWS Bedrock",
+    "runtime_interoperability": "Runtime interoperability",
+    "thread_admin_api": "Thread admin API",
+    "thread_session_switch": "Thread session switch",
+    "stable_apps": "Stable apps",
+}
+
 STAGE_BEDROCK_ENV = (
     "STAGE_BEDROCK_AWS_ACCESS_KEY_ID",
     "STAGE_BEDROCK_AWS_SECRET_ACCESS_KEY",
@@ -160,19 +175,15 @@ def bedrock_credential_from_env() -> tuple[tuple[str, str] | None, str | None]:
 
 
 def integration_label(integration: str) -> str:
-    if integration == "claude":
-        return "Claude Code"
-    if integration == "codex":
-        return "Codex"
-    if integration == "github":
-        return "GitHub"
-    if integration == "hermes":
-        return "Hermes"
-    if integration == "bedrock":
-        return "AWS Bedrock"
-    if integration == "runtime_interoperability":
-        return "Runtime interoperability"
-    return BUNDLED_TOOLS[integration].manifest.display_name
+    label = CHECK_LABELS.get(integration)
+    if label is not None:
+        return label
+    tool = BUNDLED_TOOLS.get(integration)
+    if tool is not None:
+        return tool.manifest.display_name
+    # An unlabelled check must still report itself: raising here would escape
+    # record_check's per-integration isolation and abort the whole stage run.
+    return integration.replace("_", " ").capitalize()
 
 
 def selected_integrations(suite: str) -> tuple[str, ...]:

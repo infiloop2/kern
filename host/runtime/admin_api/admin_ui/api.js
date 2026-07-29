@@ -5,6 +5,34 @@
 // it). app.js registers what happens on a 401 (show the login screen).
 
 const CSRF_HEADER = "X-Kern-Csrf";
+const SESSION_ACTIVITY_HEADER = "X-Kern-Session-Activity";
+const RECENT_OPERATOR_ACTIVITY_MS = 60 * 1000;
+
+// A page load is itself operator activity. Thereafter only real UI interaction
+// advances this timestamp; the five-second refresh loop never does. The server
+// remains authoritative for both idle and absolute expiry—this marker merely
+// tells it which already-authenticated requests may refresh the idle clock.
+let lastOperatorActivityAt = Date.now();
+
+export function markSessionActivity(event) {
+  // Programmatically dispatched DOM events are not operator activity. Calls
+  // without an event come only from the host's audited app-bridge path below.
+  if (event && !event.isTrusted) return;
+  lastOperatorActivityAt = Date.now();
+}
+
+for (const eventName of ["click", "keydown", "pointerdown", "touchstart", "wheel"]) {
+  window.addEventListener(eventName, markSessionActivity, { capture: true, passive: true });
+}
+
+function authenticatedHeaders(extraHeaders) {
+  const headers = { [CSRF_HEADER]: "1" };
+  if (Date.now() - lastOperatorActivityAt <= RECENT_OPERATOR_ACTIVITY_MS) {
+    headers[SESSION_ACTIVITY_HEADER] = "1";
+  }
+  for (const [name, value] of Object.entries(extraHeaders || {})) headers[name] = value;
+  return headers;
+}
 
 let unauthorizedHandler = () => {};
 
@@ -32,8 +60,7 @@ export async function logout() {
 }
 
 export async function api(method, path, body, extraHeaders) {
-  const headers = { [CSRF_HEADER]: "1" };
-  for (const [name, value] of Object.entries(extraHeaders || {})) headers[name] = value;
+  const headers = authenticatedHeaders(extraHeaders);
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(path, {
     method,
@@ -50,7 +77,7 @@ export async function api(method, path, body, extraHeaders) {
 export async function apiBlob(path) {
   const response = await fetch(path, {
     method: "GET",
-    headers: { [CSRF_HEADER]: "1" },
+    headers: authenticatedHeaders(),
     credentials: "same-origin",
   });
   if (response.status === 401) { unauthorizedHandler(); throw new Error("unauthorized"); }
@@ -68,7 +95,7 @@ export async function apiBlob(path) {
 export async function apiUpload(file) {
   const response = await fetch(`/v1/agent-files/upload?filename=${encodeURIComponent(file.name)}`, {
     method: "POST",
-    headers: { [CSRF_HEADER]: "1" },
+    headers: authenticatedHeaders(),
     body: file,
     credentials: "same-origin",
   });

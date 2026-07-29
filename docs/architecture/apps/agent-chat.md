@@ -2,9 +2,9 @@
 
 Agent Chat is an installed app (see [Apps](apps.md) for the platform
 contract) that gives the operator threaded conversations with the agent. It is
-the plainest possible app: each thread is a sequence of host tasks on one
+the plainest possible app: each thread is one host thread running turns on one
 agent runtime, and the app's job is organizing those threads, not changing how
-tasks run.
+turns run.
 
 The admin shell hardwires Agent Chat as the host's main interface: the home
 tab opens with a "Begin chat" navigator. In the sidebar, Agent Chat is an
@@ -16,69 +16,91 @@ ordinary entry in the Apps section based on its required
 The app owns presentation and thread bookkeeping in its `app_agent_chat`
 schema:
 
-- `threads`: the thread index: app thread id and archive state. Session
-  configuration (agent runtime, model, effort) is host-owned and no longer
-  stored here.
-- `thread_tasks`: which host tasks belong to which thread.
+- `threads`: the thread index: app thread id, display name, and archive
+  state. Session configuration (agent runtime, model, effort) is host-owned
+  and not stored here.
 
-Task contents and execution stay host-owned. The app backend reads them
-through the allowlisted app-backend socket routes and never copies transcripts
-into its own schema, so the host remains the single source of truth for what
-the agent actually did.
+That is the whole schema — there is no per-turn ledger (the old
+`thread_tasks` table is gone). Conversation contents and execution stay
+host-owned: the thread's event stream is the durable record, and the app
+backend reads it through the allowlisted app-backend socket routes without
+copying transcripts into its own schema, so the host remains the single
+source of truth for what the agent actually did.
 
 ## How It Works
 
-The UI lists unarchived threads newest-first with their tasks and statuses. A
+The UI lists unarchived threads newest-first with their live status. A
 top-level **Show archived** toggle swaps the sidebar to archived threads only;
-their retained history remains readable, but the composer and task controls
+their retained history remains readable, but the composer and stop control
 are unavailable until the operator unarchives the thread.
 The index is one bulk host call: `GET /v1/threads` over the app-backend
-socket returns summaries (runtime, model, effort, last-used time, task count,
-active task ids) for exactly this app's threads, which the backend joins
-against its own `archived` flags. It costs one round trip regardless of thread
-count, and the app stores no task data of its own. A thread the app recorded
-but whose task creation failed (a lost generated-name reservation) has no host
+socket returns summaries (runtime, model, effort, last-used time, and an
+`idle`/`running` status) for exactly this app's threads, which the backend
+joins
+against its own names and `archived` flags. It costs one round trip
+regardless of thread
+count, and the app stores no conversation data of its own. A thread the app
+recorded
+but whose first send failed (a lost generated-name reservation) has no host
 summary and stays invisible.
 
 Sending a message either creates a new thread (picking the runtime with the
-first message) or appends a task to an existing one:
+first message), starts the next turn on an idle thread, or steers the
+thread's running turn — the host decides, never the browser:
 
 - The composer accepts up to ten optional file attachments. Each file has its
   own immediate Remove control. The app asks the
   host-owned parent bridge to open the native file picker and retain the
   selection in browser memory. When the operator sends the message, the app
   asks the parent to upload each selection sequentially through
-  `POST /v1/agent-files/upload`, then creates the task after every upload
+  `POST /v1/agent-files/upload`, then sends the message after every upload
   succeeds and appends one
   `[User-uploaded file: user-files/<timestamp>_<name>]` line per file to
-  `input_message`.
+  the message text.
   The host's immutable agent instructions define that reference and the
   `user-files/` directory for every runtime. Clearing or abandoning an
   unsubmitted attachment creates no workspace file. Files over 25 MiB remain
   visible with a per-item error and cannot be sent. If an upload fails, files
   already uploaded keep their returned paths and a later Send retries only
-  unfinished files. If task creation fails after every upload, pressing Send
+  unfinished files. If the send fails after every upload, pressing Send
   again reuses every returned path. Durable files remain available without
   cleanup or reconciliation. There is no separate aggregate-byte limit; the
   ten-file and 25 MiB-per-file bounds limit one message to 250 MiB.
-- `POST /tasks` creates a host task via the app-backend socket
-  (`POST /v1/tasks`) with the thread's runtime and thread id, and records the
-  returned task id in `thread_tasks`. A request without `thread_id` starts a
+- `POST /messages` forwards the message to the host via the app-backend
+  socket (`POST /v1/threads/{thread_id}/messages`) and returns
+  `{"action": "accepted", "thread_id"}`. The composer is the same input
+  whether the thread is idle or already running; the provider receives the
+  message synchronously and the UI does not distinguish starting from
+  steering. While the request is in flight the composer shows `Sending…`.
+  Runtime, model, and effort selectors stay visible for an active thread.
+  They are disabled while the thread is running. Changing an idle thread's
+  selection shows a warning that the next send starts a fresh agent session,
+  may omit older context, and invalidates provider cache reads; the app sends
+  the complete selected triple with that message. The resulting host
+  `thread.activity` remains in the conversation as the visible session-change
+  boundary. Ordinary follow-ups omit all three configuration fields, so a
+  stale browser cannot accidentally switch an idle thread back to the
+  configuration it last observed. A recorded model or effort that has left
+  the current option catalog remains selected until the operator explicitly
+  chooses a replacement.
+  The backend retries every 500 ms for up to ten seconds when the host reports
+  its private execution is still STARTING or FINISHING, so startup and cleanup
+  races normally resolve without exposing process phases in the browser. A request without
+  `thread_id` starts a
   new thread: the backend generates the next successive name (`thread-1`,
   `thread-2`, ...), counting over every thread it has ever recorded, archived
   included, so a generated id never revives an archived thread. The name is
   reserved by inserting its `threads` row before the host call; the primary
   key makes concurrent generators take distinct names. A reservation whose
-  host call fails stays as an empty thread: the index hides threads without
-  tasks and the generator counts it, so its number is skipped rather than
-  reused. The operator never types a thread id.
-- `GET /tasks/<task_id>` proxies the host task read so the UI can poll status
-  and output. `POST /tasks/<task_id>/cancel|kill|steer` proxy the matching
-  host controls; every task id is first checked against `thread_tasks`, so the
-  app only ever touches its own tasks. Hermes has no mid-turn steering input,
-  so its running tasks omit the Steer control; the host also rejects a direct
-  Hermes steer request. The composer queues later input as a new task on the
-  same thread, which runs after the current task finishes.
+  host call fails stays as an empty thread: the index hides threads the host
+  has never seen and the generator counts it, so its number is skipped rather
+  than reused. The operator never types a thread id.
+- `POST /threads/<thread_id>/stop` proxies the host stop
+  (`POST /v1/threads/{thread_id}/stop`), which terminates the running process
+  and records `thread.stopped`; the composer shows `Stopping…` until the host
+  has durably accepted the stop and requested interruption. Hermes has no mid-run steering
+  input: the host rejects a message for a busy Hermes thread, so the UI waits
+  for the running work to finish before accepting the next message.
 - `GET /threads/<thread_id>/events` returns six events at a time, in
   chronological display order. On first view the UI preloads up to three
   pages (18 events) so the history is normally scrollable immediately without
@@ -88,19 +110,20 @@ first message) or appends a task to an existing one:
   Live updates continue forward from `since=<newest_seq>`. This makes a long
   thread useful after a small bounded set of requests instead of draining its
   complete history before first paint, while still making every retained
-  event reachable. The stream shows every
-  message of every loaded task, not just the prompt and final answer. Claude
+  event reachable. The stream shows every loaded message in chronological
+  order, not just the first prompt and final answer. Claude
   Code stream-json content blocks, Codex app-server ThreadItems, and Hermes
   tool-call hook events are normalized into provider-independent activity
   records for reasoning, plans, commands and output, file changes, tool calls,
   searches, sub-agents, images, waits, and context state. Started/completed
   snapshots fold into one expandable card. An activity with no completed
   snapshot is labeled **Started** without animation: the event proves it
-  began, but does not prove it is still running after a turn is killed.
-  Mid-task operator steering still renders inline. The UI polls once per
-  second while any task is active and every five seconds while idle.
+  began, but does not prove it is still running after the thread is stopped.
+  Messages sent while the agent is running render exactly like messages sent
+  while idle. The UI polls once per
+  second while the thread is running and every five seconds while idle.
 - Switching threads keeps each visited thread's loaded event window, cursors,
-  tasks, and reading position in browser memory. Returning to the thread
+  and reading position in browser memory. Returning to the thread
   restores that view immediately before live polling resumes. The cache lasts
   only for the current app-frame lifetime; reloading the page starts from the
   bounded initial history again.
@@ -115,8 +138,8 @@ first message) or appends a task to an existing one:
   with Copy controls. Markdown images become links instead of automatically
   loading agent-selected remote resources.
 - `POST /threads/<thread_id>/archive` moves a thread to the archived index
-  without touching host task state. Archived task and event reads remain
-  available, but message sends and task controls fail closed. The archived
+  without touching host thread state. Archived event reads remain
+  available, but message sends fail closed. The archived
   view exposes `POST /threads/<thread_id>/unarchive` to return it to the
   active index.
 
@@ -132,5 +155,5 @@ renderer always escapes raw HTML, creates only its own allowlisted elements,
 accepts only `http`, `https`, and `mailto` links, and opens links with
 `noopener noreferrer nofollow`. Everything else is the standard app-platform
 boundary: sandboxed opaque-origin UI frame, bridge-only backend access,
-peer-authenticated socket with the narrow task/thread allowlist, and an app
+peer-authenticated socket with the narrow thread-route allowlist, and an app
 role limited to the `app_agent_chat` schema.

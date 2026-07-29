@@ -63,7 +63,7 @@ redeploys.
 
 | Path | Access | Contents |
 | --- | --- | --- |
-| `/mnt/kern-admin/postgres/<major>/main/` | postgres user only | Postgres data directory: host config and operator endpoints, task/session state, app and tool state, audit logs, network policy/pins/events, and encrypted GitHub, Cloudflare, and tool credentials. |
+| `/mnt/kern-admin/postgres/<major>/main/` | postgres user only | Postgres data directory: host config and operator endpoints, thread/session state, app and tool state, audit logs, network policy/pins/events, and encrypted GitHub, Cloudflare, and tool credentials. |
 | `/mnt/kern-admin/admin-state/version.json` | admin only | Authoritative admin disk version, read by bootstrap before the database is up to enforce the deploy/upgrade/recover policy. |
 | `/mnt/kern-admin/proxy-state/network_proxy_ca.key` | proxy only | Proxy CA private key. |
 | `/mnt/kern-admin/proxy-state/network_proxy_ca.crt` | mode 644, but behind proxy-state traversal controls | Proxy CA certificate copied into the system trust store for agent/runtime use. |

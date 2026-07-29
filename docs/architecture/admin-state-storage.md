@@ -31,10 +31,8 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | --- | --- |
 | `config` | Agent name and admin password hash, a single format-checked row replaced during each provisioning bootstrap; upgrade/recover carry the stored password forward. |
 | `operator_connections` | Operator access endpoints, one row per mode (duplicates impossible by key); per-mode field requirements are row constraints, and the Cloudflare tunnel token is encrypted. |
-| `tasks` | Task queue and finished-task history, each holding one `thread_id` foreign key instead of copied session configuration (pruned to the newest 100,000 finished). `number` is the single identity; the public `task_<number>` id is just its label, formatted by the accessors. |
-| `task_steers` | Undelivered steer messages per running task, ordered; delivered steers are deleted (their content lives on as events). |
-| `agent_events` | Agent runtime and task events with typed payload columns (message/source, error, runtime, provider-neutral activity JSON); pruned to the newest 1,000,000. |
-| `thread_sessions` | One canonical row per user `thread_id`: runtime, provider session/thread id, model, effort, and recency. Rows referenced by retained tasks stay; unreferenced rows beyond the 100,000 most recently used per runtime are pruned. |
+| `agent_events` | Agent runtime and turn events with a direct `thread_id` column (`NULL` for runtime events, indexed with `seq` for per-thread paging) and typed payload columns (message/source, error, runtime, provider-neutral activity JSON); pruned to the newest 1,000,000. The event log is the single durable record of a thread's turn history — turns themselves are orchestrator memory, and the former `tasks`/`task_steers` tables were dropped by migration `0005_thread_only_turns.sql`, which also renamed `task.*` event types to `turn.*` and replaced the events' `task_id` with `thread_id`. A synchronous steer is appended only after provider acknowledgement; there is no steer mailbox or delivery-marker table. |
+| `thread_sessions` | One canonical row per user `thread_id`: current runtime, provider session/thread id, model, effort, recency, and durable idle/running state. An idle configuration change atomically replaces runtime/model/effort and clears the provider session before admitting the next run; the retained `agent_events` remain the thread's handoff source. Rows referenced by retained events stay; unreferenced rows beyond the 100,000 most recently used per runtime are pruned. |
 | `oauth_logins` | In-flight OAuth logins, fully typed per flow (device code + login handle for Codex, browser code for Claude). Hermes has no row here: its Bedrock credential connect is a single API call with nothing in flight. |
 | `provider_accounts` | Admin-side provider account records: `account_id` typed, remaining provider-owned metadata as a cached document. An anchored row (`account_id` plus its provider's approval marker in metadata) is trigger-guarded: `provider_accounts_anchor_guard` refuses writes that change or delete the approved identity. The singleton `bedrock` provider row carries only cached AWS display metadata, not an anchor. |
 | `bedrock_credentials` | Hermes's singleton Bedrock connection: the synchronously validated IAM `access_key_id`, secret access key as `secretbox` ciphertext, and selected region. The admin service writes all three atomically; the trusted proxy reads this same row only for enabled Bedrock requests and re-signs requests carrying Hermes's fixed dummy access-key id. |
@@ -51,8 +49,9 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `tool_credentials` | One OAuth credential per tool, split into typed connected-account columns, encrypted provider token material, and tool-owned non-secret metadata. |
 | `tool_approvals` | Host-owned approval records. `number` is the identity behind the public `approval_<number>.<token>` id (the token is an unguessable poll capability); conditional transitions make each approval single-use, and terminal result text is returned to both operator and agent (decided history is pruned to the newest 10,000). |
 | `tool_events` | Tool call, approval, connection, enablement, and config audit events. Accepted calls store their exact bounded arguments; lifecycle events store no arguments. Pruned to the newest 1,000,000. |
+| `host_errors` | Unexpected host-service exceptions and abnormal systemd exits copied from structured journald records. Brief repeats coalesce by service and fingerprint; retained to the newest 10,000 rows. List reads omit traceback/context until detail expansion. |
 | `app_schema_migrations` | Host-owned record of applied per-app migration versions. App SQL runs under the app role, which cannot write this table. |
-| `counters` | `next_task_number` (event seqs are a database serial). |
+| `counters` | Monotonic counters as plain rows. Currently empty — the last counter, `next_task_number`, left with the task tables (event seqs are a database serial) — the table remains for future counters. |
 | `secret_keys` | The at-rest encryption key for stored secrets (see below). The proxy and tools roles can read it, but their table grants expose only their own ciphertext-bearing rows. |
 | `schema_migrations` | Applied migration versions (owned by the migration runner). |
 
@@ -80,7 +79,7 @@ data files with new binaries.
 
 `host/runtime/core/state.py` exposes per-operation accessors that run real queries
 against normalized tables; no request materializes the complete state. Hot
-paths are indexed for task status/thread/runtime lookup, per-thread history,
+paths are indexed for thread/runtime lookup, per-thread event history,
 event paging, and pruning. Reads use MVCC transactions and fetch only the rows
 they need. Admin-process check-then-act writes use `state.mutation()`, pairing
 one database transaction with a process-local mutation lock. The proxy and
@@ -98,12 +97,13 @@ operation fails when its own slots or the database are unavailable. Nested
 transactions on one thread take separate connections so a read inside a
 mutation sees the last committed state.
 
-Growth stays bounded by deliberately high caps (100k finished tasks, 1M rows
-per audit log — agent, network, and tool events each — 100k session mappings
-per runtime, and 10k decided tool approvals), enforced by O(1)-planning range
-deletes (seq is a serial, so newest-N retention is a primary-key range below
-`MAX(seq) - N`): the audit logs prune on their own append cadence, the rest on
-the hourly maintenance pass. The admin volume is sized for those caps;
+Growth stays bounded by deliberately high caps (1M rows per ordinary audit
+log — agent, network, and tool events each — 10k host-error rows, 100k session
+mappings per runtime, and 10k decided tool approvals). Ordinary audit logs use
+O(1)-planning primary-key range deletes below `MAX(seq) - N`; host errors find
+the oldest boundary among the newest N rows because a coalesced row rotates
+its sequence without adding a row. Logs prune on their own append cadence, the
+rest on the hourly maintenance pass. The admin volume is sized for those caps;
 time-based auto-cleanup and volume monitoring can replace them later without
 touching the storage API.
 
@@ -147,10 +147,10 @@ Migrations are plain SQL files in `host/migrations/`, named
 
 ```sql
 -- migrate:up
-ALTER TABLE tasks ADD COLUMN priority BIGINT;
+ALTER TABLE thread_sessions ADD COLUMN priority BIGINT;
 
 -- migrate:down
-ALTER TABLE tasks DROP COLUMN priority;
+ALTER TABLE thread_sessions DROP COLUMN priority;
 ```
 
 `host/runtime/deploy/migrate.py` is the runner

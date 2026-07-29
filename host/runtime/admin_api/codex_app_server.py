@@ -4,7 +4,7 @@ App-servers are spawned through the root-owned ``run-codex-app-server`` sudo
 helper, which drops to the ``kern-agent`` user and points all traffic at
 the network policy proxy. Codex persists its login and threads under the agent
 home, so separate processes share state: status checks and logins use
-short-lived servers, and each task turn runs on a fresh server that resumes
+short-lived servers, and each turn runs on a fresh server that resumes
 its provider thread by id.
 
 A device-code login only completes while the app-server that started it keeps
@@ -42,7 +42,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Any, Callable
+from typing import IO, Any, Callable
 
 from host.runtime.admin_api import agent_activity, thread_scope
 from host.runtime.core.state import read_proxy_openai_account_id
@@ -59,6 +59,8 @@ LIVE_VALIDATION_RETRY_SECONDS = 240
 COMMAND_OUTPUT_EMIT_SECONDS = 0.75
 COMMAND_OUTPUT_EMIT_BYTES = 24 * 1024
 COMMAND_OUTPUT_MAX_EVENTS = 80
+CODEX_STEER_TIMEOUT_SECONDS = 30
+PROCESS_EXIT_TIMEOUT_SECONDS = 3
 
 
 @dataclass
@@ -101,18 +103,30 @@ class CodexLogin:
 
 
 class CodexAppServer:
-    """Not thread-safe: a single driver thread owns start()/call()/read_message()
-    (``_next_id`` and ``_pending`` are unsynchronized). The one sanctioned
-    cross-thread call is close() from the kill-task path; the driver then surfaces
-    the dead process as an error on its next call."""
+    """One app-server transport.
 
-    def __init__(self, command: list[str] | None = None, thread_id: str | None = None) -> None:
+    Calls and notification reads are serialized because a live turn's driver
+    reads notifications while the admin request thread may synchronously send
+    ``turn/steer``. ``interrupt()`` is the prompt, non-blocking stop request;
+    the owning execution thread later calls ``close()`` for authoritative
+    process/scope cleanup.
+    """
+
+    def __init__(
+        self,
+        command: list[str] | None = None,
+        thread_id: str | None = None,
+        on_ready: Callable[[], bool] | None = None,
+        on_session_id: Callable[[str], None] | None = None,
+    ) -> None:
         self._command = command or DEFAULT_COMMAND
         # Kept for the kill path: close() stops this thread's systemd scope by
         # name. The launcher folds the id into _command below as the run flag.
         self._thread_id = thread_id
-        # The orchestrator sets this only for an app-created task. It is kept
-        # separate from the task's user input and applied when a provider
+        self._on_ready = on_ready
+        self._on_session_id = on_session_id
+        # The orchestrator sets this only for an app-created turn. It is kept
+        # separate from the turn's user input and applied when a provider
         # thread is created as subordinate developer instructions.
         self.app_instructions: str | None = None
         # run_turn sets this as soon as the Codex threadId for this turn is
@@ -121,18 +135,23 @@ class CodexAppServer:
         # exception, discarding its locals) still leaves the orchestrator
         # able to read it and persist the thread mapping.
         self.last_known_session_id: str | None = None
-        # Task turns run inside a systemd scope named after the host thread:
+        # Turns run inside a systemd scope named after the host thread:
         # the helper consumes this pair and turns it into systemd-run --unit,
         # which lets the agent-app service derive an app from the trusted
-        # thread prefix (see agent_app_api). Non-task servers (status probes,
+        # thread prefix (see agent_app_api). Non-turn servers (status probes,
         # logins) pass no thread id and keep systemd's generated scope name.
         if thread_id is not None:
             self._command = [*self._command, "--thread-scope", thread_id]
         self._next_id = 1
         self._proc: subprocess.Popen[str] | None = None
+        self._lifecycle_lock = threading.Lock()
+        self._closed = False
         self._messages: queue.Queue[dict[str, Any]] = queue.Queue()
         self._pending: deque[dict[str, Any]] = deque()
         self._stderr_tail: deque[str] = deque(maxlen=20)
+        self._io_lock = threading.RLock()
+        self._active_thread_id: str | None = None
+        self._active_turn_id: str | None = None
 
     def __enter__(self) -> "CodexAppServer":
         self.start()
@@ -142,18 +161,22 @@ class CodexAppServer:
         self.close()
 
     def start(self, init_timeout: float = 60.0) -> None:
-        try:
-            self._proc = subprocess.Popen(
-                self._command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except OSError as exc:
-            raise CodexAppServerError(f"failed to start Codex app-server command: {exc}") from exc
-        threading.Thread(target=self._read_stdout, daemon=True).start()
-        threading.Thread(target=self._read_stderr, daemon=True).start()
+        with self._lifecycle_lock:
+            if self._closed:
+                raise CodexAppServerError("Codex app-server was interrupted before startup")
+            try:
+                self._proc = subprocess.Popen(
+                    self._command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except OSError as exc:
+                raise CodexAppServerError(f"failed to start Codex app-server command: {exc}") from exc
+        assert self._proc.stdout is not None and self._proc.stderr is not None
+        threading.Thread(target=self._read_stdout, args=(self._proc.stdout,), daemon=True).start()
+        threading.Thread(target=self._read_stderr, args=(self._proc.stderr,), daemon=True).start()
         self.call("initialize", _client_info(), timeout=init_timeout)
         self.notify("initialized")
 
@@ -161,114 +184,179 @@ class CodexAppServer:
         return self._proc is not None and self._proc.poll() is None
 
     def close(self) -> None:
-        proc = self._proc
-        if proc is not None:
-            # Closing stdin signals EOF, the app-server's normal shutdown path.
-            # This is the reliable lever: the process is spawned through sudo and
-            # may run as root/agent, so an unprivileged signal can fail with
-            # EPERM — the kill below is a best-effort fallback only.
-            if proc.stdin is not None:
+        with self._lifecycle_lock:
+            self._closed = True
+            proc = self._proc
+        try:
+            if proc is not None:
+                # Closing stdin signals EOF, the app-server's normal shutdown path.
+                # This is the reliable lever: the process is spawned through sudo and
+                # may run as root/agent, so an unprivileged signal can fail with
+                # EPERM — the kill below is a best-effort fallback only.
+                if proc.stdin is not None:
+                    try:
+                        proc.stdin.close()
+                    except OSError:
+                        pass
+                try:
+                    proc.wait(timeout=PROCESS_EXIT_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    # Best-effort signal only: the production launcher runs as root,
+                    # so this unprivileged kill fails with EPERM and the root scope
+                    # teardown below is the real kill; a same-user command (tests)
+                    # just dies here. A signal failure must never escape close() —
+                    # the orchestrator keeps a thread fenced when close() raises.
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    # The privileged scope teardown below owns the bounded,
+                    # authoritative reap for the production root launcher.
+                # stdout and stderr are deliberately not closed here: each reader
+                # thread owns its pipe and releases it at EOF. A buffered stream's
+                # close() blocks on the same lock the reader holds across its
+                # blocking read, so closing them from this thread would hang for
+                # as long as a process that outlived stdin EOF stays quiet on that
+                # pipe — which is exactly when this teardown matters.
+        finally:
+            # Last resort after the app-server's clean stdin-EOF shutdown above: the
+            # child reaping lives in the harness, but freeing the thread is the
+            # host's invariant, so guarantee the scope cgroup is gone even if a child
+            # outlived it. A clean shutdown already emptied it, so this is then a
+            # no-op — the server is never killed abruptly ahead of its own shutdown.
+            # It runs from a finally because it is the only kill that reaches a
+            # process this unprivileged user cannot signal, and the orchestrator's
+            # thread fence is only lifted once close() has run it.
+            thread_scope.stop_thread_scope(self._thread_id, self._command, DEFAULT_COMMAND)
+
+    def interrupt(self) -> None:
+        """Interrupt a turn without waiting for process/scope teardown."""
+        with self._lifecycle_lock:
+            self._closed = True
+            proc = self._proc
+            if proc is not None and proc.stdin is not None:
                 try:
                     proc.stdin.close()
                 except OSError:
                     pass
+        if proc is not None and proc.poll() is None:
             try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                # Best-effort signal only: the production launcher runs as root,
-                # so this unprivileged kill fails with EPERM and the root scope
-                # teardown below is the real kill; a same-user command (tests)
-                # just dies here. A signal failure must never escape close() —
-                # the orchestrator keeps a thread fenced when close() raises.
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
-            if proc.stdout is not None:
-                proc.stdout.close()
-            if proc.stderr is not None:
-                proc.stderr.close()
-        # Last resort after the app-server's clean stdin-EOF shutdown above: the
-        # child reaping lives in the harness, but freeing the thread is the
-        # host's invariant, so guarantee the scope cgroup is gone even if a child
-        # outlived it. A clean shutdown already emptied it, so this is then a
-        # no-op — the server is never killed abruptly ahead of its own shutdown.
-        thread_scope.stop_thread_scope(self._thread_id, self._command, DEFAULT_COMMAND)
+                proc.kill()
+            except OSError:
+                pass
+        thread_scope.interrupt_thread_scope(self._thread_id, self._command, DEFAULT_COMMAND)
 
-    def _read_stdout(self) -> None:
-        proc = self._proc
-        assert proc is not None and proc.stdout is not None
-        for line in proc.stdout:
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(message, dict):
-                self._messages.put(message)
+    def _read_stdout(self, stream: IO[str]) -> None:
+        # The reader owns its pipe: close() must not close it from another
+        # thread (that blocks on the buffer lock this loop holds across every
+        # read), so the stream is released here once the loop reaches EOF.
+        with stream:
+            for line in stream:
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(message, dict):
+                    self._messages.put(message)
 
-    def _read_stderr(self) -> None:
+    def _read_stderr(self, stream: IO[str]) -> None:
         # Drain stderr (so the child never blocks on a full pipe) and keep the
         # tail for error reporting.
-        proc = self._proc
-        assert proc is not None and proc.stderr is not None
-        for line in proc.stderr:
-            stripped = line.strip()
-            if stripped:
-                self._stderr_tail.append(stripped)
+        with stream:
+            for line in stream:
+                stripped = line.strip()
+                if stripped:
+                    self._stderr_tail.append(stripped)
 
     def stderr_tail(self) -> str:
         return "\n".join(self._stderr_tail)
 
     def notify(self, method: str) -> None:
-        proc = self._require_proc()
-        assert proc.stdin is not None
-        proc.stdin.write(json.dumps({"method": method}) + "\n")
-        proc.stdin.flush()
+        with self._io_lock:
+            proc = self._require_proc()
+            assert proc.stdin is not None
+            proc.stdin.write(json.dumps({"method": method}) + "\n")
+            proc.stdin.flush()
 
     def call(self, method: str, params: dict[str, Any], *, timeout: float = 60.0) -> Any:
-        proc = self._require_proc()
-        request_id = self._next_id
-        self._next_id += 1
-        assert proc.stdin is not None
-        proc.stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
-        proc.stdin.flush()
-        # Notifications that arrive before our response are kept for read_message.
-        while True:
-            message = self._next_message(timeout)
-            if message.get("id") != request_id:
-                self._pending.append(message)
-                continue
-            if "error" in message:
-                raise CodexAppServerError(message["error"].get("message", "Codex app-server request failed"))
-            return message.get("result")
+        with self._io_lock:
+            proc = self._require_proc()
+            request_id = self._next_id
+            self._next_id += 1
+            assert proc.stdin is not None
+            proc.stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
+            proc.stdin.flush()
+            # Notifications that arrive before our response are kept for
+            # read_message(). The I/O lock gives exactly one consumer
+            # ownership of both queues while it correlates this response.
+            while True:
+                message = self._next_message(timeout)
+                if message.get("id") != request_id:
+                    self._pending.append(message)
+                    continue
+                if "error" in message:
+                    raise CodexAppServerError(
+                        message["error"].get("message", "Codex app-server request failed")
+                    )
+                return message.get("result")
 
     def read_message(self, *, timeout: float = 60.0) -> dict[str, Any]:
-        if self._pending:
-            return self._pending.popleft()
-        return self._next_message(timeout)
+        with self._io_lock:
+            if self._pending:
+                return self._pending.popleft()
+            return self._next_message(timeout)
+
+    def set_active_turn(self, thread_id: str, turn_id: str) -> None:
+        with self._io_lock:
+            self._active_thread_id = thread_id
+            self._active_turn_id = turn_id
+
+    def clear_active_turn(self) -> None:
+        with self._io_lock:
+            self._active_thread_id = None
+            self._active_turn_id = None
+
+    def steer(self, message: str) -> None:
+        """Synchronously hand one message to the active Codex turn.
+
+        A successful return is Codex's JSON-RPC acknowledgement. The caller
+        deliberately records history only after this method returns.
+        """
+        with self._io_lock:
+            if self._active_thread_id is None or self._active_turn_id is None:
+                raise CodexAppServerError("Codex turn is not ready for steering")
+            try:
+                self.call(
+                    "turn/steer",
+                    {
+                        "threadId": self._active_thread_id,
+                        "expectedTurnId": self._active_turn_id,
+                        "input": [{"type": "text", "text": message}],
+                    },
+                    timeout=CODEX_STEER_TIMEOUT_SECONDS,
+                )
+            except OSError as exc:
+                raise CodexAppServerError(f"Codex rejected the message: {exc}") from exc
 
     def collect_completed_logins(self) -> set[str]:
         """Consume successful account/login/completed notifications, returning the
         login ids that completed. The notification carries no account id, so the
         trusted id is read separately (see read_completed_device_login_account_id)."""
-        completed: set[str] = set()
-        pending: deque[dict[str, Any]] = deque()
-        while self._pending:
-            message = self._pending.popleft()
-            if message.get("method") == "account/login/completed":
-                params = message.get("params")
-                if isinstance(params, dict) and params.get("success") is True:
-                    login_id = params.get("loginId")
-                    if isinstance(login_id, str) and login_id:
-                        completed.add(login_id)
-                continue
-            pending.append(message)
-        self._pending = pending
-        return completed
+        with self._io_lock:
+            completed: set[str] = set()
+            pending: deque[dict[str, Any]] = deque()
+            while self._pending:
+                message = self._pending.popleft()
+                if message.get("method") == "account/login/completed":
+                    params = message.get("params")
+                    if isinstance(params, dict) and params.get("success") is True:
+                        login_id = params.get("loginId")
+                        if isinstance(login_id, str) and login_id:
+                            completed.add(login_id)
+                    continue
+                pending.append(message)
+            self._pending = pending
+            return completed
 
     def _next_message(self, timeout: float) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
@@ -658,16 +746,13 @@ def run_turn(
     thread_id: str | None,
     model: str,
     effort: str,
-    steer_messages: Callable[[], list[str]],
     on_message: Callable[[str | dict[str, Any]], None],
-    steer_delivered: Callable[[str], None],
 ) -> tuple[str, str]:
-    """Run one task turn to completion. ``steer_messages`` returns the
-    undelivered steers in order; each successfully delivered steer is passed
-    to ``steer_delivered`` so the caller drops it from its queue. A steer that
-    fails transiently stays in the queue and is retried on the next loop pass.
-    Emits each completed agent message via on_message and returns
-    (thread_id, final agent message)."""
+    """Run one turn to completion, emitting completed agent messages.
+
+    Mid-turn input is sent synchronously through ``server.steer()`` by the
+    request that submitted it; this driver owns only provider notifications.
+    """
     if thread_id:
         try:
             thread = server.call(
@@ -688,7 +773,6 @@ def run_turn(
     else:
         thread = _start_thread(server, model)
     thread_id = str(thread["id"])
-    server.last_known_session_id = thread_id
     turn = server.call(
         "turn/start",
         {
@@ -699,7 +783,20 @@ def run_turn(
         },
         timeout=30,
     )["turn"]
+    # Only now, once the thread has accepted this turn's input, is the id worth
+    # remembering. A resume that fell back to _start_thread above holds a brand
+    # new empty thread, and the caller persists this attribute when a turn dies
+    # — publishing it any earlier would let a turn/start failure (a rate limit,
+    # an auth error) overwrite the thread's real history with an empty
+    # conversation. A turn that never started has nothing worth resuming, so
+    # leaving the previous mapping untouched is always the better trade.
+    server.last_known_session_id = thread_id
     turn_id = turn["id"]
+    server.set_active_turn(thread_id, turn_id)
+    if server._on_session_id is not None:
+        server._on_session_id(thread_id)
+    if server._on_ready is not None and not server._on_ready():
+        raise CodexAppServerError("Codex execution stopped during startup")
     current_parts: list[str] = []
     command_output_parts: dict[str, list[str]] = {}
     command_output_last_emit: dict[str, float] = {}
@@ -737,29 +834,11 @@ def run_turn(
         command_output_last_emit[item_id] = now
 
     while True:
-        for steer in steer_messages():
-            try:
-                server.call(
-                    "turn/steer",
-                    {"threadId": thread_id, "expectedTurnId": turn_id, "input": [{"type": "text", "text": steer}]},
-                    timeout=30,
-                )
-            except CodexAppServerError as exc:
-                if "no active turn" in str(exc).lower():
-                    # The turn is not steerable yet (turn/start returns before
-                    # the turn is active server-side) or already over. The
-                    # steer stays undelivered, so steer_messages() returns it
-                    # again on the next loop pass (~1s); if the turn is
-                    # actually over, turn/completed ends the loop and the
-                    # undelivered steer is dropped — the documented behavior
-                    # for a steer that races completion.
-                    break
-                raise
-            steer_delivered(steer)
         try:
-            # Short timeout so new steer messages are picked up promptly. There
-            # is no overall turn deadline; a stuck turn is abandoned through
-            # POST /v1/tasks/{task_id}/kill.
+            # There is no overall turn deadline; a stuck turn is abandoned
+            # through POST /v1/threads/{thread_id}/stop.
+            # Keep the ownership slice short so a synchronous steer request
+            # can acquire the transport promptly.
             message = server.read_message(timeout=1.0)
         except CodexTimeout:
             continue
@@ -839,13 +918,20 @@ def run_turn(
             if not isinstance(turn, dict):
                 continue
             if turn.get("status") == "completed":
-                # Fall back to any deltas not yet flushed by an item/completed,
-                # so a final message streamed as bare deltas is not lost.
-                final = last_message or "".join(current_parts)
-                return thread_id, final or "Task completed."
+                # A few Codex completion paths end after delta notifications
+                # without a matching item/completed. Flush that final message
+                # through the same callback as every ordinary agent message;
+                # the return value alone is not part of durable chat history.
+                pending_message = "".join(current_parts)
+                if pending_message:
+                    last_message = pending_message
+                    on_message(pending_message)
+                server.clear_active_turn()
+                return thread_id, last_message or "Task completed."
             error = turn.get("error") or {}
             if not isinstance(error, dict):
                 error = {}
+            server.clear_active_turn()
             raise CodexAppServerError(error.get("message", "Codex turn failed"))
 
 

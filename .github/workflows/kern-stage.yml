@@ -9,6 +9,7 @@ on:
         default: all
         options:
           - all
+          - all_runtimes
           - brave_search
           - gmail
           - google_calendar

@@ -23,17 +23,26 @@ HostApi = Callable[[str, str, dict[str, list[str]], Any], dict[str, Any]]
 AGENT_PROMPT = "Refresh the dashboard analysis from its current structured data."
 LOAD_ONLY_PROMPT = "This load-only request must never start an agent task."
 APP_AGENT_INPUT = f"{builder_backend.REQUEST_PREFIXES['app']}\n{AGENT_PROMPT}"
-MOCK_TASK_SECONDS = 1.0
+MOCK_TURN_SECONDS = 1.0
+MOCK_FIRST_TURN_SECONDS = 3.0
 CONVERSATION_EVENTS_PAGE = builder_backend.CONVERSATION_EVENT_PAGE_LIMIT
 INTERIM_AGENT_MESSAGE = "Drafting the app structure and checking its saved data."
 LONG_MEDIA_CONDITION = " and ".join(["(min-width: 0px)"] * 40)
 MOCK_LOCK = threading.RLock()
-TASK_DEADLINES: dict[str, float] = {}
+# One in-flight turn per workspace thread, completed when its deadline passes.
+TURN_DEADLINES: dict[str, float] = {}
 DEFAULT_SESSION = {
     "agent_runtime": "codex",
     "model": "gpt-5.6-terra",
     "effort": "high",
 }
+RUNTIME_LABELS = {
+    "codex": "Codex",
+    "claude_code": "Claude Code",
+    "hermes": "Hermes",
+}
+
+
 def _app_markup(count: int, title: str = "Weekly focus") -> str:
     return f"""
       <div class="sanitizer-probe containment-probe">
@@ -143,15 +152,12 @@ def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
 
 
 WORKSPACES: dict[str, dict[str, Any]] = {}
-NEXT_TASK_SEQUENCE = 1
 
 
 def reset_mock_state() -> None:
-    global NEXT_TASK_SEQUENCE
     with MOCK_LOCK:
         WORKSPACES.clear()
-        NEXT_TASK_SEQUENCE = 1
-        TASK_DEADLINES.clear()
+        TURN_DEADLINES.clear()
 
 
 reset_mock_state()
@@ -180,7 +186,7 @@ def _route_app_api(
     if method == "GET" and relative == "session-options":
         return {"session_options": public_session_options()}
     with MOCK_LOCK:
-        _progress_tasks()
+        _progress_turns()
         if method == "GET" and relative == "apps":
             return _list_apps(query or {})
         if method == "POST" and relative == "apps":
@@ -196,17 +202,9 @@ def _route_app_api(
         if method == "GET" and resource == "state":
             return {"app": copy.deepcopy(workspace["app"])}
         if method == "GET" and resource == "conversation":
-            tasks = _conversation_tasks(workspace)
             return {
-                "tasks": tasks,
-                "session": (
-                    {
-                        "agent_runtime": tasks[0]["agent_runtime"],
-                        "model": tasks[0]["model"],
-                        "effort": tasks[0]["effort"],
-                    }
-                    if tasks else None
-                ),
+                "session": copy.deepcopy(workspace["session"]),
+                "status": _workspace_status(workspace),
             }
         if method == "GET" and resource == "conversation/events":
             return _conversation_events(workspace, query or {})
@@ -214,9 +212,8 @@ def _route_app_api(
             return {"app": _rename_app(workspace, body)}
         if method == "POST" and resource in {"archive", "unarchive"}:
             return {"app": _set_archived(workspace, resource == "archive")}
-        task_match = re.fullmatch(r"tasks/([^/]+)/(cancel|kill)", resource)
-        if method == "POST" and task_match:
-            return _stop_task(workspace, task_match.group(1), task_match.group(2))
+        if method == "POST" and resource == "stop":
+            return _stop_turn(workspace)
         if workspace["archived"]:
             raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "app not found")
         if method == "POST" and resource == "runtime/actions":
@@ -253,18 +250,11 @@ def _list_apps(query: dict[str, list[str]]) -> dict[str, Any]:
     return {"apps": apps}
 
 
+def _workspace_status(workspace: dict[str, Any]) -> str:
+    return "running" if workspace["turn"] is not None else "idle"
+
+
 def _app_summary(workspace: dict[str, Any]) -> dict[str, Any]:
-    active = [
-        {"task_id": task["task_id"], "status": task["status"]}
-        for task in workspace["tasks"]
-        if task["status"] in {"queued", "running"}
-    ]
-    last_used_at = max(
-        [
-            workspace["app"]["updated_at"],
-            *[str(task["updated_at"]) for task in workspace["tasks"]],
-        ]
-    )
     return {
         "thread_id": workspace["thread_id"],
         "name": workspace["name"],
@@ -272,9 +262,9 @@ def _app_summary(workspace: dict[str, Any]) -> dict[str, Any]:
         "revision": workspace["app"]["revision"],
         "created_at": workspace["created_at"],
         "updated_at": workspace["app"]["updated_at"],
-        "last_used_at": last_used_at,
+        "last_used_at": max(workspace["app"]["updated_at"], workspace["last_used_at"]),
         "session": copy.deepcopy(workspace["session"]),
-        "active_tasks": active,
+        "status": _workspace_status(workspace),
     }
 
 
@@ -294,8 +284,9 @@ def _create_app() -> dict[str, Any]:
         "name": thread_id,
         "archived": False,
         "created_at": now,
+        "last_used_at": now,
         "app": app,
-        "tasks": [],
+        "turn": None,
         "events": [],
         "session": None,
     }
@@ -323,21 +314,6 @@ def _set_archived(
 ) -> dict[str, Any]:
     workspace["archived"] = archived
     return _app_summary(workspace)
-
-
-def _conversation_tasks(workspace: dict[str, Any]) -> list[dict[str, Any]]:
-    tasks = sorted(
-        workspace["tasks"],
-        key=lambda task: (task["updated_at"], task["task_id"]),
-        reverse=True,
-    )
-    tasks = copy.deepcopy(tasks[: builder_backend.CONVERSATION_TASK_LIMIT])
-    for task in tasks:
-        for field in ("input_message", "output_message", "error_message"):
-            value = task.get(field)
-            if isinstance(value, str):
-                task[field] = _clip_message(value)
-    return tasks
 
 
 def _conversation_events(
@@ -435,7 +411,6 @@ def _create_message(
     *,
     requested_by: str,
 ) -> dict[str, Any]:
-    global NEXT_TASK_SEQUENCE
     request = builder_backend._required_object(body, "message request")
     config_fields = ("agent_runtime", "model", "effort")
     builder_backend._require_keys(
@@ -469,13 +444,37 @@ def _create_message(
     session = workspace["session"]
     if session is not None:
         if requested is not None and requested != session:
-            raise builder_backend.AppError(
-                HTTPStatus.CONFLICT,
-                "agent_runtime, model, and effort must match the existing thread configuration",
+            if workspace["turn"] is not None:
+                raise builder_backend.AppError(
+                    HTTPStatus.CONFLICT,
+                    "thread runtime, model, and effort can change only while the thread is idle",
+                )
+            previous = session
+            workspace["session"] = requested
+            _append_turn_event(
+                workspace,
+                "thread.activity",
+                {
+                    "activity": {
+                        "provider": "kern",
+                        "activity_id": "session-change",
+                        "kind": "status",
+                        "status": "completed",
+                        "title": (
+                            "Agent provider changed"
+                            if previous["agent_runtime"] != requested["agent_runtime"]
+                            else "Agent session changed"
+                        ),
+                        "detail": (
+                            f"{RUNTIME_LABELS[previous['agent_runtime']]} · "
+                            f"{previous['model']} · {previous['effort']} → "
+                            f"{RUNTIME_LABELS[requested['agent_runtime']]} · "
+                            f"{requested['model']} · {requested['effort']}"
+                        ),
+                        "output": None,
+                    }
+                },
             )
-        runtime = session["agent_runtime"]
-        model = session["model"]
-        effort = session["effort"]
     else:
         if requested is None:
             raise builder_backend.AppError(
@@ -483,149 +482,95 @@ def _create_message(
                 "agent_runtime, model, and effort are required for the first message",
             )
         workspace["session"] = requested
-        runtime = requested["agent_runtime"]
-        model = requested["model"]
-        effort = requested["effort"]
-    now = _now()
-    tasks = workspace["tasks"]
-    status = "queued" if any(
-        task["status"] == "running" for task in tasks
-    ) else "running"
-    task = {
-        "task_id": f"task_mock_{NEXT_TASK_SEQUENCE}",
-        "thread_id": workspace["thread_id"],
-        "input_message": input_message,
-        "output_message": "",
-        "error_message": "",
-        "status": status,
-        "agent_runtime": runtime,
-        "model": model,
-        "effort": effort,
-        "created_at": now,
-        "updated_at": now,
-    }
-    NEXT_TASK_SEQUENCE += 1
-    if status == "running":
-        _start_task(workspace, task)
-    tasks.append(task)
-    return copy.deepcopy(task)
-
-
-def _stop_task(
-    workspace: dict[str, Any],
-    encoded_task_id: str,
-    action: str,
-) -> dict[str, Any]:
-    task_id = _path_segment(encoded_task_id)
-    task = next(
-        (
-            candidate
-            for candidate in workspace["tasks"]
-            if candidate["task_id"] == task_id
-        ),
-        None,
+    workspace["last_used_at"] = _now()
+    turn = workspace["turn"]
+    if turn is not None:
+        # No queue: a message on a busy thread steers its running turn.
+        turn["input_message"] = input_message
+        _append_turn_event(
+            workspace, "thread.message", {"message": input_message, "source": "user"}
+        )
+        return {"status": "accepted", "thread_id": workspace["thread_id"]}
+    workspace["turn"] = {"input_message": input_message}
+    has_bundle = any(
+        workspace["app"].get(field)
+        for field in ("html", "css", "javascript")
     )
-    if task is None:
-        raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "task not found")
-    expected_status = "queued" if action == "cancel" else "running"
-    if task["status"] != expected_status:
-        message = "only queued tasks can be cancelled" if action == "cancel" else "only running tasks can be killed"
-        raise builder_backend.AppError(HTTPStatus.CONFLICT, message)
-    now = _now()
-    task.update({"status": "cancelled", "updated_at": now, "completed_at": now})
-    TASK_DEADLINES.pop(task_id, None)
-    _start_next_task(workspace)
+    turn_seconds = MOCK_TURN_SECONDS if has_bundle else MOCK_FIRST_TURN_SECONDS
+    TURN_DEADLINES[workspace["thread_id"]] = time.monotonic() + turn_seconds
+    _append_turn_event(
+        workspace, "thread.message", {"message": input_message, "source": "user"}
+    )
+    _append_turn_event(
+        workspace, "thread.message", {"message": INTERIM_AGENT_MESSAGE, "source": "agent"}
+    )
+    return {"status": "accepted", "thread_id": workspace["thread_id"]}
+
+
+def _stop_turn(workspace: dict[str, Any]) -> dict[str, Any]:
+    if workspace["turn"] is None:
+        raise builder_backend.AppError(
+            HTTPStatus.CONFLICT, "the thread has no running work"
+        )
+    TURN_DEADLINES.pop(workspace["thread_id"], None)
+    workspace["turn"] = None
+    workspace["last_used_at"] = _now()
+    _append_turn_event(workspace, "thread.stopped", {})
     return {"status": "accepted"}
 
 
-def _progress_tasks() -> None:
+def _progress_turns() -> None:
     now_monotonic = time.monotonic()
     for workspace in WORKSPACES.values():
+        turn = workspace["turn"]
+        deadline = TURN_DEADLINES.get(workspace["thread_id"])
+        if turn is None or deadline is None or now_monotonic < deadline:
+            continue
         app = workspace["app"]
-        for task in workspace["tasks"]:
-            deadline = TASK_DEADLINES.get(task["task_id"])
-            if (
-                task["status"] != "running"
-                or deadline is None
-                or now_monotonic < deadline
-            ):
-                continue
-            now = _now()
-            has_bundle = bool(app["html"] or app["css"] or app["javascript"])
-            output_message = (
-                "Built the dashboard with durable priorities and interactive controls."
-                if not has_bundle
-                else (
-                    "Reviewed the current structured data and refreshed the dashboard analysis."
-                    if task["input_message"] == APP_AGENT_INPUT
-                    else "Updated the web app from this request."
-                )
+        now = _now()
+        has_bundle = bool(app["html"] or app["css"] or app["javascript"])
+        output_message = (
+            "Built the dashboard with durable priorities and interactive controls."
+            if not has_bundle
+            else (
+                "Reviewed the current structured data and refreshed the dashboard analysis."
+                if turn["input_message"] == APP_AGENT_INPUT
+                else "Updated the web app from this request."
             )
-            task.update({
-                "status": "completed",
-                "updated_at": now,
-                "completed_at": now,
-                "output_message": output_message,
-            })
-            _append_task_message(
-                workspace, task, output_message, "agent"
-            )
-            TASK_DEADLINES.pop(task["task_id"], None)
-            if not has_bundle:
-                title = (
-                    "Weekly focus"
-                    if builder_backend.THREAD_NAME_RE.fullmatch(
-                        workspace["name"]
-                    )
-                    else workspace["name"]
+        )
+        _append_turn_event(
+            workspace, "thread.message", {"message": output_message, "source": "agent"}
+        )
+        TURN_DEADLINES.pop(workspace["thread_id"], None)
+        workspace["turn"] = None
+        workspace["last_used_at"] = now
+        if not has_bundle:
+            title = (
+                "Weekly focus"
+                if builder_backend.THREAD_NAME_RE.fullmatch(
+                    workspace["name"]
                 )
-                built = _built_app(title)
-                built["updated_at"] = now
-                workspace["app"] = built
-                app = built
-            elif task["input_message"] == APP_AGENT_INPUT:
-                app["data"] = {
-                    **app["data"],
-                    "analysis": "Two priorities remain open; review the security item before shipping.",
-                }
-                app["revision"] += 1
-                app["updated_at"] = now
-            else:
-                app["revision"] += 1
-                app["updated_at"] = now
-        _start_next_task(workspace)
+                else workspace["name"]
+            )
+            built = _built_app(title)
+            built["updated_at"] = now
+            workspace["app"] = built
+        elif turn["input_message"] == APP_AGENT_INPUT:
+            app["data"] = {
+                **app["data"],
+                "analysis": "Two priorities remain open; review the security item before shipping.",
+            }
+            app["revision"] += 1
+            app["updated_at"] = now
+        else:
+            app["revision"] += 1
+            app["updated_at"] = now
 
 
-def _start_next_task(workspace: dict[str, Any]) -> None:
-    tasks = workspace["tasks"]
-    if any(task["status"] == "running" for task in tasks):
-        return
-    queued = next(
-        (task for task in tasks if task["status"] == "queued"),
-        None,
-    )
-    if queued is None:
-        return
-    _start_task(workspace, queued)
-
-
-def _start_task(workspace: dict[str, Any], task: dict[str, Any]) -> None:
-    now = _now()
-    task.update({"status": "running", "updated_at": now, "started_at": now})
-    TASK_DEADLINES[task["task_id"]] = time.monotonic() + MOCK_TASK_SECONDS
-    _append_task_message(
-        workspace, task, task["input_message"], "user"
-    )
-    _append_task_message(
-        workspace, task, INTERIM_AGENT_MESSAGE, "agent"
-    )
-
-
-def _append_task_message(
+def _append_turn_event(
     workspace: dict[str, Any],
-    task: dict[str, Any],
-    message: str,
-    source: str,
+    event_type: str,
+    payload: dict[str, Any],
 ) -> None:
     events = workspace["events"]
     seq = events[-1]["seq"] + 1 if events else 1
@@ -634,9 +579,9 @@ def _append_task_message(
             "seq": seq,
             "timestamp": _now(),
             "event_id": f"event_{workspace['thread_id']}_{seq}",
-            "event_type": "task.message",
-            "task_id": task["task_id"],
-            "payload": {"message": message, "source": source},
+            "event_type": event_type,
+            "thread_id": workspace["thread_id"],
+            "payload": payload,
         }
     )
 
@@ -670,44 +615,54 @@ def desktop_smoke(page: Any) -> None:
     frame.locator("#new-app").click()
     expect(frame.locator("#app-title")).to_have_text("app-1")
     expect(frame.locator("#first-run-how")).to_be_visible()
-    expect(frame.locator("#first-run-guidance")).to_be_visible()
+    expect(frame.locator("#first-run-guidance")).to_have_count(0)
     expect(frame.get_by_text("Build it through Agent chat", exact=True)).to_be_visible()
     expect(frame.get_by_text("Use the app directly", exact=True)).to_be_visible()
-    expect(frame.get_by_text("Agent, Model, and Level are fixed", exact=False)).to_be_visible()
+    expect(frame.locator("#agent-settings-help")).to_have_count(0)
     expect(frame.locator("#runtime")).to_have_value("codex")
     expect(frame.locator("#model")).to_have_value("gpt-5.6-terra")
     expect(frame.locator("#effort")).to_have_value("high")
     expect(frame.locator("#runtime")).to_be_enabled()
     expect(frame.locator("#model")).to_be_enabled()
     expect(frame.locator("#effort")).to_be_enabled()
-    expect(frame.locator("#runtime-fixed")).to_be_hidden()
-    expect(frame.locator("#model-fixed")).to_be_hidden()
-    expect(frame.locator("#effort-fixed")).to_be_hidden()
-    frame.locator("#agent-settings-help").hover()
-    expect(frame.locator("#agent-settings-help-text")).to_be_visible()
-    expect(frame.locator("#agent-settings-help-text")).to_contain_text("before the first message")
-    expect(frame.locator("#agent-settings-help-text")).to_contain_text("fixed for this app afterward")
     frame.get_by_role("button", name="Start building", exact=True).click()
     expect(frame.locator("#chat-drawer")).to_be_visible()
+    with page.expect_file_chooser() as chooser:
+        frame.get_by_role("button", name="Attach files").click()
+    chooser.value.set_files({
+        "name": "weekly-focus.txt",
+        "mimeType": "text/plain",
+        "buffer": b"Prioritize the release checklist.",
+    })
+    expect(frame.locator("#attachments")).to_contain_text("weekly-focus.txt")
     frame.locator("#message").fill("Build a small weekly focus dashboard.")
     frame.get_by_role("button", name="Send message", exact=True).click()
-    expect(frame.locator("#chat-history")).to_contain_text("Requested by user:")
-    expect(frame.locator("#chat-history")).to_contain_text("Build a small weekly focus dashboard.")
-    expect(frame.locator("#chat-history")).to_contain_text(INTERIM_AGENT_MESSAGE)
-    expect(frame.locator(".dashboard")).to_be_visible(timeout=8_000)
+    frame.locator("#agent-settings").hover()
+    expect(frame.locator("#agent-settings-idle-note")).to_be_visible()
+    expect(frame.locator("#agent-settings-idle-note")).to_contain_text(
+        "Stop this app's agent first"
+    )
     expect(frame.locator("#runtime")).to_be_disabled()
     expect(frame.locator("#model")).to_be_disabled()
     expect(frame.locator("#effort")).to_be_disabled()
-    expect(frame.locator("#runtime")).to_be_hidden()
-    expect(frame.locator("#model")).to_be_hidden()
-    expect(frame.locator("#effort")).to_be_hidden()
-    expect(frame.locator("#runtime-fixed")).to_have_text("Codex")
-    expect(frame.locator("#model-fixed")).to_have_text("gpt-5.6-terra")
-    expect(frame.locator("#effort-fixed")).to_have_text("High")
-    frame.locator("#agent-settings-help").hover()
-    expect(frame.locator("#agent-settings-help-text")).to_be_visible()
-    expect(frame.locator("#agent-settings-help-text")).to_contain_text("fixed for this app")
-    expect(frame.locator("#first-run-guidance")).to_be_hidden()
+    expect(frame.locator("#attachments")).to_be_hidden()
+    expect(frame.locator("#chat-history")).to_contain_text("Requested by user:")
+    expect(frame.locator("#chat-history")).to_contain_text("Build a small weekly focus dashboard.")
+    expect(frame.locator("#chat-history")).to_contain_text(
+        "[User-uploaded file: user-files/20260722T120000.000000Z_weekly-focus.txt]"
+    )
+    expect(frame.locator("#chat-history")).to_contain_text(INTERIM_AGENT_MESSAGE)
+    expect(frame.locator(".dashboard")).to_be_visible(timeout=8_000)
+    expect(frame.locator("#runtime")).to_be_enabled()
+    expect(frame.locator("#model")).to_be_enabled()
+    expect(frame.locator("#effort")).to_be_enabled()
+    frame.locator("#model").select_option("gpt-5.6-sol")
+    expect(frame.locator("#agent-session-change-warning")).to_be_visible()
+    expect(frame.locator("#agent-session-change-warning")).to_contain_text(
+        "provider cache reads will be invalidated"
+    )
+    frame.locator("#model").select_option("gpt-5.6-terra")
+    expect(frame.locator("#agent-session-change-warning")).to_be_hidden()
     expect(frame.locator("#chat-drawer select")).to_have_count(0)
     expect(frame.locator("#runtime-status")).to_have_text("Oversized render rejected")
     frame.get_by_role("button", name="Close agent chat", exact=True).click()
@@ -785,7 +740,7 @@ def desktop_smoke(page: Any) -> None:
 
     frame.get_by_role("button", name="Refresh analysis", exact=True).click()
     expect(frame.locator("dialog")).to_have_count(0)
-    expect(frame.locator("#runtime-status")).to_have_text("Agent started")
+    expect(frame.locator("#runtime-status")).to_have_text("Sent to agent")
     frame.get_by_role("button", name="Agent chat", exact=True).click()
     expect(frame.locator("#chat-history")).to_contain_text("Requested by app:")
     expect(frame.locator("#chat-history")).to_contain_text(AGENT_PROMPT)
@@ -840,12 +795,12 @@ def mobile_smoke(page: Any) -> None:
     frame.get_by_role("button", name="Show app list", exact=True).click()
     frame.get_by_role("button", name="Weekly focus", exact=False).click()
     expect(frame.locator(".dashboard")).to_be_visible()
-    expect(frame.locator("#runtime")).to_be_hidden()
-    expect(frame.locator("#model")).to_be_hidden()
-    expect(frame.locator("#effort")).to_be_hidden()
-    expect(frame.locator("#runtime-fixed")).to_be_visible()
-    expect(frame.locator("#model-fixed")).to_be_visible()
-    expect(frame.locator("#effort-fixed")).to_be_visible()
+    expect(frame.locator("#runtime")).to_be_visible()
+    expect(frame.locator("#model")).to_be_visible()
+    expect(frame.locator("#effort")).to_be_visible()
+    expect(frame.locator("#runtime")).to_be_enabled()
+    expect(frame.locator("#model")).to_be_enabled()
+    expect(frame.locator("#effort")).to_be_enabled()
     frame.get_by_role("button", name="Agent chat", exact=True).click()
     expect(frame.locator("#chat-drawer")).to_be_visible()
     frame.get_by_role("button", name="Close agent chat", exact=True).click()

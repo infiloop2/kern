@@ -16,6 +16,12 @@ set -euo pipefail
 # so the kill path can call this after every turn. Admin invokes this exact path
 # through the kern-host sudoers policy.
 
+signal_only=false
+if [ "${1:-}" = "--signal-only" ]; then
+  signal_only=true
+  shift
+fi
+
 thread_id="${1:-}"
 # The id becomes a unit name, so validate it exactly as the run-* launchers do.
 if ! [[ "${thread_id}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
@@ -24,15 +30,22 @@ if ! [[ "${thread_id}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
 fi
 
 scope="kern-agent-thread-${thread_id}.scope"
-# Best effort by design. SIGKILL empties the cgroup with an unignorable signal,
-# so stop then reaps an already-dead unit; a real stop failure needs an
-# unresponsive PID 1 or a D-state task, both of which break the whole host. A
-# missing unit (the normal-completion path, where the scope is already gone) is
-# expected and not an error. Failing loudly would only propagate through the
-# runtime close() into the orchestrator, which keeps a thread fenced when close
-# raises: that would wedge the thread permanently, a worse and less recoverable
-# outcome than the transient it prevents (a same-thread follow-up retries once
-# the scope clears). So swallow every case here.
 systemctl kill --signal=KILL "${scope}" 2>/dev/null || true
-systemctl stop "${scope}" 2>/dev/null || true
-systemctl reset-failed "${scope}" 2>/dev/null || true
+if $signal_only; then
+  exit 0
+fi
+
+# Do not inherit systemd's much larger default stop deadline. SIGKILL has
+# already emptied every healthy cgroup; request unit reaping asynchronously,
+# then verify it for five seconds. A scope still active after that is a host
+# failure (unresponsive PID 1 or an unkillable D-state process), and the caller
+# deliberately keeps the thread fenced.
+systemctl stop --no-block "${scope}" 2>/dev/null || true
+for _attempt in $(seq 1 50); do
+  if ! systemctl is-active --quiet "${scope}" 2>/dev/null; then
+    systemctl reset-failed "${scope}" 2>/dev/null || true
+    exit 0
+  fi
+  sleep 0.1
+done
+exit 1

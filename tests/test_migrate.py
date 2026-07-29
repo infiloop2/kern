@@ -126,7 +126,10 @@ class MigrateRunnerTests(unittest.TestCase):
         # and back down; this is the guardrail for every future migration.
         applied = migrate.up(quiet=True)
         self.assertGreaterEqual(len(applied), 1)
-        self.assertIn("tasks", self.table_names())
+        tables = self.table_names()
+        self.assertIn("thread_sessions", tables)
+        # The thread-only model dropped the task queue.
+        self.assertNotIn("tasks", tables)
         reverted = migrate.down(target=0, quiet=True)
         self.assertEqual(reverted, list(reversed(applied)))
         self.assertEqual(self.table_names(), {"schema_migrations"})
@@ -166,6 +169,147 @@ class MigrateRunnerTests(unittest.TestCase):
                 sorted(retained),
             )
 
+    def test_thread_only_migration_moves_task_events_onto_threads(self) -> None:
+        self.assertEqual(migrate.up(target=4, quiet=True), [1, 2, 3, 4])
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                " VALUES ('codex', 'chat', 'gpt-5.6-terra', 'high')"
+            )
+            cur.execute("INSERT INTO tasks (number, status, thread_id) VALUES (1, 'completed', 'chat')")
+            cur.execute(
+                "INSERT INTO agent_events (created_at, event_type, task_id) VALUES"
+                " ('2026-06-08T00:00:00Z', 'task.started', 'task_1'),"
+                " ('2026-06-08T00:00:01Z', 'task.completed', 'task_1'),"
+                " ('2026-06-08T00:00:02Z', 'task.message', 'task_99'),"
+                " ('2026-06-08T00:00:03Z', 'agent_runtime.started', NULL)"
+            )
+            cur.execute("INSERT INTO counters (name, value) VALUES ('next_task_number', 2)")
+
+        self.assertEqual(migrate.up(target=5, quiet=True), [5])
+
+        with db.transaction() as cur:
+            cur.execute("SELECT event_type, thread_id FROM agent_events ORDER BY seq")
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("turn.started", "chat"),
+                    ("turn.completed", "chat"),
+                    # A pruned task's events stay in the global log,
+                    # unattributed to any thread.
+                    ("turn.message", None),
+                    ("agent_runtime.started", None),
+                ],
+            )
+            cur.execute("SELECT value FROM counters WHERE name = 'next_task_number'")
+            self.assertEqual(cur.fetchall(), [])
+        tables = self.table_names()
+        self.assertNotIn("tasks", tables)
+        self.assertNotIn("task_steers", tables)
+
+    def test_thread_event_stream_migration_flattens_history_and_recovers_open_run(self) -> None:
+        self.assertEqual(migrate.up(target=5, quiet=True), [1, 2, 3, 4, 5])
+        with db.transaction() as cur:
+            for thread_id in ("closed", "open"):
+                cur.execute(
+                    "INSERT INTO thread_sessions"
+                    " (agent_runtime, thread_id, model, effort)"
+                    " VALUES ('codex', %s, 'gpt-5.6-luna', 'high')",
+                    (thread_id,),
+                )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, message, source) VALUES"
+                " ('2026-07-01T00:00:00Z', 'turn.started', 'closed', NULL, NULL)"
+                " RETURNING seq"
+            )
+            first_closed_run = int(cur.fetchone()[0])
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, message, source) VALUES"
+                " ('2026-07-01T00:00:01Z', 'turn.message', 'closed', 'hello', 'user')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, activity) VALUES"
+                " ('2026-07-01T00:00:02Z', 'turn.activity', 'closed',"
+                " '{\"activity_id\":\"command-1\"}'::jsonb)"
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id) VALUES"
+                " ('2026-07-01T00:00:03Z', 'turn.completed', 'closed')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id) VALUES"
+                " ('2026-07-01T00:00:04Z', 'turn.started', 'closed')"
+                " RETURNING seq"
+            )
+            second_closed_run = int(cur.fetchone()[0])
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, error_message) VALUES"
+                " ('2026-07-01T00:00:05Z', 'turn.failed', 'closed', 'failed')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id) VALUES"
+                " ('2026-07-01T00:00:06Z', 'turn.started', 'open')"
+                " RETURNING seq"
+            )
+            open_run = int(cur.fetchone()[0])
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, message, source) VALUES"
+                " ('2026-07-01T00:00:07Z', 'turn.message', 'open', 'pending', 'user')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, message, source) VALUES"
+                " ('2026-07-01T00:00:08Z', 'turn.message', NULL, 'global', 'agent')"
+            )
+
+        self.assertEqual(migrate.up(target=7, quiet=True), [6, 7])
+
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT pg_get_indexdef(indexrelid)"
+                " FROM pg_index"
+                " WHERE indexrelid = 'thread_sessions_recency_page_idx'::regclass"
+            )
+            index_definition = str(cur.fetchone()[0])
+            self.assertIn(
+                "(COALESCE(last_used_at, ''::text) DESC, thread_id DESC)",
+                index_definition,
+            )
+            self.assertNotIn("agent_runtime", index_definition)
+            cur.execute(
+                "SELECT event_type, thread_id, run_number"
+                " FROM agent_events ORDER BY seq"
+            )
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("thread.message", "closed", first_closed_run),
+                    ("thread.activity", "closed", first_closed_run),
+                    ("thread.error", "closed", second_closed_run),
+                    ("thread.message", "open", open_run),
+                    ("thread.message", None, None),
+                ],
+            )
+            cur.execute(
+                "SELECT thread_id, run_status, run_number"
+                " FROM thread_sessions ORDER BY thread_id"
+            )
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("closed", "idle", second_closed_run),
+                    ("open", "running", open_run),
+                ],
+            )
+
 
 class AppMigrationTests(unittest.TestCase):
     DB_NAME = "kern_app_migrate_test"
@@ -195,12 +339,12 @@ class AppMigrationTests(unittest.TestCase):
             cur.execute('CREATE SCHEMA app_agent_chat AUTHORIZATION "kern-app-0"')
 
     def test_app_migration_runs_in_app_schema_and_records_host_version(self) -> None:
-        self.assertEqual(_app_up("agent_chat"), [1, 2])
+        self.assertEqual(_app_up("agent_chat"), [1, 2, 3])
         self.assertEqual(_app_up("agent_chat"), [])
 
         with db.transaction() as cur:
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'app_agent_chat'")
-            self.assertEqual({row[0] for row in cur.fetchall()}, {"thread_tasks", "threads"})
+            self.assertEqual({row[0] for row in cur.fetchall()}, {"threads"})
             cur.execute(
                 """
                 SELECT column_name, data_type
@@ -217,27 +361,13 @@ class AppMigrationTests(unittest.TestCase):
                     ("name", "text"),
                 ],
             )
-            cur.execute(
-                """
-                SELECT column_name, data_type
-                FROM information_schema.columns
-                WHERE table_schema = 'app_agent_chat' AND table_name = 'thread_tasks'
-                ORDER BY ordinal_position
-                """
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("task_id", "text"),
-                    ("thread_id", "text"),
-                ],
-            )
             cur.execute("SELECT app_id, version, name FROM app_schema_migrations")
             self.assertEqual(
                 cur.fetchall(),
                 [
                     ("agent_chat", 1, "baseline"),
                     ("agent_chat", 2, "thread_names"),
+                    ("agent_chat", 3, "drop_thread_tasks"),
                 ],
             )
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'preferences'")
@@ -248,7 +378,7 @@ class AppMigrationTests(unittest.TestCase):
         # never-recorded version idempotent: the loop reapplies and records it.
         app_migrate.apply_sql("agent_chat", 1, connection_user="kern-app-0")
 
-        self.assertEqual(_app_up("agent_chat"), [1, 2])
+        self.assertEqual(_app_up("agent_chat"), [1, 2, 3])
 
         with db.transaction() as cur:
             cur.execute("SELECT app_id, version, name FROM app_schema_migrations")
@@ -257,10 +387,11 @@ class AppMigrationTests(unittest.TestCase):
                 [
                     ("agent_chat", 1, "baseline"),
                     ("agent_chat", 2, "thread_names"),
+                    ("agent_chat", 3, "drop_thread_tasks"),
                 ],
             )
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'app_agent_chat'")
-            self.assertEqual({row[0] for row in cur.fetchall()}, {"thread_tasks", "threads"})
+            self.assertEqual({row[0] for row in cur.fetchall()}, {"threads"})
 
     def test_deprecated_app_migrations_drop_all_app_tables(self) -> None:
         apps = {app.id: app for app in app_platform.migration_apps()}

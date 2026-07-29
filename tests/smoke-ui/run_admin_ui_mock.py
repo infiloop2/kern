@@ -5,12 +5,13 @@ This is for browser/UI development only. It does not import the real admin API
 handler because the real handler reads host state and invokes privileged helper
 paths. The mock keeps just enough in-memory state to exercise the single-page
 admin UI at ``host/runtime/admin_api/admin_ui.html``, and ships with seeded history plus
-time-based task progression so the UI looks and behaves like a live host.
+time-based turn progression so the UI looks and behaves like a live host.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -64,7 +65,7 @@ SECURITY_HEADERS = {
         "font-src 'self'; "
         "form-action 'self'; "
         "frame-ancestors 'none'; "
-        "img-src 'self' data:; "
+        "img-src 'self' data: blob:; "
         "media-src blob:; "
         "object-src 'none'; "
         "script-src 'self'; "
@@ -78,9 +79,7 @@ PASSWORD = "dev"
 # Session tokens minted by the mock /v1/login, mirroring the real cookie flow.
 MOCK_SESSIONS: set[str] = set()
 FAILED_UPLOADS_ONCE: set[str] = set()
-TASK_RE = re.compile(r"^/v1/tasks/([^/]+)(?:/(steer|cancel|kill|events))?$")
-THREAD_TASKS_RE = re.compile(r"^/v1/threads/([^/]+)/tasks$")
-THREAD_EVENTS_RE = re.compile(r"^/v1/threads/([^/]+)/events$")
+THREAD_RE = re.compile(r"^/v1/threads/([^/]+)(?:/(messages|stop|events))?$")
 TOOL_ACTION_RE = re.compile(r"^/v1/tools/([a-z0-9_]+)/(enable|disable|oauth_connect/start|oauth_connect/complete|oauth_connect/disconnect)$")
 GITHUB_PENDING_PUSH_RE = re.compile(r"^/v1/network-tools/github-pending-pushes/([a-z0-9]+)/(approve|reject)$")
 TOOL_APPROVALS_LIST_RE = re.compile(r"^/v1/tools/([a-z0-9_]+)/approvals$")
@@ -91,10 +90,10 @@ TOOL_EVENT_RE = re.compile(r"^/v1/tools/events/([1-9][0-9]*)$")
 MOCK_OAUTH_CODE = "mock-auth-code"
 RUNTIMES = ("codex", "claude_code", "hermes")
 PROVIDER_BY_RUNTIME = {"codex": "openai", "claude_code": "claude", "hermes": "bedrock"}
-MAX_RUNNING_PER_RUNTIME = 3
-MAX_RUNNING_TOTAL = 6
+RUNTIME_LABELS = {"codex": "Codex", "claude_code": "Claude Code", "hermes": "Hermes"}
+TURN_LIMIT_PER_RUNTIME = 3
 
-# Timed progression script for running tasks: (fraction of duration, message).
+# Timed progression script for running turns: (fraction of duration, message).
 PROGRESS_SCRIPT = [
     (0.2, "Reading the workspace and planning the change."),
     (0.55, "Applying edits and running the relevant checks."),
@@ -118,14 +117,18 @@ class ApiError(Exception):
 @dataclass
 class MockState:
     lock: threading.Lock = field(default_factory=threading.Lock)
-    next_task_number: int = 1
+    next_turn_number: int = 1
     next_agent_event_seq: int = 1
     next_network_event_seq: int = 1
     next_tool_event_seq: int = 1
     agent_events: list[dict[str, Any]] = field(default_factory=list)
-    tasks: list[dict[str, Any]] = field(default_factory=list)
-    task_events: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # thread_id -> thread record. Public keys mirror the admin API's thread
+    # object; underscore keys are the mock's in-memory turn state (the real
+    # host keeps the same distinction: rows in thread_sessions, live turns in
+    # orchestrator memory).
+    threads: dict[str, dict[str, Any]] = field(default_factory=dict)
     network_events: list[dict[str, Any]] = field(default_factory=list)
+    host_errors: list[dict[str, Any]] = field(default_factory=list)
     policy: dict[str, Any] = field(
         default_factory=lambda: {"network_integrations": {}}
     )
@@ -172,19 +175,17 @@ class MockState:
         return iso(datetime.now(timezone.utc))
 
     def add_agent_event(
-        self, event_type: str, task_id: str | None, payload: dict[str, Any], timestamp: str | None = None
+        self, event_type: str, thread_id: str | None, payload: dict[str, Any], timestamp: str | None = None
     ) -> None:
         event = {
             "seq": self.next_agent_event_seq,
             "timestamp": timestamp or self.now(),
             "event_type": event_type,
-            "task_id": task_id,
+            "thread_id": thread_id,
             "payload": payload,
         }
         self.next_agent_event_seq += 1
         self.agent_events.append(event)
-        if task_id:
-            self.task_events.setdefault(task_id, []).append(event)
 
     def add_network_event(self, method: str, host: str, path: str, decision: str, timestamp: str | None = None) -> None:
         parsed = urlparse(path)
@@ -224,11 +225,15 @@ class MockState:
         })
         self.next_tool_event_seq += 1
 
-    def public_task(self, task: dict[str, Any], queue_position: int | None = None) -> dict[str, Any]:
-        result = {key: value for key, value in task.items() if not key.startswith("_")}
-        if queue_position is not None:
-            result["queue_position"] = queue_position
-        return result
+    def public_thread(self, thread: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "thread_id": thread["thread_id"],
+            "agent_runtime": thread["agent_runtime"],
+            "model": thread["model"],
+            "effort": thread["effort"],
+            "last_used_at": thread["last_used_at"],
+            "status": "running" if thread.get("_running") else "idle",
+        }
 
     def runtime_status(self, runtime: str) -> str:
         provider = PROVIDER_BY_RUNTIME[runtime]
@@ -258,12 +263,12 @@ def seed_state() -> None:
     """Populate history that resembles a host that has been in use for a while.
 
     The seeded story: the operator ran a few threads earlier today, one deploy
-    task failed against the network policy, and provider access was later
-    switched off, which is why every runtime starts out deactivated.
+    turn failed against the network policy, and provider access was later
+    switched off, which is why every runtime starts out deactivated. Each entry
+    is one turn on a thread; the thread records are derived from the turns.
     """
-    seed_tasks = [
+    seed_turns = [
         {
-            "task_id": "task_1",
             "thread_id": "main",
             "agent_runtime": "codex",
             "status": "completed",
@@ -278,7 +283,6 @@ def seed_state() -> None:
             "completed_min": 197,
         },
         {
-            "task_id": "task_2",
             "thread_id": "main",
             "agent_runtime": "codex",
             "status": "completed",
@@ -292,7 +296,6 @@ def seed_state() -> None:
             "completed_min": 178,
         },
         {
-            "task_id": "task_3",
             "thread_id": "website-redesign",
             "agent_runtime": "claude_code",
             "status": "completed",
@@ -307,7 +310,6 @@ def seed_state() -> None:
             "completed_min": 84,
         },
         {
-            "task_id": "task_4",
             "thread_id": "website-redesign",
             "agent_runtime": "claude_code",
             "status": "failed",
@@ -318,17 +320,15 @@ def seed_state() -> None:
             "completed_min": 78,
         },
         {
-            "task_id": "task_5",
             "thread_id": "dependency-audit",
             "agent_runtime": "codex",
             "status": "cancelled",
             "input_message": "Upgrade all npm dependencies in acme-web and note any breaking changes.",
             "created_min": 1510,
-            "started_min": None,
+            "started_min": 1509,
             "completed_min": 1490,
         },
         {
-            "task_id": "task_6",
             "thread_id": "incident-response",
             "agent_runtime": "codex",
             "status": "running",
@@ -338,21 +338,24 @@ def seed_state() -> None:
             "completed_min": 16,
         },
         {
-            "task_id": "task_7",
             "thread_id": "docs-cleanup",
             "agent_runtime": "claude_code",
-            "status": "queued",
+            "status": "completed",
             "input_message": "Rewrite the onboarding notes to match the current deploy flow.",
-            "created_min": 9,
-            "started_min": None,
-            "completed_min": 9,
+            "output_message": (
+                "Rewrote docs/onboarding.md around the current deploy flow: staging deploys from main, "
+                "the preview environment steps are gone, and the rollback section now points at the "
+                "one-command helper. Removed the stale legacy-pipeline appendix."
+            ),
+            "created_min": 10,
+            "started_min": 9,
+            "completed_min": 7,
         },
         # Agent Chat threads (generated successive names): a long finished
-        # conversation, a live one with a steerable running task, and one that
-        # ended in a policy denial with a queued retry. Together they give the
-        # chat UI several screens of history on a phone.
+        # conversation, a live one with a steerable running turn, and one that
+        # hit a policy denial before a later retry succeeded. Together they
+        # give the chat UI several screens of history on a phone.
         {
-            "task_id": "task_8",
             "thread_id": "thread-1",
             "agent_runtime": "codex",
             "status": "completed",
@@ -373,7 +376,6 @@ def seed_state() -> None:
             "completed_min": 2896,
         },
         {
-            "task_id": "task_9",
             "thread_id": "thread-1",
             "agent_runtime": "codex",
             "status": "completed",
@@ -396,7 +398,6 @@ def seed_state() -> None:
             "completed_min": 2878,
         },
         {
-            "task_id": "task_10",
             "thread_id": "thread-1",
             "agent_runtime": "codex",
             "status": "completed",
@@ -417,7 +418,6 @@ def seed_state() -> None:
             "completed_min": 2866,
         },
         {
-            "task_id": "task_11",
             "thread_id": "thread-1",
             "agent_runtime": "codex",
             "status": "completed",
@@ -559,7 +559,6 @@ def seed_state() -> None:
             "completed_min": 2853,
         },
         {
-            "task_id": "task_12",
             "thread_id": "thread-1",
             "agent_runtime": "codex",
             "status": "completed",
@@ -575,7 +574,6 @@ def seed_state() -> None:
             "completed_min": 2839,
         },
         {
-            "task_id": "task_13",
             "thread_id": "thread-2",
             "agent_runtime": "claude_code",
             "status": "completed",
@@ -600,7 +598,6 @@ def seed_state() -> None:
             "completed_min": 41,
         },
         {
-            "task_id": "task_14",
             "thread_id": "thread-2",
             "agent_runtime": "claude_code",
             "status": "running",
@@ -633,7 +630,6 @@ def seed_state() -> None:
             "completed_min": 12,
         },
         {
-            "task_id": "task_15",
             "thread_id": "thread-3",
             "agent_runtime": "codex",
             "status": "failed",
@@ -649,87 +645,143 @@ def seed_state() -> None:
             "completed_min": 141,
         },
         {
-            "task_id": "task_16",
             "thread_id": "thread-3",
             "agent_runtime": "codex",
-            "status": "queued",
-            "input_message": "Access is being sorted out. Queue the upload again and verify the build number this time.",
+            "status": "completed",
+            "input_message": "Access is being sorted out. Run the upload again and verify the build number this time.",
+            "output_message": (
+                "Upload succeeded on the retry. Verified the build number first: 214 (1.4.2), matching the "
+                "release branch. TestFlight is processing the build; the beta group gets tonight's fixes "
+                "once Apple finishes validation."
+            ),
             "created_min": 8,
-            "started_min": None,
-            "completed_min": 8,
+            "started_min": 7,
+            "completed_min": 5,
         },
     ]
-    for spec in seed_tasks:
-        task = {
-            "task_id": spec["task_id"],
-            "status": spec["status"],
-            "agent_runtime": spec["agent_runtime"],
-            "model": "claude-opus-5" if spec["agent_runtime"] == "claude_code" else "gpt-5.6-terra",
-            "effort": "high",
-            "thread_id": spec["thread_id"],
-            "input_message": spec["input_message"],
-            "created_at": ago(spec["created_min"]),
-            "updated_at": ago(spec["completed_min"]),
-        }
-        if spec.get("output_message"):
-            task["output_message"] = spec["output_message"]
-        if spec.get("error_message"):
-            task["error_message"] = spec["error_message"]
-        if spec["started_min"] is not None:
-            task["started_at"] = ago(spec["started_min"])
-        if spec["status"] in {"completed", "failed"}:
-            task["completed_at"] = ago(spec["completed_min"])
-        STATE.tasks.append(task)
+    for spec in seed_turns:
+        thread_id = spec["thread_id"]
+        thread = STATE.threads.get(thread_id)
+        if thread is None:
+            thread = {
+                "thread_id": thread_id,
+                "agent_runtime": spec["agent_runtime"],
+                "model": "claude-opus-5" if spec["agent_runtime"] == "claude_code" else "gpt-5.6-terra",
+                "effort": "high",
+                "last_used_at": ago(spec["completed_min"]),
+            }
+            STATE.threads[thread_id] = thread
+        thread["last_used_at"] = max(thread["last_used_at"], ago(spec["completed_min"]))
 
-        task_id = spec["task_id"]
-        if spec["started_min"] is not None:
-            STATE.add_agent_event("task.started", task_id, {}, ago(spec["started_min"]))
-            # Match the orchestrator's claim-time opening prompt. It is the
-            # first user message in Agent Chat; later user messages are steers.
+        # Match the host's admission-time opening prompt.
+        STATE.add_agent_event(
+            "thread.message",
+            thread_id,
+            {"message": spec["input_message"], "source": "user"},
+            ago(spec["started_min"]),
+        )
+        STATE.add_agent_event(
+            "thread.message",
+            thread_id,
+            {"message": "Reading the workspace and planning the change.", "source": "agent"},
+            ago(spec["started_min"] - 1),
+        )
+        # Optional mid-turn conversation: interim agent progress and any
+        # operator steering, so a finished thread shows the full stream,
+        # not just prompt and answer. Timestamps fall between start and
+        # finish so ordering by seq matches the wall clock.
+        stream = spec.get("stream") or []
+        span = max(spec["started_min"] - spec["completed_min"], 1)
+        for index, (source, message) in enumerate(stream, start=1):
+            moment = spec["started_min"] - span * index / (len(stream) + 1)
+            STATE.add_agent_event("thread.message", thread_id, {"message": message, "source": source}, ago(moment))
+        for activity in spec.get("activities") or []:
             STATE.add_agent_event(
-                "task.message",
-                task_id,
-                {"message": spec["input_message"], "source": "user"},
-                ago(spec["started_min"]),
+                "thread.activity",
+                thread_id,
+                {"activity": activity},
+                ago(spec["completed_min"] + 0.5),
             )
-            STATE.add_agent_event(
-                "task.message",
-                task_id,
-                {"message": "Reading the workspace and planning the change.", "source": "agent"},
-                ago(spec["started_min"] - 1),
-            )
-            # Optional mid-task conversation: interim agent progress and any
-            # operator steering, so a finished thread shows the full stream,
-            # not just prompt and answer. Timestamps fall between start and
-            # finish so ordering by seq matches the wall clock.
-            stream = spec.get("stream") or []
-            span = max(spec["started_min"] - spec["completed_min"], 1)
-            for index, (source, message) in enumerate(stream, start=1):
-                moment = spec["started_min"] - span * index / (len(stream) + 1)
-                STATE.add_agent_event("task.message", task_id, {"message": message, "source": source}, ago(moment))
-            for activity in spec.get("activities") or []:
-                STATE.add_agent_event(
-                    "task.activity",
-                    task_id,
-                    {"activity": activity},
-                    ago(spec["completed_min"] + 0.5),
-                )
         if spec["status"] == "completed":
             STATE.add_agent_event(
-                "task.message", task_id, {"message": spec["output_message"], "source": "agent"}, ago(spec["completed_min"])
+                "thread.message", thread_id, {"message": spec["output_message"], "source": "agent"}, ago(spec["completed_min"])
             )
-            STATE.add_agent_event("task.completed", task_id, {}, ago(spec["completed_min"]))
         elif spec["status"] == "failed":
             STATE.add_agent_event(
-                "task.failed", task_id, {"error_message": spec["error_message"]}, ago(spec["completed_min"])
+                "thread.error", thread_id, {"error_message": spec["error_message"]}, ago(spec["completed_min"])
             )
         elif spec["status"] == "cancelled":
-            STATE.add_agent_event("task.cancelled", task_id, {}, ago(spec["completed_min"]))
-    STATE.next_task_number = len(seed_tasks) + 1
+            STATE.add_agent_event("thread.stopped", thread_id, {}, ago(spec["completed_min"]))
+        else:
+            # A seeded open turn: it stays running (there is no timed script
+            # attached, so it never progresses or finishes on its own) until
+            # it is stopped or its runtime deactivates and fails it.
+            thread["_running"] = True
+
+    # More than one host page ensures the browser session log follows the
+    # thread-list keyset cursor instead of silently hiding older sessions.
+    for index in range(101):
+        thread_id = f"pagination-history-{index:03d}"
+        STATE.threads[thread_id] = {
+            "thread_id": thread_id,
+            "agent_runtime": "codex",
+            "model": "gpt-5.6-luna",
+            "effort": "high",
+            "last_used_at": ago(2000 + index),
+        }
 
     # Providers were switched off ~70 minutes ago; every runtime is deactivated.
     for runtime in RUNTIMES:
         STATE.add_agent_event("agent_runtime.deactivated", None, {"agent_runtime": runtime}, ago(70))
+
+    STATE.host_errors.extend([
+        {
+            "id": 1,
+            "seq": 1,
+            "error_id": "host_error_1",
+            "first_seen_at": ago(52),
+            "last_seen_at": ago(49),
+            "service": "kern-admin-api",
+            "component": "orchestrator.execution",
+            "kind": "unexpected_exception",
+            "exception_type": "RuntimeError",
+            "summary": "execution observed a thread without its provider session",
+            "traceback": (
+                'File "host/runtime/admin_api/orchestrator.py", line 1042, in execute_thread\n'
+                '  raise RuntimeError("thread session missing")'
+            ),
+            "context": {"agent_runtime": "codex", "thread_id": "thread_16"},
+            "fingerprint": "1" * 64,
+            "occurrence_count": 3,
+            "host_version": VERSION,
+            "boot_id": "mock-boot-20260728",
+            "pid": 1420,
+            "has_details": True,
+        },
+        {
+            "id": 2,
+            "seq": 2,
+            "error_id": "host_error_2",
+            "first_seen_at": ago(12),
+            "last_seen_at": ago(12),
+            "service": "kern-app-personal_web_app_builder",
+            "component": "agentic_web_app.request",
+            "kind": "unexpected_exception",
+            "exception_type": "KeyError",
+            "summary": "selected workspace was missing from the loaded row",
+            "traceback": (
+                'File "host/apps/personal_web_app_builder/backend.py", line 518, in workspace_state\n'
+                "  workspace = rows[workspace_id]"
+            ),
+            "context": {"method": "GET", "route": "/workspaces/mock/state"},
+            "fingerprint": "2" * 64,
+            "occurrence_count": 1,
+            "host_version": VERSION,
+            "boot_id": "mock-boot-20260728",
+            "pid": 1664,
+            "has_details": True,
+        },
+    ])
 
     for minutes, method, host, path, decision in [
         (204, "POST", "api.openai.com", "/v1/responses", "allowed"),
@@ -865,6 +917,17 @@ mockUpgradeNotice.addEventListener("click", async () => {
                 self._handle_logout()
                 return
             if method == "GET" and parsed.path == "/v1/agent-files/content":
+                file_path = (parse_qs(parsed.query).get("path") or [""])[0]
+                if file_path.lower().endswith(".png"):
+                    self._send(
+                        HTTPStatus.OK,
+                        base64.b64decode(
+                            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+                            "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                        ),
+                        "image/png",
+                    )
+                    return
                 self._send(HTTPStatus.OK, b"\x00\x00\x00\x18ftypmp42mock-video", "video/mp4")
                 return
             if method == "POST" and parsed.path == "/v1/agent-files/upload":
@@ -894,7 +957,7 @@ mockUpgradeNotice.addEventListener("click", async () => {
     def _authenticate(self) -> None:
         # The session cookie minted by /v1/login is the only accepted credential,
         # and cookie-authenticated requests must carry the CSRF header.
-        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""))
+        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""), secure=False)
         if token in MOCK_SESSIONS and self.headers.get(admin_auth.CSRF_HEADER_NAME):
             return
         raise ApiError(HTTPStatus.UNAUTHORIZED, "missing or invalid admin session")
@@ -910,7 +973,7 @@ mockUpgradeNotice.addEventListener("click", async () => {
         self._send_json(HTTPStatus.OK, {"ok": True}, set_cookie=admin_auth.session_cookie(token, secure=False))
 
     def _handle_logout(self) -> None:
-        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""))
+        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""), secure=False)
         MOCK_SESSIONS.discard(token or "")
         self._send_json(HTTPStatus.OK, {"ok": True}, set_cookie=admin_auth.clear_session_cookie(secure=False))
 
@@ -1010,22 +1073,11 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
             return disconnect_bedrock_credentials()
     if path == "/v1/agent-runtime/reset-linked-account" and method == "POST":
         return reset_linked_account(body)
-    if path == "/v1/tasks":
-        if method == "GET":
-            return list_tasks()
-        if method == "POST":
-            return create_task(body)
-    task_match = TASK_RE.fullmatch(path)
-    if task_match:
-        return task_route(method, task_match.group(1), task_match.group(2), query, body)
     if method == "GET" and path == "/v1/threads":
-        return list_threads()
-    thread_match = THREAD_TASKS_RE.fullmatch(path)
-    if method == "GET" and thread_match:
-        return list_thread_tasks(unquote(thread_match.group(1)))
-    thread_events_match = THREAD_EVENTS_RE.fullmatch(path)
-    if method == "GET" and thread_events_match:
-        return list_thread_events(unquote(thread_events_match.group(1)), query)
+        return list_threads(query)
+    thread_match = THREAD_RE.fullmatch(path)
+    if thread_match:
+        return thread_route(method, unquote(thread_match.group(1)), thread_match.group(2), query, body)
     if method == "GET" and path == "/v1/events":
         before, limit = event_page_query(query, {"before", "limit"}, "event")
         return {"events": agent_events_before(before, limit)}
@@ -1043,6 +1095,19 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
             raise ApiError(HTTPStatus.NOT_FOUND, "tool event not found")
         event["has_arguments"] = isinstance(event.get("arguments"), dict)
         return {"event": event}
+    if method == "GET" and path == "/v1/host-errors":
+        before, limit = event_page_query(query, {"before", "limit", "service"}, "host error")
+        return {"events": host_errors_before(before, limit, one(query, "service"))}
+    host_error_match = re.fullmatch(r"^/v1/host-errors/([1-9][0-9]*)$", path)
+    if method == "GET" and host_error_match:
+        if query:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "host error detail does not accept query parameters")
+        error_id = int(host_error_match.group(1))
+        with STATE.lock:
+            error = next((dict(item) for item in STATE.host_errors if item["id"] == error_id), None)
+        if error is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "host error not found")
+        return {"error": error}
     if path == "/v1/network/policy":
         if method == "GET":
             return {"network_controls": STATE.policy}
@@ -1234,12 +1299,11 @@ def decide_tool_approval(approval_id: str, decision: str) -> dict[str, Any]:
 def health() -> dict[str, Any]:
     with STATE.lock:
         complete_due_codex_login_locked()
-        progress_running_tasks_locked()
-        start_queued_tasks_locked()
+        progress_running_turns_locked()
         runtime = agent_runtime_status_locked()
-        running = sum(1 for task in STATE.tasks if task["status"] == "running")
+        running = sum(1 for thread in STATE.threads.values() if thread.get("_running"))
         upgrade_available = STATE.upgrade_available
-    # Gentle drift so the dashboard feels alive; busier while tasks run.
+    # Gentle drift so the dashboard feels alive; busier while turns run.
     wave = math.sin(time.time() / 47.0)
     cpu = round(6.5 + 3.5 * wave + 24.0 * min(running, 2), 1)
     memory_used = int((0.92 + 0.05 * wave + 0.35 * min(running, 2)) * 1024**3)
@@ -1272,20 +1336,19 @@ def health() -> dict[str, Any]:
 def agent_runtime_status() -> dict[str, Any]:
     with STATE.lock:
         complete_due_codex_login_locked()
-        progress_running_tasks_locked()
-        start_queued_tasks_locked()
+        progress_running_turns_locked()
         return agent_runtime_status_locked()
 
 
 def agent_runtime_status_locked() -> dict[str, Any]:
-    active = {runtime: [] for runtime in RUNTIMES}
-    for task in STATE.tasks:
-        if task["status"] == "running":
-            active[task["agent_runtime"]].append(task["task_id"])
+    active: dict[str, list[str]] = {runtime: [] for runtime in RUNTIMES}
+    for thread in STATE.threads.values():
+        if thread.get("_running"):
+            active[thread["agent_runtime"]].append(thread["thread_id"])
     runtimes = []
     for runtime in RUNTIMES:
         status = STATE.runtime_status(runtime)
-        record = {"type": runtime, "status": status, "active_task_ids": active[runtime]}
+        record = {"type": runtime, "status": status, "active_thread_ids": sorted(active[runtime])}
         runtimes.append(record)
     return {"runtimes": runtimes}
 
@@ -1454,7 +1517,6 @@ def complete_claude_oauth(body: Any) -> dict[str, str]:
         STATE.claude_oauth = {}
         STATE.add_agent_event("agent_runtime.login_completed", None, {"agent_runtime": "claude_code"})
         STATE.add_agent_event("agent_runtime.active", None, {"agent_runtime": "claude_code"})
-        start_queued_tasks_locked()
     return {"status": "accepted"}
 
 
@@ -1482,7 +1544,6 @@ def connect_bedrock_credentials(body: Any) -> dict[str, str]:
         if not enabled:
             return {"status": "accepted"}
         STATE.add_agent_event("agent_runtime.active", None, {"agent_runtime": "hermes"})
-        start_queued_tasks_locked()
         return {"status": "accepted"}
 
 
@@ -1501,7 +1562,7 @@ def disconnect_bedrock_credentials() -> dict[str, str]:
     with STATE.lock:
         STATE.bedrock_access_key_id = None
         STATE.bedrock_region = None
-        fail_running_tasks_locked("hermes", "the AWS Bedrock connection was reset by the operator")
+        fail_running_turns_locked("hermes", "the AWS Bedrock connection was reset by the operator")
         STATE.add_agent_event("agent_runtime.linked_account_reset", None, {"agent_runtime": "hermes"})
     return {"status": "accepted"}
 
@@ -1512,8 +1573,8 @@ def reset_linked_account(body: Any) -> dict[str, str]:
         raise ApiError(HTTPStatus.BAD_REQUEST, "agent_runtime must be one of " + ", ".join(oauth_runtimes))
     runtime = body["agent_runtime"]
     with STATE.lock:
-        # The real reset fails running tasks as part of clearing the anchor.
-        fail_running_tasks_locked(runtime, "the linked provider account was reset by the operator")
+        # The real reset fails running turns as part of clearing the anchor.
+        fail_running_turns_locked(runtime, "the linked provider account was reset by the operator")
         STATE.logged_in[runtime] = False
         STATE.add_agent_event("agent_runtime.linked_account_reset", None, {"agent_runtime": runtime})
         if runtime == "codex":
@@ -1527,34 +1588,71 @@ def runtime_label(runtime: str) -> str:
     return {"codex": "Codex", "claude_code": "Claude", "hermes": "Hermes"}[runtime]
 
 
-def create_task(body: Any) -> dict[str, Any]:
-    if not isinstance(body, dict):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be an object")
-    input_message = str(body.get("input_message", "")).strip()
-    thread_id = str(body.get("thread_id", "")).strip()
-    if not input_message or not thread_id:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid task")
-    with STATE.lock:
-        stored: tuple[str, str, str] | None = None
-        for existing in STATE.tasks:
-            if existing["thread_id"] != thread_id:
-                continue
-            config = (existing["agent_runtime"], existing["model"], existing["effort"])
-            if stored is not None and stored != config:
-                raise ApiError(HTTPStatus.CONFLICT, "thread has inconsistent session configuration")
-            stored = config
+def thread_route(
+    method: str, thread_id: str, action: str | None, query: dict[str, list[str]], body: Any
+) -> dict[str, Any]:
+    if action is None and method == "GET":
+        if query:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "thread detail does not accept query parameters")
+        with STATE.lock:
+            progress_running_turns_locked()
+            thread = STATE.threads.get(thread_id)
+            if thread is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
+            return {"thread": STATE.public_thread(thread)}
+    if action == "messages" and method == "POST":
+        return send_thread_message(thread_id, body)
+    if action == "stop" and method == "POST":
+        return stop_thread(thread_id)
+    if action == "events" and method == "GET":
+        return list_thread_events(thread_id, query)
+    raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
 
+
+def send_thread_message(thread_id: str, body: Any) -> dict[str, Any]:
+    """The one write path for agent work, mirroring the real admin API: start
+    a turn on an idle thread (creating the thread on its first message) or
+    steer the thread's running turn. There is no queue — a message that cannot
+    run now is rejected and the caller decides."""
+    if not isinstance(body, dict):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
+    message = body.get("message")
+    if not isinstance(message, str) or not message:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "message must be a non-empty string")
+    with STATE.lock:
+        progress_running_turns_locked()
+        thread = STATE.threads.get(thread_id)
         fields = ("agent_runtime", "model", "effort")
         supplied = [field for field in fields if field in body]
-        if stored is not None:
-            if supplied:
-                raise ApiError(HTTPStatus.BAD_REQUEST, "session configuration must be omitted for existing thread")
-            agent_runtime, model, effort = stored
+        switching_session = False
+        stored: tuple[str, Any, Any] | None = None
+        if supplied and len(supplied) != len(fields):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "agent_runtime, model, and effort must be provided together")
+        if thread is not None:
+            stored = (thread["agent_runtime"], thread["model"], thread["effort"])
+            requested = (
+                (str(body["agent_runtime"]), body["model"], body["effort"])
+                if supplied
+                else stored
+            )
+            agent_runtime, model, effort = requested
+            if (
+                agent_runtime not in RUNTIMES
+                or session_config_error(agent_runtime, model, effort) is not None
+            ):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "invalid session configuration")
+            if thread.get("_running") and requested != stored:
+                raise ApiError(
+                    HTTPStatus.CONFLICT,
+                    "thread runtime, model, and effort can change only while the thread is idle",
+                )
+            switching_session = requested != stored
         else:
             if not supplied:
-                raise ApiError(HTTPStatus.BAD_REQUEST, "session configuration required for new thread")
-            if len(supplied) != len(fields):
-                raise ApiError(HTTPStatus.BAD_REQUEST, "session configuration must be provided together")
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "agent_runtime, model, and effort are required when starting a new thread",
+                )
             agent_runtime = str(body["agent_runtime"])
             model = body["model"]
             effort = body["effort"]
@@ -1562,127 +1660,133 @@ def create_task(body: Any) -> dict[str, Any]:
                 agent_runtime not in RUNTIMES
                 or session_config_error(agent_runtime, model, effort) is not None
             ):
-                raise ApiError(HTTPStatus.BAD_REQUEST, "invalid task")
+                raise ApiError(HTTPStatus.BAD_REQUEST, "invalid session configuration")
             assert isinstance(model, str) and isinstance(effort, str)
-        task_id = f"task_{STATE.next_task_number}"
-        STATE.next_task_number += 1
-        now = STATE.now()
-        task = {
-            "task_id": task_id,
-            "status": "queued",
-            "agent_runtime": agent_runtime,
-            "model": model,
-            "effort": effort,
-            "thread_id": thread_id,
-            "input_message": input_message,
-            "created_at": now,
-            "updated_at": now,
-        }
-        STATE.tasks.append(task)
-        start_queued_tasks_locked()
-        return STATE.public_task(task, queue_position=queue_position_locked(task))
-
-
-def active_tasks() -> list[dict[str, Any]]:
-    return [task for task in STATE.tasks if task["status"] in {"queued", "running"}]
-
-
-def queue_position_locked(task: dict[str, Any]) -> int:
-    """Mirror AdminAPI.md: running tasks report 0; queued tasks count from 1."""
-    if task["status"] == "running":
-        return 0
-    queued = [candidate for candidate in STATE.tasks if candidate["status"] == "queued"]
-    return queued.index(task) + 1
-
-
-def list_tasks() -> dict[str, Any]:
-    with STATE.lock:
-        progress_running_tasks_locked()
-        start_queued_tasks_locked()
-        return {"tasks": [STATE.public_task(task, queue_position_locked(task)) for task in active_tasks()]}
-
-
-def task_route(
-    method: str, task_id: str, action: str | None, query: dict[str, list[str]], body: Any
-) -> dict[str, Any]:
-    with STATE.lock:
-        progress_running_tasks_locked()
-        task = find_task(task_id)
-        if action is None and method == "GET":
-            return STATE.public_task(task)
-        if action == "events" and method == "GET":
-            return {"events": [event for event in STATE.task_events.get(task_id, []) if event["seq"] > since(query)]}
-        if action == "cancel" and method == "POST":
-            if task["status"] != "queued":
-                raise ApiError(HTTPStatus.CONFLICT, "only queued tasks can be cancelled")
-            task["status"] = "cancelled"
-            task["updated_at"] = STATE.now()
-            STATE.add_agent_event("task.cancelled", task_id, {})
-            return {"status": "accepted"}
-        if action == "kill" and method == "POST":
-            if task["status"] != "running":
-                raise ApiError(HTTPStatus.CONFLICT, "only running tasks can be killed")
-            task["status"] = "cancelled"
-            task["updated_at"] = STATE.now()
-            STATE.add_agent_event("task.cancelled", task_id, {"message": "runtime process terminated by operator"})
-            return {"status": "accepted"}
-        if action == "steer" and method == "POST":
-            if task["status"] != "running":
-                raise ApiError(HTTPStatus.CONFLICT, "only running tasks can be steered")
-            if task["agent_runtime"] == "hermes":
+        label = RUNTIME_LABELS[agent_runtime]
+        if thread is not None and thread.get("_running"):
+            if agent_runtime == "hermes":
                 raise ApiError(
                     HTTPStatus.CONFLICT,
-                    "Hermes tasks do not support steering; create a new task on the same thread_id",
+                    "Hermes cannot accept another message while running; wait for it to finish",
                 )
-            message = str((body or {}).get("steer_message", ""))
-            STATE.add_agent_event("task.message", task_id, {"message": message, "source": "user"})
-            return {"status": "accepted"}
-    raise ApiError(HTTPStatus.NOT_FOUND, "task route not found")
-
-
-def find_task(task_id: str) -> dict[str, Any]:
-    for task in STATE.tasks:
-        if task["task_id"] == task_id:
-            return task
-    raise ApiError(HTTPStatus.NOT_FOUND, "task not found")
-
-
-def list_threads() -> dict[str, Any]:
-    with STATE.lock:
-        progress_running_tasks_locked()
-        start_queued_tasks_locked()
-        threads: dict[tuple[str, str], dict[str, Any]] = {}
-        for task in STATE.tasks:
-            key = (task["thread_id"], task["agent_runtime"])
-            entry = threads.setdefault(
-                key,
+            STATE.add_agent_event("thread.message", thread_id, {"message": message, "source": "user"})
+            thread["last_used_at"] = STATE.now()
+            return {"status": "accepted", "thread": STATE.public_thread(thread)}
+        status = STATE.runtime_status(agent_runtime)
+        if status == "deactivated":
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                f"{label} runtime is deactivated; enable its provider under Internet Access and Tools",
+            )
+        if status != "active":
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                f"{label} runtime is {status}; messages run only while it is active",
+            )
+        running = sum(
+            1
+            for candidate in STATE.threads.values()
+            if candidate.get("_running") and candidate["agent_runtime"] == agent_runtime
+        )
+        if running >= TURN_LIMIT_PER_RUNTIME:
+            raise ApiError(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                f"{label} runtime is already running {TURN_LIMIT_PER_RUNTIME} concurrent threads; retry when one finishes",
+            )
+        if thread is None:
+            thread = {
+                "thread_id": thread_id,
+                "agent_runtime": agent_runtime,
+                "model": model,
+                "effort": effort,
+                "last_used_at": STATE.now(),
+            }
+            STATE.threads[thread_id] = thread
+        elif switching_session:
+            assert stored is not None
+            previous_runtime, previous_model, previous_effort = stored
+            thread["agent_runtime"] = agent_runtime
+            thread["model"] = model
+            thread["effort"] = effort
+            title = (
+                "Agent provider changed"
+                if previous_runtime != agent_runtime
+                else "Agent session changed"
+            )
+            STATE.add_agent_event(
+                "thread.activity",
+                thread_id,
                 {
-                    "thread_id": task["thread_id"],
-                    "agent_runtime": task["agent_runtime"],
-                    "model": task["model"],
-                    "effort": task["effort"],
-                    "last_used_at": task["updated_at"],
-                    "task_count": 0,
-                    "active_tasks": [],
+                    "activity": {
+                        "provider": "kern",
+                        "activity_id": "session-change",
+                        "kind": "status",
+                        "phase": "completed",
+                        "title": title,
+                        "status": "completed",
+                        "detail": (
+                            f"{RUNTIME_LABELS[previous_runtime]} · {previous_model} · {previous_effort}"
+                            f" → {RUNTIME_LABELS[agent_runtime]} · {model} · {effort}"
+                        ),
+                    }
                 },
             )
-            entry["last_used_at"] = max(entry["last_used_at"], task["updated_at"])
-            entry["task_count"] += 1
-            if task["status"] in {"queued", "running"}:
-                entry["active_tasks"].append({"task_id": task["task_id"], "status": task["status"]})
-        return {"threads": sorted(threads.values(), key=lambda item: item["last_used_at"], reverse=True)}
+        thread["last_used_at"] = STATE.now()
+        thread["_running"] = True
+        thread["_started_monotonic"] = time.monotonic()
+        thread["_progress_emitted"] = 0
+        thread["_turn_number"] = STATE.next_turn_number
+        thread["_input_message"] = message
+        STATE.next_turn_number += 1
+        STATE.add_agent_event("thread.message", thread_id, {"message": message, "source": "user"})
+        return {"status": "accepted", "thread": STATE.public_thread(thread)}
 
 
-def list_thread_tasks(thread_id: str) -> dict[str, Any]:
+def stop_thread(thread_id: str) -> dict[str, str]:
     with STATE.lock:
-        progress_running_tasks_locked()
-        tasks = [STATE.public_task(task) for task in STATE.tasks if task["thread_id"] == thread_id]
-        return {"tasks": list(reversed(tasks))}
+        progress_running_turns_locked()
+        thread = STATE.threads.get(thread_id)
+        if thread is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
+        if not thread.get("_running"):
+            raise ApiError(HTTPStatus.CONFLICT, "the thread has no running work")
+        finish_turn_locked(thread)
+        STATE.add_agent_event("thread.stopped", thread_id, {})
+        return {"status": "accepted"}
+
+
+def list_threads(query: dict[str, list[str]]) -> dict[str, Any]:
+    unsupported = sorted(set(query) - {"before", "limit"})
+    if unsupported:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"unsupported thread list query parameter: {unsupported[0]}")
+    limit = int((query.get("limit") or ["100"])[0])
+    if not 1 <= limit <= 100:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "limit must be between 1 and 100")
+    before = 0
+    if query.get("before"):
+        cursor = query["before"][0]
+        prefix = "thread-page:"
+        if not cursor.startswith(prefix) or not cursor.removeprefix(prefix).isdigit():
+            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid thread list cursor")
+        before = int(cursor.removeprefix(prefix))
+    with STATE.lock:
+        progress_running_turns_locked()
+        threads = [STATE.public_thread(thread) for thread in STATE.threads.values()]
+        ordered = sorted(
+            threads,
+            key=lambda item: (item["last_used_at"], item["agent_runtime"], item["thread_id"]),
+            reverse=True,
+        )
+        response: dict[str, Any] = {"threads": ordered[before:before + limit]}
+        next_offset = before + limit
+        if next_offset < len(ordered):
+            response["next_before"] = f"thread-page:{next_offset}"
+        return response
 
 
 def list_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
     """A chronological thread-event page around a forward or backward cursor."""
-    unsupported = sorted(set(query) - {"since", "before", "limit"})
+    unsupported = sorted(set(query) - {"since", "before", "limit", "message_bytes"})
     if unsupported:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"unsupported thread event query parameter: {unsupported[0]}")
     since = int(query["since"][0]) if query.get("since") else None
@@ -1691,14 +1795,12 @@ def list_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[str,
         raise ApiError(HTTPStatus.BAD_REQUEST, "since and before cannot be combined")
     limit = int((query.get("limit") or ["100"])[0])
     with STATE.lock:
-        progress_running_tasks_locked()
-        start_queued_tasks_locked()
-        task_ids = {task["task_id"] for task in STATE.tasks if task["thread_id"] == thread_id}
+        progress_running_turns_locked()
         events = [
             event
             for event in STATE.agent_events
             if (
-                event["task_id"] in task_ids
+                event["thread_id"] == thread_id
                 and (since is None or event["seq"] > since)
                 and (before is None or event["seq"] < before)
             )
@@ -1729,8 +1831,7 @@ def event_page_query(
 
 def agent_events_before(before: int | None, limit: int) -> list[dict[str, Any]]:
     with STATE.lock:
-        progress_running_tasks_locked()
-        start_queued_tasks_locked()
+        progress_running_turns_locked()
         events = list(reversed(STATE.agent_events))
         if before is not None:
             events = [event for event in events if event["seq"] < before]
@@ -1739,7 +1840,7 @@ def agent_events_before(before: int | None, limit: int) -> list[dict[str, Any]]:
 
 def network_events_before(before: int | None, decision: str, limit: int) -> list[dict[str, Any]]:
     with STATE.lock:
-        progress_running_tasks_locked()
+        progress_running_turns_locked()
         events = list(reversed(STATE.network_events))
         if before is not None:
             events = [event for event in events if event["seq"] < before]
@@ -1760,9 +1861,28 @@ def tool_events_before(before: int | None, limit: int) -> list[dict[str, Any]]:
         ]
 
 
+def host_errors_before(
+    before: int | None, limit: int, service: str | None
+) -> list[dict[str, Any]]:
+    with STATE.lock:
+        errors = list(reversed(STATE.host_errors))
+        if before is not None:
+            errors = [error for error in errors if error["seq"] < before]
+        if service is not None:
+            errors = [error for error in errors if error["service"] == service]
+        return [
+            {
+                key: value
+                for key, value in error.items()
+                if key not in {"traceback", "context", "fingerprint"}
+            }
+            for error in errors[:limit]
+        ]
+
+
 def agent_processes() -> dict[str, Any]:
     with STATE.lock:
-        progress_running_tasks_locked()
+        progress_running_turns_locked()
         processes: list[dict[str, Any]] = []
 
         def add_process(
@@ -1793,9 +1913,9 @@ def agent_processes() -> dict[str, Any]:
         if STATE.logged_in.get("claude_code"):
             add_process(4410, "claude", "claude -p /usage --output-format json", 96, 9)
 
-        running = [task for task in STATE.tasks if task["status"] == "running"]
-        for index, task in enumerate(running, start=1):
-            runtime = task["agent_runtime"]
+        running = [thread for thread in STATE.threads.values() if thread.get("_running")]
+        for index, thread in enumerate(running, start=1):
+            runtime = thread["agent_runtime"]
             base_pid = 4500 + (index * 10)
             if runtime == "codex":
                 add_process(base_pid, "codex", "codex exec --json", 142, 31)
@@ -1848,6 +1968,7 @@ def list_agent_files(path: str) -> dict[str, Any]:
                 "modified_at": ago(300),
             },
             {"name": "notes.txt", "path": "/workspace/notes.txt", "type": "file", "size_bytes": 512, "modified_at": ago(84)},
+            {"name": "screenshot.png", "path": "/workspace/screenshot.png", "type": "file", "size_bytes": 68, "modified_at": ago(84)},
         ],
         "/workspace/acme-web": [
             {"name": ".git", "path": "/workspace/acme-web/.git", "type": "directory", "modified_at": ago(84)},
@@ -2131,12 +2252,11 @@ def replace_policy(body: Any) -> dict[str, Any]:
             previous = previous_statuses[runtime]
             if status == "deactivated" and previous != "deactivated":
                 STATE.add_agent_event("agent_runtime.deactivated", None, {"agent_runtime": runtime})
-                fail_running_tasks_locked(runtime, "agent runtime deactivated because its managed network provider is disabled")
+                fail_running_turns_locked(runtime, "agent runtime deactivated because its managed network provider is disabled")
             elif previous == "deactivated" and status != "deactivated":
                 STATE.add_agent_event("agent_runtime.awaiting_login", None, {"agent_runtime": runtime})
         if not previously_required or not previous_repositories:
             maybe_hold_github_push_locked()
-        start_queued_tasks_locked()
         return {"network_controls": STATE.policy}
 
 
@@ -2148,7 +2268,7 @@ def github_integration_locked() -> dict[str, Any]:
 
 def maybe_hold_github_push_locked() -> None:
     """Simulate the .github approval gate catching a push the moment the gate
-    turns on: like the seeded tasks, this gives the UI a realistic held push to
+    turns on: like the seeded turns, this gives the UI a realistic held push to
     decide on without a real agent pushing."""
     github = github_integration_locked()
     if github.get("require_dot_github_approval") is not True:
@@ -2199,101 +2319,58 @@ def complete_due_codex_login_locked() -> None:
     STATE.codex_oauth = {}
     STATE.add_agent_event("agent_runtime.login_completed", None, {"agent_runtime": "codex"})
     STATE.add_agent_event("agent_runtime.active", None, {"agent_runtime": "codex"})
-    start_queued_tasks_locked()
 
 
-def fail_running_tasks_locked(runtime: str, error_message: str) -> None:
-    now = STATE.now()
-    for task in STATE.tasks:
-        if task["agent_runtime"] == runtime and task["status"] == "running":
-            task["status"] = "failed"
-            task["error_message"] = error_message
-            task["updated_at"] = now
-            STATE.add_agent_event("task.failed", task["task_id"], {"error_message": error_message})
+def fail_running_turns_locked(runtime: str, error_message: str) -> None:
+    for thread in STATE.threads.values():
+        if thread["agent_runtime"] == runtime and thread.get("_running"):
+            finish_turn_locked(thread)
+            STATE.add_agent_event("thread.error", thread["thread_id"], {"error_message": error_message})
 
 
-def task_duration_seconds(task_id: str) -> float:
-    number = int(task_id.rsplit("_", 1)[-1]) if task_id.rsplit("_", 1)[-1].isdigit() else 0
-    return 8.0 + (number * 3) % 7
+def finish_turn_locked(thread: dict[str, Any]) -> None:
+    """Clear a thread's live-turn state; the caller appends the terminal event."""
+    thread["last_used_at"] = STATE.now()
+    for key in ("_running", "_started_monotonic", "_progress_emitted", "_turn_number", "_input_message"):
+        thread.pop(key, None)
 
 
-def start_queued_tasks_locked() -> None:
-    """Claim queued tasks the way the real orchestrator does.
-
-    One task per thread at a time, oldest first, capped per runtime and in
-    total. Claimed tasks run for several seconds; ``progress_running_tasks_locked``
-    moves them along on subsequent polls.
-    """
-    running_threads = {task["thread_id"] for task in STATE.tasks if task["status"] == "running"}
-    running_by_runtime = {runtime: 0 for runtime in RUNTIMES}
-    for task in STATE.tasks:
-        if task["status"] == "running":
-            running_by_runtime[task["agent_runtime"]] += 1
-    for task in STATE.tasks:
-        if task["status"] != "queued" or STATE.runtime_status(task["agent_runtime"]) != "active":
-            continue
-        if task["thread_id"] in running_threads:
-            continue
-        if running_by_runtime[task["agent_runtime"]] >= MAX_RUNNING_PER_RUNTIME:
-            continue
-        if sum(running_by_runtime.values()) >= MAX_RUNNING_TOTAL:
-            break
-        now = STATE.now()
-        task["status"] = "running"
-        task["started_at"] = now
-        task["updated_at"] = now
-        task["_started_monotonic"] = time.monotonic()
-        task["_progress_emitted"] = 0
-        running_threads.add(task["thread_id"])
-        running_by_runtime[task["agent_runtime"]] += 1
-        STATE.add_agent_event("task.started", task["task_id"], {})
-        STATE.add_agent_event(
-            "task.message",
-            task["task_id"],
-            {"message": task["input_message"], "source": "user"},
-        )
+def turn_duration_seconds(turn_number: int) -> float:
+    return 8.0 + (turn_number * 3) % 7
 
 
-def progress_running_tasks_locked() -> None:
-    """Advance running tasks based on elapsed wall time.
+def progress_running_turns_locked() -> None:
+    """Advance running turns based on elapsed wall time.
 
     Emits the scripted progress messages (plus matching provider network
-    events) as their milestones pass, then completes the task with an output
-    that echoes the request.
+    events) as their milestones pass, then completes the turn with an output
+    that echoes the request. Seeded open turns carry no timer and never
+    progress on their own.
     """
-    for task in STATE.tasks:
-        if task["status"] != "running" or "_started_monotonic" not in task:
+    for thread in STATE.threads.values():
+        if not thread.get("_running") or "_started_monotonic" not in thread:
             continue
-        duration = task_duration_seconds(task["task_id"])
-        fraction = (time.monotonic() - task["_started_monotonic"]) / duration
-        emitted = task["_progress_emitted"]
+        duration = turn_duration_seconds(thread["_turn_number"])
+        fraction = (time.monotonic() - thread["_started_monotonic"]) / duration
+        emitted = thread["_progress_emitted"]
         for milestone, message in PROGRESS_SCRIPT[emitted:]:
             if fraction < milestone:
                 break
-            STATE.add_agent_event("task.message", task["task_id"], {"message": message, "source": "agent"})
-            host, api_path = PROVIDER_TRAFFIC[task["agent_runtime"]]
+            STATE.add_agent_event("thread.message", thread["thread_id"], {"message": message, "source": "agent"})
+            host, api_path = PROVIDER_TRAFFIC[thread["agent_runtime"]]
             STATE.add_network_event("POST", host, api_path, "allowed")
-            task["_progress_emitted"] += 1
+            thread["_progress_emitted"] += 1
         if fraction >= 1.0:
-            now = STATE.now()
-            summary = task["input_message"].strip().splitlines()[0][:80].rstrip(".")
-            task["status"] = "completed"
-            task["output_message"] = (
-                f"Done: {summary}.\nChecks passed; see the thread events for the step-by-step log."
+            summary = thread["_input_message"].strip().splitlines()[0][:80].rstrip(".")
+            STATE.add_agent_event(
+                "thread.message",
+                thread["thread_id"],
+                {
+                    "message": f"Done: {summary}.\nChecks passed; see the thread events for the step-by-step log.",
+                    "source": "agent",
+                },
             )
-            task["completed_at"] = now
-            task["updated_at"] = now
-            task.pop("_started_monotonic", None)
-            task.pop("_progress_emitted", None)
-            STATE.add_agent_event("task.completed", task["task_id"], {})
-
-
-def since(query: dict[str, list[str]]) -> int:
-    values = query.get("since", ["0"])
-    try:
-        return int(values[0])
-    except ValueError:
-        return 0
+            finish_turn_locked(thread)
 
 
 def one(query: dict[str, list[str]], key: str) -> str | None:
@@ -2310,18 +2387,22 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--demo",
         action="store_true",
-        help="Start pre-configured (GitHub enabled with repositories, an App credential, manual domain rules) "
-        "for interactive exploration; the UI smoke needs the default empty state.",
+        help="Start pre-configured for interactive exploration, including active agent providers with "
+        "representative usage; the UI smoke needs the default empty state.",
     )
     return parser.parse_args(argv)
 
 
 def seed_demo_state() -> None:
-    """A configured host for interactive exploration: GitHub enabled with
-    repositories cycling through every audit outcome, a GitHub App
-    credential, and a couple of manual domain rules."""
+    """A configured host for interactive exploration.
+
+    All three agent providers start active so their representative quota,
+    token, and cost values are visible immediately in the runtime toolbar.
+    """
     STATE.policy = {
         "network_integrations": {
+            "openai": {"enabled": True},
+            "claude": {"enabled": True},
             "github": {
                 "enabled": True,
                 "write_repositories": [
@@ -2342,6 +2423,7 @@ def seed_demo_state() -> None:
             },
         },
     }
+    STATE.logged_in.update({"codex": True, "claude_code": True})
     STATE.github_credential = {
         "mode": "app",
         "app_id": "12345",

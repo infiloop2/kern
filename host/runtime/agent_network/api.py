@@ -21,7 +21,7 @@ from typing import Any
 
 from host.constants import AGENT_NETWORK_SOCKET_PATH
 from host.network_integrations import registry
-from host.runtime.core import network_policy, state
+from host.runtime.core import host_errors, network_policy, state
 
 DEFAULT_SOCKET_PATH = AGENT_NETWORK_SOCKET_PATH
 SOCKET_PATH = os.environ.get("KERN_AGENT_NETWORK_SOCKET", DEFAULT_SOCKET_PATH)
@@ -197,7 +197,8 @@ class NetworkIntrospectionRequestHandler(BaseHTTPRequestHandler):
                 result = call_action(body.get("name"), body.get("input"))
             except NetworkToolCallError as exc:
                 result = {"status": "failed", "error": str(exc)}
-            except Exception:
+            except Exception as exc:
+                host_errors.report_unexpected("agent_network.call", exc)
                 result = {"status": "failed", "error": "Network introspection failed."}
             self._send_json(HTTPStatus.OK, result)
         finally:

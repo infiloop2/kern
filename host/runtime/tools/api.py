@@ -46,7 +46,7 @@ from typing import Any, BinaryIO, cast
 from urllib.parse import quote, unquote
 
 from host.constants import TOOLS_SOCKET_PATH
-from host.runtime.core import state
+from host.runtime.core import host_errors, state
 from host.runtime.tools import assets as tool_assets, tools_host
 from host.tools import OpenedStreamingAsset, StreamingAssetError
 
@@ -470,7 +470,12 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
             error = str(exc) or "Tool asset stream failed."
         except ValueError:
             error = "Tool returned invalid streaming asset metadata."
-        except Exception:
+        except Exception as exc:
+            host_errors.report_unexpected(
+                "tools.streaming_asset",
+                exc,
+                context={"tool_id": streaming.tool_id, "action_id": streaming.action},
+            )
             error = "Tool asset stream failed."
 
         tools_host.finish_streaming_action(streaming, error)
@@ -559,9 +564,10 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
                 )
             except tools_host.ToolCallError as exc:
                 action_result = {"status": "failed", "error": str(exc), "reconnect_required": False}
-            except Exception:
+            except Exception as exc:
                 # Tool packages map their own errors; anything else must not leak
                 # internals to the agent.
+                host_errors.report_unexpected("tools.agent_call", exc)
                 action_result = {"status": "failed", "error": "Tool call failed.", "reconnect_required": False}
             if isinstance(action_result, tools_host.StreamingAction):
                 self._send_streaming_action(action_result)
@@ -622,7 +628,12 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
             except tool_assets.AssetError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
-            except Exception:
+            except Exception as exc:
+                host_errors.report_unexpected(
+                    "tools.asset_staging",
+                    exc,
+                    context={"tool_id": tool_id, "asset_kind": kind},
+                )
                 self._send_json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {"error": f"{kind.title()} staging failed."},

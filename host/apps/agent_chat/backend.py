@@ -1,8 +1,9 @@
 """Agent Chat app backend.
 
-The app owns the Agent Chat thread index, task references, and archive state.
-Host task contents and execution remain host-owned and are accessed through the
-host admin API by this backend.
+The app owns the Agent Chat thread index (names, archive state). Thread
+contents and execution remain host-owned and are accessed through the host
+admin API by this backend: the host synchronously accepts each message into
+the thread's current agent session.
 """
 
 from __future__ import annotations
@@ -19,8 +20,13 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from host.constants import APP_BACKEND_ADMIN_SOCKET_PATH, LOOPBACK, MAX_REQUEST_BODY_BYTES as ADMIN_MAX_REQUEST_BODY_BYTES
-from host.runtime.core import db
+from host.constants import (
+    APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS,
+    APP_BACKEND_ADMIN_SOCKET_PATH,
+    LOOPBACK,
+    MAX_REQUEST_BODY_BYTES as ADMIN_MAX_REQUEST_BODY_BYTES,
+)
+from host.runtime.core import db, host_errors
 from host.session_options import public_session_options, recorded_session_config, session_config_error
 
 
@@ -29,19 +35,24 @@ PORT = int(os.environ.get("KERN_APP_PORT", "7450"))
 DB_SCHEMA = os.environ.get("KERN_APP_DB_SCHEMA", "app_agent_chat")
 ADMIN_API_SOCKET = os.environ.get("KERN_APP_ADMIN_API_SOCKET", APP_BACKEND_ADMIN_SOCKET_PATH)
 MAX_REQUEST_BODY_BYTES = 128 * 1024
-# Admin API responses (a thread's full task history) can exceed the inbound
-# request-body cap; size the response cap to the admin API's own body limit.
+# Admin API responses can exceed the inbound request-body cap; size the
+# response cap to the admin API's own body limit.
 MAX_ADMIN_RESPONSE_BYTES = ADMIN_MAX_REQUEST_BODY_BYTES
 APP_ID = "agent_chat"
 RUNTIME_OPTIONS = {"codex", "claude_code", "hermes"}
 # Keep each proxy response comfortably below the fixed 1 MiB bridge cap.
 # Six 120 KiB event text budgets leave more than 300 KiB for JSON envelopes
 # and bounded activity metadata. The UI drains all pages, so the smaller page
-# does not skip events. Full task messages remain stored by the host.
-THREAD_TASK_MESSAGE_BYTES = 1024
+# does not skip events. Full messages remain stored by the host.
 THREAD_EVENT_MESSAGE_BYTES = 120 * 1024
 THREAD_EVENT_PAGE = 6
+THREAD_LIST_PAGE = 100
 MESSAGE_SEND_LOCK = threading.Lock()
+# A live execution has brief startup and shutdown windows where it cannot
+# accept another message. The host marks those safe-to-retry conflicts.
+SEND_RETRY_MARKER = "retry shortly"
+SEND_BUSY_RETRIES = 21
+SEND_BUSY_RETRY_DELAY_SECONDS = 0.5
 
 
 class AppError(Exception):
@@ -89,14 +100,6 @@ class Handler(BaseHTTPRequestHandler):
                         raise AppError(HTTPStatus.BAD_REQUEST, "archived must be true or false")
                     archived = archived_values[0] == "true"
                 response = list_app_threads(archived=archived)
-            elif method == "GET" and path.startswith("/threads/") and path.endswith("/tasks"):
-                parts = path.strip("/").split("/")
-                if len(parts) != 3:
-                    raise AppError(HTTPStatus.NOT_FOUND, "route not found")
-                response = list_app_thread_tasks(
-                    _path_segment(parts[1]),
-                    include_archived=True,
-                )
             elif method == "GET" and path.startswith("/threads/") and path.endswith("/events"):
                 parts = path.strip("/").split("/")
                 if len(parts) != 3:
@@ -112,12 +115,17 @@ class Handler(BaseHTTPRequestHandler):
                 parts = path.strip("/").split("/")
                 if len(parts) != 3:
                     raise AppError(HTTPStatus.NOT_FOUND, "route not found")
-                response = {
-                    "thread": set_app_thread_archived(
-                        _path_segment(parts[1]),
-                        archived=parts[2] == "archive",
-                    )
-                }
+                # Serialize with sends: a send holds this lock from its
+                # archived-state check through the host call, so an archive
+                # cannot slip between the check and the send and revive a
+                # read-only thread.
+                with MESSAGE_SEND_LOCK:
+                    response = {
+                        "thread": set_app_thread_archived(
+                            _path_segment(parts[1]),
+                            archived=parts[2] == "archive",
+                        )
+                    }
             elif method == "PUT" and path.startswith("/threads/") and path.endswith("/name"):
                 parts = path.strip("/").split("/")
                 if len(parts) != 3:
@@ -127,20 +135,27 @@ class Handler(BaseHTTPRequestHandler):
                 }
             elif method == "POST" and path == "/messages":
                 response = send_app_message(body)
-            elif method == "POST" and path.startswith("/tasks/"):
+            elif method == "POST" and path.startswith("/threads/") and path.endswith("/stop"):
                 parts = path.strip("/").split("/")
-                if len(parts) != 3 or parts[2] not in {"cancel", "kill"}:
+                if len(parts) != 3:
                     raise AppError(HTTPStatus.NOT_FOUND, "route not found")
-                task_id = _path_segment(parts[1])
-                _require_app_task(task_id)
-                response = call_admin_api("POST", f"/v1/tasks/{quote(task_id, safe='')}/{parts[2]}", body)
+                thread_id = _path_segment(parts[1])
+                _require_app_thread(thread_id, include_archived=True)
+                response = call_admin_api(
+                    "POST", f"/v1/threads/{quote(thread_id, safe='')}/stop", body
+                )
             else:
                 raise AppError(HTTPStatus.NOT_FOUND, "route not found")
             self._send_json(HTTPStatus.OK, response)
         except AppError as exc:
             self._send_json(exc.status, {"error": {"message": exc.message}})
         except Exception as exc:
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"message": str(exc)}})
+            host_errors.report_unexpected(
+                "agent_chat.request",
+                exc,
+                context={"method": method, "route": urlparse(self.path).path},
+            )
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"message": "app request failed"}})
 
     def _require_host_proxy(self) -> None:
         if self.headers.get("X-Kern-App-Proxy") != APP_ID:
@@ -178,23 +193,17 @@ def list_app_threads(*, archived: bool = False) -> dict[str, Any]:
     session config and live status for exactly this app's threads, so the
     index costs one socket round trip regardless of thread count.
 
-    A thread is shown only when it is unarchived and has at least one recorded
-    task: the host stays the source of truth for runtime/model/effort and
-    active status, but task_count and active ids are taken from the app's own
-    `thread_tasks`, so an orphaned host task (created then cancelled when
-    `_record_app_task` failed) never inflates a count or resurrects a thread
-    the app never finished recording. A reservation that never got a task has
-    no `thread_tasks` rows and stays invisible."""
+    A thread is shown only when it is unarchived and known to the host: the
+    host row appears with the thread's first message, so a name reservation
+    whose send never went through stays invisible. The host stays the source
+    of truth for runtime/model/effort and live status; the app contributes
+    names and archive state."""
     recorded = _recorded_threads(archived=archived)
-    response = call_admin_api("GET", "/v1/threads")
-    summaries = response.get("threads")
-    if not isinstance(summaries, list):
-        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread list")
+    summaries = _host_thread_summaries()
     app_threads = [
         _app_thread_summary(
             summary,
-            recorded[summary["thread_id"]][0],
-            name=recorded[summary["thread_id"]][1],
+            name=recorded[summary["thread_id"]],
             archived=archived,
         )
         for summary in summaries
@@ -204,43 +213,54 @@ def list_app_threads(*, archived: bool = False) -> dict[str, Any]:
     return {"threads": app_threads}
 
 
-def _recorded_threads(*, archived: bool) -> dict[str, tuple[set[str], str]]:
-    """Threads in one archive state mapped to recorded task ids and names.
+def _host_thread_summaries() -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    before: str | None = None
+    seen_cursors: set[str] = set()
+    while True:
+        path = f"/v1/threads?limit={THREAD_LIST_PAGE}"
+        if before is not None:
+            path += f"&before={quote(before, safe='')}"
+        response = call_admin_api("GET", path)
+        page = response.get("threads")
+        if not isinstance(page, list) or not all(isinstance(item, dict) for item in page):
+            raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread list")
+        summaries.extend(page)
+        next_before = response.get("next_before")
+        if next_before is None:
+            return summaries
+        if (
+            not isinstance(next_before, str)
+            or not next_before
+            or next_before in seen_cursors
+        ):
+            raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread cursor")
+        seen_cursors.add(next_before)
+        before = next_before
 
-    Only threads with at least one recorded task appear, matching the index
-    rule. Threads without a custom name keep showing their stable host id.
-    """
+
+def _recorded_threads(*, archived: bool) -> dict[str, str]:
+    """Threads in one archive state mapped to their display names. Threads
+    without a custom name keep showing their stable host id."""
     with db.transaction() as cur:
         _set_search_path(cur)
         cur.execute(
-            "SELECT thread_tasks.thread_id, thread_tasks.task_id,"
-            " COALESCE(threads.name, thread_tasks.thread_id)"
-            " FROM thread_tasks JOIN threads ON threads.thread_id = thread_tasks.thread_id"
-            " WHERE threads.archived = %s",
+            "SELECT thread_id, COALESCE(name, thread_id) FROM threads WHERE archived = %s",
             (archived,),
         )
         rows = cur.fetchall()
-    task_ids: dict[str, set[str]] = {}
-    names: dict[str, str] = {}
-    for thread_id, task_id, name in rows:
-        task_ids.setdefault(thread_id, set()).add(task_id)
-        names[thread_id] = name
-    return {
-        thread_id: (ids, names[thread_id])
-        for thread_id, ids in task_ids.items()
-    }
+    return {thread_id: name for thread_id, name in rows}
 
 
 def _app_thread_summary(
     summary: dict[str, Any],
-    recorded_task_ids: set[str],
     *,
     name: str,
     archived: bool,
 ) -> dict[str, Any]:
-    runtime, model, effort = _host_task_session_config(summary)
-    active_tasks = summary.get("active_tasks")
-    if not isinstance(active_tasks, list):
+    runtime, model, effort = _host_thread_session_config(summary)
+    status = summary.get("status")
+    if status not in {"idle", "running"}:
         raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread summary")
     return {
         "thread_id": _required_response_text(summary.get("thread_id"), "thread_id"),
@@ -250,35 +270,8 @@ def _app_thread_summary(
         "effort": effort,
         "archived": archived,
         "last_used_at": str(summary.get("last_used_at") or ""),
-        # Count and active ids come from the app's recorded tasks, never the
-        # host's raw totals, so an orphaned host task cannot inflate them.
-        "task_count": len(recorded_task_ids),
-        "active_tasks": [
-            {"task_id": task["task_id"], "status": task["status"]}
-            for task in active_tasks
-            if isinstance(task, dict)
-            and isinstance(task.get("task_id"), str)
-            and isinstance(task.get("status"), str)
-            and task["task_id"] in recorded_task_ids
-        ],
+        "status": status,
     }
-
-
-def list_app_thread_tasks(
-    thread_id: str,
-    *,
-    include_archived: bool = False,
-) -> dict[str, Any]:
-    _require_app_thread(thread_id, include_archived=include_archived)
-    known_task_ids = _app_task_ids_for_thread(thread_id)
-    response = call_admin_api(
-        "GET",
-        f"/v1/threads/{quote(thread_id, safe='')}/tasks?message_bytes={THREAD_TASK_MESSAGE_BYTES}",
-    )
-    host_tasks = response.get("tasks", [])
-    if not isinstance(host_tasks, list):
-        raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid task list")
-    return {"tasks": [task for task in host_tasks if isinstance(task, dict) and task.get("task_id") in known_task_ids]}
 
 
 def list_app_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -286,9 +279,8 @@ def list_app_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[
 
     An uncursored request returns the latest page, ``before`` loads earlier
     history, and ``since`` keeps a loaded tail current. Every event under the
-    app-scoped thread comes from a task this app created, so the stream passes
-    through unfiltered; the UI groups events by task and ignores ids it does
-    not know.
+    app-scoped thread comes from a message this app sent, so the stream passes
+    through unfiltered as one chronological thread history.
     """
     _require_app_thread(thread_id, include_archived=True)
     since_values = query.get("since") or []
@@ -316,100 +308,63 @@ def list_app_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[
 
 
 def send_app_message(body: Any) -> dict[str, Any]:
-    """Steer current work or start one new turn, decided from host state.
-
-    The browser never chooses between those operations. Serializing sends
-    prevents double submissions from creating parallel queued tasks, while a
-    rejected steer is retried against fresh task state so completion races
-    become a new turn instead of losing the operator's message.
-    """
+    """Send one message into the thread's agent session. The browser never
+    chooses between starting work and directing work already in progress.
+    Serializing sends prevents double submissions; safe-to-retry startup and
+    shutdown conflicts are retried here so lifecycle races do not surface as
+    dropped messages."""
     if not isinstance(body, dict):
         raise AppError(HTTPStatus.BAD_REQUEST, "message request must be an object")
-    _required_text(body.get("input_message"), "input_message")
+    message = _required_text(body.get("input_message"), "input_message")
     with MESSAGE_SEND_LOCK:
-        if "thread_id" not in body:
-            return {**create_app_task(body), "action": "created"}
-        thread_id = _required_text(body.get("thread_id"), "thread_id")
-        for _attempt in range(2):
-            thread_tasks = list_app_thread_tasks(thread_id).get("tasks", [])
-            running = [
-                task for task in thread_tasks
-                if isinstance(task, dict) and task.get("status") == "running"
-            ]
-            if running:
-                task = max(
-                    running,
-                    key=lambda item: str(item.get("created_at") or ""),
-                )
-                task_id = _required_response_text(task.get("task_id"), "task_id")
-                try:
-                    call_admin_api(
-                        "POST",
-                        f"/v1/tasks/{quote(task_id, safe='')}/steer",
-                        {"steer_message": body["input_message"]},
-                    )
-                except AppError as exc:
-                    if exc.status == HTTPStatus.CONFLICT:
-                        continue
-                    raise
-                return {
-                    "action": "steered",
-                    "task_id": task_id,
-                    "thread_id": thread_id,
-                }
-            if any(
-                isinstance(task, dict) and task.get("status") == "queued"
-                for task in thread_tasks
-            ):
-                raise AppError(
-                    HTTPStatus.CONFLICT,
-                    "the task is starting; wait for it to begin before sending a follow-up",
-                )
-            return {**create_app_task(body), "action": "created"}
-        raise AppError(
-            HTTPStatus.CONFLICT,
-            "the task changed state while sending; retry the message",
-        )
+        if "thread_id" in body:
+            thread_id = _required_text(body.get("thread_id"), "thread_id")
+        else:
+            # A request without thread_id starts a new thread: the app owns
+            # thread naming, so the operator never types an id.
+            thread_id = _reserve_generated_thread_id()
+        _require_sendable_thread(thread_id)
+        host_request: dict[str, Any] = {"message": message}
+        for field in ("agent_runtime", "model", "effort"):
+            if field in body:
+                host_request[field] = body[field]
+        _requested_session_config(body)
+        response = _send_with_busy_retry(thread_id, host_request)
+        status = response.get("status")
+        if status != "accepted":
+            raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid send status")
+        return {"action": "accepted", "thread_id": thread_id}
 
 
-def create_app_task(body: Any) -> dict[str, Any]:
-    if not isinstance(body, dict):
-        raise AppError(HTTPStatus.BAD_REQUEST, "task request must be an object")
-    if "thread_id" in body:
-        thread_id = _required_text(body.get("thread_id"), "thread_id")
-    else:
-        # A request without thread_id starts a new thread: the app owns thread
-        # naming, so the operator never types an id.
-        thread_id = _reserve_generated_thread_id()
-        body = {**body, "thread_id": thread_id}
-    requested_config = _requested_session_config(body)
-    response = call_admin_api("POST", "/v1/tasks", body)
-    task_id = _required_response_text(response.get("task_id"), "task_id")
-    try:
-        response_thread_id = _required_response_text(response.get("thread_id"), "thread_id")
-        response_config = _host_task_session_config(response)
-        if response_thread_id != thread_id or (
-            requested_config is not None and response_config != requested_config
-        ):
-            raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned mismatched task reference")
-        _record_app_task(thread_id, task_id)
-    except Exception:
-        _cancel_orphaned_host_task(task_id)
-        raise
-    return response
-
-
-def _cancel_orphaned_host_task(task_id: str) -> None:
-    # Cancel covers a still-queued task; kill covers one a worker claimed in
-    # the create-to-conflict window, so the orphan never keeps executing. A
-    # task that already finished cannot be revoked — the app request still
-    # got its conflict error either way.
-    for action in ("cancel", "kill"):
+def _send_with_busy_retry(thread_id: str, host_request: dict[str, Any]) -> dict[str, Any]:
+    path = f"/v1/threads/{quote(thread_id, safe='')}/messages"
+    for attempt in range(SEND_BUSY_RETRIES):
         try:
-            call_admin_api("POST", f"/v1/tasks/{quote(task_id, safe='')}/{action}", {})
-            return
-        except Exception:
-            continue
+            return call_admin_api("POST", path, host_request)
+        except AppError as exc:
+            transient = exc.status == HTTPStatus.CONFLICT and SEND_RETRY_MARKER in exc.message
+            if not transient or attempt == SEND_BUSY_RETRIES - 1:
+                raise
+            time.sleep(SEND_BUSY_RETRY_DELAY_SECONDS)
+    raise AppError(HTTPStatus.CONFLICT, "the thread stayed busy while sending; retry the message")
+
+
+def _require_sendable_thread(thread_id: str) -> None:
+    """Ensure the app's thread row exists and is not archived before the host
+    call. The caller holds MESSAGE_SEND_LOCK, and archive/unarchive updates
+    take the same lock, so the archived state checked here cannot change
+    before the host send completes."""
+    with db.transaction() as cur:
+        _set_search_path(cur)
+        cur.execute(
+            "INSERT INTO threads (thread_id, archived) VALUES (%s, FALSE)"
+            " ON CONFLICT (thread_id) DO NOTHING",
+            (thread_id,),
+        )
+        cur.execute("SELECT archived FROM threads WHERE thread_id = %s FOR UPDATE", (thread_id,))
+        row = cur.fetchone()
+        if row is None or row[0]:
+            raise AppError(HTTPStatus.CONFLICT, "archived threads are read-only")
 
 
 def set_app_thread_archived(thread_id: str, *, archived: bool) -> dict[str, Any]:
@@ -474,8 +429,8 @@ def _reserve_generated_thread_id() -> str:
     session configuration on an existing thread). Names count over every
     recorded thread, archived included, so a generated id never revives an
     archived thread. A reservation whose host call later fails stays as an
-    empty thread: the index hides threads without tasks and the generator
-    counts it, so its number is skipped rather than reused.
+    empty thread: the index hides threads the host has never seen and the
+    generator counts it, so its number is skipped rather than reused.
     """
     while True:
         with db.transaction() as cur:
@@ -495,37 +450,6 @@ def _reserve_generated_thread_id() -> str:
             )
             if cur.fetchone() is not None:
                 return candidate
-
-
-def _record_app_task(thread_id: str, task_id: str) -> None:
-    with db.transaction() as cur:
-        _set_search_path(cur)
-        cur.execute(
-            """
-            INSERT INTO threads (thread_id, archived)
-            VALUES (%s, FALSE)
-            ON CONFLICT (thread_id) DO NOTHING
-            """,
-            (thread_id,),
-        )
-        # Serialize against archive/unarchive. If archive won the row lock,
-        # fail the send and let create_app_task cancel the just-created host
-        # task instead of silently reviving a read-only thread.
-        cur.execute(
-            "SELECT archived FROM threads WHERE thread_id = %s FOR UPDATE",
-            (thread_id,),
-        )
-        row = cur.fetchone()
-        if row is None or row[0]:
-            raise AppError(HTTPStatus.CONFLICT, "archived threads are read-only")
-        cur.execute(
-            """
-            INSERT INTO thread_tasks (task_id, thread_id)
-            VALUES (%s, %s)
-            ON CONFLICT (task_id) DO NOTHING
-            """,
-            (task_id, thread_id),
-        )
 
 
 def _require_app_thread(thread_id: str, *, include_archived: bool = False) -> None:
@@ -561,40 +485,18 @@ def _requested_session_config(body: dict[str, Any]) -> tuple[str, str, str] | No
     return agent_runtime, model, effort
 
 
-def _host_task_session_config(task: dict[str, Any]) -> tuple[str, str, str]:
+def _host_thread_session_config(summary: dict[str, Any]) -> tuple[str, str, str]:
     """Read back the session configuration the host recorded for a thread.
 
     Read path (`host.session_options`): the recorded model may predate the
     current matrix, so a thread started under an earlier catalog stays listed
-    and openable even though the host refuses to run further tasks on it. The
-    matrix check belongs on the create path (`_requested_session_config`).
+    and openable even though the host refuses to run further turns on it. The
+    matrix check belongs on the send path (`_requested_session_config`).
     """
-    config = recorded_session_config(task)
+    config = recorded_session_config(summary)
     if config is None:
         raise AppError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid session configuration")
     return config
-
-
-def _app_task_ids_for_thread(thread_id: str) -> set[str]:
-    with db.transaction() as cur:
-        _set_search_path(cur)
-        cur.execute("SELECT task_id FROM thread_tasks WHERE thread_id = %s", (thread_id,))
-        rows = cur.fetchall()
-    return {row[0] for row in rows}
-
-
-def _require_app_task(task_id: str) -> None:
-    with db.transaction() as cur:
-        _set_search_path(cur)
-        cur.execute(
-            "SELECT 1 FROM thread_tasks"
-            " JOIN threads ON threads.thread_id = thread_tasks.thread_id"
-            " WHERE thread_tasks.task_id = %s AND threads.archived = FALSE",
-            (task_id,),
-        )
-        row = cur.fetchone()
-    if not row:
-        raise AppError(HTTPStatus.NOT_FOUND, "task not found")
 
 
 def _required_text(value: Any, label: str) -> str:
@@ -629,7 +531,10 @@ def call_admin_api(method: str, path: str, body: Any = None) -> dict[str, Any]:
     headers = {"X-Kern-App-Backend": APP_ID}
     if encoded_body is not None:
         headers["Content-Type"] = "application/json"
-    conn = _UnixHTTPConnection(ADMIN_API_SOCKET, timeout=10)
+    conn = _UnixHTTPConnection(
+        ADMIN_API_SOCKET,
+        timeout=APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS,
+    )
     try:
         conn.request(method, path, body=encoded_body, headers=headers)
         response = conn.getresponse()

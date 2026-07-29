@@ -21,7 +21,7 @@ import time
 from typing import Any, Mapping, cast
 
 from host.param_guard import OutboundGuardService
-from host.runtime.core import state
+from host.runtime.core import host_errors, state
 from host.runtime.tools import assets as tool_assets
 import host.tools
 from host.tools import (
@@ -348,7 +348,12 @@ def execute_action(
         result = tool.execute(action, audit_arguments, host_api_for(tool, asset_store))
     except (ApprovalBackpressureError, ToolConfigKeyUnsetError) as exc:
         result = ActionFailed(str(exc))
-    except Exception:
+    except Exception as exc:
+        host_errors.report_unexpected(
+            "tools.execute",
+            exc,
+            context={"tool_id": tool_id, "action_id": action},
+        )
         result = ActionFailed("Tool call failed.")
     if isinstance(result, StreamingAsset):
         return StreamingAction(result, tool_id, action, audit_arguments)
@@ -392,7 +397,12 @@ def _execute_approved(
         )
     except (ToolCallError, ToolConfigKeyUnsetError) as exc:
         result = ActionFailed(str(exc))
-    except Exception:
+    except Exception as exc:
+        host_errors.report_unexpected(
+            "tools.execute_approved",
+            exc,
+            context={"tool_id": tool_id, "action_id": action},
+        )
         result = ActionFailed("Tool call failed.")
     if isinstance(result, ActionPendingApproval):
         # The contract forbids this; treat it as a failed execution.

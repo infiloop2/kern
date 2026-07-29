@@ -27,7 +27,7 @@ The command is intentionally split by lifecycle intent:
 | Command | Preconditions checked before launch | Bootstrap version check | State effect |
 | --- | --- | --- | --- |
 | `host.cli.deploy` | No existing Kern instance or admin/agent data volumes for `agent_name`. | Admin state must be empty. | Creates new admin and agent state at the target `VERSION`. |
-| `host.cli.upgrade` | Existing instance plus existing admin and agent data volumes. | Admin state version must be lower than the target `VERSION`. | Replaces root volume and preserves admin password, operator endpoints, network policy, tasks, account pins, and agent home. |
+| `host.cli.upgrade` | Existing instance plus existing admin and agent data volumes. | Admin state version must be lower than the target `VERSION`. | Replaces root volume and preserves admin password, operator endpoints, network policy, threads and their event history, account pins, and agent home. |
 | `host.cli.recover` | Existing admin and agent data volumes and no existing Kern instance. | Admin state version must equal the target `VERSION`; with `--allow-upgrade`, it may be older than or equal to the target `VERSION`. | Creates a new root host using preserved admin password and operator endpoints. With `--allow-upgrade`, it can also advance older preserved state. |
 | `host.cli.reconfigure` | Existing instance plus existing admin and agent data volumes. | Admin state version must equal the target `VERSION`. | Replaces root volume, replaces the full operator endpoint list, and installs a new admin password. |
 | `host.cli.start` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Starts the EC2 instance and waits for `running`; does not mutate Kern state. |
@@ -78,8 +78,8 @@ delivered to the instance one of two ways.
    After the services start it runs `host.bootstrap.verify_deploy`, which
    independently re-checks the provisioned state — account ids, path
    permissions, service sockets, loopback listeners, active units, database
-   peer auth, and live firewall probes in both directions (the agent reaches
-   only the loopback proxy; denied users' packets drop) — and fails the deploy
+   peer auth, and live firewall probes for the agent boundary (the agent reaches
+   only the loopback proxy; denied paths drop) — and fails the deploy
    listing every mismatch. Service-state checks retry briefly to absorb
    startup latency, and positive external egress is advisory only, so a
    healthy deploy on an egress-restricted network cannot false-fail. Only then does bootstrap drop the staged secrets and
@@ -161,6 +161,16 @@ gate in front. Bootstrap fails if the service does not become active, if
 `http://<hostname>` is not redirected to HTTPS so credentials never cross the
 wire in the clear.
 
+The tunnel is also authenticated as a local transport by uid: nftables permits
+`cloudflared` to connect to `127.0.0.1:7443` and drops that port for
+egress-capable services such as `kern-tools` and `kern-proxy`. This makes
+Cloudflare's forwarding headers trustworthy at the HTTP boundary without adding
+another shared secret or reverse-proxy component. Bootstrap rewrites this rule
+on every deploy, upgrade, recovery, and reconfiguration. Rendering tests pin its
+ordering, and the billable fresh-host smoke exercises the allowed and denied
+paths on real nftables; ordinary user upgrades do not wait on extra per-uid
+network probes.
+
 Egress in the security group is pinned to TCP 80, TCP 443, UDP 123 (NTP), and
 optionally TCP/UDP 7844 for Cloudflare Tunnel. The 7844 connector allowance
 is decided at launch on both deliveries, from the same derived operator
@@ -191,7 +201,7 @@ contracts:
   root-owned Kern runtime code, bootstrap helpers, systemd units,
   nftables config, global CLI installs, logs, and swap.
 - **Admin state drive**: durable data volume mounted at `/mnt/kern-admin`.
-  It holds the admin-state Postgres data directory (task history,
+  It holds the admin-state Postgres data directory (thread event history,
   thread/session mappings, provider account metadata, config, network state,
   tool state, and app migration records) plus proxy CA, generated certificate,
   held-Git-push files, and the bounded temporary tool-media spool.
@@ -221,7 +231,7 @@ requires that no current Kern instance exists. Bootstrap refreshes
 root-volume code and config, sanitizes managed mount paths against symlink
 attacks, reuses the preserved Postgres data directory, and runs `migrate up` to
 bring the preserved schema to the new code's version; it does not overwrite
-task history, provider account pins, agent home data, or an existing runtime
+thread history, provider account pins, agent home data, or an existing runtime
 network policy. `start` and `stop` never replace the root drive or attach/detach data
 volumes; they only transition the existing EC2 instance power state.
 

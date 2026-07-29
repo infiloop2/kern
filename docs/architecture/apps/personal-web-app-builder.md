@@ -9,7 +9,7 @@ chat to build, change, or ask questions about it.
 This product has no mission, goal, measurement, schedule, artifact, memory,
 tool inventory, or background pursuit state. Its complete durable domain is a
 set of independent app workspaces. Each contains one app bundle, one
-JSON document, one fixed agent chat configuration, and one host thread.
+JSON document, one selected agent chat configuration, and one host thread.
 
 ## Product Contract
 
@@ -28,7 +28,27 @@ both in one revision-checked action.
 
 The app canvas fills the product surface. Agent chat is a small floating drawer
 over the canvas and can be dismissed at any time. Closing chat does not stop an
-active task or change generated app state.
+active turn or change generated app state.
+
+The drawer uses the same conversation semantics as Agent Chat: it opens at the
+newest event page, prefetches three pages, pages older history backward without
+moving the reader's position, polls forward from the newest cursor, and retains
+each opened workspace's loaded window and scroll position for the life of the
+frame. Agent replies use the same escaped Markdown renderer. A running Codex or
+Claude turn accepts synchronous steering through the same composer; Hermes
+disables follow-ups until its turn ends. There is one thread-level Stop control
+in the composer and no per-turn status or Stop UI. Provider activity events are
+the core intentional presentation difference: the drawer omits them instead of
+showing Agent Chat's tool and command cards. Builder user bubbles also retain
+the trusted `Requested by user:` or `Requested by app:` line stored with the
+message, because generated-app requests need visible provenance; Agent Chat has
+no generated-app sender.
+
+The composer also uses Agent Chat's host-owned attachment bridge: selecting up
+to ten files records only opaque selections, Send uploads each file (25 MiB
+maximum) into `user-files/`, and the durable user message carries the returned
+`[User-uploaded file: ...]` references. Switching workspaces discards unsent
+selections so an attachment cannot land in another app's thread.
 
 ## Security Boundary
 
@@ -173,29 +193,34 @@ instruction from current structured data instead of storing a fixed prompt in
 markup. The trusted frame ignores requests sent during worker initialization,
 accepts at most one request per event turn, and bounds the encoded message.
 
-The generated-app user action is the authorization to start the task. The frame
-immediately sends the bounded message to the selected app's fixed thread. An existing
-chat reuses its session configuration. The first task uses the runtime, model,
-and effort selected in the trusted app bar, even when the chat drawer is
-closed. The app stores that configuration independently of visible task
-history. Those controls remain visible and become read-only after the session
-is established, including after old host tasks are pruned. Trusted header
-status reports whether the task started.
+The generated-app user action is the authorization to send the message. The frame
+immediately sends the bounded message to the selected app's fixed thread,
+where the host starts a turn or steers the running one. An existing
+chat reuses its session configuration unless the human explicitly changes the
+runtime, model, or effort while the thread is idle. The next human message then
+starts a fresh provider session on the same host thread using the host's bounded
+retained-history handoff. The controls are disabled while work is active, and
+their lock affordance explains that the human can Stop before changing them.
+An idle change shows the same context-loss and provider-cache warning as Agent
+Chat. Unchanged human messages and generated-app `app.askAgent` requests omit
+configuration fields, so stale or generated input cannot switch sessions
+implicitly. The host stores the selected configuration independently of visible
+conversation history, including after old events are pruned.
 
 Generated JavaScript cannot synthesize the initial trusted user event, choose a
 backend route, choose session configuration, or call the parent bridge. An
 accepted `app.askAgent` instruction has the same authority as the human typing
-that instruction in Agent chat. The task runs with the app agent's normal
+that instruction in Agent chat. The turn runs with the app agent's normal
 tools and egress, subject to the host's network policy and approval controls.
 Those host controls are the security boundary; the real-event gate, one-request
-limit, and message-size cap only constrain how the task starts. `app.askAgent`
-grants direct task-start authority from a real app interaction, not general host
+limit, and message-size cap only constrain how the turn starts. `app.askAgent`
+grants direct turn-start authority from a real app interaction, not general host
 API or browser network authority. Human chat uses the workspace-scoped
 `/messages` route and generated interaction callbacks use its
 `/runtime/agent-requests` route. The backend prepends `Requested by user:` or
-`Requested by app:` to the task input. This trusted first line gives the agent
+`Requested by app:` to the message. This trusted first line gives the agent
 and chat history durable provenance without creating a second thread or
-changing task authority.
+changing turn authority.
 
 ## Backend State And Routes
 
@@ -204,10 +229,10 @@ is both the workspace identity and the host thread identity. The row also holds
 the editable name, archive flag, revision, HTML, CSS, JavaScript, JSON data,
 and timestamps. `data_json` is opaque only because its shape is authored by the
 agent; the backend still parses and validates it as a JSON object on every
-write. The host remains authoritative for tasks and session configuration.
+write. The host remains authoritative for turns and session configuration.
 
 The active and archived indexes join these rows with the host's bulk thread
-summaries to show current agent settings, last use, and queued/running status.
+summaries to show current agent settings, last use, and idle/running status.
 Selection is deliberately browser-local, like Agent Chat: a reload returns to
 the app list instead of adding a server-side preference row.
 
@@ -220,14 +245,18 @@ data, conversation, or thread; unarchiving restores the same workspace.
 
 Archived browser surfaces are read-only. They may display the generated bundle
 and conversation, but cannot send messages, run interactive mutations, or call
-`app.askAgent`. An agent task that was already running when archive won the
+`app.askAgent`. An agent turn that was already running when archive won the
 workspace lock may finish and apply its revision-checked result. This mirrors
 Agent Chat's archive semantics: archive controls discoverability and new user
-work rather than revoking an already-issued task.
+work rather than revoking an already-started turn.
 
-Every browser state, conversation, event, message, runtime-action, and task-stop
-route includes the workspace ID. Task cancel and kill first verify that the
-host task belongs to that workspace. Agent routes use the kernel-attributed
+Every browser state, conversation, event, message, runtime-action, and stop
+route includes the workspace ID. The stop route
+(`POST /apps/{id}/stop`) targets only the workspace's own fixed host thread,
+whose running turn it ends. Send retries private STARTING/FINISHING conflicts
+every 500 ms for up to ten seconds while the chat shows the generic
+`Sending…` state; Stop shows `Stopping…` until its durable acceptance and
+interrupt request return. Agent routes use the kernel-attributed
 thread directly to resolve exactly one workspace; an unknown thread cannot read
 or mutate any other app.
 
@@ -239,8 +268,9 @@ archive and message/runtime mutations while allowing independent apps to make
 progress concurrently.
 
 Keeping state and conversation separate prevents a maximum generated bundle
-from consuming the chat history's response budget. Conversation reads retain
-the newest 20 tasks and page sequenced events five at a time with 12 KiB
+from consuming the chat history's response budget. The conversation read
+reports the workspace's session configuration and idle/running status, and
+conversation event reads page sequenced events five at a time with 12 KiB
 message bounds. Browser routes require the host app proxy marker. Agent routes
 are limited to state reads and typed revision-checked actions and require both
 the kernel-attributed app marker and thread.
@@ -272,8 +302,9 @@ fetch, importScripts, and WebSocket attempts. It asserts that the node-by-node
 rebuild rechecks promoted children, no hostile browser request occurs, forbidden
 elements and attributes are absent, richer semantic elements and safe visual
 CSS survive, and escaped resource functions remain blocked. It also verifies
-worker-backed data mutation, durable rendering after a full page reload, fixed
-app-bar agent settings, the dismissible chat drawer, and the exact agent
-instruction started by a generated button without an additional confirmation.
+worker-backed data mutation, durable rendering after a full page reload,
+workspace-scoped app-bar agent settings, the dismissible chat drawer, and the
+exact agent instruction started by a generated button without an additional
+confirmation.
 Mobile coverage verifies the full canvas, app-bar controls, and dismissible
 drawer without horizontal overflow.

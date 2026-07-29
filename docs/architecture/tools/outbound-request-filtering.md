@@ -126,7 +126,7 @@ or under prompt injection.
 | 24 | Personal names in sensitive context | "gift for Priya, stage 2 cancer" | G1 only | — | NER evaluated and rejected (breaks public search); not detectable |
 | 25 | Locations and schedule | "flights thursday 7pm from home" | G1 only | — | not reliably detectable |
 | 26 | Health/legal/sensitive topics | agent-authored searches from private context | G1 only | — | topic classification out of scope |
-| 27 | Paraphrased private content | "why would Alice cancel the merger" | G1 only | — | provenance, not shape; owned by visibility, the per-task budget, and future task-level source→sink escalation |
+| 27 | Paraphrased private content | "why would Alice cancel the merger" | G1 only | — | provenance, not shape; owned by visibility, the per-turn budget, and future turn-level source→sink escalation |
 
 Rows 22–27 are the honest limit of string checking: the byte limit bounds
 them, the admin activity history makes them visible after the fact, and the

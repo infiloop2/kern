@@ -17,6 +17,7 @@ AGENT_HOME = Path("/mnt/kern-agent/agent-home").resolve(strict=True)
 MAX_LIST_ENTRIES = 1000
 MAX_READ_BYTES = 1024 * 1024
 MAX_STREAM_BYTES = 200_000_000
+MAX_IMAGE_STREAM_BYTES = 25 * 1024 * 1024
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 NONBLOCK = getattr(os, "O_NONBLOCK", 0)
@@ -177,10 +178,18 @@ def stream_path(raw_path: str) -> None:
     parts = parse_path(raw_path)
     if not parts:
         fail(3, "path is not a regular file")
-    media_types = {".mp4": "video/mp4", ".mov": "video/quicktime"}
-    media_type = media_types.get(Path(parts[-1]).suffix.lower())
-    if media_type is None:
-        fail(3, "stream supports only MP4 or MOV video files")
+    media_types = {
+        ".mp4": ("video/mp4", MAX_STREAM_BYTES),
+        ".mov": ("video/quicktime", MAX_STREAM_BYTES),
+        ".jpg": ("image/jpeg", MAX_IMAGE_STREAM_BYTES),
+        ".jpeg": ("image/jpeg", MAX_IMAGE_STREAM_BYTES),
+        ".png": ("image/png", MAX_IMAGE_STREAM_BYTES),
+        ".webp": ("image/webp", MAX_IMAGE_STREAM_BYTES),
+    }
+    media = media_types.get(Path(parts[-1]).suffix.lower())
+    if media is None:
+        fail(3, "stream supports only MP4, MOV, JPEG, PNG, or WebP files")
+    media_type, maximum_size = media
     parent_fd = open_agent_dir(parts[:-1])
     try:
         try:
@@ -197,8 +206,8 @@ def stream_path(raw_path: str) -> None:
         info = os.fstat(file_fd)
         if not stat.S_ISREG(info.st_mode):
             fail(3, "path is not a regular file")
-        if not 0 <= info.st_size <= MAX_STREAM_BYTES:
-            fail(3, f"file is larger than {MAX_STREAM_BYTES} bytes")
+        if not 0 <= info.st_size <= maximum_size:
+            fail(3, f"file is larger than {maximum_size} bytes")
         header = {
             "path": public_path_for(parts),
             "size_bytes": info.st_size,

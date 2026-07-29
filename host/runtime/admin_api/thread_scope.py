@@ -1,6 +1,6 @@
 """Host-side teardown of per-thread transient agent scopes.
 
-Every task turn runs inside a systemd scope named after its host thread
+Every turn runs inside a systemd scope named after its host thread
 (``kern-agent-thread-<thread_id>.scope``, created by the run-*
 launchers). Freeing that scope after a turn — killed or completed — is a host
 invariant shared by all three runtimes, so it lives here rather than in each
@@ -14,6 +14,44 @@ from __future__ import annotations
 import subprocess
 
 STOP_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/stop-agent-thread"]
+INTERRUPT_TIMEOUT_SECONDS = 3
+CLOSE_TIMEOUT_SECONDS = 7
+
+
+class ThreadScopeError(RuntimeError):
+    pass
+
+
+def _is_production_turn(
+    thread_id: str | None,
+    command: list[str],
+    launcher_command: list[str],
+) -> bool:
+    return (
+        thread_id is not None
+        and command[: len(launcher_command)] == launcher_command
+    )
+
+
+def interrupt_thread_scope(
+    thread_id: str | None, command: list[str], launcher_command: list[str]
+) -> None:
+    """Request SIGKILL for a production turn scope without waiting to reap it."""
+    if not _is_production_turn(thread_id, command, launcher_command):
+        return
+    assert thread_id is not None
+    try:
+        subprocess.run(
+            [*STOP_COMMAND, "--signal-only", thread_id],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=INTERRUPT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # The owning execution thread performs the authoritative bounded close.
+        pass
 
 
 def stop_thread_scope(
@@ -25,22 +63,22 @@ def stop_thread_scope(
     test command runs in-process with no scope to stop. Codex folds
     ``--thread-scope`` into its command, so the launcher is matched by prefix.
     """
-    if thread_id is None or command[: len(launcher_command)] != launcher_command:
+    if not _is_production_turn(thread_id, command, launcher_command):
         return
+    assert thread_id is not None
     try:
-        subprocess.run(
+        result = subprocess.run(
             [*STOP_COMMAND, thread_id],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            # The helper SIGKILLs the cgroup, so the stop reaps promptly; this
-            # bound stays above systemd's default TimeoutStopSec so a slow reap
-            # never returns here before the scope is actually gone, which would
-            # lift the orchestrator's thread fence early.
-            timeout=120,
+            timeout=CLOSE_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        # Best effort: a broken privileged path is the only way this fails, and
-        # raising out of close() would keep the thread fenced forever.
-        pass
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ThreadScopeError("timed out reaping the agent process scope") from exc
+    # Test doubles that only assert the helper invocation may not provide a
+    # concrete return code; real CompletedProcess results always do.
+    returncode = getattr(result, "returncode", 0)
+    if isinstance(returncode, int) and returncode != 0:
+        raise ThreadScopeError("the agent process scope did not close")

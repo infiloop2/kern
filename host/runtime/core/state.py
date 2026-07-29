@@ -29,7 +29,7 @@ import hmac
 import secrets
 import threading
 import time
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from host.runtime.core import db, pgclient, secretbox
 
@@ -46,11 +46,9 @@ DEFAULT_PROXY_STATE_DIR = Path("/mnt/kern-admin/proxy-state")
 #   mutation() block without deadlocking (reads run on their own database
 #   connections and see the last committed state).
 # - Nesting: code inside mutation() may take the orchestrator's _LIVE_LOCK
-#   (task claiming). Nothing enters mutation() while holding it — keep it
-#   that way, or the lock graph grows a cycle.
+#   (turn admission, steer delivery, stop, finish). Nothing enters mutation()
+#   while holding it — keep it that way, or the lock graph grows a cycle.
 _MUTATION_LOCK = threading.RLock()
-TASK_LIMIT = 5
-EVENT_LIMIT = 5
 # Every audit log (agent events, network events, tool events) keeps only the
 # most recent MAX_EVENTS entries; the prune runs every PRUNE_EVERY appends so
 # its cost stays amortized.
@@ -59,28 +57,11 @@ PRUNE_EVERY = 500
 # The audit logs page newest-first in pages of EVENT_PAGE_LIMIT rows; the
 # limit query parameter can only shrink a page.
 EVENT_PAGE_LIMIT = 100
-
-_TASK_COLUMNS = (
-    "number",
-    "status",
-    "thread_id",
-    "input_message",
-    "output_message",
-    "error_message",
-    "created_at",
-    "updated_at",
-)
-_TASK_FIELDS = ", ".join(_TASK_COLUMNS)
-_TASK_WITH_SESSION_COLUMNS = (*_TASK_COLUMNS, "agent_runtime", "model", "effort")
-_TASK_SELECT_FIELDS = ", ".join(f"tasks.{column}" for column in _TASK_COLUMNS) + (
-    ", thread_sessions.agent_runtime, thread_sessions.model, thread_sessions.effort"
-)
-_TASK_SESSION_JOIN = (
-    " JOIN thread_sessions ON thread_sessions.thread_id = tasks.thread_id"
-)
-ACTIVE_STATUSES_SQL = "('queued', 'running')"
-TERMINAL_STATUSES_SQL = "('completed', 'failed', 'cancelled')"
-
+# Unexpected host failures are rare and materially larger than ordinary audit
+# rows because details may carry a stack trace. Keep a smaller bounded log.
+HOST_ERROR_LIMIT = 10_000
+HOST_ERROR_PRUNE_EVERY = 100
+HOST_ERROR_COALESCE_SECONDS = 60
 
 def _proxy_state_dir() -> Path:
     return Path(os.environ.get("KERN_PROXY_STATE_DIR", str(DEFAULT_PROXY_STATE_DIR)))
@@ -119,17 +100,23 @@ def utc_now() -> str:
 
 
 @contextmanager
-def mutation() -> Iterator[Any]:
+def mutation(*, after_commit: list[Callable[[], None]] | None = None) -> Iterator[Any]:
     """The single sanctioned way to write admin state: the process-wide
     mutation lock plus one database transaction, yielded as a cursor. The lock
     spans the whole check-then-act cycle so concurrent mutations cannot
     interleave between a read and its dependent write; an exception rolls the
-    transaction back. Do slow work (runtime spawns, helper subprocesses,
-    process closes) outside this block so reads never stall behind it. Plain
-    reads use the read-only accessors below — no lock, their own snapshot."""
+    transaction back. Callers that must publish related in-memory state may
+    pass a list and append no-fail callbacks; they run after the database
+    commit but before the mutation lock is released. Do slow work (runtime
+    spawns, helper subprocesses, process closes) outside this block so reads
+    never stall behind it. Plain reads use the read-only accessors below — no
+    lock, their own snapshot."""
+    callbacks = after_commit if after_commit is not None else []
     with _MUTATION_LOCK:
         with db.transaction() as cur:
             yield cur
+        for callback in callbacks:
+            callback()
 
 
 @contextmanager
@@ -215,247 +202,62 @@ def save_config(config: dict[str, Any]) -> None:
             )
 
 
-# -- tasks ----------------------------------------------------------------------
+# -- threads --------------------------------------------------------------------
 
 
-def _task_from_row(row: Any) -> dict[str, Any]:
-    task: dict[str, Any] = dict(zip(_TASK_WITH_SESSION_COLUMNS, row))
-    task["task_id"] = f"task_{task.pop('number')}"
-    return task
+def page_thread_summaries(
+    before: tuple[str, str] | None,
+    limit: int,
+    *,
+    thread_prefix: str | None = None,
+) -> list[dict[str, Any]]:
+    """One newest-first keyset page of canonical thread session rows.
 
-
-def _task_number(task_id: str) -> int | None:
-    """The numeric task identity behind a public "task_N" id, or None for an
-    id that cannot name a stored task."""
-    prefix, _, tail = task_id.partition("_")
-    if prefix != "task" or not tail.isdigit():
-        return None
-    return int(tail)
-
-
-def allocate_task_number(cur: Any) -> int:
-    """Return the next task number and advance the counter, atomically with
-    the enclosing transaction (an abort rolls the counter back, so numbering
-    stays dense)."""
-    cur.execute(
-        "INSERT INTO counters (name, value) VALUES ('next_task_number', 2)"
-        " ON CONFLICT (name) DO UPDATE SET value = counters.value + 1"
-        " RETURNING value - 1",
-    )
-    return int(cur.fetchone()[0])
-
-
-def insert_task(cur: Any, task: dict[str, Any]) -> None:
-    number = _task_number(str(task.get("task_id")))
-    if number is None:
-        raise ValueError(f"task_id must look like task_<number>: {task.get('task_id')!r}")
-    cur.execute(
-        f"INSERT INTO tasks ({_TASK_FIELDS})"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-        [number] + [task.get(column) for column in _TASK_COLUMNS[1:]],
-    )
-    for message in task.get("steer_messages") or []:
-        append_task_steer(cur, str(task.get("task_id")), message)
-
-
-def save_task(cur: Any, task: dict[str, Any]) -> None:
-    """Write back every mutable task field (matched by task_id). Steers are
-    not part of the row; use the task_steers accessors."""
-    cur.execute(
-        "UPDATE tasks SET status = %s, thread_id = %s,"
-        " input_message = %s, output_message = %s, error_message = %s,"
-        " created_at = %s, updated_at = %s"
-        " WHERE number = %s",
-        [task.get(column) for column in _TASK_COLUMNS[1:]] + [_task_number(str(task["task_id"]))],
-    )
-
-
-def task_steers(task_id: str, cur: Any = None) -> list[str]:
-    """The task's undelivered steer messages, oldest first."""
-    with _read(cur) as cur:
-        cur.execute(
-            "SELECT message FROM task_steers WHERE task_number = %s ORDER BY id",
-            (_task_number(task_id),),
-        )
-        return [row[0] for row in cur.fetchall()]
-
-
-def pending_steer_count(cur: Any, task_id: str) -> int:
-    cur.execute("SELECT count(*) FROM task_steers WHERE task_number = %s", (_task_number(task_id),))
-    return int(cur.fetchone()[0])
-
-
-def append_task_steer(cur: Any, task_id: str, message: str) -> None:
-    cur.execute(
-        "INSERT INTO task_steers (task_number, message) VALUES (%s, %s)",
-        (_task_number(task_id), message),
-    )
-
-
-def pop_task_steer(cur: Any, task_id: str, message: str) -> None:
-    """Drop the oldest undelivered steer if it is ``message`` (the one the
-    worker just handed to the turn). Only the owning worker pops and the API
-    only appends, so popping the head it delivered is race-free."""
-    cur.execute(
-        "DELETE FROM task_steers WHERE id = ("
-        " SELECT id FROM task_steers WHERE task_number = %s ORDER BY id LIMIT 1)"
-        " AND message = %s",
-        (_task_number(task_id), message),
-    )
-
-
-def get_task(task_id: str, cur: Any = None) -> dict[str, Any] | None:
-    """One task with its undelivered steers attached (the list accessors stay
-    lean and skip steers; no list caller needs them)."""
-    number = _task_number(task_id)
-    if number is None:
-        return None
-    with _read(cur) as cur:
-        cur.execute(
-            f"SELECT {_TASK_SELECT_FIELDS} FROM tasks{_TASK_SESSION_JOIN}"
-            " WHERE tasks.number = %s",
-            (number,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        task = _task_from_row(row)
-        task["steer_messages"] = task_steers(task_id, cur)
-    return task
-
-
-def active_tasks() -> list[dict[str, Any]]:
-    """Queued and running tasks in creation order."""
+    ``before`` is the last page's ``(last_used_at, thread_id)`` sort
+    key. App-backend callers pass their internal thread prefix so ownership is
+    applied before the limit, never by filtering a host-global page.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if thread_prefix is not None:
+        clauses.append("LEFT(thread_id, %s) = %s")
+        params.extend((len(thread_prefix), thread_prefix))
+    if before is not None:
+        clauses.append("(COALESCE(last_used_at, ''), thread_id) < (%s, %s)")
+        params.extend(before)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     with db.transaction() as cur:
         cur.execute(
-            f"SELECT {_TASK_SELECT_FIELDS} FROM tasks{_TASK_SESSION_JOIN}"
-            f" WHERE tasks.status IN {ACTIVE_STATUSES_SQL} ORDER BY tasks.number"
+            "SELECT thread_id, agent_runtime, model, effort, last_used_at, run_status"
+            f" FROM thread_sessions{where}"
+            " ORDER BY COALESCE(last_used_at, '') DESC, thread_id DESC LIMIT %s",
+            (*params, limit),
         )
-        return [_task_from_row(row) for row in cur.fetchall()]
-
-
-def running_tasks(cur: Any = None) -> list[dict[str, Any]]:
-    with _read(cur) as cur:
-        cur.execute(
-            f"SELECT {_TASK_SELECT_FIELDS} FROM tasks{_TASK_SESSION_JOIN}"
-            " WHERE tasks.status = 'running' ORDER BY tasks.number"
-        )
-        return [_task_from_row(row) for row in cur.fetchall()]
-
-
-def queued_task_count(cur: Any) -> int:
-    cur.execute("SELECT count(*) FROM tasks WHERE status = 'queued'")
-    return int(cur.fetchone()[0])
-
-
-def queued_tasks_brief(cur: Any) -> list[dict[str, Any]]:
-    """Queued tasks in claim order, without their (potentially large)
-    messages — the claim loop only needs identity and routing fields."""
-    cur.execute(
-        "SELECT tasks.number, thread_sessions.agent_runtime, tasks.thread_id"
-        f" FROM tasks{_TASK_SESSION_JOIN}"
-        " WHERE tasks.status = 'queued' ORDER BY tasks.number"
-    )
-    return [
-        {"task_id": f"task_{number}", "agent_runtime": agent_runtime, "thread_id": thread_id}
-        for number, agent_runtime, thread_id in cur.fetchall()
-    ]
-
-
-def tasks_for_thread(thread_id: str, limit: int) -> list[dict[str, Any]]:
-    """A thread's tasks, most recently updated first (ties broken by newest)."""
-    with db.transaction() as cur:
-        cur.execute(
-            f"SELECT {_TASK_SELECT_FIELDS} FROM tasks{_TASK_SESSION_JOIN}"
-            " WHERE tasks.thread_id = %s"
-            " ORDER BY tasks.updated_at DESC, tasks.number DESC LIMIT %s",
-            (thread_id, limit),
-        )
-        return [_task_from_row(row) for row in cur.fetchall()]
-
-
-def thread_summaries() -> list[dict[str, Any]]:
-    """Canonical thread configuration plus retained task aggregates."""
-    with db.transaction() as cur:
-        cur.execute(
-            "SELECT thread_sessions.thread_id, thread_sessions.agent_runtime,"
-            " thread_sessions.model, thread_sessions.effort,"
-            " GREATEST(COALESCE(thread_sessions.last_used_at, ''),"
-            " COALESCE(max(tasks.updated_at), '')), count(tasks.number)"
-            " FROM thread_sessions LEFT JOIN tasks"
-            " ON tasks.thread_id = thread_sessions.thread_id"
-            " GROUP BY thread_sessions.thread_id, thread_sessions.agent_runtime,"
-            " thread_sessions.model, thread_sessions.effort, thread_sessions.last_used_at"
-        )
-        summaries = {
-            str(thread_id): {
+        return [
+            {
                 "thread_id": str(thread_id),
                 "agent_runtime": agent_runtime,
                 "model": model,
                 "effort": effort,
                 "last_used_at": last_used_at or "",
-                "active_tasks": [],
-                "task_count": int(count),
+                "status": str(run_status),
             }
-            for thread_id, agent_runtime, model, effort, last_used_at, count in cur.fetchall()
-        }
-        cur.execute(
-            "SELECT thread_id, number, status FROM tasks"
-            f" WHERE status IN {ACTIVE_STATUSES_SQL} ORDER BY number"
-        )
-        for thread_id, number, status in cur.fetchall():
-            summaries[str(thread_id)]["active_tasks"].append(
-                {"task_id": f"task_{number}", "status": status}
-            )
-    return list(summaries.values())
+            for thread_id, agent_runtime, model, effort, last_used_at, run_status in cur.fetchall()
+        ]
 
 
-def fail_running_tasks(cur: Any, error_message: str, runtime: str | None = None) -> list[str]:
-    """Fail every running task (optionally only one runtime's) and return the
-    affected task ids; the caller records the per-task events in the same
-    transaction."""
-    sql = (
-        "UPDATE tasks SET status = 'failed', error_message = %s, updated_at = %s"
-        " WHERE status = 'running'"
-    )
-    params: list[Any] = [error_message, utc_now()]
-    if runtime is not None:
-        sql += " AND thread_id IN (SELECT thread_id FROM thread_sessions WHERE agent_runtime = %s)"
-        params.append(runtime)
-    cur.execute(sql + " RETURNING number", params)
-    return [f"task_{row[0]}" for row in cur.fetchall()]
+def recover_interrupted_thread_runs(cur: Any) -> list[tuple[str, int]]:
+    """Return stale running threads to idle and return their private run ids.
 
-
-def fail_queued_tasks_outside(
-    cur: Any, offered: list[tuple[str, str, str]], error_message: str
-) -> list[str]:
-    """Fail every queued task whose thread runs a configuration not in
-    ``offered`` (runtime, model, effort) and return the affected task ids; the
-    caller records the per-task events in the same transaction."""
-    if not offered:
-        raise ValueError("offered session configurations must not be empty")
-    placeholders = ", ".join(["(%s, %s, %s)"] * len(offered))
+    The admin process is the sole run owner, so every persisted ``running`` row
+    at its startup belongs to a process that died before it could settle.
+    """
     cur.execute(
-        "UPDATE tasks SET status = 'failed', error_message = %s, updated_at = %s"
-        " WHERE status = 'queued' AND thread_id IN ("
-        "SELECT thread_id FROM thread_sessions"
-        f" WHERE (agent_runtime, model, effort) NOT IN ({placeholders}))"
-        " RETURNING number",
-        [error_message, utc_now(), *(value for config in offered for value in config)],
+        "UPDATE thread_sessions SET run_status = 'idle'"
+        " WHERE run_status = 'running'"
+        " RETURNING thread_id, run_number"
     )
-    return [f"task_{row[0]}" for row in cur.fetchall()]
-
-
-def prune_finished_tasks(cur: Any, keep: int) -> None:
-    """Drop the oldest finished tasks beyond ``keep`` (active tasks are never
-    pruned). Recency follows the task history order: updated_at, then task
-    creation order."""
-    cur.execute(
-        f"DELETE FROM tasks WHERE status IN {TERMINAL_STATUSES_SQL} AND number NOT IN ("
-        f" SELECT number FROM tasks WHERE status IN {TERMINAL_STATUSES_SQL}"
-        "  ORDER BY updated_at DESC, number DESC LIMIT %s)",
-        (keep,),
-    )
+    return [(str(thread_id), int(run_number)) for thread_id, run_number in cur.fetchall()]
 
 
 # -- thread -> provider session maps ---------------------------------------------
@@ -463,7 +265,8 @@ def prune_finished_tasks(cur: Any, keep: int) -> None:
 
 def thread_session(cur: Any, runtime: str, thread_id: str) -> dict[str, Any] | None:
     cur.execute(
-        "SELECT provider_session_id, last_used_at, model, effort FROM thread_sessions"
+        "SELECT provider_session_id, last_used_at, model, effort, run_status, run_number"
+        " FROM thread_sessions"
         " WHERE agent_runtime = %s AND thread_id = %s",
         (runtime, thread_id),
     )
@@ -475,6 +278,8 @@ def thread_session(cur: Any, runtime: str, thread_id: str) -> dict[str, Any] | N
         "last_used_at": row[1],
         "model": str(row[2]),
         "effort": str(row[3]),
+        "status": str(row[4]),
+        "run_number": int(row[5]),
     }
 
 
@@ -503,13 +308,109 @@ def save_thread_session(
         raise ValueError(f"thread {thread_id!r} already has another session configuration")
 
 
-def thread_session_config(cur: Any, thread_id: str) -> dict[str, Any] | None:
+def rotate_thread_session(
+    cur: Any,
+    thread_id: str,
+    runtime: str,
+    model: str,
+    effort: str,
+    last_used_at: str,
+) -> None:
+    """Replace one idle thread's provider configuration.
+
+    Clearing the provider session makes the next run a new provider
+    conversation. The idle predicate is the durable race fence: a caller
+    cannot switch configuration underneath admitted work.
+    """
     cur.execute(
-        "SELECT agent_runtime, provider_session_id, last_used_at, model, effort"
-        " FROM thread_sessions WHERE thread_id = %s",
+        "UPDATE thread_sessions SET"
+        " agent_runtime = %s,"
+        " provider_session_id = NULL,"
+        " last_used_at = %s,"
+        " model = %s,"
+        " effort = %s"
+        " WHERE thread_id = %s AND run_status = 'idle'"
+        " RETURNING 1",
+        (runtime, last_used_at, model, effort, thread_id),
+    )
+    if cur.fetchone() is None:
+        raise ValueError(f"thread {thread_id!r} is running or does not exist")
+
+
+def save_thread_provider_session(
+    cur: Any,
+    thread_id: str,
+    run_number: int,
+    provider_session_id: str,
+) -> None:
+    """Persist a provider-confirmed non-empty session for exactly one run.
+
+    Matching ``run_number`` prevents a late callback from an old process from
+    replacing a newer run's mapping. The lifecycle may already be durably idle
+    while its process is finishing, so this deliberately does not require
+    ``run_status = 'running'``.
+    """
+    if not isinstance(provider_session_id, str) or not provider_session_id.strip():
+        raise ValueError("provider session id must not be empty")
+    provider_session_id = provider_session_id.strip()
+    cur.execute(
+        "UPDATE thread_sessions SET provider_session_id = %s"
+        " WHERE thread_id = %s AND run_number = %s"
+        " RETURNING 1",
+        (provider_session_id, thread_id, run_number),
+    )
+    if cur.fetchone() is None:
+        raise ValueError(f"thread {thread_id!r} run {run_number} does not exist")
+
+
+def touch_thread_session(cur: Any, thread_id: str, last_used_at: str) -> None:
+    """Refresh one existing thread's recency without changing its provider
+    session or current runtime configuration."""
+    cur.execute(
+        "UPDATE thread_sessions SET last_used_at = %s"
+        " WHERE thread_id = %s RETURNING 1",
+        (last_used_at, thread_id),
+    )
+    if cur.fetchone() is None:
+        raise ValueError(f"thread {thread_id!r} has no session configuration")
+
+
+def start_thread_run(cur: Any, thread_id: str) -> int:
+    """Atomically mark an idle thread running and allocate its private scope."""
+    cur.execute(
+        "UPDATE thread_sessions"
+        " SET run_status = 'running', run_number = run_number + 1"
+        " WHERE thread_id = %s AND run_status = 'idle'"
+        " RETURNING run_number",
         (thread_id,),
     )
     row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"thread {thread_id!r} is already running or does not exist")
+    return int(row[0])
+
+
+def finish_thread_run(cur: Any, thread_id: str, run_number: int) -> None:
+    """Return exactly the matching live run to idle."""
+    cur.execute(
+        "UPDATE thread_sessions SET run_status = 'idle'"
+        " WHERE thread_id = %s AND run_status = 'running' AND run_number = %s"
+        " RETURNING 1",
+        (thread_id, run_number),
+    )
+    if cur.fetchone() is None:
+        raise ValueError(f"thread {thread_id!r} run {run_number} is not running")
+
+
+def thread_session_config(thread_id: str, cur: Any = None) -> dict[str, Any] | None:
+    with _read(cur) as cur:
+        cur.execute(
+            "SELECT agent_runtime, provider_session_id, last_used_at, model, effort,"
+            " run_status, run_number"
+            " FROM thread_sessions WHERE thread_id = %s",
+            (thread_id,),
+        )
+        row = cur.fetchone()
     if row is None:
         return None
     return {
@@ -518,23 +419,26 @@ def thread_session_config(cur: Any, thread_id: str) -> dict[str, Any] | None:
         "last_used_at": row[2],
         "model": str(row[3]),
         "effort": str(row[4]),
+        "status": str(row[5]),
+        "run_number": int(row[6]),
     }
 
 
 def prune_thread_sessions(cur: Any, runtime: str, keep: int) -> None:
     """Drop least-recently-used unreferenced threads beyond ``keep``.
 
-    Retained tasks keep their canonical thread row; once task history pruning
-    removes the last reference, the ordinary LRU cap applies.
+    A thread with retained events keeps its canonical row so its history stays
+    listed; once event retention drops a thread's last event, the ordinary LRU
+    cap applies.
     """
     cur.execute(
         "DELETE FROM thread_sessions AS candidate"
         " WHERE candidate.agent_runtime = %s"
-        " AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.thread_id = candidate.thread_id)"
+        " AND NOT EXISTS (SELECT 1 FROM agent_events WHERE agent_events.thread_id = candidate.thread_id)"
         " AND candidate.thread_id NOT IN ("
         "  SELECT retained.thread_id FROM thread_sessions AS retained"
         "  WHERE retained.agent_runtime = %s"
-        "  AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.thread_id = retained.thread_id)"
+        "  AND NOT EXISTS (SELECT 1 FROM agent_events WHERE agent_events.thread_id = retained.thread_id)"
         "  ORDER BY retained.last_used_at DESC NULLS LAST, retained.thread_id LIMIT %s)",
         (runtime, runtime, keep),
     )
@@ -693,20 +597,37 @@ def _read_provider_account(provider: str, cur: Any = None) -> dict[str, Any]:
 
 # The typed event payload fields; every event the runtime emits uses a subset.
 _EVENT_PAYLOAD_COLUMNS = ("message", "source", "error_message", "agent_runtime", "activity")
-_EVENT_FIELDS = "seq, created_at, event_type, task_id, " + ", ".join(_EVENT_PAYLOAD_COLUMNS)
+_EVENT_FIELDS = (
+    "seq, created_at, event_type, thread_id, run_number, "
+    + ", ".join(_EVENT_PAYLOAD_COLUMNS)
+)
 
 
 def _event_dict(row: Any) -> dict[str, Any]:
-    seq, created_at, event_type, task_id = row[:4]
+    seq, created_at, event_type, thread_id, run_number = row[:5]
     payload = {
-        column: value for column, value in zip(_EVENT_PAYLOAD_COLUMNS, row[4:]) if value is not None
+        column: value for column, value in zip(_EVENT_PAYLOAD_COLUMNS, row[5:]) if value is not None
     }
+    activity = payload.get("activity")
+    if (
+        event_type == "thread.activity"
+        and run_number is not None
+        and isinstance(activity, dict)
+        and activity.get("activity_id")
+    ):
+        payload["activity"] = {
+            **activity,
+            # Opaque host scoping prevents provider ids reused by a later
+            # process from merging with an older activity.  The private run
+            # column itself is never returned by the API.
+            "activity_id": f"{run_number}:{activity['activity_id']}",
+        }
     return {
         "seq": int(seq),
         "timestamp": created_at,
         "event_id": f"event_{seq}",
         "event_type": event_type,
-        "task_id": task_id,
+        "thread_id": thread_id,
         "payload": payload,
     }
 
@@ -727,7 +648,14 @@ def _jsonb_safe(value: Any) -> Any:
     return value
 
 
-def append_agent_event(cur: Any, event_type: str, task_id: str | None, payload: dict[str, Any]) -> int:
+def append_agent_event(
+    cur: Any,
+    event_type: str,
+    thread_id: str | None,
+    payload: dict[str, Any],
+    *,
+    run_number: int | None = None,
+) -> int:
     """Insert one event inside the caller's mutation transaction, so the event
     commits or rolls back with the state change that caused it. seq is a
     serial: unique and increasing, with harmless gaps from aborted
@@ -743,22 +671,15 @@ def append_agent_event(cur: Any, event_type: str, task_id: str | None, payload: 
         for column in _EVENT_PAYLOAD_COLUMNS
     ]
     cur.execute(
-        "INSERT INTO agent_events (created_at, event_type, task_id, message, source,"
-        " error_message, agent_runtime, activity)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING seq",
-        (utc_now(), event_type, task_id, *values),
+        "INSERT INTO agent_events (created_at, event_type, thread_id, run_number,"
+        " message, source, error_message, agent_runtime, activity)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING seq",
+        (utc_now(), event_type, thread_id, run_number, *values),
     )
     seq = int(cur.fetchone()[0])
     if seq % PRUNE_EVERY == 0:
         prune_agent_events(cur)
     return seq
-
-
-def record_agent_event(event_type: str, task_id: str | None, payload: dict[str, Any]) -> None:
-    """Append one event in its own transaction (for callers with no
-    surrounding state change, like agent-message streaming)."""
-    with mutation() as cur:
-        append_agent_event(cur, event_type, task_id, payload)
 
 
 def _prune_events(cur: Any, table: str) -> None:
@@ -811,16 +732,6 @@ def page_agent_events_before(
     return _page_before("agent_events", _EVENT_FIELDS, _event_dict, before, limit)
 
 
-def page_task_events(task_id: str, since: int | None) -> list[dict[str, Any]]:
-    with db.transaction() as cur:
-        cur.execute(
-            f"SELECT {_EVENT_FIELDS} FROM agent_events"
-            " WHERE task_id = %s AND seq > %s ORDER BY seq LIMIT %s",
-            (task_id, since if since is not None else 0, EVENT_LIMIT),
-        )
-        return [_event_dict(row) for row in cur.fetchall()]
-
-
 def page_thread_events(
     thread_id: str,
     since: int | None,
@@ -828,7 +739,7 @@ def page_thread_events(
     *,
     before: int | None = None,
 ) -> list[dict[str, Any]]:
-    """One chronological page of a thread's task events.
+    """One chronological page of a thread's turn events.
 
     ``since`` pages forward for live updates. ``before`` pages backward from
     the oldest event a client already has. With neither cursor, the newest
@@ -840,8 +751,7 @@ def page_thread_events(
         if since is not None:
             cur.execute(
                 f"SELECT {_EVENT_FIELDS} FROM agent_events"
-                " WHERE task_id IN (SELECT 'task_' || number FROM tasks WHERE thread_id = %s)"
-                " AND seq > %s ORDER BY seq LIMIT %s",
+                " WHERE thread_id = %s AND seq > %s ORDER BY seq LIMIT %s",
                 (thread_id, since, limit),
             )
         else:
@@ -851,12 +761,51 @@ def page_thread_events(
             )
             cur.execute(
                 f"SELECT * FROM (SELECT {_EVENT_FIELDS} FROM agent_events"
-                " WHERE task_id IN (SELECT 'task_' || number FROM tasks WHERE thread_id = %s)"
+                " WHERE thread_id = %s"
                 f"{before_clause} ORDER BY seq DESC LIMIT %s) AS newest"
                 " ORDER BY seq",
                 params,
             )
         return [_event_dict(row) for row in cur.fetchall()]
+
+
+def recent_thread_handoff_events(
+    cur: Any,
+    thread_id: str,
+    *,
+    character_limit: int,
+) -> list[dict[str, Any]]:
+    """Newest retained public thread events that fit a bounded handoff.
+
+    The window is returned chronologically. Activity JSON is counted in full,
+    so provider detail/output shown by an expanded UI card is available to the
+    replacement session. PostgreSQL returns only the bounded suffix rather
+    than transferring the full event history to Python.
+    """
+    if character_limit <= 0:
+        return []
+    cur.execute(
+        f"SELECT {_EVENT_FIELDS} FROM ("
+        f" SELECT {_EVENT_FIELDS},"
+        " COALESCE(SUM(CASE"
+        "   WHEN event_type = 'thread.message' THEN char_length(message)"
+        "   WHEN event_type = 'thread.activity' THEN char_length(activity::text)"
+        "   WHEN event_type = 'thread.error' THEN char_length(error_message)"
+        "   ELSE 1"
+        " END) OVER ("
+        "   ORDER BY seq DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING"
+        " ), 0) AS newer_characters"
+        " FROM agent_events"
+        " WHERE thread_id = %s"
+        " AND event_type IN ("
+        "   'thread.message', 'thread.activity', 'thread.error', 'thread.stopped'"
+        " )"
+        ") AS history"
+        " WHERE newer_characters < %s"
+        " ORDER BY seq",
+        (thread_id, character_limit),
+    )
+    return [_event_dict(row) for row in cur.fetchall()]
 
 
 # -- network policy and proxy account pins (admin writes, proxy reads) ---------------
@@ -1678,6 +1627,170 @@ def tool_event(seq: int) -> dict[str, Any] | None:
         cur.execute(f"SELECT {_TOOL_EVENT_FIELDS} FROM tool_events WHERE seq = %s", (seq,))
         row = cur.fetchone()
     return _tool_event_dict(row, include_arguments=True) if row is not None else None
+
+
+# -- host error log ------------------------------------------------------------
+# A journald collector is the sole writer.
+
+_HOST_ERROR_FIELDS = (
+    "id, seq, first_seen_at, last_seen_at, service, component, kind,"
+    " exception_type, summary, traceback, context, fingerprint,"
+    " occurrence_count, host_version, boot_id, pid"
+)
+
+
+def _host_error_dict(row: Any, *, include_details: bool = False) -> dict[str, Any]:
+    (
+        error_id,
+        seq,
+        first_seen_at,
+        last_seen_at,
+        service,
+        component,
+        kind,
+        exception_type,
+        summary,
+        trace,
+        context,
+        fingerprint,
+        occurrence_count,
+        host_version,
+        boot_id,
+        pid,
+    ) = row
+    error: dict[str, Any] = {
+        "id": int(error_id),
+        "seq": int(seq),
+        "error_id": f"host_error_{error_id}",
+        "first_seen_at": first_seen_at,
+        "last_seen_at": last_seen_at,
+        "service": service,
+        "component": component,
+        "kind": kind,
+        "exception_type": exception_type,
+        "summary": summary,
+        "occurrence_count": int(occurrence_count),
+        "host_version": host_version,
+        "boot_id": boot_id,
+        "pid": int(pid) if pid is not None else None,
+        "has_details": bool(trace or context),
+    }
+    if include_details:
+        error["traceback"] = trace
+        error["context"] = dict(context) if isinstance(context, dict) else {}
+        error["fingerprint"] = fingerprint
+    return error
+
+
+def ingest_host_error(
+    realtime_usec: int,
+    event: dict[str, Any],
+) -> int:
+    """Store or briefly coalesce one validated journal error."""
+    from datetime import datetime, timedelta, timezone
+
+    seen_at = (
+        datetime.fromtimestamp(realtime_usec / 1_000_000, timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    cutoff = (
+        datetime.fromtimestamp(realtime_usec / 1_000_000, timezone.utc)
+        - timedelta(seconds=HOST_ERROR_COALESCE_SECONDS)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT id FROM host_errors"
+            " WHERE fingerprint = %s AND service = %s AND last_seen_at >= %s"
+            " ORDER BY seq DESC LIMIT 1 FOR UPDATE",
+            (event["fingerprint"], event["service"], cutoff),
+        )
+        existing = cur.fetchone()
+        if existing is not None:
+            existing_id = int(existing[0])
+            cur.execute(
+                "UPDATE host_errors SET seq = nextval('host_errors_seq_seq'),"
+                " last_seen_at = %s,"
+                " occurrence_count = occurrence_count + 1, summary = %s,"
+                " traceback = %s, context = %s, host_version = %s,"
+                " boot_id = %s, pid = %s WHERE id = %s RETURNING id, seq",
+                (
+                    seen_at,
+                    event["summary"],
+                    event["traceback"],
+                    db.jsonb(event["context"]),
+                    event["host_version"],
+                    event["boot_id"],
+                    event["pid"],
+                    existing_id,
+                ),
+            )
+            updated = cur.fetchone()
+            assert updated is not None
+            error_id, seq = int(updated[0]), int(updated[1])
+        else:
+            cur.execute(
+                "INSERT INTO host_errors"
+                " (first_seen_at, last_seen_at, service, component, kind,"
+                " exception_type, summary, traceback, context, fingerprint,"
+                " occurrence_count, host_version, boot_id, pid)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s)"
+                " RETURNING id, seq",
+                (
+                    seen_at,
+                    seen_at,
+                    event["service"],
+                    event["component"],
+                    event["kind"],
+                    event["exception_type"],
+                    event["summary"],
+                    event["traceback"],
+                    db.jsonb(event["context"]),
+                    event["fingerprint"],
+                    event["host_version"],
+                    event["boot_id"],
+                    event["pid"],
+                ),
+            )
+            inserted = cur.fetchone()
+            assert inserted is not None
+            error_id, seq = int(inserted[0]), int(inserted[1])
+        if seq % HOST_ERROR_PRUNE_EVERY == 0:
+            cur.execute(
+                "DELETE FROM host_errors WHERE"
+                " seq < COALESCE(("
+                " SELECT seq FROM host_errors ORDER BY seq DESC OFFSET %s LIMIT 1"
+                "), 0)",
+                (HOST_ERROR_LIMIT - 1,),
+            )
+    return error_id
+
+
+def page_host_errors_before(
+    before: int | None, *, service: str | None = None, limit: int = EVENT_PAGE_LIMIT
+) -> list[dict[str, Any]]:
+    clause = "service = %s" if service is not None else None
+    params: tuple[Any, ...] = (service,) if service is not None else ()
+    return _page_before(
+        "host_errors",
+        _HOST_ERROR_FIELDS,
+        _host_error_dict,
+        before,
+        limit,
+        extra_clause=clause,
+        extra_params=params,
+    )
+
+
+def host_error(error_id: int) -> dict[str, Any] | None:
+    with db.transaction() as cur:
+        cur.execute(
+            f"SELECT {_HOST_ERROR_FIELDS} FROM host_errors WHERE id = %s",
+            (error_id,),
+        )
+        row = cur.fetchone()
+    return _host_error_dict(row, include_details=True) if row is not None else None
 
 
 def _approval_id(number: int, check_token: str) -> str:

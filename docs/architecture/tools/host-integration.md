@@ -75,7 +75,7 @@ Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
   forwarded to the separate agent-app socket
   (`/run/kern-agent-app/agent-app.sock`) rather than the tools socket.
   Listing it grants no authority. On every call the service attributes the
-  session to a running app task with an agent API; there is nothing to
+  session to an app thread with an agent API; there is nothing to
   configure and no secret involved because attribution comes from the
   caller's cgroup. See
   [`../apps/agent-app-api.md`](../apps/agent-app-api.md).

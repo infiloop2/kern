@@ -1,7 +1,10 @@
 const pending = new Map();
 let nextRequestId = 1;
 let threads = [];
-let tasks = [];
+// The selected thread's live status ("idle" | "running"), from the host
+// through the thread index. Turns and their contents render purely from the
+// event stream.
+let selectedThreadStatus = "idle";
 // The selected thread opens on its newest event page. Live events page
 // forward from the newest cursor; earlier history is prepended on demand from
 // the oldest cursor. EVENTS_PAGE mirrors the app backend page size.
@@ -18,8 +21,14 @@ let restoredChatScrollTop = null;
 const threadViewStates = new Map();
 const EVENTS_PAGE = 6;
 const INITIAL_EVENT_PAGES = 3;
+const VIEW_STATE_LIMIT = 50;
 const ACTIVE_REFRESH_MS = 1000;
 const IDLE_REFRESH_MS = 5000;
+const APP_API_TIMEOUT_MS = 30000;
+// The outer browser-to-app proxy can wait 50s for a synchronous provider
+// acknowledgement. Sends and Stop must outlive that hop or a retry can
+// duplicate a message the host accepted after the frame gave up.
+const AGENT_DELIVERY_TIMEOUT_MS = 60 * 1000;
 let selectedThreadId = null;
 let selectedThreadName = null;
 let selectedThreadRuntime = null;
@@ -27,9 +36,11 @@ let selectedThreadModel = null;
 let selectedThreadEffort = null;
 let selectedThreadArchived = false;
 let showingArchivedThreads = false;
+let showingActivity = true;
 let sessionOptions = {};
 let pendingAttachments = [];
 let attachmentActivity = null;
+let sendingMessage = false;
 const ATTACHMENT_LIMIT = 10;
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 const ACTIVITY_PRESENTATION = Object.freeze({
@@ -45,14 +56,16 @@ const ACTIVITY_PRESENTATION = Object.freeze({
   status: { icon: "•", label: "Status", detail: "Details", output: "Output" },
 });
 // Render guards: polling re-renders only when data actually
-// changed, so a steering draft or the reading scroll position survives
+// changed, so a draft or the reading scroll position survives
 // refreshes that bring nothing new.
 let renderedThreadsKey = null;
 let renderedHistoryKey = null;
 let renderedHistoryThread = null;
-// Per-task rendered HTML, so a poll only patches turns that actually changed.
-const renderedTurnHtml = new Map();
+// Per-entry rendered HTML, so a poll only patches history that actually
+// changed (most often one streaming activity snapshot).
+const renderedEntryHtml = new Map();
 let forceScrollBottom = false;
+let statusOwner = null;
 
 const $ = id => document.getElementById(id);
 const runtimeLabel = runtime => runtime === "claude_code" ? "Claude Code" : runtime === "codex" ? "Codex" : runtime === "hermes" ? "Hermes" : runtime;
@@ -63,7 +76,6 @@ const modelLabel = (runtime, value) => runtime === "codex" ? value : optionLabel
 const esc = value => KernRichText.escapeHtml(value);
 const markdown = value => KernRichText.renderMarkdown(value);
 const escAttr = value => esc(value).replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-const badge = value => `<span class="status ${esc(value)}">${esc(value)}</span>`;
 const formatDateTime = value => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value || "");
@@ -96,7 +108,7 @@ window.addEventListener("message", event => {
   else callbacks.reject(new Error(message.error || "request failed"));
 });
 
-function api(method, path, body) {
+function api(method, path, body, timeoutMs = APP_API_TIMEOUT_MS) {
   if (!path.startsWith("/")) throw new Error("app API path must be absolute");
   const requestId = String(nextRequestId++);
   parent.postMessage({ type: "kern-app-api", request_id: requestId, method, path: "/v1/apps/agent_chat/api" + path, body }, "*");
@@ -106,7 +118,7 @@ function api(method, path, body) {
       if (!pending.has(requestId)) return;
       pending.delete(requestId);
       reject(new Error("request timed out"));
-    }, 30000);
+    }, timeoutMs);
   });
 }
 
@@ -146,9 +158,12 @@ function requestHostCopy(text) {
   });
 }
 
-function setStatus(message) {
+function setStatus(message, owner = "action") {
   // An empty message means healthy: hide the banner. A non-empty message is
-  // an error to show.
+  // an error to show. Background refreshes may clear their own errors, but
+  // never erase a user-action error before the operator can read it.
+  if (owner === "refresh" && statusOwner === "action") return;
+  statusOwner = message ? owner : null;
   $("status").hidden = !message;
   $("status").textContent = message;
 }
@@ -170,12 +185,21 @@ async function refresh() {
     if (archivedView !== showingArchivedThreads) return;
     threads = response.threads || [];
     const selectedThread = threads.find(thread => thread.thread_id === selectedThreadId);
-    if (selectedThread) selectedThreadName = selectedThread.name;
+    if (selectedThread) {
+      const keepPendingSessionChange = sessionConfigurationChanged()
+        && selectedThread.status !== "running";
+      selectedThreadName = selectedThread.name;
+      selectedThreadStatus = selectedThread.status || "idle";
+      selectedThreadRuntime = selectedThread.agent_runtime;
+      selectedThreadModel = selectedThread.model;
+      selectedThreadEffort = selectedThread.effort;
+      if (!keepPendingSessionChange) loadSelectedSessionControls();
+    }
     renderThreads();
     if (selectedThreadId) await refreshSelectedThread();
-    setStatus("");
+    setStatus("", "refresh");
   } catch (error) {
-    setStatus(error.message);
+    setStatus(error.message, "refresh");
   }
 }
 
@@ -190,13 +214,12 @@ function renderThreads() {
     return;
   }
   $("threads").innerHTML = threads.map(thread => {
-    const active = (thread.active_tasks || []).length > 0;
-    const count = `${thread.task_count} task${thread.task_count === 1 ? "" : "s"}`;
+    const active = thread.status === "running";
     return `
-    <button class="thread-item${thread.thread_id === selectedThreadId ? " selected" : ""}" data-thread-id="${escAttr(thread.thread_id)}" data-name="${escAttr(thread.name)}" data-runtime="${escAttr(thread.agent_runtime)}" data-model="${escAttr(thread.model)}" data-effort="${escAttr(thread.effort)}" data-archived="${thread.archived ? "true" : "false"}">
+    <button class="thread-item${thread.thread_id === selectedThreadId ? " selected" : ""}" data-thread-id="${escAttr(thread.thread_id)}" data-name="${escAttr(thread.name)}" data-runtime="${escAttr(thread.agent_runtime)}" data-model="${escAttr(thread.model)}" data-effort="${escAttr(thread.effort)}" data-status="${escAttr(thread.status || "idle")}" data-archived="${thread.archived ? "true" : "false"}">
       <span class="thread-name"><span>${esc(thread.name)}</span>${active ? `<span class="thread-dot running"></span>` : ""}</span>
       <span class="thread-meta">${esc(runtimeLabel(thread.agent_runtime))} &middot; ${esc(modelLabel(thread.agent_runtime, thread.model))}</span>
-      <span class="thread-meta">${esc(count)} &middot; ${esc(relativeTime(thread.last_used_at))}</span>
+      <span class="thread-meta">${esc(relativeTime(thread.last_used_at))}</span>
     </button>`;
   }).join("");
 }
@@ -204,8 +227,7 @@ function renderThreads() {
 function updateComposer() {
   const hasThread = selectedThreadId !== null;
   const readOnly = showingArchivedThreads || selectedThreadArchived;
-  const queuedTask = tasks.find(task => task.status === "queued");
-  const runningTask = tasks.find(task => task.status === "running");
+  const running = hasThread && selectedThreadStatus === "running";
   $("thread-title").textContent = hasThread
     ? selectedThreadName || selectedThreadId
     : showingArchivedThreads
@@ -219,38 +241,55 @@ function updateComposer() {
   $("rename-thread").hidden = !hasThread;
   $("archive-thread").hidden = !hasThread;
   $("archive-thread").textContent = selectedThreadArchived ? "Unarchive" : "Archive";
+  updateActivityToggle(hasThread);
   $("composer").hidden = readOnly;
   $("composer-hint").hidden = readOnly;
   $("composer-dock").classList.toggle("readonly", readOnly);
   $("new-thread").hidden = showingArchivedThreads;
   $("archived-toggle").textContent = showingArchivedThreads ? "Show active" : "Show archived";
-  // Follow-up tasks reuse the thread's stored session configuration, so the
-  // pills only show while composing the first task of a new thread. The
-  // thread id itself is backend-generated, never typed.
-  $("new-task-runtime").hidden = hasThread;
-  $("new-task-model").hidden = hasThread;
-  $("new-task-effort").hidden = hasThread;
-  $("composer-running").hidden = !runningTask;
-  $("new-task").placeholder = queuedTask
-    ? "Waiting for the agent to start…"
-    : runningTask
-      ? runningTask.agent_runtime === "hermes"
-        ? "Hermes does not support follow-ups while running"
-        : "Send a follow-up to steer the running task"
-      : hasThread
-        ? "Describe what the agent should do next"
-        : "Describe a task for the agent";
-  if (hasThread) {
-    $("new-task-runtime").value = selectedThreadRuntime;
-    setSessionOptions(selectedThreadModel, selectedThreadEffort);
-  }
+  // Configuration is chosen on the first message and may be changed on the
+  // next idle send. The thread id itself is backend-generated, never typed.
+  $("new-task-runtime").hidden = false;
+  $("new-task-model").hidden = false;
+  $("new-task-effort").hidden = false;
+  $("composer-running").hidden = !running;
+  $("new-task").placeholder = running
+    ? selectedThreadRuntime === "hermes"
+      ? "Hermes does not support follow-ups while running"
+      : "Send another message"
+    : hasThread
+      ? "Describe what the agent should do next"
+      : "Describe a task for the agent";
   updateComposerActions();
+}
+
+function updateActivityToggle(hasThread = selectedThreadId !== null) {
+  const button = $("activity-toggle");
+  button.hidden = !hasThread;
+  button.setAttribute("aria-checked", showingActivity ? "true" : "false");
+  button.title = showingActivity ? "Hide agent activity" : "Show agent activity";
+  $("chat-app").classList.toggle("activity-hidden", !showingActivity);
+}
+
+function toggleActivity() {
+  showingActivity = !showingActivity;
+  updateActivityToggle();
 }
 
 function setSessionOptions(preferredModel, preferredEffort) {
   const runtime = $("new-task-runtime").value;
   const models = sessionOptions[runtime] || {};
   const modelValues = Object.keys(models);
+  const preservingRecordedSession = (
+    selectedThreadId !== null && runtime === selectedThreadRuntime
+  );
+  if (
+    preservingRecordedSession
+    && preferredModel
+    && !modelValues.includes(preferredModel)
+  ) {
+    modelValues.push(preferredModel);
+  }
   if (!modelValues.length) {
     $("new-task-model").innerHTML = "";
     $("new-task-effort").innerHTML = "";
@@ -259,13 +298,25 @@ function setSessionOptions(preferredModel, preferredEffort) {
     updateComposerActions();
     return;
   }
-  const model = preferredModel && models[preferredModel] ? preferredModel : modelValues[0];
+  const model = preferredModel && modelValues.includes(preferredModel)
+    ? preferredModel
+    : modelValues[0];
   $("new-task-model").innerHTML = modelValues
     .map(value => `<option value="${esc(value)}">${esc(modelLabel(runtime, value))}</option>`)
     .join("");
   $("new-task-model").value = model;
-  const efforts = models[model];
-  const effort = preferredEffort && efforts.includes(preferredEffort) ? preferredEffort : efforts[0];
+  const efforts = [...(models[model] || [])];
+  if (
+    preservingRecordedSession
+    && model === selectedThreadModel
+    && preferredEffort
+    && !efforts.includes(preferredEffort)
+  ) {
+    efforts.push(preferredEffort);
+  }
+  const effort = preferredEffort && efforts.includes(preferredEffort)
+    ? preferredEffort
+    : efforts[0];
   $("new-task-effort").innerHTML = efforts
     .map(value => `<option value="${esc(value)}">${esc(optionLabel(value))}</option>`)
     .join("");
@@ -275,25 +326,58 @@ function setSessionOptions(preferredModel, preferredEffort) {
   updateComposerActions();
 }
 
+function loadSelectedSessionControls() {
+  if (!selectedThreadId || !selectedThreadRuntime) return;
+  $("new-task-runtime").value = selectedThreadRuntime;
+  setSessionOptions(selectedThreadModel, selectedThreadEffort);
+}
+
+function sessionConfigurationChanged() {
+  return selectedThreadId !== null && (
+    $("new-task-runtime").value !== selectedThreadRuntime
+    || $("new-task-model").value !== selectedThreadModel
+    || $("new-task-effort").value !== selectedThreadEffort
+  );
+}
+
 function updateComposerActions() {
   const hasSessionOption = Boolean($("new-task-model").value && $("new-task-effort").value);
   const hasOversizedAttachment = pendingAttachments.some(attachment => attachment.size_bytes > ATTACHMENT_MAX_BYTES);
-  const queuedTask = tasks.some(task => task.status === "queued");
-  const unsteerableRunningTask = tasks.some(
-    task => task.status === "running" && task.agent_runtime === "hermes",
+  const sessionLocked = sendingMessage || (
+    selectedThreadId !== null && selectedThreadStatus === "running"
   );
-  const activeBlock = queuedTask || unsteerableRunningTask;
+  const runningSessionLocked = selectedThreadId !== null
+    && selectedThreadStatus === "running";
+  // Hermes has no live input channel, so follow-ups wait until it is idle.
+  const activeBlock = selectedThreadId !== null
+    && selectedThreadStatus === "running"
+    && selectedThreadRuntime === "hermes";
   $("new-task").disabled = activeBlock;
   $("create-task").disabled = (
     activeBlock
+    || sendingMessage
     || attachmentActivity !== null
     || hasOversizedAttachment
     || !hasSessionOption
   );
   $("attach-file").disabled = (
     activeBlock
+    || sendingMessage
     || attachmentActivity !== null
     || pendingAttachments.length >= ATTACHMENT_LIMIT
+  );
+  $("new-task-runtime").disabled = sessionLocked;
+  $("new-task-model").disabled = sessionLocked || !$("new-task-model").value;
+  $("new-task-effort").disabled = sessionLocked || !$("new-task-effort").value;
+  $("composer-options").classList.toggle("locked", runningSessionLocked);
+  if (!runningSessionLocked) {
+    $("composer-options").classList.remove("show-lock-note");
+  }
+  $("session-change-warning").hidden = (
+    showingArchivedThreads
+    || selectedThreadArchived
+    || selectedThreadStatus === "running"
+    || !sessionConfigurationChanged()
   );
 }
 
@@ -312,7 +396,7 @@ function renderAttachments() {
             data-remove-attachment="${escAttr(attachment.selection_id)}"
             aria-label="Remove ${escAttr(attachment.original_name)}"
             title="Remove ${escAttr(attachment.original_name)}"
-            ${attachmentActivity !== null ? "disabled" : ""}
+            ${attachmentActivity !== null || sendingMessage ? "disabled" : ""}
           >&times;</button>
         </div>`;
     }),
@@ -324,6 +408,7 @@ function renderAttachments() {
 async function attachFile() {
   const remaining = ATTACHMENT_LIMIT - pendingAttachments.length;
   if (remaining <= 0) return;
+  setStatus("");
   attachmentActivity = "Selecting file…";
   renderAttachments();
   try {
@@ -352,6 +437,7 @@ async function attachFile() {
 }
 
 async function removeAttachment(selectionId) {
+  if (sendingMessage) return;
   const index = pendingAttachments.findIndex(attachment => attachment.selection_id === selectionId);
   if (index < 0) return;
   const [attachment] = pendingAttachments.splice(index, 1);
@@ -361,14 +447,16 @@ async function removeAttachment(selectionId) {
   }
 }
 
-async function showThread(threadId, name, runtime, model, effort, archived) {
+async function showThread(threadId, name, runtime, model, effort, status, archived) {
   saveSelectedThreadView();
   selectedThreadId = threadId;
   selectedThreadName = name;
   selectedThreadRuntime = runtime;
   selectedThreadModel = model;
   selectedThreadEffort = effort;
+  selectedThreadStatus = status || "idle";
   selectedThreadArchived = archived;
+  loadSelectedSessionControls();
   restoreThreadView(threadId);
   updateComposer();
   renderThreads();
@@ -384,9 +472,6 @@ async function refreshSelectedThread() {
   // Capture the id: a thread switch mid-flight must not let a stale response
   // land in the newly selected thread's state.
   const threadId = selectedThreadId;
-  const response = await api("GET", `/threads/${encodeURIComponent(threadId)}/tasks`);
-  if (threadId !== selectedThreadId) return;
-  tasks = response.tasks || [];
   await refreshThreadEvents(threadId);
   if (threadId !== selectedThreadId) return;
   updateComposer();
@@ -396,8 +481,9 @@ async function refreshSelectedThread() {
 function saveSelectedThreadView() {
   if (!selectedThreadId) return;
   const scroller = $("chat-scroll");
+  // Refresh insertion order so the oldest unvisited thread is evicted first.
+  threadViewStates.delete(selectedThreadId);
   threadViewStates.set(selectedThreadId, {
-    tasks,
     events: threadEvents,
     oldestSeq: threadEventsOldestSeq,
     newestSeq: threadEventsNewestSeq,
@@ -405,16 +491,17 @@ function saveSelectedThreadView() {
     hasOlder: hasOlderThreadEvents,
     scrollTop: scroller ? scroller.scrollTop : lastChatScrollTop,
   });
+  if (threadViewStates.size > VIEW_STATE_LIMIT) {
+    threadViewStates.delete(threadViewStates.keys().next().value);
+  }
 }
 
 function restoreThreadView(threadId) {
   const state = threadViewStates.get(threadId);
   if (!state) {
-    tasks = [];
     resetThreadEvents();
     return;
   }
-  tasks = state.tasks;
   threadEvents = state.events;
   threadEventsOldestSeq = state.oldestSeq;
   threadEventsNewestSeq = state.newestSeq;
@@ -568,7 +655,7 @@ function renderThreadHistory() {
   const key = JSON.stringify([
     selectedThreadId,
     showingArchivedThreads,
-    tasks,
+    selectedThreadStatus,
     threadEventsOldestSeq,
     threadEventsNewestSeq,
     threadEvents.length,
@@ -579,7 +666,7 @@ function renderThreadHistory() {
   renderedHistoryThread = selectedThreadId;
   const detail = $("thread-detail");
   if (!selectedThreadId) {
-    renderedTurnHtml.clear();
+    renderedEntryHtml.clear();
     renderHistoryLoader();
     detail.innerHTML = showingArchivedThreads
       ? `<div class="chat-hero">
@@ -588,27 +675,21 @@ function renderThreadHistory() {
         </div>`
       : `<div class="chat-hero">
           <h2>What should the agent work on?</h2>
-          <p>Send one message at a time. A follow-up steers running work; otherwise it starts the next turn in the same agent session.</p>
+          <p>Messages continue in the same agent session. Supported agents can also receive another message while working.</p>
         </div>`;
     return;
   }
   renderHistoryLoader();
   const scroller = $("chat-scroll");
   const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
-  // Patch turns in place instead of rebuilding the whole history: a poll that
-  // brings a task-field change only touches that task's article, so an
-  // in-flight touch scroll (and its momentum) survives the refresh.
-  const eventsByTask = new Map();
-  for (const event of threadEvents) {
-    if (!["task.message", "task.activity"].includes(event.event_type)) continue;
-    if (!eventsByTask.has(event.task_id)) eventsByTask.set(event.task_id, []);
-    eventsByTask.get(event.task_id).push(event);
-  }
-  const ordered = tasks
-    .filter(task => task.status === "queued" || eventsByTask.has(task.task_id))
-    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  // Patch entries in place instead of rebuilding the whole history, so an
+  // in-flight touch scroll (and its momentum) survives polling.
+  const ordered = threadEvents.filter(event => (
+    ["thread.message", "thread.activity", "thread.error", "thread.stopped"]
+      .includes(event.event_type)
+  ));
   if (switched || !ordered.length) {
-    renderedTurnHtml.clear();
+    renderedEntryHtml.clear();
     detail.innerHTML = ordered.length
       ? ""
       : `<div class="chat-hero"><p>No retained messages for this thread yet.</p></div>`;
@@ -618,18 +699,21 @@ function renderThreadHistory() {
       .map(card => card.dataset.activityId),
   );
   if (ordered.length) {
-    ordered.forEach((task, index) => {
-      const html = renderTurn(task, eventsByTask.get(task.task_id) || [], openActivities);
+    ordered.forEach((event, index) => {
+      const entryKey = `event-${event.seq}`;
+      const html = renderThreadEntry(event, openActivities);
       const current = detail.children[index];
-      if (current && current.dataset.taskId === task.task_id) {
-        if (renderedTurnHtml.get(task.task_id) !== html) detail.replaceChild(turnElement(html), current);
+      if (current && current.dataset.entryId === entryKey) {
+        if (renderedEntryHtml.get(entryKey) !== html) {
+          detail.replaceChild(threadEntryElement(html), current);
+        }
       } else {
-        detail.insertBefore(turnElement(html), current || null);
+        detail.insertBefore(threadEntryElement(html), current || null);
       }
-      renderedTurnHtml.set(task.task_id, html);
+      renderedEntryHtml.set(entryKey, html);
     });
     while (detail.children.length > ordered.length) {
-      renderedTurnHtml.delete(detail.lastElementChild.dataset.taskId);
+      renderedEntryHtml.delete(detail.lastElementChild.dataset.entryId);
       detail.lastElementChild.remove();
     }
   }
@@ -644,7 +728,7 @@ function renderThreadHistory() {
   forceScrollBottom = false;
 }
 
-function turnElement(html) {
+function threadEntryElement(html) {
   const template = document.createElement("template");
   template.innerHTML = html.trim();
   return template.content.firstElementChild;
@@ -696,83 +780,64 @@ function renderActivity(value, openActivities) {
     </details>`;
 }
 
-function renderTurn(task, events, openActivities) {
-  // Queued work has no message event yet, so its compact task snapshot is the
-  // temporary opening bubble. Once claimed, the snapshot is ignored and the
-  // complete conversation comes only from task.message/task.activity events.
-  const mergedActivities = new Map();
-  for (const event of events) {
-    const value = event.payload && event.payload.activity;
-    if (!value || typeof value !== "object") continue;
-    const activityId = String(value.activity_id || `event-${event.seq}`);
-    const previous = mergedActivities.get(activityId) || {};
-    const genericUpdate = ["Tool result", "Tool progress", "Command output"].includes(value.title);
-    const appendedOutput = value.append_output && previous.output
-      ? `${previous.output}${value.output || ""}`
-      : value.output;
-    mergedActivities.set(activityId, {
-      ...previous,
-      ...value,
-      // Claude tool-result blocks identify the original call but do not
-      // repeat its friendly name/kind; command output deltas are similar.
-      title: genericUpdate && previous.title ? previous.title : value.title,
-      kind: genericUpdate && previous.kind ? previous.kind : value.kind,
-      output: appendedOutput,
-      activity_id: activityId,
-    });
-  }
-  const stream = [];
-  let userMessageCount = 0;
-  const renderedActivities = new Set();
-  for (const event of task.status === "queued" ? [] : events) {
-    if (event.event_type === "task.activity") {
-      const value = event.payload && event.payload.activity;
-      if (!value || typeof value !== "object") continue;
-      const activityId = String(value.activity_id || `event-${event.seq}`);
-      if (renderedActivities.has(activityId)) continue;
-      renderedActivities.add(activityId);
-      stream.push(renderActivity(mergedActivities.get(activityId), openActivities));
-      continue;
-    }
-    const text = event.payload && event.payload.message;
-    if (typeof text !== "string" || !text) continue;
-    if (event.payload.source === "user") {
-      const steerClass = userMessageCount > 0 ? " steer-bubble" : "";
-      stream.push(`<div class="turn-user"><div class="bubble${steerClass}"><pre>${esc(text)}</pre></div></div>`);
-      userMessageCount += 1;
-    } else {
-      stream.push(`<div class="turn-agent md-content">${markdown(text)}</div>`);
-    }
-  }
-  const queuedPrompt = task.status === "queued"
-    ? `<div class="turn-user"><div class="bubble"><pre>${esc(task.input_message)}</pre></div></div>`
-    : "";
-  return `
-    <article class="turn" data-task-id="${esc(task.task_id)}">
-      ${queuedPrompt}
-      <div class="turn-meta">
-        ${task.status === "completed" ? "" : badge(task.status)}
-        <span class="mono">${esc(task.task_id)}</span>
-        <span title="${esc(formatDateTime(task.created_at))}">${esc(relativeTime(task.created_at))}</span>
-        ${task.status === "queued" && !selectedThreadArchived ? `<button class="ghost sm" data-task-action="cancel" data-task-id="${esc(task.task_id)}">Cancel</button>` : ""}
-      </div>
-      ${stream.join("")}
+function renderThreadEntry(event, openActivities) {
+  const entryId = `event-${event.seq}`;
+  const payload = event.payload || {};
+  if (event.event_type === "thread.activity") {
+    return `<article class="thread-entry" data-entry-id="${entryId}">
+      ${renderActivity(payload.activity || {}, openActivities)}
     </article>`;
+  }
+  if (event.event_type === "thread.error") {
+    return `<article class="thread-entry thread-error" data-entry-id="${entryId}">
+      ${esc(payload.error_message || "The agent stopped because of an error.")}
+    </article>`;
+  }
+  if (event.event_type === "thread.stopped") {
+    return `<article class="thread-entry thread-stopped" data-entry-id="${entryId}">
+      Agent stopped
+    </article>`;
+  }
+  const text = typeof payload.message === "string" ? payload.message : "";
+  if (payload.source === "user") {
+    return `<article class="thread-entry thread-user" data-entry-id="${entryId}">
+      <div class="bubble"><pre>${esc(text)}</pre></div>
+    </article>`;
+  }
+  return `<article class="thread-entry thread-agent md-content" data-entry-id="${entryId}">
+    ${markdown(text)}
+  </article>`;
 }
 
 async function sendMessage() {
+  if (sendingMessage || $("create-task").disabled) return;
+  sendingMessage = true;
+  updateComposerActions();
+  try {
+    await sendMessageUnlocked();
+  } finally {
+    sendingMessage = false;
+    updateComposerActions();
+  }
+}
+
+async function sendMessageUnlocked() {
   if (showingArchivedThreads || selectedThreadArchived) return;
   const message = $("new-task").value.trim();
   const runtime = $("new-task-runtime").value;
   const model = $("new-task-model").value;
   const effort = $("new-task-effort").value;
-  if ((!message && !pendingAttachments.length) || !model || !effort || $("create-task").disabled) return;
+  if ((!message && !pendingAttachments.length) || !model || !effort) return;
+  setStatus("");
   // A request without thread_id asks the backend to open a new thread with a
   // generated successive name (thread-1, thread-2, ...).
   const startingNewThread = selectedThreadId === null;
+  const changingSession = sessionConfigurationChanged();
   const request = { input_message: "" };
-  if (startingNewThread) Object.assign(request, { agent_runtime: runtime, model, effort });
-  else request.thread_id = selectedThreadId;
+  if (startingNewThread || changingSession) {
+    Object.assign(request, { agent_runtime: runtime, model, effort });
+  }
+  if (!startingNewThread) request.thread_id = selectedThreadId;
   for (const [index, attachment] of pendingAttachments.entries()) {
     if (attachment.file) continue;
     attachmentActivity = `Uploading ${index + 1} of ${pendingAttachments.length}…`;
@@ -796,42 +861,52 @@ async function sendMessage() {
     ? `${message || (uploadedFiles.length === 1 ? "Please review the uploaded file." : "Please review the uploaded files.")}\n\n${fileReferences}`
     : message;
   request.input_message = inputMessage;
-  const result = await api("POST", "/messages", request);
+  attachmentActivity = "Sending…";
+  renderAttachments();
+  let result;
+  try {
+    result = await api("POST", "/messages", request, AGENT_DELIVERY_TIMEOUT_MS);
+  } finally {
+    attachmentActivity = null;
+    renderAttachments();
+  }
   $("new-task").value = "";
   pendingAttachments = [];
   renderAttachments();
   autosizeComposer();
   if (startingNewThread) {
     // A brand-new thread has no prior event stream to keep; start its
-    // newest-page accumulator clean so its first poll reads only this task.
+    // newest-page accumulator clean so its first poll reads only this work.
     resetThreadEvents();
   }
   selectedThreadId = result.thread_id;
-  if (startingNewThread) {
-    selectedThreadName = result.thread_id;
-    selectedThreadRuntime = result.agent_runtime;
-    selectedThreadModel = result.model;
-    selectedThreadEffort = result.effort;
-  }
+  if (startingNewThread) selectedThreadName = result.thread_id;
+  selectedThreadRuntime = runtime;
+  selectedThreadModel = model;
+  selectedThreadEffort = effort;
+  selectedThreadStatus = "running";
   forceScrollBottom = true;
   updateComposer();
   await refresh();
 }
 
-async function taskAction(button) {
-  const taskId = button.dataset.taskId;
-  const action = button.dataset.taskAction;
-  if (action === "cancel") {
-    await api("POST", `/tasks/${taskId}/cancel`);
-    await refreshSelectedThread();
+async function stopRunningTurn() {
+  if (selectedThreadStatus !== "running" || !selectedThreadId) return;
+  if (!confirm("Stop the agent?")) return;
+  attachmentActivity = "Stopping…";
+  renderAttachments();
+  try {
+    await api(
+      "POST",
+      `/threads/${encodeURIComponent(selectedThreadId)}/stop`,
+      undefined,
+      AGENT_DELIVERY_TIMEOUT_MS,
+    );
+  } finally {
+    attachmentActivity = null;
+    renderAttachments();
   }
-}
-
-async function stopRunningTask() {
-  const runningTask = tasks.find(task => task.status === "running");
-  if (!runningTask || !confirm("Stop running task " + runningTask.task_id + "?")) return;
-  await api("POST", `/tasks/${runningTask.task_id}/kill`);
-  await refreshSelectedThread();
+  await refresh();
 }
 
 async function setSelectedThreadArchived() {
@@ -878,8 +953,8 @@ function clearSelectedThread() {
   selectedThreadRuntime = null;
   selectedThreadModel = null;
   selectedThreadEffort = null;
+  selectedThreadStatus = "idle";
   selectedThreadArchived = false;
-  tasks = [];
   resetThreadEvents();
   updateComposer();
   renderThreadHistory();
@@ -950,13 +1025,9 @@ document.addEventListener("click", event => {
       thread.dataset.runtime,
       thread.dataset.model,
       thread.dataset.effort,
+      thread.dataset.status,
       thread.dataset.archived === "true",
     ).catch(error => setStatus(error.message));
-    return;
-  }
-  const taskButton = event.target.closest && event.target.closest("button[data-task-action]");
-  if (taskButton) {
-    taskAction(taskButton).catch(error => setStatus(error.message));
     return;
   }
   const removeAttachmentButton = event.target.closest && event.target.closest("button[data-remove-attachment]");
@@ -975,6 +1046,7 @@ $("new-thread").addEventListener("click", () => {
 $("archived-toggle").addEventListener("click", () => toggleArchivedThreads().catch(error => setStatus(error.message)));
 $("rename-thread").addEventListener("click", () => renameSelectedThread().catch(error => setStatus(error.message)));
 $("archive-thread").addEventListener("click", () => setSelectedThreadArchived().catch(error => setStatus(error.message)));
+$("activity-toggle").addEventListener("click", toggleActivity);
 $("load-earlier").addEventListener("click", () => loadOlderThreadEvents().catch(error => setStatus(error.message)));
 $("chat-scroll").addEventListener("scroll", () => {
   const scroller = $("chat-scroll");
@@ -983,11 +1055,23 @@ $("chat-scroll").addEventListener("scroll", () => {
   if (!movedUp || scroller.scrollTop > 160) return;
   loadOlderThreadEvents().catch(error => setStatus(error.message));
 }, { passive: true });
-$("stop-task").addEventListener("click", () => stopRunningTask().catch(error => setStatus(error.message)));
+$("stop-task").addEventListener("click", () => stopRunningTurn().catch(error => setStatus(error.message)));
 $("create-task").addEventListener("click", () => sendMessage().catch(error => setStatus(error.message)));
 $("attach-file").addEventListener("click", () => attachFile().catch(error => setStatus(error.message)));
 $("new-task-runtime").addEventListener("change", () => setSessionOptions());
-$("new-task-model").addEventListener("change", () => setSessionOptions($("new-task-model").value));
+$("new-task-model").addEventListener("change", () => {
+  const model = $("new-task-model").value;
+  setSessionOptions(model, model === selectedThreadModel ? selectedThreadEffort : undefined);
+});
+$("new-task-effort").addEventListener("change", updateComposerActions);
+$("composer-options").addEventListener("mouseenter", () => {
+  if ($("composer-options").classList.contains("locked")) {
+    $("composer-options").classList.add("show-lock-note");
+  }
+});
+$("composer-options").addEventListener("mouseleave", () => {
+  $("composer-options").classList.remove("show-lock-note");
+});
 $("new-task").addEventListener("input", autosizeComposer);
 $("new-task").addEventListener("keydown", event => {
   const sendKey = event.key === "Enter" && !event.isComposing && (!event.shiftKey || event.metaKey || event.ctrlKey);
@@ -1008,7 +1092,7 @@ renderAttachments();
 setSidebarOpen(false);
 async function scheduleRefresh() {
   await refresh();
-  const active = threads.some(thread => (thread.active_tasks || []).length > 0);
+  const active = threads.some(thread => thread.status === "running");
   setTimeout(scheduleRefresh, active ? ACTIVE_REFRESH_MS : IDLE_REFRESH_MS);
 }
 scheduleRefresh();

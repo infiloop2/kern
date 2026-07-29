@@ -43,7 +43,7 @@ class AgentChatRichTextTests(unittest.TestCase):
         script = (
             f"const rich = require({json.dumps(str(renderer))});"
             "const event = (seq, phase, output, append_output=false) => ({"
-            "seq, task_id: 'task_1', event_type: 'task.activity', payload: {activity: {"
+            "seq, thread_id: 'thread-1', event_type: 'thread.activity', payload: {activity: {"
             "activity_id: 'command-1', kind: 'command', phase, title: seq === 1 ? 'npm test' : 'Command output',"
             "output, append_output}}});"
             "const compacted = rich.compactActivityEvents(["
@@ -78,10 +78,10 @@ class AgentChatRichTextTests(unittest.TestCase):
         script = (
             f"const rich = require({json.dumps(str(renderer))});"
             "const activity = (seq, phase) => ({"
-            "seq, task_id: 'task_1', event_type: 'task.activity', payload: {activity: {"
+            "seq, thread_id: 'thread-1', event_type: 'thread.activity', payload: {activity: {"
             "activity_id: 'command-1', kind: 'command', phase, title: 'npm test'}}});"
             "const message = seq => ({"
-            "seq, task_id: 'task_1', event_type: 'task.message', payload: {message: {role: 'user'}}});"
+            "seq, thread_id: 'thread-1', event_type: 'thread.message', payload: {message: {role: 'user'}}});"
             "const first = rich.compactActivityEvents(["
             "activity(10, 'started'), message(11), activity(12, 'completed')]);"
             "const second = rich.compactActivityEvents(["
@@ -98,9 +98,39 @@ class AgentChatRichTextTests(unittest.TestCase):
         ).stdout)
 
         self.assertEqual(compacted, [
-            {"seq": 10, "type": "task.activity", "phase": "completed"},
-            {"seq": 11, "type": "task.message"},
-            {"seq": 13, "type": "task.message"},
+            {"seq": 10, "type": "thread.activity", "phase": "completed"},
+            {"seq": 11, "type": "thread.message"},
+            {"seq": 13, "type": "thread.message"},
+        ])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
+    def test_activity_compaction_never_merges_host_scoped_provider_ids(self) -> None:
+        # The host prefixes provider ids with the private execution number, so
+        # a later process reusing command-1 cannot overwrite old activity.
+        renderer = Path("host/apps/agent_chat/ui/rich_text.js").resolve()
+        script = (
+            f"const rich = require({json.dumps(str(renderer))});"
+            "const activity = (seq, scope, phase, title) => ({"
+            "seq, thread_id: 'thread-1', event_type: 'thread.activity', payload: {activity: {"
+            "activity_id: `${scope}:command-1`, kind: 'command', phase, title}}});"
+            "const compacted = rich.compactActivityEvents(["
+            "activity(2, 1, 'started', 'npm test'), activity(3, 1, 'completed', 'npm test'),"
+            "activity(5, 2, 'started', 'npm run lint')]);"
+            "process.stdout.write(JSON.stringify(compacted"
+            ".filter(event => event.event_type === 'thread.activity')"
+            ".map(event => ({seq: event.seq, phase: event.payload.activity.phase,"
+            " title: event.payload.activity.title}))));"
+        )
+        compacted = json.loads(subprocess.run(
+            ["node", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout)
+
+        self.assertEqual(compacted, [
+            {"seq": 2, "phase": "completed", "title": "npm test"},
+            {"seq": 5, "phase": "started", "title": "npm run lint"},
         ])
 
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")

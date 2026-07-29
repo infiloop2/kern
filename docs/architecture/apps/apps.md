@@ -8,7 +8,7 @@ appears in the admin shell.
 
 Apps are not raw chat threads and they are not arbitrary agent plugins. Agents
 work inside a durable host and apps provide a richer UX for humans to interact
-with that work. Host-owned resources such as agent tasks, runtime credentials,
+with that work. Host-owned resources such as agent threads and turns, runtime credentials,
 network policy, process control, files, and logs stay behind the host admin API.
 
 The important security property is that the host can load app code without
@@ -120,10 +120,10 @@ instructions are missing, empty, symlinked, non-UTF-8, NUL-containing, or over
 16 KiB, so there is no installed-app state without an agent contract.
 
 The host attaches these instructions through the provider's instruction
-channel; it never concatenates them into the human's current task message.
+channel; it never concatenates them into the human's current message.
 Codex receives the current instructions as `developerInstructions` on both
-`thread/start` and every `thread/resume`, before the task's `turn/start` input.
-Claude runs one process per task, so the host passes the current instructions
+`thread/start` and every `thread/resume`, before the turn's `turn/start` input.
+Claude runs one process per turn, so the host passes the current instructions
 through `--append-system-prompt` on every new and resumed process. Hermes's
 headless API has no system-prompt option, so the host prepends the validated
 instructions to the first user message of a new Hermes session; Hermes retains
@@ -131,7 +131,7 @@ them in session history on resume. No runtime puts the app instructions in a
 later human message or requires the app to read its own package file.
 
 The host does not define or inject generic dynamic app state. Each app chooses
-what current context belongs in `input_message` and what the agent reads live
+what current context belongs in the message it sends and what the agent reads live
 through app routes.
 
 `agent.api` is an explicit boolean. When true, the app backend serves
@@ -139,7 +139,7 @@ agent-callable routes under `/agent/`; calls from that app's threads through
 the stable `app_api` MCP tool are proxied to those routes by the dedicated
 agent-app service with kernel-verified thread attribution. Listing the tool
 grants no authority. An app without `agent.api` exposes no agent-facing
-surface, and its tasks receive 404 if they call the tool. See
+surface, and its turns receive 404 if they call the tool. See
 [Agent App API](agent-app-api.md).
 
 ### Deprecated packages
@@ -262,7 +262,7 @@ network requests, credentials, parent DOM access, or arbitrary tab control.
 Adding another parent capability expands the app UI trust boundary and requires
 an explicit message type with host-side validation.
 
-When an app backend needs host resources such as tasks or threads, it calls the
+When an app backend needs host resources such as threads, it calls the
 host admin API server-to-server over a local Unix-domain socket. The admin API
 authenticates that socket by checking the peer process uid against the installed
 app's Linux user, then verifies that the request's claimed app id matches the
@@ -270,9 +270,10 @@ uid-derived app id. This avoids storing a second app secret while keeping the
 browser-facing TCP admin API protected by the operator password, and prevents
 one app service user from impersonating another app over the shared socket.
 Server-to-server calls are then checked against an app-backend route allowlist.
-The allowlist is intentionally narrow: it includes only task creation, task and
-thread lookup, thread and per-thread event listing, and task control route
-shapes needed by app workflows. The thread list (`GET /v1/threads`) and thread
+The allowlist is intentionally narrow: it includes only the thread route
+shapes app workflows need — message sends, thread lookup and listing,
+per-thread event listing, and the thread stop control — plus the read-only
+tool catalog and network-policy reads. The thread list (`GET /v1/threads`) and thread
 event stream are app-scoped at the socket boundary, not generic: the host
 filters each response to threads under the caller's own `<app_id>__` prefix
 and strips the prefix, so an app sees exactly its own threads and never another
@@ -280,14 +281,11 @@ app's or the operator's. The allowlist does not allow broad host routes such as
 network policy, files, process inventory, runtime auth, app registry, or the
 host-wide agent event log.
 
-Task and thread names sent by an app backend are app-scoped at the socket
+Thread names sent by an app backend are app-scoped at the socket
 boundary. The app sends and receives its normal `thread_id` values, but the host
 admin API rewrites app-visible thread ids to `<app_id>__<thread_id>` before
-storing or looking up host task and runtime-session state. Host task ids are
-still allocated from the host task counter and remain normal `task_N` values on
-both the app and operator-facing admin APIs. App task-id routes over the socket
-verify that the target task belongs to that app's prefixed thread; otherwise
-the task is reported as not found. Responses sent back to the app strip the
+storing or looking up host runtime-session and event state. Responses sent
+back to the app strip the
 internal thread prefix. Operator-facing admin API routes keep showing the
 host-internal thread names, which makes app-created work visibly distinct from
 core admin work. Because host thread ids remain capped at 64 characters, an
@@ -313,7 +311,7 @@ The app service uid may still send established loopback responses for
 admin-proxied requests, but it cannot initiate arbitrary TCP loopback
 connections.
 The app service uid has no direct external egress. An app can ask the host to
-run an agent task through its allowlisted socket routes, and that agent work is
+run an agent turn through its allowlisted socket routes, and that agent work is
 still subject to the host network controls.
 Operator access endpoints such as SSH forwarding and the Cloudflare Tunnel expose
 only the host admin API; app backend ports are not separately exposed.
@@ -322,7 +320,7 @@ host reverse-proxy connections, but they may not open arbitrary TCP loopback
 connections to the unauthenticated network proxy, the browser-facing admin API,
 other app backends, or other local listeners. Server-to-server host API access
 uses the local Unix socket described above instead of TCP loopback; that is how
-an app backend gets task/thread data from the host admin API.
+an app backend gets thread data from the host admin API.
 
 The host mounts app UI into the authenticated admin shell as an isolated frame.
 App UI does not run as same-origin JavaScript inside the host admin page. The
@@ -370,10 +368,11 @@ rejecting any duplicate generated names.
 
 Apps store the workflow state they own instead of using host admin lists as
 their source of truth. For a chat-like workflow, that means app-owned thread
-records, related host task ids, and archive state. The app does not duplicate
-task transcripts or thread runtime/model/effort because those remain available
+records, display names, and archive state. The app does not duplicate
+conversation transcripts or thread runtime/model/effort because those remain
+available
 through allowlisted host admin API routes. This matters once multiple apps use
-the same host admin task API: each app can show the threads it started and hide
+the same host admin thread API: each app can show the threads it started and hide
 or archive them according to its own product rules, without exposing unrelated
 threads created by another app or host surface.
 
@@ -416,7 +415,7 @@ is designed around bad or compromised app assets:
   with an opaque origin, without direct access to the host admin
   JavaScript context, cookies, local storage, or raw admin credential. The
   parent bridge only attaches admin auth for that app's backend proxy route; it
-  does not expose direct task, file, runtime, network, process, or other host
+  does not expose direct thread, file, runtime, network, process, or other host
   admin API calls to app UI.
 - Malicious backend API code can try to read runtime auth files, agent home
   directories, proxy state, host config, logs, root helpers, other apps'
@@ -432,10 +431,10 @@ is designed around bad or compromised app assets:
   use peer-authenticated Unix sockets for host admin API and Postgres access.
   External network behavior is mediated by host integrations and network
   controls. App backend calls to the host admin API are restricted to an
-  app-backend route allowlist. The first allowlist covers only task/thread route
-  shapes and the socket boundary scopes task/thread names to the authenticated
+  app-backend route allowlist. The first allowlist covers only thread route
+  shapes and the socket boundary scopes thread names to the authenticated
   app id before the normal host route handlers run. App-specific credentials,
-  broader route/capability scopes, explicit grants for non-task host objects,
+  broader route/capability scopes, explicit grants for non-thread host objects,
   and rate limits are not implemented.
   App service units run under `kern_app.slice` with a lower CPU weight
   than host services, so CPU loops in app code do not get equal priority with
@@ -463,19 +462,20 @@ Those threat cases drive the concrete controls:
   host-owned.
 - App UI is isolated from the host admin origin and receives only explicit
   bridge access to its own backend proxy route.
-- App backend code reaches agent tasks, runtime credentials, files, processes,
+- App backend code reaches agent threads, runtime credentials, files,
+  processes,
   and network controls only through host admin APIs over the local app-backend
   socket.
-- App backend task/thread access is scoped by the app service uid and claimed
+- App backend thread access is scoped by the app service uid and claimed
   app id: app-visible thread ids are internally prefixed with the app id, and
-  task-id operations are allowed only for tasks under that prefix.
+  thread operations are allowed only for threads under that prefix.
 - External side effects require host integrations and host network enforcement.
 
 ## Current Capability Boundary
 
 The app service user's Unix peer identity authenticates which installed app
 made a local admin API request. The host then applies a route-shape allowlist
-and app-scopes task and thread identifiers. The current boundary exposes no
+and app-scopes thread identifiers. The current boundary exposes no
 file, process, runtime-credential, network-policy, or cross-app grant routes to
 app backends. There are no app-specific rate limits or broader capability-grant
 model; adding either would require a new host-owned authorization contract.
@@ -483,7 +483,7 @@ model; adding either would require a new host-owned authorization contract.
 The UI bridge continues to forward only requests to that app's backend proxy
 route. Direct host admin API calls remain outside the app UI surface.
 
-Agents working an app's tasks have one inbound path to the app: the `app_api`
+Agents working an app's turns have one inbound path to the app: the `app_api`
 tool, proxied by the dedicated agent-app service to the app's `/agent/` route
 namespace with a host-attributed thread identity and host-enforced caps. The
 agent's host thread is read from kernel cgroup state; its reserved app prefix

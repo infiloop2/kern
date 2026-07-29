@@ -172,6 +172,41 @@ def stale_password_smoke(page, url: str) -> None:
     page.context.clear_cookies()
 
 
+def session_activity_smoke(page) -> None:
+    """Background calls do not refresh idle expiry; trusted UI activity does."""
+    page.evaluate(
+        """() => {
+          window.__kernRealDateNow = Date.now;
+          Date.now = () => window.__kernRealDateNow() + 61_000;
+        }"""
+    )
+    try:
+        inactive_path = "/v1/apps?activity-smoke=inactive"
+        with page.expect_request(lambda request: request.url.endswith(inactive_path)) as captured:
+            page.evaluate(
+                """path => import('/admin_ui/api.js')
+                  .then(({ api }) => api("GET", path))""",
+                inactive_path,
+            )
+        if "x-kern-session-activity" in captured.value.headers:
+            raise AssertionError("background admin API call refreshed session activity")
+
+        # Playwright generates trusted input events, unlike element.click() or
+        # dispatchEvent(), so this exercises the same path as a real operator.
+        page.keyboard.press("Shift")
+        active_path = "/v1/apps?activity-smoke=active"
+        with page.expect_request(lambda request: request.url.endswith(active_path)) as captured:
+            page.evaluate(
+                """path => import('/admin_ui/api.js')
+                  .then(({ api }) => api("GET", path))""",
+                active_path,
+            )
+        if captured.value.headers.get("x-kern-session-activity") != "1":
+            raise AssertionError("trusted operator input did not refresh session activity")
+    finally:
+        page.evaluate("() => { Date.now = window.__kernRealDateNow; delete window.__kernRealDateNow; }")
+
+
 def assert_only_guide_content_scrolls(page, fixed_selector: str) -> None:
     heading = page.locator(".connection-guide-heading")
     fixed_control = page.locator(fixed_selector)
@@ -204,6 +239,7 @@ def desktop_smoke(page, url: str) -> None:
     from playwright.sync_api import expect
 
     log_in(page, url)
+    session_activity_smoke(page)
     page.evaluate(
         "() => import('/admin_ui/helpers.js').then(({ notice }) => notice('unauthorized', 'error'))"
     )
@@ -283,9 +319,10 @@ def desktop_smoke(page, url: str) -> None:
     expect(headings.nth(2)).to_have_text("Audit")
     expect(page.locator("#sidebar-configuration .tab-button")).to_have_count(2)
     expect(page.locator("#sidebar-configuration #tab-network")).to_be_visible()
-    expect(page.locator("#sidebar-audit .tab-button")).to_have_count(6)
+    expect(page.locator("#sidebar-audit .tab-button")).to_have_count(7)
     expect(page.locator("#sidebar-audit #tab-processes")).to_be_visible()
     expect(page.locator("#sidebar-audit #tab-tool-log")).to_be_visible()
+    expect(page.locator("#sidebar-audit #tab-host-errors")).to_be_visible()
     page.locator("#home-hero").get_by_role("button", name="Begin chat", exact=True).click()
     expect(page.locator("#panel-app-agent_chat")).to_be_visible()
     expect(page.locator('iframe[title="Agent Chat"]')).to_have_attribute(
@@ -310,7 +347,8 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#runtime-overview .usage-ring.unavailable")).to_have_count(4)
     expect(page.locator("#runtime-overview .runtime-summary-bedrock")).to_have_count(1)
     expect(page.locator("#runtime-overview")).to_contain_text("--")
-    assert_desktop_runtime_usage_hover(page)
+    assert_runtime_usage_type(page, minimum_number_px=8)
+    assert_runtime_summaries_do_not_magnify(page)
     expect(page.locator("#panel-home").get_by_text("Agent runtimes")).to_have_count(0)
     expect(page.locator("#panel-home").get_by_text("Provider usage")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Codex login")).to_have_count(0)
@@ -339,58 +377,51 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#new-task")).to_have_count(0)
     expect(page.locator(".composer")).to_have_count(0)
 
-    # Seeded history from the mock is visible before any new work is created.
+    # Seeded sessions from the mock are visible before any new work is created,
+    # with a live status badge on the session that has an open turn.
     expect(page.locator("#threads")).to_contain_text("website-redesign")
     expect(page.locator("#threads")).to_contain_text("dependency-audit")
+    # This session is deliberately beyond the mock host's first 100-row page.
+    expect(page.locator("#threads")).to_contain_text("pagination-history-100")
+    expect(page.locator("#threads .thread-item", has_text="incident-response")).to_contain_text("running")
+    expect(page.locator("#threads .thread-item", has_text="website-redesign")).not_to_contain_text("running")
     page.locator("#threads .thread-item", has_text="website-redesign").click()
-    expect(page.locator("#thread-detail")).to_contain_text("failed")
-    expect(page.locator("#thread-detail .thread-head")).to_have_css("border-bottom-width", "0px")
+    expect(page.locator("#thread-detail .thread-title")).to_have_text("website-redesign")
     expect(page.locator(".composer")).to_have_count(0)
-    # Tasks appear newest-first with their results inline.
-    newest_card = page.locator("#thread-detail .task-card").nth(0)
-    older_card = page.locator("#thread-detail .task-card").nth(1)
-    expect(newest_card).to_contain_text("denied by policy")
-    expect(older_card).to_contain_text("Audit the marketing site")
-    older_card.get_by_role("button", name="Events").click()
-    expect(older_card).to_contain_text("task.started")
-    expect(page.locator("#task-events-detail")).to_have_text("")
-    expect(older_card.get_by_role("button", name="Hide events")).to_be_visible()
-    failed_card = newest_card
-    failed_card.get_by_role("button", name="Events").click()
-    expect(failed_card).to_contain_text("denied by policy")
-    expect(page.locator("#task-events-detail")).to_have_text("")
-    expect(failed_card.get_by_role("button", name="Hide events")).to_be_visible()
-    expect(older_card.get_by_role("button", name="Hide events")).to_be_visible()
-    expect(failed_card.get_by_role("button", name="Refresh task")).to_have_count(0)
-    expect(failed_card.get_by_label("Steering message")).to_have_count(0)
-    expect(failed_card.get_by_role("button", name="Steer")).to_have_count(0)
-    failed_card.get_by_role("button", name="Hide events").click()
-    expect(page.locator("#task-events-detail")).to_have_text("")
-    expect(failed_card.get_by_role("button", name="Events")).to_be_visible()
-    expect(older_card.get_by_role("button", name="Hide events")).to_be_visible()
-    failed_card.get_by_role("button", name="Events").click()
-    expect(failed_card).to_contain_text("denied by policy")
+    # The selected session shows one chronological thread event log, not
+    # per-task or per-turn cards.
+    expect(page.locator("#thread-detail .task-card")).to_have_count(0)
+    expect(page.locator("#thread-detail").get_by_role("button", name="Events")).to_have_count(0)
+    events_table = page.locator("#thread-detail table")
+    expect(events_table).to_be_visible()
+    expect(page.locator("#thread-detail table tr").nth(1)).to_contain_text("thread.message")
+    expect(events_table).to_contain_text("Audit the marketing site")
+    expect(events_table).not_to_contain_text("turn.completed")
+    expect(events_table).to_contain_text("thread.error")
+    expect(events_table).to_contain_text("denied by policy")
+    # Message rows carry their source; errors and stops show their payload.
+    expect(events_table).to_contain_text("user")
+    expect(events_table).to_contain_text("agent")
+    # The whole seeded session fits in one page, so no earlier-events control.
+    expect(page.locator("#thread-detail").get_by_role("button", name="Load earlier events")).to_have_count(0)
 
     page.locator("#threads .thread-item", has_text="incident-response").click()
-    running_card = page.locator("#thread-detail .task-card", has_text="running")
-    expect(running_card.get_by_role("button", name="Events")).to_be_visible()
-    expect(running_card.get_by_role("button", name="Refresh task")).to_have_count(0)
-    expect(running_card.get_by_role("button", name="Steer")).to_have_count(0)
-    expect(running_card.get_by_role("button", name="Kill")).to_have_count(0)
-    expect(running_card.get_by_label("Steering message")).to_have_count(0)
-    page.locator("#threads .thread-item", has_text="docs-cleanup").click()
-    queued_card = page.locator("#thread-detail .task-card", has_text="queued")
-    expect(queued_card.get_by_role("button", name="Events")).to_be_visible()
-    expect(queued_card.get_by_role("button", name="Refresh task")).to_have_count(0)
-    expect(queued_card.get_by_role("button", name="Cancel")).to_have_count(0)
-    expect(queued_card.get_by_label("Steering message")).to_have_count(0)
+    expect(page.locator("#thread-detail .thread-head")).to_contain_text("running")
+    expect(page.locator("#thread-detail")).to_contain_text("thread.message")
+    expect(page.locator("#thread-detail")).not_to_contain_text("turn.completed")
+    # The admin session log is read-only: no steering, stop, or kill controls.
+    expect(page.locator("#thread-detail").get_by_role("button", name="Steer")).to_have_count(0)
+    expect(page.locator("#thread-detail").get_by_role("button", name="Stop")).to_have_count(0)
+    expect(page.locator("#thread-detail").get_by_role("button", name="Kill")).to_have_count(0)
+    page.locator("#threads .thread-item", has_text="dependency-audit").click()
+    expect(page.locator("#thread-detail")).to_contain_text("thread.stopped")
 
     with page.expect_response(lambda response: "/v1/events" in response.url):
         page.get_by_role("button", name="Agent audit log").click()
     expect(page.locator("#panel-agent-log")).to_be_visible()
     expect(page.locator("#panel-agent-log")).to_have_css("opacity", "1")
     expect(page.locator("#events tr").nth(1)).to_be_visible()
-    expect(page.locator("#events")).to_contain_text("task.started")
+    expect(page.locator("#events")).to_contain_text("thread.message")
     expect(page.locator("#events")).to_contain_text("agent_runtime.deactivated")
     expect(page.locator("#agent-page-summary")).to_contain_text("Page 1")
     expect(page.locator("#agent-page-summary")).to_contain_text("live")
@@ -425,6 +456,12 @@ def desktop_smoke(page, url: str) -> None:
     page.locator("#file-list").get_by_role("button", name="notes.txt").click()
     expect(page.locator("#file-viewer-title")).to_contain_text("/workspace/notes.txt")
     expect(page.locator("#file-content")).to_contain_text("Mobile audit fixes")
+    page.locator("#file-list").get_by_role("button", name="screenshot.png").click()
+    expect(page.locator("#file-viewer-title")).to_contain_text("/workspace/screenshot.png")
+    expect(page.locator("#file-image")).to_be_visible()
+    expect(page.locator("#file-content")).to_be_hidden()
+    if page.locator("#file-image").evaluate("(image) => image.naturalWidth") != 1:
+        raise AssertionError("workspace image preview did not decode")
 
     with page.expect_response(lambda response: "/v1/network/events" in response.url):
         page.get_by_role("button", name="Network audit log").click()
@@ -783,30 +820,31 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#runtime-overview .bedrock-toolbar-lag")).to_have_count(0)
     expect(hermes_box).to_contain_text("active")
     expect(hermes_box.locator(".runtime-running-badge")).to_have_count(0)
-    counter_task_response = page.request.post(
-        f"{url.rstrip('/')}/v1/tasks",
+    counter_turn_response = page.request.post(
+        f"{url.rstrip('/')}/v1/threads/toolbar-hermes-counter/messages",
         headers={"X-Kern-Csrf": "1"},
         data={
             "agent_runtime": "hermes",
             "model": "deepseek.v3.2",
             "effort": "high",
-            "input_message": "Exercise the Hermes toolbar running counter.",
-            "thread_id": "toolbar-hermes-counter",
+            "message": "Exercise the Hermes toolbar running counter.",
         },
     )
-    if not counter_task_response.ok:
+    if not counter_turn_response.ok:
         raise AssertionError(
-            f"could not create Hermes toolbar counter task: {counter_task_response.status} "
-            f"{counter_task_response.text()}"
+            f"could not start Hermes toolbar counter turn: {counter_turn_response.status} "
+            f"{counter_turn_response.text()}"
         )
-    counter_task = counter_task_response.json()
+    counter_turn = counter_turn_response.json()
+    if counter_turn.get("status") != "accepted" or counter_turn.get("thread", {}).get("status") != "running":
+        raise AssertionError(f"unexpected thread message response: {counter_turn}")
     expect(hermes_box).to_contain_text("1 running", timeout=8000)
-    killed = page.request.post(
-        f"{url.rstrip('/')}/v1/tasks/{counter_task['task_id']}/kill",
+    stopped = page.request.post(
+        f"{url.rstrip('/')}/v1/threads/toolbar-hermes-counter/stop",
         headers={"X-Kern-Csrf": "1"},
     )
-    if not killed.ok:
-        raise AssertionError(f"could not stop Hermes toolbar counter task: {killed.status} {killed.text()}")
+    if not stopped.ok:
+        raise AssertionError(f"could not stop Hermes toolbar counter turn: {stopped.status} {stopped.text()}")
     # The toolbar refreshes on a five-second poll, after the other dashboard
     # sections in the same tick. Allow a full poll cycle under CI load.
     expect(hermes_box.locator(".runtime-running-badge")).to_have_count(0, timeout=12000)
@@ -974,8 +1012,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(openai_row.get_by_role("button", name="Disconnect")).to_be_visible()
     codex_summary = page.locator("#runtime-overview .runtime-summary", has_text="Codex")
     expect(codex_summary).to_contain_text("active")
-    expect(codex_summary).to_contain_text("8%")
-    expect(codex_summary).to_contain_text("84%")
+    expect(codex_summary.locator(".usage-ring text")).to_have_text(["8", "84"])
     # A healthy 5h window (no threshold class) beside a near-full weekly window
     # (warning), so the mock exercises both ring states at once.
     expect(codex_summary.locator(".usage-ring").nth(0)).not_to_have_class(re.compile(r"usage-(warning|critical)"))
@@ -1022,10 +1059,8 @@ def desktop_smoke(page, url: str) -> None:
     expect(claude_row.locator(".connection-summary b")).to_have_count(0)
     expect(claude_row.get_by_role("button", name="Disconnect")).to_be_visible()
     claude_summary = page.locator("#runtime-overview .runtime-summary", has_text="Claude Code")
-    expect(claude_summary).to_contain_text("97%")
-    expect(claude_summary).to_contain_text("46%")
     # The Fable weekly window rides along as a third ring labeled "fable".
-    expect(claude_summary).to_contain_text("88%")
+    expect(claude_summary.locator(".usage-ring text")).to_have_text(["97", "46", "88"])
     # Critical (session), healthy (weekly), and warning (Fable week) side by
     # side: all three ring thresholds in one chip.
     expect(claude_summary.locator(".usage-ring").nth(0)).to_have_class(re.compile(r"usage-critical"))
@@ -1036,31 +1071,42 @@ def desktop_smoke(page, url: str) -> None:
     expect(claude_summary).to_have_attribute("data-provider", "claude")
     with page.expect_response(lambda response: "/v1/agent-runtime/refresh" in response.url):
         page.locator("#runtime-overview").get_by_label("Refresh provider status and usage").click()
-    expect(claude_summary).to_contain_text("63%")
+    expect(claude_summary.locator(".usage-ring text")).to_have_text(["63", "46", "88"])
 
 
-def assert_desktop_runtime_usage_hover(page) -> None:
-    """A mouse magnifies usage without stealing the runtime button's click."""
+def assert_runtime_usage_type(page, minimum_number_px: float) -> None:
+    """Quota and Hermes values share readable type in the fixed-height rings."""
     from playwright.sync_api import expect
 
-    media = "(min-width: 861px) and (hover: hover) and (pointer: fine)"
-    if not page.evaluate(f"matchMedia({media!r}).matches"):
-        raise AssertionError("desktop smoke viewport does not match the usage-hover media query")
+    quota_number = page.locator("#runtime-overview .usage-ring text").first
+    quota_label = page.locator("#runtime-overview .usage-window").first
+    hermes_number = page.locator("#runtime-overview .runtime-summary-bedrock .runtime-stat-value").first
+    hermes_label = page.locator("#runtime-overview .runtime-summary-bedrock .runtime-stat-label").first
+    quota_size = quota_number.evaluate("element => getComputedStyle(element).fontSize")
+    hermes_size = hermes_number.evaluate("element => getComputedStyle(element).fontSize")
+    if quota_size != hermes_size:
+        raise AssertionError(f"quota number size {quota_size} does not match Hermes {hermes_size}")
+    if float(quota_size.removesuffix("px")) < minimum_number_px:
+        raise AssertionError(f"runtime usage number is too small: {quota_size}")
+    quota_label_size = quota_label.evaluate("element => getComputedStyle(element).fontSize")
+    hermes_label_size = hermes_label.evaluate("element => getComputedStyle(element).fontSize")
+    if quota_label_size != hermes_label_size:
+        raise AssertionError(
+            f"quota label size {quota_label_size} does not match Hermes {hermes_label_size}"
+        )
+    expect(page.locator("#runtime-overview .usage-ring svg").first).to_have_css("height", "20px")
+
+
+def assert_runtime_summaries_do_not_magnify(page) -> None:
+    """Provider summaries retain their size when a desktop pointer hovers."""
+    from playwright.sync_api import expect
+
     for runtime in ("Codex", "Claude Code", "Hermes"):
         summary = page.locator("#runtime-overview .runtime-summary", has_text=runtime)
-        usage = summary.locator(":scope > .runtime-usage")
-        expect(usage).to_have_css("transform", "none")
+        expect(summary).to_have_css("transform", "none")
         summary.hover()
-        scale = usage.evaluate(
-            "element => new DOMMatrix(getComputedStyle(element).transform).a"
-        )
-        if not 1.41 <= scale <= 1.43:
-            raise AssertionError(f"{runtime} usage did not magnify on hover: scale={scale}")
-        expect(usage).to_have_css("pointer-events", "none")
-        if usage.evaluate("element => getComputedStyle(element).boxShadow") == "none":
-            raise AssertionError(f"{runtime} usage hover has no popup surface")
+        expect(summary).to_have_css("transform", "none")
         page.mouse.move(0, 0)
-        expect(usage).to_have_css("transform", "none")
 
 
 def tools_smoke(page) -> None:
@@ -1494,6 +1540,24 @@ def tools_smoke(page) -> None:
     oauth_event = page.locator("#tool-events tr", has_text="oauth_connect")
     expect(oauth_event.get_by_text("view", exact=True)).to_have_count(0)
     expect(page.locator("#tool-page-summary")).to_contain_text("Page 1")
+
+    # Host errors are a read-only, newest-first diagnostic log. Large
+    # tracebacks and context load only when their row is expanded.
+    with page.expect_response(lambda response: "/v1/host-errors" in response.url):
+        page.get_by_role("button", name="Host errors").click()
+    expect(page.locator("#panel-host-errors")).to_be_visible()
+    expect(page.locator("#panel-host-errors")).to_contain_text("should be investigated by a Kern developer")
+    expect(page.locator("#host-errors")).to_contain_text("kern-app-personal_web_app_builder")
+    expect(page.locator("#host-errors")).to_contain_text("orchestrator.execution")
+    repeated = page.locator("#host-errors tr", has_text="orchestrator.execution")
+    expect(repeated).to_contain_text("×3")
+    newest = page.locator("#host-errors tr", has_text="agentic_web_app.request")
+    with page.expect_response(lambda response: "/v1/host-errors/2" in response.url):
+        newest.get_by_text("view", exact=True).click()
+    expect(newest.locator("pre.metadata")).to_contain_text("KeyError")
+    expect(newest.locator("pre.metadata")).to_contain_text("/workspaces/mock/state")
+    expect(page.locator("#panel-host-errors").get_by_role("button", name=re.compile("resolve|dismiss|report", re.I))).to_have_count(0)
+
     page.get_by_role("button", name="Internet Access and Tools").click()
     expect(page.locator("#panel-network")).to_be_visible()
 
@@ -1540,12 +1604,18 @@ def mobile_smoke(page, url: str) -> None:
     expect(hermes_box).to_be_visible()
     expect(page.locator("#runtime-overview .runtime-summary-bedrock")).to_have_count(1)
     expect(page.locator("#runtime-overview .runtime-stat-cost")).to_have_count(1)
-    for runtime in ("Codex", "Claude Code", "Hermes"):
-        usage = page.locator(
-            "#runtime-overview .runtime-summary",
-            has_text=runtime,
-        ).locator(":scope > .runtime-usage")
-        expect(usage).to_have_css("transform", "none")
+    assert_runtime_usage_type(page, minimum_number_px=10)
+    runtime_panel = page.locator("#runtime-overview .runtime-overview-panel")
+    panel_widths = runtime_panel.evaluate(
+        "element => ({client: element.clientWidth, scroll: element.scrollWidth})"
+    )
+    if panel_widths["scroll"] > panel_widths["client"]:
+        raise AssertionError(f"mobile runtime panel overflows horizontally: {panel_widths}")
+    summary_heights = page.locator("#runtime-overview .runtime-summary").evaluate_all(
+        "elements => elements.map(element => element.getBoundingClientRect().height)"
+    )
+    if any(height > 41 for height in summary_heights):
+        raise AssertionError(f"mobile runtime rows grew beyond the 40px design: {summary_heights}")
     # Escape dismisses the overlay like a menu; the boxes hide again.
     page.keyboard.press("Escape")
     expect(overview_toggle).to_have_attribute("aria-expanded", "false")
@@ -1579,7 +1649,7 @@ def mobile_smoke(page, url: str) -> None:
     assert_no_horizontal_overflow(page, "agent")
 
     mobile_go_to(page, "Agent audit log")
-    expect(page.locator("#events")).to_contain_text("task.started")
+    expect(page.locator("#events")).to_contain_text("thread.message")
     assert_no_horizontal_overflow(page, "agent event log")
 
     mobile_go_to(page, "Agent processes")
@@ -1658,6 +1728,11 @@ def mobile_smoke(page, url: str) -> None:
     mobile_go_to(page, "Tool audit log")
     expect(page.locator("#tool-events")).to_contain_text("oauth_connect")
     assert_no_horizontal_overflow(page, "tool audit log")
+
+    mobile_go_to(page, "Host errors")
+    expect(page.locator("#host-errors")).to_contain_text("agentic_web_app.request")
+    expect(page.locator("#host-errors")).to_contain_text("orchestrator.execution")
+    assert_no_horizontal_overflow(page, "host errors")
 
 
 def open_mobile_navigation(page) -> None:

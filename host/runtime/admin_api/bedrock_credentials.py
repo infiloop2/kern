@@ -8,7 +8,7 @@ access key pair, AWS STS reports which account it belongs to, and the admin API
 stores it encrypted only after validation succeeds. Because only the operator
 API can write that row and the agent has no database access, storing the
 credential is itself the approval — there is no separate anchor or paste gate.
-Static keys never rotate on their own, so there is no per-task repin
+Static keys never rotate on their own, so there is no per-turn repin
 convergence either.
 
 The privileged STS call runs in the root ``read-aws-account`` helper because

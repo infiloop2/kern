@@ -4,7 +4,7 @@ Claude Code does not expose Codex's stdio JSON-RPC app-server. The supported
 automation surface is the CLI/Agent SDK: print mode, stream-json I/O, and
 resumable sessions. This module wraps that process shape behind the same small
 contract the orchestrator needs: account status, start/complete OAuth login,
-run one turn, and close the running process for task kills.
+run one turn, and close the running process for turn stops.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Any, Callable
+from typing import IO, Any, Callable
 
 from host.runtime.admin_api import agent_activity, thread_scope
 
@@ -57,6 +57,7 @@ LOGIN_START_TIMEOUT_SECONDS = 30
 # Verified against the real CLI in both timings; the bound only has to beat
 # the CLI's local event-loop latency, not any network round trip.
 STEER_SETTLE_TIMEOUT_SECONDS = 10.0
+PROCESS_EXIT_TIMEOUT_SECONDS = 3
 LOGIN_URL_RE = re.compile(r"If the browser didn't open, visit: (https://\S+)")
 # Usage lines are parsed one window per line: a window header, a percent, and
 # an optional reset time. Each piece is matched independently so one odd line
@@ -102,10 +103,18 @@ class ClaudeCodeSession:
     are persisted on disk.
     """
 
-    def __init__(self, command: list[str] | None = None, thread_id: str | None = None) -> None:
+    def __init__(
+        self,
+        command: list[str] | None = None,
+        thread_id: str | None = None,
+        on_ready: Callable[[], bool] | None = None,
+        on_session_id: Callable[[str], None] | None = None,
+    ) -> None:
         self._command = command or DEFAULT_COMMAND
         self._thread_id = thread_id
-        # The orchestrator sets this only for an app-created task. Claude's
+        self._on_ready = on_ready
+        self._on_session_id = on_session_id
+        # The orchestrator sets this only for an app-created turn. Claude's
         # append-system-prompt keeps it distinct from the app's current user
         # message and alongside the host's immutable CLAUDE.md instructions.
         self.app_instructions: str | None = None
@@ -115,6 +124,16 @@ class ClaudeCodeSession:
         self._proc: subprocess.Popen[str] | None = None
         self._messages: queue.Queue[dict[str, Any]] = queue.Queue()
         self._stderr_tail: deque[str] = deque(maxlen=20)
+        self._stdin_lock = threading.Lock()
+        # close() may win before run() reaches the CLI spawn. Keep that
+        # terminal decision under the same lock as Popen/_proc publication so
+        # a stopped turn can never create a process afterward.
+        self._closed = False
+        # Count only successfully flushed direct steers. The turn driver uses
+        # the count to wait for Claude's result(s); message content never sits
+        # in a host mailbox.
+        self._delivered_steers = 0
+        self._accepting_steers = False
         # Mirrors run()'s local result_session_id, but as an attribute so a
         # kill (which surfaces as an exception out of run(), discarding its
         # locals) still leaves the last session_id the CLI reported somewhere
@@ -132,40 +151,69 @@ class ClaudeCodeSession:
         return
 
     def close(self) -> None:
-        proc = self._proc
-        if proc is not None:
-            if proc.stdin is not None:
+        with self._stdin_lock:
+            self._closed = True
+            proc = self._proc
+            self._accepting_steers = False
+            if proc is not None and proc.stdin is not None:
                 try:
                     proc.stdin.close()
                 except OSError:
                     pass
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                # Best-effort signal only: the production launcher runs as root,
-                # so this unprivileged kill fails with EPERM and the root scope
-                # teardown below is the real kill; a same-user command (tests)
-                # just dies here. A signal failure must never escape close() —
-                # the orchestrator keeps a thread fenced when close() raises.
+        try:
+            if proc is not None:
                 try:
-                    proc.kill()
+                    proc.wait(timeout=PROCESS_EXIT_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    # Best-effort signal only: the production launcher runs as root,
+                    # so this unprivileged kill fails with EPERM and the root scope
+                    # teardown below is the real kill; a same-user command (tests)
+                    # just dies here. A signal failure must never escape close() —
+                    # the orchestrator keeps a thread fenced when close() raises.
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    # The privileged scope teardown below owns the bounded,
+                    # authoritative reap for the production root launcher.
+                # stdout and stderr are deliberately not closed here. Each reader
+                # thread owns its own pipe and closes it when the loop ends, because
+                # a buffered stream's close() blocks on the very lock the reader
+                # holds across its blocking read. Closing from this thread would
+                # therefore hang for as long as the CLI stays alive and quiet on
+                # that pipe — precisely the case this teardown exists for, a CLI
+                # that outlived stdin EOF because background work is still running,
+                # and stderr is usually silent for a whole turn. The scope teardown
+                # below is what ends the process; the readers then see EOF and
+                # release the pipes.
+        finally:
+            # Last resort after Claude Code's clean stdin-EOF shutdown above: the
+            # child reaping lives in the harness, but freeing the thread is the
+            # host's invariant, so guarantee the scope cgroup is gone even if a child
+            # outlived it. A clean shutdown already emptied it, so this is then a
+            # no-op — the server is never killed abruptly ahead of its own shutdown.
+            # It runs from a finally because it is the only kill that reaches a
+            # process this unprivileged user cannot signal, and the orchestrator's
+            # thread fence is only lifted once close() has run it.
+            thread_scope.stop_thread_scope(self._thread_id, self._command, DEFAULT_COMMAND)
+
+    def interrupt(self) -> None:
+        """Interrupt a turn without waiting for process/scope teardown."""
+        with self._stdin_lock:
+            self._closed = True
+            proc = self._proc
+            self._accepting_steers = False
+            if proc is not None and proc.stdin is not None:
+                try:
+                    proc.stdin.close()
                 except OSError:
                     pass
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
-            if proc.stdout is not None:
-                proc.stdout.close()
-            if proc.stderr is not None:
-                proc.stderr.close()
-            self._proc = None
-        # Last resort after Claude Code's clean stdin-EOF shutdown above: the
-        # child reaping lives in the harness, but freeing the thread is the
-        # host's invariant, so guarantee the scope cgroup is gone even if a child
-        # outlived it. A clean shutdown already emptied it, so this is then a
-        # no-op — the server is never killed abruptly ahead of its own shutdown.
-        thread_scope.stop_thread_scope(self._thread_id, self._command, DEFAULT_COMMAND)
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        thread_scope.interrupt_thread_scope(self._thread_id, self._command, DEFAULT_COMMAND)
 
     def run(
         self,
@@ -173,10 +221,8 @@ class ClaudeCodeSession:
         session_id: str | None,
         model: str,
         effort: str,
-        steer_messages: Callable[[], list[str]],
         on_message: Callable[[str | dict[str, Any]], None],
-        steer_delivered: Callable[[str], None],
-        finish_turn: Callable[[str, str], list[str]] | None = None,
+        finish_turn: Callable[[str, str], int] | None = None,
     ) -> tuple[str, str]:
         # State the operator's web-search decision to the launcher as its
         # required first argument; the launcher translates it into the WebSearch
@@ -222,17 +268,29 @@ class ClaudeCodeSession:
             argv.extend(["--resume", session_id])
         self._messages = queue.Queue()
         self._stderr_tail.clear()
-        self._proc = subprocess.Popen(
-            argv,
-            cwd=_subprocess_cwd(self._command),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        threading.Thread(target=self._read_stdout, daemon=True).start()
-        threading.Thread(target=self._read_stderr, daemon=True).start()
-        self._send_user_message(input_message)
+        with self._stdin_lock:
+            if self._closed:
+                raise ClaudeCodeError("Claude Code turn was closed")
+            proc = subprocess.Popen(
+                argv,
+                cwd=_subprocess_cwd(self._command),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self._proc = proc
+            self._delivered_steers = 0
+            self._accepting_steers = False
+        assert proc.stdout is not None and proc.stderr is not None
+        threading.Thread(target=self._read_stdout, args=(proc.stdout,), daemon=True).start()
+        threading.Thread(target=self._read_stderr, args=(proc.stderr,), daemon=True).start()
+        with self._stdin_lock:
+            self._send_user_message_locked(input_message)
+            # A direct steer cannot overtake the turn's initial message.
+            self._accepting_steers = True
+        if self._on_ready is not None and not self._on_ready():
+            raise ClaudeCodeError("Claude Code execution stopped during startup")
         outstanding_user_messages = 1
         last_message = ""
         result_session_id = session_id
@@ -240,40 +298,36 @@ class ClaudeCodeSession:
         final: str | None = None
         settle_deadline: float | None = None
 
-        def deliver_ready_steers(ready: list[str] | None = None) -> None:
+        def observe_delivered_steers(count: int | None = None) -> int:
             nonlocal outstanding_user_messages, settle_deadline
-            for steer in steer_messages() if ready is None else ready:
-                self._send_user_message(steer)
-                outstanding_user_messages += 1
-                # The CLI acts on every steer — merged into the running turn
-                # or run as its own turn — so more events are coming either way.
+            delivered = self.take_delivered_steers() if count is None else count
+            if delivered:
+                outstanding_user_messages += delivered
                 settle_deadline = None
-                steer_delivered(steer)
+            return delivered
 
-        def finish_or_deliver_late_steers() -> bool:
-            """Return true once the caller has atomically finished the task.
+        def finish_or_observe_late_steers() -> bool:
+            """Return true once the caller has atomically finished the turn.
 
-            Without ``finish_turn`` this retains the standalone session
-            helper's old behavior. The orchestrator callback couples the last
-            pending-steer read to the RUNNING -> COMPLETED transition, so an
-            API steer cannot be accepted in between this check and process
-            shutdown.
+            The orchestrator callback shares the live turn's delivery lock
+            with the API. It either records completion or returns the number
+            of direct steers that committed immediately before that boundary.
             """
             if not result_session_id:
                 raise ClaudeCodeError("Claude result did not include a session_id")
             assert final is not None
-            ready = (
-                steer_messages()
+            delivered = (
+                self.take_delivered_steers()
                 if finish_turn is None
                 else finish_turn(result_session_id, final)
             )
-            if not ready:
+            if not delivered:
                 return True
-            deliver_ready_steers(ready)
+            observe_delivered_steers(delivered)
             return False
 
         while True:
-            deliver_ready_steers()
+            observe_delivered_steers()
             try:
                 message = self._messages.get(timeout=1.0)
             except queue.Empty:
@@ -284,8 +338,7 @@ class ClaudeCodeSession:
                     # message, and no further result is coming. The atomic
                     # finish callback still gets the final say: a steer that
                     # arrived at this boundary must be delivered instead.
-                    if finish_or_deliver_late_steers():
-                        self.close()
+                    if finish_or_observe_late_steers():
                         assert result_session_id is not None
                         assert final is not None
                         return result_session_id, final
@@ -295,7 +348,7 @@ class ClaudeCodeSession:
             if message_type in ("assistant", "user") or (
                 message_type == "system" and message.get("subtype") == "init"
             ):
-                # Definite turn activity (a queued steer's turn announces
+                # Definite turn activity (a direct steer's turn announces
                 # itself with a system init, then assistant/user events): its
                 # own result will settle the count, so stop the clock entirely.
                 settle_deadline = None
@@ -304,9 +357,21 @@ class ClaudeCodeSession:
                 # events) is not a new turn: push the deadline back rather
                 # than disarming it, so an idle-but-noisy stream still settles.
                 settle_deadline = time.monotonic() + STEER_SETTLE_TIMEOUT_SECONDS
-            if isinstance(message.get("session_id"), str):
-                result_session_id = message["session_id"]
-                self._last_session_id = result_session_id
+            reported_session_id = message.get("session_id")
+            if isinstance(reported_session_id, str):
+                result_session_id = reported_session_id
+                self._last_session_id = reported_session_id
+                # A system/init frame may identify a newly allocated but still
+                # empty session. Publish only once the provider reports actual
+                # turn activity or a result for the submitted message.
+                if (
+                    self._on_session_id is not None
+                    and not (
+                        message_type == "system"
+                        and message.get("subtype") == "init"
+                    )
+                ):
+                    self._on_session_id(reported_session_id)
             if message.get("type") == "assistant":
                 text = _assistant_text(message)
                 if text:
@@ -328,24 +393,23 @@ class ClaudeCodeSession:
                 final = agent_activity.clean_text(
                     message.get("result") or last_message or "Task completed."
                 )
-                if not outstanding_user_messages and not finish_or_deliver_late_steers():
-                    # The atomic handoff found a steer, so its own result (or a
-                    # merged result followed by the settle timeout) is still
-                    # outstanding.
+                if not outstanding_user_messages and not finish_or_observe_late_steers():
+                    # The atomic boundary observed a direct steer, so its own
+                    # result (or a merged result followed by the settle
+                    # timeout) is still outstanding.
                     settle_deadline = time.monotonic() + STEER_SETTLE_TIMEOUT_SECONDS
                     continue
                 if outstanding_user_messages:
-                    # Either a queued steer's turn is still running (its events
+                    # Either a direct steer's turn is still running (its events
                     # disarm the deadline above) or the steer was merged and
                     # this result is already final; wait for the stream to
                     # settle instead of forever.
                     settle_deadline = time.monotonic() + STEER_SETTLE_TIMEOUT_SECONDS
                     continue
-                self.close()
                 assert result_session_id is not None
                 return result_session_id, final
 
-    def _send_user_message(self, text: str) -> None:
+    def _send_user_message_locked(self, text: str) -> None:
         proc = self._require_proc()
         assert proc.stdin is not None
         proc.stdin.write(json.dumps({
@@ -355,24 +419,42 @@ class ClaudeCodeSession:
         }) + "\n")
         proc.stdin.flush()
 
-    def _read_stdout(self) -> None:
-        proc = self._proc
-        assert proc is not None and proc.stdout is not None
-        for line in proc.stdout:
+    def steer(self, text: str) -> None:
+        """Synchronously flush one user message into the live Claude CLI."""
+        with self._stdin_lock:
+            if not self._accepting_steers:
+                raise ClaudeCodeError("Claude Code turn is not ready for steering")
             try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(message, dict):
-                self._messages.put(message)
+                self._send_user_message_locked(text)
+            except OSError as exc:
+                raise ClaudeCodeError(f"Claude Code rejected the message: {exc}") from exc
+            self._delivered_steers += 1
 
-    def _read_stderr(self) -> None:
-        proc = self._proc
-        assert proc is not None and proc.stderr is not None
-        for line in proc.stderr:
-            stripped = line.strip()
-            if stripped:
-                self._stderr_tail.append(stripped)
+    def take_delivered_steers(self) -> int:
+        with self._stdin_lock:
+            delivered = self._delivered_steers
+            self._delivered_steers = 0
+            return delivered
+
+    def _read_stdout(self, stream: IO[str]) -> None:
+        # The reader owns its pipe: close() must not close it from another
+        # thread (that blocks on the buffer lock this loop holds across every
+        # read), so the stream is released here once the loop reaches EOF.
+        with stream:
+            for line in stream:
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(message, dict):
+                    self._messages.put(message)
+
+    def _read_stderr(self, stream: IO[str]) -> None:
+        with stream:
+            for line in stream:
+                stripped = line.strip()
+                if stripped:
+                    self._stderr_tail.append(stripped)
 
     def _require_proc(self) -> subprocess.Popen[str]:
         if self._proc is None or self._proc.poll() is not None:
@@ -716,19 +798,15 @@ def run_turn(
     session_id: str | None,
     model: str,
     effort: str,
-    steer_messages: Callable[[], list[str]],
     on_message: Callable[[str | dict[str, Any]], None],
-    steer_delivered: Callable[[str], None],
-    finish_turn: Callable[[str, str], list[str]] | None = None,
+    finish_turn: Callable[[str, str], int] | None = None,
 ) -> tuple[str, str]:
     return server.run(
         input_message,
         session_id,
         model,
         effort,
-        steer_messages,
         on_message,
-        steer_delivered,
         finish_turn,
     )
 
@@ -861,7 +939,7 @@ def _emit_claude_content(
                     )
         except Exception:
             # Provider progress is best-effort. One malformed block must not
-            # abort the running task or hide later valid blocks.
+            # abort the running turn or hide later valid blocks.
             continue
         if event is not None:
             # Deliberately outside the parser try: persistence failures are

@@ -1,7 +1,7 @@
 # Runtime Harness Dependencies
 
 Kern treats Codex, Claude Code, and Hermes as external runtime
-harnesses. The host owns process supervision, task state, network policy, and privilege
+harnesses. The host owns process supervision, thread and turn state, network policy, and privilege
 boundaries, but it depends on specific CLI protocols, auth files, and network
 request shapes from those harnesses. This document lists the expectations that
 can break when a harness package is upgraded.
@@ -35,14 +35,14 @@ Every harness must keep these properties:
   auth traffic to traverse the Kern proxy.
 - They can be launched through a root-owned sudo helper that immediately
   demotes to `kern-agent`.
-- A running task can be stopped by closing stdin and, if needed, terminating the
+- A running turn can be stopped by closing stdin and, if needed, terminating the
   child process.
 - Their account state can be checked without interactive prompts and without
   giving `kern-admin` direct read access to the agent home. Unlike
   conversation/session state, the account helpers do parse specific auth file
   locations and fields listed below.
 
-If any of those properties changes, the runtime status poller, task workers,
+If any of those properties changes, the runtime status poller, turn threads,
 network guards, or privilege boundary can fail.
 
 ## Codex harness expectations
@@ -57,7 +57,7 @@ codex app-server --listen stdio://
 
 The app-server is expected to speak newline-delimited JSON-RPC over stdio.
 Kern sends `initialize` followed by the `initialized` notification before
-any account or task calls.
+any account or thread calls.
 
 Expected methods:
 
@@ -69,25 +69,25 @@ Expected methods:
 | `thread/start` | Accepts `cwd`, `approvalPolicy`, `sandbox`, developer instructions, and the selected `model`. Kern appends the validated app manifest instructions for app-scoped threads. Returns `thread.id`. |
 | `thread/resume` | Accepts `threadId`, `cwd`, the selected `model`, and refreshed developer instructions. Returns a resumed `thread.id`, or fails when the thread cannot be resumed. |
 | `turn/start` | Accepts `threadId`, text input, and the selected `model` and `effort`. Returns `turn.id`. It may emit notifications before the response. |
-| `turn/steer` | Accepts `threadId`, `expectedTurnId`, and text input. A `no active turn` error is treated as transient during startup. |
+| `turn/steer` | Accepts `threadId`, `expectedTurnId`, and text input. The submitting API request waits for its JSON-RPC response; `no active turn` is returned to the caller as a retryable `409`, not retained by a host mailbox. |
 
 The pinned Codex catalog must advertise `gpt-5.6-terra` and `gpt-5.6-sol`
 with `high`, `max`, and `ultra`, plus `gpt-5.6-luna` with `high` and `max`.
 Kern intentionally exposes only that small subset; the API rejects
-unsupported pairs before a task is queued.
+unsupported pairs before a message is accepted.
 
 Expected notifications:
 
 | Notification | Expected behavior |
 | --- | --- |
 | `item/agentMessage/delta` | Carries partial assistant text in `params.delta`. |
-| `item/started` | Starts a structured ThreadItem. Kern normalizes reasoning, plans, command execution, file changes, MCP/dynamic/collaboration tools, sub-agent activity, web search, images, waits, review mode, and context compaction into provider-independent task activity. |
+| `item/started` | Starts a structured ThreadItem. Kern normalizes reasoning, plans, command execution, file changes, MCP/dynamic/collaboration tools, sub-agent activity, web search, images, waits, review mode, and context compaction into provider-independent turn activity. |
 | `item/completed` | Completes the matching structured ThreadItem. Agent messages carry text as `params.item.type == "agentMessage"`; other supported item types update the matching activity card with status and bounded output. |
-| `turn/completed` | Ends the turn. `params.turn.status == "completed"` is success; any other status must include enough error detail to fail the task. |
+| `turn/completed` | Ends the turn. `params.turn.status == "completed"` is success; any other status must include enough error detail to fail the turn. |
 
 The adapter relies on responses and notifications being interleavable: a
 notification may arrive while a request is waiting for its response, and the
-client must be able to keep it for the task event stream.
+client must be able to keep it for the thread event stream.
 
 ### Auth and account identity
 
@@ -210,7 +210,7 @@ configured stdio MCP servers as the runtime user.
 
 ### Process interface
 
-Kern starts one Claude Code process per task turn through:
+Kern starts one Claude Code process per turn through:
 
 ```text
 claude -p --input-format stream-json --output-format stream-json --verbose \
@@ -229,9 +229,10 @@ compatible. The catalog names exact model ids rather than the CLI's
 unversioned aliases (`opus`, `fable`, `sonnet`): an alias re-points to a new
 model generation on a CLI upgrade, which would move existing threads across
 generations without the operator choosing it. Threads created while the catalog
-offered aliases keep their stored alias and stay readable, but they run no
-further tasks: a thread's configuration is fixed for its lifetime, so once it
-leaves the catalog the thread is history rather than a session to resume.
+offered aliases keep their stored alias and stay readable. They cannot resume
+that superseded configuration, but an idle thread can switch to a complete
+currently offered runtime/model/effort triple and hand its retained transcript
+to a fresh provider session.
 
 The stream adapter consumes the documented assistant content blocks rather
 than reducing each record to text: `thinking` becomes reasoning activity,
@@ -248,7 +249,7 @@ immutable). It sets `permissions.defaultMode = "bypassPermissions"` and
 `env.FORCE_PROMPT_CACHING_5M = "1"` pins Claude Code to the five-minute prompt
 cache TTL used by the Infiverse development box, instead of allowing the CLI
 to select a longer cache policy. `--setting-sources user` keeps stale local or
-project settings out of the task harness while still allowing `CLAUDE.md`
+project settings out of the turn harness while still allowing `CLAUDE.md`
 instructions to load, and makes this file the only loaded settings source.
 
 WebSearch availability follows the operator's
@@ -317,7 +318,7 @@ Expected stdout messages:
 | --- | --- |
 | `type == "assistant"` | Assistant text is read from `message.content[]` blocks where `type == "text"`. |
 | `type == "result"` | Ends one submitted user message when `subtype == "success"` and `is_error` is not true. |
-| `session_id` | May appear on assistant or result messages; the final turn must provide a session id so Kern can resume future tasks. |
+| `session_id` | May appear on assistant or result messages; the final turn must provide a session id so Kern can resume future turns. |
 
 Steering is implemented by writing more user messages to the same stream while
 the process is running. The adapter waits for one successful `result` per user
@@ -361,9 +362,10 @@ steady-token authentication failure becomes `awaiting_login`; another steady
 probe failure becomes `error`.
 
 The probe's verdict is memoized per token hash. Active runtimes are rechecked
-every five minutes and immediately before each Claude task, but only a
-recheck whose memo has expired runs the probe, so the pre-task check is
-normally memory-only. An `awaiting_login` verdict never expires: that token
+every five minutes, and each Claude turn enters the same refresh before spawn
+to converge a possibly rotated pin. Only a refresh whose memo has expired runs
+the probe, so turn-start convergence is normally memory-only. An
+`awaiting_login` verdict never expires: that token
 is rejected and no background retry can fix it. An explicit refresh probes
 once; an operator login (which mints a new token) or an account reset replaces
 the credential. An `error`
@@ -535,9 +537,9 @@ curator features, and registers the bundled tools MCP server
 (``mcp_servers.kern`` spawning ``host.runtime.agent_shim.mcp_shim`` as
 the runtime user, the same shim wiring as the managed Codex and Claude Code
 configs). Bootstrap also owns an immutable empty ``~/.hermes/.env``
-so Hermes cannot replace the launcher's task-scoped region from agent-written
+so Hermes cannot replace the launcher's turn-scoped region from agent-written
 dotenv state. The launcher's required first argument is
-``region=<aws-region>``; it passes that task-specific value as ``AWS_REGION``.
+``region=<aws-region>``; it passes that turn-specific value as ``AWS_REGION``.
 The fixed toolsets ``terminal,file,kern`` limit tools to the terminal,
 files, and the shim's bundled tools (no web, browser, skills, or messaging
 surfaces); ``--yolo`` disables Hermes's approval prompts (the OS/proxy
@@ -560,7 +562,7 @@ context file. Kern runs Hermes from
 immutable there. A separate Hermes-specific instruction file is unnecessary.
 
 Hermes's built-in memory is global to its active profile, not scoped to a
-Kern task or thread. It stores bounded entries in ``MEMORY.md`` (agent
+Kern turn or thread. It stores bounded entries in ``MEMORY.md`` (agent
 notes) and ``USER.md`` (facts and preferences about the user), then adds a
 frozen snapshot to later system prompts. With the memory tool loaded, Hermes
 normally starts an in-process daemon thread every ten user turns. That thread
@@ -579,7 +581,7 @@ single-query API, whose process exits after returning the answer and does not
 wait for those daemon reviews. Enabling the feature therefore requires a
 host-owned completion lifecycle and an explicit cross-thread memory product
 contract; changing the YAML alone would make the extra calls unreliable and
-invisible to Kern task status.
+invisible to Kern turn status.
 
 Expected behavior:
 
@@ -618,12 +620,14 @@ host re-validates and bounds every record (``agent_activity.normalize_record``)
 at its trust boundary before persisting it, dropping any malformed or
 out-of-contract line.
 
-Hermes does not support steering. ``POST /v1/tasks/{task_id}/steer`` returns
-``409`` for a Hermes task, and Agent Chat does not render its steering control.
-A later instruction is a new task on the same ``thread_id``; the adapter starts
+Hermes does not support steering. A message for a Hermes thread with a
+running turn returns ``409`` from ``POST /v1/threads/{thread_id}/messages``,
+and Agent Chat surfaces no steering for it.
+A later instruction is a new message on the same ``thread_id`` once the turn
+finishes; the adapter starts
 one new process with ``--resume`` for the stored Hermes session. This keeps one
-API task equal to one Hermes process and one model turn. A task kill terminates
-that task's process; the thread remains available for a later task.
+turn equal to one Hermes process and one model turn. A thread stop terminates
+the running turn's process; the thread remains available for a later message.
 
 ### Bedrock transport
 
@@ -661,9 +665,9 @@ Before changing a harness version:
    `read-claude-account --attest --expected-token-sha256 <hash>` rejects a
    mismatched local token before egress and still resolves the expected token to
    the expected `account.uuid` through the profile endpoint.
-5. Verify a task can start, stream messages, accept steering, complete, and be
-   killed.
-6. Verify thread/session resume still works after a second task on the same
+5. Verify a turn can start, stream messages, accept steering, complete, and be
+   stopped.
+6. Verify thread/session resume still works after a second turn on the same
    `thread_id`.
 7. Verify managed provider network events still show the expected account guard
    behavior and no unexpected denied bootstrap traffic.

@@ -52,9 +52,9 @@ Error status codes:
 | `401` | Missing or invalid admin password or session. |
 | `403` | A cookie-authenticated request is missing the `X-Kern-Csrf` header, an authenticated app bridge attempted to target a different app, or an app backend attempted a disallowed host route. |
 | `404` | Requested resource or route does not exist. |
-| `409` | Request conflicts with current runtime, task, approval, or credential state. |
+| `409` | Request conflicts with current runtime, thread, approval, or credential state. |
 | `413` | Request body exceeds the 1 MiB admin API limit. |
-| `429` | Too many failed admin logins from this source; retry after the lockout window. |
+| `429` | Too many failed admin logins from this source (retry after the lockout window), or the selected runtime is already running its maximum concurrent threads (retry when one finishes). |
 | `502` | An installed app backend or delegated tools service is unavailable or returned an invalid response. |
 | `500` | Host-side error. |
 
@@ -92,12 +92,12 @@ Response:
       {
         "type": "codex",
         "status": "active",
-        "active_task_ids": []
+        "active_thread_ids": []
       },
       {
         "type": "claude_code",
         "status": "deactivated",
-        "active_task_ids": []
+        "active_thread_ids": []
       }
     ]
   },
@@ -154,7 +154,7 @@ Response fields:
 | `agent_runtime.runtimes` | array |  | Status records for every supported runtime. |
 | `agent_runtime.runtimes[].type` | enum | `codex`, `claude_code`, `hermes` | Agent runtime type. |
 | `agent_runtime.runtimes[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current agent runtime supervisor state. |
-| `agent_runtime.runtimes[].active_task_ids` | string array |  | Currently running task ids for this runtime. |
+| `agent_runtime.runtimes[].active_thread_ids` | string array |  | Threads with a live turn on this runtime. |
 | `network_controls.status` | enum | `active`, `error` | Derived network policy enforcement state. |
 | `version.status` | enum | `ok`, `mismatch`, `error` | Version health for the running root volume and preserved admin state. |
 | `version.runtime` | string or null |  | Kern version from `/opt/kern-host/VERSION`. |
@@ -215,8 +215,8 @@ Agent runtime endpoints:
 | `GET` | `/v1/agent-runtime/claude-oauth-login` | none | Claude OAuth login response | Returns the current Claude Code OAuth login link. |
 | `POST` | `/v1/agent-runtime/claude-oauth-login/complete` | `{"code": "..."}` | status response | Submits the browser login code back to the waiting Claude Code OAuth process. |
 | `GET` | `/v1/agent-runtime/bedrock-credentials` | none | `{"connected": false}` or `{"connected": true, "access_key_id": "AKIA...", "region": "us-east-1"}` | Returns whether the Bedrock connection is stored plus its non-secret access key id and region. The secret is never returned. |
-| `POST` | `/v1/agent-runtime/bedrock-credentials` | `{"access_key_id": "AKIA...", "secret_access_key": "...", "region": "us-east-1"}` | `{"status": "accepted"}` | Synchronously validates the Bedrock long-term IAM access key pair with STS, then stores the credential, region, and account metadata atomically. Validation runs even while Bedrock is disabled; a rejected candidate returns `400`, is not retained, and leaves any previous validated connection unchanged. AWS checks model-specific invocation permission and model access on the first real task, avoiding a paid setup invocation. Later AWS failures are reported by the task that encounters them; they do not create a stored credential-health state. The request accepts exactly these three fields; the secret is never returned. |
-| `DELETE` | `/v1/agent-runtime/bedrock-credentials` | none | status response | Disconnects the AWS account, clears its credential, region, and account metadata, then fails running Hermes tasks. The live usage counters are retained: they record work already done. |
+| `POST` | `/v1/agent-runtime/bedrock-credentials` | `{"access_key_id": "AKIA...", "secret_access_key": "...", "region": "us-east-1"}` | `{"status": "accepted"}` | Synchronously validates the Bedrock long-term IAM access key pair with STS, then stores the credential, region, and account metadata atomically. Validation runs even while Bedrock is disabled; a rejected candidate returns `400`, is not retained, and leaves any previous validated connection unchanged. AWS checks model-specific invocation permission and model access on the first real turn, avoiding a paid setup invocation. Later AWS failures are reported by the turn that encounters them; they do not create a stored credential-health state. The request accepts exactly these three fields; the secret is never returned. |
+| `DELETE` | `/v1/agent-runtime/bedrock-credentials` | none | status response | Disconnects the AWS account, clears its credential, region, and account metadata, then fails running Hermes turns. The live usage counters are retained: they record work already done. |
 | `POST` | `/v1/agent-runtime/reset-linked-account` | `{"agent_runtime": "codex"\|"claude_code"}` | status response | Clears the selected OAuth runtime's linked account state. Bedrock uses the credential endpoint above because it uses an IAM credential instead of OAuth. |
 
 The runtime-specific OAuth login endpoints work while that runtime's status is
@@ -229,7 +229,7 @@ guard: the operator-approved anchor, its proxy pin, and any pending OAuth
 approval. Use it to unlink the account, for example to switch a runtime to a
 different provider account. It may be called in any
 runtime status. It also moves the runtime out of `active`, clears local agent
-auth files, closes that runtime's live processes, and fails its running tasks
+auth files, closes that runtime's live processes, and fails its running turns
 so no process from the old linked account keeps executing. The runtime is then
 ready for a fresh operator login that links an account again.
 `GET /v1/agent-runtime/account` does not accept query parameters; it always returns
@@ -248,12 +248,12 @@ Agent runtime status response:
     {
       "type": "codex",
       "status": "active",
-      "active_task_ids": []
+      "active_thread_ids": []
     },
     {
       "type": "claude_code",
       "status": "deactivated",
-      "active_task_ids": []
+      "active_thread_ids": []
     }
   ]
 }
@@ -264,8 +264,8 @@ Agent runtime status response fields:
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
 | `runtimes[].type` | enum | `codex`, `claude_code`, `hermes` | Agent runtime type. |
-| `runtimes[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current runtime state. Codex uses its rate-limit request and, if that fails, one Codex-owned forced refresh. Claude Code uses a `/usage` probe for the pinned token, or provider profile attestation for a new or rotated token. Bedrock is `active` when the integration is enabled and its synchronously validated credential/account row is present. AWS checks model-specific invocation permission and current credential validity on the first real task; later provider failures are task failures. |
-| `runtimes[].active_task_ids` | string array |  | Currently running task ids for that runtime, in task order. Empty when no task is running. |
+| `runtimes[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current runtime state. Codex uses its rate-limit request and, if that fails, one Codex-owned forced refresh. Claude Code uses a `/usage` probe for the pinned token, or provider profile attestation for a new or rotated token. Bedrock is `active` when the integration is enabled and its synchronously validated credential/account row is present. AWS checks model-specific invocation permission and current credential validity on the first real turn; later provider failures are turn failures. |
+| `runtimes[].active_thread_ids` | string array |  | Threads with a live turn on that runtime, sorted by thread id. Empty when no turn is running. |
 | `runtimes[].error_message` | string | optional | Present only while `status` is `error`: the underlying runtime failure message. |
 
 Agent account response:
@@ -346,7 +346,7 @@ Agent account response fields:
 | `accounts[].agent_runtime` | enum | `codex`, `claude_code` | Runtime for an OAuth provider record. Absent on the Bedrock record. |
 | `accounts[].agent_runtimes` | string array | `["hermes"]` | Runtime that uses the Bedrock provider. Present only on the Bedrock record. |
 | `accounts[].provider` | enum | `openai`, `claude`, `bedrock` | Managed AI provider. |
-| `accounts[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current provider account status. OAuth runtimes use `awaiting_login` when operator login is required. Bedrock has no OAuth flow: its status is `awaiting_login` until a synchronously validated credential is connected, then `active`. Later inference failures are reported on their tasks, not persisted as provider status. |
+| `accounts[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current provider account status. OAuth runtimes use `awaiting_login` when operator login is required. Bedrock has no OAuth flow: its status is `awaiting_login` until a synchronously validated credential is connected, then `active`. Later inference failures are reported on their turns, not persisted as provider status. |
 | `accounts[].account_id` | string | optional | The linked provider account id; for `bedrock` this is the 12-digit AWS account id. Present whenever a validated account identity is available. |
 | `accounts[].email` | string | optional | Present when available from the linked account metadata. |
 | `accounts[].arn` | string | optional | The STS-attested IAM identity of the connected AWS credential. Present only on the Bedrock provider record while its account is linked. |
@@ -431,161 +431,169 @@ Agent runtime reset-linked-account response fields:
 | --- | --- | --- | --- |
 | `status` | enum | `accepted` | The linked account was reset. |
 
-### Tasks
+### Threads
 
 ```text
-POST /v1/tasks
-GET  /v1/tasks?last_seen_task_id=<task_id>
-GET  /v1/tasks/{task_id}
-PUT  /v1/tasks/{task_id}
-POST /v1/tasks/{task_id}/steer
-POST /v1/tasks/{task_id}/cancel
-POST /v1/tasks/{task_id}/kill
+POST /v1/threads/{thread_id}/messages
 GET  /v1/threads
-GET  /v1/threads/{thread_id}/tasks
-GET  /v1/threads/{thread_id}/events
+GET  /v1/threads/{thread_id}
+POST /v1/threads/{thread_id}/stop
+GET  /v1/threads/{thread_id}/events?since=<seq>&limit=<n>&message_bytes=<b>
 ```
 
-Every task belongs to a client-chosen thread (`thread_id`). Tasks on the same
-thread share one runtime conversation and run one at a time in creation order;
-tasks on different threads run in parallel, up to 9 total and up to 3 per
-runtime. Codex resumes the thread's provider conversation by id on a fresh
-app-server; Claude Code and Hermes resume by their recorded provider
-session ids. To start a fresh conversation with no prior
-context, use a new `thread_id`. A `thread_id` belongs to the first runtime that
-uses it; creating a task for the same `thread_id` with another runtime returns
-`409`. `agent_runtime` chooses which runtime should execute the task. A task
-runs only while its chosen runtime is `active`: a task claimed while the
-runtime is `deactivated`, `loading`, `awaiting_login`, or `error` fails
-immediately with that status in `error_message`. If a runtime leaves `active`
-while tasks are running because its provider is disabled, its login expires,
-or its health check fails, the host closes that runtime's live processes and
-marks those running tasks `failed`.
+All agent work runs on threads. A thread is a durable conversation with a
+client-chosen id (`thread_id`) and a session configuration (`agent_runtime`,
+`model`, `effort`); it is created implicitly by its first message, never by a
+separate create call. The public model has no
+turn resource or turn lifecycle: a thread is simply `idle` or `running`, and
+its history is one chronological stream. Work on the same thread is
+serialized; work on different threads runs in parallel, up to 3 per runtime.
+Codex resumes the thread's provider conversation by id on a fresh app-server;
+Claude Code and Hermes resume by their recorded provider session ids. An idle
+thread may replace all three configuration fields atomically on its next
+message. That clears the old provider session and starts a fresh one with a
+handoff containing the newest retained public thread events, bounded to
+250,000 characters. Activity records include their complete stored detail and
+output, as shown by an expanded activity card. The durable thread id and
+visible history do not change.
 
-Task endpoints:
+**There is no queue.** A message is synchronously accepted into an idle or
+running thread, or rejected with a descriptive `409` or `429`; the caller
+decides whether and when to retry. Agent work runs only while its chosen
+runtime is `active`: a message for a non-active runtime is rejected at
+admission. Policy changes and provider-status refreshes own the transition out
+of `active`; either transition closes that runtime's live processes, including
+a run admitted just before the transition, and records `thread.error`. Claude
+Code additionally converges its rotating credential pin before spawning each
+process. Any runtime/CLI exception during execution — including a provider
+rate limit — also returns the thread to idle with `thread.error` and its error
+message.
+
+Thread endpoints:
 
 | Method | Path | Request | Response | Behavior |
 | --- | --- | --- | --- | --- |
-| `POST` | `/v1/tasks` | Create task request | Task response | Creates a task for the agent runtime. Returns `409` when 1,000 tasks are already queued. |
-| `GET` | `/v1/tasks?last_seen_task_id=<task_id>` | `last_seen_task_id` query parameter is optional | Task list response | Lists up to 5 current and pending tasks with their status, in execution order. |
-| `GET` | `/v1/tasks/{task_id}` | none | Task response | Returns one task. |
-| `PUT` | `/v1/tasks/{task_id}` | Update task request | Task response | Updates one pending task. Only tasks with status `queued` can be updated. |
-| `POST` | `/v1/tasks/{task_id}/steer` | Steer task request | Steer task response | Sends additional steering to one running Codex or Claude Code task. Hermes does not support steering; create a new task on the same `thread_id` instead. |
-| `POST` | `/v1/tasks/{task_id}/cancel` | none | Task cancel response | Requests cancellation for one pending task. Only tasks with status `queued` can be cancelled. |
-| `POST` | `/v1/tasks/{task_id}/kill` | none | Task kill response | Kills one running task: its runtime process is terminated and the task becomes `cancelled`. Only tasks with status `running` can be killed; returns `409` otherwise. The thread itself survives — a later task on the same `thread_id` resumes the conversation. |
-| `GET` | `/v1/threads` | none | Thread list response | Lists recent runtime threads, including active queued/running work and retained runtime session mappings. |
-| `GET` | `/v1/threads/{thread_id}/tasks` | Optional `limit` and `message_bytes` query parameters | Task list response | Lists retained tasks for one thread, newest first by `updated_at` with task id as a tiebreaker. `limit` defaults to 1,000 and is capped there. When supplied, `message_bytes` truncates each input, output, and error string to that many encoded bytes, capped at 200,000, before the response crosses a proxy boundary. |
-| `GET` | `/v1/threads/{thread_id}/events?since=<seq>&limit=<n>` | `since` and `limit` query parameters are optional | Event list response | Streams one thread's task events across all of its tasks, oldest first, with `seq > since`. `limit` defaults to 100 and is capped there. |
+| `POST` | `/v1/threads/{thread_id}/messages` | Send message request | Send message response | Durably admits an idle thread's initial message or synchronously delivers a running thread's steer, creating the thread on its first message. Rejected with `409`/`429` when it cannot be accepted; there is no queue. |
+| `GET` | `/v1/threads?before=<cursor>&limit=<n>` | query parameters optional | Thread list response | Lists one newest-first page of threads with their session configuration and live status. |
+| `GET` | `/v1/threads/{thread_id}` | none | `{"thread": {...}}` | Returns one thread (the same shape as a thread list entry). `404` when no thread row exists. Accepts no query parameters. |
+| `POST` | `/v1/threads/{thread_id}/stop` | none | `{"status": "accepted"}` | Stops the thread's running work: the thread returns durably to `idle`, a `thread.stopped` event is appended, and process interruption is requested. `404` for an unknown thread; `409` (`the thread has no running work`) when the thread is idle. The thread survives and a later message resumes the conversation, but sends receive a retryable `409` until the old process has fully shut down. |
+| `GET` | `/v1/threads/{thread_id}/events?since=<seq>&limit=<n>&message_bytes=<b>` | query parameters optional | Event list response | One chronological page of the thread's event stream. See [Events](#events). |
 
-Create task request:
+Stop has no mailbox or deferred delivery. The HTTP request synchronizes
+directly with steering and provider event writes, commits `thread.stopped`,
+changes the private phase to FINISHING, and requests a non-blocking process
+interrupt before returning `accepted`. Provider session ids are persisted by
+adapter callbacks as soon as they become usable, not deferred to Stop. The
+owning execution thread still closes and verifies the scope before releasing
+the same-thread fence; a send during that short cleanup window receives the
+documented retryable `409`.
+
+Send message request:
 
 ```json
 {
   "agent_runtime": "codex",
   "model": "gpt-5.6-terra",
   "effort": "high",
-  "input_message": "Implement this change and report the result.",
-  "thread_id": "feature-chat-1"
+  "message": "Implement this change and report the result."
 }
 ```
 
-Create task request fields:
+Send message request fields:
 
 | Field | Required | Type | Meaning |
 | --- | --- | --- | --- |
-| `agent_runtime` | New thread | enum | Runtime to execute the task: `codex`, `claude_code`, or `hermes`. Supply it together with `model` and `effort`. An existing thread accepts all three when they exactly match its fixed configuration, or none of them. |
-| `model` | New thread | enum | Model for this session. Codex accepts `gpt-5.6-terra`, `gpt-5.6-sol`, or `gpt-5.6-luna`; Claude Code accepts `claude-opus-5`, `claude-fable-5`, or `claude-sonnet-5`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, or `moonshotai.kimi-k2.5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable — thread and task responses still report it — but it runs no further tasks: a task for such a thread returns `409`, and the value can no longer start a new thread either. |
-| `effort` | New thread | enum | Effort for this session. Codex accepts `high`, `max`, or `ultra`, except Luna accepts only `high` or `max`. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
-| `input_message` | Yes | string | Task message for the agent runtime. Must be 1 to 50,000 characters. |
-| `thread_id` | Yes | string | Client-generated conversation id this task belongs to. Must be 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `-`, or `_`. The first task requires and fixes the runtime, model, and effort on the thread. Later tasks may omit all three or repeat the complete matching triple; a partial or conflicting configuration returns `400`. Omitting them for an unknown thread also returns `400`. A thread whose fixed configuration is no longer offered returns `409` for every further task, however it is supplied; its queued tasks are failed at the next host start, since they can never run under the configuration they were queued with. Thread rows referenced by retained tasks are preserved; otherwise the host retains the 100,000 most recently used mappings per runtime. Once a thread is no longer retained, supplying a configuration starts a fresh provider conversation. |
+| `message` | Yes | string | Message for the agent runtime. Must be 1 to 50,000 characters. The host handles idle and running threads; callers use the same operation for both. |
+| `agent_runtime` | New thread or configuration change | enum | Runtime for the thread: `codex`, `claude_code`, or `hermes`. Supply it together with `model` and `effort`. On an existing thread, a matching triple resumes or steers the current provider session; a different triple starts a fresh provider session only while the thread is idle. |
+| `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-5.6-terra`, `gpt-5.6-sol`, or `gpt-5.6-luna`; Claude Code accepts `claude-opus-5`, `claude-fable-5`, or `claude-sonnet-5`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, or `moonshotai.kimi-k2.5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
+| `effort` | New thread or configuration change | enum | Effort for this session. Codex accepts `high`, `max`, or `ultra`, except Luna accepts only `high` or `max`. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
 
-Follow-up task request:
+The path's `thread_id` must be 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `-`,
+or `_`; other values are `404` (no such route). Ids containing the app-scoped
+separator (`<app_id>__...`) are reserved for app backends and return `400`.
+The first message requires all three configuration fields. Later messages may
+omit all three or repeat the complete matching triple. A different complete
+triple rotates an idle thread to a new provider session in the same admission
+transaction; a partial triple returns `400`, and a change while running
+returns `409`. The synthetic handoff is sent only to the new provider: the
+visible event stream records a completed `thread.activity` describing the old
+and new session configuration, followed by the operator's new message, but not
+the transcript wrapper. The handoff preserves the newest events and may omit
+older retained history, so provider-side context and cache reads from the
+previous session are not available. Thread rows referenced by retained events
+are preserved; otherwise the host retains the 100,000 most recently used
+mappings per runtime. Once a thread is no longer retained, supplying a
+configuration starts a fresh provider conversation.
+
+The same bounded handoff is used without a configuration change when an
+existing thread has retained events but no provider session id—for example,
+after startup failed before the replacement provider published a resumable
+id. A brand-new thread with no history receives only its first message.
+
+Follow-up message request:
 
 ```json
 {
-  "input_message": "Continue with the implementation.",
-  "thread_id": "feature-chat-1"
+  "message": "Continue with the implementation."
 }
 ```
 
-Task response:
+Send message response:
 
 ```json
 {
-  "task_id": "task_123",
-  "status": "completed",
-  "agent_runtime": "codex",
-  "model": "gpt-5.6-terra",
-  "effort": "high",
-  "thread_id": "feature-chat-1",
-  "input_message": "Implement this change and report the result.",
-  "output_message": "Implemented the change and pushed the PR update.",
-  "created_at": "2026-06-08T00:00:00Z",
-  "updated_at": "2026-06-08T00:00:00Z"
+  "status": "accepted",
+  "thread": {
+    "thread_id": "feature-chat-1",
+    "agent_runtime": "codex",
+    "model": "gpt-5.6-terra",
+    "effort": "high",
+    "last_used_at": "2026-06-08T00:00:00Z",
+    "status": "running"
+  }
 }
 ```
 
-Task response fields:
+Send message response fields:
 
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
-| `task_id` | string |  | Host-generated task id. |
-| `status` | enum | `queued`, `running`, `completed`, `failed`, `cancelled` | Current task status. |
-| `agent_runtime` | enum | `codex`, `claude_code`, `hermes` | Runtime assigned to this task. |
-| `model` | enum | See create request | Model assigned to this task and its session. |
-| `effort` | enum | See create request | Effort assigned to this task and its session. |
-| `thread_id` | string |  | Conversation thread this task belongs to. |
-| `input_message` | string |  | Task message for the agent runtime. |
-| `output_message` | string |  | Final output message from the agent runtime. Present only when `status` is `completed`. |
-| `error_message` | string |  | Human-readable failure message. Present only when `status` is `failed`. |
-| `created_at` | string | RFC 3339 timestamp | Task creation time. |
-| `updated_at` | string | RFC 3339 timestamp | Last task update time. |
+| `status` | enum | `accepted` | The host accepted the message and its durable `thread.message` event committed. Idle and running threads intentionally have the same response. |
+| `thread` | object |  | The thread, in the same shape as a thread list entry. |
 
-Task list response:
+For an idle thread, the host durably admits the message and starts its runtime
+worker; `accepted` does not mean the provider has accepted that initial
+message yet. A later startup/provider failure appears as `thread.error`. For a
+running thread, `accepted` means the live provider transport acknowledged the message and its
+`thread.message` event then committed. Codex acknowledgement is a successful
+`turn/steer` JSON-RPC response. Claude Code exposes no per-message response, so
+its acknowledgement is a successful write and flush to the live stream-json
+stdin. There is no host steer mailbox and no delivery-marker table.
 
-Task list query parameters:
+If provider acknowledgement succeeds but the following database write fails,
+the API returns an error and no user event appears even though the CLI may act
+on the message. Retrying can deliver it twice. This deliberately at-least-once
+failure edge is the trade for avoiding a durable cross-system delivery
+protocol; callers may safely retry when duplicate natural-language steering is
+acceptable.
+Hermes cannot receive another message while it is running: a message for a busy Hermes thread
+returns `409`; a later message after it becomes idle resumes the stored
+provider conversation.
 
-| Field | Required | Type | Meaning |
-| --- | --- | --- | --- |
-| `last_seen_task_id` | No | string | Last task id from the previous page. When present, the response starts after this task in execution order. |
+Message rejections (there is no queue, so each names the condition and the
+caller retries):
 
-```json
-{
-  "tasks": [
-    {
-      "task_id": "task_123",
-      "status": "running",
-      "queue_position": 0,
-      "agent_runtime": "codex",
-      "model": "gpt-5.6-terra",
-      "effort": "high",
-      "thread_id": "feature-chat-1",
-      "input_message": "Implement this change and report the result.",
-      "created_at": "2026-06-08T00:00:00Z",
-      "updated_at": "2026-06-08T00:00:00Z"
-    },
-    {
-      "task_id": "task_124",
-      "status": "queued",
-      "queue_position": 1,
-      "agent_runtime": "claude_code",
-      "model": "fable",
-      "effort": "ultracode",
-      "thread_id": "docs-chat",
-      "input_message": "Add the follow-up documentation update.",
-      "created_at": "2026-06-08T00:01:00Z",
-      "updated_at": "2026-06-08T00:01:00Z"
-    }
-  ]
-}
-```
-
-Task list response fields:
-
-| Field | Type | Meaning |
+| Status | Condition | `error.message` |
 | --- | --- | --- |
-| `tasks` | Task response array | Up to 5 tasks. The first page starts with the running tasks followed by pending tasks in creation order. Later pages continue after `last_seen_task_id`. Completed, failed, and cancelled tasks are not included. |
-| `tasks[].queue_position` | integer | Queue position for this task. `0` marks every currently running task (up to 9 total and up to 3 per runtime run in parallel). Pending tasks use `1`, `2`, `3`, and so on in creation order. If no task is running, pending tasks still start at `1`. A pending task can run ahead of an earlier one when the earlier task waits on a busy thread or when an earlier task's runtime is already at its per-runtime cap. |
+| `409` | The thread's runtime is not `active` (its status is `loading`, `awaiting_login`, or `error`). | `<Runtime> runtime is <status>; messages run only while it is active` |
+| `409` | The thread's runtime is disabled in the network policy. | `<Runtime> runtime is deactivated; enable its provider under Internet Access and Tools` |
+| `409` | The admitted process has not yet accepted its initial message. This private startup phase is normally brief; retry the same request. | `the agent is starting; retry shortly` |
+| `409` | The previous work is durably final but its runtime process is still shutting down. The live fence remains so a new message never races the dying process; retry the same request. | `the agent is finishing; retry shortly` |
+| `409` | Hermes has no mid-run input channel. | `Hermes cannot accept another message while running; wait for it to finish` |
+| `409` | A message tries to change configuration while work is running. | `thread runtime, model, and effort can change only while the thread is idle` |
+| `409` | The thread's current session configuration left the option matrix and the message does not replace it. | `this thread runs a session configuration that is no longer offered; select a currently offered model to continue` |
+| `429` | The runtime is at its concurrency cap. Each runtime owns an independent pool of 3 concurrent threads, so one busy runtime cannot take capacity from its peers. | `<Runtime> runtime is already running 3 concurrent threads; retry when one finishes` |
+| `502` | A provider that already declared itself running rejects a synchronous message. The host records `thread.error`, finalizes the run, and begins cleanup rather than treating this as startup. | `<Runtime> rejected the message: <provider detail>` |
 
 Thread list response:
 
@@ -598,129 +606,58 @@ Thread list response:
       "model": "gpt-5.6-terra",
       "effort": "high",
       "last_used_at": "2026-06-08T00:05:00Z",
-      "active_tasks": [{"task_id": "task_125", "status": "running"}],
-      "task_count": 4
+      "status": "running"
     }
-  ]
+  ],
+  "next_before": "WyIyMDI2LTA2LTA4VDAwOjA1OjAwWiIsImZlYXR1cmUtY2hhdC0xIl0"
 }
 ```
+
+An uncursored request returns the newest page. `limit=<n>` defaults to 100 and
+must be between 1 and 100. When another page exists, the response includes an
+opaque `next_before` cursor; pass it unchanged as `before=<cursor>` to load
+older threads. Ordering uses `last_used_at` followed by globally unique
+`thread_id`, so equal timestamps paginate without omissions. The cursor is a
+URL-safe encoding of that composite position, not a thread id or a secret;
+clients treat it as opaque so the sort-key representation can change without
+changing their parsing logic.
 
 Thread list response fields:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `threads` | thread array | Recent known threads sorted by `last_used_at` descending. |
+| `next_before` | string | Optional opaque cursor for the next older page. Absent when this is the last page. |
 | `threads[].thread_id` | string | Client-generated conversation id. |
-| `threads[].agent_runtime` | enum | Runtime for this thread entry: `codex`, `claude_code`, or `hermes`. |
-| `threads[].model` | enum | Model fixed for this session. |
-| `threads[].effort` | enum | Effort fixed for this session. |
-| `threads[].last_used_at` | string | Latest retained task update or runtime session use timestamp known for this thread/runtime. |
-| `threads[].active_tasks` | array | Queued or running retained tasks on this thread/runtime. Empty when no task is currently active. |
-| `threads[].task_count` | integer | Number of retained task records for this thread/runtime. Older finished tasks can be pruned. |
+| `threads[].agent_runtime` | enum | Runtime for this thread: `codex`, `claude_code`, or `hermes`. |
+| `threads[].model` | enum | Model for the thread's current provider session. |
+| `threads[].effort` | enum | Effort for the thread's current provider session. |
+| `threads[].last_used_at` | string | Latest message or successful-settlement timestamp known for this thread. |
+| `threads[].status` | enum | Public current state: `running` while an admitted execution still owns the thread fence (including private startup and cleanup), `idle` otherwise. |
 
-Thread task list response fields:
+The host stores current run state privately on the thread row; lifecycle
+markers are not public events. After a host restart or reboot, each thread
+left `running` is atomically returned to `idle` and receives one
+`thread.error` event (`host runtime restarted while the thread was running`).
+Internally, each live execution moves through `STARTING`, `RUNNING`,
+`FINISHING`, and `CLOSED`. The database commits admission before STARTING and
+finalization before FINISHING, leaving process startup and teardown as
+in-memory lifecycle work. A provider publishes a non-empty resumable session
+id as soon as it proves one usable; Kern persists that callback immediately
+for the matching run and never stores an empty replacement.
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `tasks` | Task response array | Up to 1,000 retained tasks for the selected thread, newest first by `updated_at` with task id as a tiebreaker. The host keeps active tasks and the 100,000 most recently updated finished tasks globally before pruning older task records. |
-
-Update task request:
-
-```json
-{
-  "input_message": "Use this updated task message."
-}
-```
-
-Update task request fields:
-
-| Field | Required | Type | Meaning |
-| --- | --- | --- | --- |
-| `input_message` | Yes | string | Replacement task message for the agent runtime. Must be 1 to 50,000 characters. |
-
-`PUT /v1/tasks/{task_id}` returns `409` when the task is not pending.
-
-Steer task request:
-
-```json
-{
-  "steer_message": "Focus only on the API documentation change."
-}
-```
-
-Steer task request fields:
-
-| Field | Required | Type | Meaning |
-| --- | --- | --- | --- |
-| `steer_message` | Yes | string | Additional steering message for a running Codex or Claude Code task. Must be 1 to 50,000 characters. A task holds at most 20 undelivered steer messages at a time; delivered steers leave the queue (their content is preserved as `task.message` events). Hermes rejects steering because its headless process has no mid-turn input channel. |
-
-Steer task response:
-
-```json
-{
-  "status": "accepted"
-}
-```
-
-Steer task response fields:
-
-| Field | Type | Values | Meaning |
-| --- | --- | --- | --- |
-| `status` | enum | `accepted` | Steering message was accepted and will be applied asynchronously. |
-
-`POST /v1/tasks/{task_id}/steer` returns `409` when the task is not running,
-when the task uses Hermes, or when the task already holds 20 undelivered steer
-messages. A later Hermes instruction is a new task on the same `thread_id`,
-which resumes the stored provider conversation.
-
-`accepted` means the message was recorded, not that the agent acted on it: a
-steer that lands in the instant between the turn's final steering check and
-the task completing is recorded but never delivered. If the task finishes
-right after a steer, check the task output and start a follow-up task if the
-steering still matters.
-
-Task cancel response:
-
-```json
-{
-  "status": "accepted"
-}
-```
-
-Task cancel response fields:
-
-| Field | Type | Values | Meaning |
-| --- | --- | --- | --- |
-| `status` | enum | `accepted` | Cancellation request was accepted and will be applied asynchronously. |
-
-Task kill response:
-
-```json
-{
-  "status": "accepted"
-}
-```
-
-Task kill response fields:
-
-| Field | Type | Values | Meaning |
-| --- | --- | --- | --- |
-| `status` | enum | `accepted` | The task was cancelled and its runtime process is being terminated. |
-
-Task statuses:
-
-```text
-queued
-running
-completed
-failed
-cancelled
-```
+`POST /v1/threads/{thread_id}/stop` commits `thread.stopped` and the idle
+database state, moves the execution to FINISHING, requests a prompt interrupt,
+and returns `accepted`. The owning execution thread performs bounded process
+and systemd-scope cleanup. A send during that short cleanup receives the
+retryable FINISHING conflict above. If the scope cannot be proven gone, Kern
+records `thread.error` and deliberately retains the fence; this indicates host
+process-management failure and should be recovered with a host restart.
 
 ### Events
 
 ```text
-GET /v1/tasks/{task_id}/events?since=<seq>
+GET /v1/threads/{thread_id}/events?since=<seq>&limit=<n>&message_bytes=<b>
 GET /v1/events?before=<seq>&limit=<n>
 ```
 
@@ -728,18 +665,27 @@ Event endpoints:
 
 | Method | Path | Request | Response | Behavior |
 | --- | --- | --- | --- | --- |
-| `GET` | `/v1/tasks/{task_id}/events?since=<seq>` | `since` query parameter is optional | Event list response | Streams up to 5 events for one task, oldest first. |
+| `GET` | `/v1/threads/{thread_id}/events?since=<seq>&limit=<n>&message_bytes=<b>` | query parameters optional | Event list response | One chronological page of the flat thread event stream. |
 | `GET` | `/v1/events?before=<seq>&limit=<n>` | query parameters optional | Event list response | Lists newest agent events before an optional sequence cursor. |
 
-The two endpoints serve different access patterns. Task events tail one task
-while it runs: with `since` present, the response holds events with
-`seq > since`, oldest first; use the highest returned `seq` as the next
-`since`, and keep the same `since` when a response is empty.
+The two endpoints serve different access patterns. Thread events follow one
+conversation: an uncursored request returns the newest page (in chronological
+order, so opening a long thread does not scan its full history),
+`before=<seq>` loads earlier history, and `since=<seq>` keeps a loaded tail
+current with events whose `seq > since` — use the highest returned `seq` as
+the next `since`, and keep the same `since` when a response is empty. `since`
+and `before` cannot be combined. `limit=<n>` is optional, defaults to 100,
+and must be between 1 and 100. `message_bytes=<b>` is optional and must be
+between 1 and 200,000: when supplied, each event's `message` and
+`error_message` payload text is truncated to that many encoded bytes, and an
+activity's `detail` and `output` fields share the same budget (at most 24 KiB
+of it goes to `detail`), before the response crosses a proxy boundary; every
+clipped value ends with `… (truncated)`.
 
-The audit log across all tasks pages newest-first like the network audit log:
-the first request returns the newest events, and `before=<seq>` continues with
-events whose `seq` is lower than that cursor. `limit=<n>` is optional,
-defaults to 100, and must be between 1 and 100.
+The audit log across all threads pages newest-first like the network audit
+log: the first request returns the newest events, and `before=<seq>`
+continues with events whose `seq` is lower than that cursor. `limit=<n>` is
+optional, defaults to 100, and must be between 1 and 100.
 
 The host retains only the most recent 1,000,000 agent events; older events are
 discarded and can no longer be listed.
@@ -753,10 +699,10 @@ Event list response:
       "event_id": "event_123",
       "seq": 42,
       "timestamp": "2026-06-08T00:00:00Z",
-      "event_type": "task.message",
-      "task_id": "task_123",
+      "event_type": "thread.message",
+      "thread_id": "feature-chat-1",
       "payload": {
-        "message": "Task update from the agent.",
+        "message": "Update from the agent.",
         "source": "agent"
       }
     }
@@ -768,66 +714,82 @@ Event list response fields:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `events` | event array | Events ordered by `seq`: oldest first for task events, newest first for `/v1/events`. Empty when no matching events are available. |
+| `events` | event array | Events ordered by `seq`: chronological for thread events, newest first for `/v1/events`. Empty when no matching events are available. |
 
 Event fields:
 
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
-| `event_id` | string |  | Stable event id. |
+| `event_id` | string |  | Stable event id (`event_<seq>`). |
 | `seq` | integer |  | Monotonic host-local event sequence number. |
 | `timestamp` | string | RFC 3339 timestamp | Event time. |
 | `event_type` | enum | See event types below. | Event type. |
-| `task_id` | string or null |  | Related task id for task events, or `null` for agent runtime events. |
+| `thread_id` | string or null |  | Related thread id for thread events, or `null` for agent runtime events. |
 | `payload` | object |  | Event-specific JSON payload. |
 
 Event types:
 
 ```text
-task.started
-task.message
-task.completed
-task.failed
-task.cancelled
+thread.message
+thread.activity
+thread.error
+thread.stopped
 agent_runtime.active
 agent_runtime.login_completed
 agent_runtime.linked_account_reset
 agent_runtime.deactivated
 ```
 
-`task.started` uses the top-level `task_id` field and an empty payload `{}`.
-
-`task.message` payload fields:
+`thread.message` payload fields:
 
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
-| `message` | string |  | Message text from the task, including first input, intermediate, and result messages. |
+| `message` | string |  | Message text: every accepted user message and every completed agent message including the final one. |
 | `source` | enum | `agent`, `user` | Message source. |
 
-`task.completed` uses the top-level `task_id` field and an empty payload `{}`.
-
-`task.failed` payload fields:
+`thread.activity` payload fields:
 
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
-| `error_message` | string |  | Human-readable task failure message. |
+| `activity` | object |  | One provider-independent activity record, normalized from Claude Code stream-json content blocks, Codex app-server ThreadItems, or Hermes tool-call hook events. |
 
-`task.cancelled` uses the top-level `task_id` field and an empty payload `{}`.
-It is emitted when a queued task is cancelled or a running task is killed.
+`activity` object fields:
 
-`agent_runtime.active` uses `task_id: null` and payload
+| Field | Type | Values | Meaning |
+| --- | --- | --- | --- |
+| `activity.provider` | string |  | The runtime that produced the record. |
+| `activity.activity_id` | string |  | Opaque host-scoped correlation key tying `started` and `completed` snapshots of one activity. The host scopes a provider id to its private execution so a fresh provider process may safely reuse ids. |
+| `activity.kind` | enum | `reasoning`, `plan`, `command`, `file_change`, `tool`, `agent`, `search`, `image`, `wait`, `status` | Activity category. |
+| `activity.phase` | enum | `started`, `completed` | Snapshot phase. An activity with no `completed` snapshot proves it began, not that it finished (for example when the thread was stopped mid-activity). |
+| `activity.title` | string |  | Short operator-facing summary. |
+| `activity.detail` | string | optional | Rich text detail (a command line, a plan, reasoning text). Retained up to 256 KiB; any clipping ends with `… (truncated)`. |
+| `activity.output` | string | optional | Command or tool output. Retained up to 256 KiB with the same truncation marker. |
+| `activity.status` | string | optional | Provider status text for the snapshot. |
+| `activity.append_output` | boolean | optional | `true` when this snapshot's `output` appends to the previous snapshot's output for the same `activity_id` instead of replacing it. |
+
+`thread.error` payload fields:
+
+| Field | Type | Values | Meaning |
+| --- | --- | --- | --- |
+| `error_message` | string |  | Human-readable agent failure message. |
+
+`thread.stopped` uses the top-level `thread_id` field and an empty payload
+`{}`. It is emitted when `POST /v1/threads/{thread_id}/stop` ends running
+work.
+
+`agent_runtime.active` uses `thread_id: null` and payload
 `{"agent_runtime": "codex"}`, `{"agent_runtime": "claude_code"}`, or `{"agent_runtime": "hermes"}`.
 
-`agent_runtime.login_completed` uses `task_id: null` and payload
+`agent_runtime.login_completed` uses `thread_id: null` and payload
 `{"agent_runtime": "codex"}` or `{"agent_runtime": "claude_code"}`. Hermes has
 no login flow.
 
-`agent_runtime.linked_account_reset` uses `task_id: null` and payload
+`agent_runtime.linked_account_reset` uses `thread_id: null` and payload
 `{"agent_runtime": "codex"}`, `{"agent_runtime": "claude_code"}`, or `{"agent_runtime": "hermes"}` when an
 operator reset cleared that runtime's linked account (the audit record of the
 reset-linked-account endpoint).
 
-`agent_runtime.deactivated` uses `task_id: null` and payload
+`agent_runtime.deactivated` uses `thread_id: null` and payload
 `{"agent_runtime": "codex"}`, `{"agent_runtime": "claude_code"}`, or `{"agent_runtime": "hermes"}` when a
 runtime is disabled because its managed provider integration is disabled.
 
@@ -918,7 +880,7 @@ GET /v1/agent-processes
 ```
 
 Returns a read-only diagnostic snapshot of Codex, Claude Code, and processes
-spawned by those runtimes. This is process state, not task state: short-lived turn
+spawned by those runtimes. This is process state, not turn state: short-lived turn
 processes may exit before the next snapshot. The response contains at most 1,000 processes; when
 more matching processes exist, `truncated` is `true`.
 
@@ -960,7 +922,7 @@ Network endpoints:
 | Method | Path | Request | Response | Behavior |
 | --- | --- | --- | --- | --- |
 | `GET` | `/v1/network/policy` | none | Network policy response | Returns active network policy. |
-| `PUT` | `/v1/network/policy` | Network policy request | Network policy response | Replaces network policy atomically. Disabling a managed provider integration deactivates its runtime, clears its account pin, closes its live runtime processes, and fails its running tasks. |
+| `PUT` | `/v1/network/policy` | Network policy request | Network policy response | Replaces network policy atomically. Disabling a managed provider integration deactivates its runtime, clears its account pin, closes its live runtime processes, and fails its running turns. |
 | `GET` | `/v1/network-tools/github-credential` | none | GitHub credential metadata | Returns credential metadata only; never the token. |
 | `PUT` | `/v1/network-tools/github-credential` | GitHub credential request | GitHub credential metadata | Stores or replaces the single fixed GitHub token. The `token` field is write-only. |
 | `DELETE` | `/v1/network-tools/github-credential` | none | GitHub credential metadata | Removes the stored credential and withdraws the proxy-injected working token. |
@@ -1247,7 +1209,7 @@ request and query string to the app's host-assigned loopback port with an
 `X-Kern-App-Proxy` marker and accepts a JSON response of at most 1 MiB. The browser app bridge pins a request to its own `app_id`;
 attempting to bridge to another app returns `403`. App backend failures are
 returned through the standard error envelope. App-backend-to-host calls use a
-separate peer-authenticated Unix socket and narrow task/thread allowlist,
+separate peer-authenticated Unix socket and narrow thread-route allowlist,
 documented in [Apps architecture](../architecture/apps/apps.md).
 
 ## Tools
@@ -1468,6 +1430,29 @@ the admin service writes config and enablement events and reads the table for
 the Tool Audit Log. The UI loads arguments only after the operator expands an
 event. Tool config values and OAuth callback parameters are never stored as
 event arguments.
+
+## Host Errors
+
+```text
+GET /v1/host-errors
+GET /v1/host-errors/{id}
+```
+
+| Method | Path | Request | Response | Behavior |
+| --- | --- | --- | --- | --- |
+| `GET` | `/v1/host-errors` | `?before=&limit=&service=` | `{"events": [...]}` | Lists unexpected host-service failures newest first. `before` is the row's ordering `seq`, `limit` is 1–100, and optional `service` selects one exact systemd service name. List rows omit traceback, context, and fingerprint. |
+| `GET` | `/v1/host-errors/{id}` | none | `{"error": {...}}` | Loads the full bounded diagnostic record by its stable numeric `id`, including traceback, context, and fingerprint. Returns `404` when the row does not exist. |
+
+The API is display-only: there are no resolve, dismiss, delete, or report
+routes. Expected thread, provider, tool, validation, and network-policy outcomes
+do not belong in this log. See [Host error diagnostics](../architecture/host-errors.md)
+for best-effort capture, safety, and retention.
+
+Host error list rows contain stable `id` and `error_id` fields, the rotating
+newest-first paging cursor `seq`, `first_seen_at`,
+`last_seen_at`, `service`, `component`, `kind`, `exception_type`, `summary`,
+`occurrence_count`, `host_version`, `boot_id`, `pid`, and `has_details`. Detail
+reads additionally contain `traceback`, `context`, and `fingerprint`.
 
 ## Host Runtime
 

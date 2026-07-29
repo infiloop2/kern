@@ -9,8 +9,8 @@ side-effect-free OAuth callback shell are unauthenticated.
 
 Route handlers validate the documented protocol and update admin state in the
 local Postgres database (through the storage accessors in ``state``);
-running tasks through the selected agent runtime is delegated to
-``orchestrator``, which owns the worker pool and live task processes.
+running turns through the selected agent runtime is delegated to
+``orchestrator``, which owns turn admission and the live turn processes.
 Operations that require root or agent-user authority cross through fixed
 root-owned sudo helpers. Database-backed host state is updated directly under
 the admin database role.
@@ -26,6 +26,7 @@ brute-forced over the public tunnel.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 from http import HTTPStatus
@@ -39,7 +40,6 @@ import socket
 import subprocess
 import threading
 import time
-import traceback
 from typing import Any, Callable, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
@@ -47,25 +47,22 @@ from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
 from host.network_integrations.bedrock.manifest import SUPPORTED_REGIONS as BEDROCK_REGIONS
 from host.network_integrations.github.push_gate import pending as github_pending_push
-from host.session_options import offered_session_configs, session_config_error
+from host.session_options import session_config_error
 # app_backend_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
 # object and reads its attributes only at request time, never during import.
-from host.runtime.admin_api import admin_auth, app_api_proxy, app_backend_api as app_backend_admin_api, bedrock_credentials, claude_code, codex_app_server, github_credential, github_repo_audit, orchestrator, task_status, tools_client as tools_admin_api, upgrade_check
-from host.runtime.core import app_platform, network_policy, state
+from host.runtime.admin_api import admin_auth, agent_activity, app_api_proxy, app_backend_api as app_backend_admin_api, bedrock_credentials, claude_code, codex_app_server, github_credential, github_repo_audit, orchestrator, tools_client as tools_admin_api, upgrade_check
+from host.runtime.core import app_platform, host_errors, network_policy, state
 from host.runtime.tools import tools_host
 from host.runtime.admin_api.orchestrator import agent_runtime_status
 from host.runtime.core.state import (
-    TASK_LIMIT,
     load_admin_password_hash,
     load_config,
     page_agent_events_before,
-    page_task_events,
     read_claude_account,
     read_openai_account,
     utc_now,
 )
-from host.runtime.admin_api.task_status import CANCELLED, QUEUED, RUNNING
 from host.version import version_status
 
 
@@ -113,7 +110,7 @@ SECURITY_HEADERS = {
         "font-src 'self'; "
         "form-action 'self'; "
         "frame-ancestors 'none'; "
-        "img-src 'self' data:; "
+        "img-src 'self' data: blob:; "
         "media-src blob:; "
         "object-src 'none'; "
         "script-src 'self'; "
@@ -132,17 +129,12 @@ UNTRUSTED_FILE_SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
 }
 THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 MESSAGE_LIMIT = 50_000
+THREAD_HANDOFF_CHARACTER_LIMIT = 250_000
 MAINTENANCE_INTERVAL_SECONDS = 3600  # scheduled state cleanup cadence (not per-request)
-FINISHED_TASK_LIMIT = 100_000  # finished tasks kept as history before the oldest are pruned
-THREAD_TASK_LIMIT = 1000
-THREAD_TASK_MESSAGE_BYTES_LIMIT = 200_000
+THREAD_EVENT_MESSAGE_BYTES_LIMIT = 200_000
 THREAD_MAP_LIMIT = 100_000  # user thread -> runtime session mappings kept before LRU pruning
-# Queued tasks and undelivered steers are the two operator-driven inputs that
-# would otherwise grow admin state without bound (active tasks are never
-# pruned; steers queue until the worker delivers them). Both caps return 409.
-QUEUED_TASK_LIMIT = 1000
-PENDING_STEER_LIMIT = 20
 OAUTH_LOGIN_LOCK_TIMEOUT_SECONDS = 5
 # OAuth login can start while awaiting login or in error: error states (a
 # changed account, malformed local credentials) are recovered by simply
@@ -155,7 +147,15 @@ AGENT_FILE_UPLOAD_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-
 AGENT_FILE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 AGENT_FILE_UPLOAD_FILENAME_MAX_BYTES = 200
 AGENT_FILE_STREAM_MAX_BYTES = 200_000_000
-AGENT_FILE_STREAM_MEDIA_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime"}
+AGENT_FILE_IMAGE_STREAM_MAX_BYTES = 25 * 1024 * 1024
+AGENT_FILE_STREAM_MEDIA_TYPES = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 AGENT_AUTH_CLEAR_HELPER_TIMEOUT_SECONDS = 10
 AGENT_AUTH_CLEAR_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/clear-agent-auth"]
 AGENT_CGROUP_ROOT = Path("/sys/fs/cgroup/kern_agent.slice")
@@ -282,11 +282,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(exc.status, {"error": {"message": exc.message}})
         except app_platform.AppError as exc:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": {"message": str(exc)}})
-        except Exception:
+        except Exception as exc:
             # Never leak internal exception detail (database, filesystem,
             # subprocess, config) to the client; log the real error to the
             # protected service log and return a fixed message.
-            traceback.print_exc()
+            host_errors.report_unexpected(
+                "admin_api.request",
+                exc,
+                context={"method": method, "route": urlparse(self.path).path},
+            )
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"message": "internal server error"}})
 
     def _send_ui_asset(self, path: str) -> None:
@@ -356,14 +360,21 @@ class Handler(BaseHTTPRequestHandler):
         # the password itself is presented only at login, never replayed on later
         # requests. A cookie-authenticated request must also carry the CSRF header,
         # which same-origin UI code always sends and a cross-site page cannot.
-        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""))
+        secure = self._request_is_https()
+        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""), secure=secure)
         if token is not None:
             # Check the CSRF header before validating so a cookie-only request
             # (a same-site cross-origin page can send the cookie but cannot set
             # the header) can never refresh the session's idle clock.
             if not self.headers.get(admin_auth.CSRF_HEADER_NAME):
                 raise ApiError(HTTPStatus.FORBIDDEN, "missing admin session request header")
-            token_hash = admin_auth.validate_session(token)
+            # A five-second background poll must not keep an abandoned browser
+            # tab logged in. The centralized UI request wrapper adds this marker
+            # only shortly after a real operator pointer/key/touch interaction.
+            # It is not an authorization factor—the cookie and CSRF header are—
+            # but it decides whether this valid request advances the idle clock.
+            refresh_idle = self.headers.get(admin_auth.SESSION_ACTIVITY_HEADER_NAME) == "1"
+            token_hash = admin_auth.validate_session(token, refresh_idle=refresh_idle)
             if token_hash is not None:
                 self._session_token_hash = token_hash
                 return
@@ -495,7 +506,15 @@ class Handler(BaseHTTPRequestHandler):
     def _send_agent_file(self, path: str) -> None:
         expected_media_type = AGENT_FILE_STREAM_MEDIA_TYPES.get(Path(path).suffix.lower())
         if expected_media_type is None:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "agent file streaming supports only MP4 or MOV video files")
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "agent file streaming supports only MP4, MOV, JPEG, PNG, or WebP files",
+            )
+        maximum_size = (
+            AGENT_FILE_IMAGE_STREAM_MAX_BYTES
+            if expected_media_type.startswith("image/")
+            else AGENT_FILE_STREAM_MAX_BYTES
+        )
         process = subprocess.Popen(
             [*AGENT_FILE_HELPER_COMMAND, "stream", path],
             stdout=subprocess.PIPE,
@@ -525,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
             media_type = header.get("media_type")
             if (
                 not isinstance(size_bytes, int)
-                or not 0 <= size_bytes <= AGENT_FILE_STREAM_MAX_BYTES
+                or not 0 <= size_bytes <= maximum_size
                 or media_type != expected_media_type
             ):
                 process.kill()
@@ -706,17 +725,11 @@ def route(
             return disconnect_bedrock_credentials()
     if path == "/v1/agent-runtime/reset-linked-account" and method == "POST":
         return reset_linked_account(body)
-    if path == "/v1/tasks":
-        if method == "POST":
-            return create_task(body, app_backend_id=app_backend_id)
-        if method == "GET":
-            return list_tasks(_one(query, "last_seen_task_id"))
-    if path.startswith("/v1/tasks/"):
-        return task_route(method, path, query, body)
     if path == "/v1/threads" and method == "GET":
-        return list_threads()
+        _reject_query_keys(query, {"before", "limit"}, "thread list")
+        return list_threads(query, app_backend_id=app_backend_id)
     if path.startswith("/v1/threads/"):
-        return thread_route(method, path, query)
+        return thread_route(method, path, query, body, app_backend_id=app_backend_id)
     if path == "/v1/events" and method == "GET":
         _reject_query_keys(query, {"before", "limit"}, "event")
         return {
@@ -746,6 +759,26 @@ def route(
         if event is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "tool event not found")
         return {"event": event}
+    if path == "/v1/host-errors" and method == "GET":
+        _reject_query_keys(query, {"before", "limit", "service"}, "host error")
+        service_filter = _one(query, "service")
+        if service_filter is not None and SERVICE_NAME_RE.fullmatch(service_filter) is None:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "host error service is invalid")
+        return {
+            "events": state.page_host_errors_before(
+                _optional_non_negative_int(query, "before"),
+                service=service_filter,
+                limit=_event_page_limit(query),
+            )
+        }
+    host_error_match = re.fullmatch(r"/v1/host-errors/([1-9][0-9]*)", path)
+    if host_error_match and method == "GET":
+        if query:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "host error detail does not accept query parameters")
+        error = state.host_error(int(host_error_match.group(1)))
+        if error is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "host error not found")
+        return {"error": error}
     if path == "/v1/tools" or path.startswith("/v1/tools/"):
         return tools_admin_api.tools_route(method, path, body)
     if path == "/v1/network/events" and method == "GET":
@@ -1064,53 +1097,30 @@ def _helper_error_message(stdout: str, stderr: str) -> str:
     return stderr.strip()
 
 
-def task_route(
+def thread_route(
     method: str,
     path: str,
     query: dict[str, list[str]],
     body: Any,
+    *,
+    app_backend_id: str | None = None,
 ) -> Any:
     parts = path.strip("/").split("/")
-    if len(parts) < 3:
-        raise ApiError(HTTPStatus.NOT_FOUND, "task route not found")
-    task_id = parts[2]
-    if len(parts) == 3:
-        if method == "GET":
-            return get_task(task_id)
-        if method == "PUT":
-            return update_task(task_id, body)
-    if len(parts) == 4 and parts[3] == "steer" and method == "POST":
-        return steer_task(task_id, body)
-    if len(parts) == 4 and parts[3] == "cancel" and method == "POST":
-        return cancel_task(task_id)
-    if len(parts) == 4 and parts[3] == "kill" and method == "POST":
-        return kill_task(task_id)
+    if len(parts) < 3 or not THREAD_ID_RE.fullmatch(parts[2]):
+        raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
+    thread_id = parts[2]
+    if len(parts) == 3 and method == "GET":
+        if query:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "thread detail does not accept query parameters")
+        return {"thread": get_thread(thread_id)}
+    if len(parts) == 4 and parts[3] == "messages" and method == "POST":
+        return send_thread_message(thread_id, body, app_backend_id=app_backend_id)
+    if len(parts) == 4 and parts[3] == "stop" and method == "POST":
+        return stop_thread(thread_id)
     if len(parts) == 4 and parts[3] == "events" and method == "GET":
-        return {"events": page_task_events(task_id, _optional_non_negative_int(query, "since"))}
-    raise ApiError(HTTPStatus.NOT_FOUND, "task route not found")
-
-
-def thread_route(method: str, path: str, query: dict[str, list[str]]) -> Any:
-    parts = path.strip("/").split("/")
-    if len(parts) == 4 and parts[3] == "tasks" and method == "GET":
-        thread_id = parts[2]
-        if not THREAD_ID_RE.fullmatch(thread_id):
-            raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
-        _reject_query_keys(query, {"limit", "message_bytes"}, "thread task")
-        return list_thread_tasks(
-            thread_id,
-            limit=_bounded_positive_query_int(query, "limit", THREAD_TASK_LIMIT, THREAD_TASK_LIMIT),
-            message_bytes=_optional_bounded_positive_query_int(
-                query, "message_bytes", THREAD_TASK_MESSAGE_BYTES_LIMIT
-            ),
-        )
-    if len(parts) == 4 and parts[3] == "events" and method == "GET":
-        thread_id = parts[2]
-        if not THREAD_ID_RE.fullmatch(thread_id):
-            raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
         _reject_query_keys(query, {"since", "before", "limit", "message_bytes"}, "thread event")
         message_bytes = _optional_bounded_positive_query_int(
-            query, "message_bytes", THREAD_TASK_MESSAGE_BYTES_LIMIT
+            query, "message_bytes", THREAD_EVENT_MESSAGE_BYTES_LIMIT
         )
         since = _optional_non_negative_int(query, "since")
         before = _optional_non_negative_int(query, "before")
@@ -1180,15 +1190,13 @@ def proxy_alive() -> bool:
 
 
 def prune_state() -> None:
-    """Bound admin-state growth: keep all active tasks plus the most recent
-    finished ones and cap the thread->session maps. Runs on a schedule
-    (maintenance_loop), never on the request path; the deletes are indexed and
-    touch only rows beyond the caps. The audit logs prune themselves on their
-    own append cadence."""
+    """Bound admin-state growth: cap the thread->session maps. Runs on a
+    schedule (maintenance_loop), never on the request path; the deletes are
+    indexed and touch only rows beyond the caps. The audit logs prune
+    themselves on their own append cadence."""
     with state.mutation() as cur:
-        state.prune_finished_tasks(cur, FINISHED_TASK_LIMIT)
-        # Retained tasks keep their canonical thread; unreferenced mappings use
-        # the ordinary per-runtime LRU cap.
+        # Threads with retained events keep their canonical row; unreferenced
+        # mappings use the ordinary per-runtime LRU cap.
         for runtime_type in AGENT_RUNTIME_TYPES:
             state.prune_thread_sessions(cur, runtime_type, THREAD_MAP_LIMIT)
     # Approval expiry and history pruning use their own short mutations.
@@ -1200,8 +1208,8 @@ def maintenance_loop() -> None:
         time.sleep(MAINTENANCE_INTERVAL_SECONDS)
         try:
             prune_state()
-        except Exception:
-            pass  # maintenance is best-effort; never crash the service
+        except Exception as exc:
+            host_errors.report_unexpected("admin_api.maintenance", exc)
 
 
 def _mint_codex_login() -> tuple[dict[str, str], dict[str, str]]:
@@ -1614,6 +1622,16 @@ _RUNTIME_USAGE_KEYS = {
     "claude_code": "claude_usage",
 }
 
+# Serialize sends for one thread from the first live-turn check through
+# admission or synchronous steering. A fixed stripe set avoids an unbounded
+# per-thread lock registry while unrelated threads normally proceed in
+# parallel.
+_THREAD_SEND_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+def _thread_send_lock(thread_id: str) -> threading.Lock:
+    return _THREAD_SEND_LOCKS[hash(thread_id) % len(_THREAD_SEND_LOCKS)]
+
 
 def _account_response_metadata(account: dict[str, Any], runtime_type: str) -> dict[str, Any]:
     # Provider capture sanitizes metadata before storage; this selects only the
@@ -1632,151 +1650,187 @@ def _account_response_metadata(account: dict[str, Any], runtime_type: str) -> di
     return response
 
 
-def create_task(
+def send_thread_message(
+    thread_id: str,
     body: Any,
     *,
     app_backend_id: str | None = None,
 ) -> dict[str, Any]:
-    input_message = _message(body, "input_message")
-    thread_id = _thread_id(body)
+    """The one write path for agent work: start a turn on an idle thread
+    (creating the thread on its first message) or steer the thread's running
+    turn. There is no queue — a message that cannot run now is rejected with
+    a retry hint and the caller decides."""
+    message = _message(body, "message")
     _validate_thread_id_not_reserved_by_app(thread_id, app_backend_id)
-    with state.mutation() as cur:
-        session_config = state.thread_session_config(cur, thread_id)
-        agent_runtime, model, effort = _resolve_task_session_config(body, session_config)
-        if state.queued_task_count(cur) >= QUEUED_TASK_LIMIT:
-            raise ApiError(
-                HTTPStatus.CONFLICT,
-                f"task queue is full ({QUEUED_TASK_LIMIT} queued tasks); cancel queued tasks or wait",
-            )
-        task_id = f"task_{state.allocate_task_number(cur)}"
-        now = utc_now()
-        provider_session_id = session_config.get("provider_session_id") if session_config else None
-        state.save_thread_session(
-            cur,
-            agent_runtime,
-            thread_id,
-            provider_session_id,
-            now,
-            model,
-            effort,
+    with _thread_send_lock(thread_id):
+        session_config = state.thread_session_config(thread_id)
+        agent_runtime, model, effort = _resolve_session_config(body, session_config)
+        switching_session = _session_configuration_changed(
+            session_config, agent_runtime, model, effort
         )
-        task = {
-            "task_id": task_id,
-            "status": QUEUED,
-            "agent_runtime": agent_runtime,
-            "model": model,
-            "effort": effort,
-            "thread_id": thread_id,
-            "input_message": input_message,
-            "created_at": now,
-            "updated_at": now,
-        }
-        state.insert_task(cur, task)
-    orchestrator.WORKER_WAKE.set()
-    return public_task(task)
-
-
-def list_tasks(last_seen_task_id: str | None) -> dict[str, Any]:
-    tasks = state.active_tasks()
-    ordered = _queue_order(tasks)
-    start = 0
-    if last_seen_task_id:
-        for index, task in enumerate(ordered):
-            if task[1]["task_id"] == last_seen_task_id:
-                start = index + 1
-                break
-    return {"tasks": [public_task(task, queue_position=position) for position, task in ordered[start : start + TASK_LIMIT]]}
-
-
-def list_threads() -> dict[str, Any]:
-    threads = state.thread_summaries()
-    ordered = sorted(
-        threads,
-        key=lambda item: (str(item["last_used_at"]), item["agent_runtime"], item["thread_id"]),
-        reverse=True,
-    )
-    return {"threads": ordered}
-
-
-def list_thread_tasks(
-    thread_id: str,
-    *,
-    limit: int = THREAD_TASK_LIMIT,
-    message_bytes: int | None = None,
-) -> dict[str, Any]:
+        if not switching_session and orchestrator.steer_live_turn(
+            thread_id, agent_runtime, message
+        ):
+            turn = None
+            provider_session_id = None
+        else:
+            after_commit: list[Callable[[], None]] = []
+            with state.mutation(after_commit=after_commit) as cur:
+                # Re-read inside the admission transaction. The send lock keeps
+                # same-thread messages ordered, while this snapshot keeps the
+                # initial session row and turn events in one commit.
+                session_config = state.thread_session_config(thread_id, cur)
+                agent_runtime, model, effort = _resolve_session_config(body, session_config)
+                switching_session = _session_configuration_changed(
+                    session_config, agent_runtime, model, effort
+                )
+                launch_message = message
+                session_change_activity = None
+                handoff_events: list[dict[str, Any]] = []
+                missing_provider_context = (
+                    session_config is not None
+                    and not session_config.get("provider_session_id")
+                )
+                if switching_session or missing_provider_context:
+                    handoff_events = state.recent_thread_handoff_events(
+                        cur,
+                        thread_id,
+                        character_limit=THREAD_HANDOFF_CHARACTER_LIMIT,
+                    )
+                if switching_session:
+                    assert session_config is not None
+                    if session_config["status"] != "idle":
+                        raise ApiError(
+                            HTTPStatus.CONFLICT,
+                            "thread runtime, model, and effort can change only while the thread is idle",
+                        )
+                    try:
+                        state.rotate_thread_session(
+                            cur,
+                            thread_id,
+                            agent_runtime,
+                            model,
+                            effort,
+                            utc_now(),
+                        )
+                    except ValueError as exc:
+                        raise ApiError(
+                            HTTPStatus.CONFLICT,
+                            "thread runtime, model, and effort can change only while the thread is idle",
+                        ) from exc
+                    provider_session_id = None
+                    session_change_activity = _session_change_activity(
+                        session_config,
+                        agent_runtime,
+                        model,
+                        effort,
+                    )
+                else:
+                    provider_session_id = (
+                        session_config.get("provider_session_id") if session_config else None
+                    )
+                    state.save_thread_session(
+                        cur,
+                        agent_runtime,
+                        thread_id,
+                        provider_session_id,
+                        utc_now(),
+                        model,
+                        effort,
+                    )
+                if switching_session or (missing_provider_context and handoff_events):
+                    launch_message = _session_handoff_message(handoff_events, message)
+                turn = orchestrator.admit_turn(
+                    cur,
+                    after_commit,
+                    thread_id,
+                    agent_runtime,
+                    model,
+                    effort,
+                    message,
+                    pre_message_activity=session_change_activity,
+                )
+            orchestrator.launch_turn(turn, launch_message, provider_session_id)
     return {
-        "tasks": [
-            public_task(task, message_bytes=message_bytes)
-            for task in state.tasks_for_thread(thread_id, limit)
-        ]
+        "status": "accepted",
+        "thread": _public_thread(thread_id, agent_runtime, model, effort),
     }
 
 
-def get_task(task_id: str) -> dict[str, Any]:
-    return public_task(_require_task(state.get_task(task_id)))
+def get_thread(thread_id: str) -> dict[str, Any]:
+    config = state.thread_session_config(thread_id)
+    if config is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
+    return _public_thread(
+        thread_id,
+        config["agent_runtime"],
+        config["model"],
+        config["effort"],
+        last_used_at=config.get("last_used_at"),
+    )
 
 
-def update_task(task_id: str, body: Any) -> dict[str, Any]:
-    input_message = _message(body, "input_message")
-    with state.mutation() as cur:
-        task = _require_task(state.get_task(task_id, cur))
-        if task["status"] != QUEUED:
-            raise ApiError(HTTPStatus.CONFLICT, "only queued tasks can be updated")
-        task["input_message"] = input_message
-        task["updated_at"] = utc_now()
-        state.save_task(cur, task)
-        return public_task(task)
-
-
-def steer_task(task_id: str, body: Any) -> dict[str, str]:
-    steer_message = _message(body, "steer_message")
-    with state.mutation() as cur:
-        task = _require_task(state.get_task(task_id, cur))
-        if task["status"] != RUNNING:
-            raise ApiError(HTTPStatus.CONFLICT, "only running tasks can be steered")
-        if task["agent_runtime"] == "hermes":
-            raise ApiError(
-                HTTPStatus.CONFLICT,
-                "Hermes tasks do not support steering; create a new task on the same thread_id",
-            )
-        if state.pending_steer_count(cur, task_id) >= PENDING_STEER_LIMIT:
-            raise ApiError(
-                HTTPStatus.CONFLICT,
-                f"task already has {PENDING_STEER_LIMIT} undelivered steer messages; wait for delivery",
-            )
-        state.append_task_steer(cur, task_id, steer_message)
-        now = utc_now()
-        task["updated_at"] = now
-        state.save_task(cur, task)
-        state.append_agent_event(cur, "task.message", task_id, {"message": steer_message, "source": "user"})
+def stop_thread(thread_id: str) -> dict[str, str]:
+    if state.thread_session_config(thread_id) is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
+    if not orchestrator.stop_thread_turn(thread_id):
+        raise ApiError(HTTPStatus.CONFLICT, "the thread has no running work")
     return {"status": "accepted"}
 
 
-def cancel_task(task_id: str) -> dict[str, str]:
-    with state.mutation() as cur:
-        task = _require_task(state.get_task(task_id, cur))
-        if task["status"] != QUEUED:
-            raise ApiError(HTTPStatus.CONFLICT, "only queued tasks can be cancelled")
-        task_status.set_status(task, CANCELLED, now=utc_now())
-        state.save_task(cur, task)
-        state.append_agent_event(cur, "task.cancelled", task_id, {})
-    return {"status": "accepted"}
+def list_threads(
+    query: dict[str, list[str]],
+    *,
+    app_backend_id: str | None = None,
+) -> dict[str, Any]:
+    limit = _event_page_limit(query)
+    before = _thread_list_cursor(query)
+    prefix = (
+        f"{app_backend_id}{APP_SCOPED_ID_SEPARATOR}"
+        if app_backend_id is not None
+        else None
+    )
+    summaries = state.page_thread_summaries(
+        before,
+        limit + 1,
+        thread_prefix=prefix,
+    )
+    page = summaries[:limit]
+    live = orchestrator.live_thread_ids()
+    for thread in page:
+        if thread["thread_id"] in live:
+            thread["status"] = "running"
+    response: dict[str, Any] = {"threads": page}
+    if len(summaries) > limit and page:
+        response["next_before"] = _encode_thread_list_cursor(page[-1])
+    return response
 
 
-def kill_task(task_id: str) -> dict[str, str]:
-    with state.mutation() as cur:
-        task = _require_task(state.get_task(task_id, cur))
-        if task["status"] != RUNNING:
-            raise ApiError(HTTPStatus.CONFLICT, "only running tasks can be killed")
-        task_status.set_status(task, CANCELLED, now=utc_now())
-        state.save_task(cur, task)
-        state.append_agent_event(cur, "task.cancelled", task_id, {})
-    # Kill the task's runtime process outside the mutation (closing can be
-    # slow). The worker blocked in run_turn sees the dead server as an error
-    # and finds the task already cancelled, so the cancellation sticks.
-    orchestrator.close_task_server(task_id)
-    orchestrator.WORKER_WAKE.set()  # a queued task can take the freed slot
-    return {"status": "accepted"}
+def _public_thread(
+    thread_id: str,
+    agent_runtime: str,
+    model: str,
+    effort: str,
+    *,
+    last_used_at: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    if last_used_at is None or status is None:
+        config = state.thread_session_config(thread_id)
+        if last_used_at is None:
+            last_used_at = config.get("last_used_at") if config else None
+        if status is None:
+            status = str(config.get("status") if config else "idle")
+    if thread_id in orchestrator.live_thread_ids():
+        status = "running"
+    return {
+        "thread_id": thread_id,
+        "agent_runtime": agent_runtime,
+        "model": model,
+        "effort": effort,
+        "last_used_at": str(last_used_at or ""),
+        "status": status or "idle",
+    }
 
 
 def replace_network_policy(body: Any) -> dict[str, Any]:
@@ -1893,44 +1947,6 @@ def _proc_meminfo() -> dict[str, int]:
     return values
 
 
-def public_task(
-    task: dict[str, Any],
-    queue_position: int | None = None,
-    *,
-    message_bytes: int | None = None,
-) -> dict[str, Any]:
-    value = {
-        "task_id": task["task_id"],
-        "status": task["status"],
-        "agent_runtime": task["agent_runtime"],
-        "model": task["model"],
-        "effort": task["effort"],
-        "thread_id": task["thread_id"],
-        "input_message": (
-            task["input_message"]
-            if message_bytes is None
-            else _clip_json_encoded_text(task["input_message"], message_bytes)
-        ),
-        "created_at": task["created_at"],
-        "updated_at": task["updated_at"],
-    }
-    if task.get("output_message") is not None:
-        value["output_message"] = (
-            task["output_message"]
-            if message_bytes is None
-            else _clip_json_encoded_text(task["output_message"], message_bytes)
-        )
-    if task.get("error_message") is not None:
-        value["error_message"] = (
-            task["error_message"]
-            if message_bytes is None
-            else _clip_json_encoded_text(task["error_message"], message_bytes)
-        )
-    if queue_position is not None:
-        value["queue_position"] = queue_position
-    return value
-
-
 def _validate_thread_id_not_reserved_by_app(thread_id: str, app_backend_id: str | None) -> None:
     app_id, separator, visible_thread_id = thread_id.partition(APP_SCOPED_ID_SEPARATOR)
     if not separator:
@@ -1939,21 +1955,8 @@ def _validate_thread_id_not_reserved_by_app(thread_id: str, app_backend_id: str 
         return
     raise ApiError(
         HTTPStatus.BAD_REQUEST,
-        f"thread_id prefix {app_id}{APP_SCOPED_ID_SEPARATOR} is reserved for app backend tasks",
+        f"thread_id prefix {app_id}{APP_SCOPED_ID_SEPARATOR} is reserved for app backend threads",
     )
-
-def _queue_order(tasks: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any]]]:
-    running = [task for task in tasks if task["status"] == RUNNING]
-    queued = [task for task in tasks if task["status"] == QUEUED]
-    ordered = [(0, task) for task in running]
-    ordered.extend((index, task) for index, task in enumerate(queued, start=1))
-    return ordered
-
-
-def _require_task(task: dict[str, Any] | None) -> dict[str, Any]:
-    if task is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, "task not found")
-    return task
 
 
 def _message(body: Any, key: str) -> str:
@@ -1964,18 +1967,6 @@ def _message(body: Any, key: str) -> str:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be a non-empty string")
     if len(value) > MESSAGE_LIMIT:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be at most {MESSAGE_LIMIT} characters")
-    return value
-
-
-def _thread_id(body: Any) -> str:
-    if not isinstance(body, dict):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
-    value = body.get("thread_id")
-    if not isinstance(value, str) or not THREAD_ID_RE.fullmatch(value):
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "thread_id must be 1 to 64 characters of A-Z, a-z, 0-9, '-', or '_'",
-        )
     return value
 
 
@@ -2006,7 +1997,7 @@ def _session_config(body: Any, runtime: str) -> tuple[str, str]:
     return model, effort
 
 
-def _resolve_task_session_config(
+def _resolve_session_config(
     body: Any,
     session_config: dict[str, Any] | None,
 ) -> tuple[str, str, str]:
@@ -2022,11 +2013,11 @@ def _resolve_task_session_config(
     fields = ("agent_runtime", "model", "effort")
     supplied = [field for field in fields if field in body]
     if stored is not None:
-        # A thread's configuration is fixed for its lifetime, so a thread whose
-        # configuration left the option matrix can no longer run a task at all.
-        # It stays readable — its row, tasks, and history are untouched — but a
-        # new task starts a new thread on a configuration the matrix offers.
-        if session_config_error(*stored) is not None:
+        # A superseded configuration stays readable and can be replaced, but
+        # cannot start another provider session as-is.
+        if session_config_error(*stored) is not None and (
+            not supplied or tuple(body.get(field) for field in fields) == stored
+        ):
             raise ApiError(
                 HTTPStatus.CONFLICT,
                 "this thread runs a session configuration that is no longer offered;"
@@ -2041,13 +2032,7 @@ def _resolve_task_session_config(
             )
         requested_runtime = _agent_runtime(body)
         requested_model, requested_effort = _session_config(body, requested_runtime)
-        requested = (requested_runtime, requested_model, requested_effort)
-        if requested != stored:
-            raise ApiError(
-                HTTPStatus.BAD_REQUEST,
-                "agent_runtime, model, and effort must match the existing thread configuration",
-            )
-        return requested
+        return requested_runtime, requested_model, requested_effort
     if not supplied:
         raise ApiError(
             HTTPStatus.BAD_REQUEST,
@@ -2062,6 +2047,119 @@ def _resolve_task_session_config(
     agent_runtime = _agent_runtime(body)
     model, effort = _session_config(body, agent_runtime)
     return agent_runtime, model, effort
+
+
+def _session_configuration_changed(
+    session_config: dict[str, Any] | None,
+    runtime: str,
+    model: str,
+    effort: str,
+) -> bool:
+    if session_config is None:
+        return False
+    return (
+        session_config["agent_runtime"],
+        session_config["model"],
+        session_config["effort"],
+    ) != (runtime, model, effort)
+
+
+def _session_change_activity(
+    previous: dict[str, Any],
+    runtime: str,
+    model: str,
+    effort: str,
+) -> dict[str, Any]:
+    previous_runtime = str(previous["agent_runtime"])
+    title = (
+        "Agent provider changed"
+        if previous_runtime != runtime
+        else "Agent session changed"
+    )
+
+    def label(runtime_type: str, model_name: str, effort_name: str) -> str:
+        runtime_name = orchestrator.RUNTIME_LABELS.get(runtime_type, runtime_type)
+        return f"{runtime_name} · {model_name} · {effort_name}"
+
+    detail = (
+        f"{label(previous_runtime, str(previous['model']), str(previous['effort']))}"
+        f" → {label(runtime, model, effort)}"
+    )
+    return agent_activity.activity(
+        "kern",
+        "session-change",
+        "status",
+        "completed",
+        title,
+        detail=detail,
+        status="completed",
+    )
+
+
+def _handoff_event_block(event: dict[str, Any]) -> str:
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    event_type = event.get("event_type")
+    if event_type == "thread.message":
+        label = "User" if payload.get("source") == "user" else "Agent"
+        return f"{label}:\n{payload.get('message', '')}"
+    if event_type == "thread.activity":
+        return (
+            "Agent activity (expanded):\n"
+            + json.dumps(payload.get("activity", {}), ensure_ascii=False, indent=2, default=str)
+        )
+    if event_type == "thread.error":
+        return f"Host error:\n{payload.get('error_message', '')}"
+    if event_type == "thread.stopped":
+        return "Agent work was stopped."
+    return ""
+
+
+def _session_handoff_message(history: list[dict[str, Any]], message: str) -> str:
+    """Build a bounded retained transcript for a fresh provider session."""
+    blocks_reversed: list[str] = []
+    remaining = THREAD_HANDOFF_CHARACTER_LIMIT
+    omitted = False
+    for event in reversed(history):
+        separator_size = 2 if blocks_reversed else 0
+        block = _handoff_event_block(event)
+        if not block:
+            continue
+        available = remaining - separator_size
+        if available <= 0:
+            omitted = True
+            break
+        if len(block) <= available:
+            blocks_reversed.append(block)
+            remaining -= separator_size + len(block)
+            continue
+        marker = "\n[Earlier event content truncated]\n"
+        content_space = available - len(marker)
+        if content_space > 1:
+            prefix_size = content_space // 2
+            suffix_size = content_space - prefix_size
+            blocks_reversed.append(
+                block[:prefix_size] + marker + block[-suffix_size:]
+            )
+        omitted = True
+        break
+    if len(blocks_reversed) < len(history):
+        omitted = True
+    transcript = "\n\n".join(reversed(blocks_reversed))
+    if omitted:
+        transcript = "[Older retained thread events were omitted.]\n\n" + transcript
+    return (
+        "You are a new agent session continuing a thread previously handled by another "
+        "agent session. Your provider-side context and cache are not available. Use the "
+        "retained transcript below as conversation history, then respond to the current "
+        "user message. Do not mention this handoff unless it is relevant.\n\n"
+        "--- RETAINED THREAD TRANSCRIPT ---\n"
+        f"{transcript or '[No retained messages.]'}\n"
+        "--- END RETAINED THREAD TRANSCRIPT ---\n\n"
+        "--- CURRENT USER MESSAGE ---\n"
+        f"{message}\n"
+        "--- END CURRENT USER MESSAGE ---"
+    )
 
 
 def _one(query: dict[str, list[str]], key: str) -> str | None:
@@ -2207,6 +2305,48 @@ def _event_page_limit(query: dict[str, list[str]]) -> int:
     return parsed
 
 
+def _encode_thread_list_cursor(thread: dict[str, Any]) -> str:
+    raw = json.dumps(
+        [
+            str(thread.get("last_used_at") or ""),
+            str(thread["thread_id"]),
+        ],
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _thread_list_cursor(
+    query: dict[str, list[str]],
+) -> tuple[str, str] | None:
+    value = _one(query, "before")
+    if value is None:
+        return None
+    try:
+        if not value or len(value) > 512:
+            raise ValueError
+        padded = value + "=" * (-len(value) % 4)
+        decoded = base64.b64decode(
+            padded.encode(),
+            altchars=b"-_",
+            validate=True,
+        )
+        fields = json.loads(decoded)
+        if (
+            not isinstance(fields, list)
+            or len(fields) != 2
+            or not all(isinstance(field, str) for field in fields)
+            or THREAD_ID_RE.fullmatch(fields[1]) is None
+        ):
+            raise ValueError
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "before must be a valid thread list cursor",
+        ) from exc
+    return fields[0], fields[1]
+
+
 def _reject_query_keys(query: dict[str, list[str]], allowed: set[str], label: str) -> None:
     unexpected = sorted(set(query) - allowed)
     if unexpected:
@@ -2218,31 +2358,22 @@ def _minutes_from_now(minutes: int) -> str:
 
 
 def initialize_state() -> None:
-    """Recover after a restart or reboot: a task that was mid-turn has no
-    worker attached anymore, so fail it rather than leave it running forever,
-    and a queued task whose session configuration this release no longer offers
-    can never run, so fail it too rather than leave it to be claimed.
+    """Recover after a restart or reboot: a run persisted as running died with
+    the admin process, so return its thread to idle and record the interruption.
     (A pending push interrupted mid-resolve is still pending and the operator
-    approves or rejects it again.) The tools service applies the same policy to its own
-    interrupted state at its startup: an approval caught mid-execution is
-    marked failed, never re-executed (tools_host.recover_interrupted_approvals)."""
-    error_message = "host runtime restarted while the task was running"
+    approves or rejects it again.) The tools service applies the same policy
+    to its own interrupted state at its startup: an approval caught
+    mid-execution is marked failed, never re-executed
+    (tools_host.recover_interrupted_approvals)."""
+    error_message = "host runtime restarted while the thread was running"
     with state.mutation() as cur:
-        for task_id in state.fail_running_tasks(cur, error_message):
-            state.append_agent_event(cur, "task.failed", task_id, {"error_message": error_message})
-        # A task can only be queued under a configuration the matrix offered at
-        # the time, and the matrix ships with the release — so this is the one
-        # moment it can go stale, and sweeping here covers every case. Nothing
-        # downstream would catch it: the launcher passes the stored model
-        # through, and a retired value the harness still accepts — an alias like
-        # `opus`, which now resolves to a newer generation — would run and
-        # report success on a model the operator never chose.
-        superseded_message = "the thread's session configuration is no longer offered"
-        for task_id in state.fail_queued_tasks_outside(
-            cur, offered_session_configs(), superseded_message
-        ):
+        for thread_id, run_number in state.recover_interrupted_thread_runs(cur):
             state.append_agent_event(
-                cur, "task.failed", task_id, {"error_message": superseded_message}
+                cur,
+                "thread.error",
+                thread_id,
+                {"error_message": error_message},
+                run_number=run_number,
             )
 
 
@@ -2282,7 +2413,7 @@ def main() -> int:
     # papered over.
     # Bind the port before touching state: the state lock is in-process only,
     # so the bind is the single-instance gate. A second instance must fail here
-    # rather than fail the live instance's running task first.
+    # rather than fail the live instance's running turn first.
     httpd = BoundedThreadingHTTPServer((HOST, PORT), Handler)
     app_backend_httpd = app_backend_admin_api.create_app_backend_admin_server()
     initialize_state()
@@ -2292,7 +2423,7 @@ def main() -> int:
     # The agent-facing tools socket and tool execution run in the dedicated
     # kern-tools service (its own user, egress, and scoped DB role); the
     # admin service only forwards operator operations to it.
-    orchestrator.start_workers()
+    orchestrator.start_background_loops()
     threading.Thread(target=maintenance_loop, daemon=True).start()
     threading.Thread(target=upgrade_check.poll, daemon=True).start()
     threading.Thread(target=app_backend_httpd.serve_forever, daemon=True).start()

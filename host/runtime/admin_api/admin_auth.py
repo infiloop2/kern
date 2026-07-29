@@ -42,12 +42,21 @@ SESSION_COOKIE_NAME = "tc_admin_session"
 # a cross-origin request forces a CORS preflight the admin API never answers),
 # so the ``SameSite=Strict`` cookie and this required header together close CSRF.
 CSRF_HEADER_NAME = "X-Kern-Csrf"
+# A valid same-origin request carrying this marker may refresh the idle clock.
+# It is deliberately not another credential: the session cookie plus CSRF
+# header still perform all authentication. The admin UI adds it only following
+# recent human interaction, so scheduled polling cannot extend an abandoned
+# browser session.
+SESSION_ACTIVITY_HEADER_NAME = "X-Kern-Session-Activity"
 
-# A session is dropped after this much idle time, or this much total age,
-# whichever comes first. The absolute cap bounds a stolen token's usefulness
-# even while it is actively refreshed.
+# A session is dropped after this much operator inactivity, or this much total
+# age, whichever comes first. Ordinary background API polling only validates a
+# session; it never refreshes the idle clock. The UI marks requests made within
+# a short window of a real pointer/key/touch interaction, and only those calls
+# refresh the clock. The absolute cap bounds a stolen token's usefulness even
+# when an attacker actively keeps it busy.
 SESSION_IDLE_TIMEOUT_SECONDS = 12 * 60 * 60
-SESSION_ABSOLUTE_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
+SESSION_ABSOLUTE_TIMEOUT_SECONDS = 3 * 24 * 60 * 60
 # Bound the in-memory session table; the oldest session is evicted past the cap
 # so a flood of logins can never grow it without limit.
 MAX_SESSIONS = 1000
@@ -103,10 +112,12 @@ def create_session() -> str:
     return token
 
 
-def validate_session(token: str) -> str | None:
-    """Return the token's stored hash if it names a live session, refreshing the
-    idle clock; return ``None`` (dropping any expired session) otherwise. Only
-    the hash is stored, so the raw token is never held after it is minted."""
+def validate_session(token: str, *, refresh_idle: bool = False) -> str | None:
+    """Return the token's stored hash if it names a live session, or ``None``
+    (dropping any expired session) otherwise. ``refresh_idle`` is reserved for
+    requests the UI has tied to recent operator interaction; scheduled polling
+    validates without keeping an abandoned tab alive. Only the hash is stored,
+    so the raw token is never held after it is minted."""
     token_hash = _hash(token)
     now = _now()
     with _sessions_lock:
@@ -119,7 +130,8 @@ def validate_session(token: str) -> str | None:
         ):
             del _sessions[token_hash]
             return None
-        session.last_used_at = now
+        if refresh_idle:
+            session.last_used_at = now
         return token_hash
 
 
@@ -222,15 +234,20 @@ def clear_session_cookie(*, secure: bool) -> str:
     return "; ".join(attributes)
 
 
-def parse_session_token(cookie_header: str) -> str | None:
+def parse_session_token(cookie_header: str, *, secure: bool) -> str | None:
     """The session token from a request ``Cookie`` header, or ``None``. The
-    ``__Host-`` cookie is preferred: a sibling on the shared parent domain cannot
-    set or shadow it, so it is immune to cookie-tossing; the plain name is only
-    accepted for the loopback SSH forward. The token is URL-safe base64, so it
-    needs no decoding to compare."""
-    found: dict[str, str] = {}
+    public HTTPS path accepts only its ``__Host-`` cookie: a sibling on the
+    shared parent domain cannot set or shadow it. The plain name is accepted
+    only over the loopback SSH forward. Reject duplicate values instead of
+    choosing one, so cookie ordering can never influence authentication. The
+    token is URL-safe base64, so it needs no decoding to compare."""
+    # Bind the accepted cookie name to the observed transport, using the same
+    # choice as session_cookie(): HTTPS accepts only the __Host- cookie, while
+    # the plain loopback SSH-forward transport accepts only the local cookie.
+    expected_name = _cookie_name(secure)
+    found: list[str] = []
     for part in cookie_header.split(";"):
         name, _, value = part.strip().partition("=")
-        if name in (HOST_SESSION_COOKIE_NAME, SESSION_COOKIE_NAME) and value and name not in found:
-            found[name] = value
-    return found.get(HOST_SESSION_COOKIE_NAME) or found.get(SESSION_COOKIE_NAME)
+        if name == expected_name and value:
+            found.append(value)
+    return found[0] if len(found) == 1 else None

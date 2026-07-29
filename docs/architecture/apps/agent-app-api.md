@@ -1,10 +1,10 @@
 # Agent App API
 
-How an agent working an app-created task calls that app's backend directly —
+How an agent working an app-created turn calls that app's backend directly —
 many round trips per turn, synchronous validation errors, reads on demand —
 without weakening the app platform's security boundary. This is the
-high-bandwidth successor to parsing structured action blocks out of a task's
-final `output_message`: the app still owns every write, but the agent can now
+high-bandwidth successor to parsing structured action blocks out of a turn's
+final message: the app still owns every write, but the agent can now
 converse with the app backend *during* the turn instead of batching intents
 into its final message.
 
@@ -18,7 +18,7 @@ The pieces:
 - a dedicated **`kern-agent-app` service** that authenticates the
   caller, derives its app-scoped host thread, and reverse-proxies the
   call to the owning app backend's loopback port,
-- **kernel-verified thread attribution**: every task turn runs in a systemd
+- **kernel-verified thread attribution**: every turn runs in a systemd
   scope named after its host thread id, and the service reads that thread from
   the caller's cgroup, which no agent process can rewrite.
 
@@ -31,8 +31,8 @@ claims is trusted, and no new reach is granted anywhere else.**
 
 ## Why not fenced action blocks, tokens, or claimed ids
 
-The first app-agent protocol (structured action blocks parsed from
-`output_message`) is secure but low-bandwidth: one batch of writes per turn,
+The first app-agent protocol (structured action blocks parsed from the
+turn's final message) is secure but low-bandwidth: one batch of writes per turn,
 no mid-turn reads without budgeted continuation turns, and validation errors
 that surface a full turn later. Moving to a call surface raises one question:
 when something connects and says "I belong to app A", how does the host know?
@@ -40,7 +40,7 @@ when something connects and says "I belong to app A", how does the host know?
 - **A claimed app or thread id proves nothing.** Every agent process runs as
   `kern-agent`, so socket peer credentials distinguish "an agent" but
   not which app owns the process. Any prompt-injected agent could name another
-  app's task.
+  app's thread.
 - **A secret token barely helps here.** Everything that can reach
   the socket (agent-uid processes) can also read another agent process's
   environment (`/proc/<pid>/environ` is same-uid readable), and argv is
@@ -64,12 +64,12 @@ permission), so a pid that exited and was recycled mid-check fails closed
 instead of inheriting the old process's scope.
 
 App backends submit app-visible thread ids through their peer-authenticated
-admin socket. The host prefixes them as `<app_id>__<thread_id>`; operator task
-creation rejects that reserved namespace. The agent-app service splits this
+admin socket. The host prefixes them as `<app_id>__<thread_id>`; operator
+message sends reject that reserved namespace. The agent-app service splits this
 kernel-attributed prefix, resolves the installed app, and requires its
 manifest to set `agent.api` to true. Ordinary operator threads have no app
 prefix, and non-opted-in apps fail closed even though the shim's stable tool
-list includes `app_api`. No attribution database or task-lifecycle registry is
+list includes `app_api`. No attribution database or turn-lifecycle registry is
 needed. A thread spans turns, which is intentional: app ownership is a
 workspace property. Each runtime scope is collected when its turn process
 exits, and a later turn on the same thread creates a fresh scope with the same
@@ -113,11 +113,11 @@ does not store or expose a second ledger of agent-to-app calls.
 
 The tools MCP shim (`host.runtime.agent_shim.mcp_shim`) always serves one extra
 tool, `app_api`. Its stable presence grants no authority and avoids changing
-the MCP tool list between ordinary and app-created tasks. There is nothing to
+the MCP tool list between ordinary and app-created turns. There is nothing to
 configure and no secret to deliver: the shim is a child of the runtime CLI,
 so it sits inside the thread's scope and the service attributes *each call* the
 same way it attributes every caller. Ordinary operator threads, status
-probes, login sessions, and tasks for apps without `agent.api` receive 404 if
+probes, login sessions, and turns for apps without `agent.api` receive 404 if
 they call it. The current app instructions name the app and define whether
 and how to use the tool.
 
@@ -138,7 +138,7 @@ but the transport (namespace, caps, and attribution) is host-enforced.
 
 ## What a compromised piece can and cannot do
 
-- **A prompt-injected agent** in app A's task can call exactly app A's
+- **A prompt-injected agent** in app A's turn can call exactly app A's
   `/agent/` routes for its own thread, at most 8 calls at a time. It cannot
   reach app B (its cgroup names app A's host-prefixed thread), cannot reach the app's operator routes,
   cannot reach the admin API, and gains no new network reach (the app ports
@@ -163,11 +163,11 @@ a process inside a thread's scope shares that thread's app authority by design.
 
 ## How a turn changes for an app
 
-Nothing about task dispatch changes: the app backend still composes
-`input_message`, creates the task over its admin socket, and reads
-`output_message` when the task completes. What changes is what the agent can
+Nothing about message dispatch changes: the app backend still composes
+the message, sends it over its admin socket, and follows the turn's events to
+its terminal one. What changes is what the agent can
 do mid-turn: read app state when it needs it (no continuation-turn budgets,
-no digest squeezed into the task input limit), write incrementally, and see
+no digest squeezed into the message limit), write incrementally, and see
 each write's validation verdict immediately. An app migrating from fenced
 action blocks can serve the same actions as `/agent/` routes and keep its
 feed journaling server-side; the output-message parser then becomes dead code

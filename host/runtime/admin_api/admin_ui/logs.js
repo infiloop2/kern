@@ -1,5 +1,5 @@
-// The three audit logs (agent events, network events, tool events), one tab
-// each. All share one model:
+// The three audit logs plus the read-only host error log, one tab each. All
+// share one model:
 // page 1 is a live tail refreshed while it is visible, deeper pages are
 // stable before-cursor snapshots fetched on demand (new inserts never shift
 // a snapshot, because its cursor pins it).
@@ -97,14 +97,14 @@ export const agentLog = createPagedLog({
   pagerId: "agent-event-pager",
   pageAction: "agent-page",
   columns: 4,
-  header: `<tr><th>time</th><th>type</th><th>task</th><th>payload</th></tr>`,
+  header: `<tr><th>time</th><th>type</th><th>thread</th><th>payload</th></tr>`,
   emptySummary: () => "No events",
   emptyState: () => "No agent audit events yet.",
   row: event => `
     <tr>
       <td class="muted time">${esc(formatDateTime(event.timestamp))}</td>
       <td class="mono">${esc(event.event_type)}</td>
-      <td class="mono">${esc(event.task_id || "")}</td>
+      <td class="mono">${esc(event.thread_id || "")}</td>
       <td><pre>${esc(eventPayloadText(event))}</pre></td>
     </tr>`,
 });
@@ -152,6 +152,31 @@ export const toolLog = createPagedLog({
     </tr>`,
 });
 
+export const hostErrorLog = createPagedLog({
+  endpoint: "/v1/host-errors",
+  summaryId: "host-error-page-summary",
+  tableId: "host-errors",
+  pagerId: "host-error-pager",
+  pageAction: "host-error-page",
+  pauseWhileOpen: "#host-errors .host-error-details[open]",
+  columns: 5,
+  header: `<tr><th>last seen</th><th>service</th><th>component</th><th>error</th><th>details</th></tr>`,
+  emptySummary: () => "No errors",
+  emptyState: () => "No unexpected host errors have been recorded.",
+  row: error => {
+    const repeats = Number(error.occurrence_count) > 1
+      ? ` <span class="badge warning">×${esc(error.occurrence_count)}</span>` : "";
+    return `
+      <tr>
+        <td class="muted time">${esc(formatDateTime(error.last_seen_at))}</td>
+        <td class="mono">${esc(error.service)}</td>
+        <td class="mono">${esc(error.component)}</td>
+        <td>${badge(error.kind)}${repeats}<pre>${esc(error.summary)}</pre></td>
+        <td>${error.has_details ? `<details class="host-error-details" data-host-error-id="${esc(error.id)}"><summary class="muted">view</summary><pre class="metadata"></pre></details>` : ""}</td>
+      </tr>`;
+  },
+});
+
 // Argument objects can each be up to 64 KiB. Audit pages therefore return only
 // has_arguments and load one exact object when the operator expands it, instead
 // of transferring up to 100 payloads on every five-second live refresh.
@@ -167,6 +192,35 @@ document.addEventListener("toggle", async event => {
     pre.textContent = JSON.stringify(response.event.arguments, null, 2);
   } catch (error) {
     pre.textContent = `(could not load arguments: ${error.message})`;
+    pre.dataset.filled = "";
+  }
+}, true);
+
+document.addEventListener("toggle", async event => {
+  const details = event.target;
+  if (!(details instanceof HTMLDetailsElement) || !details.open || !details.matches(".host-error-details")) return;
+  const id = details.dataset.hostErrorId;
+  const pre = details.querySelector("pre.metadata");
+  if (!id || !pre || pre.dataset.filled === "1") return;
+  pre.dataset.filled = "1";
+  try {
+    const response = await api("GET", `/v1/host-errors/${encodeURIComponent(id)}`);
+    const error = response.error || {};
+    const lines = [
+      `${error.exception_type || error.kind || "error"}: ${error.summary || ""}`,
+      error.traceback || "",
+      error.context && Object.keys(error.context).length
+        ? `context:\n${JSON.stringify(error.context, null, 2)}` : "",
+      `first seen: ${formatDateTime(error.first_seen_at)}`,
+      `last seen: ${formatDateTime(error.last_seen_at)}`,
+      `occurrences: ${error.occurrence_count || 1}`,
+      `host version: ${error.host_version || "unknown"}`,
+      `boot: ${error.boot_id || "unknown"}${error.pid ? ` · pid ${error.pid}` : ""}`,
+      `fingerprint: ${error.fingerprint || ""}`,
+    ].filter(Boolean);
+    pre.textContent = lines.join("\n\n");
+  } catch (error) {
+    pre.textContent = `(could not load error details: ${error.message})`;
     pre.dataset.filled = "";
   }
 }, true);

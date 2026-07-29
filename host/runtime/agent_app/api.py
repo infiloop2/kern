@@ -1,6 +1,6 @@
 """Agent-facing app API service: HTTP over a Unix domain socket.
 
-Agents working an app-created task call their app's backend through this
+Agents working an app-created turn call their app's backend through this
 service (the dedicated ``kern-agent-app`` process; see
 ``agent_app_service``). The MCP shim forwards the ``app_api`` tool here; this
 module authenticates the caller, reads its host thread from a kernel-owned
@@ -9,7 +9,7 @@ backend's loopback port — the one uid besides the admin service that nftables
 allows to open new connections to app ports.
 
 Attribution is kernel-verified, not claimed: the orchestrator spawns every
-task turn inside a systemd scope named after its host thread id
+turn inside a systemd scope named after its host thread id
 (``kern-agent-thread-<thread_id>.scope`` via the run-claude-code /
 run-codex-app-server helpers), so the caller's thread is read from
 ``/proc/<peer pid>/cgroup``. A process cannot rewrite its own cgroup (the
@@ -20,7 +20,7 @@ identity. The scope pid is pinned with a pidfd across the /proc reads, so a
 pid recycled mid-check fails closed. App-created host threads use the reserved
 ``<app_id>__<thread_id>`` namespace; the service splits that trusted prefix and
 requires the installed app manifest to enable ``agent.api``. No database join,
-registration row, or task-lifecycle cleanup is involved.
+registration row, or turn-lifecycle cleanup is involved.
 
 The agent-facing HTTP surface is one JSON route: ``POST /call`` with
 ``{"method", "path", "body"?}`` proxies one request to the

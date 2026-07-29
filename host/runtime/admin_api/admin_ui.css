@@ -305,32 +305,15 @@ button.runtime-summary:hover {
   display: flex;
   flex: 0 0 auto;
   gap: 0.3rem;
-  position: relative;
-}
-
-/* A mouse can inspect the compact desktop readout without changing the
-   toolbar or blocking its provider-settings button. Phones keep their
-   separate tap-to-expand panel and never match this hover-capable query. */
-@media (min-width: 861px) and (hover: hover) and (pointer: fine) {
-  button.runtime-summary:hover { z-index: 2; }
-
-  button.runtime-summary:hover > .runtime-usage {
-    background: rgba(12, 16, 23, 0.98);
-    border-radius: 5px;
-    box-shadow:
-      0 0 0 0.3rem rgba(12, 16, 23, 0.98),
-      0 12px 30px rgba(0, 0, 0, 0.55);
-    pointer-events: none;
-    transform: scale(1.42);
-    z-index: 1;
-  }
 }
 
 .usage-ring { align-items: center; color: var(--text-dim); display: grid; font-family: var(--font-mono); font-size: 0.55rem; justify-items: center; line-height: 1; }
 
+/* The matching 20-unit SVG viewBox keeps these CSS dimensions 1:1 while the
+   larger percentage type and thinner stroke leave the toolbar height intact. */
 .usage-ring svg { height: 20px; overflow: visible; width: 20px; }
 
-.usage-ring circle { fill: none; stroke-width: 3; transform: rotate(-90deg); transform-origin: center; }
+.usage-ring circle { fill: none; stroke-width: 1.25; transform: rotate(-90deg); transform-origin: center; }
 
 .usage-ring-track { stroke: var(--surface-3); }
 .usage-ring-value { stroke: var(--usage-ok); stroke-linecap: round; }
@@ -344,7 +327,8 @@ button.runtime-summary:hover {
   dominant-baseline: central;
   fill: var(--text);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 0.56rem;
+  font-weight: 650;
   text-anchor: middle;
 }
 
@@ -352,7 +336,7 @@ button.runtime-summary:hover {
 .usage-ring.usage-critical text { fill: var(--usage-critical); }
 /* Exactly one label line per ring (window plus optional reset countdown), so
    the ring block height never changes with the data. */
-.usage-window { font-size: 0.5rem; margin-top: 0.1rem; white-space: nowrap; }
+.usage-window { font-size: 0.44rem; margin-top: 0.1rem; white-space: nowrap; }
 
 .bedrock-credential-form { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.5rem 0 0.35rem; }
 .bedrock-credential-form input { flex: 1 1 14rem; }
@@ -787,26 +771,25 @@ button.home-hero-cta:hover {
 
 /* ---------- Embedded apps ---------- */
 
-/* An active app tab owns the viewport, same contract as the connection
-   guide: the outer page never scrolls, the embedded app manages its own
-   scrolling, so the operator sees a single scrollbar instead of nested
-   page + iframe ones. */
-body.app-tab-open { overflow: hidden; }
+/* Installed apps and the Integration Guide share one full-viewport shell:
+   the outer page never scrolls, while the active panel manages its own
+   scrolling. Keeping that contract on one semantic mode avoids parallel
+   height calculations drifting apart as the host toolbar changes. */
+body.viewport-panel-open { overflow: hidden; }
 
-body.app-tab-open #app {
+body.viewport-panel-open #app {
   height: calc(100dvh - 3.4rem);
   overflow: clip;
 }
 
-body.app-tab-open .shell { height: 100%; padding-bottom: 1rem; }
+body.viewport-panel-open .shell { height: 100%; padding-bottom: 1rem; }
 
-body.app-tab-open main { min-height: 0; }
+body.viewport-panel-open main { min-height: 0; }
 
 /* With the page locked, a sidebar taller than the viewport (the apps
    section grows with every installed app) must scroll on its own or the
    lower tabs become unreachable. */
-body.app-tab-open .sidebar,
-body.connection-guide-open .sidebar {
+body.viewport-panel-open .sidebar {
   max-height: calc(100dvh - 5.4rem);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1450,21 +1433,7 @@ button.info-button[aria-expanded="true"] {
 
 /* ---------- Connection guide ---------- */
 
-body.connection-guide-open { overflow: hidden; }
-
-body.connection-guide-open #app {
-  height: calc(100dvh - 3.4rem);
-  /* Clip the guide shell without creating a scroll container. A hidden
-     overflow container makes the sticky sidebar apply its top offset from
-     #app, one top-bar height lower than every other tab. */
-  overflow: clip;
-}
-
-body.connection-guide-open .shell { height: 100%; padding-bottom: 1rem; }
-
-body.connection-guide-open main, #panel-connection-guide { min-height: 0; }
-
-#panel-connection-guide { height: 100%; }
+#panel-connection-guide { height: 100%; min-height: 0; }
 
 .connection-guide-shell {
   display: grid;
@@ -2074,13 +2043,15 @@ button.file-entry:hover { color: var(--accent); }
   white-space: pre-wrap;
 }
 
-.file-video {
+.file-image, .file-video {
   align-self: center;
   justify-self: center;
   max-height: 70vh;
   max-width: 100%;
   padding: 0.8rem;
 }
+
+.file-image { object-fit: contain; }
 
 /* ---------- Status badges ---------- */
 
@@ -2253,26 +2224,26 @@ a:hover { text-decoration: underline; }
 @media (max-width: 860px) {
   body { font-size: 14px; padding-top: 0; }
 
-  body.connection-guide-open,
-  body.app-tab-open {
-    display: flex;
-    flex-direction: column;
+  body.viewport-panel-open {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
     height: 100dvh;
+    /* The global 100vh minimum is the large viewport on iOS and otherwise
+       defeats 100dvh when the software keyboard contracts the visible area.
+       A fixed toolbar row plus a shrinkable content row gives the host exactly
+       one viewport owner and keeps focused app iframes below the usage row. */
+    min-height: 0;
   }
 
-  body.connection-guide-open .topbar,
-  body.app-tab-open .topbar { flex: 0 0 auto; }
+  body.viewport-panel-open .topbar { position: relative; }
 
-  body.connection-guide-open #app,
-  body.app-tab-open #app {
-    flex: 1 1 auto;
+  body.viewport-panel-open #app {
     height: auto;
     min-height: 0;
     width: 100%;
   }
 
-  body.connection-guide-open .shell,
-  body.app-tab-open .shell {
+  body.viewport-panel-open .shell {
     height: 100%;
     min-height: 0;
     padding-bottom: 0.8rem;
@@ -2320,6 +2291,12 @@ a:hover { text-decoration: underline; }
   .topbar-actions { grid-area: actions; }
 
   .runtime-summary { min-width: 0; width: 100%; }
+  /* The floating panel has room for touch-readable type without growing the
+     collapsed toolbar. Keep quota and Hermes values at the same visual size. */
+  .runtime-overview.expanded .usage-ring text,
+  .runtime-overview.expanded .runtime-stat-value { font-size: 0.64rem; }
+  .runtime-overview.expanded .usage-window,
+  .runtime-overview.expanded .runtime-stat-label { font-size: 0.5rem; }
   /* The phone folds the hard refresh into the open gesture (opening re-polls the
      providers), so the panel carries no separate refresh button. */
   .runtime-overview-panel > .runtime-refresh { display: none; }

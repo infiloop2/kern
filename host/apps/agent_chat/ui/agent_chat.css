@@ -107,7 +107,7 @@ button.thread-item.selected { background: var(--surface-3); }
   white-space: nowrap;
 }
 
-/* Small activity dot for threads with queued/running tasks; reuses the
+/* Small activity dot for threads with running agent work; reuses the
    admin palette and the shared pulse animation keyframes. */
 .thread-dot {
   background: var(--warn);
@@ -202,6 +202,64 @@ button.thread-rename-button svg { height: 14px; width: 14px; }
   white-space: nowrap;
 }
 
+.chat-head-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.35rem;
+}
+
+button.activity-switch {
+  align-items: center;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+  display: inline-flex;
+  font-size: 0.76rem;
+  gap: 0.4rem;
+  padding: 0.3rem 0.4rem;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  white-space: nowrap;
+}
+
+button.activity-switch[hidden] { display: none; }
+
+button.activity-switch:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.activity-switch-track {
+  background: var(--border-strong);
+  border-radius: 999px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 17px;
+  padding: 2px;
+  transition: background 140ms ease, box-shadow 140ms ease;
+  width: 30px;
+}
+
+.activity-switch-thumb {
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  height: 13px;
+  transform: translateX(0);
+  transition: transform 140ms ease;
+  width: 13px;
+}
+
+button.activity-switch[aria-checked="true"] .activity-switch-track {
+  background: var(--ok);
+  background: color-mix(in srgb, var(--ok) 82%, white);
+  box-shadow: 0 0 0 2px var(--ok-soft);
+}
+
+button.activity-switch[aria-checked="true"] .activity-switch-thumb {
+  transform: translateX(13px);
+}
+
 button.icon-button.quiet {
   background: transparent;
   border-color: transparent;
@@ -222,6 +280,7 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
 .chat-scroll {
   flex: 1 1 auto;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -236,8 +295,10 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
 .chat-column {
   display: grid;
   gap: 1.35rem;
+  grid-template-columns: minmax(0, 1fr);
   margin: 0 auto;
   max-width: 48rem;
+  min-width: 0;
   padding: 1.25rem 1rem 0.75rem;
 }
 
@@ -265,18 +326,21 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   max-width: 28rem;
 }
 
-.turn { display: grid; gap: 0.55rem; }
+.thread-entry {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
-.turn pre {
+.thread-entry pre {
   font: inherit;
   margin: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
-.turn-user { display: flex; justify-content: flex-end; }
+.thread-user { display: flex; justify-content: flex-end; }
 
-.turn-user .bubble {
+.thread-user .bubble {
   background: var(--surface-3);
   border-radius: 16px;
   color: var(--text);
@@ -284,123 +348,32 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   padding: 0.55rem 0.85rem;
 }
 
-/* A steering message sent mid-task: same side as the prompt, but a quiet
-   accent outline marks it as a follow-up nudge rather than the turn's
-   opening request. */
-.turn-user .bubble.steer-bubble {
-  background: transparent;
-  border: 1px solid var(--border-strong);
-}
-
-.turn-meta {
-  align-items: center;
-  color: var(--text-dim);
-  display: flex;
-  flex-wrap: wrap;
-  font-size: 0.72rem;
-  gap: 0.3rem 0.55rem;
-  justify-content: flex-end;
-}
-
-.turn-agent {
+.thread-agent {
   color: var(--text);
   font-size: 0.92rem;
   line-height: 1.65;
 }
 
-/* Markdown is parsed by rich_text.js. Raw HTML is escaped there; these styles
-   apply only to the small set of elements the renderer creates. */
-.md-content > :first-child { margin-top: 0; }
-.md-content > :last-child { margin-bottom: 0; }
-.md-content p { margin: 0.6rem 0; }
-.md-content h1,
-.md-content h2,
-.md-content h3,
-.md-content h4,
-.md-content h5,
-.md-content h6 {
-  color: var(--text);
-  line-height: 1.3;
-  margin: 1.1rem 0 0.45rem;
-}
-.md-content h1 { font-size: 1.35rem; }
-.md-content h2 { font-size: 1.2rem; }
-.md-content h3 { font-size: 1.05rem; }
-.md-content ul,
-.md-content ol { margin: 0.6rem 0; padding-left: 1.5rem; }
-.md-content li { margin: 0.2rem 0; }
-.md-content blockquote {
-  border-left: 3px solid var(--border-strong);
+.thread-error {
+  border-left: 2px solid var(--danger, #b3564d);
   color: var(--text-dim);
-  margin: 0.7rem 0;
-  padding-left: 0.85rem;
+  font-size: 0.8rem;
+  margin-top: 0.4rem;
+  padding-left: 0.6rem;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
-.md-copy-link {
-  background: transparent;
-  border: 0;
-  color: var(--accent);
-  cursor: pointer;
-  display: inline;
-  font: inherit;
-  overflow-wrap: anywhere;
-  padding: 0;
-  text-decoration: underline;
-  text-underline-offset: 0.15em;
+
+.thread-stopped {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  text-align: center;
 }
-.md-content code,
+
 .activity-body pre {
   font-family: var(--font-mono);
   font-size: 0.82em;
 }
-.md-content :not(pre) > code {
-  background: var(--surface-3);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 0.08rem 0.3rem;
-}
-.md-content hr { border: 0; border-top: 1px solid var(--border); margin: 1rem 0; }
-.md-table-wrap { margin: 0.75rem 0; overflow-x: auto; }
-.md-table-wrap table { border-collapse: collapse; min-width: 100%; }
-.md-table-wrap th,
-.md-table-wrap td {
-  border: 1px solid var(--border);
-  padding: 0.4rem 0.55rem;
-  text-align: left;
-  vertical-align: top;
-}
-.md-table-wrap th { background: var(--surface-2); font-weight: 650; }
-.md-code {
-  background: #111827;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  color: #e5e7eb;
-  margin: 0.75rem 0;
-  overflow: hidden;
-}
-.md-code-head {
-  align-items: center;
-  background: #0b1220;
-  color: #94a3b8;
-  display: flex;
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  justify-content: space-between;
-  padding: 0.35rem 0.55rem 0.35rem 0.75rem;
-}
-.md-code-head button {
-  background: transparent;
-  border: 0;
-  color: #cbd5e1;
-  font-size: 0.7rem;
-  padding: 0.2rem 0.35rem;
-}
-.md-code pre {
-  margin: 0;
-  overflow: auto;
-  padding: 0.8rem;
-  white-space: pre;
-}
-.md-code code { font-size: 0.78rem; }
 
 /* Provider-neutral semantic progress cards. A started and completed snapshot
    with the same activity id is folded into one card by agent_chat.js. */
@@ -413,6 +386,11 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   font-size: 0.8rem;
   overflow: hidden;
 }
+
+/* Visibility is a view preference, not a data/rendering change. Keeping the
+   cards in the DOM preserves each card's expanded state when toggled. */
+.chat-app.activity-hidden .activity-card { display: none; }
+
 .activity-card summary,
 .activity-summary {
   align-items: center;
@@ -615,6 +593,15 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
 
 .attachments[hidden] { display: none; }
 
+.session-change-warning {
+  color: var(--warning, #e8b15c);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  margin: 0.05rem 0.3rem 0.15rem 0;
+}
+
+.session-change-warning[hidden] { display: none; }
+
 .attachment {
   align-items: center;
   background: var(--surface-3);
@@ -674,6 +661,38 @@ button.attachment-clear {
   flex-wrap: wrap;
   gap: 0.35rem;
   min-width: 0;
+  position: relative;
+}
+
+.composer-options.locked { cursor: not-allowed; }
+
+.session-options-note {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  bottom: calc(100% + 0.45rem);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+  color: var(--text);
+  font-size: 0.72rem;
+  line-height: 1.4;
+  max-width: min(19rem, calc(100vw - 2rem));
+  opacity: 0;
+  padding: 0.5rem 0.6rem;
+  pointer-events: none;
+  position: absolute;
+  left: 0;
+  transform: translateY(0.2rem);
+  transition: opacity 120ms ease, transform 120ms ease;
+  visibility: hidden;
+  width: max-content;
+  z-index: 4;
+}
+
+.composer-options.locked:hover .session-options-note,
+.composer-options.show-lock-note .session-options-note {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
 }
 
 .attach-button {
@@ -776,11 +795,19 @@ button.attachment-clear {
 
   #sidebar-open, #sidebar-close { display: inline-flex; }
 
-  .chat-head { padding: 0.45rem 0.6rem; }
+  .chat-head { gap: 0.4rem; padding: 0.45rem 0.6rem; }
+
+  .chat-head-actions { gap: 0.2rem; }
+
+  button.activity-switch,
+  #archive-thread {
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
 
   .chat-column { padding: 0.9rem 0.8rem 0.5rem; }
 
-  .turn-user .bubble { max-width: 88%; }
+  .thread-user .bubble { max-width: 88%; }
 
   .composer-dock { padding: 0.3rem 0.6rem calc(0.65rem + env(safe-area-inset-bottom)); }
 
@@ -791,6 +818,11 @@ button.attachment-clear {
      they are secondary; a native <select> opens a picker rather than a caret,
      so it does not trigger the focus-zoom that text inputs do. */
   .composer textarea { font-size: 16px; }
+
+  .session-change-warning {
+    font-size: 0.75rem;
+    margin-right: 0.15rem;
+  }
 
   /* A native <select> sizes to its widest option and resists flex-shrinking, so
      at 16px these three read as oversized lozenges that wrap or overflow. Lay
