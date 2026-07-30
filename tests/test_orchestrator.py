@@ -418,6 +418,32 @@ class OrchestratorTests(unittest.TestCase):
         )
         orchestrator._close_turn(turn, server)
 
+    def test_codex_completion_race_is_retryable_without_a_thread_error(self) -> None:
+        class FinishingServer(FakeServer):
+            def steer(self, message: str) -> None:
+                del message
+                raise orchestrator.codex_app_server.CodexTurnFinishing(
+                    "Codex turn is finishing"
+                )
+
+        server = FinishingServer()
+        turn = self.register_live_turn("codex", "chat", server)
+
+        with self.assertRaises(ApiError) as finishing:
+            orchestrator.steer_live_turn("chat", "codex", "too late")
+
+        self.assertEqual(finishing.exception.status.value, 409)
+        self.assertEqual(
+            finishing.exception.message,
+            "the agent is finishing; retry shortly",
+        )
+        self.assertEqual(turn.phase, orchestrator.ExecutionPhase.RUNNING)
+        self.assertFalse(server.interrupted)
+        self.assertEqual(thread_events("chat"), [])
+        self.assertNotIn("too late", server.steered)
+        self.assertTrue(orchestrator.stop_thread_turn("chat"))
+        orchestrator._close_turn(turn, server)
+
     def test_fourth_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
         self.assertEqual(orchestrator.TURN_LIMIT_PER_RUNTIME, 3)
         release = threading.Event()

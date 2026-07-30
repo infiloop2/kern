@@ -455,6 +455,39 @@ class StateStorageTests(unittest.TestCase):
         rest = state.page_thread_events("chat", seqs[0], 100)
         self.assertEqual([event["payload"]["message"] for event in rest], ["b", "d"])
 
+    def test_thread_events_can_filter_event_types_before_pagination(self) -> None:
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur,
+                "thread.message",
+                "chat",
+                {"message": "a", "source": "user"},
+            )
+            for index in range(8):
+                state.append_agent_event(cur, "thread.activity", "chat", {
+                    "activity": {
+                        "activity_id": f"work-{index}",
+                        "kind": "command",
+                        "phase": "started",
+                    }
+                })
+            state.append_agent_event(
+                cur,
+                "thread.message",
+                "chat",
+                {"message": "b", "source": "agent"},
+            )
+        messages = state.page_thread_events(
+            "chat",
+            None,
+            2,
+            event_types=("thread.message",),
+        )
+        self.assertEqual(
+            [event["payload"]["message"] for event in messages],
+            ["a", "b"],
+        )
+
     def test_recover_interrupted_thread_runs_returns_them_to_idle(self) -> None:
         with state.mutation() as cur:
             seed_thread(cur, "done")

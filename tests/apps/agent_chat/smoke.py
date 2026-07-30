@@ -22,7 +22,13 @@ AGENT_CHAT_EVENT_PAGE = 6
 # event and archive routes query the host by it directly.
 AGENT_CHAT_THREADS: dict[str, dict[str, Any]] = {
     thread_id: {"thread_id": thread_id, "name": thread_id, "archived": False}
-    for thread_id in ("website-redesign", "thread-1", "thread-2", "thread-3")
+    for thread_id in (
+        "website-redesign",
+        "thread-1",
+        "thread-2",
+        "thread-3",
+        "activity-heavy",
+    )
 }
 
 
@@ -43,7 +49,18 @@ def route_app_api(
     if method == "GET" and match:
         thread_id = match.group(1)
         _require_agent_chat_thread(thread_id, api_error, include_archived=True)
-        host_query = {"limit": [str(AGENT_CHAT_EVENT_PAGE)]}
+        include_activity = (query.get("activity") or ["true"])[0] == "true"
+        event_types = [
+            "thread.message",
+            "thread.error",
+            "thread.stopped",
+        ]
+        if include_activity:
+            event_types.insert(1, "thread.activity")
+        host_query = {
+            "limit": [str(AGENT_CHAT_EVENT_PAGE)],
+            "event_type": event_types,
+        }
         host_query.update({
             key: query[key]
             for key in ("since", "before")
@@ -143,6 +160,19 @@ def desktop_smoke(page: Any) -> None:
     )
     expect(frame.locator("#thread-detail .status")).to_have_count(0)
     expect(frame.locator("#thread-detail .thread-entry").nth(0)).to_contain_text("Audit the marketing site")
+
+    # Unsent text belongs to its thread and returns when the operator switches
+    # back, rather than leaking into whichever thread is selected next.
+    frame.locator("#new-task").fill("Website-specific unsent draft")
+    frame.locator("#threads .thread-item", has_text="thread-1").click()
+    expect(frame.locator("#new-task")).to_have_value("")
+    frame.locator("#new-task").fill("Thread-one unsent draft")
+    frame.locator("#threads .thread-item", has_text="website-redesign").click()
+    expect(frame.locator("#new-task")).to_have_value("Website-specific unsent draft")
+    frame.locator("#new-task").fill("")
+    frame.locator("#threads .thread-item", has_text="thread-1").click()
+    expect(frame.locator("#new-task")).to_have_value("Thread-one unsent draft")
+    frame.locator("#new-task").fill("")
 
     frame.get_by_role("button", name="New thread").click()
     expect(frame.locator(".thread-title")).to_have_text("New thread")
@@ -415,25 +445,94 @@ def _assert_rich_activity_stream(frame: Any) -> None:
 
 
 def _assert_activity_visibility_toggle(frame: Any, turn: Any) -> None:
-    """The header control hides only activity and accurately names its action."""
+    """Activity reflows as complete rows without moving the reading anchor."""
     from playwright.sync_api import expect
 
     cards = turn.locator(".activity-card")
     card_count = cards.count()
     if card_count < 1:
         raise AssertionError("activity visibility toggle has no seeded cards to exercise")
+    activity_rows = turn.locator(".thread-activity")
+    expect(activity_rows).to_have_count(card_count)
+    anchor = turn.locator(".thread-agent", has_text="Root cause:").last
+    anchor.evaluate("element => element.scrollIntoView({ block: 'start' })")
+    anchor_before = anchor.bounding_box()
+    if not anchor_before:
+        raise AssertionError("activity toggle reading anchor is not visible")
     toggle = frame.get_by_role("switch", name="Activity", exact=True)
     expect(toggle).to_have_attribute("aria-checked", "true")
     toggle.click()
     expect(toggle).to_have_attribute("aria-checked", "false")
     expect(toggle).to_have_attribute("title", "Show agent activity")
     expect(turn.locator(".activity-card:visible")).to_have_count(0)
+    expect(turn.locator(".thread-activity:visible")).to_have_count(0)
+    anchor_hidden = anchor.bounding_box()
+    if not anchor_hidden or abs(anchor_hidden["y"] - anchor_before["y"]) > 1:
+        raise AssertionError(
+            "hiding activity moved the reading anchor: "
+            f"{anchor_before} -> {anchor_hidden}"
+        )
+    max_gap, grid_gap = turn.evaluate(
+        """element => {
+          const visible = [...element.children].filter(
+            child => getComputedStyle(child).display !== "none",
+          );
+          const gaps = visible.slice(1).map((child, index) => (
+            child.getBoundingClientRect().top
+              - visible[index].getBoundingClientRect().bottom
+          ));
+          return [
+            gaps.length ? Math.max(...gaps) : 0,
+            parseFloat(getComputedStyle(element).rowGap),
+          ];
+        }"""
+    )
+    if max_gap > grid_gap + 1:
+        raise AssertionError(
+            f"hidden activity left a blank conversation row: gap={max_gap}, grid={grid_gap}"
+        )
     # Conversation messages remain visible; this is not a whole-turn filter.
     expect(turn.get_by_text("no flash in 20 cold loads", exact=False)).to_be_visible()
     toggle.click()
     expect(toggle).to_have_attribute("aria-checked", "true")
     expect(toggle).to_have_attribute("title", "Hide agent activity")
     expect(turn.locator(".activity-card:visible")).to_have_count(card_count)
+    anchor_shown = anchor.bounding_box()
+    if not anchor_shown or abs(anchor_shown["y"] - anchor_before["y"]) > 1:
+        raise AssertionError(
+            "showing activity moved the reading anchor: "
+            f"{anchor_before} -> {anchor_shown}"
+        )
+    scroller = frame.locator("#chat-scroll")
+    scroller.evaluate("element => { element.scrollTop = element.scrollHeight; }")
+    for expected_state in ("false", "true"):
+        toggle.click()
+        expect(toggle).to_have_attribute("aria-checked", expected_state)
+        distance_from_bottom = scroller.evaluate(
+            "element => element.scrollHeight - element.scrollTop - element.clientHeight"
+        )
+        if distance_from_bottom > 1:
+            raise AssertionError(
+                "activity reflow detached the newest message from the viewport: "
+                f"{distance_from_bottom}px"
+            )
+
+    # Opening a different thread while activity is hidden must page the
+    # conversation lane. Its latest forty raw events are activity, so the old
+    # prompt can appear in the initial view only when filtering happens before
+    # the backend applies its six-event page limit.
+    toggle.click()
+    frame.get_by_role("button", name="Show thread list").click()
+    frame.locator("#threads .thread-item", has_text="activity-heavy").click()
+    expect(frame.locator("#thread-detail")).to_contain_text(
+        "Conversation marker before dense activity"
+    )
+    expect(frame.locator("#thread-detail")).to_contain_text(
+        "Conversation marker after dense activity"
+    )
+    toggle.click()
+    frame.get_by_role("button", name="Show thread list").click()
+    frame.locator("#threads .thread-item", has_text="thread-1").click()
 
 
 def _assert_mobile_chat_scrolling(page: Any, frame: Any) -> None:

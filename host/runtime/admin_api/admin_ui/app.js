@@ -36,6 +36,10 @@ import {
 import {
   copyCallbackUri, dismissCallbackCopyFeedback, openConnectionGuide, refreshConnectionGuide,
 } from "./connection_guide.js";
+import {
+  finishPasskeyLogin, refreshLoginPasskeyStatus, refreshPasskeySetup,
+  setupPasskey, showPasskeyGuidance,
+} from "./passkeys.js";
 
 let activeTab = "home";
 let installedApps = [];
@@ -76,6 +80,28 @@ async function login() {
     return;
   }
   if (response.ok) {
+    const result = await response.json();
+    if (result.passkey_required) {
+      try {
+        response = await finishPasskeyLogin(result.publicKey);
+      } catch (error) {
+        showLoginError(
+          error && error.name === "NotAllowedError"
+            ? "Passkey verification was cancelled."
+            : error.message || "Passkey verification failed.",
+        );
+        return;
+      }
+      if (!response.ok) {
+        let message = "Passkey verification failed.";
+        try {
+          const failure = await response.json();
+          message = failure.error?.message || message;
+        } catch (_) {}
+        showLoginError(message);
+        return;
+      }
+    }
     $("password").value = "";
     $("login-error").hidden = true;
     showApp();
@@ -83,8 +109,15 @@ async function login() {
   }
   if (response.status === 429) {
     showLoginError("Too many attempts. Wait a few minutes and try again.");
-  } else {
+  } else if (response.status === 401) {
     showLoginError("Incorrect password.");
+  } else {
+    let message = "Login failed. Try again.";
+    try {
+      const failure = await response.json();
+      message = failure.error?.message || message;
+    } catch (_) {}
+    showLoginError(message);
   }
 }
 
@@ -132,8 +165,10 @@ function showLogin() {
   $("logout-button").hidden = true;
   $("agent-name").hidden = true;
   $("runtime-overview").hidden = true;
+  $("passkey-status-control").hidden = true;
   $("upgrade-notice").hidden = true;
   $("mobile-nav-toggle").hidden = true;
+  refreshLoginPasskeyStatus();
 }
 
 function showTab(name) {
@@ -159,6 +194,17 @@ function showTab(name) {
   }
   setMobileNavOpen(false, closeDrawer);
   refreshVisibleTab(name).catch(() => {});
+}
+
+function openPasskeyGuidance() {
+  const control = $("passkey-status-control");
+  if (control.dataset.configured === "true") {
+    showPasskeyGuidance();
+    return;
+  }
+  showTab("home");
+  showPasskeyGuidance();
+  setupPasskey();
 }
 
 async function refreshVisibleTab(name) {
@@ -233,6 +279,7 @@ function showApp() {
   $("runtime-overview").hidden = false;
   setMobileNavOpen(false);
   loadApps().catch(error => notice(error.message, "error"));
+  refreshPasskeySetup();
   renderThreadHistory();
   loadPolicy().catch(() => {});
   // The provider redirects a tool OAuth connect back to /oauth/callback; land
@@ -607,6 +654,8 @@ document.addEventListener("click", event => {
   const actions = {
     "login": () => login(),
     "logout": () => logout(),
+    "setup-passkey": () => setupPasskey(),
+    "show-passkey-guidance": () => openPasskeyGuidance(),
     "toggle-mobile-nav": () => toggleMobileNav(),
     "close-mobile-nav": () => setMobileNavOpen(false, true),
     "toggle-beta-apps": () => toggleBetaApps(),

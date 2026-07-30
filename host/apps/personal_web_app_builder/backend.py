@@ -58,6 +58,11 @@ SEND_BUSY_RETRY_DELAY_SECONDS = 0.5
 # JSON-encoded string size, so six 120 KiB events leave bridge headroom even
 # for text that requires escaping.
 CONVERSATION_EVENT_PAGE_LIMIT = 6
+CONVERSATION_EVENT_TYPES = (
+    "thread.message",
+    "thread.error",
+    "thread.stopped",
+)
 MAX_PATH_DEPTH = 16
 MAX_PATH_KEY_BYTES = 128
 JAVASCRIPT_FORBIDDEN = re.compile(r"\bimport\b")
@@ -455,6 +460,10 @@ def browser_conversation_events(
     parameters = [
         f"limit={CONVERSATION_EVENT_PAGE_LIMIT}",
         f"message_bytes={CONVERSATION_MESSAGE_BYTES}",
+        *(
+            f"event_type={quote(event_type, safe='')}"
+            for event_type in CONVERSATION_EVENT_TYPES
+        ),
     ]
     cursor_name = "since" if since_values else "before" if before_values else None
     if cursor_name is not None:

@@ -1,7 +1,10 @@
 # Admin API Architecture
 
 The admin API binds `127.0.0.1:7443` and is reached through an SSH port forward,
-the optional Cloudflare Tunnel, or both. nftables admits new connections to
+the optional Cloudflare Tunnel, or both. The exact path classification, route
+matrix, and cookie/session invariants are specified in
+[Admin API Authentication and Request Boundary](admin-api-authentication.md).
+nftables admits new connections to
 that listener only from root, `kern-admin`, `kern-operator`, and `cloudflared`,
 then drops the port for every other local uid. This matters even on loopback:
 an egress-capable compromised tool or proxy service cannot forge
@@ -9,15 +12,33 @@ an egress-capable compromised tool or proxy service cannot forge
 can reach only the proxy port. The admin login is the authentication boundary:
 the tunnel carries transport and Cloudflare's edge (DDoS) protection only, with
 no Cloudflare Access gate in front, so the login is hardened to stand alone
-(see [admin login sessions](#admin-login-sessions)). Static admin/app UI assets
-and the side-effect-free OAuth callback shell are the only unauthenticated HTTP
-routes.
+(see [admin login sessions](#admin-login-sessions)). Static admin/app UI assets,
+the side-effect-free OAuth callback shell, and the non-secret public
+`GET /v1/login/status` enrollment bit are the only unauthenticated HTTP routes.
 
 ## Admin login sessions
 
 The password is presented only once, at `POST /v1/login`, where it is compared in
 constant time against the SHA-256 hash of `admin_password_sha256` from the config
-table (the cleartext is never persisted). A correct password mints an opaque,
+table (the cleartext is never persisted). On public HTTPS, enrolled passkeys
+are a strict second factor: a correct password creates only a five-minute,
+single-use pre-authentication ceremony bound to the source, exact configured
+hostname, origin, and random challenge. The admin session is minted only after
+the browser returns a valid WebAuthn assertion with user presence and user
+verification. WebAuthn is deliberately confined to this one branch; the
+SSH-forward path retains password login because the SSH key is already its
+other factor and a public-domain credential is unusable on `localhost`.
+
+The passkey assertion endpoint has no separate retry counter. A caller gets
+exactly one assertion attempt from each successful password proof: the server
+atomically consumes the random pre-authentication token before parsing or
+verifying the assertion, and a failure clears the browser cookie. WebAuthn
+signatures are not guessable codes, so an additional counter would add an
+attacker-triggerable lockout without protecting a brute-forceable secret.
+Pending ceremonies expire after five minutes and are capped at 1,000; failed
+password attempts retain the per-source throttle described below.
+
+With no enrolled passkey, a correct password mints an opaque,
 server-held session token returned as a cookie that is `HttpOnly` (JavaScript
 never reads it), `SameSite=Strict`, and `Secure` whenever the request arrived
 over HTTPS. Public HTTPS uses only `__Host-tc_admin_session` (`Secure`, `Path=/`,
@@ -40,6 +61,18 @@ fresh login. Because the cookie is the credential, every cookie-authenticated
 request must also carry the `X-Kern-Csrf` header, which same-origin UI code
 always sends and a cross-site page cannot; combined with `SameSite=Strict` this
 closes CSRF.
+
+Passkey registration is offered after a password-only public login until the
+first credential exists. Kern requests a resident ES256/P-256 credential with
+user verification and no identifying attestation. One small verifier module
+parses definite-length WebAuthn CBOR/COSE, validates RP ID hash, origin,
+challenge, flags, credential id, and signature counter, then delegates ECDSA
+public-key checks and signature verification to the system OpenSSL already
+installed by bootstrap. No additional runtime package is introduced. Only
+public verification material and metadata are stored in Postgres; ceremonies
+remain bounded process memory. Upgrade and recover preserve credentials.
+Root reconfigure deletes them only when explicitly passed
+`--reset-admin-passkeys`; the service restart already clears all sessions.
 
 **HTTPS is mandatory over the tunnel.** The edge sets `X-Forwarded-Proto`, so a
 non-`https` value means the request reached the origin in the clear. The admin
@@ -212,13 +245,17 @@ logs to their own amortized on-append pruning.
 There is no steer mailbox or delivery-marker table. The message request
 serializes with completion for its one live turn, hands the message directly
 to the provider transport, then appends its `thread.message` event. Codex
-acknowledges `turn/steer` over JSON-RPC; Claude acknowledges a successful
-write/flush to the live stream-json stdin (the CLI exposes no stronger
-per-message acknowledgement). A database failure after that acknowledgement
-returns an error with no user event; delivery is deliberately ambiguous and a
-caller retry may duplicate the message. This at-least-once edge is the explicit
-trade for having neither durable delivery markers nor an in-memory message
-queue. The per-runtime turn cap bounds live processes.
+acknowledges `turn/steer` over JSON-RPC. Its stdout reader routes the matching
+response id directly to the synchronous request instead of making that request
+compete with the activity-notification consumer; provider completion shares the
+short steer lock and therefore cannot clear the active turn before an in-flight
+acknowledgement resolves. Claude acknowledges a successful write/flush to the
+live stream-json stdin (the CLI exposes no stronger per-message
+acknowledgement). A database failure after that acknowledgement returns an
+error with no user event; delivery is deliberately ambiguous and a caller
+retry may duplicate the message. This at-least-once edge is the explicit trade
+for having neither durable delivery markers nor an in-memory message queue.
+The per-runtime turn cap bounds live processes.
 
 Each admitted execution has four private, in-memory process phases:
 `STARTING`, `RUNNING`, `FINISHING`, and `CLOSED`. Admission commits the initial

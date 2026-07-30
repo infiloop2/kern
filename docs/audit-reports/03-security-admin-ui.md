@@ -1,100 +1,120 @@
-# Audit: Admin UI Browser Surface
+# Audit: Admin UI Exposure of Agent-Controlled Content
 
-Finding ID prefix: `UI`. See [README.md](README.md) for the sweep process,
-entry template, and severity scale.
+Finding ID prefix: `UI-CONTENT`. See [README.md](README.md) for the sweep process,
+finding format, and severity scale.
 
 ## Audit question
 
-Is the admin UI safe to run in the operator's browser? It must make no
-network call to anything except the admin API that served it — no CDNs,
-fonts, analytics, or other third-party fetches. There must be no cookie
-vulnerabilities, no cross-site request forgery, and no way for content
-rendered in the UI (task output, file previews, network event logs) to run
-code or act with the operator's credentials.
+Can agent-controlled data displayed by the Admin UI execute code, alter
+trusted UI, cause the browser to take an unintended action, or trick the
+operator—for example, by opening a link?
+
+## Reviewed commits
+
+Latest reviewed commit: none.
+
+| Commit | Reviewed by |
+| --- | --- |
+| _None yet_ | _No completed review_ |
+
+The historical reviews under **Collaborative review** cover the parent UI
+rendering surface but not the current end-to-end file-viewing checklist, so
+they remain partial.
+
+## Findings
+
+| Finding | Severity | Found at | Found by | Description | Resolution |
+| --- | --- | --- | --- | --- | --- |
+| UI-CONTENT-002 | Low | `f28b50e87b61` | Claude Opus 4.8 | The HTML helpers interpolated badge values into markup and escaped text without quotes. Existing callers used controlled enums or text positions and CSP blocked inline script, but the helper contract was a latent XSS footgun if a future caller supplied attacker-controlled attribute data. Use context-correct escaping or DOM construction. | Open |
 
 ## Threat model
 
-- **Adversaries:** (a) the agent, whose output the UI renders — task
-  transcripts, file contents and names, proxied host names and paths in
-  network events are all attacker-controlled strings; (b) any third-party
-  website open in the same browser, which can issue cross-origin requests
-  toward the tunneled/forwarded admin endpoint; (c) a network observer,
-  where relevant to cookie transport.
-- **Assets:** the operator's authenticated session (an `HttpOnly`
-  `tc_admin_session` cookie the page never reads), the admin password behind the
-  login, and the integrity of what the operator sees before approving settings.
-- **Trust boundaries:** the browser origin of the admin UI; the session-cookie
-  auth scheme with its CSRF defense, HTTPS enforcement, and failed-login throttle;
-  the loopback/SSH-forward or Cloudflare Tunnel transport in front of
-  `127.0.0.1:7443`, now the sole gate with no Cloudflare Access in front.
-- **In scope:** `host/runtime/admin_ui.html`, `admin_ui/*.js`, `admin_ui.css`
-  and how `admin_api.py` serves them — every sink where dynamic data enters
-  the DOM (`innerHTML` vs text nodes), external references of any kind
-  (scripts, styles, fonts, images, prefetch, `fetch` targets), session cookie
-  attributes and lifetime, CSRF exposure now that a cookie is an accepted
-  credential (the required `X-Kern-Csrf` header plus `SameSite=Strict`),
-  the failed-login throttle, response headers (CSP, `X-Content-Type-Options`,
-  frame ancestors), MIME handling of agent file previews, and anything
-  cacheable that contains secrets.
+- **Adversary:** a malicious or prompt-injected agent.
+- **Assets:** the integrity of the trusted admin interface, the operator's
+  authenticated browser authority, confidentiality of data already loaded in
+  the page, and the guarantee that untrusted values cannot cause browser
+  execution, navigation, or network disclosure.
 - **Out of scope:** browser zero-days; compromise of the operator's machine;
-  the Cloudflare Tunnel transport itself.
+  admin login, cookies, CSRF, unauthenticated routes, public/SSH transport, and
+  listener exposure (axis 04 owns those); every installed app UI and its
+  content, sandbox, bridge, backend, database, and host authority (axis 05
+  owns those).
 
-## Scope checklist
+## Minimal scope checklist
 
 This checklist is not comprehensive: it names known-important areas, but the
 audit question and threat model define the scope. Account for each item in
 your coverage section, and report anything else within scope even if no item
 below names it.
 
-1. Grep-level sweep: every `innerHTML`/`insertAdjacentHTML`/template
-   construction in `admin_ui/*.js`, and every URL the page can request.
-2. XSS via each agent-controlled string: task output, thread names, file
-   names and contents, network event fields, provider metadata JSON.
-3. Session cookie: flags (`HttpOnly`, `SameSite=Strict`, `Secure` over HTTPS),
-   scope, lifetime, and what happens on the plain-HTTP loopback transport.
-4. CSRF: confirm cookie-authenticated requests require the `X-Kern-Csrf`
-   header a cross-site page cannot set; preflight behavior; any CORS headers
-   emitted. Confirm failed logins are throttled and fail closed.
-5. Clickjacking/framing and drag-drop of the UI.
-6. The `GET /` page and static assets: verify byte-level absence of external
-   origins, not just intent.
+1. Inventory every parent Admin UI document and module, including login,
+   passkey, health, runtime, network, tools, logs, process, file, and shell
+   views. Enumerate HTML/text/attribute/style/URL sinks, templates,
+   `innerHTML`, object URLs, navigation, popups, downloads, clipboard writes,
+   dynamic imports, event-handler binding, and data attributes. App-frame
+   content and bridge behavior remain axis 05.
+2. Trace every agent-influenceable source to its final browser context:
+   network events and denial guidance; host-error summaries/tracebacks;
+   filenames, paths, contents, and media metadata; process command lines;
+   provider/runtime errors and account metadata; GitHub repository audit,
+   refs and pending-push data; tool approval payloads/results/events; thread
+   and health status; and backend/helper error strings.
+3. Require context-correct rendering for text, quoted attributes, URLs, CSS,
+   JSON, and code blocks. Test markup terminators, quotes, backticks, Unicode
+   controls/bidi, nulls, invalid UTF-8, huge values, nested JSON, duplicate
+   fields, and partial/stale updates. Agent data must not forge trusted labels,
+   buttons, approvals, errors, or operator instructions.
+4. Prove agent data cannot choose `href`, `src`, `action`, `srcdoc`, CSS URLs,
+   module/worker names, forms, downloads, popups, navigation, clipboard
+   content, or automatic requests. Any intentional operator-clicked link must
+   validate scheme/origin, display its destination honestly, and isolate the
+   opener/referrer.
+5. Audit the parent file viewer end to end: helper path confinement and
+   races, regular-file and size checks, streaming/error framing, fixed
+   content types, `Content-Disposition`, `nosniff`, cache/range behavior,
+   text replacement decoding, image/video metadata, sandbox policy, blob URL
+   creation/revocation, and hostile HTML/SVG/media/polyglot or decompression
+   inputs.
+6. Verify parent static assets and all runtime requests are same-origin and
+   expected: no CDN, analytics, fonts, images, prefetch, service worker,
+   remote import, or destination derived from agent data. Audit CSP,
+   `base-uri`, object/frame restrictions, referrer/cache/MIME headers, and
+   module dependency closure as defense in depth.
+7. Check that agent-controlled failures cannot alter authentication/passkey
+   screens, overlay trusted dialogs, trigger privileged requests, suppress
+   warnings, or persist active content across logout, navigation, refresh,
+   polling, tab switches, and out-of-order responses.
+8. Run browser tests with malicious fixtures in every parent renderer and
+   inspect actual DOM, network requests, opened windows, downloads, clipboard,
+   console/CSP reports, object-URL lifetime, and behavior on desktop/mobile.
+   Include stored history, live polling, error paths, empty states, and values
+   at every size limit.
 
-## Key code and docs
+## Collaborative review
 
-- `docs/architecture/admin-api.md`
-- `host/runtime/admin_ui.html`, `host/runtime/admin_ui/*.js`,
-  `host/runtime/admin_ui.css`
-- `host/runtime/admin_api/service.py` (static serving, auth, headers)
-- `host/runtime/admin_api/admin_auth.py` (login sessions, CSRF header, throttle)
+These historical sweeps cover the parent Admin UI rendering surface. They
+support the existing findings but remain partial because they did not complete
+the current end-to-end file-viewing checklist.
 
-## Audit entries
+### `f28b50e87b61` — partial
 
-## 2026-07-04 — Claude Opus 4.8 — `f28b50e`
+Contributors: Claude Opus 4.8 (claude-opus-4-8); GPT-5.5 (gpt-5.5)
 
-Reviewer: Claude Opus 4.8 (claude-opus-4-8)
-Commit: `f28b50e`
 Methodology: static reading of the served HTML/JS and the API's static-asset
-and auth handling; enumerated every dynamic DOM sink and every URL the page
-can request. No browser-driven test.
+handling; enumerated every dynamic DOM sink and every URL the page can
+request. No browser-driven test.
 
-### What was reviewed
+#### What was reviewed
 
 - `host/runtime/admin_ui.html` (every external reference, inline script/style,
   favicon), `host/runtime/admin_ui.js` (every `innerHTML`/`setHtml` sink, the
-  `esc()`/`badge()` helpers, cookie handling, the `api()` fetch wrapper), and
+  `esc()`/`badge()` helpers and the `api()` fetch targets), and
   `host/runtime/admin_ui.css` by reference.
-- `host/runtime/admin_api/service.py`: `_send_ui_asset`, `_authenticate`,
-  `SECURITY_HEADERS`, `_send_security_headers`, `_send_json`, cache headers.
+- `host/runtime/admin_api/service.py`: `_send_ui_asset`, browser security
+  headers, `_send_json`, and cache headers.
+- Existing Admin UI smoke tests for malicious-looking strings and layout.
 
-### Findings
-
-| ID | Status | Severity | Location | Summary |
-| --- | --- | --- | --- | --- |
-| UI-1 | Open | Low | `host/runtime/admin_ui.js:150,151` | `badge()` interpolates its argument into markup with no escaping and `esc()` does not escape `"`/`'`; both are currently fed only server-controlled enums / used only in text context, and the page's CSP (`script-src 'self'`, no `unsafe-inline`) blocks injected inline script, so this is a latent footgun rather than a live XSS — but a future caller placing agent-controlled data in an attribute or through `badge()` would reintroduce injection. Escape quotes in `esc()` and route `badge()` through it. |
-| UI-2 | Fixed | Low | `host/runtime/admin_ui.js:120` | The admin-password cookie is set without `Secure`, so over the Cloudflare Access (HTTPS) path it can be sent on a downgraded/plain-HTTP request to the same host. It is intentionally omitted so the same cookie works over the plain-HTTP SSH-tunnel transport; consider setting `Secure` when the request arrived over HTTPS. |
-
-Core requirements are met: the UI makes no external network call, has no CSRF
-exposure, and has no agent-reachable XSS.
+#### Coverage details
 
 - **No external calls.** The HTML references only same-origin `/admin_ui.css`
   and `/admin_ui.js`, an inline `data:` favicon, and inline SVGs; there are no
@@ -104,92 +124,29 @@ exposure, and has no agent-reachable XSS.
   is enforced in depth by the response CSP `default-src 'self'; connect-src
   'self'; img-src 'self' data:; script-src 'self'; style-src 'self'` plus
   `base-uri 'none'`/`object-src 'none'`.
-- **No CSRF.** `_authenticate` accepts only the `Authorization: Bearer`
-  header (constant-time SHA-256 compare) and never consults the cookie
-  server-side, so a cross-site page cannot authenticate (it cannot set the
-  header, and the `SameSite=strict` cookie is not an accepted credential
-  anyway). `frame-ancestors 'none'` + `X-Frame-Options: DENY` block
-  clickjacking.
 - **No agent-reachable XSS.** The genuinely attacker-controlled strings —
   agent file names/paths, file contents, task output, process command lines,
   and proxied hosts/paths in the network log — are rendered via `textContent`/
   `dataset` (the file list) or `esc()` in text (`<pre>`/`<td>`) contexts, none
   in an attribute position. `esc()` neutralizes `<`/`>`/`&` there.
 
-### Coverage and confidence
+#### Coverage and confidence
 
 - Checklist 1 (sink sweep): every `setHtml`/`innerHTML` template in the JS was
   enumerated; the only unescaped or quote-unsafe helpers are `badge()` and
-  `esc()` (UI-1), and I traced their callers to confirm none currently pass
+  `esc()` (UI-CONTENT-002), and I traced their callers to confirm none currently pass
   agent-controlled data into an attribute.
 - Checklist 2 (per-string XSS): file names/contents, thread/task ids, network
   event fields, process cmdlines, and provider metadata each traced to a safe
   sink.
-- Checklist 3–4 (cookie/CSRF): flags reviewed (UI-2 on `Secure`); CSRF ruled
-  out structurally by header-only auth.
-- Checklist 5 (framing): `frame-ancestors`/`X-Frame-Options` present.
-- Checklist 6 (byte-level external-origin check): confirmed by reading the
+- Browser containment: `frame-ancestors`/`X-Frame-Options` were present.
+- UI and JSON responses also set `Referrer-Policy: no-referrer` and
+  `X-Content-Type-Options: nosniff`.
+- Byte-level external-origin check: confirmed by reading the
   served HTML and the static-asset handler; assets are read from disk and
   served with fixed content types and `nosniff`. Not verified against a live
   rendered response or a browser CSP report.
+- Login, cookie, and CSRF observations from this historical combined sweep
+  are tracked by axis 04 and do not define this rendering axis.
 - Not done: no live browser test, no automated CSP evaluator run. Given the
   CSP strength and header-only auth, residual risk is low.
-## 2026-07-04 — GPT-5.5 — `f28b50e87b61`
-
-Reviewer: GPT-5.5 (gpt-5.5)
-Commit: `f28b50e87b61507db372d288d971487f55cb2121`
-Methodology: static code reading and grep sweeps. I enumerated DOM sinks,
-external references, fetch targets, cookie handling, auth headers, CSP/security
-headers, and agent-controlled data renderers. I did not run browser automation
-or a live XSS/CSRF PoC.
-
-### What was reviewed
-
-- `host/runtime/admin_ui.html`: static markup, script/style/icon references,
-  login form, tabs, agent task composer, file explorer, policy builder, and
-  audit-log tables.
-- `host/runtime/admin_ui.js`: every `innerHTML` assignment and template
-  renderer, `fetch` wrapper, cookie read/write, OAuth link rendering, agent
-  output rendering, file explorer rendering, network event rendering, provider
-  metadata rendering, and click delegation.
-- `host/runtime/admin_api/service.py`: UI asset serving, JSON responses, auth, request
-  body limits, CSP, referrer policy, frame denial, MIME sniffing header, and
-  lack of CORS headers.
-- `tests/smoke-ui/admin_ui_smoke.py` and `tests/smoke-ui/run_admin_ui_mock.py`
-  for existing UI smoke coverage of malicious-looking strings and layout.
-
-### Findings
-
-| ID | Status | Severity | Location | Summary |
-| --- | --- | --- | --- | --- |
-| UI-001 | Fixed | Medium | `host/runtime/admin_ui.js:120` | The admin password is stored in a month-long JavaScript-readable cookie with `SameSite=Strict`, but the cookie is not marked `Secure` when the UI is served over a Cloudflare Access HTTPS hostname. If the operator later visits `http://<configured-hostname>` or a downgrade/misconfiguration exposes plain HTTP, the browser can send the admin password cookie over cleartext before any redirect. Keep JavaScript readability if the bearer-header design requires it, but append `; secure` when `location.protocol === "https:"` and clear the cookie with matching attributes. |
-| UI-002 | Open | Low | `host/runtime/admin_ui.js:501` | OAuth login links open external provider pages with `target="_blank"` but no explicit `rel="noopener noreferrer"`. Modern browsers generally imply `noopener`, but older/embedded browsers can leave `window.opener` available; a compromised provider login page could navigate the admin tab to a phishing page. Add `rel="noopener noreferrer"` to both OAuth links. |
-
-### Coverage and confidence
-
-Grep-level DOM sweep: I checked every `innerHTML` and dynamic template call.
-Dynamic agent-controlled strings pass through `esc()` before insertion, while
-the file explorer uses `textContent`/DOM nodes for file names and file content.
-Task input/output/error text, task events, network events, provider metadata,
-process command lines, thread ids, and file paths were all inspected for either
-escaping or text-node insertion. I did not find a direct XSS sink.
-
-External references: the page loads `/admin_ui.css`, `/admin_ui.js`, and a
-data-URL favicon; `fetch()` calls use same-origin relative admin API paths.
-The intentional external navigations are OAuth links rendered after API calls.
-CSP is `default-src 'self'` with `connect-src 'self'`, no third-party scripts,
-no external fonts, no analytics, `object-src 'none'`, and
-`frame-ancestors 'none'`.
-
-Cookie/CSRF: API requests use an `Authorization: Bearer <password>` header set
-by same-origin JavaScript, so cross-site forms/images cannot authenticate and
-non-simple cross-origin XHR would need a preflight that the server does not
-enable with CORS headers. The cookie is intentionally not `HttpOnly` because
-the JS reads it to build that header; UI-001 covers the missing HTTPS `Secure`
-attribute.
-
-Static/API headers: UI and JSON responses include CSP, `Referrer-Policy:
-no-referrer`, `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY`.
-I did not verify byte-level browser requests with Playwright or packet capture,
-so confidence is high for source-level surfaces and lower for browser-specific
-behavior.

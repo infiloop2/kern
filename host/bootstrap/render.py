@@ -44,6 +44,7 @@ def _bootstrap_payload(
     mode: str,
     target_version: str,
     allow_upgrade: bool = False,
+    reset_admin_passkeys: bool = False,
 ) -> dict[str, Any]:
     runtime_config: dict[str, Any] = {
         "agent_name": config.agent_name,
@@ -54,12 +55,15 @@ def _bootstrap_payload(
         ]
     if admin_password_sha256 is not None:
         runtime_config["admin_password_sha256"] = admin_password_sha256
+    operation: dict[str, Any] = {
+        "mode": mode,
+        "target_version": target_version,
+        "allow_upgrade": allow_upgrade,
+    }
+    if reset_admin_passkeys:
+        operation["reset_admin_passkeys"] = True
     return {
-        "operation": {
-            "mode": mode,
-            "target_version": target_version,
-            "allow_upgrade": allow_upgrade,
-        },
+        "operation": operation,
         "runtime_config": runtime_config,
         "storage_volumes": storage_volumes or {},
     }

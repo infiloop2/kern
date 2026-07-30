@@ -95,6 +95,10 @@ class CodexTimeout(CodexAppServerError):
     pass
 
 
+class CodexTurnFinishing(CodexAppServerError):
+    """A steer arrived after Codex published this turn's completion."""
+
+
 @dataclass(frozen=True)
 class CodexLogin:
     login_id: str
@@ -105,11 +109,12 @@ class CodexLogin:
 class CodexAppServer:
     """One app-server transport.
 
-    Calls and notification reads are serialized because a live turn's driver
-    reads notifications while the admin request thread may synchronously send
-    ``turn/steer``. ``interrupt()`` is the prompt, non-blocking stop request;
-    the owning execution thread later calls ``close()`` for authoritative
-    process/scope cleanup.
+    Ordinary calls and notification reads share one response consumer. A
+    synchronous ``turn/steer`` has a dedicated response waiter fed directly by
+    the stdout reader, so activity processing cannot starve its acknowledgement.
+    ``interrupt()`` is the prompt, non-blocking stop request; the owning
+    execution thread later calls ``close()`` for authoritative process/scope
+    cleanup.
     """
 
     def __init__(
@@ -150,6 +155,14 @@ class CodexAppServer:
         self._pending: deque[dict[str, Any]] = deque()
         self._stderr_tail: deque[str] = deque(maxlen=20)
         self._io_lock = threading.RLock()
+        self._stdin_lock = threading.Lock()
+        self._steer_lock = threading.Lock()
+        self._response_waiters_lock = threading.Lock()
+        self._response_waiters: dict[int, queue.Queue[dict[str, Any]]] = {}
+        # The stdout reader publishes this fence as soon as it observes
+        # turn/completed. It remains set until this one-turn server is closed,
+        # spanning the gap before the orchestrator durably records FINISHING.
+        self._turn_completion_pending = threading.Event()
         self._active_thread_id: str | None = None
         self._active_turn_id: str | None = None
 
@@ -257,6 +270,20 @@ class CodexAppServer:
                 except json.JSONDecodeError:
                     continue
                 if isinstance(message, dict):
+                    if message.get("method") == "turn/completed":
+                        self._turn_completion_pending.set()
+                    request_id = message.get("id")
+                    waiter = None
+                    if isinstance(request_id, int):
+                        with self._response_waiters_lock:
+                            waiter = self._response_waiters.get(request_id)
+                    if waiter is not None:
+                        try:
+                            waiter.put_nowait(message)
+                        except queue.Full:
+                            pass
+                        else:
+                            continue
                     self._messages.put(message)
 
     def _read_stderr(self, stream: IO[str]) -> None:
@@ -272,7 +299,7 @@ class CodexAppServer:
         return "\n".join(self._stderr_tail)
 
     def notify(self, method: str) -> None:
-        with self._io_lock:
+        with self._stdin_lock:
             proc = self._require_proc()
             assert proc.stdin is not None
             proc.stdin.write(json.dumps({"method": method}) + "\n")
@@ -280,12 +307,8 @@ class CodexAppServer:
 
     def call(self, method: str, params: dict[str, Any], *, timeout: float = 60.0) -> Any:
         with self._io_lock:
-            proc = self._require_proc()
-            request_id = self._next_id
-            self._next_id += 1
-            assert proc.stdin is not None
-            proc.stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
-            proc.stdin.flush()
+            with self._stdin_lock:
+                request_id = self._write_request_locked(method, params)
             # Notifications that arrive before our response are kept for
             # read_message(). The I/O lock gives exactly one consumer
             # ownership of both queues while it correlates this response.
@@ -307,14 +330,19 @@ class CodexAppServer:
             return self._next_message(timeout)
 
     def set_active_turn(self, thread_id: str, turn_id: str) -> None:
-        with self._io_lock:
-            self._active_thread_id = thread_id
-            self._active_turn_id = turn_id
+        with self._steer_lock:
+            with self._stdin_lock:
+                self._active_thread_id = thread_id
+                self._active_turn_id = turn_id
 
     def clear_active_turn(self) -> None:
-        with self._io_lock:
-            self._active_thread_id = None
-            self._active_turn_id = None
+        # Completion waits for a steer acknowledgement already in flight.
+        # This preserves the original provider-ack-before-completion boundary
+        # without making the steer compete with notification reads.
+        with self._steer_lock:
+            with self._stdin_lock:
+                self._active_thread_id = None
+                self._active_turn_id = None
 
     def steer(self, message: str) -> None:
         """Synchronously hand one message to the active Codex turn.
@@ -322,21 +350,90 @@ class CodexAppServer:
         A successful return is Codex's JSON-RPC acknowledgement. The caller
         deliberately records history only after this method returns.
         """
-        with self._io_lock:
-            if self._active_thread_id is None or self._active_turn_id is None:
-                raise CodexAppServerError("Codex turn is not ready for steering")
+        with self._steer_lock:
+            with self._stdin_lock:
+                if self._turn_completion_pending.is_set():
+                    raise CodexTurnFinishing("Codex turn is finishing")
+                if self._active_thread_id is None or self._active_turn_id is None:
+                    raise CodexAppServerError("Codex turn is not ready for steering")
+                waiter: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
+                request_id = self._next_id
+                self._next_id += 1
+                with self._response_waiters_lock:
+                    self._response_waiters[request_id] = waiter
+                try:
+                    self._write_request_with_id_locked(
+                        request_id,
+                        "turn/steer",
+                        {
+                            "threadId": self._active_thread_id,
+                            "expectedTurnId": self._active_turn_id,
+                            "input": [{"type": "text", "text": message}],
+                        },
+                    )
+                except OSError as exc:
+                    with self._response_waiters_lock:
+                        self._response_waiters.pop(request_id, None)
+                    raise CodexAppServerError(f"Codex rejected the message: {exc}") from exc
+                except Exception:
+                    with self._response_waiters_lock:
+                        self._response_waiters.pop(request_id, None)
+                    raise
             try:
-                self.call(
-                    "turn/steer",
-                    {
-                        "threadId": self._active_thread_id,
-                        "expectedTurnId": self._active_turn_id,
-                        "input": [{"type": "text", "text": message}],
-                    },
+                response = self._wait_for_direct_response(
+                    waiter,
                     timeout=CODEX_STEER_TIMEOUT_SECONDS,
                 )
-            except OSError as exc:
-                raise CodexAppServerError(f"Codex rejected the message: {exc}") from exc
+            finally:
+                with self._response_waiters_lock:
+                    self._response_waiters.pop(request_id, None)
+            if "error" in response:
+                if self._turn_completion_pending.is_set():
+                    raise CodexTurnFinishing("Codex turn is finishing")
+                error = response.get("error")
+                detail = (
+                    error.get("message", "Codex app-server request failed")
+                    if isinstance(error, dict)
+                    else "Codex app-server request failed"
+                )
+                raise CodexAppServerError(detail)
+
+    def _write_request_locked(self, method: str, params: dict[str, Any]) -> int:
+        """Allocate and write one request while the caller owns `_stdin_lock`."""
+        request_id = self._next_id
+        self._next_id += 1
+        self._write_request_with_id_locked(request_id, method, params)
+        return request_id
+
+    def _write_request_with_id_locked(
+        self,
+        request_id: int,
+        method: str,
+        params: dict[str, Any],
+    ) -> None:
+        proc = self._require_proc()
+        assert proc.stdin is not None
+        proc.stdin.write(
+            json.dumps({"id": request_id, "method": method, "params": params}) + "\n"
+        )
+        proc.stdin.flush()
+
+    def _wait_for_direct_response(
+        self,
+        waiter: queue.Queue[dict[str, Any]],
+        *,
+        timeout: float,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._require_proc()
+                raise CodexTimeout("timed out waiting for Codex app-server")
+            try:
+                return waiter.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                self._require_proc()
 
     def collect_completed_logins(self) -> set[str]:
         """Consume successful account/login/completed notifications, returning the

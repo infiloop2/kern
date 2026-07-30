@@ -71,14 +71,25 @@ class AgentChatBackendTests(unittest.TestCase):
             backend.MAX_ADMIN_RESPONSE_BYTES - 256 * 1024,
         )
 
-    def test_composer_shows_generic_pending_states_without_process_phases(self) -> None:
+    def test_composer_uses_send_button_spinner_without_process_phases(self) -> None:
         source = (APP_DIR / "ui" / "agent_chat.js").read_text()
-        self.assertIn('attachmentActivity = "Sending…"', source)
+        css = (APP_DIR / "ui" / "agent_chat.css").read_text()
+        self.assertNotIn('attachmentActivity = "Sending…"', source)
+        self.assertIn('sendButton.classList.toggle("sending", sendingMessage)', source)
+        self.assertIn(".send-button.sending::after", css)
         self.assertIn('attachmentActivity = "Stopping…"', source)
         self.assertNotIn("Waiting for agent to start", source)
         self.assertEqual(
             (backend.SEND_BUSY_RETRIES - 1) * backend.SEND_BUSY_RETRY_DELAY_SECONDS,
             10,
+        )
+
+    def test_composer_restores_the_new_thread_draft_on_startup(self) -> None:
+        source = (APP_DIR / "ui" / "agent_chat.js").read_text()
+        startup = source.rsplit("setSessionOptions();", 1)[1]
+        self.assertLess(
+            startup.index("restoreComposerDraft();"),
+            startup.index("updateComposer();"),
         )
 
     def test_composer_omits_unchanged_session_configuration(self) -> None:
@@ -481,7 +492,12 @@ class AgentChatBackendTests(unittest.TestCase):
             "GET",
             "/v1/threads/thread-1/events"
             f"?limit={backend.THREAD_EVENT_PAGE}"
-            f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}&since=2",
+            f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}"
+            "&event_type=thread.message"
+            "&event_type=thread.activity"
+            "&event_type=thread.error"
+            "&event_type=thread.stopped"
+            "&since=2",
         )
         self.assertEqual(response, events)
 
@@ -504,16 +520,55 @@ class AgentChatBackendTests(unittest.TestCase):
                     "GET",
                     "/v1/threads/thread-1/events"
                     f"?limit={backend.THREAD_EVENT_PAGE}"
-                    f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}",
+                    f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}"
+                    "&event_type=thread.message"
+                    "&event_type=thread.activity"
+                    "&event_type=thread.error"
+                    "&event_type=thread.stopped",
                 ),
                 call(
                     "GET",
                     "/v1/threads/thread-1/events"
                     f"?limit={backend.THREAD_EVENT_PAGE}"
-                    f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}&before=5",
+                    f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}"
+                    "&event_type=thread.message"
+                    "&event_type=thread.activity"
+                    "&event_type=thread.error"
+                    "&event_type=thread.stopped"
+                    "&before=5",
                 ),
             ],
         )
+
+    def test_list_app_thread_events_can_page_conversation_without_activity(self) -> None:
+        events = {
+            "events": [
+                {"seq": 5, "thread_id": "thread-1", "event_type": "thread.message"}
+            ]
+        }
+        with (
+            patch("host.apps.agent_chat.backend._require_app_thread"),
+            patch(
+                "host.apps.agent_chat.backend.call_admin_api",
+                return_value=events,
+            ) as admin_call,
+        ):
+            response = backend.list_app_thread_events(
+                "thread-1",
+                {"activity": ["false"], "before": ["5"]},
+            )
+
+        admin_call.assert_called_once_with(
+            "GET",
+            "/v1/threads/thread-1/events"
+            f"?limit={backend.THREAD_EVENT_PAGE}"
+            f"&message_bytes={backend.THREAD_EVENT_MESSAGE_BYTES}"
+            "&event_type=thread.message"
+            "&event_type=thread.error"
+            "&event_type=thread.stopped"
+            "&before=5",
+        )
+        self.assertEqual(response, events)
 
     def test_list_app_thread_events_rejects_non_numeric_since(self) -> None:
         with (

@@ -266,6 +266,33 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn("setInterval", api)
         self.assertNotIn("markSessionActivity", app)
 
+    def test_admin_passkey_ui_keeps_password_as_factor_one(self) -> None:
+        runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
+        html = (runtime / "admin_ui.html").read_text()
+        app = (runtime / "admin_ui/app.js").read_text()
+        passkeys = (runtime / "admin_ui/passkeys.js").read_text()
+        self.assertIn('id="passkey-setup"', html)
+        self.assertIn('id="passkey-status-control"', html)
+        self.assertIn('id="login-passkey-status"', html)
+        self.assertIn("Two-factor authentication enabled", html)
+        self.assertIn("Your admin password remains unchanged.", html)
+        self.assertIn("finishPasskeyLogin(result.publicKey)", app)
+        self.assertIn("refreshLoginPasskeyStatus()", app)
+        self.assertIn('"show-passkey-guidance": () => openPasskeyGuidance()', app)
+        self.assertIn('showTab("home")', app)
+        self.assertIn("setupPasskey();", app)
+        self.assertIn('"/v1/login/status"', passkeys)
+        self.assertIn('"/v1/login/passkey"', passkeys)
+        self.assertIn('"/v1/admin-passkeys/register/options"', passkeys)
+        self.assertIn("navigator.credentials.create", passkeys)
+        self.assertIn("navigator.credentials.get", passkeys)
+        self.assertIn("control.hidden = !available", passkeys)
+        self.assertIn('control.classList.toggle("passkey-protected", configured)', passkeys)
+        self.assertIn('control.classList.toggle("passkey-setup-needed", !configured)', passkeys)
+        self.assertIn("banner.scrollIntoView", passkeys)
+        setup_flow = passkeys.split("export async function setupPasskey()", 1)[1]
+        self.assertLess(setup_flow.index("try {"), setup_flow.index("requireWebAuthn();"))
+
     def test_agent_chat_uses_one_backend_authoritative_composer(self) -> None:
         script = (
             Path(__file__).parents[1] / "host/apps/agent_chat/ui/agent_chat.js"
@@ -286,7 +313,9 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('id="activity-toggle"', (
             Path(__file__).parents[1] / "host/apps/agent_chat/ui/index.html"
         ).read_text())
-        self.assertIn(".chat-app.activity-hidden .activity-card", stylesheet)
+        self.assertIn(".chat-app.activity-hidden .thread-activity", stylesheet)
+        self.assertIn('class="thread-entry thread-activity"', script)
+        self.assertIn('querySelectorAll(".thread-entry:not(.thread-activity)")', script)
         self.assertIn(
             'button.activity-switch[aria-checked="true"] .activity-switch-track',
             stylesheet,
@@ -302,9 +331,16 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn('"task.updated"', script)
         self.assertNotIn("task-steer-input", script)
         self.assertNotIn("task.output_message", script)
-        self.assertIn("`/threads/${encodeURIComponent(threadId)}/events`", script)
-        self.assertIn("events?before=${before}", script)
-        self.assertIn("events?since=${threadEventsNewestSeq}", script)
+        self.assertIn(
+            "`/threads/${encodeURIComponent(threadId)}/events${suffix}`",
+            script,
+        )
+        self.assertIn('query.push("activity=false")', script)
+        self.assertIn('threadEventPath(threadId, pageState, "before", before)', script)
+        self.assertIn(
+            'threadEventPath(threadId, pageState, "since", pageState.newestSeq)',
+            script,
+        )
         self.assertIn("const INITIAL_EVENT_PAGES = 3", script)
         self.assertIn("const threadViewStates = new Map()", script)
         self.assertIn("saveSelectedThreadView();", script)
@@ -690,7 +726,7 @@ class AdminUiStaticTests(unittest.TestCase):
             "/v1/threads/agent_chat__chat",
             {},
             None,
-            app_backend_id="agent_chat",
+            principal=admin_api.AppBackendPrincipal("agent_chat"),
         )
         self.assertEqual(response["thread"], {"thread_id": "chat", "status": "idle"})
 
@@ -707,7 +743,7 @@ class AdminUiStaticTests(unittest.TestCase):
             "/v1/threads/agent_chat__chat/stop",
             {},
             None,
-            app_backend_id="agent_chat",
+            principal=admin_api.AppBackendPrincipal("agent_chat"),
         )
         self.assertEqual(response, {"status": "accepted"})
 
@@ -721,7 +757,11 @@ class AdminUiStaticTests(unittest.TestCase):
             )
 
         route.assert_called_once_with(
-            "GET", "/v1/threads/agent_chat__chat/events", {"since": ["2"]}, None, app_backend_id="agent_chat"
+            "GET",
+            "/v1/threads/agent_chat__chat/events",
+            {"since": ["2"]},
+            None,
+            principal=admin_api.AppBackendPrincipal("agent_chat"),
         )
         self.assertEqual(response["events"][0]["seq"], 4)
         self.assertEqual(response["events"][0]["thread_id"], "chat")
@@ -787,6 +827,48 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread_1/events",
                 {"since": ["2"], "before": ["42"]},
+                None,
+            )
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+
+    def test_thread_events_can_filter_to_display_event_types(self) -> None:
+        with patch(
+            "host.runtime.admin_api.service.state.page_thread_events",
+            return_value=[],
+        ) as page:
+            self.assertEqual(
+                admin_api.thread_route(
+                    "GET",
+                    "/v1/threads/thread_1/events",
+                    {
+                        "limit": ["6"],
+                        "event_type": [
+                            "thread.message",
+                            "thread.error",
+                            "thread.stopped",
+                        ],
+                    },
+                    None,
+                ),
+                {"events": []},
+            )
+
+        page.assert_called_once_with(
+            "thread_1",
+            None,
+            6,
+            before=None,
+            event_types=(
+                "thread.message",
+                "thread.error",
+                "thread.stopped",
+            ),
+        )
+        with self.assertRaises(admin_api.ApiError) as error:
+            admin_api.thread_route(
+                "GET",
+                "/v1/threads/thread_1/events",
+                {"event_type": ["turn.started"]},
                 None,
             )
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
@@ -936,7 +1018,13 @@ class AdminUiStaticTests(unittest.TestCase):
                 "agent_chat", "GET", "/v1/threads", {}, None
             )
 
-        route.assert_called_once_with("GET", "/v1/threads", {}, None, app_backend_id="agent_chat")
+        route.assert_called_once_with(
+            "GET",
+            "/v1/threads",
+            {},
+            None,
+            principal=admin_api.AppBackendPrincipal("agent_chat"),
+        )
         # Only this app's threads survive, and the prefix is stripped from each.
         self.assertEqual(
             response["threads"],
@@ -975,8 +1063,40 @@ class AdminUiStaticTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 with self.assertRaises(admin_api.ApiError) as error:
-                    admin_api.route("GET", path, {}, None, bridge_app_id="other-app")
+                    admin_api.route(
+                        "GET",
+                        path,
+                        {},
+                        None,
+                        principal=admin_api.OperatorPrincipal("test-session"),
+                        bridge_app_id="other-app",
+                    )
                 self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
+
+    def test_shared_route_requires_a_valid_explicit_principal(self) -> None:
+        with self.assertRaises(TypeError):
+            admin_api.route("GET", "/v1/health", {}, None)  # type: ignore[call-arg]
+        with self.assertRaisesRegex(TypeError, "route principal is invalid"):
+            admin_api.route("GET", "/v1/health", {}, None, principal=None)  # type: ignore[arg-type]
+
+    def test_http_service_cannot_mint_auth_cookies_or_sessions(self) -> None:
+        source = Path(admin_api.__file__).read_text()
+        for private_auth_operation in (
+            "_create_session",
+            "_destroy_session",
+            "_session_cookie",
+            "_clear_session_cookie",
+            "_passkey_login_cookie",
+            "_clear_passkey_login_cookie",
+            "_completed_session",
+        ):
+            with self.subTest(operation=private_auth_operation):
+                self.assertNotIn(
+                    f"admin_auth.{private_auth_operation}",
+                    source,
+                )
+        self.assertIn("admin_auth.begin_password_login(", source)
+        self.assertIn("admin_auth.complete_passkey_login(", source)
 
 
 class AgentFileUploadHttpTests(unittest.TestCase):
@@ -989,7 +1109,7 @@ class AgentFileUploadHttpTests(unittest.TestCase):
         self.config_patch.start()
         self.addCleanup(self.config_patch.stop)
         admin_api.admin_auth._sessions.clear()
-        self.session_token = admin_api.admin_auth.create_session()
+        self.session_token = admin_api.admin_auth._create_session()
         self.addCleanup(admin_api.admin_auth._sessions.clear)
         self.base_url = start_admin_http_server(self)
 
@@ -1089,6 +1209,75 @@ class AgentFileUploadHttpTests(unittest.TestCase):
             urllib.request.urlopen(bridge, timeout=5)
         self.assertEqual(error.exception.code, 403)
         self.assertIn("only target the app's own API", error.exception.read().decode())
+
+    def test_app_bridge_scope_is_enforced_before_passkey_dispatch(self) -> None:
+        token = admin_api.admin_auth._create_session()
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/admin-passkeys",
+            method="GET",
+            headers={
+                "Cookie": (
+                    f"{admin_api.admin_auth.HOST_SESSION_COOKIE_NAME}={token}"
+                ),
+                admin_api.admin_auth.CSRF_HEADER_NAME: "1",
+                "Host": "admin.example.com",
+                "X-Forwarded-Proto": "https",
+                "X-Kern-App-Bridge": "agent_chat",
+            },
+        )
+        with (
+            patch(
+                "host.runtime.admin_api.service.state.load_cloudflare_hostname",
+                return_value="admin.example.com",
+            ),
+            patch("host.runtime.admin_api.service.admin_passkeys.status") as status,
+            self.assertRaises(urllib.error.HTTPError) as error,
+        ):
+            urllib.request.urlopen(request, timeout=5)
+
+        self.assertEqual(error.exception.code, 403)
+        self.assertIn("only target the app's own API", error.exception.read().decode())
+        status.assert_not_called()
+
+    def test_app_bridge_scope_is_enforced_before_login_dispatch(self) -> None:
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/login",
+            data=json.dumps({"password": "wrong"}).encode(),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Kern-App-Bridge": "agent_chat",
+            },
+        )
+        with (
+            patch(
+                "host.runtime.admin_api.service.admin_auth.register_attempt"
+            ) as register_attempt,
+            self.assertRaises(urllib.error.HTTPError) as error,
+        ):
+            urllib.request.urlopen(request, timeout=5)
+
+        self.assertEqual(error.exception.code, 403)
+        self.assertIn("only target the app's own API", error.exception.read().decode())
+        register_attempt.assert_not_called()
+
+    def test_ssh_forward_does_not_expose_any_passkey_management_route(self) -> None:
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/admin-passkeys",
+            method="GET",
+            headers=_session_headers(self.session_token),
+        )
+        with patch(
+            "host.runtime.admin_api.service.admin_passkeys.status"
+        ) as status, self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+
+        self.assertEqual(error.exception.code, 404)
+        self.assertEqual(
+            json.loads(error.exception.read()),
+            {"error": {"message": "route not found"}},
+        )
+        status.assert_not_called()
 
     def test_short_upload_gives_helper_time_to_remove_its_partial_file(self) -> None:
         process = MagicMock()
@@ -1216,8 +1405,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # them so a throttle test never leaks a lockout into another test.
         admin_api.admin_auth._sessions.clear()
         admin_api.admin_auth._client_failures.clear()
-        admin_api._ADMIN_PASSWORD_HASH = None  # reload from this test's config
-        self.session_token = admin_api.admin_auth.create_session()
+        admin_api.admin_auth._ADMIN_PASSWORD_HASH = None  # reload from this test's config
+        self.session_token = admin_api.admin_auth._create_session()
         self.addCleanup(admin_api.admin_auth._sessions.clear)
         self.addCleanup(admin_api.admin_auth._client_failures.clear)
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1365,13 +1554,41 @@ class AdminApiIntegrationTests(unittest.TestCase):
         for value in headers.get_all("Set-Cookie") or []:
             token = admin_api.admin_auth.parse_session_token(
                 value,
-                secure=value.startswith(
-                    f"{admin_api.admin_auth.HOST_SESSION_COOKIE_NAME}="
+                context=(
+                    admin_api.admin_auth.RequestAuthContext(
+                        admin_api.admin_auth.AccessPath.PUBLIC_HTTPS,
+                        "admin.example.com",
+                    )
+                    if value.startswith(
+                        f"{admin_api.admin_auth.HOST_SESSION_COOKIE_NAME}="
+                    )
+                    else admin_api.admin_auth.LOCAL_SSH_FORWARD
                 ),
             )
             if token:
                 return token
         return None
+
+    def seed_public_passkey(self) -> None:
+        save_config({
+            "agent_name": "kern-test",
+            "admin_password_sha256": hashlib.sha256(b"admin-secret").hexdigest(),
+            "operator_connections": [{
+                "mode": "cloudflare_tunnel",
+                "hostname": "admin.example.com",
+                "tunnel_token": "mock-tunnel-token",
+            }],
+        })
+        state.save_admin_passkey(
+            user_handle="u" * 43,
+            credential_id="credential-id",
+            rp_id="admin.example.com",
+            public_key_spki="A" * 120,
+            sign_count=0,
+            transports=["internal"],
+            backed_up=True,
+            created_at="2026-07-29T00:00:00Z",
+        )
 
     def cookie_request(
         self,
@@ -1395,6 +1612,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             request.add_header(admin_api.admin_auth.SESSION_ACTIVITY_HEADER_NAME, "1")
         if forwarded_proto is not None:
             request.add_header("X-Forwarded-Proto", forwarded_proto)
+            request.add_header("Host", "admin.example.com")
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
                 return response.status, json.loads(response.read())
@@ -1416,6 +1634,116 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(any(app["id"] == "agent_chat" for app in apps["apps"]))
 
+    def test_public_password_requires_passkey_but_ssh_forward_does_not(self) -> None:
+        self.seed_public_passkey()
+        # Loopback remains the SSH-key + password recovery path.
+        with patch.object(
+            admin_api.admin_passkeys,
+            "configured",
+            side_effect=RuntimeError("Postgres unavailable"),
+        ) as configured:
+            status, headers, body = self.login()
+        configured.assert_not_called()
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        self.assertIsNotNone(self.session_token_from_headers(headers))
+
+        data = json.dumps({"password": "admin-secret"}).encode()
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/login", data=data, method="POST"
+        )
+        request.add_header("Host", "admin.example.com")
+        request.add_header("X-Forwarded-Proto", "https")
+        request.add_header("Cf-Connecting-Ip", "203.0.113.8")
+        request.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            public = json.loads(response.read())
+            cookies = response.headers.get_all("Set-Cookie") or []
+        self.assertTrue(public["passkey_required"])
+        self.assertEqual(public["publicKey"]["rpId"], "admin.example.com")
+        self.assertTrue(any(
+            admin_api.admin_auth.PASSKEY_LOGIN_COOKIE_NAME in cookie
+            for cookie in cookies
+        ))
+        self.assertFalse(any(
+            admin_api.admin_auth.HOST_SESSION_COOKIE_NAME in cookie
+            for cookie in cookies
+        ))
+
+    def test_public_passkey_login_requires_password_pre_authentication(self) -> None:
+        self.seed_public_passkey()
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/login/passkey",
+            data=b"{}",
+            method="POST",
+            headers={
+                "Host": "admin.example.com",
+                "X-Forwarded-Proto": "https",
+                "Cf-Connecting-Ip": "203.0.113.8",
+                admin_api.admin_auth.CSRF_HEADER_NAME: "1",
+                "Content-Type": "application/json",
+            },
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+
+        self.assertEqual(error.exception.code, 401)
+        self.assertIn(
+            "enter the admin password again",
+            error.exception.read().decode(),
+        )
+        cookies = error.exception.headers.get_all("Set-Cookie") or []
+        self.assertFalse(any(
+            admin_api.admin_auth.HOST_SESSION_COOKIE_NAME in cookie
+            for cookie in cookies
+        ))
+
+    def test_public_login_status_exposes_only_passkey_enrollment(self) -> None:
+        self.seed_public_passkey()
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/login/status", method="GET"
+        )
+        request.add_header("Host", "admin.example.com")
+        request.add_header("X-Forwarded-Proto", "https")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertEqual(
+                json.loads(response.read()),
+                {"passkey_configured": True},
+            )
+
+        state.reset_admin_passkeys()
+        with urllib.request.urlopen(request, timeout=5) as response:
+            self.assertEqual(
+                json.loads(response.read()),
+                {"passkey_configured": False},
+            )
+
+    def test_login_status_is_not_exposed_on_ssh_forward_or_wrong_host(self) -> None:
+        with patch.object(
+            admin_api.admin_passkeys,
+            "configured",
+            side_effect=RuntimeError("must not query on loopback"),
+        ) as configured:
+            request = urllib.request.Request(
+                f"{self.base_url}/v1/login/status", method="GET"
+            )
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request, timeout=5)
+            self.assertEqual(error.exception.code, 404)
+        configured.assert_not_called()
+
+        self.seed_public_passkey()
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/login/status", method="GET"
+        )
+        request.add_header("Host", "other.example.com")
+        request.add_header("X-Forwarded-Proto", "https")
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(error.exception.code, 403)
+
     def test_session_cookie_without_csrf_header_is_forbidden(self) -> None:
         _, headers, _ = self.login()
         token = self.session_token_from_headers(headers)
@@ -1424,7 +1752,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 403)
 
     def test_session_cookie_name_is_bound_to_its_transport(self) -> None:
-        token = admin_api.admin_auth.create_session()
+        self.seed_public_passkey()
+        token = admin_api.admin_auth._create_session()
         # The public tunnel accepts only the un-tossable __Host- cookie.
         status, _ = self.cookie_request(
             "GET",
@@ -1455,7 +1784,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         admin_api.admin_auth._sessions.clear()
         start = 1000.0
         with patch.object(admin_api.admin_auth, "_now", return_value=start):
-            token = admin_api.admin_auth.create_session()
+            token = admin_api.admin_auth._create_session()
         with patch.object(
             admin_api.admin_auth,
             "_now",
@@ -1476,7 +1805,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         start = 2000.0
         idle = admin_api.admin_auth.SESSION_IDLE_TIMEOUT_SECONDS
         with patch.object(admin_api.admin_auth, "_now", return_value=start):
-            token = admin_api.admin_auth.create_session()
+            token = admin_api.admin_auth._create_session()
         with patch.object(admin_api.admin_auth, "_now", return_value=start + idle - 1):
             status, _ = self.cookie_request(
                 "GET",
@@ -1539,6 +1868,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # A tunnel request (X-Forwarded-Proto set) must carry exactly one
         # Cf-Connecting-Ip; a missing/stripped header fails closed so it cannot
         # collapse every internet visitor into one throttle bucket.
+        self.seed_public_passkey()
+        state.reset_admin_passkeys()
         data = json.dumps({"password": "admin-secret"}).encode()
 
         def login(headers: dict[str, str]):
@@ -1552,7 +1883,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
             except urllib.error.HTTPError as error:
                 return error.code
 
-        base = {"X-Forwarded-Proto": "https"}
+        base = {
+            "Host": "admin.example.com",
+            "X-Forwarded-Proto": "https",
+        }
         self.assertEqual(login(base), 403)  # missing
         self.assertEqual(login({**base, "Cf-Connecting-Ip": "not-an-ip"}), 403)  # invalid
         self.assertEqual(login({**base, "Cf-Connecting-Ip": "203.0.113.7"}), 200)  # IPv4
@@ -1564,7 +1898,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         # Duplicate Cf-Connecting-Ip headers fail closed.
         duplicate = self.raw_request(
-            b"POST /v1/login HTTP/1.1\r\nHost: h\r\nX-Forwarded-Proto: https\r\n"
+            b"POST /v1/login HTTP/1.1\r\nHost: admin.example.com\r\nX-Forwarded-Proto: https\r\n"
             b"Cf-Connecting-Ip: 203.0.113.7\r\nCf-Connecting-Ip: 198.51.100.9\r\n"
             b"Content-Type: application/json\r\n"
             + f"Content-Length: {len(data)}\r\n\r\n".encode()
@@ -1600,9 +1934,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
     def test_cleartext_tunnel_request_never_accepts_credentials(self) -> None:
         # X-Forwarded-Proto: http means the edge forwarded the request in the
         # clear. A credential POST is refused, and a GET is upgraded to https.
+        save_config({
+            "agent_name": "kern-test",
+            "admin_password_sha256": hashlib.sha256(b"admin-secret").hexdigest(),
+            "operator_connections": [{
+                "mode": "cloudflare_tunnel",
+                "hostname": "kern.example.com",
+                "tunnel_token": "mock-tunnel-token",
+            }],
+        })
         data = json.dumps({"password": "admin-secret"}).encode()
         request = urllib.request.Request(f"{self.base_url}/v1/login", data=data, method="POST")
         request.add_header("Content-Type", "application/json")
+        request.add_header("Host", "kern.example.com")
         request.add_header("X-Forwarded-Proto", "http")
         with self.assertRaises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(request, timeout=5)
@@ -1616,6 +1960,34 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertIn(b" 301 ", response)
         self.assertIn(b"Location: https://kern.example.com/", response)
+
+    def test_public_boundary_is_enforced_before_static_assets(self) -> None:
+        save_config({
+            "agent_name": "kern-test",
+            "admin_password_sha256": hashlib.sha256(b"admin-secret").hexdigest(),
+            "operator_connections": [{
+                "mode": "cloudflare_tunnel",
+                "hostname": "kern.example.com",
+                "tunnel_token": "mock-tunnel-token",
+            }],
+        })
+        wrong_host = self.raw_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: other.example.com\r\n"
+            b"X-Forwarded-Proto: https\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        self.assertIn(b" 403 ", wrong_host)
+        duplicate_marker = self.raw_request(
+            b"GET / HTTP/1.1\r\n"
+            b"Host: kern.example.com\r\n"
+            b"X-Forwarded-Proto: https\r\n"
+            b"X-Forwarded-Proto: https\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        self.assertIn(b" 403 ", duplicate_marker)
+        self.assertNotIn(b"<title>Kern</title>", wrong_host)
+        self.assertNotIn(b"<title>Kern</title>", duplicate_marker)
 
     def test_app_backend_message_threads_are_internally_app_prefixed(self) -> None:
         with patch.object(
@@ -5157,7 +5529,7 @@ class ToolRoutesTests(unittest.TestCase):
             }
         )
         admin_api.admin_auth._sessions.clear()
-        self.session_token = admin_api.admin_auth.create_session()
+        self.session_token = admin_api.admin_auth._create_session()
         self.addCleanup(admin_api.admin_auth._sessions.clear)
         self.base_url = start_admin_http_server(self)
         # The operator delegation routes (connect complete/disconnect, approval

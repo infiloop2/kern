@@ -23,6 +23,8 @@ const APP_API_TIMEOUT_MS = 12000;
 // acknowledgement. Sends and Stop must outlive that hop or a retry can
 // duplicate a message the host accepted after the frame gave up.
 const AGENT_DELIVERY_TIMEOUT_MS = 60 * 1000;
+const COMPOSER_DRAFTS_STORAGE_KEY = "kern.agentic-web-app.composer-drafts.v1";
+const COMPOSER_DRAFT_LIMIT = 50;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const pendingApi = new Map();
@@ -57,6 +59,50 @@ let pendingAttachments = [];
 const attachmentActivities = new Map();
 
 const $ = id => document.getElementById(id);
+const composerDrafts = loadComposerDrafts();
+
+function loadComposerDrafts() {
+  try {
+    const drafts = JSON.parse(localStorage.getItem(COMPOSER_DRAFTS_STORAGE_KEY) || "{}");
+    return drafts && typeof drafts === "object" && !Array.isArray(drafts) ? drafts : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function persistComposerDrafts() {
+  try {
+    localStorage.setItem(COMPOSER_DRAFTS_STORAGE_KEY, JSON.stringify(composerDrafts));
+  } catch (_error) {
+    // Draft persistence is best-effort when browser storage is unavailable.
+  }
+}
+
+function saveComposerDraft() {
+  if (!selectedAppId) return;
+  const key = `app:${selectedAppId}`;
+  const value = $("message").value;
+  delete composerDrafts[key];
+  if (value) composerDrafts[key] = value;
+  while (Object.keys(composerDrafts).length > COMPOSER_DRAFT_LIMIT) {
+    delete composerDrafts[Object.keys(composerDrafts)[0]];
+  }
+  persistComposerDrafts();
+}
+
+function restoreComposerDraft() {
+  $("message").value = selectedAppId
+    ? composerDrafts[`app:${selectedAppId}`] || ""
+    : "";
+}
+
+function clearComposerDraft(threadId, submittedDraft) {
+  const key = `app:${threadId}`;
+  if ((composerDrafts[key] ?? "") !== submittedDraft) return false;
+  delete composerDrafts[key];
+  persistComposerDrafts();
+  return true;
+}
 
 window.addEventListener("message", event => {
   const message = event.data;
@@ -834,7 +880,8 @@ function clearPendingAttachments() {
 async function sendMessage(forcedMessage = null, targetAppId = null) {
   const fromGeneratedApp = forcedMessage !== null;
   const threadId = targetAppId || selectedAppId;
-  const message = (forcedMessage || $("message").value).trim();
+  const submittedDraft = fromGeneratedApp ? null : $("message").value;
+  const message = (fromGeneratedApp ? forcedMessage : submittedDraft).trim();
   const attachments = fromGeneratedApp ? [] : pendingAttachments;
   if (
     (!message && !attachments.length)
@@ -846,10 +893,10 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
     if (fromGeneratedApp) showRuntimeStatus("Agent is already starting");
     return;
   }
+  if (!fromGeneratedApp) saveComposerDraft();
   messageBusyApps.add(threadId);
   setSessionOptions();
-  $("send-message").disabled = true;
-  showChatStatus("Sending…");
+  showChatStatus("");
   if (fromGeneratedApp) showRuntimeStatus("Sending to agent…");
   try {
     for (const [index, attachment] of attachments.entries()) {
@@ -894,9 +941,14 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
       AGENT_DELIVERY_TIMEOUT_MS,
     );
     if (!fromGeneratedApp && selectedAppId === threadId) {
-      $("message").value = "";
+      const clearedSubmittedDraft = clearComposerDraft(threadId, submittedDraft);
+      if (clearedSubmittedDraft && $("message").value === submittedDraft) {
+        $("message").value = "";
+      }
       pendingAttachments = [];
       renderAttachments();
+    } else if (!fromGeneratedApp) {
+      clearComposerDraft(threadId, submittedDraft);
     }
     await refreshSelectedApp(threadId);
     if (selectedAppId !== threadId) return;
@@ -1232,6 +1284,14 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
     || !modelSelect.value
     || !effortSelect.value
   );
+  const composerSending = messageBusyApps.has(selectedAppId);
+  $("send-message").classList.toggle("sending", composerSending);
+  $("send-message").setAttribute("aria-busy", String(composerSending));
+  $("send-message").setAttribute(
+    "aria-label",
+    composerSending ? "Sending message" : "Send message",
+  );
+  $("send-message").title = composerSending ? "Sending message" : "Send";
   $("attach-file").disabled = (
     !selectedAppId
     || messageBusyApps.has(selectedAppId)
@@ -1400,6 +1460,7 @@ function restoreConversationView(app) {
 }
 
 function clearSelectedApp() {
+  saveComposerDraft();
   saveSelectedConversationView();
   clearPendingAttachments();
   stopCapabilityWorker();
@@ -1407,6 +1468,7 @@ function clearSelectedApp() {
   selectedAppId = null;
   selectedAppName = null;
   selectedAppArchived = false;
+  restoreComposerDraft();
   snapshot = { app: null, session: null, status: "idle" };
   conversationEvents = [];
   conversationEventsOldestSeq = null;
@@ -1428,6 +1490,7 @@ function clearSelectedApp() {
 }
 
 async function showApp(app) {
+  saveComposerDraft();
   saveSelectedConversationView();
   if (selectedAppId !== app.thread_id) clearPendingAttachments();
   stopCapabilityWorker();
@@ -1435,6 +1498,7 @@ async function showApp(app) {
   selectedAppId = app.thread_id;
   selectedAppName = app.name;
   selectedAppArchived = Boolean(app.archived);
+  restoreComposerDraft();
   restoreConversationView(app);
   renderedChatEntries.clear();
   renderedRevision = -1;
@@ -1686,4 +1750,5 @@ $("message").addEventListener("keydown", event => {
     sendMessage();
   }
 });
+$("message").addEventListener("input", saveComposerDraft);
 initialize();

@@ -7,12 +7,11 @@ let threads = [];
 let selectedThreadStatus = "idle";
 // The selected thread opens on its newest event page. Live events page
 // forward from the newest cursor; earlier history is prepended on demand from
-// the oldest cursor. EVENTS_PAGE mirrors the app backend page size.
+// the oldest cursor. Full activity and conversation-only views keep separate
+// cursors, so hiding activity can page actual messages without losing the
+// activity position needed if it is shown again.
 let threadEvents = [];
-let threadEventsOldestSeq = null;
-let threadEventsNewestSeq = 0;
-let threadEventsInitialized = false;
-let hasOlderThreadEvents = false;
+let threadEventPages = freshThreadEventPages();
 let loadingOlderThreadEvents = false;
 let lastChatScrollTop = 0;
 let restoredChatScrollTop = null;
@@ -29,6 +28,8 @@ const APP_API_TIMEOUT_MS = 30000;
 // acknowledgement. Sends and Stop must outlive that hop or a retry can
 // duplicate a message the host accepted after the frame gave up.
 const AGENT_DELIVERY_TIMEOUT_MS = 60 * 1000;
+const COMPOSER_DRAFTS_STORAGE_KEY = "kern.agent-chat.composer-drafts.v1";
+const COMPOSER_DRAFT_LIMIT = 50;
 let selectedThreadId = null;
 let selectedThreadName = null;
 let selectedThreadRuntime = null;
@@ -68,6 +69,7 @@ let forceScrollBottom = false;
 let statusOwner = null;
 
 const $ = id => document.getElementById(id);
+const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => runtime === "claude_code" ? "Claude Code" : runtime === "codex" ? "Codex" : runtime === "hermes" ? "Hermes" : runtime;
 const optionLabel = value => value.split(/[-_]/).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 // Claude Code model ids carry the provider prefix ("claude-opus-5"); the
@@ -93,6 +95,51 @@ const relativeTime = value => {
   if (days < 7) return `${days}d ago`;
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 };
+
+function loadComposerDrafts() {
+  try {
+    const drafts = JSON.parse(localStorage.getItem(COMPOSER_DRAFTS_STORAGE_KEY) || "{}");
+    return drafts && typeof drafts === "object" && !Array.isArray(drafts) ? drafts : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function composerDraftKey(threadId = selectedThreadId) {
+  return threadId === null ? "new" : `thread:${threadId}`;
+}
+
+function persistComposerDrafts() {
+  try {
+    localStorage.setItem(COMPOSER_DRAFTS_STORAGE_KEY, JSON.stringify(composerDrafts));
+  } catch (_error) {
+    // Draft persistence is best-effort when browser storage is unavailable.
+  }
+}
+
+function saveComposerDraft() {
+  const key = composerDraftKey();
+  const value = $("new-task").value;
+  delete composerDrafts[key];
+  if (value) composerDrafts[key] = value;
+  while (Object.keys(composerDrafts).length > COMPOSER_DRAFT_LIMIT) {
+    delete composerDrafts[Object.keys(composerDrafts)[0]];
+  }
+  persistComposerDrafts();
+}
+
+function restoreComposerDraft() {
+  $("new-task").value = composerDrafts[composerDraftKey()] || "";
+  autosizeComposer();
+}
+
+function clearComposerDraft(threadId, submittedDraft) {
+  const key = composerDraftKey(threadId);
+  if ((composerDrafts[key] ?? "") !== submittedDraft) return false;
+  delete composerDrafts[key];
+  persistComposerDrafts();
+  return true;
+}
 
 window.addEventListener("message", event => {
   const message = event.data;
@@ -272,8 +319,47 @@ function updateActivityToggle(hasThread = selectedThreadId !== null) {
 }
 
 function toggleActivity() {
+  const scroller = $("chat-scroll");
+  const scrollerTop = scroller.getBoundingClientRect().top;
+  const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+  const anchor = Array.from(
+    $("thread-detail").querySelectorAll(".thread-entry:not(.thread-activity)"),
+  ).find(entry => entry.getBoundingClientRect().bottom > scrollerTop);
+  const anchorOffset = anchor
+    ? anchor.getBoundingClientRect().top - scrollerTop
+    : null;
+  const previousScrollTop = scroller.scrollTop;
   showingActivity = !showingActivity;
   updateActivityToggle();
+  // Hiding a long run can remove most of the scroll height at once. Preserve
+  // what the operator was reading instead of letting the viewport jump to an
+  // unrelated message. Readers at the tail remain pinned to the newest event.
+  if (distanceFromBottom < 60) {
+    scroller.scrollTop = scroller.scrollHeight;
+  } else if (anchor && anchorOffset !== null && anchor.isConnected) {
+    scroller.scrollTop += (
+      anchor.getBoundingClientRect().top - scrollerTop - anchorOffset
+    );
+  } else {
+    scroller.scrollTop = Math.min(
+      previousScrollTop,
+      Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+    );
+  }
+  renderHistoryLoader();
+  if (selectedThreadId && !activeThreadEventPage().initialized) {
+    const threadId = selectedThreadId;
+    refreshSelectedThread().then(() => {
+      if (threadId !== selectedThreadId) return;
+      if (distanceFromBottom < 60) {
+        scroller.scrollTop = scroller.scrollHeight;
+      } else if (anchor && anchorOffset !== null && anchor.isConnected) {
+        scroller.scrollTop += (
+          anchor.getBoundingClientRect().top - scrollerTop - anchorOffset
+        );
+      }
+    }).catch(error => setStatus(error.message));
+  }
 }
 
 function setSessionOptions(preferredModel, preferredEffort) {
@@ -353,13 +439,18 @@ function updateComposerActions() {
     && selectedThreadStatus === "running"
     && selectedThreadRuntime === "hermes";
   $("new-task").disabled = activeBlock;
-  $("create-task").disabled = (
+  const sendButton = $("create-task");
+  sendButton.disabled = (
     activeBlock
     || sendingMessage
     || attachmentActivity !== null
     || hasOversizedAttachment
     || !hasSessionOption
   );
+  sendButton.classList.toggle("sending", sendingMessage);
+  sendButton.setAttribute("aria-busy", String(sendingMessage));
+  sendButton.setAttribute("aria-label", sendingMessage ? "Sending message" : "Send");
+  sendButton.title = sendingMessage ? "Sending message" : "Send (Enter)";
   $("attach-file").disabled = (
     activeBlock
     || sendingMessage
@@ -448,6 +539,7 @@ async function removeAttachment(selectionId) {
 }
 
 async function showThread(threadId, name, runtime, model, effort, status, archived) {
+  saveComposerDraft();
   saveSelectedThreadView();
   selectedThreadId = threadId;
   selectedThreadName = name;
@@ -456,6 +548,7 @@ async function showThread(threadId, name, runtime, model, effort, status, archiv
   selectedThreadEffort = effort;
   selectedThreadStatus = status || "idle";
   selectedThreadArchived = archived;
+  restoreComposerDraft();
   loadSelectedSessionControls();
   restoreThreadView(threadId);
   updateComposer();
@@ -485,10 +578,10 @@ function saveSelectedThreadView() {
   threadViewStates.delete(selectedThreadId);
   threadViewStates.set(selectedThreadId, {
     events: threadEvents,
-    oldestSeq: threadEventsOldestSeq,
-    newestSeq: threadEventsNewestSeq,
-    initialized: threadEventsInitialized,
-    hasOlder: hasOlderThreadEvents,
+    eventPages: {
+      all: { ...threadEventPages.all },
+      conversation: { ...threadEventPages.conversation },
+    },
     scrollTop: scroller ? scroller.scrollTop : lastChatScrollTop,
   });
   if (threadViewStates.size > VIEW_STATE_LIMIT) {
@@ -503,10 +596,10 @@ function restoreThreadView(threadId) {
     return;
   }
   threadEvents = state.events;
-  threadEventsOldestSeq = state.oldestSeq;
-  threadEventsNewestSeq = state.newestSeq;
-  threadEventsInitialized = state.initialized;
-  hasOlderThreadEvents = state.hasOlder;
+  threadEventPages = {
+    all: { ...state.eventPages.all },
+    conversation: { ...state.eventPages.conversation },
+  };
   loadingOlderThreadEvents = false;
   lastChatScrollTop = state.scrollTop;
   restoredChatScrollTop = state.scrollTop;
@@ -515,14 +608,36 @@ function restoreThreadView(threadId) {
 
 function resetThreadEvents() {
   threadEvents = [];
-  threadEventsOldestSeq = null;
-  threadEventsNewestSeq = 0;
-  threadEventsInitialized = false;
-  hasOlderThreadEvents = false;
+  threadEventPages = freshThreadEventPages();
   loadingOlderThreadEvents = false;
   lastChatScrollTop = 0;
   restoredChatScrollTop = null;
   renderHistoryLoader();
+}
+
+function freshThreadEventPages() {
+  const page = () => ({
+    oldestSeq: null,
+    newestSeq: 0,
+    initialized: false,
+    hasOlder: false,
+  });
+  return { all: page(), conversation: page() };
+}
+
+function activeThreadEventPage() {
+  return showingActivity
+    ? threadEventPages.all
+    : threadEventPages.conversation;
+}
+
+function threadEventPath(threadId, pageState, cursorName = null, cursor = null) {
+  const conversationOnly = pageState === threadEventPages.conversation;
+  const query = [];
+  if (conversationOnly) query.push("activity=false");
+  if (cursorName !== null) query.push(`${cursorName}=${cursor}`);
+  const suffix = query.length ? `?${query.join("&")}` : "";
+  return `/threads/${encodeURIComponent(threadId)}/events${suffix}`;
 }
 
 function mergeThreadEvents(events) {
@@ -536,63 +651,65 @@ function mergeThreadEvents(events) {
 }
 
 async function refreshThreadEvents(threadId) {
-  if (!threadEventsInitialized) {
+  const pageState = activeThreadEventPage();
+  if (!pageState.initialized) {
     // No cursor means "latest page". Prefetch three bounded pages so a first
-    // view normally has enough history to scroll without making the operator
-    // click the top loader, while every individual response stays below the
-    // app bridge's fixed size ceiling.
+    // view normally has enough history to scroll. With activity hidden, the
+    // backend fills those pages with conversation events rather than making
+    // the operator page through command-output deltas that cannot be seen.
     const response = await api(
       "GET",
-      `/threads/${encodeURIComponent(threadId)}/events`,
+      threadEventPath(threadId, pageState),
     );
     if (threadId !== selectedThreadId) return;
     const events = response.events || [];
     mergeThreadEvents(events);
     if (events.length) {
-      threadEventsOldestSeq = events[0].seq;
-      threadEventsNewestSeq = events[events.length - 1].seq;
+      pageState.oldestSeq = events[0].seq;
+      pageState.newestSeq = events[events.length - 1].seq;
     }
     let oldestPage = events;
     for (
       let page = 1;
       page < INITIAL_EVENT_PAGES
       && oldestPage.length === EVENTS_PAGE
-      && threadEventsOldestSeq !== null;
+      && pageState.oldestSeq !== null;
       page += 1
     ) {
-      const before = threadEventsOldestSeq;
+      const before = pageState.oldestSeq;
       const olderResponse = await api(
         "GET",
-        `/threads/${encodeURIComponent(threadId)}/events?before=${before}`,
+        threadEventPath(threadId, pageState, "before", before),
       );
       if (threadId !== selectedThreadId) return;
       oldestPage = (olderResponse.events || []).filter(event => event.seq < before);
       if (oldestPage.length) {
         mergeThreadEvents(oldestPage);
-        threadEventsOldestSeq = oldestPage[0].seq;
+        pageState.oldestSeq = oldestPage[0].seq;
       }
     }
-    hasOlderThreadEvents = oldestPage.length === EVENTS_PAGE;
-    threadEventsInitialized = true;
+    pageState.hasOlder = oldestPage.length === EVENTS_PAGE;
+    pageState.initialized = true;
     renderHistoryLoader();
     return;
   }
-  // Once the tail is loaded, forward paging drains only events that arrived
-  // after it. This keeps live activity complete without revisiting history.
+  // Each view advances its own tail. Switching activity back on catches the
+  // full stream up from its prior cursor without discarding messages loaded
+  // through the conversation-only lane.
   for (;;) {
     const response = await api(
       "GET",
-      `/threads/${encodeURIComponent(threadId)}/events?since=${threadEventsNewestSeq}`,
+      threadEventPath(threadId, pageState, "since", pageState.newestSeq),
     );
     if (threadId !== selectedThreadId) return;
     const events = response.events || [];
     // Only accept events past the cursor, so a server that re-sends an
     // overlapping page can never double-append into the stream.
-    const fresh = events.filter(event => event.seq > threadEventsNewestSeq);
+    const fresh = events.filter(event => event.seq > pageState.newestSeq);
     if (fresh.length) {
       mergeThreadEvents(fresh);
-      threadEventsNewestSeq = fresh[fresh.length - 1].seq;
-      if (threadEventsOldestSeq === null) threadEventsOldestSeq = fresh[0].seq;
+      pageState.newestSeq = fresh[fresh.length - 1].seq;
+      if (pageState.oldestSeq === null) pageState.oldestSeq = fresh[0].seq;
     }
     // Keep paging only while the cursor advanced by a full page. A short or
     // no-progress page means the live tail is caught up.
@@ -601,21 +718,22 @@ async function refreshThreadEvents(threadId) {
 }
 
 async function loadOlderThreadEvents() {
+  const pageState = activeThreadEventPage();
   if (
     !selectedThreadId
-    || !threadEventsInitialized
-    || !hasOlderThreadEvents
+    || !pageState.initialized
+    || !pageState.hasOlder
     || loadingOlderThreadEvents
-    || threadEventsOldestSeq === null
+    || pageState.oldestSeq === null
   ) return;
   const threadId = selectedThreadId;
-  const before = threadEventsOldestSeq;
+  const before = pageState.oldestSeq;
   loadingOlderThreadEvents = true;
   renderHistoryLoader();
   try {
     const response = await api(
       "GET",
-      `/threads/${encodeURIComponent(threadId)}/events?before=${before}`,
+      threadEventPath(threadId, pageState, "before", before),
     );
     if (threadId !== selectedThreadId) return;
     const events = response.events || [];
@@ -628,9 +746,9 @@ async function loadOlderThreadEvents() {
     const previousTop = scroller.scrollTop;
     if (older.length) {
       mergeThreadEvents(older);
-      threadEventsOldestSeq = older[0].seq;
+      pageState.oldestSeq = older[0].seq;
     }
-    hasOlderThreadEvents = older.length === EVENTS_PAGE;
+    pageState.hasOlder = older.length === EVENTS_PAGE;
     renderThreadHistory();
     scroller.scrollTop = previousTop + (scroller.scrollHeight - previousHeight);
   } finally {
@@ -644,8 +762,11 @@ async function loadOlderThreadEvents() {
 function renderHistoryLoader() {
   const loader = $("history-loader");
   if (!loader) return;
-  loader.hidden = !selectedThreadId || !hasOlderThreadEvents;
-  loader.dataset.oldestSeq = threadEventsOldestSeq === null ? "" : String(threadEventsOldestSeq);
+  const pageState = activeThreadEventPage();
+  loader.hidden = !selectedThreadId || !pageState.hasOlder;
+  loader.dataset.oldestSeq = pageState.oldestSeq === null
+    ? ""
+    : String(pageState.oldestSeq);
   const button = $("load-earlier");
   button.disabled = loadingOlderThreadEvents;
   button.textContent = loadingOlderThreadEvents ? "Loading earlier messages…" : "Load earlier messages";
@@ -656,8 +777,7 @@ function renderThreadHistory() {
     selectedThreadId,
     showingArchivedThreads,
     selectedThreadStatus,
-    threadEventsOldestSeq,
-    threadEventsNewestSeq,
+    threadEventPages,
     threadEvents.length,
   ]);
   if (key === renderedHistoryKey) return;
@@ -784,7 +904,7 @@ function renderThreadEntry(event, openActivities) {
   const entryId = `event-${event.seq}`;
   const payload = event.payload || {};
   if (event.event_type === "thread.activity") {
-    return `<article class="thread-entry" data-entry-id="${entryId}">
+    return `<article class="thread-entry thread-activity" data-entry-id="${entryId}">
       ${renderActivity(payload.activity || {}, openActivities)}
     </article>`;
   }
@@ -823,7 +943,9 @@ async function sendMessage() {
 
 async function sendMessageUnlocked() {
   if (showingArchivedThreads || selectedThreadArchived) return;
-  const message = $("new-task").value.trim();
+  const submittedDraft = $("new-task").value;
+  saveComposerDraft();
+  const message = submittedDraft.trim();
   const runtime = $("new-task-runtime").value;
   const model = $("new-task-model").value;
   const effort = $("new-task-effort").value;
@@ -832,6 +954,7 @@ async function sendMessageUnlocked() {
   // A request without thread_id asks the backend to open a new thread with a
   // generated successive name (thread-1, thread-2, ...).
   const startingNewThread = selectedThreadId === null;
+  const submittedThreadId = selectedThreadId;
   const changingSession = sessionConfigurationChanged();
   const request = { input_message: "" };
   if (startingNewThread || changingSession) {
@@ -861,31 +984,33 @@ async function sendMessageUnlocked() {
     ? `${message || (uploadedFiles.length === 1 ? "Please review the uploaded file." : "Please review the uploaded files.")}\n\n${fileReferences}`
     : message;
   request.input_message = inputMessage;
-  attachmentActivity = "Sending…";
-  renderAttachments();
-  let result;
-  try {
-    result = await api("POST", "/messages", request, AGENT_DELIVERY_TIMEOUT_MS);
-  } finally {
-    attachmentActivity = null;
-    renderAttachments();
+  const result = await api("POST", "/messages", request, AGENT_DELIVERY_TIMEOUT_MS);
+  const clearedSubmittedDraft = clearComposerDraft(submittedThreadId, submittedDraft);
+  const stillViewingSubmittedThread = selectedThreadId === submittedThreadId;
+  if (
+    clearedSubmittedDraft
+    && stillViewingSubmittedThread
+    && $("new-task").value === submittedDraft
+  ) {
+    $("new-task").value = "";
   }
-  $("new-task").value = "";
   pendingAttachments = [];
   renderAttachments();
   autosizeComposer();
-  if (startingNewThread) {
+  if (startingNewThread && stillViewingSubmittedThread) {
     // A brand-new thread has no prior event stream to keep; start its
     // newest-page accumulator clean so its first poll reads only this work.
     resetThreadEvents();
   }
-  selectedThreadId = result.thread_id;
-  if (startingNewThread) selectedThreadName = result.thread_id;
-  selectedThreadRuntime = runtime;
-  selectedThreadModel = model;
-  selectedThreadEffort = effort;
-  selectedThreadStatus = "running";
-  forceScrollBottom = true;
+  if (stillViewingSubmittedThread) {
+    selectedThreadId = result.thread_id;
+    if (startingNewThread) selectedThreadName = result.thread_id;
+    selectedThreadRuntime = runtime;
+    selectedThreadModel = model;
+    selectedThreadEffort = effort;
+    selectedThreadStatus = "running";
+    forceScrollBottom = true;
+  }
   updateComposer();
   await refresh();
 }
@@ -947,6 +1072,7 @@ async function renameSelectedThread() {
 }
 
 function clearSelectedThread() {
+  saveComposerDraft();
   saveSelectedThreadView();
   selectedThreadId = null;
   selectedThreadName = null;
@@ -955,6 +1081,7 @@ function clearSelectedThread() {
   selectedThreadEffort = null;
   selectedThreadStatus = "idle";
   selectedThreadArchived = false;
+  restoreComposerDraft();
   resetThreadEvents();
   updateComposer();
   renderThreadHistory();
@@ -1072,7 +1199,10 @@ $("composer-options").addEventListener("mouseenter", () => {
 $("composer-options").addEventListener("mouseleave", () => {
   $("composer-options").classList.remove("show-lock-note");
 });
-$("new-task").addEventListener("input", autosizeComposer);
+$("new-task").addEventListener("input", () => {
+  autosizeComposer();
+  saveComposerDraft();
+});
 $("new-task").addEventListener("keydown", event => {
   const sendKey = event.key === "Enter" && !event.isComposing && (!event.shiftKey || event.metaKey || event.ctrlKey);
   if (!sendKey) return;
@@ -1085,9 +1215,9 @@ $("sidebar-backdrop").addEventListener("click", () => setSidebarOpen(false, true
 drawerMedia.addEventListener("change", () => setSidebarOpen(false));
 
 setSessionOptions();
+restoreComposerDraft();
 updateComposer();
 renderThreadHistory();
-autosizeComposer();
 renderAttachments();
 setSidebarOpen(false);
 async function scheduleRefresh() {

@@ -1,15 +1,27 @@
 # Audit: Agent Isolation From Host and Operator Data
 
 Finding ID prefix: `ISO`. See [README.md](README.md) for the sweep process,
-entry template, and severity scale.
+finding format, and severity scale.
 
 ## Audit question
 
-Can the agent (`kern-agent` processes, or code the agent writes and
-runs) access any data belonging to other Unix users on the host — admin
-state, proxy policy and CA material, operator credentials, Cloudflare tunnel
-token — or escalate its privileges through any implementation bug, sudo
-helper flaw, file permission mistake, or open socket?
+Can the agent process, or anything it spawns, read or change another host
+user's data, reach privileged secrets or sockets, or gain privileges through
+anything available to it on the host?
+
+## Reviewed commits
+
+Latest reviewed commit: `f28b50e87b61`.
+
+| Commit | Reviewed by |
+| --- | --- |
+| `f28b50e87b61` | Claude Opus 4.8; GPT-5.5 |
+
+## Findings
+
+| Finding | Severity | Found at | Found by | Description | Resolution |
+| --- | --- | --- | --- | --- | --- |
+| ISO-001 | Info | `f28b50e87b61` | GPT-5.5 | `docs/architecture/filesystem.md` described policy-update, proxy-state-read, and provider-pin-sync helpers that did not exist, overstating the privileged helper surface and misdirecting reviewers. Align the inventory with the actual fixed sudo-helper allowlist. | Fixed at `fa6dc4ab5bc` |
 
 ## Threat model
 
@@ -21,62 +33,72 @@ helper flaw, file permission mistake, or open socket?
   proxy CA private key and TLS material, admin password hash, provider OAuth
   tokens beyond the agent's own, `/etc/kern/cloudflared.token`,
   operator SSH environment, and root itself.
-- **Trust boundaries:** Unix user separation between `kern-agent`,
-  `kern-admin`, `kern-proxy`, `cloudflared`, `postgres`, and
-  root; the six root-owned sudo helpers in
-  `/usr/local/lib/kern-host/`; Postgres peer authentication on the
-  Unix socket; nftables uid-based rules blocking the agent from the admin
-  API port and all direct egress.
-- **In scope:** everything Kern configures or ships — bootstrap file
-  modes and ownership (`host/bootstrap/`), sudoers entries, helper
-  implementations (`host/bootstrap/helpers/`), `read-agent-file` path
-  confinement, the admin API's handling of agent-produced content, sockets
-  reachable from the agent uid, systemd unit sandboxing, environment leakage
-  into agent processes.
 - **Out of scope:** Ubuntu/kernel/setuid vulnerabilities in stock OS
   packages, EC2/hypervisor escape, and physical access. (A Kern choice
   that *widens* exposure to such a bug — e.g. leaving an unnecessary
   privileged socket reachable — is in scope.)
 
-## Scope checklist
+## Minimal scope checklist
 
 This checklist is not comprehensive: it names known-important areas, but the
 audit question and threat model define the scope. Account for each item in
 your coverage section, and report anything else within scope even if no item
 below names it.
 
-1. Every sudoers grant and every helper binary/script: argument handling,
-   path confinement, symlink and TOCTOU races, environment sanitization.
-2. File ownership and modes for secrets and state created by bootstrap and at
-   runtime (CA key, tunnel token, database directory, config files).
-3. Sockets and abstract endpoints reachable as `kern-agent`: Postgres
-   socket peer auth, proxy port, admin API port block, systemd/dbus surfaces.
-4. Data flows carrying agent-controlled content into privileged contexts:
-   task output through the admin API and DB, file names/paths through
-   `read-agent-file`, headers through the proxy.
-5. Anything the agent's environment inherits from the launch helpers
-   (variables, file descriptors, cwd).
+1. Enumerate every Unix identity, group, sudoers grant, root-owned helper,
+   PATH shim, systemd unit, transient scope, and generated app identity.
+   Verify stable uid/gid allocation, root ownership, modes, and that no
+   agent-controlled path can replace executable or configuration code.
+2. Trace Codex, Claude Code, and Hermes launch and shutdown from the admin API
+   through their helpers and all descendants. Check demotion to `kern-agent`,
+   `kern_agent.slice`, `BindsTo`, cgroup naming, environment, argv, stdin/stdout,
+   inherited file descriptors, cwd, `HOME`, proxy variables, and root-owned
+   harness/MCP configuration.
+3. Audit every sudo helper and root implementation, including provider login
+   and account reads, auth clearing, thread stopping, file read/upload,
+   upgrade checks, AWS/GitHub credential operations, repository audit, and
+   `.github` push approval. Check exact argument/stdin grammars, path and ref
+   confinement, symlink/TOCTOU handling, environment preservation, subprocess
+   output parsing, timeouts, cleanup, and failure behavior.
+4. Walk all durable and ephemeral paths the host creates or preserves across
+   deploy, upgrade, recover, and reconfigure. Check parent-directory traversal,
+   ownership/modes, managed-path symlink replacement, temp files, `/proc`,
+   `/run`, journald, and secrets including admin/tool/GitHub/Bedrock/provider
+   credentials, proxy CA keys, tunnel tokens, SSH state, and database files.
+5. Probe every local interface from the agent and its children: Postgres,
+   admin/proxy/app TCP ports, preview ports 8000–8015, tools/network/app Unix
+   sockets, the app-backend admin socket, systemd/D-Bus, and future listeners.
+   Verify peer credentials, pid/cgroup attribution, socket modes, nftables
+   source/destination and established-flow rules, and port-range disjointness.
+6. Verify PostgreSQL peer authentication, role creation, grants, ownership,
+   schema/search-path selection, and migration privileges for every service
+   and app. The agent must have no database role, and a compromised
+   low-privilege service must not expose another principal's state to it.
+7. Trace every agent-controlled value entering privileged code: thread
+   messages/events/activity, file names and bytes, process metadata, proxy
+   requests/events, app and tool calls, provider metadata, Git refs/objects,
+   and error records. Check for shell/SQL/path/unit/log injection, confused
+   deputies, unsafe deserialization, and secret-bearing error output.
+8. Prove the agent and its children cannot bypass the proxy through direct
+   DNS/egress, cloud metadata, another service's egress, app ports, preview
+   ports, or a listening service they induce a privileged process to call.
+9. Repeat least-privilege probes on a freshly deployed host and after
+   upgrade/recover/reconfigure. Compare actual users, modes, sockets, grants,
+   nftables, units, environments, and process trees with generated artifacts
+   and deployment verification tests.
 
-## Key code and docs
+## Collaborative review
 
-- `docs/architecture/privilege-boundaries.md`, `docs/architecture/filesystem.md`
-- `host/bootstrap/bootstrap.sh`, `host/bootstrap/helpers/`
-- `host/runtime/admin_api/service.py` (agent file routes, process listing),
-  `host/runtime/admin_api/orchestrator.py`, `host/runtime/core/pgclient.py`
-- systemd units and nftables rules as written by bootstrap
+### `f28b50e87b61`
 
-## Audit entries
+Reviewed by: Claude Opus 4.8 (claude-opus-4-8); GPT-5.5 (gpt-5.5)
 
-## 2026-07-04 — Claude Opus 4.8 — `f28b50e`
-
-Reviewer: Claude Opus 4.8 (claude-opus-4-8)
-Commit: `f28b50e`
 Methodology: static code reading of the bootstrap, the six sudo helpers, the
 admin API's agent-facing routes, and the nftables/pg_hba configuration.
 Reasoned about filesystem modes and socket reachability from the bootstrap
 source; did not run a live host or write exploit code.
 
-### What was reviewed
+#### What was reviewed
 
 - `host/bootstrap/bootstrap.sh`: service-user creation (stable uids), durable
   volume ownership/mode fixups, the `/etc/sudoers.d/kern-host` grant,
@@ -89,13 +111,11 @@ source; did not run a live host or write exploit code.
   `read-agent-file` list/read routes and their argument handling
   (`host/runtime/admin_api/service.py` `_run_agent_file_helper`, `_agent_file_path`),
   and the `agent-processes` `/proc` reader.
-- The environment the run-helpers hand to agent runtimes.
+- Runtime launch/shutdown and the environment handed to agent processes;
+  database roles/grants and proxy state access; architecture claims about
+  privilege, filesystem, and admin-state boundaries.
 
-### Findings
-
-No agent isolation or privilege-escalation findings at this commit.
-
-Basis for the negative result:
+#### Coverage details
 
 - The agent (`kern-agent`) has no sudo entry; the sudoers grant is
   scoped to `kern-admin` and six fixed absolute helper paths with no
@@ -123,9 +143,9 @@ confidentiality/integrity holds regardless, because `pg_hba.conf` grants roles
 only to `kern-admin`/`kern-proxy`/`postgres` and rejects everyone
 else under peer auth, so the agent cannot read or write any table. Socket
 *reachability* is not an isolation break, but it is a denial-of-service vector
-— see `REL-1` in [05-reliability.md](05-reliability.md).
+— see `REL-001` in [08-reliability.md](08-reliability.md).
 
-### Coverage and confidence
+#### Coverage and confidence
 
 - Sudoers/helpers (checklist 1): all six helpers and the single sudoers line
   reviewed line by line; argument handling for `run-claude-code`'s `"$@"` is
@@ -150,67 +170,3 @@ else under peer auth, so the agent cannot read or write any table. Socket
 - Out of scope, untested: kernel/setuid local-privilege-escalation and EC2
   metadata credential theft (the latter depends on IMDS configuration set at
   instance launch, outside this layer).
-## 2026-07-04 — GPT-5.5 — `f28b50e87b61`
-
-Reviewer: GPT-5.5 (gpt-5.5)
-Commit: `f28b50e87b61507db372d288d971487f55cb2121`
-Methodology: static code reading and grep sweeps. I reviewed bootstrap-created
-users, file modes, sudoers grants, helper scripts, admin routes that cross into
-agent-owned data, Postgres peer-auth configuration, nftables loopback rules, and
-runtime launch environments. I did not run a live host or exploit PoCs.
-
-### What was reviewed
-
-- `host/bootstrap/bootstrap.sh`: stable service users, managed-path symlink
-  cleanup, Postgres `pg_hba.conf`, cloudflared token ownership, proxy CA
-  ownership, sudoers, nftables, systemd units, and agent slice setup.
-- `host/bootstrap/helpers/*.sh`: runtime launch helpers, account readers,
-  `read-agent-file`, and `reboot-host`.
-- `host/runtime/admin_api/service.py`: `/v1/agent-files*`, `/v1/agent-processes`,
-  reboot helper invocation, auth, static serving, and route dispatch.
-- `host/runtime/core/state.py`, `host/runtime/core/db.py`, `host/runtime/core/pgclient.py`,
-  and `host/migrations/0001_admin_state_schema.sql`: database roles, peer auth,
-  proxy grants, event writes, provider pins, and certificate file paths.
-- `host/runtime/admin_api/orchestrator.py`, `host/runtime/admin_api/codex_app_server.py`, and
-  `host/runtime/admin_api/claude_code.py`: launch environment, task process ownership,
-  runtime status/account metadata reads, and process shutdown paths.
-- `docs/architecture/privilege-boundaries.md`,
-  `docs/architecture/filesystem.md`, and
-  `docs/architecture/admin-state-storage.md` for doc/code drift.
-
-### Findings
-
-| ID | Status | Severity | Location | Summary |
-| --- | --- | --- | --- | --- |
-| ISO-001 | Open | Info | `docs/architecture/filesystem.md:26` | The filesystem table says `/usr/local/lib/kern-host/*` includes policy-update, proxy-state-read, and provider-pin-sync helpers, but the actual sudoers allowlist installs only `reboot-host`, runtime launch helpers, account readers, and `read-agent-file` (`host/bootstrap/bootstrap.sh:673`). This does not weaken isolation; it overstates privileged helper surface and can send future reviewers toward non-existent code. Update the docs to match the six installed helpers. |
-
-No isolation-breaking defects were found in this sweep.
-
-### Coverage and confidence
-
-For sudoers and helpers, I checked the single sudoers entry, every helper
-script, argument handling, demotion with `runuser`, root-only ownership, and
-the `read-agent-file` path algorithm. `read-agent-file` rejects NULs and `..`,
-opens each parent directory by file descriptor with `O_NOFOLLOW`, rejects
-symlinks, skips disappeared directory entries, lists at most 1000 entries, and
-reads at most 1 MiB as `kern-agent`.
-
-For file ownership and modes, I checked bootstrap's managed-path `lstat`
-cleanup, root-owned runtime code, admin/proxy/agent volume roots, Postgres data
-directory ownership, proxy CA key mode, Cloudflare token mode/group, sudoers
-mode, and system trust-store CA copy. The only writable durable agent path is
-the agent home; standard world-writable temporary directories remain ordinary
-OS scratch space and are not trusted inputs.
-
-For sockets and endpoints, I checked Postgres Unix-socket-only configuration,
-peer `pg_hba.conf` rules, absence of an agent database role, the proxy's narrow
-database grants, nftables rules that let `kern-agent` reach only the
-loopback proxy port and drop other loopback/direct egress, and the admin API's
-loopback bind.
-
-For agent-controlled data flows, I checked task output/event rendering paths
-only insofar as they enter privileged host code, proxy event writes, process
-listing under the agent cgroup, and file names/paths/content returned by the
-file helper. I did not perform a live permission probe as `kern-agent`, so
-confidence is highest for shipped bootstrap/runtime code and lower for
-distribution-specific defaults outside the scripts.

@@ -20,3 +20,5 @@ class LifecycleCommand:
     # Operator endpoints for deploy and reconfigure; at least one is required.
     operator_ssh_public_key: str | None = None
     operator_cloudflare_hostname: str | None = None
+    # Root recovery switch. Only reconfigure may remove durable passkeys.
+    reset_admin_passkeys: bool = False

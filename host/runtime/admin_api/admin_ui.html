@@ -27,6 +27,16 @@
   </div>
   <div id="runtime-overview" class="runtime-overview" aria-label="Agent runtime status and usage" hidden></div>
   <div class="topbar-actions">
+    <button id="passkey-status-control" class="passkey-status-control" type="button" data-action="show-passkey-guidance" aria-describedby="passkey-status-popover" hidden>
+      <svg width="14" height="14" viewBox="0 0 20 20" aria-hidden="true">
+        <rect x="5.5" y="8.5" width="9" height="7.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M7.5 8.5V6.8a2.5 2.5 0 0 1 5 0v1.7M10 11.6v1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <span id="passkey-status-popover" class="upgrade-popover" role="tooltip">
+        <strong id="passkey-status-title"></strong>
+        <span id="passkey-status-detail"></span>
+      </span>
+    </button>
     <span id="upgrade-notice" class="upgrade-notice" tabindex="0" aria-describedby="upgrade-popover" hidden>
       <svg width="14" height="14" viewBox="0 0 20 20" aria-hidden="true">
         <path class="upgrade-arrow" d="M10 16V5m0 0L6.5 8.5M10 5l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -48,6 +58,13 @@
     <img class="login-mark" width="44" height="44" src="/favicon.svg" alt="">
     <h1>Welcome back</h1>
     <p class="muted">Your trusted agent host is standing by</p>
+    <p id="login-passkey-status" class="login-passkey-status" hidden>
+      <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M10 2.8 16 5v4.4c0 3.8-2.4 6.3-6 7.8-3.6-1.5-6-4-6-7.8V5l6-2.2Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        <path d="m7.2 9.8 1.8 1.8 3.8-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>Two-factor authentication enabled</span>
+    </p>
     <input id="password" type="password" placeholder="Admin password" autocomplete="current-password">
     <p id="login-error" class="login-error" role="alert" hidden></p>
     <button class="primary block" data-action="login">Log in</button>
@@ -140,6 +157,19 @@
 
     <main>
       <div id="panel-home" class="tab-panel">
+        <section id="passkey-setup" class="passkey-setup" aria-labelledby="passkey-setup-title" hidden>
+          <span class="passkey-setup-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 20 20">
+              <path d="M10 2.5 16 4.8v4.4c0 3.8-2.4 6.3-6 8-3.6-1.7-6-4.2-6-8V4.8L10 2.5Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+              <path d="M10 6.8v5.4M7.3 9.5h5.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <span class="passkey-setup-copy">
+            <strong id="passkey-setup-title">Protect public login with a passkey</strong>
+            <span>Add a phishing-resistant second factor. Your admin password remains unchanged.</span>
+          </span>
+          <button id="setup-passkey" class="primary sm" data-action="setup-passkey">Set up passkey</button>
+        </section>
         <div id="home-hero" hidden></div>
         <section>
           <div class="section-head">

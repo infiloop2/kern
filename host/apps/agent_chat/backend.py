@@ -42,10 +42,15 @@ APP_ID = "agent_chat"
 RUNTIME_OPTIONS = {"codex", "claude_code", "hermes"}
 # Keep each proxy response comfortably below the fixed 1 MiB bridge cap.
 # Six 120 KiB event text budgets leave more than 300 KiB for JSON envelopes
-# and bounded activity metadata. The UI drains all pages, so the smaller page
-# does not skip events. Full messages remain stored by the host.
+# and bounded activity metadata. Full messages remain stored by the host.
 THREAD_EVENT_MESSAGE_BYTES = 120 * 1024
 THREAD_EVENT_PAGE = 6
+THREAD_DISPLAY_EVENT_TYPES = (
+    "thread.message",
+    "thread.activity",
+    "thread.error",
+    "thread.stopped",
+)
 THREAD_LIST_PAGE = 100
 MESSAGE_SEND_LOCK = threading.Lock()
 # A live execution has brief startup and shutdown windows where it cannot
@@ -278,18 +283,39 @@ def list_app_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[
     """One chronological page of the thread's event stream.
 
     An uncursored request returns the latest page, ``before`` loads earlier
-    history, and ``since`` keeps a loaded tail current. Every event under the
-    app-scoped thread comes from a message this app sent, so the stream passes
-    through unfiltered as one chronological thread history.
+    history, and ``since`` keeps a loaded tail current. Only displayable event
+    types cross the app bridge. ``activity=false`` lets the hidden-activity UI
+    page conversation events before the host applies its raw event limit.
     """
     _require_app_thread(thread_id, include_archived=True)
+    unexpected = sorted(set(query) - {"since", "before", "activity"})
+    if unexpected:
+        raise AppError(
+            HTTPStatus.BAD_REQUEST,
+            f"unsupported event query parameter: {unexpected[0]}",
+        )
     since_values = query.get("since") or []
     before_values = query.get("before") or []
+    activity_values = query.get("activity") or []
     if since_values and before_values:
         raise AppError(HTTPStatus.BAD_REQUEST, "since and before cannot be combined")
+    if len(activity_values) > 1 or (
+        activity_values and activity_values[0] not in {"true", "false"}
+    ):
+        raise AppError(HTTPStatus.BAD_REQUEST, "activity must be true or false")
+    include_activity = not activity_values or activity_values[0] == "true"
     path = (
         f"/v1/threads/{quote(thread_id, safe='')}/events"
         f"?limit={THREAD_EVENT_PAGE}&message_bytes={THREAD_EVENT_MESSAGE_BYTES}"
+    )
+    event_types = THREAD_DISPLAY_EVENT_TYPES if include_activity else tuple(
+        event_type
+        for event_type in THREAD_DISPLAY_EVENT_TYPES
+        if event_type != "thread.activity"
+    )
+    path += "".join(
+        f"&event_type={quote(event_type, safe='')}"
+        for event_type in event_types
     )
     cursor_name = "since" if since_values else "before" if before_values else None
     if cursor_name is not None:

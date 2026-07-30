@@ -4,8 +4,9 @@ The supported endpoint paths are SSH port forwarding and the optional
 Cloudflare Tunnel. The admin login is the authentication boundary: the tunnel
 carries transport and Cloudflare's edge (DDoS) protection only, with no
 Cloudflare Access gate in front, so the login is hardened to stand alone. API
-routes require an authenticated caller; only static admin/app assets and the
-side-effect-free OAuth callback shell are unauthenticated.
+routes require an authenticated caller; only static admin/app assets, the
+side-effect-free OAuth callback shell, and the non-secret public-login status
+are unauthenticated.
 
 Route handlers validate the documented protocol and update admin state in the
 local Postgres database (through the storage accessors in ``state``);
@@ -27,8 +28,6 @@ brute-forced over the public tunnel.
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -40,7 +39,7 @@ import socket
 import subprocess
 import threading
 import time
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, cast, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
@@ -51,12 +50,11 @@ from host.session_options import session_config_error
 # app_backend_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
 # object and reads its attributes only at request time, never during import.
-from host.runtime.admin_api import admin_auth, agent_activity, app_api_proxy, app_backend_api as app_backend_admin_api, bedrock_credentials, claude_code, codex_app_server, github_credential, github_repo_audit, orchestrator, tools_client as tools_admin_api, upgrade_check
+from host.runtime.admin_api import admin_auth, admin_passkeys, agent_activity, app_api_proxy, app_backend_api as app_backend_admin_api, bedrock_credentials, claude_code, codex_app_server, github_credential, github_repo_audit, orchestrator, tools_client as tools_admin_api, upgrade_check
 from host.runtime.core import app_platform, host_errors, network_policy, state
 from host.runtime.tools import tools_host
 from host.runtime.admin_api.orchestrator import agent_runtime_status
 from host.runtime.core.state import (
-    load_admin_password_hash,
     load_config,
     page_agent_events_before,
     read_claude_account,
@@ -64,6 +62,21 @@ from host.runtime.core.state import (
     utc_now,
 )
 from host.version import version_status
+
+
+class OperatorPrincipal(NamedTuple):
+    """An operator session authenticated by the TCP request boundary."""
+
+    session_token_hash: str
+
+
+class AppBackendPrincipal(NamedTuple):
+    """An installed app authenticated by the Unix peer boundary."""
+
+    app_id: str
+
+
+RoutePrincipal = OperatorPrincipal | AppBackendPrincipal
 
 
 HOST = LOOPBACK
@@ -134,6 +147,12 @@ MESSAGE_LIMIT = 50_000
 THREAD_HANDOFF_CHARACTER_LIMIT = 250_000
 MAINTENANCE_INTERVAL_SECONDS = 3600  # scheduled state cleanup cadence (not per-request)
 THREAD_EVENT_MESSAGE_BYTES_LIMIT = 200_000
+THREAD_DISPLAY_EVENT_TYPES = frozenset({
+    "thread.message",
+    "thread.activity",
+    "thread.error",
+    "thread.stopped",
+})
 THREAD_MAP_LIMIT = 100_000  # user thread -> runtime session mappings kept before LRU pruning
 OAUTH_LOGIN_LOCK_TIMEOUT_SECONDS = 5
 # OAuth login can start while awaiting login or in error: error states (a
@@ -182,24 +201,6 @@ REQUEST_TIMEOUT_SECONDS = 30
 MAX_CONCURRENT_REQUESTS = 32
 # A login body is a tiny JSON object; cap it far below the general request limit.
 LOGIN_MAX_BODY_BYTES = 4096
-LOGIN_MAX_PASSWORD_BYTES = 256
-
-# The admin password hash, cached at startup so the login path does no
-# per-request database work or tunnel-token decryption (reconfigure restarts the
-# service, which reloads it). Loaded lazily on first use if not pre-warmed.
-_ADMIN_PASSWORD_HASH: str | None = None
-_ADMIN_PASSWORD_HASH_LOCK = threading.Lock()
-
-
-def admin_password_hash() -> str:
-    global _ADMIN_PASSWORD_HASH
-    cached = _ADMIN_PASSWORD_HASH
-    if cached is not None:
-        return cached
-    with _ADMIN_PASSWORD_HASH_LOCK:
-        if _ADMIN_PASSWORD_HASH is None:
-            _ADMIN_PASSWORD_HASH = load_admin_password_hash()
-        return _ADMIN_PASSWORD_HASH
 
 
 # ApiError is defined in a shared module so it is one class whether admin_api is
@@ -230,25 +231,29 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def _handle(self, method: str) -> None:
-        # Set by _authenticate when the caller presented a valid session cookie,
-        # so /v1/logout can revoke exactly that session.
-        self._session_token_hash: str | None = None
         try:
-            # HTTPS is mandatory over the tunnel: the edge sets X-Forwarded-Proto,
-            # so a non-https value means the request reached the origin in the
-            # clear (Cloudflare "Always Use HTTPS" off or bypassed). Never accept
-            # credentials or serve secrets over cleartext: upgrade a GET so the
-            # browser re-requests over https before any form is shown, and refuse
-            # every other method outright. A request with no such header is the
-            # loopback SSH forward, which is plain-http localhost by design.
-            forwarded_proto = self.headers.get("X-Forwarded-Proto", "")
-            if forwarded_proto and forwarded_proto.lower() != "https":
-                if method == "GET":
-                    self._send_https_redirect()
-                else:
-                    self._send_json(HTTPStatus.FORBIDDEN, {"error": {"message": "HTTPS is required"}})
-                return
+            # Classify the request once, before static assets or auth routes.
+            # The resulting immutable context owns every SSH-forward/public
+            # distinction used below. Its hostname loader is not called for the
+            # local path, preserving database-independent SSH recovery.
+            self._auth_context = admin_auth.classify_request(
+                forwarded_proto_values=(
+                    self.headers.get_all("X-Forwarded-Proto") or []
+                ),
+                host_values=self.headers.get_all("Host") or [],
+                public_hostname_loader=state.load_cloudflare_hostname,
+            )
             path = urlparse(self.path)
+            if not admin_auth.route_is_available(
+                self._auth_context, method, path.path
+            ):
+                raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
+            # The shell adds this marker only when forwarding an embedded
+            # app's postMessage request. Scope it before every dispatch,
+            # including unauthenticated login and static routes, so URL
+            # normalization can never turn an app request into a host action.
+            bridge_app_id = self.headers.get("X-Kern-App-Bridge", "") or None
+            _enforce_app_bridge_scope(path.path, bridge_app_id)
             if method == "GET" and path.path in UI_ASSETS:
                 self._send_ui_asset(path.path)
                 return
@@ -257,27 +262,52 @@ class Handler(BaseHTTPRequestHandler):
                 if app_asset is not None:
                     self._send_app_ui_asset(*app_asset)
                     return
-            # Login mints the session, so it must be reachable before auth.
+            # The login flow establishes the session, so it is reachable
+            # before session authentication.
             if method == "POST" and path.path == "/v1/login":
                 self._handle_login()
                 return
-            self._authenticate()
-            if method == "POST" and path.path == "/v1/logout":
-                self._handle_logout()
+            if method == "POST" and path.path == "/v1/login/passkey":
+                self._handle_passkey_login()
                 return
-            bridge_app_id = self.headers.get("X-Kern-App-Bridge", "") or None
+            if method == "GET" and path.path == "/v1/login/status":
+                self._handle_login_status()
+                return
+            principal = self._authenticate()
+            if method == "POST" and path.path == "/v1/logout":
+                self._handle_logout(principal)
+                return
+            if path.path.startswith("/v1/admin-passkeys"):
+                self._handle_admin_passkeys(method, path.path, principal)
+                return
             if method == "GET" and path.path == "/v1/agent-files/content":
                 self._send_agent_file(_agent_file_path(parse_qs(path.query)))
                 return
             if method == "POST" and path.path == "/v1/agent-files/upload":
-                if bridge_app_id is not None:
-                    raise ApiError(HTTPStatus.FORBIDDEN, "app bridge requests may only target the app's own API")
                 self._send_agent_file_upload(parse_qs(path.query))
                 return
             response = route(
-                method, path.path, parse_qs(path.query), self._read_body(), bridge_app_id=bridge_app_id
+                method,
+                path.path,
+                parse_qs(path.query),
+                self._read_body(),
+                principal=principal,
+                bridge_app_id=bridge_app_id,
             )
             self._send_json(HTTPStatus.OK, response)
+        except admin_auth.PublicHttpsRequired as exc:
+            if method == "GET":
+                self._send_https_redirect(exc.hostname)
+            else:
+                self._send_json(
+                    HTTPStatus.FORBIDDEN,
+                    {"error": {"message": "HTTPS is required"}},
+                )
+        except admin_auth.RequestBoundaryError as exc:
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": {"message": str(exc)}},
+            )
         except ApiError as exc:
             self._send_json(exc.status, {"error": {"message": exc.message}})
         except app_platform.AppError as exc:
@@ -348,87 +378,171 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "SAMEORIGIN")
 
     def _app_ui_asset_origin(self) -> str:
+        if self._auth_context.passkey_context is not None:
+            return self._auth_context.passkey_context[1]
         host = self.headers.get("Host", "")
         if not re.fullmatch(r"[A-Za-z0-9.:-]+", host):
             host = f"{LOOPBACK}:{ADMIN_API_PORT}"
-        forwarded_proto = self.headers.get("X-Forwarded-Proto", "")
-        scheme = forwarded_proto if forwarded_proto in {"http", "https"} else "http"
-        return f"{scheme}://{host}"
+        return f"http://{host}"
 
-    def _authenticate(self) -> None:
-        # The session cookie minted by /v1/login is the only accepted credential:
-        # the password itself is presented only at login, never replayed on later
-        # requests. A cookie-authenticated request must also carry the CSRF header,
-        # which same-origin UI code always sends and a cross-site page cannot.
-        secure = self._request_is_https()
-        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""), secure=secure)
-        if token is not None:
-            # Check the CSRF header before validating so a cookie-only request
-            # (a same-site cross-origin page can send the cookie but cannot set
-            # the header) can never refresh the session's idle clock.
-            if not self.headers.get(admin_auth.CSRF_HEADER_NAME):
-                raise ApiError(HTTPStatus.FORBIDDEN, "missing admin session request header")
-            # A five-second background poll must not keep an abandoned browser
-            # tab logged in. The centralized UI request wrapper adds this marker
-            # only shortly after a real operator pointer/key/touch interaction.
-            # It is not an authorization factor—the cookie and CSRF header are—
-            # but it decides whether this valid request advances the idle clock.
-            refresh_idle = self.headers.get(admin_auth.SESSION_ACTIVITY_HEADER_NAME) == "1"
-            token_hash = admin_auth.validate_session(token, refresh_idle=refresh_idle)
-            if token_hash is not None:
-                self._session_token_hash = token_hash
-                return
-        raise ApiError(HTTPStatus.UNAUTHORIZED, "missing or invalid admin session")
+    def _authenticate(self) -> OperatorPrincipal:
+        # The session cookie minted by the completed login flow is the only
+        # accepted credential: the password itself is presented only at login,
+        # never replayed on later requests. A cookie-authenticated request must
+        # also carry the CSRF header, which same-origin UI code always sends and
+        # a cross-site page cannot.
+        try:
+            session_token_hash = admin_auth.authenticate_session_request(
+                self._auth_context,
+                cookie_header=self.headers.get("Cookie", ""),
+                csrf_header=self.headers.get(admin_auth.CSRF_HEADER_NAME, ""),
+                activity_header=self.headers.get(
+                    admin_auth.SESSION_ACTIVITY_HEADER_NAME, ""
+                ),
+            )
+        except admin_auth.MissingSessionRequestHeader as exc:
+            raise ApiError(HTTPStatus.FORBIDDEN, str(exc)) from exc
+        except admin_auth.SessionAuthError as exc:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, str(exc)) from exc
+        return OperatorPrincipal(session_token_hash)
 
     def _handle_login(self) -> None:
-        # An unauthenticated route. Each attempt from a source is counted under
-        # the throttle lock before the password is compared; once a source reaches
-        # the per-source limit inside the window it is blocked with 429 (even a
-        # correct password is refused) until the window rolls over. The block is
-        # per-source, so it can never lock every operator out at once, and a
-        # blocked operator recovers by waiting it out, using the loopback SSH
-        # forward (a separate bucket), or a different IP.
+        # The HTTP adapter parses the bounded request; admin_auth owns password
+        # verification, throttling, factor-two policy, and every auth cookie.
         client_key = self._client_key()
-        if not admin_auth.register_attempt(client_key):
+
+        def password_loader() -> str | None:
+            # Keep HTTP parsing here, but let admin_auth invoke it only after
+            # the source passes the throttle preflight.
+            length = self._content_length(LOGIN_MAX_BODY_BYTES)
+            try:
+                body = json.loads(self.rfile.read(length)) if length else None
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body = None
+            if (
+                isinstance(body, dict)
+                and set(body) == {"password"}
+                and isinstance(body.get("password"), str)
+            ):
+                return body["password"]
+            return None
+
+        try:
+            result = admin_auth.begin_password_login(
+                self._auth_context,
+                client_key=client_key,
+                password_loader=password_loader,
+            )
+        except admin_auth.LoginRateLimited as exc:
             self._send_json(
                 HTTPStatus.TOO_MANY_REQUESTS,
-                {"error": {"message": "too many failed admin logins; try again later"}},
+                {"error": {"message": str(exc)}},
             )
             return
-        # A login body is a small JSON object; cap it well below the general
-        # request limit and require the exact {"password": <str>} shape.
-        length = self._content_length(LOGIN_MAX_BODY_BYTES)
-        try:
-            body = json.loads(self.rfile.read(length)) if length else None
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            body = None
-        password = body.get("password") if isinstance(body, dict) else None
-        valid_shape = (
-            isinstance(body, dict)
-            and set(body) == {"password"}
-            and isinstance(password, str)
-            and 0 < len(password.encode()) <= LOGIN_MAX_PASSWORD_BYTES
-        )
-        expected = admin_password_hash()
-        if (
-            valid_shape
-            and isinstance(password, str)
-            and expected
-            and hmac.compare_digest(hashlib.sha256(password.encode()).hexdigest(), expected)
-        ):
-            admin_auth.record_success(client_key)
-            cookie = admin_auth.session_cookie(admin_auth.create_session(), secure=self._request_is_https())
-            self._send_json(HTTPStatus.OK, {"ok": True}, set_cookies=[cookie])
+        except admin_auth.InvalidPassword as exc:
+            self._send_json(
+                HTTPStatus.UNAUTHORIZED,
+                {"error": {"message": str(exc)}},
+            )
             return
+        except admin_auth.PasskeyStartError as exc:
+            raise ApiError(HTTPStatus.FORBIDDEN, str(exc)) from exc
+        if result.passkey_options is not None:
+            body = {
+                "passkey_required": True,
+                "publicKey": result.passkey_options,
+            }
+        else:
+            body = {"ok": True}
         self._send_json(
-            HTTPStatus.UNAUTHORIZED,
-            {"error": {"message": "missing or invalid admin password"}},
+            HTTPStatus.OK,
+            body,
+            set_cookies=list(result.set_cookies),
         )
 
-    def _handle_logout(self) -> None:
-        if self._session_token_hash is not None:
-            admin_auth.destroy_session(self._session_token_hash)
-        cookie = admin_auth.clear_session_cookie(secure=self._request_is_https())
+    def _handle_passkey_login(self) -> None:
+        try:
+            result = admin_auth.complete_passkey_login(
+                self._auth_context,
+                cookie_header=self.headers.get("Cookie", ""),
+                csrf_header=self.headers.get(admin_auth.CSRF_HEADER_NAME, ""),
+                client_key_loader=self._client_key,
+                response_loader=self._read_body,
+            )
+        except admin_auth.MissingPasskeyRequestHeader as exc:
+            raise ApiError(HTTPStatus.FORBIDDEN, str(exc)) from exc
+        except admin_auth.PasskeyVerificationError as exc:
+            self._send_json(
+                HTTPStatus.UNAUTHORIZED,
+                {"error": {"message": str(exc)}},
+                set_cookies=list(exc.set_cookies),
+            )
+            return
+        self._send_json(
+            HTTPStatus.OK,
+            {"ok": True},
+            set_cookies=list(result.set_cookies),
+        )
+
+    def _handle_login_status(self) -> None:
+        """Expose only whether public login has its second factor enrolled.
+
+        This deliberately exists only on the configured HTTPS login origin.
+        It lets the login page and Kern Cloud show an accurate security state
+        without authenticating, but discloses no credential metadata.
+        """
+        self._send_json(
+            HTTPStatus.OK,
+            {"passkey_configured": admin_auth.passkey_login_configured()},
+        )
+
+    def _handle_admin_passkeys(
+        self,
+        method: str,
+        path: str,
+        principal: OperatorPrincipal,
+    ) -> None:
+        # HTTPS_ONLY_AUTH_ROUTES and _authenticate establish both invariants
+        # before this handler is selected.
+        context = cast(tuple[str, str], self._auth_context.passkey_context)
+        if method == "GET" and path == "/v1/admin-passkeys":
+            self._send_json(
+                HTTPStatus.OK,
+                admin_passkeys.status(
+                    public_https=True,
+                    rp_id=context[0],
+                ),
+            )
+            return
+        if method == "POST" and path == "/v1/admin-passkeys/register/options":
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "publicKey": admin_passkeys.begin_registration(
+                        principal.session_token_hash,
+                        rp_id=context[0],
+                        origin=context[1],
+                        agent_name="Kern",
+                    )
+                },
+            )
+            return
+        if method == "POST" and path == "/v1/admin-passkeys/register":
+            try:
+                result = admin_passkeys.finish_registration(
+                    principal.session_token_hash, self._read_body()
+                )
+            except admin_passkeys.PasskeyError as exc:
+                raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+            self._send_json(HTTPStatus.OK, result)
+            return
+        raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
+
+    def _handle_logout(self, principal: OperatorPrincipal) -> None:
+        cookie = admin_auth.logout(
+            self._auth_context,
+            session_token_hash=principal.session_token_hash,
+        )
         self._send_json(HTTPStatus.OK, {"ok": True}, set_cookies=[cookie])
 
     def _client_key(self) -> str:
@@ -440,25 +554,19 @@ class Handler(BaseHTTPRequestHandler):
         # (which would let one source lock out others). IPv4 buckets by address,
         # IPv6 by /64 so address rotation within a prefix cannot spread out. The
         # plain loopback SSH forward has no such header and uses the socket peer.
-        if self.headers.get("X-Forwarded-Proto"):
-            # Under Cloudflare Pseudo IPv4 "Overwrite Headers", Cf-Connecting-Ip
-            # carries a generated IPv4 and the real client is in Cf-Connecting-IPv6;
-            # prefer that when present so IPv6 clients keep their real /64 bucket.
-            header = "Cf-Connecting-Ipv6" if self.headers.get("Cf-Connecting-Ipv6") else "Cf-Connecting-Ip"
-            values = self.headers.get_all(header) or []
-            if len(values) != 1:
-                raise ApiError(HTTPStatus.FORBIDDEN, "invalid tunnel client identity")
-            try:
-                return admin_auth.throttle_key_from_ip(values[0])
-            except ValueError as exc:
-                raise ApiError(HTTPStatus.FORBIDDEN, "invalid tunnel client identity") from exc
-        return f"local:{self.client_address[0]}"
-
-    def _request_is_https(self) -> bool:
-        # cloudflared forwards plain HTTP to the loopback origin and marks the
-        # original scheme here; the SSH forward is plain-HTTP loopback with no
-        # such header, where a Secure cookie would never be sent back.
-        return self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        try:
+            return admin_auth.login_client_key(
+                self._auth_context,
+                local_address=self.client_address[0],
+                cf_connecting_ip_values=(
+                    self.headers.get_all("Cf-Connecting-Ip") or []
+                ),
+                cf_connecting_ipv6_values=(
+                    self.headers.get_all("Cf-Connecting-Ipv6") or []
+                ),
+            )
+        except admin_auth.RequestBoundaryError as exc:
+            raise ApiError(HTTPStatus.FORBIDDEN, str(exc)) from exc
 
     def _read_body(self) -> Any:
         try:
@@ -476,15 +584,11 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             raise ApiError(HTTPStatus.BAD_REQUEST, f"invalid JSON: {exc}") from exc
 
-    def _send_https_redirect(self) -> None:
+    def _send_https_redirect(self, hostname: str) -> None:
         # Upgrade a cleartext GET to https on the same host so the browser
         # re-requests securely before any form or secret is served.
-        host = self.headers.get("Host", "")
-        if not re.fullmatch(r"[A-Za-z0-9.:-]+", host):
-            self._send_json(HTTPStatus.FORBIDDEN, {"error": {"message": "HTTPS is required"}})
-            return
         self.send_response(HTTPStatus.MOVED_PERMANENTLY.value)
-        self.send_header("Location", f"https://{host}{self.path}")
+        self.send_header("Location", f"https://{hostname}{self.path}")
         self.send_header("Content-Length", "0")
         self._send_security_headers()
         self.end_headers()
@@ -674,22 +778,36 @@ class Handler(BaseHTTPRequestHandler):
         return length
 
 
+def _enforce_app_bridge_scope(path: str, bridge_app_id: str | None) -> None:
+    """Keep an iframe bridge inside its own app API before any dispatch."""
+    if bridge_app_id is not None and not path.startswith(f"/v1/apps/{bridge_app_id}/api/"):
+        raise ApiError(HTTPStatus.FORBIDDEN, "app bridge requests may only target the app's own API")
+
+
 def route(
     method: str,
     path: str,
     query: dict[str, list[str]],
     body: Any,
     *,
+    principal: RoutePrincipal,
     bridge_app_id: str | None = None,
-    app_backend_id: str | None = None,
 ) -> Any:
+    # Authentication belongs to the two transport boundaries. Requiring their
+    # resulting principal here (with no operator-like default) makes any new
+    # in-process caller an explicit security-boundary decision.
+    if isinstance(principal, OperatorPrincipal):
+        app_backend_id = None
+    elif isinstance(principal, AppBackendPrincipal):
+        app_backend_id = principal.app_id
+    else:
+        raise TypeError("route principal is invalid")
     # A bridge-tagged request (the admin shell forwarding an app iframe's
     # postMessage) may only target that app's own API surface — enforced here,
     # before any route dispatch, so no host route is reachable through the
     # bridge. Un-normalized dot-segment paths that pass the literal prefix
     # check are proxied into the app's own backend, which 404s them.
-    if bridge_app_id is not None and not path.startswith(f"/v1/apps/{bridge_app_id}/api/"):
-        raise ApiError(HTTPStatus.FORBIDDEN, "app bridge requests may only target the app's own API")
+    _enforce_app_bridge_scope(path, bridge_app_id)
     if method == "GET" and path == "/v1/health":
         return health()
     if method == "GET" and path == "/v1/agent-runtime/status":
@@ -1118,19 +1236,35 @@ def thread_route(
     if len(parts) == 4 and parts[3] == "stop" and method == "POST":
         return stop_thread(thread_id)
     if len(parts) == 4 and parts[3] == "events" and method == "GET":
-        _reject_query_keys(query, {"since", "before", "limit", "message_bytes"}, "thread event")
+        _reject_query_keys(
+            query,
+            {"since", "before", "limit", "message_bytes", "event_type"},
+            "thread event",
+        )
         message_bytes = _optional_bounded_positive_query_int(
             query, "message_bytes", THREAD_EVENT_MESSAGE_BYTES_LIMIT
         )
+        requested_event_types = query.get("event_type")
+        event_types: tuple[str, ...] | None = None
+        if requested_event_types:
+            unknown_event_types = sorted(
+                set(requested_event_types) - THREAD_DISPLAY_EVENT_TYPES
+            )
+            if unknown_event_types:
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    f"unsupported thread event type: {unknown_event_types[0]}",
+                )
+            event_types = tuple(dict.fromkeys(requested_event_types))
         since = _optional_non_negative_int(query, "since")
         before = _optional_non_negative_int(query, "before")
         if since is not None and before is not None:
             raise ApiError(HTTPStatus.BAD_REQUEST, "since and before cannot be combined")
+        page_kwargs: dict[str, Any] = {"before": before}
+        if event_types is not None:
+            page_kwargs["event_types"] = event_types
         events = state.page_thread_events(
-            thread_id,
-            since,
-            _event_page_limit(query),
-            before=before,
+            thread_id, since, _event_page_limit(query), **page_kwargs
         )
         if message_bytes is not None:
             for event in events:
@@ -2419,7 +2553,7 @@ def main() -> int:
     initialize_state()
     # Cache the admin password hash once so the login path never touches the
     # database (reconfigure restarts this service, which reloads it).
-    admin_password_hash()
+    admin_auth.preload_password_verifier()
     # The agent-facing tools socket and tool execution run in the dedicated
     # kern-tools service (its own user, egress, and scoped DB role); the
     # admin service only forwards operator operations to it.
