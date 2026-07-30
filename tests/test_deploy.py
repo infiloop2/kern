@@ -1707,7 +1707,7 @@ class DeployUnitTests(unittest.TestCase):
         # passes the operation mode through and stages the effective config for
         # the root-only steps. Behavior is covered by tests/test_write_config.py.
         self.assertIn("python3 -m host.runtime.deploy.write_config > /tmp/kern_effective_config.json", bootstrap)
-        self.assertIn("json.dumps({'mode': payload['operation']['mode'], 'runtime_config': payload['runtime_config']})", bootstrap)
+        self.assertIn("'reset_admin_passkeys': bool(payload['operation'].get('reset_admin_passkeys', False))", bootstrap)
         self.assertIn("chmod 600 /tmp/kern_effective_config.json", bootstrap)
         self.assertIn("pathlib.Path('/tmp/kern_effective_config.json').read_text()", bootstrap)
         self.assertNotIn("admin-state/config.json", bootstrap)

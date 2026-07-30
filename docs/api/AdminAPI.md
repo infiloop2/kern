@@ -8,9 +8,13 @@ Base URL after port forwarding:
 http://127.0.0.1:7443
 ```
 
-Every API request authenticates with a session cookie. `POST /v1/login` with
+Every API request except the narrowly scoped public-login status authenticates
+with a session cookie. `POST /v1/login` with
 `{"password": "<admin-password>"}` returns an `HttpOnly`, `SameSite=Strict`
-`tc_admin_session` cookie; subsequent requests send that cookie automatically and
+session cookie immediately when no passkey is configured. Once a passkey is
+enrolled, public HTTPS login returns WebAuthn request options and mints the
+session only after `POST /v1/login/passkey` verifies the second factor.
+Subsequent requests send the session cookie automatically and
 must also include the CSRF header `X-Kern-Csrf: 1`. `POST /v1/logout`
 revokes the session and clears the cookie. The password is presented only at
 `/v1/login` and never replayed on later requests; there is no bearer-token path.
@@ -22,9 +26,11 @@ refuses cleartext). Repeated failed logins are throttled and return `429`; see
 API responses are JSON. Static UI assets are the exception: `GET /`,
 `GET /oauth/callback`, the admin CSS/JavaScript/favicon paths, and installed app
 UI assets under `/v1/apps/{app_id}/ui/` are served without authentication.
-They return only static files and perform no state change. Every API route,
-including `GET /v1/apps` and every app backend proxy request, requires an
-authenticated caller.
+They return only static files and perform no state change. The sole
+unauthenticated JSON read is `GET /v1/login/status` on the configured public
+HTTPS hostname; it returns only whether a passkey is enrolled. Every other API
+route, including `GET /v1/apps` and every app backend proxy request, requires
+an authenticated caller.
 
 ## Errors
 
@@ -62,14 +68,50 @@ Error status codes:
 
 ```text
 POST /v1/login
+POST /v1/login/passkey
+GET  /v1/login/status
 POST /v1/logout
 ```
 
-`POST /v1/login` takes `{"password": "<admin-password>"}` and is the one route
-reachable without authentication. A correct password returns `{"ok": true}` and
+`POST /v1/login` takes `{"password": "<admin-password>"}`. With no passkey, a
+correct password returns `{"ok": true}` and
 a `Set-Cookie: tc_admin_session=...; HttpOnly; SameSite=Strict` header (with
 `Secure` when the request arrived over HTTPS); a wrong password returns `401` and
-sets no cookie. Repeated failures are throttled with `429`.
+sets no cookie. When passkeys are configured on the public HTTPS path, a correct
+password instead returns `{"passkey_required": true, "publicKey": {...}}` and a
+five-minute, non-session pre-authentication cookie. The browser submits its
+WebAuthn assertion to `POST /v1/login/passkey`; only successful verification
+mints the admin session. The assertion route therefore runs before session
+authentication, but it is not an independent login path: it requires the
+unguessable pre-authentication cookie issued only after a correct password.
+That cookie and its server-side challenge expire after five minutes, are bound
+to the same client source and public origin, and are consumed by the first
+assertion attempt whether it succeeds or fails. Repeated password failures are
+throttled with `429`.
+
+`GET /v1/login/status` is available only through the configured public HTTPS
+admin hostname and returns `{"passkey_configured": true|false}` with
+`Cache-Control: no-store`. It requires no session so the login page and Kern
+Cloud can accurately show whether public login has its second factor enabled.
+It exposes no credential identifiers or metadata. The SSH-forward origin
+returns `404`, preserving its database-independent recovery path.
+
+Authenticated passkey enrollment uses:
+
+```text
+GET  /v1/admin-passkeys
+POST /v1/admin-passkeys/register/options
+POST /v1/admin-passkeys/register
+```
+
+The status response tells the UI whether credentials exist and whether setup is
+available on the current public HTTPS hostname. Registration requires an
+authenticated session, a fresh single-use challenge, an ES256 resident
+credential, and authenticator user verification. Enrollment is not offered on
+the SSH-forward origin: every route in this passkey-management namespace
+returns `404` there because WebAuthn credentials are scoped to their public RP
+domain. The host stores only the credential id, public key, signature counter,
+transports, backup flag, and timestamps.
 
 `POST /v1/logout` revokes the current session and clears the cookie, returning
 `{"ok": true}`. Like every non-login route it requires an authenticated caller;
@@ -566,9 +608,11 @@ worker; `accepted` does not mean the provider has accepted that initial
 message yet. A later startup/provider failure appears as `thread.error`. For a
 running thread, `accepted` means the live provider transport acknowledged the message and its
 `thread.message` event then committed. Codex acknowledgement is a successful
-`turn/steer` JSON-RPC response. Claude Code exposes no per-message response, so
-its acknowledgement is a successful write and flush to the live stream-json
-stdin. There is no host steer mailbox and no delivery-marker table.
+`turn/steer` JSON-RPC response. The Codex stdout reader routes that response
+directly to the waiting request, so processing unrelated activity
+notifications cannot delay acknowledgement. Claude Code exposes no per-message
+response, so its acknowledgement is a successful write and flush to the live
+stream-json stdin. There is no host steer mailbox and no delivery-marker table.
 
 If provider acknowledgement succeeds but the following database write fails,
 the API returns an error and no user event appears even though the CLI may act

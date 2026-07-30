@@ -175,6 +175,18 @@ def load_admin_password_hash() -> str:
     return row[0] if row and row[0] is not None else ""
 
 
+def load_cloudflare_hostname() -> str | None:
+    """The configured public admin hostname without decrypting its tunnel
+    token. WebAuthn uses this exact value as both RP ID and expected origin."""
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT hostname FROM operator_connections"
+            " WHERE mode = 'cloudflare_tunnel'"
+        )
+        row = cur.fetchone()
+    return str(row[0]) if row and row[0] is not None else None
+
+
 def save_config(config: dict[str, Any]) -> None:
     """Replace the whole host config, the way deploy refreshes it. The table
     constraints validate field formats and per-mode shapes; write_config
@@ -200,6 +212,130 @@ def save_config(config: dict[str, Any]) -> None:
                     _encrypt_secret(connection.get("tunnel_token")),
                 ),
             )
+
+
+# -- admin passkeys ------------------------------------------------------------
+
+
+def admin_passkey_config() -> dict[str, Any] | None:
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT user_handle, created_at FROM admin_passkey_config"
+            " WHERE singleton = TRUE"
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {"user_handle": row[0], "created_at": row[1]}
+
+
+def admin_passkeys(rp_id: str | None = None) -> list[dict[str, Any]]:
+    sql = (
+        "SELECT credential_id, rp_id, public_key_spki, sign_count, transports,"
+        " backed_up, created_at, last_used_at FROM admin_passkeys"
+    )
+    params: tuple[Any, ...] = ()
+    if rp_id is not None:
+        sql += " WHERE rp_id = %s"
+        params = (rp_id,)
+    sql += " ORDER BY created_at, credential_id"
+    with db.transaction() as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    return [
+        {
+            "credential_id": row[0],
+            "rp_id": row[1],
+            "public_key_spki": row[2],
+            "sign_count": row[3],
+            "transports": row[4],
+            "backed_up": row[5],
+            "created_at": row[6],
+            "last_used_at": row[7],
+        }
+        for row in rows
+    ]
+
+
+def save_admin_passkey(
+    *,
+    user_handle: str,
+    credential_id: str,
+    rp_id: str,
+    public_key_spki: str,
+    sign_count: int,
+    transports: list[str],
+    backed_up: bool,
+    created_at: str,
+) -> None:
+    """Create one credential and its singleton user handle atomically."""
+    with mutation() as cur:
+        cur.execute(
+            "INSERT INTO admin_passkey_config (singleton, user_handle, created_at)"
+            " VALUES (TRUE, %s, %s)"
+            " ON CONFLICT (singleton) DO NOTHING",
+            (user_handle, created_at),
+        )
+        cur.execute(
+            "SELECT user_handle FROM admin_passkey_config WHERE singleton = TRUE"
+        )
+        row = cur.fetchone()
+        if row is None or row[0] != user_handle:
+            raise ValueError("admin passkey user handle changed during registration")
+        cur.execute(
+            "INSERT INTO admin_passkeys"
+            " (credential_id, rp_id, public_key_spki, sign_count, transports,"
+            " backed_up, created_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                credential_id,
+                rp_id,
+                public_key_spki,
+                sign_count,
+                db.jsonb(transports),
+                backed_up,
+                created_at,
+            ),
+        )
+
+
+def mark_admin_passkey_used(
+    credential_id: str,
+    *,
+    previous_sign_count: int,
+    sign_count: int,
+    backed_up: bool,
+    used_at: str,
+) -> bool:
+    """Advance one credential after an assertion. The previous counter is in
+    the predicate so concurrent replay can never make both requests succeed."""
+    with mutation() as cur:
+        cur.execute(
+            "UPDATE admin_passkeys"
+            " SET sign_count = %s, backed_up = %s, last_used_at = %s"
+            " WHERE credential_id = %s AND sign_count = %s"
+            " RETURNING credential_id",
+            (
+                sign_count,
+                backed_up,
+                used_at,
+                credential_id,
+                previous_sign_count,
+            ),
+        )
+        return cur.fetchone() is not None
+
+
+def reset_admin_passkeys() -> int:
+    """Root-reconfigure recovery: remove every public credential and its user
+    handle. Returns the number of credentials removed."""
+    with mutation() as cur:
+        cur.execute("SELECT COUNT(*) FROM admin_passkeys")
+        row = cur.fetchone()
+        count = int(row[0]) if row else 0
+        cur.execute("DELETE FROM admin_passkeys")
+        cur.execute("DELETE FROM admin_passkey_config")
+    return count
 
 
 # -- threads --------------------------------------------------------------------
@@ -738,31 +874,47 @@ def page_thread_events(
     limit: int,
     *,
     before: int | None = None,
+    event_types: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """One chronological page of a thread's turn events.
 
     ``since`` pages forward for live updates. ``before`` pages backward from
     the oldest event a client already has. With neither cursor, the newest
     page is returned so opening a long thread does not scan its full history.
+    Optional event-type filtering happens in PostgreSQL before ``limit``, so
+    an activity-dense run cannot crowd messages out of a conversation page.
     Backward and initial pages are selected newest-first in the inner query,
     then restored to chronological order for chat rendering.
     """
+    event_type_clause = ""
+    event_type_params: tuple[Any, ...] = ()
+    if event_types is not None:
+        if not event_types:
+            return []
+        placeholders = ", ".join(["%s"] * len(event_types))
+        event_type_clause = f" AND event_type IN ({placeholders})"
+        event_type_params = event_types
     with db.transaction() as cur:
         if since is not None:
             cur.execute(
                 f"SELECT {_EVENT_FIELDS} FROM agent_events"
-                " WHERE thread_id = %s AND seq > %s ORDER BY seq LIMIT %s",
-                (thread_id, since, limit),
+                " WHERE thread_id = %s AND seq > %s"
+                f"{event_type_clause} ORDER BY seq LIMIT %s",
+                (thread_id, since, *event_type_params, limit),
             )
         else:
             before_clause = " AND seq < %s" if before is not None else ""
-            params: tuple[Any, ...] = (
-                (thread_id, before, limit) if before is not None else (thread_id, limit)
+            before_params: tuple[Any, ...] = (before,) if before is not None else ()
+            params = (
+                thread_id,
+                *before_params,
+                *event_type_params,
+                limit,
             )
             cur.execute(
                 f"SELECT * FROM (SELECT {_EVENT_FIELDS} FROM agent_events"
                 " WHERE thread_id = %s"
-                f"{before_clause} ORDER BY seq DESC LIMIT %s) AS newest"
+                f"{before_clause}{event_type_clause} ORDER BY seq DESC LIMIT %s) AS newest"
                 " ORDER BY seq",
                 params,
             )

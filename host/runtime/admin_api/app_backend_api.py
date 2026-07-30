@@ -170,7 +170,7 @@ def route_app_backend_request(
         internal_path,
         query,
         body,
-        app_backend_id=app_id,
+        principal=admin_api.AppBackendPrincipal(app_id),
     )
     if method == "GET" and path == "/v1/threads" and isinstance(response, dict):
         # The bulk thread list is host-global; an app backend sees only the

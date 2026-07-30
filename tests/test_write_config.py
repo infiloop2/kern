@@ -31,8 +31,12 @@ CLOUDFLARE_CONNECTION = {
 }
 
 
-def run(mode: str, runtime_config: dict) -> tuple[int, str, str]:
-    stdin = io.StringIO(json.dumps({"mode": mode, "runtime_config": runtime_config}))
+def run(mode: str, runtime_config: dict, *, reset_admin_passkeys: bool = False) -> tuple[int, str, str]:
+    stdin = io.StringIO(json.dumps({
+        "mode": mode,
+        "runtime_config": runtime_config,
+        "reset_admin_passkeys": reset_admin_passkeys,
+    }))
     stdout, stderr = io.StringIO(), io.StringIO()
     with patch("sys.stdin", stdin), patch("sys.stdout", stdout), patch("sys.stderr", stderr):
         code = write_config.main()
@@ -116,6 +120,21 @@ class WriteConfigTests(unittest.TestCase):
         code, _, _ = run("reconfigure", self.payload(operator_connections=[]))
         self.assertEqual(code, 1)
         self.assertEqual(load_config()["admin_password_sha256"], KEEP_HASH)
+
+    def test_only_reconfigure_can_explicitly_reset_passkeys(self) -> None:
+        with patch.object(write_config, "reset_admin_passkeys") as reset:
+            code, _, stderr = run(
+                "reconfigure", self.payload(), reset_admin_passkeys=True
+            )
+            self.assertEqual(code, 0, stderr)
+            reset.assert_called_once_with()
+        for mode in ("deploy", "upgrade", "recover"):
+            with self.subTest(mode=mode):
+                code, _, stderr = run(
+                    mode, self.payload(), reset_admin_passkeys=True
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("only during reconfigure", stderr)
 
 
 if __name__ == "__main__":

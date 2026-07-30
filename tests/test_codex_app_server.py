@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ from host.runtime.admin_api import codex_app_server as codex_app_server_module
 from host.runtime.admin_api.codex_app_server import (
     CodexAppServer,
     CodexAppServerError,
+    CodexTurnFinishing,
     read_codex_account_id,
     run_turn,
 )
@@ -201,6 +203,24 @@ for line in sys.stdin:
         send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
     elif method == "turn/steer":
         send({"id": msg["id"], "error": {"message": "steer rejected: malformed input"}})
+"""
+
+
+FAKE_DELAYED_STEER_ACK_SERVER = r"""
+import json, sys, time
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg["id"], "result": {}})
+    elif method == "turn/steer":
+        time.sleep(0.25)
+        send({"id": msg["id"], "result": {"turnId": "turn_1"}})
 """
 
 
@@ -1418,6 +1438,151 @@ for line in sys.stdin:
             with self.assertRaises(CodexAppServerError) as error:
                 server.steer("redirect")
         self.assertIn("malformed input", str(error.exception))
+
+    def test_notification_wait_cannot_delay_synchronous_steer_ack(self) -> None:
+        with CodexAppServer([sys.executable, "-u", "-c", FAKE_STEER_REJECT_SERVER]) as server:
+            server.set_active_turn("thread_1", "turn_1")
+            waiting = threading.Event()
+            original_next_message = server._next_message
+
+            def observed_next_message(timeout: float) -> dict[str, Any]:
+                waiting.set()
+                return original_next_message(timeout)
+
+            server._next_message = observed_next_message  # type: ignore[method-assign]
+            reader_error: list[Exception] = []
+
+            def read_notification() -> None:
+                try:
+                    server.read_message(timeout=1)
+                except Exception as exc:
+                    reader_error.append(exc)
+
+            reader = threading.Thread(target=read_notification)
+            reader.start()
+            self.assertTrue(waiting.wait(timeout=1), "notification reader did not start")
+            started = time.monotonic()
+            with self.assertRaisesRegex(CodexAppServerError, "malformed input"):
+                server.steer("redirect")
+            elapsed = time.monotonic() - started
+            reader.join(timeout=5)
+
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(len(reader_error), 1)
+        self.assertIsInstance(reader_error[0], codex_app_server_module.CodexTimeout)
+
+    def test_completion_waits_for_synchronous_steer_ack(self) -> None:
+        with CodexAppServer(
+            [sys.executable, "-u", "-c", FAKE_DELAYED_STEER_ACK_SERVER]
+        ) as server:
+            server.set_active_turn("thread_1", "turn_1")
+            steer_error: list[Exception] = []
+
+            def steer() -> None:
+                try:
+                    server.steer("redirect")
+                except Exception as exc:
+                    steer_error.append(exc)
+
+            steering = threading.Thread(target=steer)
+            steering.start()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with server._response_waiters_lock:
+                    if server._response_waiters:
+                        break
+                time.sleep(0.005)
+            else:
+                self.fail("steer response waiter was not registered")
+
+            cleared = threading.Event()
+            clearing = threading.Thread(
+                target=lambda: (server.clear_active_turn(), cleared.set())
+            )
+            clearing.start()
+            self.assertFalse(cleared.wait(timeout=0.05))
+            steering.join(timeout=5)
+            clearing.join(timeout=5)
+
+        self.assertFalse(steering.is_alive())
+        self.assertFalse(clearing.is_alive())
+        self.assertEqual(steer_error, [])
+        self.assertTrue(cleared.is_set())
+
+    def test_completion_notification_fences_later_steers(self) -> None:
+        with CodexAppServer(
+            [sys.executable, "-u", "-c", FAKE_DELAYED_STEER_ACK_SERVER]
+        ) as server:
+            server.set_active_turn("thread_1", "turn_1")
+            server._read_stdout(
+                io.StringIO(
+                    json.dumps(
+                        {
+                            "method": "turn/completed",
+                            "params": {"turn": {"status": "completed"}},
+                        }
+                    )
+                    + "\n"
+                )
+            )
+            server.clear_active_turn()
+
+            with self.assertRaisesRegex(CodexTurnFinishing, "is finishing"):
+                server.steer("too late")
+
+    def test_synchronous_steers_are_serialized_until_each_ack(self) -> None:
+        with CodexAppServer(
+            [sys.executable, "-u", "-c", FAKE_DELAYED_STEER_ACK_SERVER]
+        ) as server:
+            server.set_active_turn("thread_1", "turn_1")
+            errors: list[Exception] = []
+
+            def steer(message: str) -> None:
+                try:
+                    server.steer(message)
+                except Exception as exc:
+                    errors.append(exc)
+
+            first = threading.Thread(target=steer, args=("first",))
+            first.start()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with server._response_waiters_lock:
+                    if server._response_waiters:
+                        break
+                time.sleep(0.005)
+            else:
+                self.fail("first steer response waiter was not registered")
+
+            second = threading.Thread(target=steer, args=("second",))
+            second.start()
+            time.sleep(0.05)
+            with server._response_waiters_lock:
+                self.assertEqual(len(server._response_waiters), 1)
+            first.join(timeout=5)
+            second.join(timeout=5)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_steer_timeout_removes_its_direct_response_waiter(self) -> None:
+        with CodexAppServer(
+            [sys.executable, "-u", "-c", FAKE_DELAYED_STEER_ACK_SERVER]
+        ) as server:
+            server.set_active_turn("thread_1", "turn_1")
+            with (
+                patch.object(
+                    codex_app_server_module,
+                    "CODEX_STEER_TIMEOUT_SECONDS",
+                    0.05,
+                ),
+                self.assertRaises(codex_app_server_module.CodexTimeout),
+            ):
+                server.steer("redirect")
+            with server._response_waiters_lock:
+                self.assertEqual(server._response_waiters, {})
+            server.clear_active_turn()
 
 
 if __name__ == "__main__":

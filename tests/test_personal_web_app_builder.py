@@ -73,7 +73,9 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("stopRunningTurn()", source)
         self.assertIn("sessionConfigurationChanged()", source)
         self.assertIn("!fromGeneratedApp && sessionConfigurationChanged()", source)
-        self.assertIn('showChatStatus("Sending…")', source)
+        self.assertNotIn('showChatStatus("Sending…")', source)
+        self.assertIn('classList.toggle("sending", composerSending)', source)
+        self.assertIn(".send-button.sending::after", css)
         self.assertIn('showChatStatus("Stopping…")', source)
         self.assertNotIn("Waiting for agent to start", source)
         self.assertIn('"kern-app-upload-file"', source)
@@ -83,7 +85,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("loadOlderConversationEvents()", source)
         self.assertIn("refreshSequence !== appsRefreshSequence", source)
         self.assertIn("if (selectedAppId === threadId) clearSelectedApp()", source)
-        self.assertNotIn("localStorage", source)
+        self.assertIn("COMPOSER_DRAFTS_STORAGE_KEY", source)
+        self.assertIn("localStorage.setItem", source)
         self.assertNotIn("conversation/events?since=0", source)
         self.assertNotIn("reset-app", index)
         self.assertNotIn('api("POST", "/reset")', source)
@@ -338,7 +341,9 @@ class ConversationTests(unittest.TestCase):
             )
         host.assert_called_once_with(
             "GET",
-            "/v1/threads/app-6/events?since=2&limit=6&message_bytes=122880",
+            "/v1/threads/app-6/events?since=2&limit=6&message_bytes=122880"
+            "&event_type=thread.message&event_type=thread.error"
+            "&event_type=thread.stopped",
         )
 
     def test_conversation_events_open_at_tail_and_page_backward(self) -> None:
@@ -356,14 +361,18 @@ class ConversationTests(unittest.TestCase):
             host.call_args_list[0].args,
             (
                 "GET",
-                "/v1/threads/app-6/events?limit=6&message_bytes=122880",
+                "/v1/threads/app-6/events?limit=6&message_bytes=122880"
+                "&event_type=thread.message&event_type=thread.error"
+                "&event_type=thread.stopped",
             ),
         )
         self.assertEqual(
             host.call_args_list[1].args,
             (
                 "GET",
-                "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880",
+                "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880"
+                "&event_type=thread.message&event_type=thread.error"
+                "&event_type=thread.stopped",
             ),
         )
 

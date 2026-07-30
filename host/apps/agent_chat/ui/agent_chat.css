@@ -387,9 +387,11 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   overflow: hidden;
 }
 
-/* Visibility is a view preference, not a data/rendering change. Keeping the
-   cards in the DOM preserves each card's expanded state when toggled. */
-.chat-app.activity-hidden .activity-card { display: none; }
+/* Visibility is a view preference, not a data/rendering change. Remove the
+   complete grid item from layout so hidden activity cannot leave empty rows
+   and accumulated conversation gaps. The card stays in the DOM, preserving
+   its expanded state when activity is shown again. */
+.chat-app.activity-hidden .thread-activity { display: none; }
 
 .activity-card summary,
 .activity-summary {
@@ -755,6 +757,22 @@ button.attachment-clear {
 .send-button:disabled {
   background: var(--surface-3);
   color: var(--text-dim);
+}
+
+.send-button.sending:disabled { opacity: 1; }
+.send-button.sending svg { display: none; }
+.send-button.sending::after {
+  animation: send-button-spin 0.7s linear infinite;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  content: "";
+  height: 13px;
+  width: 13px;
+}
+
+@keyframes send-button-spin {
+  to { transform: rotate(360deg); }
 }
 
 .composer-hint {

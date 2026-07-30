@@ -574,7 +574,11 @@ echo "== migrating app schemas =="
 python3 - <<'PY' | runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.write_config > /tmp/kern_effective_config.json
 import json, pathlib
 payload = json.loads(pathlib.Path('/tmp/kern_payload.json').read_text())
-print(json.dumps({'mode': payload['operation']['mode'], 'runtime_config': payload['runtime_config']}))
+print(json.dumps({
+    'mode': payload['operation']['mode'],
+    'runtime_config': payload['runtime_config'],
+    'reset_admin_passkeys': bool(payload['operation'].get('reset_admin_passkeys', False)),
+}))
 PY
 chmod 600 /tmp/kern_effective_config.json
 }

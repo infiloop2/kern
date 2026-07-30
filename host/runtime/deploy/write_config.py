@@ -16,7 +16,7 @@ import json
 import sys
 from typing import Any
 
-from host.runtime.core.state import load_config, save_config
+from host.runtime.core.state import load_config, reset_admin_passkeys, save_config
 
 PAYLOAD_MODES = {"deploy", "reconfigure"}
 CARRY_OVER_MODES = {"upgrade", "recover"}
@@ -64,6 +64,11 @@ def main() -> int:
     if not isinstance(raw, dict) or not isinstance(raw.get("runtime_config"), dict):
         return _fail("stdin must be an object with mode and runtime_config")
     mode = raw.get("mode")
+    reset_passkeys = raw.get("reset_admin_passkeys", False)
+    if not isinstance(reset_passkeys, bool):
+        return _fail("reset_admin_passkeys must be a boolean")
+    if reset_passkeys and mode != "reconfigure":
+        return _fail("reset_admin_passkeys is allowed only during reconfigure")
     payload_config = raw["runtime_config"]
     if mode in CARRY_OVER_MODES:
         existing = load_config()
@@ -88,6 +93,8 @@ def main() -> int:
         "operator_connections": operator_connections,
     }
     save_config(runtime_config)
+    if reset_passkeys:
+        reset_admin_passkeys()
     print(json.dumps(runtime_config, sort_keys=True))
     return 0
 

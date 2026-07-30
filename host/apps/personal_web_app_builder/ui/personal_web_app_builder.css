@@ -431,7 +431,29 @@ button.attachment-clear {
 .attach-button:hover { background: var(--surface-3); color: var(--text); }
 .attach-button svg { height: 17px; width: 17px; }
 .composer-row textarea { background: transparent; border: 0; flex: 1 1 auto; font-size: 16px; line-height: 1.4; max-height: 8rem; min-height: 2.25rem; outline: none; padding: 0.42rem 0.48rem; resize: none; }
-.composer-row .send-button { flex: 0 0 auto; height: 2.4rem; width: 2.4rem; }
+.composer-row .send-button {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 2.4rem;
+  justify-content: center;
+  width: 2.4rem;
+}
+.composer-row .send-button svg { height: 17px; width: 17px; }
+.composer-row .send-button.sending:disabled { opacity: 1; }
+.composer-row .send-button.sending svg { display: none; }
+.composer-row .send-button.sending::after {
+  animation: send-button-spin 0.7s linear infinite;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  content: "";
+  height: 13px;
+  width: 13px;
+}
+@keyframes send-button-spin {
+  to { transform: rotate(360deg); }
+}
 .chat-status { color: var(--text-dim); font-size: 0.7rem; }
 .chat-status.error { color: var(--danger); }
 

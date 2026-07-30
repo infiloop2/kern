@@ -381,6 +381,34 @@ button.runtime-summary:hover {
 .upgrade-notice:focus-visible { outline: 2px solid var(--ok); outline-offset: 1px; }
 .upgrade-notice svg { display: block; flex: 0 0 auto; }
 
+.passkey-status-control {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  height: 1.65rem;
+  justify-content: center;
+  padding: 0;
+  position: relative;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  width: 1.65rem;
+}
+
+.passkey-status-control.passkey-setup-needed {
+  background: var(--warn-soft);
+  border-color: rgba(232, 194, 104, 0.4);
+  color: var(--warn);
+}
+
+.passkey-status-control.passkey-protected {
+  background: var(--ok-soft);
+  border-color: rgba(95, 214, 162, 0.34);
+  color: var(--ok);
+}
+
+.passkey-status-control:hover { filter: brightness(1.12); }
+.passkey-status-control:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+.passkey-status-control svg { display: block; flex: 0 0 auto; }
+
 .upgrade-popover {
   background: var(--surface-3);
   border: 1px solid var(--border-strong);
@@ -405,7 +433,14 @@ button.runtime-summary:hover {
 }
 
 .upgrade-popover > span { color: var(--text-dim); }
-.upgrade-notice:hover .upgrade-popover, .upgrade-notice:focus .upgrade-popover { opacity: 1; transform: translateY(0); visibility: visible; }
+.upgrade-notice:hover .upgrade-popover,
+.upgrade-notice:focus .upgrade-popover,
+.passkey-status-control:hover .upgrade-popover,
+.passkey-status-control:focus .upgrade-popover {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
 button.mobile-nav-toggle.icon-button, .sidebar-mobile-head, .nav-backdrop { display: none; }
 
 /* ---------- Notice toast ---------- */
@@ -480,6 +515,22 @@ button.mobile-nav-toggle.icon-button, .sidebar-mobile-head, .nav-backdrop { disp
 
 .login-card p { margin: 0 0 1.3rem; }
 
+.login-card .login-passkey-status {
+  align-items: center;
+  background: var(--ok-soft);
+  border: 1px solid rgba(95, 214, 162, 0.3);
+  border-radius: 999px;
+  color: var(--ok);
+  display: inline-flex;
+  font-size: 0.76rem;
+  font-weight: 600;
+  gap: 0.38rem;
+  margin: -0.4rem 0 1rem;
+  padding: 0.32rem 0.6rem;
+}
+
+.login-card .login-passkey-status[hidden] { display: none; }
+
 .login-card input { margin-bottom: 0.8rem; text-align: center; }
 .login-error { color: var(--danger); font-size: 0.85rem; margin: -0.2rem 0 0.8rem; }
 
@@ -488,6 +539,22 @@ button.mobile-nav-toggle.icon-button, .sidebar-mobile-head, .nav-backdrop { disp
   margin: 1.4rem 0 0 !important;
   opacity: 0.75;
 }
+
+.passkey-setup {
+  align-items: center;
+  background: var(--ok-soft);
+  border: 1px solid rgba(95, 214, 162, 0.35);
+  border-radius: 12px;
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.75rem 0.85rem;
+}
+
+.passkey-setup[hidden] { display: none; }
+.passkey-setup-icon { color: var(--ok); display: inline-flex; }
+.passkey-setup-copy { display: grid; flex: 1; gap: 0.12rem; min-width: 0; }
+.passkey-setup-copy strong { font-size: 0.82rem; }
+.passkey-setup-copy span { color: var(--text-dim); font-size: 0.72rem; }
 
 /* ---------- Shell layout ---------- */
 
@@ -1014,14 +1081,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 
 button.primary {
-  background: linear-gradient(135deg, #2ab5a5, #6f5ce8);
+  background: linear-gradient(135deg, #287f79, #54509a);
   border-color: transparent;
   color: #eafffb;
   font-weight: 600;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
-button.primary:hover { filter: brightness(1.12); }
+button.primary:hover { filter: brightness(1.07); }
+
+.login-card button.primary {
+  background: linear-gradient(135deg, #2ab5a5, #6f5ce8);
+}
+
+.login-card button.primary:hover { filter: brightness(1.12); }
 
 button.ghost { background: transparent; border-color: var(--border); color: var(--text-dim); }
 

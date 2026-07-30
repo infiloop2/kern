@@ -117,6 +117,9 @@ class ApiError(Exception):
 @dataclass
 class MockState:
     lock: threading.Lock = field(default_factory=threading.Lock)
+    public_https_preview: bool = False
+    passkey_configured: bool = False
+    passkey_credential_id: str | None = None
     next_turn_number: int = 1
     next_agent_event_seq: int = 1
     next_network_event_seq: int = 1
@@ -658,6 +661,28 @@ def seed_state() -> None:
             "started_min": 7,
             "completed_min": 5,
         },
+        {
+            "thread_id": "activity-heavy",
+            "agent_runtime": "codex",
+            "status": "completed",
+            "input_message": "Conversation marker before dense activity",
+            "activities": [
+                {
+                    "provider": "codex",
+                    "activity_id": f"dense-command-{index}",
+                    "kind": "command",
+                    "phase": "completed",
+                    "title": f"Dense command {index}",
+                    "output": "done",
+                    "status": "exit 0",
+                }
+                for index in range(40)
+            ],
+            "output_message": "Conversation marker after dense activity",
+            "created_min": 4,
+            "started_min": 3,
+            "completed_min": 2,
+        },
     ]
     for spec in seed_turns:
         thread_id = spec["thread_id"]
@@ -912,9 +937,32 @@ mockUpgradeNotice.addEventListener("click", async () => {
             if method == "POST" and parsed.path == "/v1/login":
                 self._handle_login()
                 return
+            if (
+                STATE.public_https_preview
+                and method == "GET"
+                and parsed.path == "/v1/login/status"
+            ):
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"passkey_configured": STATE.passkey_configured},
+                )
+                return
+            if (
+                STATE.public_https_preview
+                and method == "POST"
+                and parsed.path == "/v1/login/passkey"
+            ):
+                self._handle_passkey_login()
+                return
             self._authenticate()
             if method == "POST" and parsed.path == "/v1/logout":
                 self._handle_logout()
+                return
+            if (
+                STATE.public_https_preview
+                and parsed.path.startswith("/v1/admin-passkeys")
+            ):
+                self._handle_admin_passkeys(method, parsed.path)
                 return
             if method == "GET" and parsed.path == "/v1/agent-files/content":
                 file_path = (parse_qs(parsed.query).get("path") or [""])[0]
@@ -957,7 +1005,10 @@ mockUpgradeNotice.addEventListener("click", async () => {
     def _authenticate(self) -> None:
         # The session cookie minted by /v1/login is the only accepted credential,
         # and cookie-authenticated requests must carry the CSRF header.
-        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""), secure=False)
+        token = admin_auth.parse_session_token(
+            self.headers.get("Cookie", ""),
+            context=admin_auth.LOCAL_SSH_FORWARD,
+        )
         if token in MOCK_SESSIONS and self.headers.get(admin_auth.CSRF_HEADER_NAME):
             return
         raise ApiError(HTTPStatus.UNAUTHORIZED, "missing or invalid admin session")
@@ -968,14 +1019,123 @@ mockUpgradeNotice.addEventListener("click", async () => {
         if password != PASSWORD:
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": {"message": "missing or invalid admin password"}})
             return
+        if STATE.public_https_preview and STATE.passkey_configured:
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "passkey_required": True,
+                    "publicKey": self._passkey_login_options(),
+                },
+            )
+            return
+        self._mint_session()
+
+    def _mint_session(self) -> None:
         token = secrets.token_urlsafe(32)
         MOCK_SESSIONS.add(token)
-        self._send_json(HTTPStatus.OK, {"ok": True}, set_cookie=admin_auth.session_cookie(token, secure=False))
+        self._send_json(
+            HTTPStatus.OK,
+            {"ok": True},
+            set_cookie=admin_auth._session_cookie(
+                token, context=admin_auth.LOCAL_SSH_FORWARD
+            ),
+        )
+
+    def _handle_passkey_login(self) -> None:
+        if not STATE.passkey_configured:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "no mock passkey is configured")
+        if not self.headers.get(admin_auth.CSRF_HEADER_NAME):
+            raise ApiError(HTTPStatus.FORBIDDEN, "missing passkey login request header")
+        # Preview-only: the browser performs the real WebAuthn ceremony against
+        # localhost. The mock accepts its serialized result instead of storing
+        # or validating credential material.
+        if not isinstance(self._read_body(), dict):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "missing passkey response")
+        self._mint_session()
+
+    def _handle_admin_passkeys(self, method: str, path: str) -> None:
+        if method == "GET" and path == "/v1/admin-passkeys":
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "configured": STATE.passkey_configured,
+                    "credential_count": 1 if STATE.passkey_configured else 0,
+                    "setup_available": True,
+                    "rp_id": self._mock_rp_id(),
+                },
+            )
+            return
+        if method == "POST" and path == "/v1/admin-passkeys/register/options":
+            self._send_json(
+                HTTPStatus.OK,
+                {"publicKey": self._passkey_registration_options()},
+            )
+            return
+        if method == "POST" and path == "/v1/admin-passkeys/register":
+            body = self._read_body()
+            credential_id = body.get("id") if isinstance(body, dict) else None
+            if not isinstance(credential_id, str) or not credential_id:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "missing passkey credential")
+            STATE.passkey_credential_id = credential_id
+            STATE.passkey_configured = True
+            self._send_json(
+                HTTPStatus.OK,
+                {"configured": True, "credential_count": 1},
+            )
+            return
+        raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
+
+    def _mock_rp_id(self) -> str:
+        host = self.headers.get("Host", "localhost").split(":", 1)[0].lower()
+        return host if host in {"localhost", "127.0.0.1"} else "localhost"
+
+    def _passkey_registration_options(self) -> dict[str, Any]:
+        return {
+            "challenge": _mock_b64(secrets.token_bytes(32)),
+            "timeout": 300_000,
+            "rp": {"id": self._mock_rp_id(), "name": "Kern · mock preview"},
+            "user": {
+                "id": _mock_b64(b"kern-mock-admin"),
+                "name": "admin",
+                "displayName": "Kern administrator",
+            },
+            "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+            "authenticatorSelection": {
+                "residentKey": "required",
+                "requireResidentKey": True,
+                "userVerification": "required",
+            },
+            "excludeCredentials": [],
+            "attestation": "none",
+        }
+
+    def _passkey_login_options(self) -> dict[str, Any]:
+        credential_id = STATE.passkey_credential_id
+        return {
+            "challenge": _mock_b64(secrets.token_bytes(32)),
+            "timeout": 300_000,
+            "rpId": self._mock_rp_id(),
+            "allowCredentials": (
+                [{"type": "public-key", "id": credential_id}]
+                if credential_id is not None
+                else []
+            ),
+            "userVerification": "required",
+        }
 
     def _handle_logout(self) -> None:
-        token = admin_auth.parse_session_token(self.headers.get("Cookie", ""), secure=False)
+        token = admin_auth.parse_session_token(
+            self.headers.get("Cookie", ""),
+            context=admin_auth.LOCAL_SSH_FORWARD,
+        )
         MOCK_SESSIONS.discard(token or "")
-        self._send_json(HTTPStatus.OK, {"ok": True}, set_cookie=admin_auth.clear_session_cookie(secure=False))
+        self._send_json(
+            HTTPStatus.OK,
+            {"ok": True},
+            set_cookie=admin_auth._clear_session_cookie(
+                context=admin_auth.LOCAL_SSH_FORWARD
+            ),
+        )
 
     def _read_body(self) -> Any:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -1786,7 +1946,9 @@ def list_threads(query: dict[str, list[str]]) -> dict[str, Any]:
 
 def list_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
     """A chronological thread-event page around a forward or backward cursor."""
-    unsupported = sorted(set(query) - {"since", "before", "limit", "message_bytes"})
+    unsupported = sorted(
+        set(query) - {"since", "before", "limit", "message_bytes", "event_type"}
+    )
     if unsupported:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"unsupported thread event query parameter: {unsupported[0]}")
     since = int(query["since"][0]) if query.get("since") else None
@@ -1794,6 +1956,7 @@ def list_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[str,
     if since is not None and before is not None:
         raise ApiError(HTTPStatus.BAD_REQUEST, "since and before cannot be combined")
     limit = int((query.get("limit") or ["100"])[0])
+    event_types = set(query.get("event_type") or [])
     with STATE.lock:
         progress_running_turns_locked()
         events = [
@@ -1801,6 +1964,7 @@ def list_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict[str,
             for event in STATE.agent_events
             if (
                 event["thread_id"] == thread_id
+                and (not event_types or event["event_type"] in event_types)
                 and (since is None or event["seq"] > since)
                 and (before is None or event["seq"] < before)
             )
@@ -2380,6 +2544,10 @@ def one(query: dict[str, list[str]], key: str) -> str | None:
     return values[0]
 
 
+def _mock_b64(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
@@ -2389,6 +2557,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Start pre-configured for interactive exploration, including active agent providers with "
         "representative usage; the UI smoke needs the default empty state.",
+    )
+    parser.add_argument(
+        "--public-https",
+        action="store_true",
+        help=(
+            "Preview the public HTTPS passkey UI on http://localhost. "
+            "Use localhost rather than 127.0.0.1 so WebAuthn can bind its RP ID."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -2441,10 +2617,16 @@ def main(argv: list[str] | None = None) -> int:
     seed_state()
     if args.demo:
         seed_demo_state()
+    STATE.public_https_preview = args.public_https
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     actual_host, actual_port = server.server_address
     print(f"Kern mock admin UI: http://{actual_host}:{actual_port}/")
     print(f"Admin password: {PASSWORD}")
+    if args.public_https:
+        print(
+            f"Public HTTPS passkey preview: http://localhost:{actual_port}/ "
+            "(localhost WebAuthn secure-context exception)"
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

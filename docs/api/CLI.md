@@ -14,6 +14,7 @@ result JSON ([Deploy result](DeployResult.md)).
 | `--admin-password-sha256 <hex>` | `deploy`, `reconfigure` | Yes | SHA-256 hex digest of the admin password. The host stores only this hash; `python3 -m host.cli.generate_password` prints a generated password with its digest. |
 | `--bootstrap-from-github [commit-sha]` | `deploy`, `upgrade`, `recover`, `reconfigure` | No | Provisions the instance from a pinned `infiloop2/kern` commit via EC2 user data instead of pushing the local checkout over SSH; without a value, the latest `main` commit is pinned. The pinned commit's `VERSION` is the operation's target and the CLI asks for confirmation. Pins older than `0.35.0` are rejected. |
 | `--allow-upgrade` | `recover` | No | Allows no-instance recovery to advance preserved admin state from an older version to the target `VERSION`. |
+| `--reset-admin-passkeys` | `reconfigure` | No | Recovery switch that deletes all enrolled admin passkeys. Use it after losing passkey access or when replacing the public admin hostname. It does not alter the password beyond reconfigure's existing password input. |
 
 ## Environment variables
 

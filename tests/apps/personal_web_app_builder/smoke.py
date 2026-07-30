@@ -765,12 +765,14 @@ def desktop_smoke(page: Any) -> None:
     frame.get_by_role("button", name="Send message", exact=True).click()
     expect(frame.locator(".dashboard")).to_be_visible(timeout=8_000)
     expect(frame.locator(".dashboard h1")).to_have_text("Scratch app")
+    frame.locator("#message").fill("Keep this scratch-app draft.")
     frame.get_by_role("button", name="Close agent chat", exact=True).click()
     expect(frame.locator(".metric strong")).to_have_text("2")
 
     frame.locator(".app-item", has_text="Weekly focus").click()
     expect(frame.locator(".metric strong")).to_have_text("3")
     frame.get_by_role("button", name="Agent chat", exact=True).click()
+    expect(frame.locator("#message")).to_have_value("Keep this unsent human draft.")
     expect(frame.locator("#chat-history")).not_to_contain_text(
         "separate scratch dashboard"
     )
@@ -779,6 +781,7 @@ def desktop_smoke(page: Any) -> None:
     frame.locator(".app-item", has_text="Scratch app").click()
     expect(frame.locator(".metric strong")).to_have_text("2")
     frame.get_by_role("button", name="Agent chat", exact=True).click()
+    expect(frame.locator("#message")).to_have_value("Keep this scratch-app draft.")
     expect(frame.locator("#chat-history")).to_contain_text(
         "separate scratch dashboard"
     )

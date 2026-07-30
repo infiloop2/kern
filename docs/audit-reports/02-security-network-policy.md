@@ -1,15 +1,26 @@
 # Audit: Network Proxy Policy Enforcement
 
 Finding ID prefix: `NET`. See [README.md](README.md) for the sweep process,
-entry template, and severity scale.
+finding format, and severity scale.
 
 ## Audit question
 
-Does the network proxy enforce the configured network policy without gaps or
-loopholes? Is there any implementation bug through which traffic the active
-policy does not allow — by domain, method, port, scheme, path guard, or
-provider guard — can reach the internet, an internal address, or otherwise
-exfiltrate data?
+Can an agent send any internet traffic the active policy does not intend to
+allow?
+
+## Reviewed commits
+
+Latest reviewed commit: `f28b50e87b61`.
+
+| Commit | Reviewed by |
+| --- | --- |
+| `f28b50e87b61` | Claude Opus 4.8; GPT-5.5 |
+
+## Findings
+
+| Finding | Severity | Found at | Found by | Description | Resolution |
+| --- | --- | --- | --- | --- | --- |
+| NET-001 | High | `f28b50e87b61` | Claude Opus 4.8 | Managed-provider account pins were derived repeatedly from agent-writable provider credentials. A malicious agent could replace those credentials with an attacker-controlled account, wait for the pin refresh, and then exfiltrate through an otherwise allowed provider domain. Anchor pins to operator-approved account state and attest refreshed credentials against that anchor. | Fixed at `fa6dc4ab5bc` |
 
 ## Threat model
 
@@ -22,72 +33,90 @@ exfiltrate data?
   operator-approved rule; the non-resolution of denied host names; the
   unreachability of loopback/link-local/private addresses; the OpenAI and
   Anthropic account pins.
-- **Trust boundaries:** the proxy process (`kern-proxy`) between the
-  agent and the internet; nftables as the independent backstop; the
-  read-only database role the proxy uses for policy and pins.
-- **In scope:** the whole request lifecycle in `host/runtime/network_proxy/service.py`
-  and `host/runtime/core/network_policy.py` — CONNECT and TLS interposition,
-  request parsing (chunked encoding, header folding, smuggling), domain and
-  wildcard matching, method/port/scheme checks, `path_guards` regex
-  semantics, body buffering limits, WebSocket handshake and tunneling,
-  upstream address vetting (DNS rebinding, IPv6, redirects), domain spoofing
-  (look-alike/homograph and confusable names, trailing dots, case tricks,
-  mismatches between SNI, `Host`, CONNECT target, and the policy-matched
-  domain), upstream TLS certificate and hostname verification and the trust
-  store it uses, the provider guards and their fail-closed states, policy
-  read/validation per request, and the nftables egress rules as the second
-  layer.
-- **Out of scope:** covert channels that carry no agent-chosen data to an
-  agent-chosen endpoint (e.g. timing against an allowed host); cryptographic
-  attacks on the TLS protocol itself — everything about *how the proxy
-  verifies* the upstream (certificates, hostnames, trust anchors) stays in
-  scope; Ubuntu/kernel bugs. Whether the *policy an operator wrote* is wise
-  is axis 04's problem — here the policy as stored is the spec.
+- **Out of scope:** cryptographic attacks on the TLS protocol itself —
+  everything about *how the proxy verifies* the upstream (certificates,
+  hostnames, trust anchors) stays in scope; Ubuntu/kernel bugs. Whether the
+  *policy an operator wrote* is wise is axis 07's problem — here the policy
+  as stored is the spec.
 
-## Scope checklist
+## Minimal scope checklist
 
 This checklist is not comprehensive: it names known-important areas, but the
 audit question and threat model define the scope. Account for each item in
 your coverage section, and report anything else within scope even if no item
 below names it.
 
-1. Parsing and canonicalization: can two components disagree about the host,
-   port, method, or path of the same request (smuggling, absolute-form URIs,
-   `Host` vs CONNECT target, percent-encoding, unicode)?
-2. Matching semantics: wildcard precedence, empty `allow_http_methods`,
-   case sensitivity, trailing dots, IP-literal hosts.
-3. Every deny path actually closes the connection without forwarding, and
-   denied names are never resolved.
-4. Upstream connection: public-routability check ordering vs DNS resolution
-   (rebinding), redirect handling, IPv6 and dual-stack answers, and TLS
-   certificate/hostname verification against the policy-matched domain.
-5. WebSockets: policy at handshake, and what the tunnel permits afterward.
-6. Provider guards: OpenAI web-search denial and account pinning, Anthropic
-   bearer-hash pinning, all fail-closed windows (missing pin, unreadable
-   account file, database down).
-7. Resource-exhaustion bypasses: does any overload path fail open?
-8. nftables backstop: uid coverage, DNS blocking, the 7844 allowance.
+1. Validate the integration registry and every manifest/config parser:
+   OpenAI, Claude, Bedrock, GitHub, Python packages, npm packages, and custom
+   domains. Check unique ids and denial codes, disjoint owned apexes,
+   managed-domain ownership under broad wildcards, disabled/omitted entries,
+   extra fields, and malformed or unavailable database state.
+2. Audit the proxy protocol boundary: HTTPS/WSS through CONNECT only, port
+   443 only, plain HTTP/WS denial before body or DNS work, origin-form inner
+   targets, one request per tunnel, and agreement among CONNECT authority,
+   `Host`, SNI, policy owner, and upstream destination. Include duplicate
+   headers, IPv6 authorities, userinfo, ports, absolute-form targets, header
+   folding, CL/TE ambiguity, chunking, pipelining, and malformed UTF-8/bytes.
+3. Verify domain, method, normalized path, and query matching exactly reflects
+   typed policy: exact versus longest wildcard, apex exclusion, case and
+   trailing dots, IP literals, percent/double encoding, dot segments, Unicode,
+   regex anchoring, empty method lists, and the shared outbound parameter
+   guard over every effective URL value.
+4. For every denial and exception path, prove no certificate generation, DNS,
+   upstream socket, credential rewrite, gate side effect, or forwarded byte
+   occurs earlier than intended. Policy/credential reads and decision logging
+   must fail closed under invalid state, PostgreSQL outage, races, disconnects,
+   and internal exceptions; denials must close rather than reuse the tunnel.
+5. Audit DNS and upstream TLS: all resolved answers must be public before
+   connecting to a vetted address; cover rebinding, mixed public/private
+   answers, IPv4-mapped IPv6, link-local/metadata/loopback ranges, dual-stack
+   ordering, resolution failures, certificate chain/hostname/SNI validation,
+   and the absence of proxy-followed redirects.
+6. Exercise every integration-specific guard. Include OpenAI account pinning,
+   cached-search-only and HTTP/WebSocket hosted-tool/remote-MCP denial; Claude
+   token anchoring, narrow pre-pin reads, web-search option, server-tool and
+   remote-MCP denial; Bedrock region/model routes, dummy SigV4 identity,
+   query/session credential denial, race-safe re-signing and usage metering;
+   GitHub read/write repository scoping, GraphQL/admin/LFS restrictions,
+   credential stripping/injection and `.github` push quarantine/approval; and
+   package-registry name/download plus custom-domain rules.
+7. Test body inspection across content types, gzip/zlib/zstd/brotli, invalid or
+   oversized encodings, JSON ambiguity, nested tool declarations, renamed
+   hosted tools, and values split across structures. A body the relevant
+   upstream could interpret as privileged must not bypass a failed decoder or
+   parser.
+8. Audit WebSockets at handshake and per message: upgrade/header validation,
+   masking, RSV/extensions, control frames, fragmentation, interleaving,
+   compressed/uninspectable traffic, initial pipelined frames, message and
+   buffer caps, close behavior, and which integrations may tunnel opaquely
+   after request-only checks.
+9. Check secrets and mutable state around enforcement: provider account
+   anchors, Bedrock and GitHub credentials, token refresh/replacement races,
+   agent-supplied authorization/header stripping, real credential injection,
+   push-gate objects, and error/event output. The agent must neither select nor
+   recover operator credentials.
+10. Test overload and lifecycle failures—connection/body caps, slowloris,
+    memory pressure, certificate-cache failure, push-gate/quarantine failure,
+    proxy/database restart, and concurrent policy replacement—and prove none
+    fail open.
+11. Verify the nftables backstop and live host behavior: only `kern-agent` can
+    reach the proxy, agent DNS/direct egress and other loopback ports are
+    denied, preview-port exceptions cannot become egress, proxy DNS/80/443
+    access is scoped to its uid, and deployment probes catch missing or
+    reordered rules.
 
-## Key code and docs
+## Collaborative review
 
-- `docs/architecture/network-controls.md`, `docs/api/NetworkControls.md`
-- `host/runtime/network_proxy/service.py`, `host/runtime/core/network_policy.py`,
-  `host/runtime/proxy_state_client.py`
-- nftables rules and proxy CA setup in `host/bootstrap/`
-- `tests/` for existing proxy coverage (gaps in it are reportable as Info)
+### `f28b50e87b61`
 
-## Audit entries
+Reviewed by: Claude Opus 4.8 (claude-opus-4-8); GPT-5.5 (gpt-5.5)
 
-## 2026-07-04 — Claude Opus 4.8 — `f28b50e`
-
-Reviewer: Claude Opus 4.8 (claude-opus-4-8)
-Commit: `f28b50e`
 Methodology: static code reading of the full proxy request lifecycle and the
 policy-matching/provider-guard code; one empirical check of Python's
 `ipaddress.is_global` behavior for IPv4-mapped IPv6 on the target interpreter.
 No live proxy run or PoC traffic.
 
-### What was reviewed
+#### What was reviewed
 
 - `host/runtime/network_proxy/service.py`: `do_CONNECT` + `_serve_tls_request` (TLS
   interposition), `_proxy_http` (plain HTTP/WS, removed since — the proxy is
@@ -103,21 +132,11 @@ No live proxy run or PoC traffic.
   and the bounded gzip/zlib/zstd/brotli decoders.
 - `host/config.py` `parse_network_controls`/`expand_network_controls`: method
   uppercasing, domain validation, managed-domain expansion.
-- The nftables output chain as the independent backstop.
+- Policy and provider-pin storage, proxy database grants, network-event
+  writes, the nftables output chain as the independent backstop, and related
+  parser/policy/provider-guard tests.
 
-### Findings
-
-| ID | Status | Severity | Location | Summary |
-| --- | --- | --- | --- | --- |
-| NET-1 | Fixed | High | `host/runtime/admin_api/orchestrator.py:217`, `host/runtime/core/network_policy.py:140` | The managed-provider account pin is sourced from **agent-writable** state, so a malicious agent can redirect it to an attacker-controlled provider account and exfiltrate through the allowed provider domain. For OpenAI, `_seed_runtime_proxy_pin_for_status_check`/`account_status()` derive the account id by running `read-codex-account-id.sh` as `kern-agent` against `agent-home/.codex/auth.json` and write it into `proxy_provider_pins`; `openai_request_denied` then only checks the request's `ChatGPT-Account-Id` header against that DB pin (and never pins the OpenAI bearer token). There is no operator-controlled anchor for the expected account. A malicious agent overwrites its `auth.json` with valid credentials for an attacker-owned ChatGPT account B, waits for the background poller (`runtime_status_loop`, ≤300s) to re-derive the pin to B, then POSTs arbitrary data to the allowed `api.openai.com`/`chatgpt.com` with `ChatGPT-Account-Id: B` + B's token — the guard passes and the data lands in account B, retrievable by the attacker. The Anthropic guard shares the structure (`read-claude-account.sh` → `access_token_sha256` pin from agent-home credentials), so the same account-redirection exfil applies to Claude. Anchor the pin to operator-approved account state captured at login rather than re-deriving it from agent-home on every refresh, or treat provider domains as untrusted egress under the malicious-agent model. |
-
-I did not find any other policy-bypass path: domain/method/port/scheme/path-guard
-matching and the SSRF vet all hold, and no request reaches an upstream the active
-policy does not name. The one gap was NET-1 — the provider *account* control,
-whose enforcement source was agent-controlled; since fixed via operator-approved
-account anchors, with Claude identity server-attested against the token itself.
-
-Specific checks and why they held (with the NET-1 caveat on provider guards):
+#### Coverage details
 
 - **SSRF / DNS rebinding / mapped-IPv6 (verified negative).** `connect_public`
   resolves once, requires *every* resolved address to be `is_global`, then
@@ -147,13 +166,13 @@ Specific checks and why they held (with the NET-1 caveat on provider guards):
   (bounded, fail-closed decode) and by byte-marker anti-evasion; Anthropic
   bearer-hash pin with a narrow pre-pin GET allowlist; all fail closed when the
   pin/account is unavailable. But the *pinned value itself* comes from
-  agent-writable credential files, which is NET-1: the guard confines the header
+  agent-writable credential files, which is NET-001: the guard confines the header
   to whatever account the agent is logged into, and the agent controls that, so
   it does not confine traffic to an operator-approved account.
 - **Fail-closed states.** Missing policy row, unparseable policy, and database
   outage all deny; a decision that cannot be logged fails that request.
 
-### Coverage and confidence
+#### Coverage and confidence
 
 - Checklist 1–3 (parsing/matching/deny paths): covered by reading; the
   matching precedence (exact > longest wildcard) and empty-`allow_http_methods`
@@ -168,14 +187,14 @@ Specific checks and why they held (with the NET-1 caveat on provider guards):
   full. Tracing the *provenance* of the account pin (not just its matching
   logic) through `orchestrator.refresh_runtime_status` →
   `read-codex-account-id.sh`/`read-claude-account.sh` → `proxy_provider_pins`
-  is what surfaced NET-1; an earlier draft of this report wrongly concluded the
+  is what surfaced NET-001; an earlier draft of this report wrongly concluded the
   provider guards hold, because I checked the comparison but not the source of
   the pinned value.
 - Checklist 7 (overload): no policy path fails *open* under load; the closest
   reliability concern is unbounded proxy memory (64 handlers × 128 MiB buffered
   bodies, proxy not in a memory-limited cgroup) and unbounded per-host cert
-  minting under wildcards — both reported as `REL-5` and `REL-2` in
-  [05-reliability.md](05-reliability.md), not as policy bypasses.
+  minting under wildcards — both reported as `REL-005` and `REL-002` in
+  [08-reliability.md](08-reliability.md), not as policy bypasses.
 - Checklist 8 (nftables backstop): output-chain uid rules and non-root DNS drop
   confirmed in bootstrap.
 - Low-confidence / not done: I did not drive live traffic or fuzz the header/
@@ -183,76 +202,3 @@ Specific checks and why they held (with the NET-1 caveat on provider guards):
   real origin server's path resolution. A running-proxy fuzz of
   `read_request_head`/`read_chunked_body` and the path-guard normalizer would
   raise confidence most.
-## 2026-07-04 — GPT-5.5 — `f28b50e87b61`
-
-Reviewer: GPT-5.5 (gpt-5.5)
-Commit: `f28b50e87b61507db372d288d971487f55cb2121`
-Methodology: static code reading and grep sweeps. I traced HTTP, CONNECT/TLS,
-WebSocket, provider-guard, DNS/connect, policy-load, and nftables paths against
-the scope checklist. I did not run live proxy fuzzing or packet-level PoCs.
-
-### What was reviewed
-
-- `host/runtime/network_proxy/service.py`: request parsing, CONNECT prechecks, TLS
-  interposition, Host/target validation, body buffering, WebSocket frame
-  inspection, upstream DNS/connect, certificate generation, connection caps,
-  and event logging.
-- `host/runtime/core/network_policy.py`: domain matching, path normalization,
-  HTTP method checks, OpenAI account/web-search guard, Anthropic bearer-hash
-  guard, body decoding, and managed-provider expansion call sites.
-- `host/config.py`: domain/method/path guard validation and managed provider
-  rule expansion.
-- `host/runtime/proxy_state_client.py`, `host/runtime/core/state.py`, and
-  `host/migrations/0001_admin_state_schema.sql`: policy storage, proxy grants,
-  provider pins, and network event logging.
-- `host/bootstrap/bootstrap.sh`: nftables uid rules, proxy service identity,
-  proxy CA setup, DNS allowance, and fail-closed defaults.
-- Proxy-related tests under `tests/`, especially request parsing, policy,
-  provider guard, and smoke/stage coverage.
-
-### Findings
-
-No findings.
-
-### Coverage and confidence
-
-Parsing and canonicalization: I checked plain HTTP absolute-form and
-origin-form paths, CONNECT targets, TLS inner request targets, duplicate/missing
-Host headers, malformed ports, method normalization, path percent-decoding and
-`posixpath.normpath`, chunked dechunking, and stripping of
-`Content-Length`/`Transfer-Encoding` before forwarding. I did not fuzz raw byte
-streams beyond static parser inspection.
-
-Matching semantics: I checked exact-domain precedence over wildcard matches,
-longest wildcard selection, lower-casing, empty method denial through
-`host_allowed`, IP literals via policy/domain validation and public-IP checks,
-and trailing-dot behavior. A host must match the stored policy shape before DNS
-resolution or upstream connect.
-
-Deny paths: I checked that denied CONNECT targets are rejected before
-certificate generation and DNS, and that plain HTTP/TLS requests record a deny
-event and return 403 without calling `connect_public`. Plain HTTP currently
-reads a bounded body before policy denial; that is a reliability finding in
-axis 05, not a policy-bypass finding, because the request is still not
-forwarded.
-
-Upstream connection: I checked `connect_public` resolves only after policy
-allowance, rejects every non-global resolved address before connecting, connects
-to the vetted address, and uses default TLS verification with `server_hostname`
-for HTTPS/WSS upstreams. Redirect following is absent in the proxy itself.
-
-WebSockets: I checked handshake policy enforcement, removal of extension
-offers, client-frame mask and RSV validation, message-size bounds, fragmented
-message assembly, OpenAI live-web-search inspection for guarded domains, and
-opaque tunneling for domains with no message-dependent guard.
-
-Provider guards: I checked OpenAI `ChatGPT-Account-Id` pinning, missing/mismatch
-denials, live `web_search_preview` and `web_search` body denial semantics,
-compressed body decoding fail-closed behavior, Claude bearer hash matching,
-pre-pin bootstrap read allowances, and database/pin-missing fail-closed states.
-
-nftables: I checked the backstop allows proxy DNS/80/443 egress, blocks
-non-root DNS otherwise, lets the agent reach only the loopback proxy port, and
-drops other agent loopback/direct egress. Confidence is high for code-level
-policy enforcement; lower for kernel/nftables behavior because this sweep did
-not run a live host.

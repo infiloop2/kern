@@ -1186,6 +1186,12 @@ def steer_live_turn(thread_id: str, runtime_type: str, message: str) -> bool:
         else:
             try:
                 server.steer(message)
+            except codex_app_server.CodexTurnFinishing:
+                # Codex's stdout reader has already observed turn/completed,
+                # but the execution worker has not yet committed FINISHING.
+                # Preserve that completion fence as a retryable phase instead
+                # of recording a false terminal provider error.
+                raise _retryable_phase_error(ExecutionPhase.FINISHING)
             except (codex_app_server.CodexAppServerError, claude_code.ClaudeCodeError) as exc:
                 # Once the adapter has declared RUNNING, "not ready" is no
                 # longer a transient phase. It is a provider/transport failure

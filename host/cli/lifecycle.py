@@ -167,6 +167,15 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
             action="store_true",
             help="Allow recovery to also advance preserved state to the target VERSION.",
         )
+    if mode == "reconfigure":
+        parser.add_argument(
+            "--reset-admin-passkeys",
+            action="store_true",
+            help=(
+                "Delete every enrolled admin passkey during reconfigure. Use only "
+                "for recovery after losing passkey access or changing the public hostname."
+            ),
+        )
     args = parser.parse_args(argv)
     # Only deploy and reconfigure define the flag; upgrade, recover, start,
     # and stop never install a password and reject it as an unknown argument.
@@ -195,6 +204,7 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
         github_commit_sha=github_commit_sha,
         operator_ssh_public_key=getattr(args, "operator_ssh_public_key", None),
         operator_cloudflare_hostname=getattr(args, "operator_cloudflare_hostname", None),
+        reset_admin_passkeys=bool(getattr(args, "reset_admin_passkeys", False)),
     )
 
 
@@ -266,6 +276,7 @@ def main_for_mode(mode: str, argv: list[str] | None = None) -> int:
                     mode=command.mode,
                     target_version=target_version,
                     allow_upgrade=command.allow_upgrade,
+                    reset_admin_passkeys=command.reset_admin_passkeys,
                 )
                 deploy_key: Path | None = None
                 if github_commit_sha is not None:
@@ -451,5 +462,4 @@ def _aws_region_from_env() -> str:
     if not region:
         raise ConfigError("set AWS_REGION to the agent's AWS region")
     return region
-
 

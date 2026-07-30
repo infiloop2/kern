@@ -113,6 +113,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str) -> None:
                 desktop = browser.new_context()
                 desktop.grant_permissions(["clipboard-read", "clipboard-write"], origin=url.rstrip("/"))
                 desktop_page = desktop.new_page()
+                login_error_mapping_smoke(desktop_page, url)
                 stale_password_smoke(desktop_page, url)
                 desktop_smoke(desktop_page, url)
                 desktop.close()
@@ -149,6 +150,30 @@ def log_in(page, url: str) -> None:
     page.locator("#password").fill(PASSWORD)
     page.get_by_role("button", name="Log in").click()
     expect(page.locator("#app")).to_be_visible()
+
+
+def login_error_mapping_smoke(page, url: str) -> None:
+    """A post-password ceremony failure must not be mislabeled as a bad password."""
+    from playwright.sync_api import expect
+
+    recovery_message = "Public hostname changed; reset admin passkeys during reconfigure."
+
+    def reject_passkey_start(route) -> None:
+        route.fulfill(
+            status=403,
+            content_type="application/json",
+            body=f'{{"error":{{"message":"{recovery_message}"}}}}',
+        )
+
+    page.route("**/v1/login", reject_passkey_start)
+    try:
+        page.goto(url)
+        page.locator("#password").fill(PASSWORD)
+        page.get_by_role("button", name="Log in").click()
+        expect(page.locator("#login-error")).to_have_text(recovery_message)
+        expect(page.locator("#login")).to_be_visible()
+    finally:
+        page.unroute("**/v1/login", reject_passkey_start)
 
 
 def stale_password_smoke(page, url: str) -> None:

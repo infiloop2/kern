@@ -3008,24 +3008,41 @@ class AwsSmoke:
         self._step(f"{self.agent_runtime} steering: redirect a running turn mid-turn")
         thread_id = f"smoke-steer-{self.agent_runtime}"
         baseline = self._latest_thread_event_seq(thread_id)
+        slow_prompt = (
+            "Use the terminal tool to run "
+            "`python3 -c 'import time; [(print(i, flush=True), time.sleep(0.05)) "
+            "for i in range(400)]'`, then write a 300-word essay about bananas."
+            if self.agent_runtime == "codex"
+            else "Use the terminal tool to run `sleep 20`, then write a 300-word essay about bananas."
+        )
         slow = self.send_message(
             thread_id,
-            "Use the terminal tool to run `sleep 20`, then write a 300-word essay about bananas.",
+            slow_prompt,
         )
         if slow.get("status") != "accepted":
             raise AssertionError(f"steer target was not started: {slow}")
         self._wait_for_turn_activity(thread_id, since=baseline, timeout=120)
+        steer_started = time.monotonic()
         steered = self.send_follow_up(
             thread_id, "Task update: stop the essay and reply with exactly the word STEERED."
         )
+        steer_elapsed = time.monotonic() - steer_started
         if steered.get("status") != "accepted":
             raise AssertionError(f"message on the running thread was not delivered as a steer: {steered}")
+        if self.agent_runtime == "codex" and steer_elapsed >= 8:
+            raise AssertionError(
+                "Codex steer acknowledgement was delayed behind activity: "
+                f"{steer_elapsed:.2f}s"
+            )
         done = self._wait_for_turn(thread_id, since=baseline, timeout=240)
         if done["status"] != "completed":
             raise AssertionError(f"steered turn ended {done['status']}: {self._thread_failure_detail(thread_id)}")
         if "STEERED" not in (done.get("output_message") or "").upper():
             raise AssertionError(f"steer did not take effect, output: {done.get('output_message')!r}")
-        self._ok(f"{self.agent_runtime} steer redirected the running turn")
+        self._ok(
+            f"{self.agent_runtime} steer redirected the running turn "
+            f"(acknowledged in {steer_elapsed:.2f}s)"
+        )
 
     def check_agent_kill_and_thread_survival(self, *, expect_steering_denied: bool = False) -> None:
         """Stop a running turn (its runtime process is terminated mid-turn),
