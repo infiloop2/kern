@@ -401,7 +401,7 @@ async function showOauth(start, runtime) {
       if (!target) return;
       setHtml(target, `<div class="oauth-card">
         <span>Claude Code login: open
-        <a href="${esc(login.login_url)}" target="_blank">${esc(login.login_url)}</a>
+        <a href="${esc(login.login_url)}" target="_blank" rel="noopener noreferrer">${esc(login.login_url)}</a>
         <span class="muted">(expires ${esc(login.expires_at)})</span></span>
         <button class="primary sm" data-action="complete-claude-login">Submit code</button></div>`);
       return;
@@ -411,7 +411,7 @@ async function showOauth(start, runtime) {
     if (!target) return;
     setHtml(target, `<div class="oauth-card">
       <span>Codex login: enter code <b>${esc(login.device_code)}</b> at
-      <a href="${esc(login.login_url)}" target="_blank">${esc(login.login_url)}</a>
+      <a href="${esc(login.login_url)}" target="_blank" rel="noopener noreferrer">${esc(login.login_url)}</a>
       <span class="muted">(expires ${esc(login.expires_at)})</span>
       <span class="muted">After approving in your browser, wait ~5 seconds for the status to update.</span></span></div>`);
   } catch (error) {
@@ -434,7 +434,7 @@ export async function completeClaudeLogin() {
 }
 
 export async function rebootHost() {
-  if (!confirm("Reboot the host machine?")) return;
+  if (!confirm("Reboot the host machine? This fails any agent work in progress right now. Queued work and durable data — threads, files, credentials, and policy — survive and resume after the host boots.")) return;
   try { await api("POST", "/v1/host-runtime/reboot"); notice("Reboot accepted; the host will be back shortly."); }
   catch (error) { notice(error.message, "error"); }
 }

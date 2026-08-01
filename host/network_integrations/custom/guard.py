@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from host.network_integrations.base import request_param_denial
+from host.network_integrations.base import AccountAttestor, request_param_denial
 from host.network_integrations.custom.manifest import CustomIntegration, rule_for_host
 from host.runtime.core.network_policy import route_allowed
 
@@ -10,6 +10,11 @@ from host.runtime.core.network_policy import route_allowed
 def host_allowed(config: CustomIntegration, host: str) -> bool:
     rule = rule_for_host(config, host)
     return bool(rule and rule.allow_http_methods)
+
+
+def websocket_allowed(config: CustomIntegration, host: str) -> bool:
+    rule = rule_for_host(config, host)
+    return bool(rule and rule.allow_websocket)
 
 
 def request_denied(
@@ -20,8 +25,9 @@ def request_denied(
     query: str,
     headers: list[tuple[str, str]],
     body: bytes,
+    account_attestor: AccountAttestor | None = None,
 ) -> str | None:
-    del headers, body
+    del headers, body, account_attestor
     rule = rule_for_host(config, host)
     if rule is None or not route_allowed(
         method, path, query, rule.allow_http_methods, rule.path_guards

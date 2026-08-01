@@ -59,7 +59,8 @@ is the exact contract the app provides to the host.
   },
   "ui": {
     "path": "ui",
-    "capability_worker": false
+    "capability_worker": false,
+    "host_fullscreen": false
   }
 }
 ```
@@ -113,6 +114,12 @@ untrusted computation in a dedicated blob worker. This flag does not relax
 capabilities. An app that enables it owns the worker protocol and must keep all
 DOM and backend authority in audited renderer code. Agentic Web App defines
 that protocol in [Agentic Web App](personal-web-app-builder.md).
+
+`ui.host_fullscreen` is an optional boolean that defaults to false. When true,
+the selected app panel covers the host shell so the app can behave as a product
+surface instead of an embedded settings panel. The host always renders an
+`Back to host` control above the sandboxed iframe; app code cannot remove, restyle,
+or intercept it.
 
 Every manifest contains an `agent` object. `agent.instructions` names a UTF-8
 Markdown file inside the app package. The host rejects a package whose
@@ -214,7 +221,10 @@ An app UI runs in an isolated iframe without the operator's admin credential.
 It communicates with the parent admin shell through a small, typed
 `postMessage` bridge. The parent accepts messages only from the exact
 `contentWindow` of an installed app iframe. All other message types and sources
-are ignored.
+are ignored. The source check is required on the frame side too: an app frame
+must accept `*-result` bridge replies only when `event.source` is its own
+parent window, because sibling app frames can reach `parent[i].postMessage`
+and could otherwise forge a reply to a pending bridge request.
 
 The complete iframe-to-parent request allowlist is:
 
@@ -273,13 +283,16 @@ Server-to-server calls are then checked against an app-backend route allowlist.
 The allowlist is intentionally narrow: it includes only the thread route
 shapes app workflows need — message sends, thread lookup and listing,
 per-thread event listing, and the thread stop control — plus the read-only
-tool catalog and network-policy reads. The thread list (`GET /v1/threads`) and thread
+tool catalog and a read-only network-policy read (`GET /v1/network/policy`,
+which returns the operator's stored `network_controls` and carries no
+credential). The thread list (`GET /v1/threads`) and thread
 event stream are app-scoped at the socket boundary, not generic: the host
 filters each response to threads under the caller's own `<app_id>__` prefix
 and strips the prefix, so an app sees exactly its own threads and never another
-app's or the operator's. The allowlist does not allow broad host routes such as
-network policy, files, process inventory, runtime auth, app registry, or the
-host-wide agent event log.
+app's or the operator's. Apart from that read-only network-policy read, the
+allowlist does not allow broad host routes such as
+network-policy changes, files, process inventory, runtime auth, app registry, or
+the host-wide agent event log.
 
 Thread names sent by an app backend are app-scoped at the socket
 boundary. The app sends and receives its normal `thread_id` values, but the host
@@ -475,8 +488,11 @@ Those threat cases drive the concrete controls:
 
 The app service user's Unix peer identity authenticates which installed app
 made a local admin API request. The host then applies a route-shape allowlist
-and app-scopes thread identifiers. The current boundary exposes no
-file, process, runtime-credential, network-policy, or cross-app grant routes to
+and app-scopes thread identifiers. Beyond a read-only network-policy read
+(`GET /v1/network/policy`, returning the operator's stored `network_controls`
+with no credential), the current boundary exposes no
+file, process, runtime-credential, network-policy-change, or cross-app grant
+routes to
 app backends. There are no app-specific rate limits or broader capability-grant
 model; adding either would require a new host-owned authorization contract.
 

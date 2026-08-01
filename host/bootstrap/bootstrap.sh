@@ -148,6 +148,14 @@ ensure_user() {
   useradd --uid "$uid" --gid "$group" $extra_args --home-dir "$home" --no-create-home --shell /usr/sbin/nologin "$name"
 }
 
+ensure_group_member() {
+  local user="$1"
+  local group="$2"
+  if ! id -nG "$user" | tr ' ' '\n' | grep -Fxq "$group"; then
+    usermod --append --groups "$group" "$user"
+  fi
+}
+
 provision_service_accounts() {
 ensure_group kern-admin "$KERN_ADMIN_GID"
 ensure_group kern-proxy "$KERN_PROXY_GID"
@@ -156,6 +164,7 @@ ensure_group cloudflared "$CLOUDFLARED_GID"
 ensure_group kern-tools "$KERN_TOOLS_GID"
 ensure_group kern-agent-app "$KERN_AGENT_APP_GID"
 ensure_group kern-agent-network "$KERN_AGENT_NETWORK_GID"
+ensure_group kern-app-backends "$KERN_APP_BACKENDS_GID"
 @APP_ENSURE_GROUPS@
 ensure_user kern-admin "$KERN_ADMIN_UID" kern-admin /mnt/kern-admin/admin-home
 ensure_user kern-proxy "$KERN_PROXY_UID" kern-proxy /mnt/kern-admin/proxy-state
@@ -171,6 +180,8 @@ ensure_user kern-agent-app "$KERN_AGENT_APP_UID" kern-agent-app /nonexistent
 # filesystem state or egress.
 ensure_user kern-agent-network "$KERN_AGENT_NETWORK_UID" kern-agent-network /nonexistent
 @APP_ENSURE_USERS@
+ensure_group_member kern-admin kern-app-backends
+@APP_ENSURE_GROUP_MEMBERS@
 # The postgres account is created here, before the postgresql packages would
 # create it with a dynamic system uid: the preserved cluster files on the
 # admin volume are 0600/0700 postgres-owned, so like the kern-* users
@@ -709,10 +720,14 @@ fi
 write_codex_policy() {
 mkdir -p /etc/codex
 chmod 755 /etc/codex
+# Codex 0.144 enables zstd request compression by default. Pin it off with the
+# other enforced feature requirements so the network-policy proxy can inspect
+# uncompressed request JSON fail-closed.
 cat > /etc/codex/requirements.toml <<'EOF'
 allowed_web_search_modes = ["cached"]
 
 [features]
+enable_request_compression = false
 apps = false
 plugins = false
 tool_search = false
@@ -1165,6 +1180,10 @@ UMask=0077
 # credentials authenticate the caller.
 RuntimeDirectory=kern-admin-api
 RuntimeDirectoryMode=0755
+# The app-backend socket is connectable by every local uid, and it shares this
+# process's fd table with the operator TCP listener, so the descriptor limit
+# must not be the first resource a connection flood exhausts.
+LimitNOFILE=8192
 Environment=PYTHONPATH=/opt/kern-host
 Environment=HOME=/mnt/kern-admin/admin-home
 WorkingDirectory=/mnt/kern-admin/admin-home

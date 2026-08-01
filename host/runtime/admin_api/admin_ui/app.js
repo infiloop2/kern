@@ -160,6 +160,7 @@ function showLogin() {
   document.body.classList.remove("connection-guide-open");
   document.body.classList.remove("app-tab-open");
   document.body.classList.remove("viewport-panel-open");
+  document.body.classList.remove("host-fullscreen-app-open");
   $("login").hidden = false;
   $("app").hidden = true;
   $("logout-button").hidden = true;
@@ -176,11 +177,15 @@ function showTab(name) {
   activeTab = name;
   const connectionGuideOpen = name === "connection-guide";
   const appTabOpen = name.startsWith("app:");
+  const fullscreenAppOpen = appTabOpen && installedApps.some(
+    app => name === `app:${app.id}` && app.ui?.host_fullscreen === true,
+  );
   const viewportPanelOpen = connectionGuideOpen || appTabOpen;
   if (viewportPanelOpen) window.scrollTo(0, 0);
   document.body.classList.toggle("connection-guide-open", connectionGuideOpen);
   document.body.classList.toggle("app-tab-open", appTabOpen);
   document.body.classList.toggle("viewport-panel-open", viewportPanelOpen);
+  document.body.classList.toggle("host-fullscreen-app-open", fullscreenAppOpen);
   for (const tabName of staticTabs) {
     $(`tab-${tabName}`).classList.toggle("active-tab", tabName === name);
     $(`panel-${tabName}`).hidden = tabName !== name;
@@ -338,9 +343,27 @@ function renderAppTabs() {
     const section = document.createElement("section");
     section.className = "app-frame-section";
     panel.appendChild(section);
+    if (app.ui.host_fullscreen === true) {
+      const exit = document.createElement("button");
+      exit.className = "host-app-exit";
+      exit.dataset.action = "show-tab";
+      exit.dataset.tab = "home";
+      exit.setAttribute("aria-label", "Back to host");
+      exit.innerHTML = `
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <path d="m5 5 10 10M15 5 5 15" fill="none" stroke="currentColor"
+            stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+        <span>Back to host</span>`;
+      panel.appendChild(exit);
+    }
     main.appendChild(panel);
     if (activeTab === `app:${app.id}`) loadAppFrame(app);
   }
+  // Login can resume within the same page after showLogin cleared viewport
+  // classes. Reapply the selected app's host presentation once its manifest
+  // is available again.
+  if (activeTab.startsWith("app:")) showTab(activeTab);
 }
 
 function toggleBetaApps() {
@@ -721,6 +744,10 @@ document.addEventListener("click", event => {
 setUnauthorizedHandler(showLogin);
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
+  if (document.body.classList.contains("host-fullscreen-app-open")) {
+    showTab("home");
+    return;
+  }
   closeIntegrationInfo();
   collapseRuntimeOverview();
   if (mobileNavOpen) setMobileNavOpen(false, true);

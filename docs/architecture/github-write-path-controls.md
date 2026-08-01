@@ -33,6 +33,14 @@ paths.
 The proxy parses pkt-line command framing only. Pack objects are parsed by
 `git`, not by custom Python object logic.
 
+## Queue Bound
+
+The proxy permits at most ten pending pushes globally. It checks the count
+before `index-pack` writes the request into the durable mirror; the proxy's
+existing 128 MiB request cap is the per-push bound. A full queue rejects the
+push with `github_push_queue_full` until the operator resolves an item. There
+is deliberately no TTL, free-space heuristic, or background maintenance pass.
+
 ## Approval Flow
 
 Operators list and resolve held pushes through the admin API:
@@ -43,6 +51,11 @@ quarantine mirror with `git push --atomic` and per-ref
 `--force-with-lease=<ref>:<old>` checks. Rejecting a push invokes the same
 helper in cleanup mode and removes the pending refs.
 
+The proxy's inspection path and the root helper share one file lock. After an
+approve or reject, the helper deletes that push's refs and runs
+`git gc --prune=now` before releasing the lock, so no concurrent pack can be
+pruned between indexing and creation of its pending ref.
+
 Approve and reject actions serialize inside the admin service (the single
 resolver: only its role can update pending pushes, and the port bind keeps it
 single-instance); a concurrent duplicate action gets a conflict error. A crash
@@ -51,9 +64,7 @@ rejects again. Approving with no working GitHub token is refused and the row
 stays `pending` — fix the credential and approve again. If a replay fails, the
 row is marked `failed` with the failure detail; the recovery for every failure
 is the same — the agent pushes again, which starts a fresh gate round.
-Pending-ref cleanup is best-effort housekeeping of the proxy-private mirror:
-its failure never changes a resolution outcome (a reject is always
-`rejected`, an approval whose push landed is `approved`), and a leftover
+Pending-ref cleanup is housekeeping of the proxy-private mirror. A leftover
 `refs/pending/*` ref is inert — it is never pushed anywhere.
 
 ## Failure Behavior

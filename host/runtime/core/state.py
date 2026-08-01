@@ -54,6 +54,14 @@ _MUTATION_LOCK = threading.RLock()
 # its cost stays amortized.
 MAX_EVENTS = 1_000_000
 PRUNE_EVERY = 500
+# Bound each stored message, not just the row count: a pathological multi-
+# megabyte streamed message would otherwise grow durable Postgres storage far
+# past the apparent MAX_EVENTS cap. The bound sits well above any normal
+# assistant message and below THREAD_HANDOFF_CHARACTER_LIMIT, so the already
+# character-budgeted history reconstruction is unaffected in practice; an over-
+# limit value is truncated with a marker rather than dropped so replay stays
+# coherent.
+MAX_EVENT_MESSAGE_CHARS = 128 * 1024
 # The audit logs page newest-first in pages of EVENT_PAGE_LIMIT rows; the
 # limit query parameter can only shrink a page.
 EVENT_PAGE_LIMIT = 100
@@ -784,6 +792,19 @@ def _jsonb_safe(value: Any) -> Any:
     return value
 
 
+def _bounded_event_message(value: Any) -> Any:
+    """Cap a single audit message so one over-large streamed message cannot grow
+    durable storage past the row-count cap. Non-strings and in-bound strings
+    pass through unchanged; an over-limit string is truncated with a marker that
+    records the original length."""
+    if isinstance(value, str) and len(value) > MAX_EVENT_MESSAGE_CHARS:
+        return (
+            value[:MAX_EVENT_MESSAGE_CHARS]
+            + f"\n…[truncated {len(value)} chars to {MAX_EVENT_MESSAGE_CHARS}]"
+        )
+    return value
+
+
 def append_agent_event(
     cur: Any,
     event_type: str,
@@ -800,12 +821,15 @@ def append_agent_event(
     unknown = set(payload) - set(_EVENT_PAYLOAD_COLUMNS)
     if unknown:
         raise ValueError(f"unsupported event payload keys: {sorted(unknown)}")
-    values = [
-        pgclient.Jsonb(_jsonb_safe(payload[column]))
-        if column == "activity" and payload.get(column) is not None
-        else payload.get(column)
-        for column in _EVENT_PAYLOAD_COLUMNS
-    ]
+    values: list[Any] = []
+    for column in _EVENT_PAYLOAD_COLUMNS:
+        value = payload.get(column)
+        if column == "activity" and value is not None:
+            values.append(pgclient.Jsonb(_jsonb_safe(value)))
+        elif column in ("message", "error_message"):
+            values.append(_bounded_event_message(value))
+        else:
+            values.append(value)
     cur.execute(
         "INSERT INTO agent_events (created_at, event_type, thread_id, run_number,"
         " message, source, error_message, agent_runtime, activity)"
@@ -997,9 +1021,11 @@ def network_policy_record() -> dict[str, Any] | None:
         if claude_row and claude_row[0] and "claude" in integrations:
             integrations["claude"]["web_search"] = True
         allowed: dict[str, dict[str, Any]] = {}
-        cur.execute("SELECT domain FROM allowed_domains ORDER BY domain")
-        for (domain,) in cur.fetchall():
+        cur.execute("SELECT domain, allow_websocket FROM allowed_domains ORDER BY domain")
+        for domain, allow_websocket in cur.fetchall():
             allowed[str(domain)] = {"allow_http_methods": []}
+            if allow_websocket:
+                allowed[str(domain)]["allow_websocket"] = True
         cur.execute("SELECT domain, method FROM domain_methods ORDER BY domain, position")
         for domain, method in cur.fetchall():
             allowed[str(domain)]["allow_http_methods"].append(method)
@@ -1164,7 +1190,10 @@ def save_network_policy(controls: dict[str, Any], updated_at: str) -> None:
         custom = integrations.get("custom")
         custom_domains = custom.get("domains") if isinstance(custom, dict) else {}
         for domain, rule in (custom_domains or {}).items():
-            cur.execute("INSERT INTO allowed_domains (domain) VALUES (%s)", (domain,))
+            cur.execute(
+                "INSERT INTO allowed_domains (domain, allow_websocket) VALUES (%s, %s)",
+                (domain, rule.get("allow_websocket") is True),
+            )
             for position, method in enumerate(rule.get("allow_http_methods") or []):
                 cur.execute(
                     "INSERT INTO domain_methods (domain, position, method) VALUES (%s, %s, %s)",
@@ -1178,7 +1207,7 @@ def save_network_policy(controls: dict[str, Any], updated_at: str) -> None:
 
 
 def save_proxy_openai_account_id(account_id: str | None, cur: Any = None) -> None:
-    _save_proxy_pin("openai", {"account_id": account_id}, cur)
+    _save_proxy_account_id("openai", account_id, cur)
 
 
 def read_proxy_openai_account_id() -> str | None:
@@ -1186,12 +1215,13 @@ def read_proxy_openai_account_id() -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def save_proxy_claude_account(account: dict[str, Any] | None, cur: Any = None) -> None:
-    _save_proxy_pin("claude", account or {}, cur)
+def save_proxy_claude_account_id(account_id: str | None, cur: Any = None) -> None:
+    _save_proxy_account_id("claude", account_id, cur)
 
 
-def read_proxy_claude_account() -> dict[str, Any]:
-    return _read_proxy_pin("claude")
+def read_proxy_claude_account_id() -> str | None:
+    value = _read_proxy_pin("claude").get("account_id")
+    return value if isinstance(value, str) and value else None
 
 
 _bedrock_proxy_credential_cache: tuple[str, str, str, str] | None = None
@@ -1223,42 +1253,34 @@ def read_bedrock_proxy_credential() -> tuple[str, str, str] | None:
     return access_key_id, secret, region
 
 
-def _save_proxy_pin(provider: str, data: dict[str, Any], cur: Any = None) -> None:
-    # Exactly the two values the guards compare (account_id and
-    # access_token_sha256); the proxy never receives the rest of the account
-    # metadata. Callers inside a mutation pass their cursor so the pin commits
-    # atomically with the anchor/status change.
+def _save_proxy_account_id(provider: str, account_id: str | None, cur: Any = None) -> None:
+    """Set or clear the account identity currently allowed through the proxy.
+
+    This temporary authorization row is deliberately separate from the
+    user-controlled account anchor in ``provider_accounts`` and from the
+    candidate credential observed in the agent user's auth files.
+    """
     if cur is None:
         with mutation() as fresh:
-            _save_proxy_pin(provider, data, fresh)
+            _save_proxy_account_id(provider, account_id, fresh)
         return
-    account_id = data.get("account_id")
-    access_token_sha256 = data.get("access_token_sha256")
     cur.execute(
-        "INSERT INTO proxy_provider_pins (provider, account_id, access_token_sha256)"
-        " VALUES (%s, %s, %s)"
-        " ON CONFLICT (provider) DO UPDATE SET account_id = EXCLUDED.account_id,"
-        " access_token_sha256 = EXCLUDED.access_token_sha256",
-        (provider, account_id, access_token_sha256),
+        "INSERT INTO proxy_provider_pins (provider, account_id) VALUES (%s, %s)"
+        " ON CONFLICT (provider) DO UPDATE SET account_id = EXCLUDED.account_id",
+        (provider, account_id),
     )
 
 
 def _read_proxy_pin(provider: str) -> dict[str, Any]:
     with db.transaction() as cur:
         cur.execute(
-            "SELECT account_id, access_token_sha256 FROM proxy_provider_pins"
-            " WHERE provider = %s",
+            "SELECT account_id FROM proxy_provider_pins WHERE provider = %s",
             (provider,),
         )
         row = cur.fetchone()
     if row is None:
         return {}
-    pin: dict[str, Any] = {}
-    if row[0] is not None:
-        pin["account_id"] = row[0]
-    if row[1] is not None:
-        pin["access_token_sha256"] = row[1]
-    return pin
+    return {"account_id": row[0]} if row[0] is not None else {}
 
 
 # -- github credential (admin only; the proxy role has no grant on it) ----------------
@@ -1431,6 +1453,14 @@ def enqueue_pending_push(
             " VALUES (%s, %s, %s, %s, %s, %s)",
             (push_id, owner, repo, db.jsonb(ref_updates), db.jsonb(changed_paths), utc_now()),
         )
+
+
+def count_pending_pushes() -> int:
+    """Number of pushes still waiting for an operator decision."""
+    with db.transaction() as cur:
+        cur.execute("SELECT count(*) FROM pending_pushes WHERE status = 'pending'")
+        row = cur.fetchone()
+    return int(row[0]) if row else 0
 
 
 def _pending_push_row(row: tuple[Any, ...]) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 """Claude managed integration: static contract.
 
 Opens the Anthropic API and the Claude Code OAuth path, pinned to the
-configured account by bearer-token hash. The ``web_search`` option opts into
+configured account by provider-attested account uuid. The ``web_search`` option opts into
 Anthropic's server-side web search; server-side web fetch, code execution,
 and remote MCP servers are always denied.
 """
@@ -30,8 +30,8 @@ MANIFEST = IntegrationManifest(
     owned_apexes=("anthropic.com", "claude.ai", "claude.com"),
     denial_reasons=(
         DenialReason(
-            "anthropic_token_unavailable",
-            "The pinned Claude account token is not available yet (Claude Code login has not "
+            "anthropic_account_unavailable",
+            "The pinned Claude account identity is not available yet (Claude Code login has not "
             "completed on this host), so API requests fail closed. Complete the Claude Code "
             "login or ask the operator to check the agent provider status.",
         ),
@@ -42,8 +42,8 @@ MANIFEST = IntegrationManifest(
         ),
         DenialReason(
             "anthropic_token_mismatch",
-            "The bearer token does not match the Claude account configured on this host. Only "
-            "the configured account may be used.",
+            "The bearer token could not be verified as the Claude account configured on this "
+            "host. Only provider-attested tokens for the configured account may be used.",
         ),
         DenialReason(
             "anthropic_body_undecodable",

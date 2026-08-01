@@ -421,11 +421,10 @@ def _live_claude_status(
     First capture and an already-observed token rotation skip this probe because
     the root profile attestation below is their live validation. For a steady
     token, `/usage` authenticates through the agent proxy and gives Claude Code
-    a chance to refresh. A refresh writes the new token before its first
-    data-plane retry, which the old proxy pin correctly denies. Detect that hash
-    change after either success or failure and pass the candidate onward for
-    provider attestation and atomic repinning instead of misclassifying it as a
-    broken login.
+    a chance to refresh. Detect a resulting hash change after either success or
+    failure and pass the candidate onward for provider attestation before
+    updating the admin-side rotation metadata. The proxy independently
+    authorizes every old or rotated bearer against the approved account UUID.
 
     Each probe's verdict is memoized per token hash (_CLAUDE_LIVE_PROBE), so
     the probe itself runs at most once per CLAUDE_LIVE_PROBE_RETRY_SECONDS:
@@ -519,11 +518,10 @@ def _backfill_claude_usage(account: dict[str, Any] | None) -> None:
     """One usage read for an active token the steady probe has not covered.
 
     A first-capture or just-rotated token is validated by attestation, not the
-    usage probe: its proxy pin only goes live when the refresh commits, so the
-    probe would have been denied. Run it once now, right after that commit,
-    so the admin UI shows usage immediately instead of after the next
-    five-minute recheck. Metadata only: failures are ignored and never touch
-    the runtime status; the next scheduled probe classifies auth state."""
+    usage probe. Run usage once after that identity/metadata commit so the admin
+    UI updates immediately instead of waiting for the next five-minute recheck.
+    Metadata only: failures are ignored and never touch the runtime status; the
+    next scheduled probe classifies auth state."""
     token_hash = _string_field(account, "access_token_sha256") if account else None
     if not token_hash or not account or "claude_usage" in account:
         return
@@ -814,10 +812,10 @@ def mark_oauth_login_completed(key: str, access_token_sha256: str | None = None)
 def _sync_runtime_proxy_pin_in(cur: Any, runtime_type: str, account: dict[str, Any] | None) -> None:
     """Write the runtime's proxy pin inside the caller's mutation, so pin and
     anchor/status commit in one transaction."""
-    if runtime_type == "claude_code":
-        state.save_proxy_claude_account(account, cur)
-        return
     account_id = _string_field(account, "account_id") if account else None
+    if runtime_type == "claude_code":
+        state.save_proxy_claude_account_id(account_id, cur)
+        return
     state.save_proxy_openai_account_id(account_id, cur)
 
 

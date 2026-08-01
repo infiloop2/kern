@@ -11,21 +11,17 @@ operator—for example, by opening a link?
 
 ## Reviewed commits
 
-Latest reviewed commit: none.
+Latest reviewed commit: `6151eea5abb61590684c4cf667ae6f619d705231`.
 
 | Commit | Reviewed by |
 | --- | --- |
-| _None yet_ | _No completed review_ |
-
-The historical reviews under **Collaborative review** cover the parent UI
-rendering surface but not the current end-to-end file-viewing checklist, so
-they remain partial.
+| `6151eea5abb61590684c4cf667ae6f619d705231` | gpt-5.6-sol; Claude Opus 5 |
 
 ## Findings
 
 | Finding | Severity | Found at | Found by | Description | Resolution |
 | --- | --- | --- | --- | --- | --- |
-| UI-CONTENT-002 | Low | `f28b50e87b61` | Claude Opus 4.8 | The HTML helpers interpolated badge values into markup and escaped text without quotes. Existing callers used controlled enums or text positions and CSP blocked inline script, but the helper contract was a latent XSS footgun if a future caller supplied attacker-controlled attribute data. Use context-correct escaping or DOM construction. | Open |
+| UI-CONTENT-002 | Low | `f28b50e87b61` | Claude Opus 4.8 | The HTML helpers interpolated badge values into markup and escaped text without quotes. Existing callers used controlled enums or text positions and CSP blocked inline script, but the helper contract was a latent XSS footgun if a future caller supplied attacker-controlled attribute data. Use context-correct escaping or DOM construction. | Fixed — esc() now escapes quotes as well as &<> so it is safe in attribute position, and badge() interpolates esc(value) in both the class and text, closing the attribute-injection footgun; existing enum callers render unchanged. |
 
 ## Threat model
 
@@ -92,61 +88,111 @@ below names it.
 
 ## Collaborative review
 
-These historical sweeps cover the parent Admin UI rendering surface. They
-support the existing findings but remain partial because they did not complete
-the current end-to-end file-viewing checklist.
+### `6151eea5abb61590684c4cf667ae6f619d705231`
 
-### `f28b50e87b61` — partial
+Reviewed by: gpt-5.6-sol; Claude Opus 5
 
-Contributors: Claude Opus 4.8 (claude-opus-4-8); GPT-5.5 (gpt-5.5)
-
-Methodology: static reading of the served HTML/JS and the API's static-asset
-handling; enumerated every dynamic DOM sink and every URL the page can
-request. No browser-driven test.
+Methodology: static, repository-level source-to-sink review of the complete
+parent Admin UI and its API/helper inputs. HTML, text, attribute, URL,
+navigation, clipboard, object-URL, and request sinks were grep-enumerated and
+then traced from agent-, provider-, tool-, GitHub-, process-, file-, and
+host-error-controlled values. File viewing and media delivery were followed
+through the privileged helper and browser lifecycle. Existing browser smoke
+fixtures were source-reviewed; no live browser or hostile-media run was
+performed.
 
 #### What was reviewed
 
-- `host/runtime/admin_ui.html` (every external reference, inline script/style,
-  favicon), `host/runtime/admin_ui.js` (every `innerHTML`/`setHtml` sink, the
-  `esc()`/`badge()` helpers and the `api()` fetch targets), and
-  `host/runtime/admin_ui.css` by reference.
-- `host/runtime/admin_api/service.py`: `_send_ui_asset`, browser security
-  headers, `_send_json`, and cache headers.
-- Existing Admin UI smoke tests for malicious-looking strings and layout.
-
-#### Coverage details
-
-- **No external calls.** The HTML references only same-origin `/admin_ui.css`
-  and `/admin_ui.js`, an inline `data:` favicon, and inline SVGs; there are no
-  external scripts, styles, fonts, images, or prefetch. Every runtime request
-  goes through `api()` to a relative `/v1/...` path. OAuth login URLs are
-  rendered as operator-clicked `<a target="_blank">`, not auto-fetched. This
-  is enforced in depth by the response CSP `default-src 'self'; connect-src
-  'self'; img-src 'self' data:; script-src 'self'; style-src 'self'` plus
-  `base-uri 'none'`/`object-src 'none'`.
-- **No agent-reachable XSS.** The genuinely attacker-controlled strings —
-  agent file names/paths, file contents, task output, process command lines,
-  and proxied hosts/paths in the network log — are rendered via `textContent`/
-  `dataset` (the file list) or `esc()` in text (`<pre>`/`<td>`) contexts, none
-  in an attribute position. `esc()` neutralizes `<`/`>`/`&` there.
+- `host/runtime/admin_api/admin_ui.html`, its CSS, and every parent module:
+  `api.js`, `app.js`, `connection_guide.js`, `files.js`, `health.js`,
+  `helpers.js`, `integration_catalog.js`, `logs.js`, `network.js`,
+  `passkeys.js`, `processes.js`, `threads.js`, and `tools.js`.
+- Parent renderers and browser actions for health/runtime state, threads,
+  provider/account errors, network events, tool approvals/results, GitHub
+  audits and pending pushes, host errors, process command lines, file names,
+  paths, text, images, and videos. Installed-app frame content and its bridge
+  were deliberately left to axis 05.
+- `host/runtime/admin_api/service.py` and
+  `host/bootstrap/helpers/read-agent-file.sh`: authenticated file list/read
+  routes, dirfd and `O_NOFOLLOW` path walking, open-fd regular-file checks,
+  byte/type bounds, fixed media types, response security headers, text
+  decoding, object-URL publication, and cleanup.
+- Static asset mapping and module closure, CSP/cache/referrer/MIME/framing
+  headers, login-screen separation, polling/re-render behavior, logout, and
+  the malicious-string/file fixtures in the Playwright smoke suite.
 
 #### Coverage and confidence
 
-- Checklist 1 (sink sweep): every `setHtml`/`innerHTML` template in the JS was
-  enumerated; the only unescaped or quote-unsafe helpers are `badge()` and
-  `esc()` (UI-CONTENT-002), and I traced their callers to confirm none currently pass
-  agent-controlled data into an attribute.
-- Checklist 2 (per-string XSS): file names/contents, thread/task ids, network
-  event fields, process cmdlines, and provider metadata each traced to a safe
-  sink.
-- Browser containment: `frame-ancestors`/`X-Frame-Options` were present.
-- UI and JSON responses also set `Referrer-Policy: no-referrer` and
-  `X-Content-Type-Options: nosniff`.
-- Byte-level external-origin check: confirmed by reading the
-  served HTML and the static-asset handler; assets are read from disk and
-  served with fixed content types and `nosniff`. Not verified against a live
-  rendered response or a browser CSP report.
-- Login, cookie, and CSRF observations from this historical combined sweep
-  are tracked by axis 04 and do not define this rendering axis.
-- Not done: no live browser test, no automated CSP evaluator run. Given the
-  CSP strength and header-only auth, residual risk is low.
+- Checklists 1–4: every parent sink and relative API request was enumerated,
+  and agent-influenceable values were traced to their final context.
+  Untrusted text is escaped or assigned through DOM text APIs; values used in
+  quoted attributes are currently constrained enums, validated identifiers,
+  or trusted manifests. `badge()` remains a latent quote-unsafe helper
+  contract, already recorded as UI-CONTENT-002. No agent-controlled value was
+  found selecting a browser destination or privileged action. An independent
+  sink sweep agreed: one document (`admin_ui.html`, also served at
+  `/oauth/callback`) and thirteen modules, with no `srcdoc`, `document.write`,
+  `eval`, `new Function`, `window.open`, dynamic `import()`, service worker, or
+  inline event-handler attribute anywhere, and no unquoted attribute
+  (`data-page`, `colspan`, `stroke-dasharray`, `<progress value>` all take
+  numbers). Login and passkey screens contain no HTML sink at all — every
+  string is `textContent`.
+- Checklist 4, verified negative worth recording because it was tested as a
+  candidate finding and rejected: the OAuth login anchor
+  (`admin_ui/health.js:404,414`) interpolates `esc(login.login_url)` into a
+  quoted `href`, and `esc()` does not escape `"`. This is not separately
+  reportable. The line is byte-identical to `f28b50e87b61`'s
+  `admin_ui.js:501,509`, so it is the sink UI-CONTENT-002 was already filed
+  against and examined at. More importantly it is unreachable for this axis's
+  adversary: the URL comes from the provider's device-code/OAuth endpoint over
+  proxied TLS, and both login processes are spawned by root helpers that build
+  the environment themselves and exec root-owned binaries with `chattr +i`
+  harness configuration, so a malicious agent does not influence the value.
+  Every other external link in the UI carries `rel="noopener noreferrer"`;
+  this one does not, which is ADM-002's subject, not this axis's.
+- Checklist 5: file delivery rejects traversal/symlink swaps, non-regular and
+  oversized files, unsupported or mismatched media, SVG, and HTML. Responses
+  use fixed JPEG/PNG/WebP/MP4/MOV types, `nosniff`, no-store, and sandbox
+  headers; text uses replacement decoding and blob URLs are revoked on
+  selection/reset. Confidence is lower for decompression/dimension behavior
+  because no hostile-media corpus or live decoder test was run.
+- Checklist 6: the parent asset map and imports are fixed and same-origin,
+  with no CDN, analytics, remote font/import, prefetch, or service worker.
+  CSP, `base-uri`, frame/object restrictions, referrer policy, cache policy,
+  and MIME headers provide defense in depth.
+- Checklist 7: authentication views, 401 transitions, polling updates, lazy
+  payload rendering, navigation, and logout/reload were traced. Agent data
+  does not persist active content or trigger an authenticated mutation in the
+  reviewed paths.
+- Checklist 8: existing smoke fixtures cover quote/markup filenames,
+  script-looking text, image decoding, and desktop/mobile overflow, but were
+  read rather than rerun. They are not an exhaustive malicious fixture matrix
+  for every renderer, window/download/clipboard path, CSP report, object-URL
+  lifetime, or media edge case. Confidence is high for static source/sink
+  containment and medium for browser/media implementation edges. Neither
+  reviewer could run them: there is no live Kern host and loopback TCP is
+  blocked in the review sandbox, so `tests/smoke-ui/` (Playwright against
+  `run_admin_ui_mock.py`) did not execute, and no claim on this axis rests on
+  observed DOM, network log, CSP report, object-URL lifetime, clipboard, or
+  mobile layout. One concrete test-coverage gap: the suite's login fixtures are
+  benign `https://` URLs only (`run_admin_ui_mock.py:1650-1664`), so the OAuth
+  `href` sink discussed above has no hostile-fixture coverage even though it is
+  the UI's one externally-sourced attribute value.
+- Checklist 3, unmitigated but not a finding: Unicode bidi/RLO and other
+  formatting controls are stripped or annotated nowhere, so agent-chosen text
+  (a process command line, a network-log target, a tool approval summary) can
+  render visually reordered beside trusted labels. No scenario was found in
+  which this crosses a table cell or forges a specific trusted control — each
+  agent string is confined to its own cell — so it is recorded here rather than
+  in the register. Producer-side caps that bound the exposure were confirmed:
+  1 MiB file read, 500-byte approval summary, 64 KiB payloads,
+  `MAX_CHANGED_PATHS`, `ACTIVITY_TEXT_BYTES`.
+- Checklist 5, additional verified negatives on the file viewer: a file that
+  grows between `fstat` and the copy is truncated to the announced
+  `Content-Length`, and one that shrinks leaves `remaining > 0`, kills the
+  helper, and sets `close_connection`. An over-long or unterminated header
+  line, non-JSON, missing/out-of-range `size_bytes`, or a `media_type` mismatch
+  all abort before headers are committed. Because `_authenticate()` requires
+  the `X-Kern-Csrf` header, `/v1/agent-files/content` cannot be reached by a
+  top-level navigation at all, so hostile HTML/SVG/polyglot content cannot be
+  rendered as a same-origin document regardless of the type checks.

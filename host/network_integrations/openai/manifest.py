@@ -44,6 +44,13 @@ MANIFEST = IntegrationManifest(
             "Only the configured OpenAI account may be used.",
         ),
         DenialReason(
+            "openai_token_account_mismatch",
+            "The Authorization credential is not a single ChatGPT OAuth bearer token for the "
+            "account configured on this host, so the request failed closed. Use the managed "
+            "Codex runtime's credential; platform sk- keys and other accounts' tokens are "
+            "denied.",
+        ),
+        DenialReason(
             "openai_body_undecodable",
             "The request body's Content-Encoding could not be decoded for inspection, so the "
             "request failed closed. Send the request uncompressed.",

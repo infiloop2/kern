@@ -312,6 +312,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(exc.status, {"error": {"message": exc.message}})
         except app_platform.AppError as exc:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": {"message": str(exc)}})
+        except (BrokenPipeError, ConnectionResetError):
+            # The client closed the connection while the response was being
+            # written: expected transport termination, not a service fault.
+            # Close without reporting a host error or writing to the dead
+            # socket again.
+            self.close_connection = True
         except Exception as exc:
             # Never leak internal exception detail (database, filesystem,
             # subprocess, config) to the client; log the real error to the
@@ -412,8 +418,9 @@ class Handler(BaseHTTPRequestHandler):
         client_key = self._client_key()
 
         def password_loader() -> str | None:
-            # Keep HTTP parsing here, but let admin_auth invoke it only after
-            # the source passes the throttle preflight.
+            # Keep HTTP parsing here; admin_auth charges the login throttle
+            # only when this returns a valid-shaped body, so a cross-site
+            # page's malformed POSTs cannot consume the source's attempts.
             length = self._content_length(LOGIN_MAX_BODY_BYTES)
             try:
                 body = json.loads(self.rfile.read(length)) if length else None
@@ -586,9 +593,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_https_redirect(self, hostname: str) -> None:
         # Upgrade a cleartext GET to https on the same host so the browser
-        # re-requests securely before any form or secret is served.
+        # re-requests securely before any form or secret is served. Only an
+        # origin-form target may be echoed: a crafted request line such as
+        # "GET @evil.com/" would otherwise turn the stored hostname into a
+        # userinfo component of the Location.
+        path = self.path if self.path.startswith("/") else "/"
         self.send_response(HTTPStatus.MOVED_PERMANENTLY.value)
-        self.send_header("Location", f"https://{hostname}{self.path}")
+        self.send_header("Location", f"https://{hostname}{path}")
         self.send_header("Content-Length", "0")
         self._send_security_headers()
         self.end_headers()

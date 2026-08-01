@@ -4,9 +4,8 @@ The ``.github`` push-approval gate quarantines a held push's objects under
 ``refs/pending/<id>/<n>`` in the proxy's mirror. When the operator approves, the
 admin service (which has no egress) calls this helper to replay the push to
 GitHub: root has egress and the working token, and reads the proxy-owned mirror.
-It runs a single ``git push`` of every held ref, then best-effort drops the
-pending refs so ``git gc`` can reclaim them (a leftover ref is inert in the
-proxy-private mirror). A validation or push failure fails the approval; the
+It runs a single ``git push`` of every held ref, then drops the pending refs
+and immediately runs ``git gc``. A validation or push failure fails the approval; the
 operator's recovery is to have the agent push again, which starts a fresh gate
 round.
 
@@ -66,6 +65,19 @@ def main() -> None:
             _fail("token is required")
         token_value = token
 
+    with engine.quarantine_lock():
+        _resolve_locked(owner, repo, push_id, action, token_value, ref_updates)
+
+
+def _resolve_locked(
+    owner: str,
+    repo: str,
+    push_id: str,
+    action: str,
+    token_value: str | None,
+    ref_updates: Any,
+) -> None:
+    """Resolve one push while pack indexing is excluded by the shared lock."""
     mirror = engine.QUARANTINE_ROOT / owner.lower() / f"{repo.lower()}.git"
     if not (mirror / "HEAD").exists():
         _fail("quarantine mirror is missing (the held objects are gone)")
@@ -76,6 +88,7 @@ def main() -> None:
     if action == "cleanup":
         for pending in pending_refs:
             _delete_pending_ref(mirror, pending)
+        _gc_mirror(mirror)
         _ok()
         return
     if token_value is None:
@@ -114,6 +127,7 @@ def main() -> None:
     # housekeeping and must not turn an on-GitHub push into a failed row.
     for pending in pending_refs:
         _delete_pending_ref(mirror, pending)
+    _gc_mirror(mirror)
     _ok()
 
 
@@ -133,6 +147,15 @@ def _delete_pending_ref(mirror: Any, ref: str) -> None:
     # Best-effort: a ref that resists deletion stays in the proxy-private
     # quarantine mirror where it is inert (never pushed anywhere).
     _run(_git_cmd(mirror, "update-ref", "-d", ref))
+
+
+def _gc_mirror(mirror: Any) -> None:
+    """Immediately reclaim objects made unreachable by the operator decision.
+
+    The cross-process quarantine lock makes ``--prune=now`` safe from a pack
+    that has been indexed but not yet pinned by its pending ref.
+    """
+    _run(_git_cmd(mirror, "gc", "--quiet", "--prune=now"))
 
 
 def _git_cmd(mirror: Any, *args: str) -> list[str]:

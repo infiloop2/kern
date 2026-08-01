@@ -400,7 +400,7 @@ Shared flags:
 | `--operator-ssh-public-key <key>` | `deploy`, `reconfigure` | Installs this OpenSSH public key as the SSH operator endpoint. At least one operator endpoint is required. |
 | `--operator-cloudflare-hostname <host>` | `deploy`, `reconfigure` | Configures a Cloudflare Tunnel operator endpoint at this exact hostname; the tunnel token is read from `KERN_CLOUDFLARE_TUNNEL_TOKEN`. At least one operator endpoint is required. |
 | `--admin-password-sha256 <hex>` | `deploy`, `reconfigure` | Required. SHA-256 hex digest of the chosen admin password, for example `printf %s 'your-password' | sha256sum`. The CLI and the host only ever see this hash. |
-| `--bootstrap-from-github [commit-sha]` | `deploy`, `upgrade`, `recover`, `reconfigure` | Provisions the instance from a pinned `infiloop2/kern` commit via EC2 user data instead of pushing the local checkout over SSH; without a value, the latest `main` commit is pinned. The CLI first reads the commit's `VERSION` from GitHub — that version is the operation's target — and asks for confirmation. The command returns once the instance is launched with its volumes attached; bootstrap completes on the host, and a bootstrap failure terminates the instance. |
+| `--bootstrap-from-github [commit-sha]` | `deploy`, `upgrade`, `recover`, `reconfigure` | Provisions the instance from a pinned `infiloop2/kern` commit via EC2 user data instead of pushing the local checkout over SSH; without a value, the latest `main` commit is pinned. The CLI first reads the commit's `VERSION` from GitHub — that version is the operation's target and must exactly equal the local checkout's `VERSION`, or the command aborts before any AWS call — and asks for confirmation. The command returns once the instance is launched with its volumes attached; bootstrap completes on the host, and a bootstrap failure terminates the instance. |
 | `--allow-upgrade` | `recover` | Allows no-instance recovery to advance preserved admin state from an older version to the target `VERSION`. |
 
 Lifecycle commands fail before replacing an existing instance when the AWS
@@ -412,6 +412,30 @@ The admin toolbar quietly shows version status after checking the `VERSION` on
 the public repository's `main` branch. A small upgrade icon shows the available
 version and reminds you to use the operator plane; a small checkmark confirms
 the host is at the latest version. The icons themselves perform no action.
+
+### Recovering From Lost Passkeys
+
+If you enable passkey login for the admin UI and later lose every enrolled
+passkey, you can still recover from the operator plane — passkeys are optional
+convenience credentials, and the admin password remains a valid way in. Run
+`reconfigure` with `--reset-admin-passkeys`:
+
+```bash
+python3 -m host.cli.reconfigure \
+  --agent-name my-kern \
+  --operator-cloudflare-hostname <hostname> \
+  --admin-password-sha256 <sha256> \
+  --reset-admin-passkeys
+```
+
+This deletes every enrolled admin passkey so you can sign in with the admin
+password again and enroll new passkeys. It preserves your admin and agent data
+volumes (Postgres state, tasks, audit logs, credentials, apps, network policy)
+unchanged. Because it is a normal `reconfigure`, it installs the
+`--admin-password-sha256` digest as the admin password and replaces the full
+operator endpoint list — pass your current password digest and endpoints unless
+you also intend to change them. The same flow doubles as the way to move to a
+new public admin hostname.
 
 The host uses three EBS volumes:
 

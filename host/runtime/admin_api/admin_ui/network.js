@@ -493,10 +493,18 @@ export function toggleCustomDomainAccess() {
 }
 
 export async function setIntegrationEnabled(name, enabled) {
+  const label = MANAGED_INTEGRATIONS[name].label;
+  const runtime = providerRuntime(name);
   const dropsRepositories = !enabled && name === "github" && githubRepositories(activeNetworkPolicy).length > 0;
+  // Disabling re-publishes the policy, which cuts the integration off from any
+  // agent work already running against it. Name the affected runtime when the
+  // integration is an inference provider (Codex/Claude Code/Hermes).
+  const disclosure = runtime
+    ? `This immediately fails any running ${runtimeLabel(runtime)} work, which loses its ${label} access mid-task.`
+    : `This immediately fails any running agent work that is using ${label}.`;
   const prompt = dropsRepositories
-    ? `Disable the ${MANAGED_INTEGRATIONS[name].label} integration and remove its write repositories?`
-    : `Disable the ${MANAGED_INTEGRATIONS[name].label} integration for the agent right now?`;
+    ? `Disable the ${label} integration and remove its write repositories? ${disclosure}`
+    : `Disable the ${label} integration for the agent right now? ${disclosure}`;
   if (!enabled && !confirm(prompt)) return;
   if (name === "github" && enabled) expandedIntegrations.add("github");
   await publishPolicy(name, policy => {
@@ -844,7 +852,7 @@ function renderDomainRules() {
     return;
   }
   setHtml($("domain-rules"), `<table>
-    <tr><th>domain</th><th>methods</th><th>path guards</th><th></th></tr>
+    <tr><th>domain</th><th>methods</th><th>WebSocket</th><th>path guards</th><th></th></tr>
     ${domains.map(domain => {
       const rule = objectValue(rules[domain]);
       const methods = (rule.allow_http_methods || []).join(", ");
@@ -853,6 +861,7 @@ function renderDomainRules() {
       <tr>
         <td class="mono">${esc(domain)}</td>
         <td>${esc(methods)}</td>
+        <td>${rule.allow_websocket === true ? "allowed" : "off"}</td>
         <td class="mono">${guards ? `<pre>${esc(guards)}</pre>` : `<span class="muted">any path</span>`}</td>
         <td><button class="ghost sm" data-action="remove-domain-rule" data-domain="${esc(domain)}">Remove</button></td>
       </tr>`;
@@ -864,9 +873,11 @@ export async function addDomainRule() {
   const domain = $("policy-domain").value.trim().toLowerCase();
   const methods = $("policy-methods").value.split(",").map(value => value.trim().toUpperCase()).filter(Boolean);
   const pathGuards = $("policy-path-guards").value.split("\n").map(value => value.trim()).filter(Boolean);
+  const allowWebsocket = $("policy-allow-websocket").checked;
   if (!domain || !methods.length) { policyMessage("custom_domain", "Domain and at least one HTTP method are required.", true); return; }
   const rule = {"allow_http_methods": methods};
   if (pathGuards.length) rule.path_guards = pathGuards;
+  if (allowWebsocket) rule.allow_websocket = true;
   await publishPolicy("custom_domain", policy => {
     const domains = customDomains(policy);
     domains[domain] = rule;
@@ -875,6 +886,7 @@ export async function addDomainRule() {
   $("policy-domain").value = "";
   $("policy-methods").value = "";
   $("policy-path-guards").value = "";
+  $("policy-allow-websocket").checked = false;
 }
 
 export async function removeDomainRule(domain) {

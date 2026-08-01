@@ -1227,7 +1227,8 @@ the host-derived resources assigned to each one. Migration-only manifests with
       },
       "ui": {
         "iframe_src": "/v1/apps/agent_chat/ui/index.html",
-        "sandbox": ["allow-scripts", "allow-forms", "allow-modals"]
+        "sandbox": ["allow-scripts", "allow-forms", "allow-modals"],
+        "host_fullscreen": false
       }
     }
   ]
@@ -1241,6 +1242,7 @@ the host-derived resources assigned to each one. Migration-only manifests with
 | `apps[].backend.api_route` | Authenticated admin API prefix that reverse-proxies to this app backend. |
 | `apps[].ui.iframe_src` | Static entry point mounted by the admin API. |
 | `apps[].ui.sandbox` | iframe permissions the admin shell applies. `allow-same-origin` is deliberately absent, so the app frame has an opaque origin. |
+| `apps[].ui.host_fullscreen` | Whether the host displays the app over its full shell with an unoccludable host-owned exit control. |
 
 App UI assets under `/v1/apps/{app_id}/ui/` are static and do not require
 authentication. They carry a restrictive CSP and no-store cache headers, expose

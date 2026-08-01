@@ -25,8 +25,8 @@ Every axis has the same five durable parts:
    named reviewer completed the whole axis at that exact commit; it does not
    mean every file in the repository was reviewed. It records only the current
    audit; a newer audit replaces the prior commit and reviewers.
-3. **Findings** is the single source of truth. Audit reviewers append new
-   finding rows and never edit an existing row.
+3. **Findings** is the single source of truth. Audit reviewers insert new
+   finding rows in severity order and never edit an existing row.
 4. **Audit instructions** are the threat model and minimal scope checklist.
    The checklist is a required baseline, not a complete definition of scope.
 5. **Collaborative review** holds the shared evidence for each reviewed
@@ -47,14 +47,19 @@ open, and where a fix was verified.
 3. Review the code independently. Reading the existing findings is encouraged,
    but first form your own view so earlier reviewers do not become the only
    search plan.
-4. Append to the canonical **Findings** table:
-   - Add a new stable `<PREFIX>-NNN` row for a materially new defect.
+4. Add findings to the canonical **Findings** table:
+   - Insert a new stable `<PREFIX>-NNN` row for a materially new defect.
+     Rows may be inserted between existing rows; they are not required to be
+     appended at the end of the table.
+   - Keep rows ordered by descending severity: `Critical`, `High`, `Medium`,
+     `Low`, then `Info`. Within one severity, preserve the existing row order
+     and place new rows after the other rows at that severity.
    - Never edit an existing row, including its severity, attribution,
      description, or resolution.
-   - If your finding overlaps an existing one, append it only when you found a
+   - If your finding overlaps an existing one, add it only when you found a
      materially new trigger, impact, or affected surface. Describe only that
      new part instead of restating the earlier finding.
-   - If you found nothing new, do not append a row.
+   - If you found nothing new, do not add a row.
    - Keep **Found at** as the earliest known affected commit. A later re-audit
      does not replace it.
    - Never delete or renumber a finding.
@@ -88,11 +93,12 @@ Allowed resolutions are deliberately small:
 | --- | --- |
 | `Open` | The finding is still believed to apply and needs a decision or fix. |
 | `Wontfix — <reason>` | The finding is accepted and intentionally will not be fixed. |
-| `Fixed at <commit>` | A reviewer verified the fix at that exact commit. |
+| `Fixed — <description>` | The repository owner verified the remediation. Summarize the durable security property rather than a commit hash that can change during a rebase or squash merge. |
 
 Audit reviewers set new findings to `Open`. Resolution changes are repository
 owner actions, not audit-agent actions; an audit agent must not modify the
-existing row.
+existing row. Tests and Git history retain the implementation evidence while
+the finding row records a stable description of the verified result.
 
 ## Collaborative review template
 

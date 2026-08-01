@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
+from contextlib import ExitStack, nullcontext
 import io
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 
 import pg_harness
@@ -40,9 +43,22 @@ def openai_request_denied(policy, host, headers, body, path="/"):
     )
 
 
-def anthropic_request_denied(policy, method, host, path, headers, body=b""):
+def _jwt_segment(obj) -> str:
+    return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+
+def openai_bearer(account_id: str) -> str:
+    """A genuine-shaped ChatGPT OAuth access token: base64url JSON header and
+    payload (with the chatgpt_account_id claim) plus a dummy signature."""
+    header = _jwt_segment({"alg": "RS256", "typ": "JWT"})
+    payload = _jwt_segment({"https://api.openai.com/auth": {"chatgpt_account_id": account_id}})
+    return f"Bearer {header}.{payload}.c2ln"
+
+
+def anthropic_request_denied(policy, method, host, path, headers, body=b"", attest_account=None):
     return claude_guard.request_denied(
-        _controls(policy).integrations["claude"], method, host, path, "", headers, body
+        _controls(policy).integrations["claude"], method, host, path, "", headers, body,
+        attest_account,
     )
 
 
@@ -58,12 +74,26 @@ def github_push_gate_response(policy, method, host, path, body):
     )
 
 
+def _gate_capacity(pending: int = 0) -> ExitStack:
+    stack = ExitStack()
+    stack.enter_context(
+        patch("host.network_integrations.github.guard.count_pending_pushes", return_value=pending)
+    )
+    stack.enter_context(
+        patch(
+            "host.network_integrations.github.guard.push_gate.quarantine_lock",
+            return_value=nullcontext(),
+        )
+    )
+    return stack
+
+
 def request_allowed(policy, method, host, path, query=""):
     return network_integrations.request_denied(
         _controls(policy), method, host, path, query, [], b""
     ) is None
 from host.runtime.network_proxy.service import read_request_head
-from host.runtime.core.state import save_proxy_claude_account, save_proxy_openai_account_id
+from host.runtime.core.state import save_proxy_claude_account_id, save_proxy_openai_account_id
 
 
 class ConfigTests(unittest.TestCase):
@@ -491,6 +521,36 @@ class ConfigTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
+    def test_custom_websocket_requires_boolean_opt_in_and_round_trips(self) -> None:
+        policy = _custom_policy(
+            {
+                "socket.example.com": {
+                    "allow_http_methods": ["GET"],
+                    "allow_websocket": True,
+                },
+                "http.example.com": {"allow_http_methods": ["GET"]},
+            }
+        )
+        controls = _controls(policy)
+        self.assertTrue(network_integrations.websocket_allowed(controls, "socket.example.com"))
+        self.assertFalse(network_integrations.websocket_allowed(controls, "http.example.com"))
+        self.assertEqual(controls.to_json(), policy)
+
+        for bad in (None, 0, "true", []):
+            with self.subTest(value=bad), self.assertRaisesRegex(
+                ConfigError, "allow_websocket must be a boolean"
+            ):
+                _controls(
+                    _custom_policy(
+                        {
+                            "socket.example.com": {
+                                "allow_http_methods": ["GET"],
+                                "allow_websocket": bad,
+                            }
+                        }
+                    )
+                )
+
     def test_policy_matches_domain_method_and_path(self) -> None:
         policy = _custom_policy({
             "*.example.com": {
@@ -757,6 +817,7 @@ class PolicyTests(unittest.TestCase):
         # construction); a read probe never reaches inspect().
         clean = type("R", (), {"touches_github": False})()
         with (
+            _gate_capacity(),
             patch("host.network_integrations.github.guard.read_proxy_github_token", return_value="ghs_test"),
             patch("host.network_integrations.github.guard.push_gate.inspect", return_value=clean) as inspect_fn,
         ):
@@ -770,6 +831,7 @@ class PolicyTests(unittest.TestCase):
         # trigger (and the write guard before it) matched: dot segments and
         # percent-encoding cannot smuggle a different identity into the gate.
         with (
+            _gate_capacity(),
             patch("host.network_integrations.github.guard.read_proxy_github_token", return_value="ghs_test"),
             patch("host.network_integrations.github.guard.push_gate.inspect", return_value=clean) as inspect_fn,
         ):
@@ -856,6 +918,7 @@ class PolicyTests(unittest.TestCase):
             },
         })
         with (
+            _gate_capacity(),
             patch("host.network_integrations.github.guard.read_proxy_github_token", return_value=None),
             patch("host.network_integrations.github.guard.push_gate.inspect", return_value=result),
             patch("host.network_integrations.github.guard.push_gate.new_push_id", return_value="abc123"),
@@ -895,6 +958,7 @@ class PolicyTests(unittest.TestCase):
             },
         })
         with (
+            _gate_capacity(),
             patch("host.network_integrations.github.guard.read_proxy_github_token", return_value=None),
             patch("host.network_integrations.github.guard.push_gate.inspect", return_value=result),
             patch("host.network_integrations.github.guard.push_gate.new_push_id", return_value="abc123"),
@@ -906,6 +970,27 @@ class PolicyTests(unittest.TestCase):
         self.assertIsNone(response)
         self.assertEqual(reason, "github_push_gate_unavailable")
         self.assertEqual(result.cleaned, ["abc123"])
+
+    def test_github_push_queue_cap_is_checked_before_indexing(self) -> None:
+        policy = parse_network_controls({
+            "network_integrations": {
+                "github": {
+                    "enabled": True,
+                    "require_dot_github_approval": True,
+                    "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
+                }
+            },
+        })
+        path = "/infiversehq/kern-tools.git/git-receive-pack"
+        with (
+            _gate_capacity(pending=10),
+            patch("host.network_integrations.github.guard.push_gate.inspect") as inspect_fn,
+        ):
+            self.assertEqual(
+                github_push_gate_response(policy, "POST", "github.com", path, b"body"),
+                (None, "github_push_queue_full"),
+            )
+            inspect_fn.assert_not_called()
 
     def test_github_lfs_batch_allows_download_denies_upload(self) -> None:
         policy = (
@@ -984,22 +1069,61 @@ class PolicyTests(unittest.TestCase):
             "network_integrations": {"openai": {"enabled": True}},
         })
         host = "chatgpt.com"
-        # Subsequent web-search checks carry the valid account header so they
-        # isolate the web-search logic from the account pin.
-        json_header = [("Content-Type", "application/json"), ("ChatGPT-Account-Id", "acct_good")]
+        # Subsequent web-search checks carry the valid account header and a
+        # matching bearer so they isolate the web-search logic from the
+        # account pin and the credential binding.
+        auth = ("Authorization", openai_bearer("acct_good"))
+        json_header = [("Content-Type", "application/json"), ("ChatGPT-Account-Id", "acct_good"), auth]
 
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KERN_STATE_DIR": tmp}):
             # Without a stored account id, OpenAI data-plane requests fail
             # closed even if the presented header would otherwise match.
-            self.assertIsNotNone(openai_request_denied(policy, host, [("ChatGPT-Account-Id", "acct_good")], b"{}"))
+            self.assertIsNotNone(openai_request_denied(policy, host, [("ChatGPT-Account-Id", "acct_good"), auth], b"{}"))
             save_proxy_openai_account_id("acct_good")
             # Account pinning on the ChatGPT-Account-Id header.
-            self.assertIsNone(openai_request_denied(policy, host, [("ChatGPT-Account-Id", "acct_good")], b"{}"))
-            self.assertIsNotNone(openai_request_denied(policy, host, [("ChatGPT-Account-Id", "acct_evil")], b"{}"))
+            self.assertIsNone(openai_request_denied(policy, host, [("ChatGPT-Account-Id", "acct_good"), auth], b"{}"))
+            self.assertIsNotNone(openai_request_denied(policy, host, [("ChatGPT-Account-Id", "acct_evil"), auth], b"{}"))
             # A missing account header is denied, not allowed — otherwise the pin is
             # bypassable by omission.
             self.assertIsNotNone(openai_request_denied(policy, host, [("Content-Type", "application/json")], b"{}"))
             self.assertIsNone(openai_request_denied(policy, "auth.openai.com", [], b"{}"))
+
+            # API WebSockets are a narrow GET exception for Responses only;
+            # ordinary API GETs and upgrades on other paths remain denied.
+            websocket_headers = [
+                ("ChatGPT-Account-Id", "acct_good"),
+                ("Upgrade", "websocket"),
+                auth,
+            ]
+            api_config = policy.integrations["openai"]
+            self.assertIsNone(
+                openai_guard.request_denied(
+                    api_config,
+                    "GET",
+                    "api.openai.com",
+                    "/v1/responses",
+                    "",
+                    websocket_headers,
+                    b"",
+                )
+            )
+            for path, headers in (
+                ("/v1/responses", [("ChatGPT-Account-Id", "acct_good"), auth]),
+                ("/v1/realtime", websocket_headers),
+            ):
+                with self.subTest(path=path, headers=headers):
+                    self.assertEqual(
+                        openai_guard.request_denied(
+                            api_config,
+                            "GET",
+                            "api.openai.com",
+                            path,
+                            "",
+                            headers,
+                            b"",
+                        ),
+                        "network_policy_denied",
+                    )
 
             # Live web search (external access on, or unset) is denied; cached is allowed.
             live = b'{"tools": [{"type": "web_search", "external_web_access": true}]}'
@@ -1109,7 +1233,7 @@ class PolicyTests(unittest.TestCase):
             # A body the upstream cannot parse as JSON cannot declare tools, so a
             # mislabeled body with a junk prefix is not a search vector; a
             # JSON-looking body that fails to parse still fails closed.
-            text_header = [("Content-Type", "text/plain"), ("ChatGPT-Account-Id", "acct_good")]
+            text_header = [("Content-Type", "text/plain"), ("ChatGPT-Account-Id", "acct_good"), auth]
             self.assertIsNone(openai_request_denied(policy, host, text_header, b'x' + live))
             self.assertIsNotNone(openai_request_denied(policy, host, json_header, b'{"tools": [{"type": "web_search"'))
             self.assertIsNotNone(
@@ -1125,8 +1249,71 @@ class PolicyTests(unittest.TestCase):
                 ("Content-Type", "application/json"),
                 ("Content-Encoding", "gzip"),
                 ("ChatGPT-Account-Id", "acct_good"),
+                auth,
             ]
             self.assertIsNotNone(openai_request_denied(policy, host, gz_headers, gzip.compress(live)))
+
+    def test_openai_guard_binds_bearer_credential_to_pinned_account(self) -> None:
+        # NET-006: the chatgpt-account-id header names an account without
+        # authenticating as it. The Authorization bearer must be a ChatGPT
+        # OAuth JWT whose payload claims the pinned account.
+        pg_harness.reset_database()
+        policy = parse_network_controls({
+            "network_integrations": {"openai": {"enabled": True}},
+        })
+        account_header = ("ChatGPT-Account-Id", "acct_good")
+        good = ("Authorization", openai_bearer("acct_good"))
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KERN_STATE_DIR": tmp}):
+            save_proxy_openai_account_id("acct_good")
+            # A genuine-shaped token claiming the pinned account is allowed.
+            self.assertIsNone(openai_request_denied(policy, "chatgpt.com", [account_header, good], b"{}"))
+            # A valid JWT for a different account echoes the pinned header but
+            # authenticates as someone else: the credential decides, not the
+            # header.
+            for host in ("chatgpt.com", "api.openai.com"):
+                with self.subTest(host=host):
+                    self.assertEqual(
+                        openai_request_denied(
+                            policy, host,
+                            [account_header, ("Authorization", openai_bearer("acct_evil"))],
+                            b"{}",
+                        ),
+                        "openai_token_account_mismatch",
+                    )
+            # Non-JWT bearers (sk- platform keys), missing Authorization, a
+            # non-Bearer scheme, and duplicated Authorization all fail closed.
+            for headers in (
+                [account_header, ("Authorization", "Bearer sk-proj-1234567890")],
+                [account_header],
+                [account_header, ("Authorization", "Basic dXNlcjpwYXNz")],
+                [account_header, good, good],
+            ):
+                with self.subTest(headers=headers):
+                    self.assertEqual(
+                        openai_request_denied(policy, "chatgpt.com", headers, b"{}"),
+                        "openai_token_account_mismatch",
+                    )
+            # The Responses WebSocket handshake runs through the same request
+            # guard, so the binding covers it too.
+            upgrade = ("Upgrade", "websocket")
+            api_config = policy.integrations["openai"]
+            self.assertEqual(
+                openai_guard.request_denied(
+                    api_config, "GET", "api.openai.com", "/v1/responses", "",
+                    [account_header, upgrade, ("Authorization", openai_bearer("acct_evil"))],
+                    b"",
+                ),
+                "openai_token_account_mismatch",
+            )
+            self.assertIsNone(
+                openai_guard.request_denied(
+                    api_config, "GET", "api.openai.com", "/v1/responses", "",
+                    [account_header, upgrade, good],
+                    b"",
+                )
+            )
+            # auth.openai.com (token refresh) is unguarded and needs no bearer.
+            self.assertIsNone(openai_request_denied(policy, "auth.openai.com", [], b"{}"))
 
     def test_external_url_guard_caps_gzip_and_deflate_decoded_size(self) -> None:
         pg_harness.reset_database()
@@ -1152,6 +1339,7 @@ class PolicyTests(unittest.TestCase):
                     ("Content-Type", "application/json"),
                     ("Content-Encoding", encoding),
                     ("ChatGPT-Account-Id", "acct_good"),
+                    ("Authorization", openai_bearer("acct_good")),
                 ]
                 with self.subTest(encoding=encoding):
                     self.assertIsNotNone(openai_request_denied(policy, "chatgpt.com", headers, compressed))
@@ -1172,6 +1360,7 @@ class PolicyTests(unittest.TestCase):
                         ("Content-Type", "application/json"),
                         ("Content-Encoding", encoding),
                         ("ChatGPT-Account-Id", "acct_good"),
+                        ("Authorization", openai_bearer("acct_good")),
                     ]
                     self.assertIsNotNone(
                         openai_request_denied(policy, "chatgpt.com", headers, b'{"input": "hello"}')
@@ -1188,10 +1377,11 @@ class PolicyTests(unittest.TestCase):
                 ("Content-Type", "application/json"),
                 ("Content-Encoding", "lzma"),
                 ("ChatGPT-Account-Id", "acct_good"),
+                ("Authorization", openai_bearer("acct_good")),
             ]
             self.assertIsNotNone(openai_request_denied(policy, "chatgpt.com", headers, b'{"input": "hello"}'))
 
-    def test_anthropic_guard_pins_oauth_bearer_hash(self) -> None:
+    def test_anthropic_guard_requires_approved_account_identity(self) -> None:
         pg_harness.reset_database()
         policy = parse_network_controls({
             "network_integrations": {"claude": {"enabled": True}},
@@ -1200,7 +1390,7 @@ class PolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KERN_STATE_DIR": tmp}):
             self.assertEqual(
                 anthropic_request_denied(policy, "POST", "api.anthropic.com", "/v1/messages", headers),
-                "anthropic_token_unavailable",
+                "anthropic_account_unavailable",
             )
             for path in (
                 "/api/oauth/profile",
@@ -1217,14 +1407,13 @@ class PolicyTests(unittest.TestCase):
                     policy, "POST", "api.anthropic.com", "/api/event_logging/v2/batch", headers
                 )
             )
-            save_proxy_claude_account(
-                {
-                    "account_id": "acct",
-                    "organization_id": "org",
-                    "access_token_sha256": "2743594a82ad13b481caa0b87bea69906b4888c10e25fa1dc95020166edd5a67",
-                }
+            save_proxy_claude_account_id("acct")
+            self.assertEqual(
+                anthropic_request_denied(
+                    policy, "POST", "api.anthropic.com", "/v1/messages", headers
+                ),
+                "anthropic_token_mismatch",
             )
-            self.assertIsNone(anthropic_request_denied(policy, "POST", "api.anthropic.com", "/v1/messages", headers))
             self.assertIsNotNone(
                 anthropic_request_denied(
                     policy, "POST", "api.anthropic.com", "/v1/messages", [("Authorization", "Bearer wrong")]
@@ -1240,6 +1429,129 @@ class PolicyTests(unittest.TestCase):
                     policy, "GET", "api.anthropic.com", "/api/oauth/profile", [("Authorization", "Bearer wrong")]
                 )
             )
+
+    def test_anthropic_guard_always_attests_uuid_once_per_token_hash(self) -> None:
+        pg_harness.reset_database()
+        controls = parse_network_controls({
+            "network_integrations": {"claude": {"enabled": True}},
+        })
+        save_proxy_claude_account_id("acct-approved")
+        claude_guard.clear_token_attestation_cache()
+        self.addCleanup(claude_guard.clear_token_attestation_cache)
+        calls: list[str] = []
+
+        def attest(token: str) -> str:
+            calls.append(token)
+            return "acct-approved"
+
+        headers = [("Authorization", "Bearer older-token")]
+        self.assertIsNone(
+            anthropic_request_denied(
+                controls, "POST", "api.anthropic.com", "/v1/messages", headers,
+                attest_account=attest,
+            )
+        )
+        self.assertIsNone(
+            anthropic_request_denied(
+                controls, "POST", "api.anthropic.com", "/v1/messages", headers,
+                attest_account=lambda _token: self.fail("cached token was attested twice"),
+            )
+        )
+        self.assertEqual(calls, ["older-token"])
+
+    def test_anthropic_guard_rejects_token_attested_to_another_uuid(self) -> None:
+        pg_harness.reset_database()
+        controls = parse_network_controls({
+            "network_integrations": {"claude": {"enabled": True}},
+        })
+        save_proxy_claude_account_id("acct-approved")
+        claude_guard.clear_token_attestation_cache()
+        self.addCleanup(claude_guard.clear_token_attestation_cache)
+        headers = [("Authorization", "Bearer other-account-token")]
+
+        self.assertEqual(
+            anthropic_request_denied(
+                controls, "POST", "api.anthropic.com", "/v1/messages", headers,
+                attest_account=lambda _token: "acct-other",
+            ),
+            "anthropic_token_mismatch",
+        )
+        self.assertEqual(
+            anthropic_request_denied(
+                controls, "POST", "api.anthropic.com", "/v1/messages",
+                headers + [("Authorization", "Bearer duplicate")],
+                attest_account=lambda _token: "acct-approved",
+            ),
+            "anthropic_token_mismatch",
+        )
+
+    def test_anthropic_parallel_cache_misses_attest_once(self) -> None:
+        pg_harness.reset_database()
+        controls = parse_network_controls({
+            "network_integrations": {"claude": {"enabled": True}},
+        })
+        save_proxy_claude_account_id("acct-approved")
+        claude_guard.clear_token_attestation_cache()
+        self.addCleanup(claude_guard.clear_token_attestation_cache)
+        headers = [("Authorization", "Bearer one-new-parallel-token")]
+        entered = threading.Event()
+        release = threading.Event()
+        calls: list[str] = []
+        results: list[str | None] = []
+
+        def attest(token: str) -> str:
+            calls.append(token)
+            entered.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("test did not release attestation")
+            return "acct-approved"
+
+        def authorize() -> None:
+            results.append(
+                anthropic_request_denied(
+                    controls, "POST", "api.anthropic.com", "/v1/messages", headers,
+                    attest_account=attest,
+                )
+            )
+
+        threads = [threading.Thread(target=authorize) for _ in range(4)]
+        threads[0].start()
+        self.assertTrue(entered.wait(timeout=5))
+        for thread in threads[1:]:
+            thread.start()
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(results, [None] * 4)
+        self.assertEqual(calls, ["one-new-parallel-token"])
+
+    def test_anthropic_guard_rechecks_account_pin_after_attestation(self) -> None:
+        pg_harness.reset_database()
+        controls = parse_network_controls({
+            "network_integrations": {"claude": {"enabled": True}},
+        })
+        save_proxy_claude_account_id("acct-approved")
+        claude_guard.clear_token_attestation_cache()
+        self.addCleanup(claude_guard.clear_token_attestation_cache)
+        headers = [("Authorization", "Bearer rotating-token")]
+
+        def attest_after_reset(_token: str) -> str:
+            save_proxy_claude_account_id(None)
+            return "acct-approved"
+
+        self.assertEqual(
+            anthropic_request_denied(
+                controls,
+                "POST",
+                "api.anthropic.com",
+                "/v1/messages",
+                headers,
+                attest_account=attest_after_reset,
+            ),
+            "anthropic_token_mismatch",
+        )
 
     def test_parse_https_request_head(self) -> None:
         method, target, headers = read_request_head(
@@ -1281,7 +1593,7 @@ class DenialReasonCatalogTests(unittest.TestCase):
             "web_search_call", "web_fetch", "code_execution", "mcp_servers",
             "computer_use", "computer_use_preview", "code_interpreter",
             "allow_http_methods", "path_guards", "network_integrations",
-            "access_token_sha256",
+            "account_id", "access_token_sha256", "chatgpt_account_id",
             "pending_deployments", "deployment_protection_rule",
         }
         self.assertGreater(len(emitted), 15)
@@ -1353,7 +1665,13 @@ class DisabledIntegrationDispatchTests(unittest.TestCase):
                     network_integrations.gate_response(controls, "POST", host, "/x/y.git/git-receive-pack", b""),
                     (None, None),
                 )
-                self.assertIsNone(network_integrations.ws_message_guard(controls, host))
+                self.assertFalse(network_integrations.websocket_allowed(controls, host))
+                # The frame path always receives a callable content decision;
+                # the disabled integration's decision is the default no-op,
+                # even though its upgrade gate can never reach that path.
+                self.assertIsNone(
+                    network_integrations.ws_message_guard(controls, host)(b"message")
+                )
 
     def test_enabled_integrations_allow_their_hosts_at_dispatch(self) -> None:
         controls = parse_network_controls(

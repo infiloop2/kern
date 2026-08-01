@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from host.param_guard import find_denial
+
+AccountAttestor = Callable[[str], str | None]
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,12 @@ _CORE_PROXY_DENIAL_REASONS: tuple[DenialReason, ...] = (
         "standard HTTP client that sends one matching Host header.",
     ),
     DenialReason(
+        "duplicate_header_denied",
+        "A single-valued header (Content-Type, Content-Encoding, Content-Length, "
+        "Transfer-Encoding, or Authorization) was sent more than once, so the request had no one "
+        "meaning to inspect. Use a standard HTTP client that sends each of these once.",
+    ),
+    DenialReason(
         "request_body_malformed",
         "The request body framing (Content-Length or chunked encoding) was malformed, so the "
         "body could not be inspected. Resend with valid framing.",
@@ -139,6 +147,18 @@ _CORE_PROXY_DENIAL_REASONS: tuple[DenialReason, ...] = (
         "request_body_too_large",
         "The request body exceeds the proxy's inspection limit (128 MiB). Split the upload or "
         "send less data per request.",
+    ),
+    DenialReason(
+        "websocket_upgrade_declined",
+        "The upstream did not accept the WebSocket handshake with 101 Switching Protocols, so "
+        "the proxy closed the connection instead of treating an ordinary HTTP response as an "
+        "unchecked tunnel. Check the WebSocket URL and authentication, then reconnect.",
+    ),
+    DenialReason(
+        "websocket_not_allowed",
+        "WebSocket upgrades are enabled only for guarded OpenAI endpoints or a custom domain "
+        "whose operator rule explicitly sets allow_websocket. Use ordinary HTTPS, or ask the "
+        "operator to enable the custom-domain option if a WebSocket is intended.",
     ),
     DenialReason(
         "websocket_uninspectable",

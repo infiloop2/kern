@@ -27,17 +27,19 @@ from host.network_integrations.claude import guard as claude_guard
 from host.network_integrations.claude.manifest import ClaudeIntegration
 
 
-def anthropic_request_denied(config, method, host, path, headers):
-    return claude_guard.request_denied(config, method, host, path, "", headers, b"")
+def anthropic_request_denied(config, method, host, path, headers, attest_account=None):
+    return claude_guard.request_denied(
+        config, method, host, path, "", headers, b"", attest_account
+    )
 from host.runtime.core.state import save_network_policy as save_policy
 from host.runtime.core.state import (
     read_claude_account,
     read_openai_account,
-    read_proxy_claude_account,
+    read_proxy_claude_account_id,
     read_proxy_openai_account_id,
     save_claude_account,
     save_openai_account,
-    save_proxy_claude_account,
+    save_proxy_claude_account_id,
     save_proxy_openai_account_id,
 )
 
@@ -1042,23 +1044,22 @@ class OrchestratorTests(unittest.TestCase):
                 self.wait_until_idle("chat")
             self.assertEqual(seen, ["claude-session-1"])
 
-    def test_claude_turn_repins_rotated_token_before_the_turn(self) -> None:
+    def test_claude_turn_updates_rotated_token_metadata_before_the_turn(self) -> None:
         # The Claude CLI refreshes its OAuth access token on its own schedule.
-        # The bearer-token pin must follow that rotation (only the account
-        # identity is anchored), and turn-start convergence is what re-pins it.
+        # Turn-start convergence updates the stored token metadata, while the
+        # proxy authorizes both hashes through the one account-UUID rule.
         old_token = "old-token"
         fresh_token = "fresh-token"
+        claude_guard.clear_token_attestation_cache()
+        self.addCleanup(claude_guard.clear_token_attestation_cache)
         policy = ClaudeIntegration(enabled=True, web_search=False)
         save_attested_claude_account("acct", access_token_sha256=hashlib.sha256(old_token.encode()).hexdigest())
-        save_proxy_claude_account(
-            {
-                "account_id": "acct",
-                "access_token_sha256": hashlib.sha256(old_token.encode()).hexdigest(),
-            }
-        )
+        save_proxy_claude_account_id("acct")
+        old_headers = [("Authorization", f"Bearer {old_token}")]
         self.assertIsNone(
             anthropic_request_denied(
-                policy, "POST", "api.anthropic.com", "/v1/messages", [("Authorization", f"Bearer {old_token}")]
+                policy, "POST", "api.anthropic.com", "/v1/messages", old_headers,
+                lambda _token: "acct",
             )
         )
 
@@ -1088,15 +1089,12 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(event_summary(thread_events("chat"))[-1], ("thread.message", "hi"))
         self.assertEqual(read_claude_account()["access_token_sha256"], hashlib.sha256(fresh_token.encode()).hexdigest())
-        self.assertEqual(read_proxy_claude_account()["access_token_sha256"], hashlib.sha256(fresh_token.encode()).hexdigest())
-        self.assertIsNotNone(
-            anthropic_request_denied(
-                policy, "POST", "api.anthropic.com", "/v1/messages", [("Authorization", f"Bearer {old_token}")]
-            )
-        )
+        self.assertEqual(read_proxy_claude_account_id(), "acct")
+        fresh_headers = [("Authorization", f"Bearer {fresh_token}")]
         self.assertIsNone(
             anthropic_request_denied(
-                policy, "POST", "api.anthropic.com", "/v1/messages", [("Authorization", f"Bearer {fresh_token}")]
+                policy, "POST", "api.anthropic.com", "/v1/messages", fresh_headers,
+                lambda _token: "acct",
             )
         )
 
@@ -1606,7 +1604,7 @@ class OrchestratorTests(unittest.TestCase):
         # token's owner comes from the provider's profile endpoint, so forged
         # local metadata cannot help: the attested uuid decides.
         save_attested_claude_account("acct-trusted", access_token_sha256="0" * 64)
-        save_proxy_claude_account({"account_id": "acct-trusted", "access_token_sha256": "0" * 64})
+        save_proxy_claude_account_id("acct-trusted")
 
         with (
             patch.object(
@@ -1623,7 +1621,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "error")
 
         self.assertEqual(read_claude_account()["account_id"], "acct-trusted")
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
         record = orchestrator.runtime_status_record("claude_code")
         self.assertIn("account changed", record["error_message"])
 
@@ -1649,7 +1647,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "error")
 
         self.assertEqual(read_claude_account()["account_id"], "acct-trusted")
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
         self.assertIn("account changed", orchestrator.runtime_status_record("claude_code").get("error_message", ""))
 
     def test_claude_refresh_skips_attestation_for_anchored_token_and_ignores_local_metadata(self) -> None:
@@ -1674,8 +1672,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(read_claude_account()["account_id"], "acct-trusted")
         self.assertEqual(read_claude_account()["email"], "op@example.com")
-        self.assertEqual(read_proxy_claude_account()["account_id"], "acct-trusted")
-        self.assertEqual(read_proxy_claude_account()["access_token_sha256"], "f" * 64)
+        self.assertEqual(read_proxy_claude_account_id(), "acct-trusted")
 
     def test_claude_legacy_anchor_without_login_stays_awaiting(self) -> None:
         # Pre-attestation releases could anchor Claude by local agent-writable
@@ -1706,7 +1703,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(account["account_id"], "op@example.com")
         self.assertEqual(account["email"], "op@example.com")
         self.assertNotIn("identity_attestation", account)
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
 
     def test_claude_legacy_anchor_recaptured_by_operator_login_without_reset(self) -> None:
         # A pre-attestation upgrade row plus a completed operator login re-captures
@@ -1750,7 +1747,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(account["account_id"], "acct-real")
         self.assertEqual(account["email"], "op@example.com")
         self.assertEqual(account["identity_attestation"], orchestrator.CLAUDE_IDENTITY_ATTESTATION)
-        self.assertEqual(read_proxy_claude_account()["account_id"], "acct-real")
+        self.assertEqual(read_proxy_claude_account_id(), "acct-real")
         self.assertIsNone(state.oauth_login("claude"))
 
     def test_claude_attestation_failure_is_retryable(self) -> None:
@@ -1770,7 +1767,7 @@ class OrchestratorTests(unittest.TestCase):
             "could not reach", orchestrator.runtime_status_record("claude_code").get("error_message", "")
         )
         self.assertEqual(read_claude_account()["access_token_sha256"], "0" * 64)
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
 
         # A failed attestation is memoized for CLAUDE_LIVE_PROBE_RETRY_SECONDS
         # so the five-second poll does not refetch the profile; simulate the
@@ -1786,7 +1783,7 @@ class OrchestratorTests(unittest.TestCase):
         ):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "active")
         self.assertEqual(read_claude_account()["access_token_sha256"], "1" * 64)
-        self.assertEqual(read_proxy_claude_account()["access_token_sha256"], "1" * 64)
+        self.assertEqual(read_proxy_claude_account_id(), "acct-trusted")
 
     def test_claude_first_capture_anchors_attested_identity(self) -> None:
         orchestrator._set_runtime_status("claude_code", "awaiting_login")
@@ -1823,13 +1820,13 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(account["account_id"], "acct-real")
         self.assertEqual(account["email"], "op@example.com")
         self.assertEqual(account["organization_id"], "org-real")
-        self.assertEqual(read_proxy_claude_account()["account_id"], "acct-real")
+        self.assertEqual(read_proxy_claude_account_id(), "acct-real")
         self.assertIsNone(state.oauth_login("claude"))
 
-    def test_claude_first_capture_backfills_usage_after_pin_publish(self) -> None:
+    def test_claude_first_capture_backfills_usage_after_identity_publish(self) -> None:
         # Attestation, not the usage probe, validates a first-capture token:
-        # its pin only goes live when the refresh commits. The refresh then
-        # reads usage once, so the admin UI shows it immediately instead of
+        # its account identity only goes live when the refresh commits. The
+        # refresh then reads usage once, so the admin UI shows it immediately instead of
         # after the next five-minute recheck.
         orchestrator._set_runtime_status("claude_code", "awaiting_login")
         seed_oauth_login(
@@ -1844,7 +1841,7 @@ class OrchestratorTests(unittest.TestCase):
         pin_at_probe: list[str] = []
 
         def probe() -> dict[str, object]:
-            pin_at_probe.append(str(read_proxy_claude_account().get("access_token_sha256", "")))
+            pin_at_probe.append(str(read_proxy_claude_account_id() or ""))
             return {"current_session_used_percent": 14, "weekly_used_percent": 31}
 
         with (
@@ -1862,13 +1859,13 @@ class OrchestratorTests(unittest.TestCase):
         ):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "active")
 
-        self.assertEqual(pin_at_probe, ["f" * 64])  # exactly one probe, after the pin went live
+        self.assertEqual(pin_at_probe, ["acct-real"])  # exactly one probe, after the pin went live
         usage = read_claude_account()["claude_usage"]
         self.assertEqual(usage["current_session_used_percent"], 14)
         self.assertEqual(usage["weekly_used_percent"], 31)
         self.assertIn("last_checked_at", usage)
 
-    def test_claude_rotated_token_replaces_old_usage_after_pin_publish(self) -> None:
+    def test_claude_rotated_token_replaces_old_usage_after_metadata_publish(self) -> None:
         save_attested_claude_account(
             "acct-real",
             access_token_sha256="a" * 64,
@@ -1930,7 +1927,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(orchestrator.runtime_status_record("claude_code"), {"status": "awaiting_login"})
         self.assertEqual(read_claude_account(), {})
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
 
     def test_claude_pending_oauth_cannot_attest_or_anchor_first_account(self) -> None:
         orchestrator._set_runtime_status("claude_code", "awaiting_login")
@@ -1959,7 +1956,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(orchestrator.runtime_status_record("claude_code"), {"status": "awaiting_login"})
         self.assertEqual(read_claude_account(), {})
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
 
     def test_all_runtimes_persist_a_failed_turns_session_for_the_next_turn(self) -> None:
         # The production shape is a mid-turn rate limit: the CLI reports a
@@ -2262,7 +2259,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "awaiting_login")
 
         self.assertEqual(read_claude_account(), {})
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
         self.assertIsNone(state.oauth_login("claude"))
 
     def test_claude_refresh_without_oauth_cannot_attest_or_anchor_first_account(self) -> None:
@@ -2282,7 +2279,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(orchestrator.runtime_status_record("claude_code"), {"status": "awaiting_login"})
         self.assertEqual(read_claude_account(), {})
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
 
     def test_claude_refresh_deactivates_when_policy_disables_during_probe(self) -> None:
         # The one in-mutation policy re-check wins over the stale probe: the
@@ -2290,7 +2287,7 @@ class OrchestratorTests(unittest.TestCase):
         # but nothing it produced is committed and the pin is cleared in the
         # same transaction as the deactivation.
         save_attested_claude_account("acct-trusted", access_token_sha256="0" * 64)
-        save_proxy_claude_account({"account_id": "acct-trusted", "access_token_sha256": "0" * 64})
+        save_proxy_claude_account_id("acct-trusted")
 
         with (
             patch.object(
@@ -2308,7 +2305,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "deactivated")
 
         self.assertEqual(read_claude_account()["account_id"], "acct-trusted")
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
 
     def test_claude_attestation_disallowed_means_no_helper_egress(self) -> None:
         save_attested_claude_account("acct-trusted", access_token_sha256="0" * 64)
@@ -2330,7 +2327,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(allowed.call_count, 1)
         self.assertEqual(read_claude_account()["account_id"], "acct-trusted")
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
 
     def test_codex_refresh_clears_seeded_proxy_pin_when_account_is_not_active(self) -> None:
         save_approved_openai_account("acct-local")

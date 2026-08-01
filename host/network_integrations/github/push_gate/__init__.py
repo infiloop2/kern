@@ -16,10 +16,19 @@ under the proxy's existing role and uid grants.
 """
 
 from host.network_integrations.github.push_gate.engine import (
+    PENDING_PUSH_LIMIT,
     GateError,
     GateResult,
     inspect,
     new_push_id,
+    quarantine_lock,
 )
 
-__all__ = ["GateError", "GateResult", "inspect", "new_push_id"]
+__all__ = [
+    "PENDING_PUSH_LIMIT",
+    "GateError",
+    "GateResult",
+    "inspect",
+    "new_push_id",
+    "quarantine_lock",
+]

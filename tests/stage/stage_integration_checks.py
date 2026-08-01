@@ -281,7 +281,6 @@ class StageIntegrationChecks(AwsSmoke):
 
         proxy = f"http://127.0.0.1:{PROXY_PORT}"
         url = "https://chatgpt.com/backend-api/codex/responses"
-        live = '{"tools":[{"type":"web_search","external_web_access":true}]}'
         cached = '{"tools":[{"type":"web_search","external_web_access":false}]}'
 
         def post_openai(payload: str, account_header: str | None = account_id) -> str:
@@ -294,19 +293,19 @@ class StageIntegrationChecks(AwsSmoke):
 
         missing_account_response = post_openai(cached, account_header=None)
         wrong_account_response = post_openai(cached, account_header=f"{account_id}-wrong")
-        live_response = post_openai(live)
-        cached_response = post_openai(cached)
+        missing_token_response = post_openai(cached)
         if "openai_account_header_required" not in missing_account_response:
             raise AssertionError(f"missing account header was not blocked; proxy returned {missing_account_response!r}")
         if "openai_account_mismatch" not in wrong_account_response:
             raise AssertionError(f"wrong account header was not blocked; proxy returned {wrong_account_response!r}")
-        if "openai_web_tool_denied" not in live_response:
-            raise AssertionError(f"live web search payload was not blocked; proxy returned {live_response!r}")
-        if "openai_web_tool_denied" in cached_response:
-            raise AssertionError("cached web search payload was incorrectly blocked")
+        if "openai_token_account_mismatch" not in missing_token_response:
+            raise AssertionError(
+                "request without the pinned account token was not blocked; "
+                f"proxy returned {missing_token_response!r}"
+            )
         print(
             "    [provider guards] runtime=codex missing-account=denied "
-            "wrong-account=denied live-web=denied cached-web=allowed",
+            "wrong-account=denied missing-token=denied",
             flush=True,
         )
 

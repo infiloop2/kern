@@ -36,7 +36,11 @@ return this shape:
 | `admin_volume_id`, `agent_volume_id` | Always | Durable EBS volume ids attached to the host. |
 | `version` | Always | Target `VERSION` installed by this provisioning command. |
 | `operator_connections` | `deploy`, `reconfigure` | Public summary of the replacement endpoint list. Tunnel tokens and SSH key material are omitted. Upgrade/recover preserve the stored list and omit this field. |
-| `admin_password` | `deploy`, `reconfigure` | Cleartext admin password, read from `--admin-password-env` when supplied or generated otherwise. Upgrade/recover preserve the password and omit this field. |
+
+No result carries the admin password. Deploy and reconfigure accept only
+`--admin-password-sha256` (the SHA-256 hex digest of the operator's chosen
+password); the host stores only that hash, so neither the CLI, its output, nor
+the instance ever holds the cleartext.
 
 ## Power result
 
@@ -69,12 +73,17 @@ existing instance's power transition:
 | `ssh_user`, `admin_ui_local_url` | Always | Operator SSH identity and the local forwarded admin URL. |
 | `admin_volume_id`, `agent_volume_id` | When the tagged volume is found | Durable volume ids associated with the host. Valid power operations require both volumes, so normal results contain both. |
 
-Power results never contain `version`, `operator_connections`, or
-`admin_password` because the commands do not change or read those values.
+Power results never contain `version` or `operator_connections` because the
+commands do not change those values.
 
 ## Secret handling
 
-Only deploy and reconfigure result files contain `admin_password`; keep them
-private. With SSH access, the matching private SSH key is also required. With a
-Cloudflare Tunnel, the operator enters the Kern admin password. Lifecycle
-result files are created mode `0600`.
+Lifecycle results carry no secrets. The admin password is never handled by the
+CLI — deploy and reconfigure take only its SHA-256 digest through
+`--admin-password-sha256`, and the host stores only that hash — so no result
+ever contains the password. Tunnel tokens and SSH key material are likewise
+omitted from `operator_connections`. Each command prints its result to stdout
+rather than writing a file, so redirect it yourself (`> result.json`) if you
+want to keep it. Reaching the admin UI still requires credentials the result
+does not contain: with SSH access, the matching private SSH key; with a
+Cloudflare Tunnel, the Kern admin password.

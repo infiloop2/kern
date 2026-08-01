@@ -5,7 +5,9 @@ exact hosts and methods plus two request controls:
 
 Data-plane traffic must carry the ``chatgpt-account-id`` header matching the
 account pinned from Codex login status, failing closed while that id is
-unavailable. Requests that would make the upstream reach an external URL with
+unavailable, and must authenticate with a ChatGPT OAuth token whose JWT
+payload claims that same account — the header alone names an account without
+authenticating as it. Requests that would make the upstream reach an external URL with
 request data are denied while cache-backed search remains allowed. The upstream
 enables search and remote MCP only from parsed request fields, so prompt text
 that merely mentions a tool name carries no capability and enforcement is
@@ -14,10 +16,11 @@ structural. The same decision applies per-message on WebSocket connections.
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any
 
-from host.network_integrations.base import ManagedIntegration
+from host.network_integrations.base import AccountAttestor, ManagedIntegration
 from host.runtime.core.network_policy import decode_body, normalized_path, route_allowed
 from host.runtime.core.state import read_proxy_openai_account_id
 
@@ -40,6 +43,7 @@ ROUTES = {
     "chatgpt.com": (("GET", "POST"), ()),
 }
 GUARDED_HOSTS = frozenset({"api.openai.com", "chatgpt.com"})
+RESPONSES_WEBSOCKET_PATH = "/v1/responses"
 
 
 def host_allowed(config: ManagedIntegration, host: str) -> bool:
@@ -55,13 +59,26 @@ def request_denied(
     query: str,
     headers: list[tuple[str, str]],
     body: bytes,
+    account_attestor: AccountAttestor | None = None,
 ) -> str | None:
     """Apply the OpenAI-owned route, account, and body controls."""
-    del config
-    route = ROUTES.get(host.lower())
-    if route is None or not route_allowed(method, path, query, *route):
+    del config, account_attestor
+    lowered_host = host.lower()
+    route = ROUTES.get(lowered_host)
+    responses_websocket = (
+        lowered_host == "api.openai.com"
+        and method.upper() == "GET"
+        and normalized_path(path) == RESPONSES_WEBSOCKET_PATH
+        and any(
+            key.lower() == "upgrade" and value.lower() == "websocket"
+            for key, value in headers
+        )
+    )
+    if route is None or (
+        not route_allowed(method, path, query, *route) and not responses_websocket
+    ):
         return "network_policy_denied"
-    if host.lower() not in GUARDED_HOSTS:
+    if lowered_host not in GUARDED_HOSTS:
         return None
     account_id = read_proxy_openai_account_id()
     if not account_id:
@@ -74,13 +91,79 @@ def request_denied(
         return "openai_account_header_required"
     if any(value != account_id for value in presented):
         return "openai_account_mismatch"
+    denial = _token_account_denial(headers, account_id)
+    if denial is not None:
+        return denial
     return _external_url_request_denial(headers, body, path)
 
 
-def ws_inspection_required(config: ManagedIntegration, host: str) -> bool:
-    """Whether WebSocket messages to ``host`` must be inspected. Only the
-    external URL request guard depends on message bodies; the other controls
-    (methods, paths, account pin) are fully decided at the handshake."""
+def _token_account_denial(headers: list[tuple[str, str]], account_id: str) -> str | None:
+    """Bind the credential, not just the routing header, to the pinned account.
+
+    The ``chatgpt-account-id`` header names an account but authenticates
+    nothing; the Authorization bearer is the credential the upstream acts on,
+    so an agent holding a foreign OpenAI credential could otherwise present it
+    while echoing the pinned id. Require exactly one Authorization header
+    carrying a Bearer token whose JWT payload claims the pinned account. The
+    payload is parsed WITHOUT signature verification, which is sound here: a
+    tampered claim breaks the signature OpenAI itself verifies, so only a
+    genuine token of the pinned account both passes this check and
+    authenticates upstream. Anything else fails closed — a missing or
+    duplicated header, a non-Bearer scheme, a non-JWT bearer such as an ``sk-``
+    platform key, and (should OpenAI ever ship opaque access tokens) a token
+    with no readable claim.
+    """
+    authorization = [value for key, value in headers if key.lower() == "authorization"]
+    if len(authorization) != 1:
+        return "openai_token_account_mismatch"
+    token = _bearer_token(authorization[0])
+    if token is None:
+        return "openai_token_account_mismatch"
+    if _jwt_chatgpt_account_id(token) != account_id:
+        return "openai_token_account_mismatch"
+    return None
+
+
+def _bearer_token(value: str) -> str | None:
+    scheme, _, credential = value.partition(" ")
+    if scheme.lower() != "bearer" or not credential.strip():
+        return None
+    return credential.strip()
+
+
+def _jwt_chatgpt_account_id(token: str) -> str | None:
+    """The ``chatgpt_account_id`` claim of a ChatGPT OAuth token, else None.
+
+    Mirrors the parsing in host/bootstrap/helpers/read-codex-account-id.sh:
+    split on ".", base64url-decode the payload with padding restored, and
+    tolerate any failure.
+    """
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    padded = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    auth_claim = payload.get("https://api.openai.com/auth")
+    if not isinstance(auth_claim, dict):
+        return None
+    claimed = auth_claim.get("chatgpt_account_id")
+    if isinstance(claimed, str) and claimed.strip():
+        return claimed.strip()
+    return None
+
+
+def websocket_allowed(config: ManagedIntegration, host: str) -> bool:
+    """Whether this OpenAI host intentionally supports WebSocket upgrades.
+
+    Both eligible hosts also use ``ws_message_denied`` below. The ordinary
+    request guard has already checked the method, route, and account pin on
+    the handshake before this decision is consulted.
+    """
     del config
     return host.lower() in GUARDED_HOSTS
 
@@ -89,7 +172,7 @@ def ws_message_denied(payload: bytes) -> str | None:
     """Apply the external URL request guard to one complete WebSocket message,
     mirroring the HTTP body check. WS payloads carry no Content-Encoding or
     Content-Type, so the message is inspected as-is. Only called for guarded
-    hosts: the proxy gates on ws_inspection_required at the handshake and
+    hosts: the proxy gates on websocket_allowed at the handshake and
     tunnels everything else opaquely."""
     return _external_url_request_denial([], payload)
 

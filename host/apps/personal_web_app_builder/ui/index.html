@@ -10,124 +10,293 @@
 </head>
 <body>
 <div class="builder-shell" id="builder-shell">
-  <button id="sidebar-backdrop" class="sidebar-backdrop" aria-label="Close app list" hidden></button>
-  <aside class="app-pane" aria-label="Apps">
-    <div class="pane-head">
-      <span class="app-frame-title">Agentic Web App</span>
-      <button class="icon-button quiet" id="sidebar-close" aria-label="Close app list">
-        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8M14 6l-8 8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+
+  <button id="workspace-panel-backdrop" class="workspace-panel-backdrop" aria-label="Dismiss all apps panel" hidden></button>
+  <aside id="workspace-panel" class="workspace-panel" aria-label="All apps">
+    <header class="workspace-panel-head">
+      <div>
+        <span class="workspace-panel-eyebrow">Agentic Web App</span>
+        <h2>All apps</h2>
+      </div>
+      <button id="workspace-panel-close" class="ghost icon-button" aria-label="Close all apps">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
       </button>
-    </div>
-    <button id="new-app" class="new-app-button">
+    </header>
+    <button id="workspace-new-app" class="workspace-new-app">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
       New app
     </button>
-    <button id="archived-toggle" class="archive-toggle ghost sm">Show archived</button>
-    <div id="apps" class="app-list"></div>
+    <nav id="workspace-list" class="workspace-list" aria-label="Built web apps"></nav>
+    <p id="workspace-list-empty" class="workspace-list-empty">No apps yet</p>
   </aside>
+  <button id="workspace-panel-open" class="workspace-panel-open" aria-expanded="true" hidden>
+    <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7.5 3.5v13M10.5 7h3M10.5 10h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+    All apps
+  </button>
 
-  <section class="workspace-main">
-    <header class="builder-bar">
-      <button class="icon-button quiet" id="sidebar-open" aria-label="Show app list">
-        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M4 10h12M4 14h12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-      </button>
-      <div class="builder-brand">
-        <div class="app-title-row">
-          <span class="builder-title" id="app-title">Select an app</span>
-          <button class="app-rename-button" id="rename-app" aria-label="Rename app" title="Rename app" hidden>
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4.5 14.5-.5 2 2-.5 9-9-1.5-1.5-9 9ZM12.5 6.5 14 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
-        <span id="revision-label" class="revision-label"></span>
+  <section id="home-view" class="home-view" aria-label="All apps">
+    <header class="home-head">
+      <div class="home-brand">
+        <h1>Agentic Web App</h1>
+        <p id="home-tagline" class="home-tagline">Describe an app. The agent builds it, runs it, and keeps it alive.</p>
       </div>
-      <div id="agent-settings" class="agent-settings" aria-label="App agent settings"
-        aria-describedby="agent-settings-idle-note" hidden>
-        <label>
-          <span>Agent</span>
-          <select id="runtime" aria-label="App agent"></select>
-        </label>
-        <label>
-          <span>Model</span>
-          <select id="model" aria-label="App model"></select>
-        </label>
-        <label>
-          <span>Level</span>
-          <select id="effort" aria-label="App effort level"></select>
-        </label>
-        <span id="agent-settings-idle-note" class="agent-settings-note" role="tooltip">
-          Agent settings can only be changed while the agent is idle. Stop this
-          app's agent first if you want to change them.
-        </span>
-        <span id="agent-session-change-warning" class="agent-settings-note change" role="status" hidden>
-          Changing Agent, Model, or Level starts a new agent session. Some older
-          context may be omitted, and provider cache reads will be invalidated.
-        </span>
-      </div>
-      <div class="builder-actions">
-        <span id="runtime-status" class="runtime-status" hidden></span>
-        <button id="archive-app" class="ghost sm" hidden>Archive</button>
-        <button id="open-chat" class="chat-toggle" aria-expanded="false" aria-controls="chat-drawer" hidden>
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5.5h12v8H9l-3.5 2v-2H4z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
-          Agent chat
+      <div class="home-actions">
+        <button id="new-app" class="new-app-button">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          New app
         </button>
       </div>
     </header>
-
-    <main class="app-stage" id="app-stage">
-      <div id="empty-state" class="empty-state">
-        <div class="empty-mark">+</div>
-        <h1 id="empty-title">Select an app</h1>
-        <p id="empty-description">Choose an app from the list, or create a new workspace.</p>
-        <ol id="first-run-how" class="first-run-how" hidden>
-          <li>
-            <strong>Build it through Agent chat</strong>
-            <span>Describe what you want or ask the agent to revise the selected app.</span>
-          </li>
-          <li>
-            <strong>Use the app directly</strong>
-            <span>Interact with the interface the agent builds. Each app keeps its own code, data, and conversation.</span>
-          </li>
-        </ol>
-        <button id="empty-primary" class="primary">New app</button>
+    <div id="apps" class="app-grid"></div>
+    <div id="home-empty" class="home-empty" hidden>
+      <div class="home-empty-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 2.8c.8 5.3 3.9 8.4 9.2 9.2-5.3.8-8.4 3.9-9.2 9.2-.8-5.3-3.9-8.4-9.2-9.2 5.3-.8 8.4-3.9 9.2-9.2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
       </div>
-      <div id="generated-host" class="generated-host" hidden></div>
-    </main>
-
-    <aside id="chat-drawer" class="chat-drawer" aria-label="Agent chat" hidden>
-      <header class="chat-head">
-        <div>
-          <strong>Agent chat</strong>
-          <span id="chat-subtitle">Build, edit, or ask about this app</span>
-        </div>
-        <button id="close-chat" class="icon-button quiet" aria-label="Close agent chat">
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8M14 6l-8 8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-        </button>
-      </header>
-      <div id="chat-history" class="chat-history">
-        <div id="history-loader" class="history-loader" hidden>
-          <button id="load-earlier" class="ghost">Load earlier messages</button>
-        </div>
-        <div id="chat-turns" class="chat-turns"></div>
-      </div>
-      <footer class="chat-composer" id="chat-composer">
-        <div id="chat-status" class="chat-status" hidden></div>
-        <div id="composer-running" class="composer-running" hidden>
-          <span>Agent is working</span>
-          <button id="stop-turn" class="danger ghost">Stop</button>
-        </div>
-        <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
-        <div class="composer-row">
-          <button id="attach-file" class="attach-button" aria-label="Attach files" title="Attach up to 10 files (25 MiB each)">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.2 10.8 4.7-4.7a2.4 2.4 0 0 1 3.4 3.4l-6.2 6.2a4 4 0 0 1-5.7-5.7l6.4-6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-          </button>
-          <textarea id="message" rows="1" placeholder="Describe the app or ask about its data"></textarea>
-          <button id="send-message" class="send-button" aria-label="Send message" title="Send">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15.5v-11m0 0L5.5 9M10 4.5 14.5 9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
-      </footer>
-    </aside>
+      <h2 id="home-empty-title">Build your first app</h2>
+      <p id="home-empty-description">Create a workspace, then tell its agent what you want. Interface, behavior, and data all grow from the conversation.</p>
+      <button id="home-empty-primary" class="primary">New app</button>
+    </div>
   </section>
+
+  <section id="app-view" class="app-view" hidden>
+    <header class="app-view-toolbar">
+      <div class="app-view-mode">
+        <span class="app-view-eyebrow">App view</span>
+        <strong>Interact with your app</strong>
+      </div>
+      <div class="app-view-admin-action">
+        <span>To make changes</span>
+        <button id="admin-open" class="admin-fab" aria-haspopup="dialog" aria-expanded="false" title="Open app administration">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 7.1a2.9 2.9 0 1 0 0 5.8 2.9 2.9 0 0 0 0-5.8Z M16 11.1v-2.2l-1.8-.5a6.7 6.7 0 0 0-.6-1.4l.9-1.6-1.6-1.6-1.6.9a6.7 6.7 0 0 0-1.4-.6L9.4 2H7.2l-.5 2.1a6.7 6.7 0 0 0-1.4.6l-1.6-.9-1.6 1.6L3 7a6.7 6.7 0 0 0-.6 1.4l-1.8.5v2.2l1.8.5A6.7 6.7 0 0 0 3 13l-.9 1.6 1.6 1.6 1.6-.9a6.7 6.7 0 0 0 1.4.6l.5 2.1h2.2l.5-2.1a6.7 6.7 0 0 0 1.4-.6l1.6.9 1.6-1.6-.9-1.6a6.7 6.7 0 0 0 .6-1.4l1.8-.5Z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span id="admin-fab-label">View admin</span>
+        </button>
+      </div>
+    </header>
+    <div class="app-canvas">
+      <div id="generated-host" class="generated-host" hidden></div>
+      <div id="canvas-empty" class="canvas-empty">
+        <div class="canvas-empty-inner">
+          <div class="canvas-empty-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 2.8c.8 5.3 3.9 8.4 9.2 9.2-5.3.8-8.4 3.9-9.2 9.2-.8-5.3-3.9-8.4-9.2-9.2 5.3-.8 8.4-3.9 9.2-9.2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+          </div>
+          <h1 id="empty-title">Build this app</h1>
+          <p id="empty-description">Open the agent chat and describe what you want.</p>
+          <button id="empty-primary" class="primary">Open agent chat</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div id="admin-overlay" class="admin-overlay" role="dialog" aria-modal="true" aria-label="App administration" hidden>
+    <header class="admin-head">
+      <button id="admin-close" class="admin-back">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="4" width="13" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.5 7.5h13M8 12h5m0 0-2-2m2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Go to app
+      </button>
+      <div class="admin-title">
+        <span class="admin-context">App administration</span>
+        <span class="admin-title-row">
+          <strong id="admin-app-title"></strong>
+          <button class="app-rename-button" id="rename-app" aria-label="Rename app" title="Rename app">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4.5 14.5-.5 2 2-.5 9-9-1.5-1.5-9 9ZM12.5 6.5 14 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </span>
+        <span id="revision-label" class="revision-label"></span>
+      </div>
+      <div class="admin-head-actions">
+      </div>
+    </header>
+
+    <div class="admin-body">
+      <nav class="admin-nav" aria-label="Admin sections" role="tablist">
+        <button id="tab-chat" class="admin-tab active" data-admin-tab="chat" role="tab"
+          aria-controls="panel-chat" aria-selected="true" tabindex="0">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5.5h12v8H9l-3.5 2v-2H4z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+          Chat
+        </button>
+        <button id="tab-schedules" class="admin-tab" data-admin-tab="schedules" role="tab"
+          aria-controls="panel-schedules" aria-selected="false" tabindex="-1">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 6.5V10l2.5 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Schedules
+        </button>
+        <button id="tab-memory" class="admin-tab" data-admin-tab="memory" role="tab"
+          aria-controls="panel-memory" aria-selected="false" tabindex="-1">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h8.5A1.5 1.5 0 0 1 15 6v9.5l-3-1.8-3 1.8V6H5v9.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+          Memory
+        </button>
+        <button id="tab-history" class="admin-tab" data-admin-tab="history" role="tab"
+          aria-controls="panel-history" aria-selected="false" tabindex="-1">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 10a5.5 5.5 0 1 1 1.6 3.9M4.5 10V6.6M4.5 10H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Recovery
+        </button>
+      </nav>
+
+      <div class="admin-panels">
+        <section id="panel-chat" class="admin-panel" role="tabpanel" aria-labelledby="tab-chat" tabindex="0">
+          <div id="agent-settings" class="agent-settings" aria-label="App agent settings"
+            aria-describedby="agent-settings-idle-note">
+            <label>
+              <span>Agent</span>
+              <select id="runtime" aria-label="App agent"></select>
+            </label>
+            <label>
+              <span>Model</span>
+              <select id="model" aria-label="App model"></select>
+            </label>
+            <label>
+              <span>Level</span>
+              <select id="effort" aria-label="App effort level"></select>
+            </label>
+            <span id="agent-settings-idle-note" class="agent-settings-note" role="tooltip">
+              Agent settings can only be changed while the agent is idle. Stop this
+              app's agent first if you want to change them.
+            </span>
+            <span id="agent-session-change-warning" class="agent-settings-note change" role="status" hidden>
+              Changing Agent, Model, or Level starts a new agent session. Some older
+              context may be omitted, and provider cache reads will be invalidated.
+            </span>
+          </div>
+          <div id="chat-history" class="chat-history">
+            <div id="history-loader" class="history-loader" hidden>
+              <button id="load-earlier" class="ghost">Load earlier messages</button>
+            </div>
+            <div id="chat-turns" class="chat-turns"></div>
+          </div>
+          <footer class="chat-composer" id="chat-composer">
+            <div id="chat-status" class="chat-status" hidden></div>
+            <div id="composer-running" class="composer-running" hidden>
+              <span>Agent is working</span>
+              <button id="stop-turn" class="danger ghost">Stop</button>
+            </div>
+            <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
+            <div class="composer-row">
+              <button id="attach-file" class="attach-button" aria-label="Attach files" title="Attach up to 10 files (25 MiB each)">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.2 10.8 4.7-4.7a2.4 2.4 0 0 1 3.4 3.4l-6.2 6.2a4 4 0 0 1-5.7-5.7l6.4-6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+              </button>
+              <textarea id="message" rows="1" placeholder="Describe the app or ask about its data"></textarea>
+              <button id="send-message" class="send-button" aria-label="Send message" title="Send">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15.5v-11m0 0L5.5 9M10 4.5 14.5 9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+            <p class="muted">The agent will run autonomously within the active network policy.</p>
+          </footer>
+        </section>
+
+        <section id="panel-schedules" class="admin-panel" role="tabpanel"
+          aria-labelledby="tab-schedules" tabindex="0" hidden>
+          <header class="panel-heading">
+            <div>
+              <h2>Schedules</h2>
+              <p class="panel-intro">Ask the agent to return on a cadence. Runs wait while the agent is busy;
+                daily times use UTC.</p>
+            </div>
+          </header>
+          <div id="schedules-list" class="schedules-list"></div>
+          <form id="schedule-form" class="schedule-form">
+            <h3>New schedule</h3>
+            <label class="field">
+              <span>Name</span>
+              <input id="schedule-name" maxlength="100" placeholder="Morning review" required>
+            </label>
+            <label class="field">
+              <span>Message to the agent</span>
+              <textarea id="schedule-message" rows="3" placeholder="Summarize yesterday's entries and update the dashboard." required></textarea>
+            </label>
+            <div class="schedule-cadence-row">
+              <label class="field">
+                <span>Cadence</span>
+                <select id="schedule-cadence">
+                  <option value="interval">Every N minutes</option>
+                  <option value="daily">Daily at (UTC)</option>
+                </select>
+              </label>
+              <label class="field" id="schedule-interval-field">
+                <span>Minutes</span>
+                <input id="schedule-interval" type="number" min="5" max="10080" step="1" value="60">
+              </label>
+              <label class="field" id="schedule-time-field" hidden>
+                <span>Time (UTC)</span>
+                <input id="schedule-time" type="time" value="09:00">
+              </label>
+            </div>
+            <button id="schedule-create" class="primary" type="submit">Add schedule</button>
+          </form>
+        </section>
+
+        <section id="panel-memory" class="admin-panel" role="tabpanel"
+          aria-labelledby="tab-memory" tabindex="0" hidden>
+          <header class="panel-heading">
+            <div>
+              <h2>Memory</h2>
+              <p class="panel-intro">Choose what the agent should always know and what it can look up later.</p>
+            </div>
+          </header>
+          <div class="memory-card" id="instructions-card">
+            <header class="memory-card-head">
+              <h3>
+                Always-on
+                <span class="memory-chip">used every turn</span>
+              </h3>
+              <span id="instructions-meta" class="memory-meta"></span>
+            </header>
+            <p class="panel-intro">Short guidance the agent follows automatically. Keep only what matters every time.</p>
+            <textarea id="instructions-editor" rows="7" placeholder="e.g. Keep the tone friendly. Preserve completed items under data.completed."></textarea>
+            <div class="memory-card-actions" id="instructions-actions" hidden>
+              <span id="instructions-status" class="memory-status" role="status"></span>
+              <span class="memory-actions-spacer"></span>
+              <button id="instructions-discard" class="ghost sm">Discard</button>
+              <button id="instructions-save" class="primary sm">Save instructions</button>
+            </div>
+          </div>
+          <div class="memory-card">
+            <header class="memory-card-head">
+              <h3>
+                Memory
+                <span class="memory-chip dim">opened when needed</span>
+              </h3>
+              <button id="memory-new" class="ghost sm">New memory</button>
+            </header>
+            <p class="panel-intro">Saved notes for specific topics. Open one to read or edit it.</p>
+            <div id="memory-editor" class="memory-editor" hidden>
+              <label class="field">
+                <span>Name (lowercase-slug)</span>
+                <input id="memory-name" maxlength="64" pattern="[a-z0-9][a-z0-9-]*" placeholder="weekly-cadence">
+              </label>
+              <label class="field">
+                <span>One-line description</span>
+                <input id="memory-description" maxlength="150" placeholder="What this topic covers, in one line">
+              </label>
+              <label class="field">
+                <span>Body (markdown)</span>
+                <textarea id="memory-body" rows="7"></textarea>
+              </label>
+              <div class="memory-card-actions">
+                <span class="memory-actions-spacer"></span>
+                <button id="memory-cancel" class="ghost sm">Cancel</button>
+                <button id="memory-save" class="primary sm">Save memory</button>
+              </div>
+            </div>
+            <div id="memories-list" class="memories-list"></div>
+          </div>
+        </section>
+
+        <section id="panel-history" class="admin-panel" role="tabpanel"
+          aria-labelledby="tab-history" tabindex="0" hidden>
+          <header class="panel-heading">
+            <div>
+              <h2>Recovery</h2>
+              <p class="panel-intro">Successful changes are saved immediately. Daily snapshots use UTC
+                and stay for seven days; your saved checkpoint updates one slot for today.</p>
+            </div>
+            <button id="checkpoint-save" class="primary sm">Save checkpoint</button>
+          </header>
+          <p id="checkpoint-status" class="checkpoint-status" role="status"></p>
+          <div id="app-history-list" class="app-history-list"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+  <span id="runtime-status" class="runtime-status" role="status" hidden></span>
 </div>
 
 <script src="/v1/apps/agent_chat/ui/rich_text.js"></script>

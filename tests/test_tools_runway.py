@@ -353,7 +353,7 @@ class RunwayToolTests(unittest.TestCase):
             )
 
     def test_runway_urls_reject_ips_credentials_ports_and_oversize(self) -> None:
-        self.assertTrue(runway._is_https_runway_url("https://uploads.runway.example/object"))
+        self.assertTrue(runway._is_public_https_url("https://uploads.runway.example/object"))
         for value in (
             "https://127.0.0.1/object",
             "https://user@example.com/object",
@@ -362,7 +362,7 @@ class RunwayToolTests(unittest.TestCase):
             "https://example.com/" + "x" * 2_100,
         ):
             with self.subTest(value=value[:100]):
-                self.assertFalse(runway._is_https_runway_url(value))
+                self.assertFalse(runway._is_public_https_url(value))
 
     def test_save_video_uses_authoritative_task_output_and_returns_stream(self) -> None:
         api = api_with_key()

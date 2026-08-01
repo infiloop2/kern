@@ -621,7 +621,7 @@ def desktop_smoke(page, url: str) -> None:
         "results-receiver.actions.githubusercontent.com"
     )
     expect(page.locator("[data-guide-section='github']")).to_contain_text(
-        "*.blob.core.windows.net"
+        "productionresultssa{0..19}.blob.core.windows.net"
     )
     expect(page.locator("[data-guide-section='github'] .guide-kind")).to_have_text("Direct network integration")
     expect(page.locator("[data-guide-section='github'] .guide-network-scope")).to_be_visible()
@@ -960,6 +960,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#domain-rules")).to_contain_text("No custom domains configured")
     page.locator("#policy-domain").fill("api.example.com")
     page.locator("#policy-methods").fill("GET,HEAD")
+    page.locator("#policy-allow-websocket").check()
     page.get_by_role("button", name="Add domain rule", exact=True).click()
     domain_message = page.locator("[data-integration-message='custom_domain']")
     expect(domain_message).to_contain_text("Domain rule for api.example.com saved")
@@ -967,6 +968,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#domain-rule-count")).to_have_class("status enabled")
     expect(page.locator("#domain-rules")).to_contain_text("api.example.com")
     expect(page.locator("#domain-rules")).to_contain_text("GET, HEAD")
+    expect(page.locator("#domain-rules")).to_contain_text("allowed")
     page.once("dialog", lambda dialog: dialog.accept())
     page.locator("#domain-rules").get_by_role("button", name="Remove", exact=True).click()
     expect(domain_message).to_contain_text("Domain rule for api.example.com removed")

@@ -42,7 +42,11 @@ class AppPlatformTests(unittest.TestCase):
         self.assertEqual(agent_chat.public()["ui"]["iframe_src"], "/v1/apps/agent_chat/ui/index.html")
         self.assertEqual(set(agent_chat.public()), {"id", "title", "release_stage", "backend", "ui"})
         self.assertEqual(set(agent_chat.public()["backend"]), {"api_route"})
-        self.assertEqual(set(agent_chat.public()["ui"]), {"iframe_src", "sandbox"})
+        self.assertEqual(
+            set(agent_chat.public()["ui"]),
+            {"iframe_src", "sandbox", "host_fullscreen"},
+        )
+        self.assertFalse(agent_chat.host_fullscreen)
         allocation = agent_chat.allocation
         self.assertIsNotNone(allocation)
         assert allocation is not None
@@ -83,15 +87,17 @@ class AppPlatformTests(unittest.TestCase):
 
         builder = apps["personal_web_app_builder"]
         self.assertTrue(builder.capability_worker)
+        self.assertTrue(builder.host_fullscreen)
         self.assertTrue(builder.agent_api)
         self.assertEqual(builder.release_stage, "stable")
         self.assertEqual(builder.allocation.port_offset, 6)
         self.assertEqual(builder.linux_user, "kern-app-6")
         self.assertEqual(builder.db_role, "kern-app-6")
-        self.assertIn("dedicated capability worker", builder.agent_instructions)
+        self.assertIn("JavaScript runs in a capability worker", builder.agent_instructions)
         for app_id, app in apps.items():
             if app_id != builder.id:
                 self.assertFalse(app.capability_worker, app_id)
+                self.assertFalse(app.host_fullscreen, app_id)
 
     def test_app_account_names_are_always_the_host_slot(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -273,6 +279,20 @@ class AppPlatformTests(unittest.TestCase):
             root = Path(temp)
             self._write_minimal_app(root, "bad_app", release_stage="preview")
             with self.assertRaisesRegex(app_platform.AppError, "must be 'stable' or 'beta'"):
+                app_platform.installed_apps(root)
+
+    def test_manifest_requires_boolean_host_fullscreen(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._write_minimal_app(root, "bad_app")
+            manifest_path = root / "bad_app" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["ui"]["host_fullscreen"] = "yes"
+            manifest_path.write_text(json.dumps(manifest))
+
+            with self.assertRaisesRegex(
+                app_platform.AppError, "ui.host_fullscreen must be a boolean"
+            ):
                 app_platform.installed_apps(root)
 
     def test_manifest_requires_release_stage(self) -> None:

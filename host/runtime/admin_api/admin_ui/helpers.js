@@ -48,12 +48,14 @@ export function inlineMessage(node, message, isError = false) {
   }
 }
 
-export function badge(value) { return `<span class="status ${value}">${value}</span>`; }
+export function badge(value) { return `<span class="status ${esc(value)}">${esc(value)}</span>`; }
 
+// Escapes quotes as well as &<>, so callers can interpolate the result into
+// attribute values, not just element text.
 export function esc(value) {
   const div = document.createElement("div");
   div.textContent = value == null ? "" : String(value);
-  return div.innerHTML;
+  return div.innerHTML.replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
 export function informationIcon() {

@@ -268,6 +268,16 @@ def desktop_smoke(page: Any) -> None:
     frame.locator("#new-task").fill("agent app smoke follow up")
     frame.get_by_role("button", name="Send").click()
     expect(frame.locator("#thread-detail")).to_contain_text("agent app smoke follow up")
+    # A running thread cannot be archived (UX-014): archiving would hide it
+    # while the turn kept going, with Stop out of reach. Stop it first.
+    if frame.locator("#composer-running").is_visible():
+        frame.get_by_role("button", name="Archive", exact=True).click()
+        expect(frame.locator("#status")).to_have_text(
+            "Stop the agent before archiving this thread."
+        )
+        page.once("dialog", lambda dialog: dialog.accept())
+        frame.locator("#composer-running").get_by_role("button", name="Stop").click()
+        expect(frame.locator("#composer-running")).to_be_hidden()
     frame.get_by_role("button", name="Archive", exact=True).click()
     expect(frame.locator(".thread-title")).to_have_text("New thread")
     expect(frame.locator("#threads")).not_to_contain_text(generated_thread)
@@ -321,7 +331,7 @@ def mobile_smoke(page: Any) -> None:
     _assert_mobile_composer_ergonomics(frame)
     _assert_mobile_keyboard_viewport_recovery(page, frame)
     _assert_mobile_running_message(frame)
-    _assert_mobile_send_flow(frame)
+    _assert_mobile_send_flow(page, frame)
     _assert_long_message_has_no_horizontal_overflow(frame)
 
 
@@ -796,7 +806,7 @@ def _assert_mobile_running_message(frame: Any) -> None:
     ).to_have_count(1)
 
 
-def _assert_mobile_send_flow(frame: Any) -> None:
+def _assert_mobile_send_flow(page: Any, frame: Any) -> None:
     """Starting a thread from a phone: no thread-id typing, generated name,
     the sent message lands in view at the bottom."""
     from playwright.sync_api import expect
@@ -811,6 +821,11 @@ def _assert_mobile_send_flow(frame: Any) -> None:
     expect(frame.locator("#thread-detail")).to_contain_text("mobile smoke: check the deploy status")
     sent_bubble = frame.locator("#thread-detail .thread-user").last
     expect(sent_bubble).to_be_in_viewport()
+    # A running thread cannot be archived (UX-014), so stop the turn first.
+    if frame.locator("#composer-running").is_visible():
+        page.once("dialog", lambda dialog: dialog.accept())
+        frame.locator("#composer-running").get_by_role("button", name="Stop").click()
+        expect(frame.locator("#composer-running")).to_be_hidden()
     frame.get_by_role("button", name="Archive", exact=True).click()
     expect(frame.locator(".thread-title")).to_have_text("New thread")
 

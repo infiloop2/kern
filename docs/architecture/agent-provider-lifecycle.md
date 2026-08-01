@@ -37,15 +37,13 @@ compared against every later probe, and cleared only by an operator reset.
 The anchor cannot enforce anything by itself: it is a database row the
 orchestrator consults.
 
-The pin is the **enforcement** of that decision for the credential that most
-recently proved it: the value the network proxy checks on every provider
-request. Its shape is whatever each provider's requests actually expose —
-OpenAI requests carry the ChatGPT account id, so the OpenAI pin is that id;
-Claude requests carry only an opaque bearer token, so the Claude pin is
-sha256 of the validated token.
-The Claude pin therefore rotates with the token while the anchor never
-changes; a rotated token must be re-attested to the same anchored account
-before its hash becomes the new pin. Hermes has no pin and no
+The pin is the **enforcement** of that decision: the account identity the
+network proxy checks on every provider request. OpenAI requests carry the
+ChatGPT account id directly. Claude requests carry only opaque bearer tokens,
+so the proxy asks Anthropic's profile endpoint for the account uuid on the
+first request from each distinct token and caches a successful `(account id,
+token hash)` result in bounded process memory. Every token—initial or rotated—
+must resolve to the same anchored account. Hermes has no pin and no
 account anchor at all: the agent never holds a real AWS credential. It signs
 with a dummy routing identity and the proxy
 re-signs each allowed request with the operator's key. The routing identity is
@@ -56,11 +54,11 @@ Publishing the pin is what the `active` transition *means*, which is why the
 two are inseparable:
 
 - A refresh that commits `active` has just live-validated a credential and
-  checked it against the anchor. The pin write, the anchor check (or first
-  capture), and the status record commit in one database transaction, so
-  there is no window where the proxy admits traffic for a credential the
-  orchestrator has not just validated — and no window where a slow probe
-  republishes a pin for an account a concurrent operator reset just cleared.
+  checked it against the anchor. The proxy account-id write, the anchor check
+  (or first capture), and the status record commit in one database transaction.
+  A rotated token may be accepted before the orchestrator observes it, but only
+  after the proxy independently receives the same provider-signed account uuid;
+  a slow probe can never republish an account a concurrent reset just cleared.
 - A refresh that commits anything else clears the pin in that same
   transaction: any non-active status means "no validated credential", so
   provider data-plane traffic fails closed at the proxy immediately (only the
@@ -81,27 +79,15 @@ a trigger on the account row refuses any single write that moves an anchored
 account id, strips its approval marker, or deletes the row (see
 [Admin state storage](admin-state-storage.md)).
 
-An `active` commit does not require a non-active starting state, and the pin
-is not write-once: every refresh writes the pin as part of its commit, and
-the refresh commit is the pin's only writer besides the reset that clears it.
-A steady recheck of an already-active runtime rewrites the same value; a
-recheck that finds Claude Code rotated its token — routine CLI behavior —
-attests the new token against the anchor and atomically replaces the pin
-with the new token hash, all while the status stays `active` throughout.
-Rotation therefore never passes through `awaiting_login`. Between the CLI
-writing a rotated token and the refresh that replaces the pin, the old pin
-denies the new token's traffic (fail closed); the scheduled recheck and Claude
-pin convergence at turn start are the points that close that window.
-Because turn-start convergence finishes before the process spawns, a
-turn never starts inside that window: rotation can only fail a turn already
-in flight whose token expires mid-turn (its CLI refreshes and retries against
-the old pin). That failure is one-time and retryable — the next convergence
-point replaces the pin — and it is rare in practice, because the five-minute
-usage probe is itself a CLI invocation: an expired token normally refreshes
-inside a refresh cycle, which detects the new hash and repins in the same
-commit. There is deliberately no mid-turn repin machinery for the residual
-case. The OpenAI pin is the anchored account id, so its active-state
-rewrites never change the value.
+An `active` commit does not require a non-active starting state, and every
+refresh rewrites the proxy row with the same anchored account id. A recheck
+that observes a Claude token rotation still attests it and updates the stored
+credential hash/metadata, but request authorization does not wait for that
+poll: any parallel Claude process can present a different token, and the proxy
+independently attests its account uuid on the first request. Consequently a
+rotation never creates an old-pin/new-token or new-pin/old-token gap. The
+OpenAI pin is also the anchored account id, but its requests expose that id
+directly and need no token attestation cache.
 
 ## Status meaning and cadence
 
@@ -208,8 +194,10 @@ Every trigger funnels into the same provider-connection refresh:
      owns refreshing an expired access token; the credential hash is re-read
      afterwards, so a refresh-rotation detected here continues to attestation
      instead of misclassifying as a broken login.
-   - *Claude, new or rotated token*: skip the probe (the old pin, or no pin,
-     denies it) — the profile attestation in step 5 is its live validation.
+   - *Claude, new or rotated token*: skip the probe — the profile attestation
+     in step 5 is its orchestrator live validation. The proxy independently
+     attests the bearer UUID on its first request and does not depend on the
+     stored hash having converged.
    - *Codex*: the `account/rateLimits/read` usage read authenticates live.
      If it fails for a pinned account, one `account/read
      {"refreshToken": true}` asks Codex to validate or refresh through the
@@ -220,7 +208,7 @@ Every trigger funnels into the same provider-connection refresh:
    login; a completion observed here records the provider-signed account id
    for anchoring in this same refresh. Claude records sha256 of the token its
    completed login produced.
-5. **Attestation (Claude).** A token hash not already on the anchor is
+5. **Attestation (Claude).** A token hash that differs from stored metadata is
    attested: a read-only profile fetch returns the account uuid the provider
    itself binds to that token. First capture additionally requires the token
    hash recorded by the completed operator login, so agent-swapped
@@ -229,12 +217,11 @@ Every trigger funnels into the same provider-connection refresh:
    disable that landed during the slow probe wins), validate the probed
    account against the anchor — reject a changed account, capture a first
    anchor only from step 4/5 evidence — then save the account, publish or
-   clear the pin, and record the status. Bedrock has no anchor or pin; it only
+   clear its proxy-readable identity row, and record the status. Bedrock has no anchor or pin; it only
    records the local status.
-7. **Usage backfill (Claude).** A first-capture or just-rotated token could
-   not run the usage probe (its pin only went live at the commit), so the
-   refresh reads usage once now; the admin UI shows usage immediately after
-   login.
+7. **Usage backfill (Claude).** A first-capture or just-rotated token skipped
+   the usage probe, so the refresh reads usage once now; the admin UI shows
+   usage immediately after login.
 
 ## What each recheck actually runs
 
@@ -249,7 +236,7 @@ pipeline finds. Per state, the work and the provider traffic are:
 | `awaiting_login`, login expired unfinished | The expired login record is dropped the next time anything reads it (the poll's login capture, or the UI's card fetch, which then shows Start login again); status is unchanged. | None; the device-code polling ends with the code's expiry. Starting a new login replaces the old parked flow. |
 | `awaiting_login`, rejected credential still cached | Same local reads; the verdict memory answers without probing. | None from automatic checks. An explicit operator refresh probes once; login or reset replaces the credential. |
 | `awaiting_login` → login just completed | Same local reads discover the new credential; Codex also reads the completed login's provider-signed account id (local helper). | One Claude profile attestation (root egress) to bind the new token to its account; Codex validates on its next recheck through the usage read. |
-| `active` (five-minute recheck) | Policy read, local account read, credential hash re-read, commit. | Exactly one authenticated round trip: Claude runs `claude -p /usage` (the CLI may additionally call its OAuth token endpoint if the access token expired — that refresh is the point); Codex runs `account/rateLimits/read`. A Codex failure on a pinned account adds one `account/read {"refreshToken": true}`. A detected Claude rotation adds one profile attestation and one post-commit usage read. |
+| `active` (five-minute recheck) | Policy read, local account read, credential hash re-read, commit. | Exactly one authenticated round trip: Claude runs `claude -p /usage` (the CLI may additionally refresh its OAuth token); Codex runs `account/rateLimits/read`. A Codex failure on a pinned account adds one `account/read {"refreshToken": true}`. A detected Claude rotation adds one orchestrator profile attestation and one post-commit usage read. Separately, the first proxy request for each uncached Claude token makes one profile attestation. |
 | `error` | Same local reads; the verdict memory answers until it expires. | None while the verdict holds; one normal live validation when it expires. |
 
 Bedrock is simpler than this OAuth table. Its five-minute recheck reads policy,
@@ -299,7 +286,7 @@ starts re-enter the refresh. An explicit operator refresh bypasses this memory:
   five-minute recheck, so infrastructure failures recover on the next
   scheduled poll without a five-second retry loop.
 - A **fresh `active` verdict** (with its usage snapshot) is reused until it
-  expires, so Claude pin convergence at turn start is normally memory-only.
+  expires, so Claude credential convergence at turn start is normally memory-only.
 - **Claude attestations** are memoized per token hash: a token's attested
   identity never changes, so one successful profile fetch answers every later
   recheck (including a runtime parked in account-mismatch `error`).
@@ -354,14 +341,15 @@ existing host boundary intact: neither the admin service nor the agent gains
 internet access, the agent-facing proxy exposes no STS route, and the
 plaintext never touches disk.
 
-## Claude pin convergence at turn start
+## Claude credential convergence at turn start
 
 Admission already requires `active`. Before a Claude process spawns, its turn
-worker invokes the normal refresh solely to converge a bearer token that the
-CLI may have rotated. Verdict memory normally makes this local; when the token
-did change, the refresh detects its new hash, attests it, and republishes the
-pin before turn traffic reaches the proxy. There is no separate policy/status
-decision in the worker. If the refresh itself moves the runtime out of
+worker invokes the normal refresh to converge local credential metadata that
+the CLI may have rotated. Verdict memory normally makes this local; when the
+token did change, the refresh detects its new hash, attests it, and updates the
+stored metadata. Request authorization does not depend on this timing: the
+proxy independently verifies every distinct bearer against the pinned account
+uuid. There is no separate policy/status decision in the worker. If the refresh itself moves the runtime out of
 `active`, the common status-transition path records `thread.error` and stops
 the admitted turn, whose worker observes that terminal flag before spawning.
 Codex carries the account id the proxy already pins, and Bedrock uses a static

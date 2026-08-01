@@ -92,6 +92,33 @@ class AgentChatBackendTests(unittest.TestCase):
             startup.index("updateComposer();"),
         )
 
+    def test_message_listener_rejects_a_forged_bridge_reply_source(self) -> None:
+        # APP-003: request ids are sequential and guessable, so the frame must
+        # accept bridge replies only from its own parent window. Without the
+        # source check a sibling app frame could forge a kern-app-*-result.
+        source = (APP_DIR / "ui" / "agent_chat.js").read_text()
+        handler = source.split('addEventListener("message"', 1)[1].split(
+            "\nfunction ", 1
+        )[0]
+        self.assertIn("event.source !== parent", handler)
+        self.assertLess(
+            handler.index("event.source !== parent"),
+            handler.index("pending.get(message.request_id)"),
+        )
+
+    def test_a_running_thread_cannot_be_archived(self) -> None:
+        # UX-014: archiving does not stop a running turn and the archived view
+        # hides Stop, so the UI refuses to archive until the turn ends.
+        source = (APP_DIR / "ui" / "agent_chat.js").read_text()
+        archive_fn = source.split(
+            "async function setSelectedThreadArchived()", 1
+        )[1].split("\nasync function", 1)[0]
+        self.assertIn('selectedThreadStatus === "running"', archive_fn)
+        self.assertLess(
+            archive_fn.index('selectedThreadStatus === "running"'),
+            archive_fn.index("await api("),
+        )
+
     def test_composer_omits_unchanged_session_configuration(self) -> None:
         source = (APP_DIR / "ui" / "agent_chat.js").read_text()
         self.assertIn("const changingSession = sessionConfigurationChanged();", source)

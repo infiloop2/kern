@@ -2614,6 +2614,10 @@ def seed_demo_state() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # App smoke modules are loaded lazily on their first API request. Demo
+    # mode renders representative product data without surfacing the
+    # intentionally hostile probes used by the automated security smoke.
+    app_mocks.set_demo_mode(args.demo)
     seed_state()
     if args.demo:
         seed_demo_state()
