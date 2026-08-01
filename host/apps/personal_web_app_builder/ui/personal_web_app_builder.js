@@ -25,17 +25,20 @@ const APP_API_TIMEOUT_MS = 12000;
 const AGENT_DELIVERY_TIMEOUT_MS = 60 * 1000;
 const COMPOSER_DRAFTS_STORAGE_KEY = "kern.agentic-web-app.composer-drafts.v1";
 const COMPOSER_DRAFT_LIMIT = 50;
+// The trusted block the backend injects after the provenance line of every
+// outgoing message. Stripped from displayed user bubbles.
+const CONTEXT_OPEN = "[Workspace context]";
+const CONTEXT_CLOSE = "[/Workspace context]";
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const pendingApi = new Map();
 let requestCounter = 0;
 let sessionOptions = {};
 let apps = [];
-let showingArchivedApps = false;
 let selectedAppId = null;
 let selectedAppName = null;
-let selectedAppArchived = false;
 let renderedAppsKey = "";
+let workspacePanelOpen = true;
 let snapshot = { app: null, session: null, status: "idle" };
 let conversationEvents = [];
 let conversationEventsOldestSeq = null;
@@ -47,9 +50,15 @@ let lastChatScrollTop = 0;
 let restoredChatScrollTop = null;
 const conversationViewStates = new Map();
 const renderedChatEntries = new Map();
-let renderedRevision = -1;
+let renderedUiRevision = -1;
+let renderedDataVersion = -1;
 let generatedRoot = null;
 let workerRun = null;
+let armedWorker = null;
+let bundleUrl = null;
+let lastRenderKey = "";
+let cssCacheKey = null;
+let cssCacheValue = "";
 let appsRefreshSequence = 0;
 const messageBusyApps = new Set();
 let selectedRefreshSequence = 0;
@@ -57,6 +66,18 @@ let establishedSession = null;
 let establishedSessionKey = "";
 let pendingAttachments = [];
 const attachmentActivities = new Map();
+let adminOpen = false;
+let adminTab = "chat";
+let adminAutoOpened = false;
+let adminReturnFocus = null;
+let panelRefreshSequence = 0;
+let recoveryPoints = [];
+let instructionsLoadedFor = null;
+let savedInstructionsMd = "";
+let memoriesIndex = [];
+let expandedMemory = null;
+let scheduleRequestPending = false;
+let runtimeStatusSequence = 0;
 
 const $ = id => document.getElementById(id);
 const composerDrafts = loadComposerDrafts();
@@ -184,6 +205,9 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
   // so script-src must keep unsafe-eval and wasm-unsafe-eval absent. The blob
   // worker inherits that policy and connect-src 'none'. Scrubbing common
   // globals below is defense in depth, not the code-execution or egress bound.
+  // Timers and message channels are denied so a pre-armed worker waiting for
+  // its event turn has no way to schedule background work: with an empty event
+  // loop, only trusted frame messages can wake generated code.
   const send = globalThis.postMessage.bind(globalThis);
   const clone = globalThis.structuredClone.bind(globalThis);
   const resolvePromise = Promise.resolve.bind(Promise);
@@ -194,6 +218,8 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
     "webkitRTCPeerConnection", "Worker", "SharedWorker", "importScripts",
     "WebSocketStream", "WebTransport", "FontFace", "BroadcastChannel", "indexedDB",
     "caches", "navigator", "eval", "Function",
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval", "setImmediate",
+    "MessageChannel", "MessagePort",
   ];
   for (const name of deniedGlobals) {
     let target = globalThis;
@@ -453,6 +479,16 @@ function sanitizeCss(css) {
   return Array.from(sheet.cssRules, sanitizeRule).filter(Boolean).join("\n");
 }
 
+function sanitizeCssCached(css) {
+  // Re-renders usually change markup, not styles; skip the CSSOM round trip
+  // when the stylesheet text is unchanged.
+  if (css === cssCacheKey) return cssCacheValue;
+  const value = sanitizeCss(css);
+  cssCacheKey = css;
+  cssCacheValue = value;
+  return value;
+}
+
 function sanitizeRule(rule) {
   const kind = rule.constructor.name;
   if (kind === "CSSStyleRule") {
@@ -485,49 +521,132 @@ function sanitizeDeclarations(style) {
   return safe.join(";");
 }
 
+// --- Incremental rendering ---------------------------------------------------
+// The sanitizers produce a fresh safe tree; instead of replacing the whole
+// shadow root (which drops focus, selection, and scroll on every render), the
+// existing tree is patched in place. Both trees came from the same sanitizer,
+// so patching only ever copies already-sanitized nodes and attributes.
+
 function renderGenerated(html, css) {
-  const fragment = sanitizeHtml(html);
-  const safeCss = sanitizeCss(css);
   const host = $("generated-host");
   if (!generatedRoot) generatedRoot = host.attachShadow({ mode: "open" });
-  generatedRoot.replaceChildren();
-  const style = document.createElement("style");
-  style.textContent = `:host{display:block;min-height:100%;color:var(--text);background:var(--bg);font-family:system-ui,sans-serif}${safeCss}`;
-  generatedRoot.append(style, fragment);
+  const renderKey = `${html}\u0000${css}`;
+  if (renderKey !== lastRenderKey || !generatedRoot.firstChild) {
+    const fragment = sanitizeHtml(html);
+    const safeCss = sanitizeCssCached(css);
+    const styleText = `:host{display:block;min-height:100%;color:var(--text);background:var(--bg);font-family:system-ui,sans-serif}${safeCss}`;
+    let style = generatedRoot.firstChild;
+    if (!style || style.tagName !== "STYLE") {
+      generatedRoot.replaceChildren();
+      style = document.createElement("style");
+      style.textContent = styleText;
+      generatedRoot.append(style, fragment);
+    } else {
+      if (style.textContent !== styleText) style.textContent = styleText;
+      patchSiblings(generatedRoot, style, fragment);
+    }
+    lastRenderKey = renderKey;
+  }
   host.hidden = false;
-  $("empty-state").hidden = true;
+  $("canvas-empty").hidden = true;
+}
+
+function patchSiblings(parent, afterNode, fragment) {
+  const desired = Array.from(fragment.childNodes);
+  let current = afterNode.nextSibling;
+  for (const want of desired) {
+    if (!current) {
+      parent.append(want);
+      continue;
+    }
+    current = patchNode(current, want).nextSibling;
+  }
+  while (current) {
+    const next = current.nextSibling;
+    current.remove();
+    current = next;
+  }
+}
+
+function patchNode(current, want) {
+  if (current.nodeType === Node.TEXT_NODE && want.nodeType === Node.TEXT_NODE) {
+    if (current.data !== want.data) current.data = want.data;
+    return current;
+  }
+  if (
+    current.nodeType !== want.nodeType
+    || current.nodeType !== Node.ELEMENT_NODE
+    || current.tagName !== want.tagName
+  ) {
+    current.replaceWith(want);
+    return want;
+  }
+  if (current.isEqualNode(want)) {
+    syncControlState(current, want);
+    return current;
+  }
+  syncAttributes(current, want);
+  const desired = Array.from(want.childNodes);
+  let child = current.firstChild;
+  for (const wantChild of desired) {
+    if (!child) {
+      current.appendChild(wantChild);
+      continue;
+    }
+    child = patchNode(child, wantChild).nextSibling;
+  }
+  while (child) {
+    const next = child.nextSibling;
+    child.remove();
+    child = next;
+  }
+  syncControlState(current, want);
+  return current;
+}
+
+function syncAttributes(current, want) {
+  for (const attribute of Array.from(current.attributes)) {
+    if (!want.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+  }
+  for (const attribute of want.attributes) {
+    if (current.getAttribute(attribute.name) !== attribute.value) {
+      current.setAttribute(attribute.name, attribute.value);
+    }
+  }
+}
+
+function syncControlState(current, want) {
+  // Attribute sync only changes control defaults; a render that sets a new
+  // value must also win over live user state — except in the control the user
+  // is currently editing.
+  if (!generatedRoot || generatedRoot.activeElement === current) return;
+  const tag = current.tagName;
+  if (tag === "INPUT") {
+    if (current.type === "checkbox" || current.type === "radio") {
+      if (current.checked !== want.checked) current.checked = want.checked;
+    } else if (current.value !== want.value) {
+      current.value = want.value;
+    }
+  } else if (tag === "TEXTAREA" || tag === "SELECT") {
+    if (current.value !== want.value) current.value = want.value;
+  }
 }
 
 function clearGenerated() {
-  generatedRoot.replaceChildren();
+  if (generatedRoot) generatedRoot.replaceChildren();
+  lastRenderKey = "";
   $("generated-host").hidden = true;
-  $("empty-state").hidden = false;
+  $("canvas-empty").hidden = false;
 }
 
-function syncEmptyState() {
-  const hasApp = selectedAppId !== null;
-  if (!hasApp) {
-    $("first-run-how").hidden = true;
-    $("empty-title").textContent = showingArchivedApps ? "Archived apps" : "Select an app";
-    $("empty-description").textContent = showingArchivedApps
-      ? "Choose an archived app to view it, or return to active apps."
-      : "Choose an app from the list, or create a new workspace.";
-    $("empty-primary").textContent = showingArchivedApps ? "Show active" : "New app";
-    return;
-  }
+function syncCanvasState() {
+  if (!selectedAppId) return;
   const firstRun = !snapshot.session;
-  $("first-run-how").hidden = !firstRun;
-  $("empty-title").textContent = selectedAppArchived
-    ? "This app is archived"
-    : firstRun ? "Build this app" : "Your app will appear here";
-  $("empty-description").textContent = selectedAppArchived
-    ? "Unarchive it to keep building or use its interactive controls."
-    : firstRun
-      ? "Open agent chat and describe what you want. The agent can create the interface, behavior, and structured data."
-      : "Open agent chat to continue building or ask the agent to create the first version.";
-  $("empty-primary").textContent = selectedAppArchived
-    ? "Unarchive"
-    : firstRun ? "Start building" : "Open agent chat";
+  $("empty-title").textContent = firstRun ? "Build this app" : "Your app will appear here";
+  $("empty-description").textContent = firstRun
+    ? "Open the agent chat and describe what you want. The agent creates the interface, behavior, and structured data."
+    : "Open the agent chat to continue building.";
+  $("empty-primary").textContent = "Open agent chat";
 }
 
 function eventPayload(element) {
@@ -567,7 +686,7 @@ function jsonByteLength(value) {
 }
 
 function generatedInteraction(event) {
-  if (!selectedAppId || selectedAppArchived) return;
+  if (!selectedAppId) return;
   if (!(event.target instanceof Element)) return;
   const changeControl = event.target.closest("input, select, textarea");
   if ((event.type === "click" && changeControl) || (event.type === "change" && !changeControl)) return;
@@ -581,24 +700,135 @@ function generatedInteraction(event) {
   runCapabilityWorker({ action: target.dataset.action, event: eventPayload(target) });
 }
 
+// --- Capability worker lifecycle ---------------------------------------------
+// Every turn still runs in a worker that is terminated when the turn ends —
+// that contract is unchanged. Two things move off the interaction's critical
+// path: the bundle's blob URL is cached per UI revision (so the engine can
+// reuse its compiled script), and after each completed turn the next worker
+// is spawned and initialized ahead of time ("armed"), so a user event starts
+// its handler immediately instead of paying spawn + parse + init round trips.
+
+function workerUrlFor(threadId, uiRevision) {
+  if (bundleUrl && bundleUrl.threadId === threadId && bundleUrl.uiRevision === uiRevision) {
+    return bundleUrl.url;
+  }
+  revokeBundleUrl();
+  const source = (
+    `(${capabilityWorkerBootstrap.toString()})(${MAX_RENDER_HTML_BYTES},${MAX_RENDER_CSS_BYTES});\n`
+    + `${snapshot.app.javascript}\n`
+  );
+  const url = URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
+  bundleUrl = { threadId, uiRevision, url };
+  return url;
+}
+
+function revokeBundleUrl() {
+  if (!bundleUrl) return;
+  URL.revokeObjectURL(bundleUrl.url);
+  bundleUrl = null;
+}
+
+function discardArmedWorker() {
+  if (!armedWorker) return;
+  clearTimeout(armedWorker.timer);
+  armedWorker.worker.terminate();
+  armedWorker = null;
+}
+
+function armCapabilityWorker() {
+  if (
+    !selectedAppId || workerRun
+    || !snapshot.app || !snapshot.app.javascript
+  ) return;
+  const app = snapshot.app;
+  if (
+    armedWorker
+    && armedWorker.threadId === selectedAppId
+    && armedWorker.uiRevision === app.ui_revision
+    && armedWorker.dataVersion === app.data_version
+  ) return;
+  discardArmedWorker();
+  const worker = new Worker(workerUrlFor(selectedAppId, app.ui_revision));
+  const armed = {
+    worker,
+    threadId: selectedAppId,
+    uiRevision: app.ui_revision,
+    dataVersion: app.data_version,
+    data: app.data,
+    state: "arming",
+    run: null,
+    timer: null,
+  };
+  armedWorker = armed;
+  const discard = () => {
+    if (armedWorker === armed) discardArmedWorker();
+    else if (!armed.run) {
+      clearTimeout(armed.timer);
+      worker.terminate();
+    }
+  };
+  armed.timer = setTimeout(discard, WORKER_TURN_TIMEOUT_MS);
+  worker.addEventListener("error", event => {
+    event.preventDefault();
+    if (armed.run) armed.run.finish("error");
+    else discard();
+  });
+  worker.addEventListener("message", event => {
+    if (armed.run) {
+      handleWorkerMessage(armed.run, event.data);
+      return;
+    }
+    const message = event.data;
+    if (!message || typeof message !== "object") {
+      discard();
+      return;
+    }
+    if (message.type === "ready" && armed.state === "arming") {
+      worker.postMessage({ type: "init", data: armed.data, load: false });
+      return;
+    }
+    if (message.type === "initialized" && armed.state === "arming") {
+      armed.state = "armed";
+      clearTimeout(armed.timer);
+      // Promise/queueMicrotask remain part of ordinary JavaScript and can
+      // self-schedule without any exposed timer or channel. Keep a short idle
+      // lifetime even after initialization so pre-arming is an optimization,
+      // never a way for generated code to run in the background indefinitely.
+      armed.timer = setTimeout(discard, WORKER_TURN_TIMEOUT_MS);
+      return;
+    }
+    // Anything else from a worker that has no active turn — including a
+    // spontaneous message while idle — is out of contract.
+    discard();
+  });
+}
+
 async function runCapabilityWorker(pendingEvent = null) {
-  if (!selectedAppId || selectedAppArchived || !snapshot.app || !snapshot.app.javascript) return;
+  if (!selectedAppId || !snapshot.app || !snapshot.app.javascript) return;
   if (workerRun) workerRun.finish("restarted");
   const threadId = selectedAppId;
   const app = snapshot.app;
-  const source = (
-    `(${capabilityWorkerBootstrap.toString()})(${MAX_RENDER_HTML_BYTES},${MAX_RENDER_CSS_BYTES});\n`
-    + `${app.javascript}\n`
-  );
-  const url = URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
-  const worker = new Worker(url);
-  URL.revokeObjectURL(url);
+  let armed = null;
+  if (
+    pendingEvent
+    && armedWorker
+    && armedWorker.state === "armed"
+    && armedWorker.threadId === threadId
+    && armedWorker.uiRevision === app.ui_revision
+    && armedWorker.dataVersion === app.data_version
+  ) {
+    armed = armedWorker;
+    armedWorker = null;
+  } else {
+    discardArmedWorker();
+  }
+  const worker = armed ? armed.worker : new Worker(workerUrlFor(threadId, app.ui_revision));
   const run = {
     worker,
     threadId,
     data: app.data,
-    revision: app.revision,
-    state: "starting",
+    dataVersion: app.data_version,
+    state: armed ? "event" : "starting",
     event: pendingEvent,
     count: 0,
     totalMessages: 0,
@@ -612,10 +842,19 @@ async function runCapabilityWorker(pendingEvent = null) {
       worker.terminate();
       if (workerRun === this) workerRun = null;
       if (reason === "timeout" || reason === "error") showRuntimeStatus("Generated behavior stopped safely", "error");
+      if (reason === "complete") setTimeout(armCapabilityWorker, 0);
     },
   };
   workerRun = run;
   run.timer = setTimeout(() => run.finish("timeout"), WORKER_TURN_TIMEOUT_MS);
+  if (armed) {
+    clearTimeout(armed.timer);
+    armed.run = run;
+    worker.postMessage({
+      type: "event", action: pendingEvent.action, event: pendingEvent.event, turn_id: "turn",
+    });
+    return;
+  }
   worker.addEventListener("error", event => {
     event.preventDefault();
     run.finish("error");
@@ -625,7 +864,7 @@ async function runCapabilityWorker(pendingEvent = null) {
 
 async function handleWorkerMessage(run, message) {
   if (
-    workerRun !== run || selectedAppId !== run.threadId || selectedAppArchived
+    workerRun !== run || selectedAppId !== run.threadId
     || !message || typeof message !== "object"
   ) return;
   const now = performance.now();
@@ -703,7 +942,7 @@ async function handleWorkerDataAction(run, message) {
   run.mutations += 1;
   const body = {
     action: message.action,
-    expected_revision: run.revision,
+    expected_data_version: run.dataVersion,
     path: message.path,
   };
   if (message.action !== "delete") body.value = message.value;
@@ -714,11 +953,15 @@ async function handleWorkerDataAction(run, message) {
       body,
     );
     if (workerRun !== run || selectedAppId !== run.threadId) return;
-    snapshot.app = response.app;
+    snapshot.app = {
+      ...snapshot.app,
+      data: response.app.data,
+      data_version: response.app.data_version,
+      updated_at: response.app.updated_at,
+    };
     run.data = response.app.data;
-    run.revision = response.app.revision;
-    renderedRevision = response.app.revision;
-    $("revision-label").textContent = `Revision ${response.app.revision}`;
+    run.dataVersion = response.app.data_version;
+    renderedDataVersion = response.app.data_version;
     run.mutationPending = false;
     run.worker.postMessage({ type: "data-result", request_id: message.request_id, ok: true, data: response.app.data });
   } catch (_error) {
@@ -740,23 +983,607 @@ function validDataPath(path) {
 
 function showRuntimeStatus(message, level = "info") {
   const status = $("runtime-status");
+  const sequence = ++runtimeStatusSequence;
   status.textContent = message;
   status.className = `runtime-status ${level}`;
   status.hidden = false;
-  setTimeout(() => { if (status.textContent === message) status.hidden = true; }, 4500);
+  $("builder-shell").classList.add("runtime-status-visible");
+  setTimeout(() => {
+    if (runtimeStatusSequence !== sequence) return;
+    status.hidden = true;
+    $("builder-shell").classList.remove("runtime-status-visible");
+  }, 4500);
 }
 
-function openChat() {
+// --- Admin overlay -----------------------------------------------------------
+
+function openAdmin(tab = adminTab) {
   if (!selectedAppId) return;
-  $("chat-drawer").hidden = false;
-  $("open-chat").setAttribute("aria-expanded", "true");
-  if (!selectedAppArchived) $("message").focus();
+  const wasOpen = adminOpen;
+  if (!wasOpen && document.activeElement instanceof HTMLElement) {
+    adminReturnFocus = document.activeElement;
+  }
+  adminOpen = true;
+  $("builder-shell").classList.add("admin-active");
+  $("admin-overlay").hidden = false;
+  $("app-view").inert = true;
+  $("admin-open").setAttribute("aria-expanded", "true");
+  setAdminTab(tab);
+  if (!wasOpen) requestAnimationFrame(() => $("admin-close").focus());
 }
 
-function closeChat() {
-  $("chat-drawer").hidden = true;
-  $("open-chat").setAttribute("aria-expanded", "false");
+function closeAdmin() {
+  const wasOpen = adminOpen;
+  adminOpen = false;
+  $("builder-shell").classList.remove("admin-active");
+  $("admin-overlay").hidden = true;
+  $("app-view").inert = false;
+  $("admin-open").setAttribute("aria-expanded", "false");
+  if (wasOpen) {
+    const target = adminReturnFocus && adminReturnFocus.isConnected
+      ? adminReturnFocus
+      : $("admin-open");
+    requestAnimationFrame(() => target.focus());
+  }
+  adminReturnFocus = null;
 }
+
+function setAdminTab(tab) {
+  adminTab = tab;
+  for (const button of document.querySelectorAll(".admin-tab")) {
+    const active = button.dataset.adminTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  }
+  $("panel-chat").hidden = tab !== "chat";
+  $("panel-schedules").hidden = tab !== "schedules";
+  $("panel-memory").hidden = tab !== "memory";
+  $("panel-history").hidden = tab !== "history";
+  // A freshly selected workspace has not loaded its instruction value yet.
+  // Keep the editor inert until that read completes so a fast first edit
+  // cannot be overwritten by the asynchronous panel load.
+  if (tab === "memory" && instructionsLoadedFor !== selectedAppId) {
+    $("instructions-editor").disabled = true;
+  }
+  void refreshAdminPanel(true);
+}
+
+async function refreshAdminPanel(opened = false) {
+  if (!adminOpen || !selectedAppId) return;
+  const sequence = ++panelRefreshSequence;
+  const threadId = selectedAppId;
+  const tab = adminTab;
+  const panel = $(`panel-${tab}`);
+  panel?.setAttribute("aria-busy", "true");
+  if (opened) showPanelLoading(tab);
+  try {
+    if (adminTab === "schedules") {
+      const response = await api("GET", `/apps/${encodeURIComponent(threadId)}/schedules`);
+      if (sequence !== panelRefreshSequence || threadId !== selectedAppId) return;
+      renderSchedules(response.schedules || []);
+    } else if (adminTab === "history") {
+      const response = await api("GET", `/apps/${encodeURIComponent(threadId)}/checkpoints`);
+      if (sequence !== panelRefreshSequence || threadId !== selectedAppId) return;
+      recoveryPoints = response.checkpoints || [];
+      renderRecovery();
+    } else if (adminTab === "memory" && opened) {
+      // Never reload the memory panel on a poll: it would clobber edits.
+      const [instructions, memories] = await Promise.all([
+        api("GET", `/apps/${encodeURIComponent(threadId)}/instructions`),
+        api("GET", `/apps/${encodeURIComponent(threadId)}/memories`),
+      ]);
+      if (sequence !== panelRefreshSequence || threadId !== selectedAppId) return;
+      const instructionsDirty = instructionsLoadedFor === threadId
+        && $("instructions-editor").value !== savedInstructionsMd;
+      if (!instructionsDirty) renderInstructions(instructions);
+      const inlineEditDirty = Boolean(expandedMemory?.editing && hasUnsavedAdminEdits());
+      if (!inlineEditDirty) renderMemories(memories.memories || []);
+    }
+  } catch (error) {
+    if (opened) showRuntimeStatus(error.message || "Could not load this panel", "error");
+  } finally {
+    if (sequence === panelRefreshSequence && threadId === selectedAppId) {
+      panel?.removeAttribute("aria-busy");
+    }
+  }
+}
+
+function showPanelLoading(tab) {
+  const targets = {
+    schedules: ["schedules-list", "Loading schedules…"],
+    memory: ["memories-list", "Loading saved topics…"],
+    history: ["app-history-list", "Loading recovery points…"],
+  };
+  const target = targets[tab];
+  if (!target) return;
+  const container = $(target[0]);
+  if (container.children.length) return;
+  const loading = document.createElement("p");
+  loading.className = "panel-empty panel-loading";
+  loading.setAttribute("role", "status");
+  loading.textContent = target[1];
+  container.append(loading);
+}
+
+// --- Schedules panel ---------------------------------------------------------
+
+function cadenceLabel(schedule) {
+  if (schedule.cadence === "daily") return `Daily at ${schedule.daily_time} UTC`;
+  const minutes = schedule.interval_minutes;
+  if (minutes % 1440 === 0) return `Every ${minutes / 1440}d`;
+  if (minutes % 60 === 0) return `Every ${minutes / 60}h`;
+  return `Every ${minutes}m`;
+}
+
+function setSchedulePending(pending) {
+  scheduleRequestPending = pending;
+  $("schedule-create").disabled = pending;
+  document.querySelectorAll("[data-schedule-toggle], [data-schedule-delete]")
+    .forEach(button => { button.disabled = pending; });
+}
+
+function renderSchedules(schedules) {
+  const list = $("schedules-list");
+  list.replaceChildren();
+  if (!schedules.length) {
+    const empty = document.createElement("p");
+    empty.className = "panel-empty";
+    empty.textContent = "No schedules yet. The agent can also create them when you ask for recurring work.";
+    list.append(empty);
+    return;
+  }
+  for (const schedule of schedules) {
+    const card = document.createElement("article");
+    card.className = `schedule-card${schedule.enabled ? "" : " disabled"}`;
+
+    const head = document.createElement("div");
+    head.className = "schedule-head";
+    const name = document.createElement("strong");
+    name.textContent = schedule.name;
+    const cadence = document.createElement("span");
+    cadence.className = "schedule-cadence";
+    cadence.textContent = cadenceLabel(schedule);
+    head.append(name, cadence);
+    if (schedule.created_by === "agent") {
+      const chip = document.createElement("span");
+      chip.className = "actor-chip agent";
+      chip.textContent = "agent";
+      head.append(chip);
+    }
+
+    const message = document.createElement("p");
+    message.className = "schedule-message";
+    message.textContent = schedule.message;
+
+    const meta = document.createElement("div");
+    meta.className = "schedule-meta";
+    meta.textContent = schedule.enabled
+      ? `Next ${relativeFuture(schedule.next_run_at)}${schedule.last_run_at ? ` · last ${relativeTime(schedule.last_run_at)}` : ""}`
+      : "Paused";
+
+    const actions = document.createElement("div");
+    actions.className = "schedule-actions";
+    const toggle = document.createElement("button");
+    toggle.className = "ghost sm";
+    toggle.dataset.scheduleToggle = String(schedule.id);
+    toggle.dataset.scheduleEnabled = String(schedule.enabled);
+    toggle.textContent = schedule.enabled ? "Pause" : "Resume";
+    const remove = document.createElement("button");
+    remove.className = "danger ghost sm";
+    remove.dataset.scheduleDelete = String(schedule.id);
+    remove.textContent = "Delete";
+    toggle.disabled = remove.disabled = scheduleRequestPending;
+    actions.append(toggle, remove);
+
+    card.append(head, message, meta, actions);
+    list.append(card);
+  }
+}
+
+async function submitSchedule(event) {
+  event.preventDefault();
+  if (!selectedAppId || scheduleRequestPending) return;
+  const threadId = selectedAppId;
+  const cadence = $("schedule-cadence").value;
+  const body = {
+    name: $("schedule-name").value.trim(),
+    message: $("schedule-message").value.trim(),
+    cadence,
+  };
+  if (cadence === "interval") body.interval_minutes = Number($("schedule-interval").value);
+  else body.daily_time = $("schedule-time").value;
+  if (!body.name || !body.message) return;
+  const button = $("schedule-create");
+  setSchedulePending(true);
+  button.textContent = "Adding…";
+  try {
+    await api("POST", `/apps/${encodeURIComponent(threadId)}/schedules`, body);
+    if (selectedAppId !== threadId) return;
+    $("schedule-name").value = "";
+    $("schedule-message").value = "";
+    await refreshAdminPanel(true);
+    showRuntimeStatus("Schedule added", "success");
+  } catch (error) {
+    showRuntimeStatus(error.message || "Could not add the schedule", "error");
+  } finally {
+    setSchedulePending(false);
+    button.textContent = "Add schedule";
+  }
+}
+
+async function toggleSchedule(scheduleId, enabled) {
+  if (!selectedAppId || scheduleRequestPending) return;
+  const threadId = selectedAppId;
+  setSchedulePending(true);
+  try {
+    await api(
+      "PUT",
+      `/apps/${encodeURIComponent(threadId)}/schedules/${scheduleId}`,
+      { enabled: !enabled },
+    );
+    if (selectedAppId === threadId) await refreshAdminPanel(true);
+  } finally {
+    setSchedulePending(false);
+  }
+}
+
+async function deleteSchedule(scheduleId) {
+  if (
+    !selectedAppId
+    || scheduleRequestPending
+    || !confirm("Delete this schedule?")
+  ) return;
+  const threadId = selectedAppId;
+  setSchedulePending(true);
+  try {
+    await api("DELETE", `/apps/${encodeURIComponent(threadId)}/schedules/${scheduleId}`);
+    if (selectedAppId === threadId) await refreshAdminPanel(true);
+  } finally {
+    setSchedulePending(false);
+  }
+}
+
+// --- Memory panel ------------------------------------------------------------
+// One panel holds everything the agent remembers: the always-on block at the
+// top (injected into every turn) and the memory topic index below it. Topics
+// read in place — tap to expand the body — and edit in place.
+
+function renderInstructions(instructions) {
+  instructionsLoadedFor = selectedAppId;
+  savedInstructionsMd = instructions.instructions_md || "";
+  $("instructions-editor").value = savedInstructionsMd;
+  $("instructions-editor").disabled = false;
+  $("instructions-status").textContent = "";
+  $("instructions-meta").textContent = instructions.updated_by
+    ? `Last edited by ${instructions.updated_by === "user" ? "you" : "the agent"} · ${relativeTime(instructions.updated_at)}`
+    : "";
+  syncInstructionsDirtyState();
+}
+
+function syncInstructionsDirtyState() {
+  const dirty = instructionsLoadedFor === selectedAppId
+    && $("instructions-editor").value !== savedInstructionsMd;
+  $("instructions-actions").hidden = !dirty && !$("instructions-status").textContent;
+  $("instructions-discard").hidden = !dirty;
+  $("instructions-save").disabled = !dirty;
+}
+
+async function saveInstructions() {
+  if (!selectedAppId || instructionsLoadedFor !== selectedAppId) return;
+  const threadId = selectedAppId;
+  try {
+    const response = await api(
+      "PUT",
+      `/apps/${encodeURIComponent(threadId)}/instructions`,
+      { instructions_md: $("instructions-editor").value },
+    );
+    if (selectedAppId !== threadId) return;
+    renderInstructions(response);
+    $("instructions-status").textContent = "Saved";
+    $("instructions-actions").hidden = false;
+  } catch (error) {
+    $("instructions-status").textContent = error.message || "Could not save";
+    $("instructions-actions").hidden = false;
+  }
+}
+
+function discardInstructions() {
+  if (instructionsLoadedFor !== selectedAppId) return;
+  $("instructions-editor").value = savedInstructionsMd;
+  $("instructions-status").textContent = "";
+  syncInstructionsDirtyState();
+}
+
+function renderMemories(memories) {
+  memoriesIndex = memories;
+  const list = $("memories-list");
+  list.replaceChildren();
+  if (!memories.length) {
+    const empty = document.createElement("p");
+    empty.className = "panel-empty";
+    empty.textContent = "No memories yet. The agent saves durable topics here; you can add or edit them too.";
+    list.append(empty);
+    return;
+  }
+  for (const memory of memories) {
+    const expanded = expandedMemory && expandedMemory.name === memory.name;
+    const item = document.createElement("div");
+    item.className = `memory-item${expanded ? " expanded" : ""}`;
+
+    const head = document.createElement("button");
+    head.className = "memory-item-head";
+    head.dataset.memoryToggle = memory.name;
+    head.setAttribute("aria-expanded", String(Boolean(expanded)));
+    const title = document.createElement("span");
+    title.className = "memory-item-title";
+    const name = document.createElement("strong");
+    name.textContent = memory.name;
+    const description = document.createElement("span");
+    description.className = "memory-description";
+    description.textContent = memory.description;
+    title.append(name, description);
+    const meta = document.createElement("span");
+    meta.className = "memory-meta";
+    meta.textContent = `${memory.updated_by === "user" ? "you" : "agent"} · ${relativeTime(memory.updated_at)}`;
+    const chevron = document.createElement("span");
+    chevron.className = "memory-chevron";
+    chevron.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 8 3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    head.append(title, meta, chevron);
+    item.append(head);
+
+    if (expanded) item.append(renderExpandedMemory());
+    list.append(item);
+  }
+}
+
+function renderExpandedMemory() {
+  const detail = document.createElement("div");
+  detail.className = "memory-detail";
+  const memory = expandedMemory.memory;
+  if (!memory) {
+    detail.textContent = "Loading…";
+    return detail;
+  }
+  if (expandedMemory.editing) {
+    const description = document.createElement("input");
+    description.id = "memory-edit-description";
+    description.maxLength = 150;
+    description.value = memory.description;
+    const descriptionField = document.createElement("label");
+    descriptionField.className = "field";
+    descriptionField.innerHTML = "<span>One-line description</span>";
+    descriptionField.append(description);
+    const body = document.createElement("textarea");
+    body.id = "memory-edit-body";
+    body.rows = 8;
+    body.value = memory.body_md;
+    const bodyField = document.createElement("label");
+    bodyField.className = "field";
+    bodyField.innerHTML = "<span>Body (markdown)</span>";
+    bodyField.append(body);
+    const actions = document.createElement("div");
+    actions.className = "memory-card-actions";
+    const cancel = document.createElement("button");
+    cancel.className = "ghost sm";
+    cancel.dataset.memoryEditCancel = memory.name;
+    cancel.textContent = "Cancel";
+    const save = document.createElement("button");
+    save.className = "primary sm";
+    save.dataset.memoryEditSave = memory.name;
+    save.textContent = "Save";
+    const spacer = document.createElement("span");
+    spacer.className = "memory-actions-spacer";
+    actions.append(spacer, cancel, save);
+    detail.append(descriptionField, bodyField, actions);
+    return detail;
+  }
+  const body = document.createElement("pre");
+  body.className = "memory-body-view";
+  body.textContent = memory.body_md || "(empty)";
+  detail.append(body);
+  const actions = document.createElement("div");
+  actions.className = "memory-card-actions";
+  const remove = document.createElement("button");
+  remove.className = "danger ghost sm";
+  remove.dataset.memoryDeleteName = memory.name;
+  remove.textContent = "Delete";
+  const spacer = document.createElement("span");
+  spacer.className = "memory-actions-spacer";
+  const edit = document.createElement("button");
+  edit.className = "ghost sm";
+  edit.dataset.memoryEdit = memory.name;
+  edit.textContent = "Edit";
+  actions.append(remove, spacer, edit);
+  detail.append(actions);
+  return detail;
+}
+
+function openMemoryEditor() {
+  expandedMemory = null;
+  $("memory-editor").hidden = false;
+  $("memory-name").value = "";
+  $("memory-description").value = "";
+  $("memory-body").value = "";
+  renderMemories(memoriesIndex);
+  $("memory-name").focus();
+}
+
+function closeMemoryEditor() {
+  expandedMemory = null;
+  const editor = $("memory-editor");
+  if (editor) editor.hidden = true;
+}
+
+async function toggleMemory(name, editing = false) {
+  if (expandedMemory && expandedMemory.name === name && !editing) {
+    expandedMemory = null;
+    renderMemories(memoriesIndex);
+    return;
+  }
+  const threadId = selectedAppId;
+  expandedMemory = { name, memory: null, editing };
+  renderMemories(memoriesIndex);
+  try {
+    const response = await api(
+      "GET",
+      `/apps/${encodeURIComponent(threadId)}/memories/${encodeURIComponent(name)}`,
+    );
+    if (selectedAppId !== threadId || !expandedMemory || expandedMemory.name !== name) return;
+    expandedMemory.memory = response.memory;
+    renderMemories(memoriesIndex);
+  } catch (error) {
+    expandedMemory = null;
+    renderMemories(memoriesIndex);
+    showRuntimeStatus(error.message || "Could not load the memory", "error");
+  }
+}
+
+async function saveMemoryWith(name, description, bodyMd, isNew) {
+  if (!selectedAppId) return;
+  const threadId = selectedAppId;
+  if (!name) {
+    showRuntimeStatus("Memory needs a lowercase-slug name", "error");
+    return;
+  }
+  try {
+    const response = await api(
+      "PUT",
+      `/apps/${encodeURIComponent(threadId)}/memories/${encodeURIComponent(name)}`,
+      { description, body_md: bodyMd },
+    );
+    if (selectedAppId !== threadId) return;
+    if (isNew) $("memory-editor").hidden = true;
+    // A new topic joins the index collapsed so its first tap consistently
+    // means "read". An edited topic stays open to show the saved result.
+    expandedMemory = isNew ? null : { name, memory: response.memory, editing: false };
+    await refreshAdminPanel(true);
+    showRuntimeStatus("Memory saved", "success");
+  } catch (error) {
+    showRuntimeStatus(error.message || "Could not save the memory", "error");
+  }
+}
+
+async function deleteMemoryNamed(name) {
+  if (!selectedAppId || !confirm(`Delete memory "${name}"?`)) return;
+  try {
+    await api(
+      "DELETE",
+      `/apps/${encodeURIComponent(selectedAppId)}/memories/${encodeURIComponent(name)}`,
+    );
+    expandedMemory = null;
+    await refreshAdminPanel(true);
+  } catch (error) {
+    showRuntimeStatus(error.message || "Could not delete the memory", "error");
+  }
+}
+
+// --- Recovery panel ----------------------------------------------------------
+
+function historyIcon(kind) {
+  if (kind === "checkpoint") {
+    return '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5v11l4-2.5 4 2.5v-11z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+  }
+  if (kind === "ui") {
+    return '<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="4" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M4 8.5h12" stroke="currentColor" stroke-width="1.5"/></svg>';
+  }
+  if (kind === "snapshot") {
+    return '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5v11l4-2.5 4 2.5v-11z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+  }
+  if (kind === "instructions" || kind === "memory") {
+    return '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h8.5A1.5 1.5 0 0 1 15 6v9.5l-3-1.8-3 1.8V6H5v9.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+  }
+  if (kind === "schedule") {
+    return '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 6.5V10l2.5 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+  }
+  return '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3" fill="currentColor"/></svg>';
+}
+
+function renderRecovery() {
+  const list = $("app-history-list");
+  list.replaceChildren();
+  if (!recoveryPoints.length) {
+    const empty = document.createElement("p");
+    empty.className = "panel-empty";
+    empty.textContent = "No recovery points yet. Save a checkpoint now, or wait for the next daily snapshot.";
+    list.append(empty);
+  }
+  recoveryPoints.forEach(entry => {
+    const item = document.createElement("article");
+    item.className = `history-item history-${entry.kind}`;
+
+    const icon = document.createElement("span");
+    icon.className = "history-icon";
+    icon.innerHTML = historyIcon(entry.kind);
+
+    const body = document.createElement("div");
+    body.className = "history-body";
+    const resource = document.createElement("span");
+    resource.className = "history-resource";
+    resource.textContent = entry.checkpoint_type === "manual" ? "Manual" : "Daily";
+    const summary = document.createElement("span");
+    summary.className = "history-summary";
+    summary.textContent = entry.summary;
+    const meta = document.createElement("span");
+    meta.className = "history-meta";
+    meta.textContent = new Date(entry.created_at).toLocaleString();
+    meta.title = `Interface revision ${entry.ui_revision}, data version ${entry.data_version}`;
+    body.append(resource, summary, meta);
+
+    item.append(icon, body);
+    const revert = document.createElement("button");
+    revert.className = "ghost sm history-revert";
+    revert.dataset.revertId = String(entry.id);
+    revert.textContent = "Revert";
+    item.append(revert);
+    list.append(item);
+  });
+}
+
+async function revertCheckpoint(historyId) {
+  if (!selectedAppId) return;
+  const entry = recoveryPoints.find(candidate => candidate.id === historyId);
+  if (!entry || !confirm(entry.revert_prompt || "Revert this change?")) return;
+  const threadId = selectedAppId;
+  try {
+    await api(
+      "POST",
+      `/apps/${encodeURIComponent(threadId)}/checkpoints/${historyId}/revert`,
+      {},
+      AGENT_DELIVERY_TIMEOUT_MS,
+    );
+    if (selectedAppId !== threadId) return;
+    showRuntimeStatus("Workspace restored", "success");
+    closeMemoryEditor();
+    instructionsLoadedFor = null;
+    await refresh();
+    await refreshAdminPanel(true);
+  } catch (error) {
+    showRuntimeStatus(error.message || "Could not revert this change", "error");
+  }
+}
+
+async function saveCheckpoint() {
+  if (!selectedAppId) return;
+  const threadId = selectedAppId;
+  const button = $("checkpoint-save");
+  button.disabled = true;
+  button.textContent = "Saving…";
+  $("checkpoint-status").textContent = "";
+  try {
+    await api("POST", `/apps/${encodeURIComponent(threadId)}/checkpoints`, {});
+    if (selectedAppId !== threadId) return;
+    $("checkpoint-status").textContent = "Today’s saved checkpoint is up to date.";
+    await refreshAdminPanel(true);
+  } catch (error) {
+    $("checkpoint-status").textContent = error.message || "Could not save checkpoint";
+  } finally {
+    button.disabled = false;
+    button.textContent = "Save checkpoint";
+  }
+}
+
+// --- Chat --------------------------------------------------------------------
 
 function showChatStatus(message, error = false) {
   const status = $("chat-status");
@@ -816,7 +1643,6 @@ async function attachFile() {
   if (
     !threadId
     || remaining <= 0
-    || selectedAppArchived
     || messageBusyApps.has(threadId)
   ) return;
   showChatStatus("");
@@ -879,6 +1705,10 @@ function clearPendingAttachments() {
 
 async function sendMessage(forcedMessage = null, targetAppId = null) {
   const fromGeneratedApp = forcedMessage !== null;
+  // Pointer activation already respects the disabled button. Match that
+  // behavior for Enter and any other programmatic composer submission while
+  // attachments or session options make the draft invalid.
+  if (!fromGeneratedApp && $("send-message").disabled) return;
   const threadId = targetAppId || selectedAppId;
   const submittedDraft = fromGeneratedApp ? null : $("message").value;
   const message = (fromGeneratedApp ? forcedMessage : submittedDraft).trim();
@@ -887,7 +1717,6 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
     (!message && !attachments.length)
     || !threadId
     || threadId !== selectedAppId
-    || selectedAppArchived
   ) return;
   if (messageBusyApps.has(threadId)) {
     if (fromGeneratedApp) showRuntimeStatus("Agent is already starting");
@@ -974,7 +1803,7 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
 
 async function stopRunningTurn() {
   const threadId = selectedAppId;
-  if (!threadId || snapshot.status !== "running" || selectedAppArchived) return;
+  if (!threadId || snapshot.status !== "running") return;
   if (!confirm("Stop the agent?")) return;
   showChatStatus("Stopping…");
   try {
@@ -1001,9 +1830,7 @@ function renderChat() {
     entries.replaceChildren();
     const empty = document.createElement("p");
     empty.className = "chat-empty";
-    empty.textContent = selectedAppArchived
-      ? "This archived app has no conversation yet."
-      : "Describe the app you want. The agent can build its UI, behavior, and data, then keep changing it here.";
+    empty.textContent = "Describe the app you want. The agent can build its UI, behavior, and data, then keep changing it here.";
     entries.append(empty);
     syncAgentSettings(snapshot.session);
     return;
@@ -1037,6 +1864,17 @@ function renderChat() {
   }
 }
 
+function displayedUserMessage(message) {
+  // Hide the injected workspace-context block from user bubbles. It is the
+  // block directly after the provenance line; nothing else is stripped.
+  const lines = message.split("\n");
+  if (lines.length > 1 && lines[1] === CONTEXT_OPEN) {
+    const end = lines.indexOf(CONTEXT_CLOSE, 1);
+    if (end !== -1) return [lines[0], ...lines.slice(end + 1)].join("\n");
+  }
+  return message;
+}
+
 function conversationEntries() {
   const entries = [];
   for (const event of conversationEvents) {
@@ -1058,10 +1896,11 @@ function conversationEntries() {
       && typeof payload.message === "string"
       && payload.message
     ) {
+      const fromUser = payload.source === "user";
       entries.push({
         key: `event-${event.seq}`,
-        kind: payload.source === "user" ? "user" : "agent",
-        message: payload.message,
+        kind: fromUser ? "user" : "agent",
+        message: fromUser ? displayedUserMessage(payload.message) : payload.message,
       });
     }
   }
@@ -1251,7 +2090,7 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
     ? currentEffort
     : efforts[0] || "";
   const activeSettingsLock = running || messageBusyApps.has(selectedAppId);
-  const settingsLocked = activeSettingsLock || selectedAppArchived;
+  const settingsLocked = activeSettingsLock;
   runtimeSelect.disabled = settingsLocked;
   modelSelect.disabled = settingsLocked || !modelSelect.value;
   effortSelect.disabled = settingsLocked || !effortSelect.value;
@@ -1260,9 +2099,7 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
     $("agent-settings").classList.remove("show-lock-note");
   }
   $("agent-session-change-warning").hidden = (
-    settingsLocked
-    || selectedAppArchived
-    || !sessionConfigurationChanged()
+    settingsLocked || !sessionConfigurationChanged()
   );
   const activeBlock = running && establishedSession?.agent_runtime === "hermes";
   const hasOversizedAttachment = pendingAttachments.some(
@@ -1277,7 +2114,7 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
       : "Send another message"
     : "Describe the app or ask about its data";
   $("send-message").disabled = (
-    !selectedAppId || messageBusyApps.has(selectedAppId) || selectedAppArchived
+    !selectedAppId || messageBusyApps.has(selectedAppId)
     || activeBlock
     || attachmentBusy
     || hasOversizedAttachment
@@ -1295,7 +2132,6 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
   $("attach-file").disabled = (
     !selectedAppId
     || messageBusyApps.has(selectedAppId)
-    || selectedAppArchived
     || activeBlock
     || attachmentBusy
     || pendingAttachments.length >= ATTACHMENT_LIMIT
@@ -1342,73 +2178,128 @@ function relativeTime(value) {
   return new Date(timestamp).toLocaleDateString();
 }
 
+function relativeFuture(value) {
+  const timestamp = Date.parse(value || "");
+  if (!Number.isFinite(timestamp)) return "soon";
+  const seconds = Math.floor((timestamp - Date.now()) / 1000);
+  if (seconds <= 60) return "in under a minute";
+  if (seconds < 3600) return `in ${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `in ${Math.round(seconds / 3600)}h`;
+  return `in ${Math.round(seconds / 86400)}d`;
+}
+
+// --- Home view ---------------------------------------------------------------
+
 function renderApps() {
-  const key = JSON.stringify([selectedAppId, showingArchivedApps, apps]);
+  const key = JSON.stringify([selectedAppId, apps]);
   if (key === renderedAppsKey) return;
   renderedAppsKey = key;
-  const list = $("apps");
-  list.replaceChildren();
-  if (!apps.length) {
-    const empty = document.createElement("div");
-    empty.className = "sidebar-empty";
-    empty.textContent = showingArchivedApps ? "No archived apps." : "No apps yet.";
-    list.append(empty);
-    return;
-  }
+  const grid = $("apps");
+  grid.replaceChildren();
+  $("home-view").classList.toggle("empty-library", !apps.length);
+  $("home-empty").hidden = Boolean(apps.length);
+  $("home-empty-title").textContent = "Build your first app";
+  $("home-empty-description").textContent = "Create a workspace, then tell its agent what you want. Interface, behavior, and data all grow from the conversation.";
+  renderWorkspaceList();
   for (const app of apps) {
-    const item = document.createElement("button");
-    item.className = `app-item${app.thread_id === selectedAppId ? " selected" : ""}`;
-    item.dataset.appId = app.thread_id;
+    const card = document.createElement("button");
+    card.className = "app-card";
+    card.dataset.appId = app.thread_id;
 
+    const head = document.createElement("span");
+    head.className = "app-card-head";
     const name = document.createElement("span");
-    name.className = "app-name";
-    const label = document.createElement("span");
-    label.textContent = app.name;
-    name.append(label);
+    name.className = "app-card-name";
+    name.textContent = app.name;
+    head.append(name);
     if (app.status === "running") {
       const dot = document.createElement("span");
       dot.className = "app-dot";
-      name.append(dot);
+      dot.title = "Agent is working";
+      head.append(dot);
     }
 
     const session = document.createElement("span");
-    session.className = "app-meta";
+    session.className = "app-card-meta";
     session.textContent = app.session
       ? `${runtimeLabel(app.session.agent_runtime)} · ${app.session.model}`
-      : "No agent session";
+      : "No agent session yet";
 
     const details = document.createElement("span");
-    details.className = "app-meta";
-    details.textContent = `Revision ${app.revision} · ${relativeTime(app.last_used_at)}`;
-    item.append(name, session, details);
-    list.append(item);
+    details.className = "app-card-meta dim";
+    details.textContent = `v${app.ui_revision} · ${relativeTime(app.last_used_at)}`;
+
+    card.append(head, session, details);
+    grid.append(card);
   }
+}
+
+function renderWorkspaceList() {
+  const list = $("workspace-list");
+  list.replaceChildren();
+  $("workspace-list-empty").hidden = Boolean(apps.length);
+  for (const app of apps) {
+    const button = document.createElement("button");
+    button.className = "workspace-list-item";
+    button.classList.toggle("current", app.thread_id === selectedAppId);
+    button.dataset.workspaceId = app.thread_id;
+    if (app.thread_id === selectedAppId) button.setAttribute("aria-current", "page");
+
+    const icon = document.createElement("span");
+    icon.className = "workspace-list-icon";
+    icon.innerHTML = `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7 7h6M7 10h6M7 13h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+    const name = document.createElement("span");
+    name.className = "workspace-list-name";
+    name.textContent = app.name;
+    const meta = document.createElement("span");
+    meta.className = "workspace-list-meta";
+    meta.textContent = app.session
+      ? `${runtimeLabel(app.session.agent_runtime)} · ${relativeTime(app.last_used_at)}`
+      : `Not built · ${relativeTime(app.last_used_at)}`;
+    button.append(icon, name, meta);
+    if (app.status === "running") {
+      const running = document.createElement("span");
+      running.className = "workspace-list-running";
+      running.title = "Agent is working";
+      button.append(running);
+    }
+    list.append(button);
+  }
+}
+
+function syncWorkspacePanel() {
+  const mobile = matchMedia("(max-width: 720px)").matches;
+  if (!mobile) workspacePanelOpen = true;
+  $("builder-shell").classList.toggle("workspace-panel-open", workspacePanelOpen);
+  $("workspace-panel").inert = !workspacePanelOpen;
+  $("workspace-panel-backdrop").hidden = !workspacePanelOpen || !mobile;
+  $("workspace-panel-open").hidden = workspacePanelOpen;
+  $("workspace-panel-open").setAttribute("aria-expanded", String(workspacePanelOpen));
+}
+
+function setWorkspacePanelOpen(open, focusTarget = false) {
+  workspacePanelOpen = Boolean(open);
+  syncWorkspacePanel();
+  if (!focusTarget) return;
+  (workspacePanelOpen ? $("workspace-panel-close") : $("workspace-panel-open")).focus();
 }
 
 function syncWorkspaceControls() {
   const hasApp = selectedAppId !== null;
-  $("app-title").textContent = hasApp
-    ? selectedAppName || selectedAppId
-    : showingArchivedApps ? "Archived apps" : "Select an app";
-  $("rename-app").hidden = !hasApp;
-  $("archive-app").hidden = !hasApp;
-  $("archive-app").textContent = selectedAppArchived ? "Unarchive" : "Archive";
-  $("open-chat").hidden = !hasApp;
-  $("agent-settings").hidden = !hasApp;
-  $("chat-composer").hidden = !hasApp || selectedAppArchived;
-  $("chat-subtitle").textContent = selectedAppArchived
-    ? "Read-only while this app is archived"
-    : "Build, edit, or ask about this app";
-  $("generated-host").classList.toggle("readonly", selectedAppArchived);
-  $("new-app").hidden = showingArchivedApps;
-  $("archived-toggle").textContent = showingArchivedApps ? "Show active" : "Show archived";
+  $("admin-fab-label").textContent = "View admin";
+  $("admin-app-title").textContent = selectedAppName || "";
+  $("chat-composer").hidden = !hasApp;
+  $("home-tagline").textContent = "Describe an app. The agent builds it, runs it, and keeps it alive.";
+  $("checkpoint-save").disabled = !hasApp;
+  $("schedule-create").disabled = !hasApp || scheduleRequestPending;
   if (!hasApp) $("revision-label").textContent = "";
   setSessionOptions();
-  syncEmptyState();
+  syncCanvasState();
 }
 
 function stopCapabilityWorker() {
   if (workerRun) workerRun.finish("workspace-switched");
+  discardArmedWorker();
 }
 
 function saveSelectedConversationView() {
@@ -1459,15 +2350,48 @@ function restoreConversationView(app) {
   renderHistoryLoader();
 }
 
-function clearSelectedApp() {
+function hasUnsavedAdminEdits() {
+  const instructionsDirty = instructionsLoadedFor === selectedAppId
+    && $("instructions-editor").value !== savedInstructionsMd;
+  const newMemoryDirty = !$("memory-editor").hidden && [
+    $("memory-name").value,
+    $("memory-description").value,
+    $("memory-body").value,
+  ].some(value => value.trim());
+  const editDescription = $("memory-edit-description");
+  const editBody = $("memory-edit-body");
+  const memoryEditDirty = Boolean(
+    expandedMemory?.editing
+    && expandedMemory.memory
+    && editDescription
+    && editBody
+    && (
+      editDescription.value !== expandedMemory.memory.description
+      || editBody.value !== expandedMemory.memory.body_md
+    )
+  );
+  return instructionsDirty || newMemoryDirty || memoryEditDirty;
+}
+
+function confirmDiscardAdminEdits() {
+  return !hasUnsavedAdminEdits() || confirm("Discard unsaved admin edits?");
+}
+
+function clearSelectedApp(force = false) {
+  if (!force && !confirmDiscardAdminEdits()) return false;
   saveComposerDraft();
   saveSelectedConversationView();
   clearPendingAttachments();
   stopCapabilityWorker();
+  revokeBundleUrl();
+  closeMemoryEditor();
   selectedRefreshSequence += 1;
+  panelRefreshSequence += 1;
   selectedAppId = null;
   selectedAppName = null;
-  selectedAppArchived = false;
+  adminAutoOpened = false;
+  instructionsLoadedFor = null;
+  recoveryPoints = [];
   restoreComposerDraft();
   snapshot = { app: null, session: null, status: "idle" };
   conversationEvents = [];
@@ -1479,37 +2403,55 @@ function clearSelectedApp() {
   lastChatScrollTop = 0;
   restoredChatScrollTop = null;
   renderedChatEntries.clear();
-  renderedRevision = -1;
+  renderedUiRevision = -1;
+  renderedDataVersion = -1;
   establishedSession = null;
   establishedSessionKey = "";
   clearGenerated();
-  closeChat();
+  closeAdmin();
+  $("app-view").hidden = true;
+  $("home-view").hidden = false;
   renderChat();
   renderApps();
   syncWorkspaceControls();
+  return true;
 }
 
 async function showApp(app) {
+  if (
+    selectedAppId
+    && selectedAppId !== app.thread_id
+    && !confirmDiscardAdminEdits()
+  ) return;
   saveComposerDraft();
   saveSelectedConversationView();
   if (selectedAppId !== app.thread_id) clearPendingAttachments();
   stopCapabilityWorker();
+  revokeBundleUrl();
+  closeMemoryEditor();
   selectedRefreshSequence += 1;
+  panelRefreshSequence += 1;
   selectedAppId = app.thread_id;
   selectedAppName = app.name;
-  selectedAppArchived = Boolean(app.archived);
+  adminAutoOpened = false;
+  instructionsLoadedFor = null;
+  recoveryPoints = [];
   restoreComposerDraft();
   restoreConversationView(app);
   renderedChatEntries.clear();
-  renderedRevision = -1;
+  renderedUiRevision = -1;
+  renderedDataVersion = -1;
   establishedSession = null;
   establishedSessionKey = "";
   clearGenerated();
-  closeChat();
+  closeAdmin();
+  adminTab = "chat";
+  $("home-view").hidden = true;
+  $("app-view").hidden = false;
+  if (matchMedia("(max-width: 720px)").matches) setWorkspacePanelOpen(false);
   renderChat();
   renderApps();
   syncWorkspaceControls();
-  setSidebarOpen(false);
   await refreshSelectedApp(app.thread_id);
 }
 
@@ -1532,45 +2474,75 @@ async function refreshSelectedApp(threadId = selectedAppId) {
   };
   await refreshConversationEvents(threadId, refreshSequence);
   if (threadId !== selectedAppId || selectedRefreshSequence !== refreshSequence) return;
-  if (snapshot.app && next.app.revision < snapshot.app.revision) next.app = snapshot.app;
+  if (
+    snapshot.app
+    && (
+      next.app.ui_revision < snapshot.app.ui_revision
+      || (
+        next.app.ui_revision === snapshot.app.ui_revision
+        && next.app.data_version < snapshot.app.data_version
+      )
+    )
+  ) {
+    next.app = snapshot.app;
+  }
   snapshot = next;
-  if (next.app.revision !== renderedRevision) {
+  const hasBundle = Boolean(next.app.html || next.app.css || next.app.javascript);
+  if (next.app.ui_revision !== renderedUiRevision) {
     stopCapabilityWorker();
-    renderedRevision = next.app.revision;
-    if (next.app.html || next.app.css || next.app.javascript) {
-      $("revision-label").textContent = `Revision ${next.app.revision}`;
+    renderedUiRevision = next.app.ui_revision;
+    renderedDataVersion = next.app.data_version;
+    if (hasBundle) {
+      $("revision-label").textContent = `Revision ${next.app.ui_revision}`;
       renderGenerated(next.app.html, next.app.css);
-      if (!selectedAppArchived) runCapabilityWorker();
+      runCapabilityWorker();
     } else {
       $("revision-label").textContent = "Empty app";
       clearGenerated();
     }
+  } else if (next.app.data_version !== renderedDataVersion) {
+    // Data moved (usually an agent write) while the interface is unchanged:
+    // one load turn re-renders from durable data without tearing the
+    // canvas down. Keep the old marker while another worker is active so a
+    // later poll cannot mistake an update that was never rendered for one
+    // that completed.
+    if (hasBundle && !workerRun) {
+      renderedDataVersion = next.app.data_version;
+      runCapabilityWorker();
+    }
+  }
+  if (!hasBundle && !adminOpen && !adminAutoOpened) {
+    // A fresh workspace is an empty canvas; open the admin chat so the
+    // human lands where building starts.
+    adminAutoOpened = true;
+    openAdmin("chat");
   }
   renderChat();
   syncAgentSettings(snapshot.session);
   syncWorkspaceControls();
+  armCapabilityWorker();
 }
 
 async function refresh() {
   const refreshSequence = ++appsRefreshSequence;
-  const archivedView = showingArchivedApps;
   try {
-    const response = await api("GET", archivedView ? "/apps?archived=true" : "/apps");
-    if (
-      refreshSequence !== appsRefreshSequence
-      || archivedView !== showingArchivedApps
-    ) return;
+    const response = await api("GET", "/apps");
+    if (refreshSequence !== appsRefreshSequence) return;
     apps = response.apps || [];
     const selected = apps.find(app => app.thread_id === selectedAppId);
     if (selected) {
       selectedAppName = selected.name;
-      selectedAppArchived = Boolean(selected.archived);
     } else if (selectedAppId) {
-      clearSelectedApp();
+      clearSelectedApp(true);
     }
     renderApps();
     syncWorkspaceControls();
-    if (selectedAppId) await refreshSelectedApp(selectedAppId);
+    if (selectedAppId) {
+      await refreshSelectedApp(selectedAppId);
+      if (adminOpen && (adminTab === "schedules" || adminTab === "history")) {
+        await refreshAdminPanel();
+      }
+    }
   } catch (_error) {
     if (refreshSequence === appsRefreshSequence) {
       showRuntimeStatus("Agentic Web App backend unavailable", "error");
@@ -1579,18 +2551,17 @@ async function refresh() {
 }
 
 async function createApp() {
-  const button = $("new-app");
-  button.disabled = true;
+  const buttons = [$("new-app"), $("home-empty-primary"), $("workspace-new-app")];
+  buttons.forEach(button => { button.disabled = true; });
   try {
     const response = await api("POST", "/apps", {});
-    showingArchivedApps = false;
     await refresh();
     const app = apps.find(candidate => candidate.thread_id === response.app.thread_id) || response.app;
     await showApp(app);
   } catch (error) {
     showRuntimeStatus(error.message || "Could not create app", "error");
   } finally {
-    button.disabled = false;
+    buttons.forEach(button => { button.disabled = false; });
   }
 }
 
@@ -1616,42 +2587,12 @@ async function renameSelectedApp() {
   syncWorkspaceControls();
 }
 
-async function setSelectedAppArchived() {
-  if (!selectedAppId) return;
-  const threadId = selectedAppId;
-  const action = selectedAppArchived ? "unarchive" : "archive";
-  await api("POST", `/apps/${encodeURIComponent(threadId)}/${action}`, {});
-  if (selectedAppId === threadId) clearSelectedApp();
-  await refresh();
-}
-
-async function toggleArchivedApps() {
-  showingArchivedApps = !showingArchivedApps;
-  clearSelectedApp();
-  await refresh();
-}
-
-// Must match the drawer breakpoint in the stylesheet.
-const drawerMedia = window.matchMedia("(max-width: 720px)");
-
-function setSidebarOpen(open, restoreFocus = false) {
-  const mobile = drawerMedia.matches;
-  const isOpen = mobile && open;
-  const pane = document.querySelector(".app-pane");
-  $("builder-shell").classList.toggle("sidebar-open", isOpen);
-  pane.inert = mobile && !isOpen;
-  document.querySelector(".workspace-main").inert = isOpen;
-  $("sidebar-backdrop").hidden = !isOpen;
-  $("sidebar-open").setAttribute("aria-expanded", String(isOpen));
-  if (isOpen) $("sidebar-close").focus();
-  else if (restoreFocus && mobile) $("sidebar-open").focus();
-}
-
 async function initialize() {
   generatedRoot = $("generated-host").attachShadow({ mode: "open" });
   generatedRoot.addEventListener("click", generatedInteraction);
   generatedRoot.addEventListener("change", generatedInteraction);
   generatedRoot.addEventListener("submit", event => event.preventDefault());
+  syncWorkspacePanel();
   try {
     const options = await api("GET", "/session-options");
     sessionOptions = options.session_options || {};
@@ -1660,14 +2601,14 @@ async function initialize() {
   } catch (_error) {
     showRuntimeStatus("Agent settings are unavailable", "error");
   }
-  setSidebarOpen(false);
-  clearSelectedApp();
+  clearSelectedApp(true);
   await refresh();
   setInterval(refresh, 3000);
 }
 
 document.addEventListener("click", event => {
-  const linkButton = event.target.closest && event.target.closest(".md-copy-link");
+  const closest = selector => event.target.closest && event.target.closest(selector);
+  const linkButton = closest(".md-copy-link");
   if (linkButton) {
     requestHostCopy(linkButton.dataset.copyHref || "").then(() => {
       linkButton.textContent = "Copied";
@@ -1675,7 +2616,7 @@ document.addEventListener("click", event => {
     }).catch(error => showChatStatus(error.message, true));
     return;
   }
-  const copyButton = event.target.closest && event.target.closest(".md-copy");
+  const copyButton = closest(".md-copy");
   if (copyButton) {
     const code = copyButton.closest(".md-code")?.querySelector("code")?.textContent || "";
     requestHostCopy(code).then(() => {
@@ -1684,38 +2625,123 @@ document.addEventListener("click", event => {
     }).catch(error => showChatStatus(error.message, true));
     return;
   }
-  const removeAttachmentButton = event.target.closest
-    && event.target.closest("button[data-remove-attachment]");
+  const removeAttachmentButton = closest("button[data-remove-attachment]");
   if (removeAttachmentButton) {
     removeAttachment(removeAttachmentButton.dataset.removeAttachment)
       .catch(error => showChatStatus(error.message, true));
     return;
   }
-  const item = event.target.closest && event.target.closest(".app-item");
-  if (!item) return;
-  const app = apps.find(candidate => candidate.thread_id === item.dataset.appId);
+  const tabButton = closest(".admin-tab");
+  if (tabButton) {
+    setAdminTab(tabButton.dataset.adminTab);
+    return;
+  }
+  const scheduleToggle = closest("button[data-schedule-toggle]");
+  if (scheduleToggle) {
+    toggleSchedule(
+      Number(scheduleToggle.dataset.scheduleToggle),
+      scheduleToggle.dataset.scheduleEnabled === "true",
+    ).catch(error => showRuntimeStatus(error.message, "error"));
+    return;
+  }
+  const scheduleDelete = closest("button[data-schedule-delete]");
+  if (scheduleDelete) {
+    deleteSchedule(Number(scheduleDelete.dataset.scheduleDelete))
+      .catch(error => showRuntimeStatus(error.message, "error"));
+    return;
+  }
+  const memoryToggle = closest("button[data-memory-toggle]");
+  if (memoryToggle) {
+    void toggleMemory(memoryToggle.dataset.memoryToggle);
+    return;
+  }
+  const memoryEdit = closest("button[data-memory-edit]");
+  if (memoryEdit) {
+    if (expandedMemory && expandedMemory.name === memoryEdit.dataset.memoryEdit) {
+      expandedMemory.editing = true;
+      renderMemories(memoriesIndex);
+    }
+    return;
+  }
+  const memoryEditCancel = closest("button[data-memory-edit-cancel]");
+  if (memoryEditCancel) {
+    if (expandedMemory) {
+      expandedMemory.editing = false;
+      renderMemories(memoriesIndex);
+    }
+    return;
+  }
+  const memoryEditSave = closest("button[data-memory-edit-save]");
+  if (memoryEditSave) {
+    void saveMemoryWith(
+      memoryEditSave.dataset.memoryEditSave,
+      $("memory-edit-description").value.trim(),
+      $("memory-edit-body").value,
+      false,
+    );
+    return;
+  }
+  const memoryDelete = closest("button[data-memory-delete-name]");
+  if (memoryDelete) {
+    void deleteMemoryNamed(memoryDelete.dataset.memoryDeleteName);
+    return;
+  }
+  const revertButton = closest("button[data-revert-id]");
+  if (revertButton) {
+    void revertCheckpoint(Number(revertButton.dataset.revertId));
+    return;
+  }
+  const workspaceButton = closest("button[data-workspace-id]");
+  if (workspaceButton) {
+    const app = apps.find(candidate => candidate.thread_id === workspaceButton.dataset.workspaceId);
+    if (app) void showApp(app).catch(error => showRuntimeStatus(error.message, "error"));
+    return;
+  }
+  const card = closest(".app-card");
+  if (!card) return;
+  const app = apps.find(candidate => candidate.thread_id === card.dataset.appId);
   if (app) void showApp(app).catch(error => showRuntimeStatus(error.message, "error"));
 });
 $("new-app").addEventListener("click", () => createApp());
-$("archived-toggle").addEventListener("click", () => toggleArchivedApps());
+$("home-empty-primary").addEventListener("click", () => createApp());
+$("workspace-new-app").addEventListener("click", () => createApp());
+$("workspace-panel-close").addEventListener("click", () => setWorkspacePanelOpen(false, true));
+$("workspace-panel-open").addEventListener("click", () => setWorkspacePanelOpen(true, true));
+$("workspace-panel-backdrop").addEventListener("click", () => setWorkspacePanelOpen(false, true));
 $("rename-app").addEventListener("click", () => renameSelectedApp().catch(error => showRuntimeStatus(error.message, "error")));
-$("archive-app").addEventListener("click", () => setSelectedAppArchived().catch(error => showRuntimeStatus(error.message, "error")));
-$("open-chat").addEventListener("click", () => $("chat-drawer").hidden ? openChat() : closeChat());
+$("admin-open").addEventListener("click", () => openAdmin());
+$("admin-close").addEventListener("click", () => closeAdmin());
 $("empty-primary").addEventListener("click", () => {
-  if (!selectedAppId) {
-    if (showingArchivedApps) void toggleArchivedApps();
-    else void createApp();
-  } else if (selectedAppArchived) {
-    void setSelectedAppArchived().catch(error => showRuntimeStatus(error.message, "error"));
-  } else {
-    openChat();
-  }
+  if (!selectedAppId) return;
+  openAdmin("chat");
 });
-$("close-chat").addEventListener("click", closeChat);
-$("sidebar-open").addEventListener("click", () => setSidebarOpen(true));
-$("sidebar-close").addEventListener("click", () => setSidebarOpen(false, true));
-$("sidebar-backdrop").addEventListener("click", () => setSidebarOpen(false, true));
-drawerMedia.addEventListener("change", () => setSidebarOpen(false));
+$("schedule-form").addEventListener("submit", event => {
+  submitSchedule(event).catch(error => showRuntimeStatus(error.message, "error"));
+});
+$("schedule-cadence").addEventListener("change", () => {
+  const daily = $("schedule-cadence").value === "daily";
+  $("schedule-interval-field").hidden = daily;
+  $("schedule-time-field").hidden = !daily;
+});
+$("instructions-save").addEventListener("click", () => saveInstructions());
+$("instructions-discard").addEventListener("click", () => discardInstructions());
+$("instructions-editor").addEventListener("input", () => {
+  $("instructions-status").textContent = "";
+  syncInstructionsDirtyState();
+});
+$("memory-new").addEventListener("click", () => openMemoryEditor());
+$("memory-cancel").addEventListener("click", () => {
+  $("memory-editor").hidden = true;
+});
+$("memory-save").addEventListener("click", () => {
+  void saveMemoryWith(
+    $("memory-name").value.trim(),
+    $("memory-description").value.trim(),
+    $("memory-body").value,
+    true,
+  );
+});
+$("checkpoint-save").addEventListener("click", () => saveCheckpoint());
 $("runtime").addEventListener("change", () => setSessionOptions());
 $("model").addEventListener("change", () => setSessionOptions($("model").value));
 $("effort").addEventListener("change", () => setSessionOptions());
@@ -1751,4 +2777,59 @@ $("message").addEventListener("keydown", event => {
   }
 });
 $("message").addEventListener("input", saveComposerDraft);
+$("admin-overlay").addEventListener("keydown", event => {
+  if (event.key !== "Tab") return;
+  const focusable = Array.from($("admin-overlay").querySelectorAll(
+    'button:not(:disabled), select:not(:disabled), textarea:not(:disabled), input:not(:disabled), [tabindex="0"]',
+  )).filter(element => !element.hidden && element.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+$("admin-overlay").querySelector(".admin-nav").addEventListener("keydown", event => {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  const tabs = Array.from(document.querySelectorAll(".admin-tab"));
+  const current = tabs.indexOf(document.activeElement);
+  if (current < 0) return;
+  event.preventDefault();
+  let next = current;
+  if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = tabs.length - 1;
+  else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+    next = (current - 1 + tabs.length) % tabs.length;
+  } else {
+    next = (current + 1) % tabs.length;
+  }
+  setAdminTab(tabs[next].dataset.adminTab);
+  tabs[next].focus();
+});
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  if (workspacePanelOpen && matchMedia("(max-width: 720px)").matches) {
+    event.preventDefault();
+    setWorkspacePanelOpen(false, true);
+    return;
+  }
+  if (!adminOpen) return;
+  event.preventDefault();
+  if (!$("memory-editor").hidden) {
+    $("memory-editor").hidden = true;
+    $("memory-new").focus();
+  } else if (expandedMemory?.editing) {
+    const name = expandedMemory.name;
+    expandedMemory.editing = false;
+    renderMemories(memoriesIndex);
+    document.querySelector(`[data-memory-edit="${CSS.escape(name)}"]`)?.focus();
+  } else {
+    closeAdmin();
+  }
+});
+window.addEventListener("resize", syncWorkspacePanel);
 initialize();

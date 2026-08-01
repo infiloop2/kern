@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -51,6 +52,13 @@ CALENDAR_CHANGE_OPERATIONS = frozenset({"create", "update", "delete"})
 CALENDAR_CHANGE_TOOL_FIELDS = frozenset(
     {"operation", "event_id", "summary", "description", "location", "start_time", "end_time", "time_zone"}
 )
+# Google Calendar event ids are lowercase base32hex tokens ([a-v0-9], 5-1024
+# chars); an instance of a recurring series appends exactly one
+# "_<YYYYMMDD>T<HHMMSS>Z" suffix. An underscore is legal only in that suffix,
+# so prose-shaped input like "call_alice" cannot pass. Enforcing the provider's
+# exact grammar keeps free agent text out of the event-lookup URL that runs
+# before any approval.
+CALENDAR_EVENT_ID_RE = re.compile(r"^[a-v0-9]{5,1024}(_[0-9]{8}T[0-9]{6}Z)?$")
 
 
 class ToolInputValidationError(ValueError):
@@ -229,6 +237,23 @@ def _calendar_response_time(value: object) -> str:
     return date if isinstance(date, str) else ""
 
 
+def _parse_calendar_timestamp(value: str, key: str) -> datetime:
+    """Same intake grammar as Gmail's search time filters: an agent-supplied
+    time field must parse as ISO 8601 (a trailing Z means UTC) or the action
+    fails, so free agent text can never ride a time field into a request."""
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ToolInputValidationError(f"Calendar tool_input.{key} must be an ISO 8601 timestamp.") from exc
+
+
+def _validated_event_id(event_id: str) -> str:
+    if not CALENDAR_EVENT_ID_RE.fullmatch(event_id):
+        raise ToolInputValidationError("Calendar event_id must be a Google Calendar event id.")
+    return event_id
+
+
 def _calendar_read_input(tool_input: JSONObject) -> JSONObject:
     extra_fields = set(tool_input) - CALENDAR_READ_TOOL_FIELDS
     if extra_fields:
@@ -239,7 +264,12 @@ def _calendar_read_input(tool_input: JSONObject) -> JSONObject:
         if value is not None:
             if not isinstance(value, str) or not value.strip():
                 raise ToolInputValidationError(f"Calendar read tool_input.{key} must be a string.")
-            output[key] = value.strip()
+            # Only a parsed-and-reserialized timestamp reaches the request URL,
+            # keeping the data policy's "only the requested time range" exact.
+            parsed = _parse_calendar_timestamp(value.strip(), key)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            output[key] = parsed.isoformat()
     return output
 
 
@@ -305,6 +335,10 @@ def _calendar_change_proposal(tool_input: JSONObject) -> JSONObject:
         stripped = value.strip()
         if not stripped and not (operation == "update" and key in clearable_on_update):
             raise ToolInputValidationError(f"Calendar change tool_input.{key} must be a non-empty string.")
+        if key == "event_id":
+            stripped = _validated_event_id(stripped)
+        elif key in {"start_time", "end_time"}:
+            _parse_calendar_timestamp(stripped, key)
         proposal[key] = stripped
     has_event_id = "event_id" in proposal
     changed_fields = ("summary", "description", "location", "start_time", "end_time")
@@ -333,7 +367,9 @@ def _calendar_change_proposal(tool_input: JSONObject) -> JSONObject:
 def _calendar_event_preview(access_token: str, event_id: str) -> JSONObject:
     """Current state of one event, captured at proposal time so the approval
     can show what is being changed and detect changes before executing."""
-    encoded_event_id = urllib.parse.quote(event_id, safe="")
+    # This lookup runs before any approval, so the id grammar is re-checked at
+    # the choke point even for ids echoed back from an approval payload.
+    encoded_event_id = urllib.parse.quote(_validated_event_id(event_id), safe="")
     event = google_json_request(
         "GET",
         f"{CALENDAR_API_BASE_URL}/calendars/primary/events/{encoded_event_id}",

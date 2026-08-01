@@ -22,18 +22,26 @@ definition.
 | `/var/run/postgresql/.s.PGSQL.5432` | `postgres` | `kern-admin`, `kern-proxy`, `kern-tools`, `kern-agent-network`, `postgres`, and per-app uids, each mapped to its matching database role | Admin, network, tool, and per-app state. `pg_hba.conf` admits these named peer identities and then explicitly rejects everyone else; table/schema grants narrow each non-owner role. There is no TCP listener. |
 | `/run/kern-tools/tools.sock` | `kern-tools` (tools service) | `kern-agent`, `kern-admin` (each path-scoped) | Agent-facing tools surface plus operator delegation, scoped strictly by path per peer. Only `kern-agent` reaches `GET /tools`, JSON `POST /call`, and raw-byte `POST /assets/video` and `POST /assets/image`; the MCP shim forwards calls and streams agent-opened media without sending its pathname. Only `kern-admin` reaches `/operator/...` for OAuth, revoke, and approved execution. Neither peer can call the other's routes. |
 | `/run/kern-agent-network/agent-network.sock` | `kern-agent-network` (network-introspection service) | `kern-agent` | Agent-facing `list_network_integrations` and `recent_network_denials` tools. The service has no egress and a SELECT-only Postgres role for policy and network-event tables; the MCP shim aggregates its listing with the tools and app services. |
-| `/run/kern-admin-api/app-backend.sock` | `kern-admin` (admin API) | per-app account uids | App-backend → host admin API, server-to-server. The admin API checks the peer uid against the installed app's Linux user, then applies a narrow app-backend route allowlist (thread route shapes only). Lets an app backend reach host resources without a second app secret. |
+| `/run/kern-admin-api/app-backend.sock` | `kern-admin:kern-app-backends`, mode `0660` (admin API) | provisioned per-app account uids | App-backend → host admin API, server-to-server. Bootstrap adds the socket-owning admin service and installed app accounts to `kern-app-backends`; the admin API then checks the peer uid against the claimed app's Linux user and applies a narrow route allowlist. Lets an app backend reach host resources without a second app secret. |
 | `/run/kern-agent-app/agent-app.sock` | `kern-agent-app` (agent-app service) | `kern-agent` | Agent → app backend agent API (`POST /call`, used by the MCP shim's stable `app_api` tool). The peer uid proves "an agent"; the caller's app-prefixed host thread is read from `kern-agent-thread-<thread_id>.scope`, resolved through the installed manifest, then proxied to that app's `/agent/` routes over its loopback port. See [`agent-app-api.md`](apps/agent-app-api.md). |
 
 ## Design notes
 
-- **Directories are world-traversable, the sockets are peer-gated.** Bootstrap
+- **Directories are world-traversable; sockets are peer- or group-gated.** Bootstrap
   gives the admin-api unit `RuntimeDirectory=kern-admin-api`, the tools
   unit `RuntimeDirectory=kern-tools`, the network-introspection unit
   `RuntimeDirectory=kern-agent-network`, and the agent-app unit
   `RuntimeDirectory=kern-agent-app`, all at mode `0755`, so the agent/app
-  uids can `connect(2)`; access control is the server's peer-uid check, not
-  filesystem permissions.
+  uids can reach the socket paths. Most sockets rely on the server's peer-uid
+  check. `app-backend.sock` additionally uses mode `0660` and a group containing
+  its admin owner plus provisioned app accounts, then uses peer uid to identify
+  the exact app.
+- **Every socket server bounds pre-authentication work.** Peer credentials are
+  read only once a request arrives, so each server sets a per-connection read
+  timeout and caps concurrent handlers; a local uid that connects and stalls can
+  cost at most one slot. `app-backend.sock` drops connections past its cap
+  rather than queueing them, because it shares the admin API process's fd table
+  with the operator-facing TCP listener.
 - **Sockets are not TCP.** They carry no port, are unreachable over SSH
   forwarding or the Cloudflare Tunnel, and are not affected by the agent's nftables
   loopback drop rules. TCP loopback listeners (the admin API on `127.0.0.1:7443`,

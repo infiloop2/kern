@@ -2,17 +2,18 @@
 
 App backends reach host thread routes through a Unix-domain socket instead of
 the operator-facing TCP admin API. This module owns the app-backend-specific
-boundary: authenticate the peer uid as an installed app service user, verify
-the claimed app id, narrow the route surface, and translate app-visible thread
-ids to host-internal app-prefixed ids. Every route is thread-scoped, so
-authorization is the mechanical prefix mapping — no per-request ownership
-lookup exists.
+boundary: reject a non-app peer uid before it occupies a handler slot, verify
+an admitted peer's claimed app id, narrow the route surface, and translate
+app-visible thread ids to host-internal app-prefixed ids. Every route is
+thread-scoped, so authorization is the mechanical prefix mapping — no
+per-request ownership lookup exists.
 """
 
 from __future__ import annotations
 
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
+import grp
 import json
 import os
 from pathlib import Path
@@ -22,10 +23,11 @@ import socket
 import socketserver
 import stat
 import struct
+import threading
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from host.constants import APP_BACKEND_ADMIN_SOCKET_PATH, MAX_REQUEST_BODY_BYTES
+from host.constants import APP_BACKEND_ADMIN_SOCKET_PATH, APP_BACKEND_GROUP, MAX_REQUEST_BODY_BYTES
 from host.runtime.admin_api import service as admin_api
 from host.runtime.core import app_platform, host_errors
 
@@ -43,14 +45,71 @@ APP_BACKEND_ALLOWED_ADMIN_ROUTES = (
     ("POST", "/v1/threads/:thread_id/stop"),
     ("GET", "/v1/threads/:thread_id/events"),
 )
+# Filesystem permissions admit only provisioned app accounts; peer credentials
+# then bind an admitted connection to one exact app. The socket is served from
+# a daemon thread of the admin API process, whose fd table also holds the
+# operator-facing TCP listener. Cap concurrent connections at the same figure
+# as that listener's worker cap so neither surface may starve the other of file
+# descriptors. Read at
+# construction rather than import: service.py imports this module while its own
+# constants are still being defined, so a module-level read of one would make
+# importing service.py fail.
+REQUEST_READ_TIMEOUT_SECONDS = 30
 
 
 class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """Bound concurrent connections, rejecting rather than queueing at capacity.
+
+    A non-app peer is rejected from SO_PEERCRED before it takes a slot. Among
+    admitted app peers, dropping connections at capacity rather than queueing
+    keeps the handler-thread and fd cost bounded by the semaphore.
+    """
+
     daemon_threads = True
+
+    def __init__(self, *args: Any, max_connections: int | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if max_connections is None:
+            max_connections = admin_api.MAX_CONCURRENT_REQUESTS
+        self._connection_slots = threading.BoundedSemaphore(max_connections)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        # SO_PEERCRED is available as soon as accept(2) returns. Refuse every
+        # uid that is not an installed app before it acquires a slot or starts
+        # a handler: BaseHTTPRequestHandler cannot authenticate the claimed
+        # app id until it has read the headers, and an idle socket timeout alone
+        # can be kept alive forever by trickling one byte per window.
+        try:
+            peer_is_app = app_id_for_peer_uid(_peer_uid(request)) is not None
+        except OSError:
+            peer_is_app = False
+        if not peer_is_app:
+            self.shutdown_request(request)
+            return
+        if not self._connection_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            # process_request_thread is the normal release point; if the handler
+            # thread could not start at all the slot would leak and the socket
+            # would permanently refuse every app backend.
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "KernAppBackend/0.1"
+    # Only an installed app uid reaches a handler. Bound an admitted app that
+    # stalls while sending its request line, headers, or body as well.
+    timeout = REQUEST_READ_TIMEOUT_SECONDS
 
     def do_GET(self) -> None:
         self._handle("GET")
@@ -134,7 +193,8 @@ def create_app_backend_admin_server() -> ThreadingUnixHTTPServer:
         else:
             raise OSError(f"refusing to replace non-socket app backend admin path: {APP_BACKEND_ADMIN_SOCKET}")
     server = ThreadingUnixHTTPServer(str(APP_BACKEND_ADMIN_SOCKET), Handler)
-    APP_BACKEND_ADMIN_SOCKET.chmod(0o666)
+    os.chown(APP_BACKEND_ADMIN_SOCKET, -1, grp.getgrnam(APP_BACKEND_GROUP).gr_gid)
+    APP_BACKEND_ADMIN_SOCKET.chmod(0o660)
     return server
 
 

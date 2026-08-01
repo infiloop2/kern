@@ -11,12 +11,14 @@ import os
 from pathlib import Path
 import socket
 import socketserver
+import stat
 import tempfile
 import threading
 import time
 import unittest
 from unittest.mock import MagicMock, call, patch
 import subprocess
+import sys
 from typing import Any
 import urllib.error
 from urllib.parse import quote
@@ -36,7 +38,7 @@ from host.runtime.core.state import (
     append_network_event,
     read_claude_account,
     read_openai_account,
-    read_proxy_claude_account,
+    read_proxy_claude_account_id,
     read_proxy_openai_account_id,
     save_config,
     save_claude_account,
@@ -456,6 +458,14 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn("The first task is the live check", catalog)
         self.assertNotIn("Kern immediately verifies", catalog)
         self.assertNotIn("Kern verifies the credential", catalog)
+
+    def test_custom_domain_ui_exposes_websocket_opt_in(self) -> None:
+        network = (
+            Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui/network.js"
+        ).read_text()
+        html = (Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui.html").read_text()
+        self.assertIn('id="policy-allow-websocket"', html)
+        self.assertIn("if (allowWebsocket) rule.allow_websocket = true", network)
 
     def test_connection_guide_screenshots_are_local_png_assets(self) -> None:
         repo = Path(__file__).parents[1]
@@ -1398,6 +1408,24 @@ class AgentProcessSnapshotTests(unittest.TestCase):
         )
 
 
+class AdminApiClientDisconnectTests(unittest.TestCase):
+    def test_client_disconnect_mid_response_is_not_a_host_error(self) -> None:
+        # A client that closes its connection while the response is being
+        # written is expected transport termination: no structured host-error
+        # report (which spawns /usr/bin/logger) and no second JSON write to
+        # the dead socket. Loopback TCP is firewalled on Kern hosts, so the
+        # handler runs directly on one end of a socketpair whose peer closed.
+        client, request = socket.socketpair()
+        self.addCleanup(request.close)
+        client.sendall(b"GET / HTTP/1.1\r\nHost: kern-admin.test\r\n\r\n")
+        client.close()
+        with patch.object(admin_api.host_errors, "report_unexpected") as report:
+            # Without the disconnect handling, the BrokenPipeError from the
+            # retried error write would propagate out of the handler here.
+            admin_api.Handler(request, ("127.0.0.1", 0), MagicMock())
+        report.assert_not_called()
+
+
 class AdminApiIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
@@ -1864,6 +1892,43 @@ class AdminApiIntegrationTests(unittest.TestCase):
         status, _, _ = self.login("wrong")
         self.assertEqual(status, 401)
 
+    def test_malformed_login_bodies_do_not_consume_throttle_attempts(self) -> None:
+        # The throttle bucket is keyed on the browser's egress IP, so a
+        # hostile page the operator visits can fire bodiless no-cors POSTs at
+        # /v1/login charged to the operator's own bucket. Malformed bodies
+        # must fail without consuming the attempt budget.
+        garbage = b"not-json"
+        empty = (
+            b"POST /v1/login HTTP/1.1\r\n"
+            b"Host: kern-admin.test\r\n"
+            b"Content-Length: 0\r\n\r\n"
+        )
+        malformed = (
+            b"POST /v1/login HTTP/1.1\r\n"
+            b"Host: kern-admin.test\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(garbage)}\r\n\r\n".encode()
+            + garbage
+        )
+        for request in (empty, malformed):
+            for _ in range(admin_api.admin_auth.MAX_FAILURES_PER_CLIENT):
+                self.assertIn(b" 401 ", self.raw_request(request))
+        # No attempt was consumed: the correct password still logs in.
+        status, headers, body = self.login()
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        self.assertIsNotNone(self.session_token_from_headers(headers))
+
+    def test_valid_shaped_wrong_password_attempts_still_count_toward_the_block(self) -> None:
+        # The brute-force protection is unchanged: a valid-shaped body with a
+        # wrong password charges the throttle, and past the limit even the
+        # correct password is refused until the window clears.
+        for _ in range(admin_api.admin_auth.MAX_FAILURES_PER_CLIENT):
+            status, _, _ = self.login("wrong")
+            self.assertEqual(status, 401)
+        status, _, _ = self.login("admin-secret")
+        self.assertEqual(status, 429)
+
     def test_tunnel_login_requires_a_valid_cf_connecting_ip(self) -> None:
         # A tunnel request (X-Forwarded-Proto set) must carry exactly one
         # Cf-Connecting-Ip; a missing/stripped header fails closed so it cannot
@@ -1960,6 +2025,29 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertIn(b" 301 ", response)
         self.assertIn(b"Location: https://kern.example.com/", response)
+
+    def test_https_redirect_refuses_a_non_origin_form_request_target(self) -> None:
+        # A request target need not be origin-form; echoing "GET @evil.com/"
+        # into the Location would turn the stored hostname into a userinfo
+        # component (https://kern.example.com@evil.com/ resolves to evil.com).
+        save_config({
+            "agent_name": "kern-test",
+            "admin_password_sha256": hashlib.sha256(b"admin-secret").hexdigest(),
+            "operator_connections": [{
+                "mode": "cloudflare_tunnel",
+                "hostname": "kern.example.com",
+                "tunnel_token": "mock-tunnel-token",
+            }],
+        })
+        response = self.raw_request(
+            b"GET @evil.com/ HTTP/1.1\r\n"
+            b"Host: kern.example.com\r\n"
+            b"X-Forwarded-Proto: http\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        self.assertIn(b" 301 ", response)
+        self.assertIn(b"Location: https://kern.example.com/\r\n", response)
+        self.assertNotIn(b"evil.com", response)
 
     def test_public_boundary_is_enforced_before_static_assets(self) -> None:
         save_config({
@@ -4349,12 +4437,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "awaiting_login")
 
         self.assertEqual(read_claude_account(), {"account_id": "acct_smoke", "access_token_sha256": "f" * 64})
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
 
-    def test_active_claude_runtime_refresh_repins_rotated_token(self) -> None:
+    def test_active_claude_runtime_refresh_records_rotated_token(self) -> None:
         # The Claude CLI rotates its OAuth access token on its own schedule;
-        # the bearer-token pin follows, because only the account identity is
-        # anchored.
+        # admin metadata follows it, while the proxy pin remains the stable
+        # account identity.
         save_policy(
             {
                 "network_integrations": {"claude": {"enabled": True}},
@@ -4383,8 +4471,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "active")
 
         self.assertEqual(read_claude_account()["access_token_sha256"], "1" * 64)
-        self.assertEqual(read_proxy_claude_account()["access_token_sha256"], "1" * 64)
-        self.assertEqual(read_proxy_claude_account()["account_id"], "acct_smoke")
+        self.assertEqual(read_proxy_claude_account_id(), "acct_smoke")
 
     def test_active_claude_runtime_refresh_rejects_rotation_to_another_account(self) -> None:
         save_policy(
@@ -4413,7 +4500,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "error")
 
         self.assertEqual(read_claude_account()["account_id"], "acct_operator")
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
         record = orchestrator.runtime_status_record("claude_code")
         self.assertIn("account changed", record["error_message"])
 
@@ -5134,7 +5221,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         set_runtime_statuses(codex="active", claude_code="active")
         save_claude_account({"account_id": "acct_old", "access_token_sha256": "f" * 64})
-        state.save_proxy_claude_account({"account_id": "acct_old", "access_token_sha256": "f" * 64})
+        state.save_proxy_claude_account_id("acct_old")
 
         completed = subprocess.CompletedProcess(
             [*admin_api.AGENT_AUTH_CLEAR_HELPER_COMMAND, "claude"], 0, stdout='{"removed":[]}', stderr=""
@@ -5161,7 +5248,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         refresh_status.assert_called_once_with("claude_code")
         self.assertEqual(read_claude_account(), {})
-        self.assertEqual(read_proxy_claude_account(), {})
+        self.assertIsNone(read_proxy_claude_account_id())
 
     def test_reset_linked_account_rejects_unknown_runtime(self) -> None:
         for body in (
@@ -5884,6 +5971,173 @@ class ToolRoutesTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn("text/html", response.headers["Content-Type"])
             self.assertIn(b"Kern", response.read())
+
+
+class AppBackendAdminSocketImportTests(unittest.TestCase):
+    def test_service_imports_when_it_is_the_entry_module(self) -> None:
+        # service.py imports app_backend_api partway through its own import,
+        # so anything app_backend_api reads off service at module scope is not
+        # defined yet. Importing service first is the shape that catches it.
+        for entry in (
+            "host.runtime.admin_api.service",
+            "host.runtime.admin_api.app_backend_api",
+        ):
+            with self.subTest(entry=entry):
+                root = Path(__file__).resolve().parents[1]
+                subprocess.run(
+                    [sys.executable, "-c", f"import {entry}"],
+                    check=True,
+                    capture_output=True,
+                    env={**os.environ, "PYTHONPATH": str(root)},
+                )
+
+
+class AppBackendAdminSocketTests(unittest.TestCase):
+    """The socket path is world-connectable, but only an installed app uid may
+    occupy a handler slot in the admin API process."""
+
+    def setUp(self) -> None:
+        self.app_peer = patch.object(
+            app_backend_admin_api, "app_id_for_peer_uid", return_value="test-app"
+        )
+        self.app_peer.start()
+        self.addCleanup(self.app_peer.stop)
+
+    def socket_path(self) -> Path:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return Path(directory.name) / "app-backend.sock"
+
+    def created_server(self, path: Path) -> app_backend_admin_api.ThreadingUnixHTTPServer:
+        # KERN_APP_BACKEND_ADMIN_SOCKET is read into this constant at import,
+        # so patching it is the same override the service unit uses.
+        with (
+            patch.object(app_backend_admin_api, "APP_BACKEND_ADMIN_SOCKET", path),
+            patch.object(
+                app_backend_admin_api.grp,
+                "getgrnam",
+                return_value=MagicMock(gr_gid=os.getgid()),
+            ),
+        ):
+            return app_backend_admin_api.create_app_backend_admin_server()
+
+    def serve(self, server: app_backend_admin_api.ThreadingUnixHTTPServer) -> None:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+    def test_created_socket_is_app_group_connectable_and_unlinkable(self) -> None:
+        path = self.socket_path()
+        with patch.object(app_backend_admin_api, "APP_BACKEND_ADMIN_SOCKET", path):
+            server = self.created_server(path)
+            self.addCleanup(server.server_close)
+            mode = path.lstat().st_mode
+            # Only provisioned app accounts share this group; the peer-uid
+            # check then binds an admitted connection to one exact app.
+            self.assertTrue(stat.S_ISSOCK(mode))
+            self.assertEqual(stat.S_IMODE(mode), 0o660)
+            self.assertEqual(path.stat().st_gid, os.getgid())
+            app_backend_admin_api.unlink_app_backend_admin_socket()
+            self.assertFalse(path.exists())
+            # Shutdown may unlink a socket a restart already removed.
+            app_backend_admin_api.unlink_app_backend_admin_socket()
+
+    def test_creation_refuses_to_replace_a_non_socket_path(self) -> None:
+        path = self.socket_path()
+        path.write_text("not a socket")
+        with (
+            patch.object(app_backend_admin_api, "APP_BACKEND_ADMIN_SOCKET", path),
+            self.assertRaises(OSError),
+        ):
+            app_backend_admin_api.create_app_backend_admin_server()
+
+    def test_stalled_request_is_closed_by_the_read_timeout(self) -> None:
+        # A peer that connects and never finishes its request must not pin a
+        # handler thread and its fd before the peer-uid check runs.
+        path = self.socket_path()
+        self.serve(self.created_server(path))
+        with (
+            patch.object(app_backend_admin_api.Handler, "timeout", 0.3),
+            socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection,
+        ):
+            connection.settimeout(5)
+            connection.connect(str(path))
+            # A request line, but never the blank line that ends the headers.
+            connection.sendall(b"GET /v1/threads HTTP/1.1\r\n")
+            self.assertEqual(connection.recv(65536), b"")
+
+
+    def test_non_app_peer_is_rejected_before_it_takes_a_slot(self) -> None:
+        path = self.socket_path()
+        server = self.created_server(path)
+        self.serve(server)
+
+        with (
+            patch.object(app_backend_admin_api, "app_id_for_peer_uid", return_value=None),
+            socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection,
+        ):
+            connection.settimeout(5)
+            connection.connect(str(path))
+            connection.sendall(b"G")  # a trickle cannot reach a handler
+            try:
+                closed = connection.recv(65536)
+            except ConnectionResetError:
+                closed = b""
+            self.assertEqual(closed, b"")
+
+        # The rejected peer never acquired the semaphore.
+        self.assertTrue(server._connection_slots.acquire(blocking=False))
+
+    def test_connections_past_the_cap_are_rejected_not_queued(self) -> None:
+        handling = threading.Event()
+        finish = threading.Event()
+
+        class BlockingHandler(app_backend_admin_api.Handler):
+            def handle(self) -> None:
+                handling.set()
+                finish.wait(5)
+
+        path = self.socket_path()
+        server = app_backend_admin_api.ThreadingUnixHTTPServer(
+            str(path), BlockingHandler, max_connections=1
+        )
+        self.serve(server)
+        self.addCleanup(finish.set)
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as holder:
+            holder.connect(str(path))
+            self.assertTrue(handling.wait(5))
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as rejected:
+                rejected.settimeout(5)
+                rejected.connect(str(path))
+                # The only slot is taken, so the server closes this connection
+                # rather than parking its fd until a slot frees.
+                self.assertEqual(rejected.recv(65536), b"")
+        finish.set()
+
+    def test_connection_slot_is_released_when_the_handler_thread_cannot_start(self) -> None:
+        path = self.socket_path()
+        server = app_backend_admin_api.ThreadingUnixHTTPServer(
+            str(path), app_backend_admin_api.Handler, max_connections=1
+        )
+        self.addCleanup(server.server_close)
+        client, request = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(request.close)
+
+        with (
+            patch.object(
+                socketserver.ThreadingMixIn,
+                "process_request",
+                side_effect=RuntimeError("cannot start thread"),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            server.process_request(request, ("local", 0))
+
+        # process_request_thread, the normal release point, never ran; a leak
+        # here would make the socket refuse every app backend from now on.
+        self.assertTrue(server._connection_slots.acquire(blocking=False))
 
 
 if __name__ == "__main__":

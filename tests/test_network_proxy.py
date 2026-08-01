@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import contextmanager, ExitStack
 import json
 import hashlib
+import os
 from pathlib import Path
 import socket
 import ssl
@@ -11,7 +13,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pg_harness
 
@@ -26,9 +28,17 @@ from host.network_integrations.openai import guard as openai_guard
 from host.runtime.core import network_policy, state
 from host.runtime.core.network_policy import load_policy
 from host.runtime.core.state import save_network_policy as save_policy
-from host.runtime.core.state import save_proxy_claude_account, save_proxy_openai_account_id
+from host.runtime.core.state import save_proxy_claude_account_id, save_proxy_openai_account_id
 from state_seed import read_network_events
 from host.runtime.network_proxy import service as network_proxy
+
+
+def openai_bearer(account_id: str) -> str:
+    """A genuine-shaped ChatGPT OAuth JWT (dummy signature) for one account."""
+    def segment(obj: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+    payload = {"https://api.openai.com/auth": {"chatgpt_account_id": account_id}}
+    return "Bearer " + ".".join((segment({"alg": "RS256"}), segment(payload), "c2ln"))
 
 
 class UpstreamHandler(BaseHTTPRequestHandler):
@@ -168,6 +178,110 @@ class NetworkProxyTests(unittest.TestCase):
         self.assertIsNone(denial)
         self.assertIsNotNone(restored)
         self.assertIn("api.example.com", restored.to_json()["network_integrations"]["custom"]["domains"])
+
+    def test_claude_token_attestation_reads_provider_signed_account_uuid(self) -> None:
+        raw = MagicMock()
+        tls = MagicMock()
+        context = MagicMock()
+        context.wrap_socket.return_value = tls
+        response = MagicMock()
+        response.status = 200
+        response.read.return_value = b'{"account":{"uuid":"acct-approved"}}'
+
+        with (
+            patch.object(network_proxy, "connect_public", return_value=raw),
+            patch.object(network_proxy.ssl, "create_default_context", return_value=context),
+            patch.object(network_proxy.http.client, "HTTPResponse", return_value=response),
+        ):
+            self.assertEqual(
+                network_proxy.attest_claude_token_account("rotated-token"),
+                "acct-approved",
+            )
+
+        context.wrap_socket.assert_called_once_with(
+            raw, server_hostname="api.anthropic.com"
+        )
+        sent = b"".join(call.args[0] for call in tls.sendall.call_args_list)
+        self.assertIn(b"GET /api/oauth/profile HTTP/1.1", sent)
+        self.assertIn(b"Authorization: Bearer rotated-token", sent)
+        self.assertIn(b"Content-Type: application/json", sent)
+        self.assertIn(b"Cache-Control: no-cache", sent)
+        response.close.assert_called_once_with()
+        tls.close.assert_called_once_with()
+
+    def test_claude_token_attestation_fails_closed_on_bad_profile(self) -> None:
+        raw = MagicMock()
+        tls = MagicMock()
+        context = MagicMock()
+        context.wrap_socket.return_value = tls
+        response = MagicMock()
+        response.status = 200
+        response.read.return_value = b'{"account":{}}'
+
+        with (
+            patch.object(network_proxy, "connect_public", return_value=raw),
+            patch.object(network_proxy.ssl, "create_default_context", return_value=context),
+            patch.object(network_proxy.http.client, "HTTPResponse", return_value=response),
+        ):
+            self.assertIsNone(
+                network_proxy.attest_claude_token_account("unverified-token")
+            )
+
+    def test_proxy_attests_claude_bearer_before_forwarding_original_request(self) -> None:
+        controls = parse_network_controls({
+            "network_integrations": {"claude": {"enabled": True}},
+        })
+        save_proxy_claude_account_id("acct-approved")
+        claude_guard.clear_token_attestation_cache()
+        self.addCleanup(claude_guard.clear_token_attestation_cache)
+        headers = [
+            ("Host", "api.anthropic.com"),
+            ("Authorization", "Bearer parallel-token"),
+            ("Content-Type", "application/json"),
+        ]
+        client = MagicMock()
+        upstream_raw = MagicMock()
+        upstream_tls = MagicMock()
+        context = MagicMock()
+        context.wrap_socket.return_value = upstream_tls
+
+        with (
+            patch.object(network_proxy, "SocketReader"),
+            patch.object(
+                network_proxy,
+                "read_request_head",
+                return_value=("POST", "/v1/messages", headers),
+            ),
+            patch.object(network_proxy, "read_body", return_value=(b'{"model":"x"}', None)),
+            patch.object(network_proxy, "_policy_load_denial", return_value=(controls, None)),
+            patch.object(network_proxy, "host_header_denial", return_value=None),
+            patch.object(network_proxy, "append_network_event") as append_event,
+            patch.object(
+                network_proxy,
+                "attest_claude_token_account",
+                return_value="acct-approved",
+            ) as attest,
+            patch.object(network_proxy, "connect_public", return_value=upstream_raw),
+            patch.object(network_proxy.ssl, "create_default_context", return_value=context),
+            patch.object(network_proxy, "send_http_request") as send_request,
+            patch.object(network_proxy, "forward_until_close"),
+        ):
+            network_proxy.ProxyHandler._serve_tls_request(
+                MagicMock(), "api.anthropic.com", 443, client
+            )
+
+        attest.assert_called_once_with("parallel-token")
+        append_event.assert_called_once_with(
+            "https", "POST", "api.anthropic.com", 443, "/v1/messages", "", True, None
+        )
+        send_request.assert_called_once_with(
+            upstream_tls,
+            "POST",
+            "/v1/messages",
+            headers,
+            b'{"model":"x"}',
+            websocket=False,
+        )
 
     def self_signed_cert(self, name: str) -> tuple[str, str]:
         cert = Path(self.temp_dir.name) / f"{name}.crt"
@@ -560,6 +674,7 @@ class NetworkProxyTests(unittest.TestCase):
         request = (
             b"POST /v1/responses HTTP/1.1\r\nHost: chatgpt.com\r\n"
             b"ChatGPT-Account-ID: acct-test\r\n"
+            b"Authorization: " + openai_bearer("acct-test").encode() + b"\r\n"
             b"Content-Type: application/json\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
         )
 
@@ -579,6 +694,7 @@ class NetworkProxyTests(unittest.TestCase):
                 "127.0.0.1": {
                     "allow_http_methods": ["GET"],
                     "path_guards": ["^/socket$"],
+                    "allow_websocket": True,
                 }
             }
         )
@@ -708,12 +824,343 @@ class WebSocketHandshakeTests(unittest.TestCase):
         self.assertIn(b"Sec-WebSocket-Key", sent)
 
 
+class PassThroughContext:
+    """Stands in for ssl.create_default_context(): these tests speak plaintext
+    to a socketpair upstream so no listener or loopback dial is involved."""
+
+    def wrap_socket(self, sock: socket.socket, server_hostname: str | None = None) -> socket.socket:
+        del server_hostname
+        return sock
+
+
+class ServeRequestTests(unittest.TestCase):
+    """Drive one decrypted request through _serve_tls_request with both ends on
+    socketpairs, which exercises the forwarding decision itself rather than the
+    CONNECT plumbing the tests above cover."""
+
+    def setUp(self) -> None:
+        pg_harness.reset_database()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        env_patch = patch.dict("os.environ", {"KERN_PROXY_STATE_DIR": self.temp_dir.name})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        save_policy(
+            {
+                "network_integrations": {
+                    "custom": {
+                        "domains": {
+                            "example.com": {
+                                "allow_http_methods": ["GET", "HEAD", "POST"],
+                                "allow_websocket": True,
+                            }
+                        }
+                    },
+                },
+            },
+            "2026-06-08T00:00:00Z",
+        )
+
+    def serve(self, request: bytes) -> tuple[socket.socket, socket.socket, threading.Thread]:
+        """Return (client, upstream, thread) for one served request."""
+        client_side, proxy_client = socket.socketpair()
+        proxy_upstream, upstream_side = socket.socketpair()
+        client_side.settimeout(5)
+        upstream_side.settimeout(5)
+        for sock in (client_side, upstream_side, proxy_client, proxy_upstream):
+            self.addCleanup(sock.close)
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(
+            patch.object(network_proxy, "connect_public", lambda host, port, timeout: proxy_upstream)
+        )
+        stack.enter_context(
+            patch.object(network_proxy.ssl, "create_default_context", PassThroughContext)
+        )
+        # The method reads nothing off the handler, so it runs on a bare
+        # instance rather than a live connection.
+        handler = object.__new__(network_proxy.ProxyHandler)
+        thread = threading.Thread(
+            target=handler._serve_tls_request,
+            args=("example.com", 443, proxy_client),
+            daemon=True,
+        )
+        thread.start()
+        client_side.sendall(request)
+        return client_side, upstream_side, thread
+
+    @staticmethod
+    def read_head(sock: socket.socket) -> bytes:
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            head += chunk
+        return head
+
+    HANDSHAKE = (
+        b"GET /socket HTTP/1.1\r\nHost: example.com\r\n"
+        b"Upgrade: websocket\r\nConnection: keep-alive\r\n\r\n"
+    )
+    SMUGGLED = b"GET /admin HTTP/1.1\r\nHost: example.com\r\n\r\n"
+
+    def test_custom_domain_websocket_requires_explicit_opt_in(self) -> None:
+        save_policy(
+            {
+                "network_integrations": {
+                    "custom": {
+                        "domains": {"example.com": {"allow_http_methods": ["GET"]}}
+                    }
+                }
+            },
+            "2026-06-08T00:00:01Z",
+        )
+        client, _upstream, thread = self.serve(self.HANDSHAKE)
+
+        response = self.read_head(client)
+        self.assertIn(b"403 Forbidden", response)
+        self.assertIn(b"websocket_not_allowed", response)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+
+    def test_declined_upgrade_returns_fixed_error_and_drops_pipelined_bytes(self) -> None:
+        # NET-004: upgrade handling is not a second general-purpose HTTP
+        # client. Any final response other than 101 becomes one fixed error,
+        # and pipelined bytes never reach the ordinary upstream.
+        client, upstream, thread = self.serve(self.HANDSHAKE + self.SMUGGLED)
+        self.read_head(upstream)
+        upstream.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+
+        response = self.read_head(client)
+        self.assertIn(b"502 Bad Gateway", response)
+        self.assertIn(b"websocket_upgrade_declined", response)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(upstream.recv(65536), b"")
+
+        events = read_network_events()
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["decision"], "denied")
+        self.assertEqual(event["reason_code"], "websocket_upgrade_declined")
+
+    def test_interim_response_does_not_decide_the_upgrade(self) -> None:
+        # Informational heads are optional and discarded; the proxy keeps
+        # reading until the final 101 that actually authorizes the tunnel.
+        client, upstream, thread = self.serve(self.HANDSHAKE)
+        self.read_head(upstream)
+        upstream.sendall(
+            b"HTTP/1.1 103 Early Hints\r\nLink: </socket.css>; rel=preload\r\n\r\n"
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+            b"Connection: Upgrade\r\n\r\nhello"
+        )
+
+        relayed = client.recv(65536)
+        self.assertNotIn(b"103 Early Hints", relayed)
+        self.assertIn(b"101 Switching Protocols", relayed)
+        if not relayed.endswith(b"hello"):
+            relayed += client.recv(65536)
+        self.assertTrue(relayed.endswith(b"hello"))
+        client.close()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+
+    def test_verified_101_still_tunnels_both_directions(self) -> None:
+        client, upstream, thread = self.serve(self.HANDSHAKE)
+        self.read_head(upstream)
+        upstream.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n")
+
+        self.assertIn(b"101 Switching Protocols", self.read_head(client))
+        events = read_network_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["decision"], "allowed")
+        self.assertNotIn("reason_code", events[0])
+        client_frame = masked_frame(b"abc")
+        client.sendall(client_frame)
+        self.assertEqual(upstream.recv(1024), client_frame)
+        upstream.sendall(b"\x81\x03xyz")
+        self.assertEqual(client.recv(1024), b"\x81\x03xyz")
+        client.close()
+        thread.join(timeout=5)
+
+    def test_fragment_and_authority_prefixed_targets_are_denied(self) -> None:
+        # NET-005: urlsplit reads the bytes after "#" as a fragment and those
+        # between a leading "//" and the next "/" as an authority, hiding them
+        # from the path guards and the audit row while the request line would
+        # forward them upstream verbatim. Strict origin-form denies both.
+        for target in (b"/health#/../../admin", b"//evil.example/health"):
+            with self.subTest(target=target):
+                client, _upstream, thread = self.serve(
+                    b"GET " + target + b" HTTP/1.1\r\nHost: example.com\r\n\r\n"
+                )
+
+                response = self.read_head(client)
+                self.assertIn(b"403 Forbidden", response)
+                self.assertIn(b"request_target_invalid", response)
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+                event = read_network_events()[-1]
+                self.assertEqual(event["decision"], "denied")
+                self.assertEqual(event["reason_code"], "request_target_invalid")
+
+    def test_legitimate_origin_form_target_is_forwarded_verbatim(self) -> None:
+        # NET-005: an ordinary origin-form target with a query still passes and
+        # reaches the upstream unchanged on the wire.
+        client, upstream, thread = self.serve(
+            b"GET /v1/messages?foo=bar HTTP/1.1\r\nHost: example.com\r\n\r\n"
+        )
+
+        forwarded = self.read_head(upstream)
+        self.assertIn(b"GET /v1/messages?foo=bar HTTP/1.1", forwarded)
+        upstream.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+        upstream.close()
+        self.assertIn(b"200 OK", self.read_head(client))
+        thread.join(timeout=5)
+        event = read_network_events()[-1]
+        self.assertEqual(event["decision"], "allowed")
+
+    def test_duplicate_content_encoding_is_denied_before_forwarding(self) -> None:
+        # NET-002: the guards read one value while every instance is forwarded,
+        # so a request carrying two has no single meaning to inspect.
+        client, _upstream, thread = self.serve(
+            b"POST /v1/x HTTP/1.1\r\nHost: example.com\r\n"
+            b"Content-Encoding: gzip\r\nContent-Encoding: identity\r\n"
+            b"Content-Length: 0\r\n\r\n"
+        )
+
+        self.assertIn(b"403 Forbidden", self.read_head(client))
+        thread.join(timeout=5)
+        event = read_network_events()[-1]
+        self.assertEqual(event["decision"], "denied")
+        self.assertEqual(event["reason_code"], "duplicate_header_denied")
+
+
+class ResponseHeadTests(unittest.TestCase):
+    def read(self, raw: bytes) -> tuple[int, list[tuple[str, str]], bytes]:
+        ours, theirs = socket.socketpair()
+        self.addCleanup(ours.close)
+        self.addCleanup(theirs.close)
+        theirs.sendall(raw)
+        theirs.shutdown(socket.SHUT_WR)
+        return network_proxy.read_response_head(network_proxy.SocketReader(ours))
+
+    def test_status_and_raw_bytes_are_returned_unchanged(self) -> None:
+        head = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n"
+        self.assertEqual(self.read(head), (101, [("Upgrade", "websocket")], head))
+
+    def test_ordinary_response_reports_its_status_and_framing(self) -> None:
+        status, headers, raw = self.read(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers, [("Content-Length", "4")])
+        self.assertNotIn(b"body", raw)  # the body stays buffered for the caller
+
+    def test_empty_reason_phrase_is_accepted(self) -> None:
+        # The reason phrase is optional and some upstreams omit it; rejecting
+        # such a response would break an otherwise allowed request.
+        status, _headers, _raw = self.read(b"HTTP/1.1 101\r\n\r\n")
+        self.assertEqual(status, 101)
+
+    def test_malformed_status_lines_are_refused(self) -> None:
+        for raw in (b"nonsense\r\n\r\n", b"HTTP/1.1 abc OK\r\n\r\n", b"", b"101 OK\r\n\r\n"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(OSError):
+                    self.read(raw)
+
+
+class DuplicateHeaderTests(unittest.TestCase):
+    def test_repeated_single_valued_headers_are_denied(self) -> None:
+        for name in ("Content-Encoding", "Content-Type", "Content-Length", "Authorization"):
+            with self.subTest(name=name):
+                headers = [("Host", "example.com"), (name, "a"), (name.lower(), "b")]
+                self.assertEqual(
+                    network_proxy.duplicate_header_denial(headers), "duplicate_header_denied"
+                )
+
+    def test_list_valued_headers_may_repeat(self) -> None:
+        headers = [
+            ("Host", "example.com"),
+            ("Accept", "text/html"),
+            ("Accept", "application/json"),
+            ("Cookie", "a=1"),
+            ("Cookie", "b=2"),
+            ("Content-Type", "application/json"),
+        ]
+        self.assertIsNone(network_proxy.duplicate_header_denial(headers))
+
+
+
+class GeneratedCertCacheTests(unittest.TestCase):
+    """REL-002: a wildcard rule makes unique subdomains unlimited, so the
+    durable cert cache on the admin volume needs a bound."""
+
+    def test_eviction_keeps_the_newest_and_removes_whole_families(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            directory = Path(raw_dir)
+            for index in range(5):
+                for suffix in network_proxy.CERT_SUFFIXES:
+                    path = directory / f"host{index}.example.com{suffix}"
+                    path.write_text("x")
+                    os.utime(path, (index, index))
+
+            network_proxy.evict_generated_certs(directory, 2)
+
+            self.assertEqual(
+                {path.name.split(".", 1)[0] for path in directory.iterdir()},
+                {"host3", "host4"},
+            )
+
+    def test_eviction_counts_families_with_no_certificate(self) -> None:
+        # A mint that fails partway leaves a key with no certificate. Counting
+        # only *.crt would let those accumulate outside the cap forever.
+        with tempfile.TemporaryDirectory() as raw_dir:
+            directory = Path(raw_dir)
+            for index in range(4):
+                path = directory / f"orphan{index}.example.com.key"
+                path.write_text("x")
+                os.utime(path, (index, index))
+
+            network_proxy.evict_generated_certs(directory, 1)
+
+            self.assertEqual(
+                [path.name for path in directory.iterdir()], ["orphan3.example.com.key"]
+            )
+
+    def test_eviction_matches_families_by_suffix_not_by_last_label(self) -> None:
+        # Host names carry dots, so the family stem is everything before the
+        # known suffix, not everything before the last dot.
+        with tempfile.TemporaryDirectory() as raw_dir:
+            directory = Path(raw_dir)
+            for suffix in network_proxy.CERT_SUFFIXES:
+                (directory / f"a.b.c.example.com{suffix}").write_text("x")
+
+            network_proxy.evict_generated_certs(directory, 0)
+
+            self.assertEqual(list(directory.iterdir()), [])
+
+    def test_eviction_is_a_no_op_below_the_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            directory = Path(raw_dir)
+            (directory / "only.example.com.crt").write_text("x")
+
+            network_proxy.evict_generated_certs(directory, network_proxy.MAX_GENERATED_CERTS)
+
+            self.assertTrue((directory / "only.example.com.crt").exists())
+
+
 class WebSocketGuardTests(unittest.TestCase):
     POLICY = parse_network_controls(
         {
             "network_integrations": {
                 "openai": {"enabled": True},
-                "custom": {"domains": {"example.com": {"allow_http_methods": ["GET"]}}},
+                "custom": {
+                    "domains": {
+                        "example.com": {
+                            "allow_http_methods": ["GET"],
+                            "allow_websocket": True,
+                        }
+                    }
+                },
             },
         }
     )
@@ -876,11 +1323,21 @@ class WebSocketGuardTests(unittest.TestCase):
         client.close()
         thread.join(timeout=5)
 
-    def test_tunnel_stays_opaque_for_unguarded_domains(self) -> None:
+    def test_custom_tunnel_uses_frame_guard_with_no_op_content_policy(self) -> None:
         client, upstream, thread = self.run_tunnel("example.com")
-        client.sendall(b"\x00not a websocket frame at all")
-        self.assertEqual(upstream.recv(1024), b"\x00not a websocket frame at all")
+        frame = masked_frame(b"custom message")
+        client.sendall(frame)
+        self.assertEqual(upstream.recv(1024), frame)
         client.close()
+        thread.join(timeout=5)
+
+    def test_custom_tunnel_still_rejects_an_invalid_frame(self) -> None:
+        client, upstream, thread = self.run_tunnel("example.com")
+        client.sendall(masked_frame(b"custom message", masked=False))
+
+        close_frame = client.recv(1024)
+        self.assertEqual(close_frame[0], 0x88)
+        self.assertEqual(upstream.recv(1024), b"")
         thread.join(timeout=5)
 
 
@@ -939,6 +1396,74 @@ class ExternalUrlRequestGuardTests(unittest.TestCase):
         # But a truthy flag under a non-web type is a renamed web tool: deny.
         self.assertIsNotNone(self.deny({"tools": [{"type": "surf", "external_web_access": True}]}))
         self.assertIsNotNone(self.deny({"tools": [{"type": "surf", "indexed_web_access": True}]}))
+
+
+class OpenAIAccountBindingTests(unittest.TestCase):
+    """NET-006: the pinned ``chatgpt-account-id`` header only *names* an account;
+    the Authorization bearer must also *authenticate* as it. The bearer's JWT
+    payload claim (``https://api.openai.com/auth`` -> ``chatgpt_account_id``) is
+    read locally with no signature check, so a foreign genuine token (carrying
+    the attacker's own account), a token missing the claim, and a non-JWT
+    ``sk-`` platform key all fail closed."""
+
+    ACCOUNT = "acct-pinned"
+
+    def deny(self, headers, *, method="POST", path="/v1/responses", body=b"") -> str | None:
+        with patch.object(openai_guard, "read_proxy_openai_account_id", return_value=self.ACCOUNT):
+            return openai_guard.request_denied(
+                object(), method, "api.openai.com", path, "", headers, body
+            )
+
+    def pinned(self) -> tuple[str, str]:
+        return ("ChatGPT-Account-ID", self.ACCOUNT)
+
+    def test_matching_account_and_token_pass(self) -> None:
+        headers = [self.pinned(), ("Authorization", openai_bearer(self.ACCOUNT))]
+        self.assertIsNone(self.deny(headers))
+
+    def test_foreign_token_account_is_denied(self) -> None:
+        headers = [self.pinned(), ("Authorization", openai_bearer("acct-attacker"))]
+        self.assertEqual(self.deny(headers), "openai_token_account_mismatch")
+
+    def test_missing_authorization_is_denied(self) -> None:
+        self.assertEqual(self.deny([self.pinned()]), "openai_token_account_mismatch")
+
+    def test_platform_sk_key_is_not_a_jwt_and_is_denied(self) -> None:
+        headers = [self.pinned(), ("Authorization", "Bearer sk-live-000111222333")]
+        self.assertEqual(self.deny(headers), "openai_token_account_mismatch")
+
+    def test_token_without_account_claim_is_denied(self) -> None:
+        def segment(obj: dict) -> str:
+            return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+        token = "Bearer " + ".".join((segment({"alg": "RS256"}), segment({"sub": "u"}), "c2ln"))
+        self.assertEqual(
+            self.deny([self.pinned(), ("Authorization", token)]),
+            "openai_token_account_mismatch",
+        )
+
+    def test_non_bearer_scheme_is_denied(self) -> None:
+        credential = openai_bearer(self.ACCOUNT).split(" ", 1)[1]
+        headers = [self.pinned(), ("Authorization", "Basic " + credential)]
+        self.assertEqual(self.deny(headers), "openai_token_account_mismatch")
+
+    def test_account_header_still_checked_before_token(self) -> None:
+        # The pre-existing header pin is unchanged: an omitted account header is
+        # its own denial, decided before the credential binding runs.
+        headers = [("Authorization", openai_bearer(self.ACCOUNT))]
+        self.assertEqual(self.deny(headers), "openai_account_header_required")
+
+    def test_websocket_handshake_binds_the_same_credential(self) -> None:
+        # The Responses WebSocket handshake carries Authorization through the
+        # same request_denied, so the credential binding covers it too.
+        ws = [("Upgrade", "websocket"), ("Connection", "Upgrade"), self.pinned()]
+        self.assertIsNone(
+            self.deny(ws + [("Authorization", openai_bearer(self.ACCOUNT))], method="GET")
+        )
+        self.assertEqual(
+            self.deny(ws + [("Authorization", openai_bearer("acct-attacker"))], method="GET"),
+            "openai_token_account_mismatch",
+        )
 
 
 class BedrockGuardTests(unittest.TestCase):
@@ -1207,15 +1732,20 @@ class AnthropicServerToolGuardTests(unittest.TestCase):
     built-ins and user-defined tools pass."""
 
     JSON = [("content-type", "application/json"), ("authorization", "Bearer test-token")]
-    ACCOUNT = {"access_token_sha256": hashlib.sha256(b"test-token").hexdigest()}
+    def setUp(self) -> None:
+        claude_guard.clear_token_attestation_cache()
+        self.addCleanup(claude_guard.clear_token_attestation_cache)
 
     def deny(self, payload: dict, allow_web_search: bool = False) -> str | None:
-        with patch.object(claude_guard, "read_proxy_claude_account", return_value=self.ACCOUNT):
-            return claude_guard.request_denied(
-                ClaudeIntegration(True, allow_web_search),
+        config = ClaudeIntegration(True, allow_web_search)
+        with patch.object(claude_guard, "read_proxy_claude_account_id", return_value="acct-approved"):
+            denial = claude_guard.request_denied(
+                config,
                 "POST", "api.anthropic.com", "/v1/messages", "", self.JSON,
                 json.dumps(payload).encode(),
+                lambda _token: "acct-approved",
             )
+            return denial
 
     def test_server_side_web_tools_are_denied(self) -> None:
         for tool_type in ("web_search_20250305", "web_search_20260209", "web_fetch_20250910", "code_execution_20260120"):
@@ -1251,13 +1781,15 @@ class AnthropicServerToolGuardTests(unittest.TestCase):
         self.assertIsNotNone(reason)
 
     def test_non_json_body_is_not_inspected(self) -> None:
-        with patch.object(claude_guard, "read_proxy_claude_account", return_value=self.ACCOUNT):
-            self.assertIsNone(
+        with patch.object(claude_guard, "read_proxy_claude_account_id", return_value="acct-approved"):
+            self.assertEqual(
                 claude_guard.request_denied(
                     ClaudeIntegration(True), "POST", "api.anthropic.com", "/v1/messages", "",
                     [("content-type", "text/plain"), ("authorization", "Bearer test-token")],
                     b"plain text mentioning web_search",
-                )
+                    lambda _token: "acct-approved",
+                ),
+                None,
             )
 
 

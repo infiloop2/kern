@@ -20,8 +20,9 @@ MANIFEST = IntegrationManifest(
     integration_id="custom",
     display_name="Custom domains",
     description=(
-        "Operator-configured HTTPS domains with explicit methods and optional path patterns. "
-        "Use this integration when no built-in provider integration owns the destination."
+        "Operator-configured HTTPS domains with explicit methods, optional path patterns, and "
+        "an explicit opt-in for WebSockets. Use this integration when no built-in "
+        "provider integration owns the destination."
     ),
     owned_apexes=(),
 )
@@ -31,11 +32,14 @@ MANIFEST = IntegrationManifest(
 class CustomDomainRule:
     allow_http_methods: tuple[str, ...]
     path_guards: tuple[str, ...] = ()
+    allow_websocket: bool = False
 
     def to_json(self) -> dict[str, Any]:
         value: dict[str, Any] = {"allow_http_methods": list(self.allow_http_methods)}
         if self.path_guards:
             value["path_guards"] = list(self.path_guards)
+        if self.allow_websocket:
+            value["allow_websocket"] = True
         return value
 
 
@@ -83,7 +87,7 @@ def parse(raw: dict[str, Any]) -> CustomIntegration:
 
 def _parse_rule(raw: dict[str, Any], domain: str) -> CustomDomainRule:
     context = f"network_integrations.custom.domains[{domain!r}]"
-    reject_extra(raw, {"allow_http_methods", "path_guards"}, context)
+    reject_extra(raw, {"allow_http_methods", "path_guards", "allow_websocket"}, context)
     methods = tuple(method.upper() for method in _string_list(raw, "allow_http_methods"))
     for method in methods:
         if method not in ALLOWED_HTTP_METHODS:
@@ -98,7 +102,10 @@ def _parse_rule(raw: dict[str, Any], domain: str) -> CustomDomainRule:
             raise IntegrationConfigError(
                 f"{context}.path_guards invalid regex {pattern!r}: {exc}"
             ) from exc
-    return CustomDomainRule(methods, path_guards)
+    allow_websocket = raw.get("allow_websocket", False)
+    if not isinstance(allow_websocket, bool):
+        raise IntegrationConfigError(f"{context}.allow_websocket must be a boolean")
+    return CustomDomainRule(methods, path_guards, allow_websocket)
 
 
 def _string_list(raw: dict[str, Any], key: str, *, required: bool = True) -> list[str]:

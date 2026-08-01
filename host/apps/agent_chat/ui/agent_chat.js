@@ -143,11 +143,15 @@ function clearComposerDraft(threadId, submittedDraft) {
 
 window.addEventListener("message", event => {
   const message = event.data;
-  if (!message || ![
-    "kern-app-api-result",
-    "kern-app-copy-text-result",
-    "kern-app-upload-file-result",
-  ].includes(message.type)) return;
+  if (
+    event.source !== parent
+    || !message
+    || ![
+      "kern-app-api-result",
+      "kern-app-copy-text-result",
+      "kern-app-upload-file-result",
+    ].includes(message.type)
+  ) return;
   const callbacks = pending.get(message.request_id);
   if (!callbacks) return;
   pending.delete(message.request_id);
@@ -1037,6 +1041,12 @@ async function stopRunningTurn() {
 async function setSelectedThreadArchived() {
   if (!selectedThreadId) return;
   const action = selectedThreadArchived ? "unarchive" : "archive";
+  // A running turn keeps going after archiving and the archived view hides
+  // Stop, so refuse to archive until the turn ends.
+  if (action === "archive" && selectedThreadStatus === "running") {
+    setStatus("Stop the agent before archiving this thread.");
+    return;
+  }
   await api("POST", `/threads/${encodeURIComponent(selectedThreadId)}/${action}`);
   clearSelectedThread();
   await refresh();

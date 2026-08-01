@@ -45,7 +45,6 @@ GUARDED_FIELDS = {
 # (tool_id, action_id, field) -> reason it is deliberately not guarded.
 # Categories follow the architecture doc's scope rule.
 APPROVAL_GATED = "approval-gated content: the operator approval is the control"
-CONNECTED_ACCOUNT = "connected-account value: the destination already holds the data"
 CONNECTED_ACCOUNT_GUARDED = (
     "connected-account mailbox query: guarded via allow_identifiers=True "
     "(secret/credential shapes denied, personal identifiers including one-time codes allowed as search syntax)"
@@ -56,9 +55,37 @@ PROTOCOL = "provider protocol value on a fixed-destination typed path"
 EXEMPT_FIELDS = {
     ("brave_search", "search_web", "count"): TYPED,
     ("gmail", "search_messages", "query"): CONNECTED_ACCOUNT_GUARDED,
+    ("gmail", "search_messages", "start_time"): TYPED,
+    ("gmail", "search_messages", "end_time"): TYPED,
+    ("gmail", "read_message", "message_id"): TYPED,
+    ("gmail", "read_thread", "thread_id"): TYPED,
     ("gmail", "list_drafts", "query"): CONNECTED_ACCOUNT_GUARDED,
-    ("gmail", "*", "*"): CONNECTED_ACCOUNT,
-    ("google_calendar", "*", "*"): CONNECTED_ACCOUNT,
+    ("gmail", "list_drafts", "page_token"): PROTOCOL,
+    ("gmail", "list_drafts", "include_spam_trash"): TYPED,
+    ("gmail", "send_email", "*"): APPROVAL_GATED,
+    ("gmail", "message_action", "action"): TYPED,
+    ("gmail", "message_action", "message_ids"): TYPED,
+    ("gmail", "message_action", "label_ids"): APPROVAL_GATED,
+    ("gmail", "label_action", "action"): TYPED,
+    ("gmail", "label_action", "label_id"): TYPED,
+    ("gmail", "label_action", "name"): APPROVAL_GATED,
+    ("gmail", "label_action", "background_color"): TYPED,
+    ("gmail", "label_action", "text_color"): TYPED,
+    ("gmail", "draft_action", "action"): TYPED,
+    ("gmail", "draft_action", "draft_id"): TYPED,
+    ("gmail", "draft_action", "to"): APPROVAL_GATED,
+    ("gmail", "draft_action", "subject"): APPROVAL_GATED,
+    ("gmail", "draft_action", "blocks"): APPROVAL_GATED,
+    ("google_calendar", "read_events", "start_time"): TYPED,
+    ("google_calendar", "read_events", "end_time"): TYPED,
+    ("google_calendar", "event_change", "operation"): TYPED,
+    ("google_calendar", "event_change", "event_id"): TYPED,
+    ("google_calendar", "event_change", "start_time"): TYPED,
+    ("google_calendar", "event_change", "end_time"): TYPED,
+    ("google_calendar", "event_change", "summary"): APPROVAL_GATED,
+    ("google_calendar", "event_change", "description"): APPROVAL_GATED,
+    ("google_calendar", "event_change", "location"): APPROVAL_GATED,
+    ("google_calendar", "event_change", "time_zone"): APPROVAL_GATED,
     ("ibkr", "*", "*"): TYPED,
     ("instagram", "*", "*"): APPROVAL_GATED,
     ("instagram_discovery", "search_reels", "page"): TYPED,
@@ -365,6 +392,17 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             deny(config, "POST", host, "/actions-results/job/logs.zip", sas_query, [], b""),
             "network_policy_denied",
         )
+        self.assertTrue(guard.host_allowed(config, host))
+        self.assertTrue(
+            guard.host_allowed(config, "productionresultssa0.blob.core.windows.net")
+        )
+        for unowned_host in (
+            "attacker.blob.core.windows.net",
+            "productionresultssa20.blob.core.windows.net",
+            "nested.productionresultssa17.blob.core.windows.net",
+        ):
+            with self.subTest(unowned_host=unowned_host):
+                self.assertFalse(guard.host_allowed(config, unowned_host))
         for unsigned in (
             "",
             "sv=2025-07-05",
@@ -506,6 +544,89 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         )
         self.assertIsInstance(result, ActionFailed)
         self.assertIn("numeric", result.error)
+
+    def test_gmail_path_ids_require_the_gmail_id_grammar(self) -> None:
+        # TYPED exemption backing: free agent text must never reach the Gmail
+        # API path, only a provider-shaped id. Each id kind has its own
+        # grammar (hex message/thread ids, "r<digits>" draft ids, uppercase or
+        # "Label_<n>" label ids), so prose that fits a generic charset — e.g.
+        # "please_forward_alice" — is rejected before any request is built.
+        from host.tools import gmail
+        from host.tools.gmail import BUNDLED_TOOL
+        from host.tools.gmail.api import ToolInputValidationError, gmail_operation_request
+        from test_tools import connected_google_api
+
+        api = connected_google_api(gmail.MANIFEST.tool_id, gmail.REQUIRED_GMAIL_SCOPES)
+        result = BUNDLED_TOOL.execute(
+            "read_message", {"message_id": "please_forward_alice"}, api
+        )
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("valid Gmail message id", result.error)
+        result = BUNDLED_TOOL.execute("read_thread", {"thread_id": "not-a-thread-id"}, api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("valid Gmail thread id", result.error)
+        # Every operation's path goes through the same choke point, so the
+        # per-kind grammars also hold for drafts and labels, and one kind's
+        # valid id is not accepted for another kind's path.
+        for operation, bad_id in (
+            ("users.messages.get", "please_forward_alice"),
+            ("users.messages.trash", "Label_7"),
+            ("users.threads.get", "not-a-thread-id"),
+            ("users.drafts.get", "attach_the_report"),
+            ("users.drafts.delete", "18c2f0d1a2b3c4d5"),
+            ("users.labels.get", "personal_notes"),
+            ("users.labels.delete", "r1234567890"),
+        ):
+            with self.assertRaises(ToolInputValidationError, msg=f"{operation} accepted {bad_id!r}"):
+                gmail_operation_request(operation, {"id": bad_id})
+        for operation, provider_id in (
+            ("users.messages.get", "18c2f0d1a2b3c4d5"),
+            ("users.threads.get", "0a1b2c3d4e5f6789"),
+            ("users.drafts.get", "r-1234567890123456789"),
+            ("users.drafts.delete", "r987654321"),
+            ("users.labels.get", "INBOX"),
+            ("users.labels.delete", "CATEGORY_PERSONAL"),
+            ("users.labels.get", "Label_25"),
+        ):
+            request = gmail_operation_request(operation, {"id": provider_id})
+            self.assertIn(provider_id, str(request["path"]))
+
+    def test_calendar_time_fields_and_event_id_require_their_grammars(self) -> None:
+        # TYPED exemption backing: read_events time fields must parse as ISO
+        # 8601 timestamps, and the pre-approval event preview only accepts an
+        # id-shaped event_id.
+        from host.tools import google_calendar
+        from host.tools.google_calendar import BUNDLED_TOOL
+        from test_tools import connected_google_api
+
+        api = connected_google_api(
+            google_calendar.MANIFEST.tool_id, google_calendar.REQUIRED_CALENDAR_SCOPES
+        )
+        result = BUNDLED_TOOL.execute(
+            "read_events", {"start_time": "notes about alice's meeting"}, api
+        )
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("ISO 8601", result.error)
+        result = BUNDLED_TOOL.execute(
+            "event_change", {"operation": "delete", "event_id": "call_alice"}, api
+        )
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("event id", result.error)
+        # The grammar is the provider's own shape — lowercase base32hex, with
+        # an underscore legal only in the recurring-instance suffix — so
+        # prose-shaped ids cannot pass, while real ids (including recurring
+        # instances) do.
+        for provider_id in ("abc12def45", "0f9e8d7c6b5a4321", "abc12def45_20240101T100000Z"):
+            self.assertIsNotNone(google_calendar.CALENDAR_EVENT_ID_RE.fullmatch(provider_id))
+        for prose_id in (
+            "call_alice",
+            "delete_the_planning_event",
+            "not-an-event-id",
+            "ABC12DEF45",
+            "abc1",
+            "abc12def45_tomorrow",
+        ):
+            self.assertIsNone(google_calendar.CALENDAR_EVENT_ID_RE.fullmatch(prose_id))
 
     def test_custom_domain_requests_are_parameter_guarded(self) -> None:
         from host.network_integrations.custom import guard

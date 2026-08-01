@@ -73,10 +73,12 @@ The proxy enforces, per request:
   ultimate enforcement layer.
 - Anthropic guards: the Claude integration owns the
   Claude Code OAuth path on `platform.claude.com` and the Anthropic API domain.
-  The API domain fails closed until Claude Code OAuth has produced a locally
-  readable account file; after that, API requests must carry the exact bearer
-  token whose SHA-256 hash was inferred from the agent user's Claude credentials.
-  The proxy reads only that hash, never the bearer token itself. The API domain
+  The API domain fails closed until Claude Code OAuth has established an
+  operator-approved account uuid. Each presented bearer is hashed and looked
+  up in a bounded in-memory cache for that uuid; on a miss, the trusted proxy
+  calls Anthropic's fixed profile endpoint with the bearer and allows the
+  original request only when its provider-signed account uuid matches. Raw
+  bearers are never cached or logged. The API domain
   also applies a structural body guard that denies Anthropic server-side tools
   which run off-box and reach external URLs with request data: `web_fetch`,
   `code_execution`, and remote `mcp_servers` are always denied, and `web_search`
@@ -108,9 +110,20 @@ HTTPS and WSS are inspected by terminating client TLS with a per-host certificat
 signed by the local proxy CA, then opening a separate verified TLS connection
 upstream. Each upstream connection carries exactly one policy-checked request
 (`Connection: close`), except WebSockets, which tunnel frames after their
-handshake passes policy. Request bodies are buffered for inspection — chunked
-bodies are decoded and re-sent with an explicit `Content-Length` — and bodies over
-128 MiB are rejected so the policy always sees the complete body.
+handshake passes policy. A client's `Upgrade` header alone does not make a
+WebSocket: the connection becomes a tunnel only once the upstream answers `101
+Switching Protocols`. Any other final status becomes the proxy's fixed `502
+websocket_upgrade_declined` response and the connection closes; the upstream
+response is not exposed as a second general-purpose HTTP path. Anything the
+client pipelined behind the handshake is dropped rather than forwarded as
+requests no guard inspected. Request bodies are buffered for
+inspection — chunked bodies are decoded and re-sent with an explicit
+`Content-Length` — and bodies over 128 MiB are rejected so the policy always
+sees the complete body. A request that repeats a single-valued header
+(`Content-Type`, `Content-Encoding`, `Content-Length`, `Transfer-Encoding`, or
+`Authorization`) is denied: the guards read one value while every instance is
+forwarded, so two instances would let the upstream act on a meaning the guards
+never saw.
 
 The host firewall accepts outbound traffic from root, the dedicated
 `kern-proxy` and `kern-tools` uids, and the optional `cloudflared`
@@ -167,7 +180,8 @@ Each network integration is a package under
   provider-specific request decisions. Integrations can also provide a
   post-allow gate response (the GitHub `.github` push gate), header rewriting
   (GitHub credential injection), and per-message WebSocket inspection (the
-  OpenAI external-URL guard).
+  OpenAI external-URL guard). Claude additionally resolves opaque token cache
+  misses through a fixed-endpoint account-identity attestation before forwarding.
 
 The registry is hand-written, not discovered: `registry.py` maps integration
 ids to manifests and `runtime.py` maps them to guards. This is deliberately
@@ -285,8 +299,10 @@ server serves is a bypass:
 
 
 Guard inputs that are secrets or account pins live where the proxy can read
-no more than it needs: the OpenAI/Claude pins are the two comparison values in
-the `proxy_provider_pins` table (SELECT-only for the proxy role), and the
+no more than it needs: `proxy_provider_pins` tells the proxy which approved
+OpenAI/Claude account is currently allowed (SELECT-only for the proxy role).
+The admin service may clear that temporary permission when a runtime becomes
+inactive, while the user-controlled anchor remains in `provider_accounts`. The
 GitHub credential — a pasted PAT or a GitHub App key with its minted
 installation tokens — lives in the admin-owned `github_credential` table with
 no proxy grant at all, because the network guard only decides repository

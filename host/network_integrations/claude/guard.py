@@ -1,11 +1,13 @@
-"""Claude/Anthropic request guard: account pin and server-tool controls.
+"""Claude/Anthropic request guard: account identity and server-tool controls.
 
 Runs in the proxy for hosts under the Claude apexes.
 
-Claude Code OAuth requests to api.anthropic.com use opaque bearer tokens and
-do not carry an OpenAI-style account header. The enforceable pin is therefore
-the bearer credential hash read from the agent user's Claude credentials after
-login. A tiny unauthenticated readiness path is allowed before the pin because
+Claude Code OAuth requests to api.anthropic.com use opaque, independently
+rotating bearer tokens and do not carry an OpenAI-style account header. The
+proxy therefore attests each distinct token through Anthropic's profile
+endpoint and compares its provider-signed account uuid with the operator-
+approved account id. Successful token hashes are cached in memory. A tiny
+unauthenticated readiness path is allowed before the account is linked because
 Claude Code probes it during startup.
 
 Separately, Messages API requests may declare Anthropic server-side tools that
@@ -19,13 +21,18 @@ them; the Claude integration denies them structurally.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from dataclasses import dataclass, field
 import hashlib
+import hmac
 import json
+import threading
 from typing import Any
 
+from host.network_integrations.base import AccountAttestor
 from host.network_integrations.claude.manifest import ClaudeIntegration
 from host.runtime.core.network_policy import decode_body, normalized_path, route_allowed
-from host.runtime.core.state import read_proxy_claude_account
+from host.runtime.core.state import read_proxy_claude_account_id
 
 ANTHROPIC_PRE_PIN_BOOTSTRAP_GET_PATHS = {
     "/api/oauth/profile",
@@ -38,6 +45,21 @@ ROUTES = {
     "api.anthropic.com": (("GET", "POST"), ()),
     "platform.claude.com": (("GET", "POST"), (r"^/v1/oauth(?:/.*)?$",)),
 }
+# A successful profile attestation binds an opaque token hash to the already
+# approved account id. Keep only hashes (never bearer tokens), and bound the
+# process-local cache so agent-authored candidate tokens cannot grow it.
+_TOKEN_ATTESTATION_CACHE_LIMIT = 32
+_TOKEN_ATTESTATION_CACHE: OrderedDict[tuple[str, str], None] = OrderedDict()
+_TOKEN_ATTESTATION_LOCK = threading.Lock()
+
+
+@dataclass
+class _TokenAttestationFlight:
+    done: threading.Event = field(default_factory=threading.Event)
+    allowed: bool = False
+
+
+_TOKEN_ATTESTATIONS_IN_FLIGHT: dict[tuple[str, str], _TokenAttestationFlight] = {}
 
 
 def host_allowed(config: ClaudeIntegration, host: str) -> bool:
@@ -53,8 +75,9 @@ def request_denied(
     query: str,
     headers: list[tuple[str, str]],
     body: bytes,
+    account_attestor: AccountAttestor | None = None,
 ) -> str | None:
-    """Apply the Claude-owned route, account, and server-tool controls."""
+    """Apply the Claude-owned route, account, token, and server-tool controls."""
     route = ROUTES.get(host.lower())
     if route is None or not route_allowed(method, path, query, *route):
         return "network_policy_denied"
@@ -65,23 +88,89 @@ def request_denied(
         return denial
     if method.upper() == "GET" and path == "/api/hello":
         return None
-    presented = [
-        bearer for key, value in headers
-        if key.lower() == "authorization"
-        for bearer in [_bearer_token(value)]
-        if bearer is not None
-    ]
-    account = read_proxy_claude_account()
-    expected_hash = account.get("access_token_sha256")
-    if not isinstance(expected_hash, str) or not expected_hash:
-        if _pre_pin_bootstrap_allowed(method, path, presented):
+    authorization = [value for key, value in headers if key.lower() == "authorization"]
+    presented = [_bearer_token(value) for value in authorization]
+    bearer_tokens = [token for token in presented if token is not None]
+    authorized_account_id = read_proxy_claude_account_id()
+    if authorized_account_id is None:
+        if _pre_pin_bootstrap_allowed(method, path, bearer_tokens):
             return None
-        return "anthropic_token_unavailable"
-    if not presented:
+        return "anthropic_account_unavailable"
+    if not bearer_tokens:
         return "anthropic_token_required"
-    if any(hashlib.sha256(value.encode()).hexdigest() != expected_hash for value in presented):
+    if len(authorization) != 1 or len(bearer_tokens) != 1 or account_attestor is None:
         return "anthropic_token_mismatch"
-    return None
+    if (
+        _token_belongs_to_account(authorized_account_id, bearer_tokens[0], account_attestor)
+        and read_proxy_claude_account_id() == authorized_account_id
+    ):
+        return None
+    return "anthropic_token_mismatch"
+
+
+def _token_belongs_to_account(
+    account_id: str,
+    token: str,
+    attest_account: AccountAttestor,
+) -> bool:
+    """Return true when Anthropic binds the bearer to the pinned account.
+
+    Parallel Claude processes can temporarily use different access tokens as
+    the shared OAuth credential rotates. The proxy authorizes every token by
+    the same identity rule: Anthropic's profile endpoint must bind it to the
+    durable, operator-approved account uuid. Successful ``(account id, token
+    hash)`` decisions are cached; raw bearer tokens are neither stored nor
+    logged.
+
+    A per-hash in-flight record prevents concurrent requests carrying one new
+    token from generating duplicate profile calls. The network round trip does
+    not hold the cache lock, so already-cached tokens and different rotations
+    continue independently.
+    """
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    cache_key = (account_id, token_hash)
+    with _TOKEN_ATTESTATION_LOCK:
+        if cache_key in _TOKEN_ATTESTATION_CACHE:
+            _TOKEN_ATTESTATION_CACHE.move_to_end(cache_key)
+            return True
+        flight = _TOKEN_ATTESTATIONS_IN_FLIGHT.get(cache_key)
+        leader = flight is None
+        if flight is None:
+            flight = _TokenAttestationFlight()
+            _TOKEN_ATTESTATIONS_IN_FLIGHT[cache_key] = flight
+    assert flight is not None
+    if not leader:
+        flight.done.wait()
+        return flight.allowed
+    allowed = False
+    try:
+        try:
+            attested_account_id = attest_account(token)
+        except Exception:
+            attested_account_id = None
+        allowed = isinstance(attested_account_id, str) and hmac.compare_digest(
+            attested_account_id, account_id
+        )
+        return allowed
+    finally:
+        with _TOKEN_ATTESTATION_LOCK:
+            if allowed:
+                _TOKEN_ATTESTATION_CACHE[cache_key] = None
+                _TOKEN_ATTESTATION_CACHE.move_to_end(cache_key)
+                while len(_TOKEN_ATTESTATION_CACHE) > _TOKEN_ATTESTATION_CACHE_LIMIT:
+                    _TOKEN_ATTESTATION_CACHE.popitem(last=False)
+            flight.allowed = allowed
+            _TOKEN_ATTESTATIONS_IN_FLIGHT.pop(cache_key, None)
+            flight.done.set()
+
+
+def clear_token_attestation_cache() -> None:
+    """Clear process-local rotation attestations (used by tests)."""
+    with _TOKEN_ATTESTATION_LOCK:
+        _TOKEN_ATTESTATION_CACHE.clear()
+        for flight in _TOKEN_ATTESTATIONS_IN_FLIGHT.values():
+            flight.done.set()
+        _TOKEN_ATTESTATIONS_IN_FLIGHT.clear()
 
 
 def _server_tool_denial(

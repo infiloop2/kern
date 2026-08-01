@@ -3,6 +3,7 @@
     "defaultMode": "bypassPermissions"
   },
   "env": {
+    "CLAUDE_CODE_NO_MODEL_FALLBACK": "1",
     "FORCE_PROMPT_CACHING_5M": "1"
   },
   "skipDangerousModePermissionPrompt": true

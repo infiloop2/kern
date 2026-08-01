@@ -462,11 +462,18 @@ def begin_password_login(
     password_loader: Callable[[], str | None],
 ) -> LoginResult:
     """Verify factor one and either mint a session or begin factor two."""
+    # Only a syntactically valid login body may charge the throttle: the
+    # public bucket is keyed on the browser's egress IP, so a cross-site
+    # page's bodiless no-cors POSTs must not be able to consume the real
+    # operator's attempt budget. A valid-shaped body with a wrong password
+    # still charges below — that is the brute-force protection.
+    password = password_loader()
+    if password is None:
+        raise InvalidPassword("missing or invalid admin password")
     if not register_attempt(client_key):
         raise LoginRateLimited("too many failed admin logins; try again later")
-    password = password_loader()
     try:
-        encoded_password = password.encode("utf-8") if password is not None else b""
+        encoded_password = password.encode("utf-8")
     except UnicodeEncodeError:
         encoded_password = b""
     expected = _admin_password_hash()

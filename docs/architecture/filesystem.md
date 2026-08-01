@@ -32,7 +32,7 @@ directory below. Those writable locations are not trusted code or policy inputs.
 | `/etc/kern/cloudflared.token` | root-owned, `0640`, group `cloudflared` | Cloudflare Tunnel token for the optional `cloudflared` service. Directly readable only by root and `cloudflared`; the SSH operator can deliberately cross that boundary with unrestricted sudo. |
 | `/etc/kern/cloudflare_hostname` | root-owned, `644` | Configured Cloudflare Tunnel hostname used for bootstrap verification and operator diagnostics. |
 | `/etc/nftables.conf` | root-owned system config, not service-writable | Host firewall rules. |
-| `/etc/codex/requirements.toml`, `/etc/codex/managed_config.toml` | root-owned, `644`, not service-writable | Managed Codex policy restricting web search and connector surfaces, plus the bundled-tools MCP server definition. |
+| `/etc/codex/requirements.toml`, `/etc/codex/managed_config.toml` | root-owned, `644`, not service-writable | Managed Codex policy restricting web search and connector surfaces, disabling request compression for proxy inspection, and defining the bundled-tools MCP server. |
 | `/usr/local/share/ca-certificates/kern-network-proxy.crt` | root-owned, `644`, public certificate | Public proxy CA certificate installed in the system trust store for agent runtimes. |
 | `/swapfile` | root only | 6 GiB swapfile. |
 
@@ -67,8 +67,8 @@ redeploys.
 | `/mnt/kern-admin/admin-state/version.json` | admin only | Authoritative admin disk version, read by bootstrap before the database is up to enforce the deploy/upgrade/recover policy. |
 | `/mnt/kern-admin/proxy-state/network_proxy_ca.key` | proxy only | Proxy CA private key. |
 | `/mnt/kern-admin/proxy-state/network_proxy_ca.crt` | mode 644, but behind proxy-state traversal controls | Proxy CA certificate copied into the system trust store for agent/runtime use. |
-| `/mnt/kern-admin/proxy-state/generated-certs/` | proxy only | Per-host leaf certificates minted by the proxy. |
-| `/mnt/kern-admin/proxy-state/github-quarantine/` | proxy only | Bare per-repository Git mirrors and `refs/pending/...` objects for `.github` pushes held for operator approval. |
+| `/mnt/kern-admin/proxy-state/generated-certs/` | proxy only | Per-host leaf certificates minted by the proxy. Capped at 512 hosts, oldest evicted first, so a wildcard rule cannot turn unique subdomains into unbounded files on the volume Postgres shares. |
+| `/mnt/kern-admin/proxy-state/github-quarantine/` | proxy only | Bare per-repository Git mirrors and `refs/pending/...` objects for `.github` pushes held for operator approval. At most ten pushes may be pending, and each operator approve/reject deletes its refs and immediately runs `git gc` under the shared quarantine lock. |
 | `/mnt/kern-admin/tools-state/assets/` | tools only | Bounded temporary image/video copies for tool calls. Cleared on tools-service start; expired files are swept hourly. |
 | `/mnt/kern-admin/admin-home/` | admin only | Admin service home directory. |
 

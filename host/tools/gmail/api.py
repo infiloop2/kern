@@ -29,6 +29,20 @@ GMAIL_HTML_ALTERNATIVE_BODY_NOTE = (
     "This message also contains an HTML alternative that is not rendered in Kern approval previews. "
     "Double-check the message in Gmail before approving."
 )
+# Gmail API object ids have kind-specific provider shapes: message and thread
+# ids are lowercase hex tokens (typically 16 chars), draft ids are "r"-prefixed
+# decimal tokens, and label ids are uppercase system names ("INBOX",
+# "CATEGORY_PERSONAL") or "Label_<n>" user labels. Enforcing the exact per-kind
+# grammar on every id that enters a request path keeps free agent text (which
+# none of these alphabets can spell) out of direct, no-approval URLs. The kind
+# is derived from the first path segment of the operation template, so every
+# operation states which grammar applies; an unknown segment fails closed.
+GMAIL_API_ID_RES: dict[str, re.Pattern[str]] = {
+    "drafts": re.compile(r"^r-?[0-9]{1,25}$"),
+    "labels": re.compile(r"^(?:[A-Z][A-Z_]{0,63}|Label_[0-9]{1,25})$"),
+    "messages": re.compile(r"^[0-9a-f]{10,32}$"),
+    "threads": re.compile(r"^[0-9a-f]{10,32}$"),
+}
 GMAIL_DRAFT_ATTACHMENT_UNSUPPORTED_MESSAGE = (
     "Gmail draft has attachments that cannot be preserved safely. Please recreate the approval."
 )
@@ -127,11 +141,18 @@ def _query_parameter_items(parameters: JSONObject) -> list[tuple[str, str]]:
 def _format_gmail_api_path(path_template: str, parameters: JSONObject) -> tuple[str, JSONObject]:
     consumed_keys: set[str] = set()
     path = path_template
+    id_kind = path_template.strip("/").split("/", 1)[0]
+    id_re = GMAIL_API_ID_RES.get(id_kind)
     for key in re.findall(r"{([^}]+)}", path_template):
         value = parameters.get(key)
         if not isinstance(value, str) or not value.strip():
             raise ToolInputValidationError(f"Gmail API operation requires parameters.{key}.")
-        path = path.replace(f"{{{key}}}", urllib.parse.quote(value.strip(), safe=""))
+        identifier = value.strip()
+        if id_re is None or not id_re.fullmatch(identifier):
+            raise ToolInputValidationError(
+                f"Gmail API operation parameters.{key} must be a valid Gmail {id_kind.rstrip('s')} id."
+            )
+        path = path.replace(f"{{{key}}}", urllib.parse.quote(identifier, safe=""))
         consumed_keys.add(key)
     query_parameters = {key: value for key, value in parameters.items() if key not in consumed_keys}
     return path, cast(JSONObject, query_parameters)

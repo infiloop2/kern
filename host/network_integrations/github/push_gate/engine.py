@@ -24,6 +24,7 @@ parsed here; pack objects are only ever read by ``git``.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import fcntl
 import os
 from pathlib import Path
 import re
@@ -31,6 +32,8 @@ import subprocess
 import tempfile
 from typing import Iterator
 import uuid
+
+from host.constants import SERVICE_ACCOUNTS
 
 # git's well-known empty-tree object: the base for an orphan branch with no
 # common history on the remote, so every path it carries counts as introduced.
@@ -48,10 +51,33 @@ CHANGED_PATHS_TRUNCATED = ".github/... (additional paths omitted)"
 # The quarantine mirrors live under the proxy's own state directory (proxy-owned,
 # root-readable so the approval helper can replay from them).
 QUARANTINE_ROOT = Path("/mnt/kern-admin/proxy-state/github-quarantine")
+PENDING_PUSH_LIMIT = 10
 
 
 class GateError(Exception):
     """Inspection could not complete; the caller fails closed."""
+
+
+@contextmanager
+def quarantine_lock() -> Iterator[None]:
+    """Serialize pack indexing with operator cleanup and immediate pruning.
+
+    The lock is a file because the proxy indexes packs while the root approval
+    helper removes them. One global lock keeps that cross-process boundary
+    obvious; gated pushes are rare and already wait for a human decision.
+    """
+    QUARANTINE_ROOT.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(QUARANTINE_ROOT / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    if os.geteuid() == 0:
+        proxy_uid = SERVICE_ACCOUNTS["kern-proxy"]
+        os.fchown(lock_fd, proxy_uid, proxy_uid)
+        os.fchmod(lock_fd, 0o600)
+    with os.fdopen(lock_fd, "r+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def parse_receive_pack(body: bytes) -> tuple[list[tuple[str, str, str]], set[str], bytes]:

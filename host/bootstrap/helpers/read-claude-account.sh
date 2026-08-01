@@ -34,32 +34,94 @@ if [[ "${mode}" == "attest" ]]; then
   # token by the provider instead of agent-writable metadata. It runs as root
   # on purpose: the agent uid can only reach the local proxy (whose account
   # guard rejects a just-rotated token) and the admin uid has no egress at
-  # all, while root egress is open. The token is read straight from the agent
-  # credential file and never leaves this process.
+  # all, while root egress is open. Root needs the *raw* access token to make
+  # the provider request (the admin caller only ever holds its sha256), so the
+  # token cannot be piped in from an unprivileged pass without exposing the
+  # secret to the no-egress admin uid — root must open the file itself. That
+  # read is hardened below (see read_agent_credential). The token never leaves
+  # this process.
   EXPECTED_TOKEN_SHA256="${expected_token_sha256}" exec /usr/bin/python3 - <<'PY'
+import errno
 import hashlib
 import json
 import os
+import stat
 import sys
 import urllib.error
 import urllib.request
-from pathlib import Path
 
-agent_home = Path("/mnt/kern-agent/agent-home")
+# The agent owns /mnt/kern-agent/agent-home/.claude (0700) and .credentials.json
+# is NOT among the chattr +i managed files, so the agent can swap that name for
+# a symlink, a FIFO, /dev/zero, or a root-only path between any unprivileged
+# pre-read and this root read. We therefore open the credential exactly like the
+# sibling read-agent-file root helper rather than json.loads(path.read_text()):
+#   - walk down real directory fds with O_NOFOLLOW (a symlinked component or a
+#     final-name symlink fails with ELOOP, so root can't be redirected at a
+#     root-only path to leak an existence/size oracle);
+#   - open the file with O_NONBLOCK (a FIFO returns immediately instead of
+#     blocking the root helper forever — the kern-admin parent cannot signal a
+#     root child, so the subprocess timeout would otherwise be inert);
+#   - re-check S_ISREG on the *opened* fd via fstat (rejects /dev/zero, FIFOs,
+#     and any other non-regular file that slipped past the name check);
+#   - cap the read to a small bound (a real credential file is a few KB, so this
+#     defeats an unbounded /dev/zero-style allocation outside the agent cgroup).
+AGENT_HOME = "/mnt/kern-agent/agent-home"
+CREDENTIAL_PARTS = (".claude", ".credentials.json")
+MAX_CREDENTIAL_BYTES = 256 * 1024
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
-def load_first(paths):
-    for path in paths:
+def read_agent_credential():
+    try:
+        dir_fd = os.open(AGENT_HOME, os.O_RDONLY | DIRECTORY | NOFOLLOW)
         try:
-            return json.loads(path.read_text())
-        except FileNotFoundError:
-            continue
-    return {}
+            for part in CREDENTIAL_PARTS[:-1]:
+                info = os.stat(part, dir_fd=dir_fd, follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode):
+                    raise OSError(errno.ELOOP, "symlink in credential path")
+                next_fd = os.open(
+                    part, os.O_RDONLY | DIRECTORY | NOFOLLOW, dir_fd=dir_fd
+                )
+                os.close(dir_fd)
+                dir_fd = next_fd
+            file_fd = os.open(
+                CREDENTIAL_PARTS[-1],
+                os.O_RDONLY | NOFOLLOW | NONBLOCK,
+                dir_fd=dir_fd,
+            )
+        finally:
+            os.close(dir_fd)
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        # ELOOP: O_NOFOLLOW refused a symlink component/target (swap attack).
+        if exc.errno == errno.ELOOP:
+            return {}
+        raise
+    try:
+        info = os.fstat(file_fd)
+        if not stat.S_ISREG(info.st_mode):
+            # /dev/zero, a FIFO, or any other non-regular swap target.
+            return {}
+        with os.fdopen(file_fd, "rb") as handle:
+            file_fd = -1
+            data = handle.read(MAX_CREDENTIAL_BYTES + 1)
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+    if len(data) > MAX_CREDENTIAL_BYTES:
+        print("Claude credential file is unexpectedly large", file=sys.stderr)
+        sys.exit(1)
+    try:
+        parsed = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
-credentials = load_first([
-    agent_home / ".claude" / ".credentials.json",
-])
+credentials = read_agent_credential()
 tokens = credentials.get("claudeAiOauth")
 access_token = tokens.get("accessToken") if isinstance(tokens, dict) else None
 if not isinstance(access_token, str) or not access_token.strip():

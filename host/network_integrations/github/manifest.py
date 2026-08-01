@@ -96,6 +96,12 @@ MANIFEST = IntegrationManifest(
             "inspected (git or quarantine failure), so it failed closed. Retry the push; if "
             "it keeps failing, ask the operator to check the host.",
         ),
+        DenialReason(
+            "github_push_queue_full",
+            "Ten .github pushes are already waiting for an operator decision, so this push "
+            "was denied before Git stored its pack. Ask the operator to approve or reject "
+            "an item in the admin UI's Network tab, then retry.",
+        ),
     ),
 )
 

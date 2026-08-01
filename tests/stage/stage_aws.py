@@ -706,66 +706,64 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
         if not isinstance(builder_thread, str) or not builder_thread:
             raise AssertionError(f"App Builder did not create a workspace: {created}")
         encoded_builder_thread = quote(builder_thread, safe="")
-        try:
-            sent = self._api(
-                "POST",
-                f"{builder_base}/apps/{encoded_builder_thread}/messages",
-                {
-                    "content": (
-                        "Create the smallest possible app whose visible heading is "
-                        "STAGE_APP_BUILDER_OK. Keep the UI and data minimal."
-                    ),
-                    "agent_runtime": runtime,
-                    "model": model,
-                    "effort": CHEAP_EFFORT,
-                },
-            )
-            if sent.get("status") != "accepted":
-                raise AssertionError(
-                    f"App Builder did not accept its stage message: {sent}"
-                )
-            builder_events = self._wait_for_app_thread_idle(
-                status_path=(
-                    f"{builder_base}/apps/{encoded_builder_thread}/conversation"
+        sent = self._api(
+            "POST",
+            f"{builder_base}/apps/{encoded_builder_thread}/messages",
+            {
+                "content": (
+                    "Create the smallest possible app whose visible heading is "
+                    "STAGE_APP_BUILDER_OK. Keep the UI and data minimal."
                 ),
-                events_path=(
-                    f"{builder_base}/apps/{encoded_builder_thread}/conversation/events"
-                ),
-                thread_id=builder_thread,
-                list_key=None,
-                timeout=300,
+                "agent_runtime": runtime,
+                "model": model,
+                "effort": CHEAP_EFFORT,
+            },
+        )
+        if sent.get("status") != "accepted":
+            raise AssertionError(
+                f"App Builder did not accept its stage message: {sent}"
             )
-            builder_types = {event.get("event_type") for event in builder_events}
-            if not builder_types.issubset(public_types):
-                raise AssertionError(
-                    f"App Builder exposed non-public event types: {builder_events}"
-                )
-            if any(
-                event.get("event_type") in {"thread.error", "thread.stopped"}
-                for event in builder_events
-            ):
-                raise AssertionError(
-                    f"App Builder agent did not complete successfully: {builder_events}"
-                )
-            state = self._api(
-                "GET", f"{builder_base}/apps/{encoded_builder_thread}/state"
-            ).get("app")
-            if not isinstance(state, dict) or int(state.get("revision") or 0) < 1:
-                raise AssertionError(
-                    f"App Builder agent did not revise app state: {state}"
-                )
-            generated = " ".join(
-                str(state.get(field) or "")
-                for field in ("html", "css", "javascript")
-            ) + json.dumps(state.get("data") or {}, sort_keys=True)
-            if "STAGE_APP_BUILDER_OK" not in generated:
-                raise AssertionError(
-                    f"App Builder output omitted the requested heading: {state}"
-                )
-        finally:
-            self._api_status(
-                "POST",
-                f"{builder_base}/apps/{encoded_builder_thread}/archive",
+        builder_events = self._wait_for_app_thread_idle(
+            status_path=(
+                f"{builder_base}/apps/{encoded_builder_thread}/conversation"
+            ),
+            events_path=(
+                f"{builder_base}/apps/{encoded_builder_thread}/conversation/events"
+            ),
+            thread_id=builder_thread,
+            list_key=None,
+            timeout=300,
+        )
+        builder_types = {event.get("event_type") for event in builder_events}
+        if not builder_types.issubset(public_types):
+            raise AssertionError(
+                f"App Builder exposed non-public event types: {builder_events}"
+            )
+        if any(
+            event.get("event_type") in {"thread.error", "thread.stopped"}
+            for event in builder_events
+        ):
+            raise AssertionError(
+                f"App Builder agent did not complete successfully: {builder_events}"
+            )
+        state = self._api(
+            "GET", f"{builder_base}/apps/{encoded_builder_thread}/state"
+        ).get("app")
+        if (
+            not isinstance(state, dict)
+            or int(state.get("ui_revision") or 0) < 1
+            or not isinstance(state.get("data_version"), int)
+        ):
+            raise AssertionError(
+                f"App Builder agent did not revise app state: {state}"
+            )
+        generated = " ".join(
+            str(state.get(field) or "")
+            for field in ("html", "css", "javascript")
+        ) + json.dumps(state.get("data") or {}, sort_keys=True)
+        if "STAGE_APP_BUILDER_OK" not in generated:
+            raise AssertionError(
+                f"App Builder output omitted the requested heading: {state}"
             )
 
         self._ok(

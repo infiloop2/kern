@@ -317,6 +317,38 @@ def clip_text(value: str, max_bytes: int) -> str:
     return encoded[: max_bytes - 3].decode("utf-8", errors="ignore") + "…"
 
 
+def _save_if_still_connected(
+    api: HostAPI, loaded: StoredCredential, credential: StoredCredential, *, reconnect_message: str
+) -> None:
+    """The compare-before-write guard shared/oauth2.py gives the newer OAuth
+    tools: persist a refreshed secret only if the stored connection is still
+    exactly the one this call loaded (same account id and same secret). An
+    operator disconnect or reconnect during the network round trip must win:
+    fail closed and let a retry run against the current credential."""
+    current = api.credentials.load()
+    if (
+        current is None
+        or current["account"]["id"] != loaded["account"]["id"]
+        or current["secret"] != loaded["secret"]
+    ):
+        raise IntegrationReconnectRequired(reconnect_message)
+    api.credentials.save(credential)
+
+
+def _clear_if_still_loaded(api: HostAPI, loaded: StoredCredential) -> None:
+    """Clear only the credential this call actually inspected, so a stale
+    failure (an invalid-grant, missing-scope, or identity result for a token
+    the operator already rotated by reconnecting) cannot delete a fresh
+    connection."""
+    current = api.credentials.load()
+    if (
+        current is not None
+        and current["account"]["id"] == loaded["account"]["id"]
+        and current["secret"] == loaded["secret"]
+    ):
+        api.credentials.clear()
+
+
 class GoogleCredentialStore:
     def __init__(
         self,
@@ -409,11 +441,10 @@ class GoogleCredentialStore:
                 revoke_google_token(token)
         api.credentials.clear()
 
-    # Saves and clears after a network round trip are deliberately unguarded:
-    # an operator disconnect/reconnect landing in that multi-second window can
-    # clobber the fresh credential or drop a stale one, and the recovery is
-    # simply reconnecting once more (disconnect also revokes the token at
-    # Google, so a clobbered stale token is dead regardless of what is stored).
+    # Saves and clears after a network round trip go through the
+    # compare-before-write guards above, so an operator disconnect/reconnect
+    # landing in that multi-second window always wins: a stale refresh cannot
+    # clobber the fresh credential and a stale failure cannot drop it.
 
     def connection_status(self, api: HostAPI) -> ConnectionStatus:
         existing = api.credentials.load()
@@ -428,14 +459,14 @@ class GoogleCredentialStore:
         token_payload = existing["secret"]
         missing_scopes = self.required_scopes - set(existing["account"]["scopes"])
         if missing_scopes:
-            api.credentials.clear()
+            _clear_if_still_loaded(api, existing)
             raise IntegrationReconnectRequired(self.reconnect_message)
         payload = cast(Mapping[str, object], token_payload)
         if google_access_token_is_fresh(payload, now()):
             return google_access_token_from_payload(payload)
         refresh_token = google_refresh_token_from_payload(payload)
         if not refresh_token:
-            api.credentials.clear()
+            _clear_if_still_loaded(api, existing)
             raise IntegrationReconnectRequired(self.reconnect_message)
         try:
             token_response = refresh_google_oauth_token(
@@ -446,14 +477,19 @@ class GoogleCredentialStore:
                 invalid_response_message="Google OAuth token refresh returned an invalid response.",
             )
         except GoogleOAuthInvalidGrantError as exc:
-            api.credentials.clear()
+            _clear_if_still_loaded(api, existing)
             raise IntegrationReconnectRequired(self.reconnect_message) from exc
         updated_payload = google_refreshed_token_payload(payload, token_response, current_time=now())
-        api.credentials.save({
-            "account": existing["account"],
-            "secret": updated_payload,
-            "metadata": {**existing["metadata"], "updated_at": now()},
-        })
+        _save_if_still_connected(
+            api,
+            existing,
+            {
+                "account": existing["account"],
+                "secret": updated_payload,
+                "metadata": {**existing["metadata"], "updated_at": now()},
+            },
+            reconnect_message=self.reconnect_message,
+        )
         return google_access_token_from_payload(updated_payload)
 
     def refresh_identity(self, api: HostAPI, access_token: str) -> ConnectionAccount:
@@ -468,23 +504,28 @@ class GoogleCredentialStore:
             )
         )
         if existing["account"]["id"] != identity["sub"]:
-            api.credentials.clear()
+            _clear_if_still_loaded(api, existing)
             raise IntegrationReconnectRequired(self.reconnect_message)
         account: ConnectionAccount = {
             "id": str(identity["sub"]),
             "label": str(identity["email"]),
             "scopes": existing["account"]["scopes"],
         }
-        api.credentials.save({
-            "account": account,
-            "secret": existing["secret"],
-            "metadata": {
-                **existing["metadata"],
-                "email_verified": identity["email_verified"],
-                "identity_checked_at": now(),
-                "updated_at": now(),
+        _save_if_still_connected(
+            api,
+            existing,
+            {
+                "account": account,
+                "secret": existing["secret"],
+                "metadata": {
+                    **existing["metadata"],
+                    "email_verified": identity["email_verified"],
+                    "identity_checked_at": now(),
+                    "updated_at": now(),
+                },
             },
-        })
+            reconnect_message=self.reconnect_message,
+        )
         return account
 
     def _signed_state(self, api: HostAPI) -> str:

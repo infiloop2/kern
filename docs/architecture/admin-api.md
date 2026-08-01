@@ -105,6 +105,18 @@ and validated as exactly `{"password": <string ≤256 bytes>}`. The server also
 caps concurrent worker threads and sets a per-connection read timeout so a
 connection flood or slow client cannot exhaust host threads.
 
+The same process also serves the app-backend Unix socket on a daemon thread, so
+both listeners draw on one fd table. That server is bounded too, but it rejects
+at capacity instead of queueing: its peers are unauthenticated until a request
+line arrives, and a queued connection still costs a descriptor the operator API
+would need. The socket is `0660`, owned by the dedicated `kern-app-backends`
+group. Its `kern-admin` owner and every provisioned app service account are
+added to that group before services start; agent and unrelated service uids
+therefore cannot connect.
+Peer credentials still bind each request to the claimed app id, and an idle
+timeout bounds accidental stalls by trusted app code. The unit's `LimitNOFILE`
+is raised for the same reason.
+
 App backends are reached only through the admin API reverse proxy. Each app
 service binds a host-assigned `127.0.0.1` port, and nftables accepts new
 connections to that port only from the `kern-admin` uid before dropping
@@ -137,16 +149,16 @@ either runtime.
 Each live-validation verdict is remembered in process memory, so validation
 generates provider traffic at most once per scheduled recheck even though
 loading or awaiting-login runtimes are polled every five seconds and Claude
-turns converge a rotated credential pin as they start (the full lifecycle is in
+turns converge rotated credential metadata as they start (the full lifecycle is in
 [Agent provider lifecycle](agent-provider-lifecycle.md)). The operator refresh
 endpoint bypasses this memory and performs an immediate provider check. An
 authentication failure is final for automatic checks: the runtime stays
 `awaiting_login` with no background provider traffic until an explicit refresh
 rechecks it or an operator login or account reset replaces the credential. Any
 other validation failure surfaces as `error` and is retried on the next
-scheduled recheck. When a new or rotated Claude token is
-validated by attestation, the same refresh reads usage once right after it
-publishes the token's proxy pin, so usage appears immediately after login.
+scheduled recheck. When a new or rotated Claude token is validated by
+attestation, the same refresh reads usage once after publishing the approved
+account identity and updated admin metadata, so usage appears immediately.
 
 Route handlers are thin: validate the documented protocol, read or update
 admin state (the local Postgres database — see

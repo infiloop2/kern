@@ -10,21 +10,25 @@ require manual repair?
 
 ## Reviewed commits
 
-Latest reviewed commit: `f28b50e87b61`.
+Latest reviewed commit: `6151eea5abb61590684c4cf667ae6f619d705231`.
 
 | Commit | Reviewed by |
 | --- | --- |
-| `f28b50e87b61` | Claude Opus 4.8; GPT-5.5 |
+| `6151eea5abb61590684c4cf667ae6f619d705231` | gpt-5.6-sol; Claude Opus 5 |
 
 ## Findings
 
 | Finding | Severity | Found at | Found by | Description | Resolution |
 | --- | --- | --- | --- | --- | --- |
-| REL-001 | Medium | `f28b50e87b61` | Claude Opus 4.8 | The agent uid could exhaust Postgres backend slots by opening Unix-socket connections and stalling before the startup packet, temporarily making the admin API and proxy unable to connect. Reboot clears the stalled agent processes, so this is capped at Medium under the reliability rule. Restrict the socket to service users or sharply bound authentication startup time. | Open |
-| REL-002 | High | `f28b50e87b61` | Claude Opus 4.8; GPT-5.5 | Wildcard-allowed hosts caused an unbounded durable cache of generated TLS key/certificate files on the admin volume. An agent could request unlimited unique subdomains until the volume shared with Postgres filled. The files survive reboot, so reboot does not resolve the condition. Cap/evict the cache or move it to bounded ephemeral storage. | Open |
-| REL-003 | Medium | `f28b50e87b61` | Claude Opus 4.8 | Postgres socket reads and statements had no timeout, so a stalled database could hold the process-wide mutation lock indefinitely and freeze operator mutations. Reboot clears the in-memory lock when underlying durable state is healthy; add socket and statement deadlines so recovery does not require reboot. | Open |
-| REL-004 | Medium | `f28b50e87b61` | Claude Opus 4.8 | Agent event retention bounded row count but not message size, allowing unusually large streamed messages to grow durable Postgres storage far beyond the apparent cap. Bound each stored message as well as the number of rows. | Open |
-| REL-005 | Medium | `f28b50e87b61` | Claude Opus 4.8; GPT-5.5 | The proxy could buffer up to 128 MiB in each of 64 handlers while running outside the agent memory cgroup, allowing roughly 8 GiB of pressure and an operator-visible proxy/OOM outage. Reboot clears the memory condition, so severity is capped at Medium. Add an aggregate memory bound, lower the body/concurrency product, or reserve service memory with cgroups. | Open |
+| REL-002 | High | `f28b50e87b61` | Claude Opus 4.8; GPT-5.5 | Wildcard-allowed hosts caused an unbounded durable cache of generated TLS key/certificate files on the admin volume. An agent could request unlimited unique subdomains until the volume shared with Postgres filled. The files survive reboot, so reboot does not resolve the condition. Cap/evict the cache or move it to bounded ephemeral storage. | Fixed — generated certificate families are capped and evicted oldest-first under the mint/load lock, with partial mint files cleaned up. |
+| REL-006 | High | `d28713d3ad19` | gpt-5.6-sol | With GitHub write access and `.github` approval enabled, an agent can repeatedly push unique packs that touch `.github` and leave them pending. Each request indexes up to the proxy's 128 MiB body into the durable quarantine mirror, pins tips under `refs/pending/<id>/...`, and inserts a `pending_pushes` row; there is no pending-count/byte quota, TTL, pruning, or bounded listing. The proxy state and PostgreSQL data share the admin volume, so this survives reboot and can exhaust disk/inodes until manual cleanup. Enforce per-repository/global pending count and byte budgets before indexing, expire and delete refs/rows, run bounded GC/eviction, and reserve volume headroom. | Fixed — the existing 128 MiB request limit bounds each push, at most ten pushes may be pending, and manual approve/reject removes its refs and immediately prunes unreachable objects under the quarantine lock. |
+| REL-001 | Medium | `f28b50e87b61` | Claude Opus 4.8 | The agent uid could exhaust Postgres backend slots by opening Unix-socket connections and stalling before the startup packet, temporarily making the admin API and proxy unable to connect. Reboot clears the stalled agent processes, so this is capped at Medium under the reliability rule. Restrict the socket to service users or sharply bound authentication startup time. | Wontfix — reboot is the documented recovery for agent-induced resource exhaustion on this single-operator host; the reliability rule already caps it at Medium on that basis. |
+| REL-003 | Medium | `f28b50e87b61` | Claude Opus 4.8 | Postgres socket reads and statements had no timeout, so a stalled database could hold the process-wide mutation lock indefinitely and freeze operator mutations. Reboot clears the in-memory lock when underlying durable state is healthy; add socket and statement deadlines so recovery does not require reboot. | Wontfix — reboot is the documented recovery for agent-induced resource exhaustion on this single-operator host; the reliability rule already caps it at Medium on that basis. |
+| REL-004 | Medium | `f28b50e87b61` | Claude Opus 4.8 | Agent event retention bounded row count but not message size, allowing unusually large streamed messages to grow durable Postgres storage far beyond the apparent cap. Bound each stored message as well as the number of rows. | Fixed — append_agent_event now truncates each stored message/error_message to MAX_EVENT_MESSAGE_CHARS (128 KiB) with a length-recording marker, bounding per-message durable growth as well as the existing row-count cap; the bound sits below THREAD_HANDOFF_CHARACTER_LIMIT so history reconstruction is unaffected. |
+| REL-005 | Medium | `f28b50e87b61` | Claude Opus 4.8; GPT-5.5 | The proxy could buffer up to 128 MiB in each of 64 handlers while running outside the agent memory cgroup, allowing roughly 8 GiB of pressure and an operator-visible proxy/OOM outage. Reboot clears the memory condition, so severity is capped at Medium. Add an aggregate memory bound, lower the body/concurrency product, or reserve service memory with cgroups. | Wontfix — reboot is the documented recovery for agent-induced resource exhaustion on this single-operator host; the reliability rule already caps it at Medium on that basis. |
+| REL-007 | Medium | `47daf37e08a8` | gpt-5.6-sol | The world-connectable tools, network-introspection, and agent-app Unix sockets use `ThreadingHTTPServer`, which creates a daemon thread for every accepted connection before peer checks, header parsing, and the eight-call semaphore. A runaway agent can rapidly open or slow-roll connections for the 30-second read window, accumulating service threads, file descriptors, memory, and PIDs outside `kern_agent.slice`; the units define no explicit task/memory caps. This can starve or restart those control services but reboot clears it. Gate/reject before thread creation as the bounded Admin/proxy servers do, and add explicit service task/memory budgets. | Wontfix — reboot is the documented recovery for agent-induced resource exhaustion on this single-operator host; the reliability rule already caps it at Medium on that basis. |
+| REL-008 | Medium | `e7b5494267aa` | Claude Opus 5 | `_close_turn` (`host/runtime/admin_api/orchestrator.py:1502-1527`) is the only place a turn is removed from the in-memory `_LIVE` registry, and when `server.close()` raises it records a `thread.error` event and returns early, deliberately leaving the entry in phase `FINISHING` so a new process cannot race a surviving scope. Nothing ever retries: there is no reaper, and `_stop_runtime_processes` skips turns that are not `STARTING`/`RUNNING` and never deletes entries. `close()` raises whenever `thread_scope.stop_thread_scope` does — when the `stop-agent-thread` helper exits non-zero because the scope is still active after its 5 s verification loop, or when the whole `sudo` invocation exceeds `CLOSE_TIMEOUT_SECONDS = 7`. The leaked entry then answers that thread with a permanent 409 ("the agent is finishing; retry shortly") while the durable `run_status` already reads `idle`, and it permanently consumes one of the runtime's three concurrency slots, because the capacity count at `:1128` counts every `_LIVE` entry regardless of phase. An agent that resists teardown can repeat this until the runtime admits no turns at all. A restart of the admin service clears it, so severity is capped at Medium. Retry scope teardown from the maintenance loop or on the next admission for that thread, and release the fence once the scope is confirmed gone rather than holding it for the process lifetime. | Wontfix — an admin-service restart (or reboot) is the documented recovery for this agent-induced wedge on this single-operator host; the reliability rule already caps it at Medium on that basis. |
+| REL-009 | Medium | `e7b5494267aa` | Claude Opus 5 | Both provider adapters write to the child CLI's stdin over an ordinary blocking pipe with no deadline, while holding the locks the operator's recovery paths need. `ClaudeCodeSession._send_user_message_locked` (`claude_code.py:412-420`) writes and flushes under `self._stdin_lock`, and both `close()` (`:154`) and `interrupt()` (`:202`) begin by acquiring that same lock; `CodexAppServer.steer` (`codex_app_server.py:347-380`) writes under `_steer_lock` + `_stdin_lock`, and on the steer path the orchestrator holds `turn.delivery_lock` across the whole call while the admin API holds one of 64 send-lock stripes. A pipe holds 64 KiB, while a steer may be up to `MESSAGE_LIMIT = 50_000` characters and a session-handoff launch message up to `THREAD_HANDOFF_CHARACTER_LIMIT = 250_000`, so writes that block until the child consumes are routine rather than exotic — and the runtime processes run as `kern-agent`, so agent code can simply stop reading stdin. Once such a write blocks, the operator's own recovery action is what deadlocks: `stop_thread_turn` blocks on `turn.delivery_lock` and Claude's `interrupt()`/`close()` block on `_stdin_lock`. (Codex's `close()`/`interrupt()` take `_lifecycle_lock` rather than `_stdin_lock`, and block inside `proc.stdin.close()` on the CPython buffered-writer lock instead; the outcome is the same. The 250,000-character handoff write is taken under `_stdin_lock` only, since the execution worker releases `delivery_lock` before `provider.run_turn`, so it wedges interrupt/close rather than stop.) Restarting the admin service clears the held locks, capping this at Medium. Write to stdin with a deadline or hand writes to a dedicated writer thread with a bounded queue, and never hold `delivery_lock`/`_stdin_lock` across a blocking child write. | Wontfix — an admin-service restart (or reboot) is the documented recovery for this agent-induced wedge on this single-operator host; the reliability rule already caps it at Medium on that basis. |
 
 ## Threat model
 
@@ -129,62 +133,106 @@ reboot recovery, and unbounded database or disk growth.
 
 ## Collaborative review
 
-### `f28b50e87b61`
+### `6151eea5abb61590684c4cf667ae6f619d705231`
 
-Reviewed by: Claude Opus 4.8 (claude-opus-4-8); GPT-5.5 (gpt-5.5)
+Reviewed by: gpt-5.6-sol; Claude Opus 5
 
-Methodology: static reading of the cgroup/slice unit, the admin-API threading
-and lock discipline, the DB connection layer and wire client, the orchestrator
-worker pool, and the state pruning/caps. The five findings below are reasoned
-from the code and standard PostgreSQL/systemd defaults; none were reproduced on
-a live host.
+Methodology: repository-level resource-budget, blocking-boundary, durable-
+growth, lifecycle, and recovery audit across every host service, agent/app
+slice, local listener, database table, file path, queue/lock, and deployment
+operation. Bounds and cleanup were traced in source/config/tests; focused
+state, push-gate, service, orchestration, and deployment tests were used. No
+deployed load, low-disk, OOM/fork, crash, migration-failure, or reboot drill
+was performed.
 
 #### What was reviewed
 
-- `host/bootstrap/bootstrap.sh`: `kern_agent.slice`
-  (`CPUWeight`/`MemoryHigh`/`MemoryMax`/`MemorySwapMax`/`TasksMax`), the
-  network-proxy/admin-api/postgres units and restart policies, the volume
-  layout, `postgresql.conf` (`max_connections=50`), and `pg_hba.conf`.
-- `host/runtime/admin_api/service.py` locks (mutation lock usage, `NETWORK_POLICY_LOCK`,
-  `OAUTH_LOGIN_LOCK`), helper timeouts, the maintenance loop, and the
-  queue/steer caps.
-- `host/runtime/core/state.py` (`mutation()` RLock, event caps + amortized prune,
-  task/thread-session pruning), `host/runtime/core/db.py` (pool, `MAX_ACTIVE_CONNECTIONS`,
-  checkout timeout), `host/runtime/core/pgclient.py` (socket handling),
-  `host/runtime/admin_api/orchestrator.py` (worker pool, claim caps, lock ordering).
-- `host/runtime/network_proxy/service.py` for proxy-side resource bounds.
+- Bootstrap/rendered units and deploy verification for Postgres, Admin API,
+  proxy, tools, network/app sockets, app backends, cloudflared, host-error
+  collector, `kern_agent.slice`, `kern_app.slice`, nftables, swap, and the
+  root/agent/admin volume layout.
+- Admin API/orchestrator/runtime lifecycle: handler pool, mutation/provider/
+  OAuth locks, worker capacity, start/steer/stop/finish fencing, helper and
+  provider subprocesses, session callbacks, restart reconciliation, health/
+  filesystem/process/error observability, and reboot.
+- `core/{db,pgclient,state}.py` and every growing relation: threads/events/
+  activity, sessions, usage/accounts, network/tool logs, credentials,
+  approvals/assets, host errors, passkeys, GitHub audit/pending pushes, and
+  active/deprecated app schemas, with caps, pruning, pagination, transactions,
+  and blocking calls.
+- Proxy request/certificate/WebSocket/quarantine resources; tools, network-
+  introspection, agent-app and app-backend sockets; app API/bridge/database
+  concurrency; file view/upload, tool staging/streaming, agent attachments,
+  provider caches/auth, temp files, journals, and partial cleanup.
+- Deploy, upgrade, recover, reconfigure, start, stop, passkey reset, migration,
+  volume attach/repair, service ordering/restart, and interruption paths.
 
 #### Coverage and confidence
 
-- **REL-A (starvation):** CPU/memory/PIDs are bounded for agent runtimes by
-  `kern_agent.slice` (`CPUWeight=50`, `MemoryHigh/Max`, `MemorySwapMax`,
-  `TasksMax=4096`) and agent-home is on a separate volume, so those are sound.
-  The gaps are the resources the slice does not cover and the services that
-  are *not* in it: the Postgres connection budget (REL-001), the admin-volume
-  disk shared with Postgres (REL-002/REL-004), and the un-capped proxy service
-  memory (REL-005).
-- **REL-B (admin API stuck):** lock discipline is otherwise good — mutation
-  lock, `NETWORK_POLICY_LOCK`/`OAUTH_LOGIN_LOCK` (both 5s-timeout → 409), and
-  the orchestrator's documented mutation→`_POOL_LOCK` ordering are acyclic, and
-  slow work (runtime spawn/turn/close, helper subprocesses) runs outside all
-  locks. The single systemic weakness is the missing DB timeout (REL-003), which
-  turns any Postgres stall into an indefinite mutation-lock hold. Helper
-  subprocess calls are timeout-guarded (10s).
-- **REL-C (reboot recovery):** reviewed by reading only. `initialize_state`
-  fails orphaned running tasks on restart; every service is `Restart=always`
-  with `StartLimitIntervalSec=0`; nftables is enabled so egress stays
-  fail-closed before the proxy comes up; connections are ping-verified on
-  checkout so a Postgres restart costs a reconnect. I did **not** test a real
-  reboot, a reboot with a full admin volume, or the `reboot-host` path under a
-  degraded box — worth a live drill.
-- **REL-D (bounded growth):** every admin-state table has a cap with an
-  amortized range-delete prune (agent_events/network_events 1M rows,
-  finished tasks 100k, thread sessions 100k/runtime, idempotency 10k). Growth
-  is bounded in *row count*; the exceptions are per-row size (REL-004) and the
-  on-disk cert cache (REL-002), which are the real disk risks. I did not compute
-  the worst-case total DB size against the admin volume's provisioned size —
-  the caps permit tens of GB, so volume sizing deserves its own check.
-- Not done: no live load test, fork-bomb/OOM drill, socket-exhaustion
-  reproduction, or reboot drill. The findings are reasoned from the code and
-  documented PostgreSQL/systemd defaults; REL-001/REL-002 in particular should be
-  confirmed on a running host.
+- Checklists 1–2: a service-by-service CPU, memory/swap, task/thread, FD,
+  connection, handler, body, queue, disk, and timeout inventory was built.
+  Agent CPU/RAM/swap/tasks and app CPU are cgrouped, but agent-reachable host
+  services remain outside that containment. Existing REL-001/REL-005 and new
+  REL-007 cover the concrete connection/memory/thread gaps. One correction to
+  the ceiling those gaps hit: for the thread-per-connection sockets the
+  binding resource is the service's file-descriptor soft limit — 1024 by
+  default on the target Ubuntu 22.04/systemd 249 platform, with no
+  `LimitNOFILE` set on any unit — so roughly a thousand stalled connections
+  suffice, well below what a memory- or `TasksMax`-based estimate suggests.
+  The app-backend admin socket shares this shape and additionally lacks the
+  per-connection read timeout its three siblings all set; because it is served
+  from the admin API's own process and fd table, exhausting it also stops the
+  operator-facing TCP listener accepting. That is registered on axis 04 as
+  ADM-004, where the admin-availability impact belongs, and was independently
+  found here and on axis 05.
+- Checklists 3–4: Admin, provider, OAuth, DB, worker, runtime, app, tool, proxy,
+  and helper locks/semaphores were mapped with their blocking calls, ordering,
+  timeouts, cancellation, and crash cleanup. Thread start/steer/stop/finish,
+  late exit, session persistence, restart reconciliation, and live/database
+  fences were traced for Codex, Claude Code, and Hermes. REL-003 remains the
+  indefinite DB/mutation-lock case. Two further blocking boundaries were found
+  by asking, for each lock, what the operator's own recovery path needs rather
+  than only whether the ordering is acyclic. The child CLI's stdin is an
+  ordinary blocking pipe holding 64 KiB, written under the very locks that
+  stop/interrupt/close acquire, while message limits reach 50,000 and 250,000
+  characters and the child runs as `kern-agent` — so an agent that stops
+  reading stdin wedges the operator's stop button (REL-009). And the live-turn
+  fence is released in exactly one place with no retry, so a scope teardown
+  that fails or exceeds its 7 s budget strands the entry in `FINISHING`,
+  yielding a permanent 409 against an `idle` durable status and a permanently
+  consumed runtime slot (REL-008). Both are cleared by restarting the admin
+  service, hence Medium.
+- Checklists 5–6: service dependencies, restart policies, stale socket/scope
+  cleanup, migration ordering, lifecycle version/volume semantics, permission
+  repair, passkey reset, and interrupted replacement were reviewed. Restart
+  paths are fail-closed and observable when durable state is healthy; no
+  partial-boot or corrupt/full-volume run was performed.
+- Checklists 7–8: all growing relations and filesystem/journal paths were
+  inventoried for row/value/count/time bounds and cleanup. Existing
+  REL-002/REL-004 remain open; REL-006 adds a distinct durable Git quarantine
+  and pending-row path with neither quota nor expiry. An independent sweep
+  reached REL-006's two halves separately — the unbounded quarantine mirror on
+  the admin volume, and `pending_pushes` rows that are never pruned while the
+  operator route returns the whole table — which is worth recording as
+  corroboration rather than as new rows, since REL-006 already names the
+  missing quota, TTL, pruning, and bounded listing. Worst-case WAL,
+  autovacuum, total DB cap, journal rotation, and admin-volume sizing were not
+  measured on a deployed host.
+- Checklist 9: API/header/body/page/event/activity/file/app/tool/approval/
+  passkey/process/log limits and their beyond-limit paths were checked.
+  Rejections generally leave reusable slots/state; the socket admission point
+  behind REL-007 allows work to accumulate before the intended call cap.
+- Checklist 10: PostgreSQL, DNS/TLS/provider, helper, systemd, service crash,
+  client disconnect, malformed response, and concurrent mutation boundaries
+  were traced for deadlines, rollback, idempotency, and diagnostics.
+  Repository tests cover deterministic failures, but no unkillable process,
+  clock shift, sustained dependency stall, or restart storm was injected.
+- Checklist 11: health, runtime, filesystem, host-error coalescing, network/
+  tool/app errors, service-exit capture, upgrade notice, and safe operator
+  actions were checked under represented error states. Availability after
+  full disk or global task pressure remains lower confidence.
+- Checklist 12: no live contention, load, crash, reboot, low-disk/inode,
+  OOM/fork, socket exhaustion, concurrent app/tool, migration, or long-idle
+  campaign was run. Findings are code/config-backed and classify reboot-
+  persistent versus reboot-cleared impact explicitly; confidence is high for
+  missing bounds and medium for the exact load needed to exhaust a real host.

@@ -14,6 +14,7 @@
   },
   "ui": {
     "path": "ui",
-    "capability_worker": true
+    "capability_worker": true,
+    "host_fullscreen": true
   }
 }

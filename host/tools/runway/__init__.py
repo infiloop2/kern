@@ -580,7 +580,7 @@ def _upload_staged_asset(
     upload_url = initialized.get("uploadUrl")
     runway_uri = initialized.get("runwayUri")
     fields = initialized.get("fields")
-    if not isinstance(upload_url, str) or not _is_https_runway_url(upload_url):
+    if not isinstance(upload_url, str) or not _is_public_https_url(upload_url):
         raise RuntimeError(f"Runway {kind} upload initialization returned no HTTPS upload URL.")
     if (
         not isinstance(runway_uri, str)
@@ -654,7 +654,7 @@ def _task_result(response: JSONObject, output_kind: str = "video") -> JSONObject
         output_url = ""
         if isinstance(output, list) and output and isinstance(output[0], str):
             output_url = output[0]
-        if output_url and _is_https_output_url(output_url):
+        if output_url and _is_public_https_url(output_url):
             result[f"{output_kind}_url"] = output_url
             result["message"] = (
                 f"Generation succeeded. The {output_kind}_url is a temporary link valid for about "
@@ -681,11 +681,14 @@ def _task_result(response: JSONObject, output_kind: str = "video") -> JSONObject
     return result
 
 
-def _is_https_output_url(value: str) -> bool:
-    return _is_https_runway_url(value)
-
-
-def _is_https_runway_url(value: str) -> bool:
+def _is_public_https_url(value: str) -> bool:
+    """Structural checks only — this does NOT pin the hostname. Runway's
+    upload and output URLs come from Runway's own authenticated HTTPS API
+    responses, and Runway does not document which asset/CDN hosts those URLs
+    use (presigned object-store or CDN hosts are likely), so pinning a domain
+    here would risk rejecting legitimate provider traffic. What is enforced:
+    plain HTTPS on the default port to a named public host — no userinfo, no
+    IP literals, no oversized URLs."""
     if len(value) > 2_048:
         return False
     try:
@@ -738,7 +741,7 @@ def _save_video(task_id: str, headers: dict[str, str]) -> ActionResult:
         return ActionFailed("Runway video is not complete. Poll get_task and try again after it succeeds.")
     output = response.get("output")
     output_url = output[0] if isinstance(output, list) and output and isinstance(output[0], str) else ""
-    if not output_url or not _is_https_output_url(output_url):
+    if not output_url or not _is_public_https_url(output_url):
         return ActionFailed("Runway reported success but returned no valid video URL.")
     @contextmanager
     def open_video() -> Iterator[OpenedStreamingAsset]:

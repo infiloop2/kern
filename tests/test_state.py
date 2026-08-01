@@ -25,12 +25,12 @@ from host.runtime.core.state import (
     network_proxy_cert_files,
     read_claude_account,
     read_openai_account,
-    read_proxy_claude_account,
+    read_proxy_claude_account_id,
     read_proxy_openai_account_id,
     save_config,
     save_claude_account,
     save_openai_account,
-    save_proxy_claude_account,
+    save_proxy_claude_account_id,
     save_proxy_openai_account_id,
 )
 
@@ -94,6 +94,31 @@ class StateStorageTests(unittest.TestCase):
             event["payload"]["activity"]["nested"]["output"],
             r"before\0after",
         )
+
+    def test_oversized_event_message_is_truncated_with_a_marker(self) -> None:
+        oversized = "a" * (state.MAX_EVENT_MESSAGE_CHARS + 5000)
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur, "thread.message", "t1", {"message": oversized, "source": "agent"}
+            )
+            state.append_agent_event(
+                cur, "thread.error", "t1", {"error_message": oversized}
+            )
+        events = {event["event_type"]: event for event in read_agent_events()}
+        stored_message = events["thread.message"]["payload"]["message"]
+        stored_error = events["thread.error"]["payload"]["error_message"]
+        for stored in (stored_message, stored_error):
+            self.assertLess(len(stored), len(oversized))
+            self.assertTrue(stored.startswith("a" * state.MAX_EVENT_MESSAGE_CHARS))
+            self.assertIn(f"truncated {len(oversized)} chars", stored)
+
+    def test_in_bound_event_message_is_stored_verbatim(self) -> None:
+        exact = "b" * state.MAX_EVENT_MESSAGE_CHARS
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur, "thread.message", "t1", {"message": exact, "source": "agent"}
+            )
+        self.assertEqual(read_agent_events()[0]["payload"]["message"], exact)
 
     def test_thread_summaries_report_the_canonical_session_rows(self) -> None:
         with state.mutation() as cur:
@@ -609,9 +634,9 @@ class StateStorageTests(unittest.TestCase):
 
     def test_proxy_pins_and_network_policy_live_in_the_database(self) -> None:
         save_proxy_openai_account_id("acct_pin")
-        save_proxy_claude_account({"access_token_sha256": "d" * 64})
+        save_proxy_claude_account_id("claude_pin")
         self.assertEqual(read_proxy_openai_account_id(), "acct_pin")
-        self.assertEqual(read_proxy_claude_account(), {"access_token_sha256": "d" * 64})
+        self.assertEqual(read_proxy_claude_account_id(), "claude_pin")
         self.assertIsNone(state.network_policy_record())
         state.save_network_policy({"network_integrations": {}}, "2026-06-08T00:00:00Z")
         record = state.network_policy_record()
@@ -692,7 +717,14 @@ class StateStorageTests(unittest.TestCase):
                     ],
                 },
                 "npm_packages": {"enabled": True},
-                "custom": {"domains": {"example.com": {"allow_http_methods": ["GET"]}}},
+                "custom": {
+                    "domains": {
+                        "example.com": {
+                            "allow_http_methods": ["GET"],
+                            "allow_websocket": True,
+                        }
+                    }
+                },
             },
         }
         state.save_network_policy(controls, "2026-06-08T00:00:00Z")
@@ -748,9 +780,11 @@ class StateStorageTests(unittest.TestCase):
         self.assertEqual(pending[0]["id"], "abc123")
         self.assertEqual(pending[0]["changed_paths"], [".github/workflows/ci.yml"])
         self.assertEqual(pending[0]["status"], "pending")
+        self.assertEqual(state.count_pending_pushes(), 1)
         self.assertEqual(state.get_pending_push("abc123")["ref_updates"][0]["ref"], "refs/heads/main")
         approved = state.resolve_pending_push("abc123", "approved")
         self.assertEqual(approved["status"], "approved")
+        self.assertEqual(state.count_pending_pushes(), 0)
         self.assertEqual(state.get_pending_push("abc123")["status"], "approved")
         # Resolving a row that is no longer pending is a programming error
         # (the caller checks under RESOLVE_LOCK) and fails loudly.

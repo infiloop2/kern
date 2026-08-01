@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 
+from host.network_integrations.base import AccountAttestor
 from host.network_integrations.bedrock import usage
 from host.network_integrations.bedrock.manifest import (
     BedrockIntegration,
@@ -55,8 +56,10 @@ def request_denied(
     query: str,
     headers: list[tuple[str, str]],
     body: bytes,
+    account_attestor: AccountAttestor | None = None,
 ) -> str | None:
     """Apply the shared region, route, and signing-identity controls."""
+    del account_attestor
     if _QUERY_AUTH_RE.search(query or ""):
         # Before the route check: the route patterns admit no query string at
         # all, and the presigned-auth attempt deserves its specific reason.

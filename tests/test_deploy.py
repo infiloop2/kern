@@ -1625,6 +1625,8 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap.index('apt_get install -y "postgresql-${PG_MAJOR}"'),
         )
         self.assertIn("ensure_group kern-admin \"$KERN_ADMIN_GID\"", bootstrap)
+        self.assertIn("ensure_group kern-app-backends \"$KERN_APP_BACKENDS_GID\"", bootstrap)
+        self.assertIn("ensure_group_member kern-admin kern-app-backends", bootstrap)
         self.assertIn("ensure_user kern-agent \"$KERN_AGENT_UID\" kern-agent /mnt/kern-agent/agent-home", bootstrap)
         self.assertNotIn("remap_preserved_tree_owner", bootstrap)
         self.assertNotIn("-uid \"$old_uid\"", bootstrap)
@@ -1665,6 +1667,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("User=kern-admin", bootstrap)
         self.assertIn("RuntimeDirectory=kern-admin-api", bootstrap)
         self.assertIn("RuntimeDirectoryMode=0755", bootstrap)
+        self.assertIn("LimitNOFILE=8192", bootstrap)
         self.assertIn("User=kern-proxy", bootstrap)
         self.assertIn("User=cloudflared", bootstrap)
         self.assertIn("User=kern-app-0", bootstrap)
@@ -1925,6 +1928,10 @@ class DeployUnitTests(unittest.TestCase):
             json.loads(claude_settings)["env"]["FORCE_PROMPT_CACHING_5M"],
             "1",
         )
+        self.assertEqual(
+            json.loads(claude_settings)["env"]["CLAUDE_CODE_NO_MODEL_FALLBACK"],
+            "1",
+        )
         self.assertIn("Do not prompt the operator for local approvals", agent_instructions)
         # The tools section tells the agent how to discover and use bundled tools.
         self.assertIn("`kern` MCP server", agent_instructions)
@@ -1997,6 +2004,10 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("plugins = false", bootstrap)
         self.assertIn("tool_search = false", bootstrap)
         self.assertIn("tool_suggest = false", bootstrap)
+        requirements = bootstrap.split(
+            "cat > /etc/codex/requirements.toml <<'EOF'", 1
+        )[1].split("\nEOF\nchmod 644 /etc/codex/requirements.toml", 1)[0]
+        self.assertIn("enable_request_compression = false", requirements)
         # The bundled tools MCP shim is wired into Codex through the managed
         # /etc/codex/managed_config.toml layer, and the admin service gets the
         # runtime directory that holds the agent-facing tools socket.
@@ -2008,6 +2019,14 @@ class DeployUnitTests(unittest.TestCase):
         # socket dir; the agent-facing tools socket dir is owned by the dedicated
         # kern-tools.service.
         self.assertIn("RuntimeDirectory=kern-admin-api\n", bootstrap)
+        # The app-backend socket lives on this unit, admits only provisioned
+        # app accounts, and shares the process's fd table with the operator TCP
+        # listener, so only this unit raises the descriptor limit.
+        admin_api_unit = bootstrap.split(
+            "cat > /etc/systemd/system/kern-admin-api.service <<'UNIT'", 1
+        )[1].split("\nUNIT\n", 1)[0]
+        self.assertIn("LimitNOFILE=8192\n", admin_api_unit)
+        self.assertEqual(bootstrap.count("LimitNOFILE="), 1)
         self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.tools.service", bootstrap)
         self.assertIn("RuntimeDirectory=kern-tools\n", bootstrap)
         self.assertIn("RuntimeDirectoryMode=0755", bootstrap)
@@ -2221,6 +2240,9 @@ class DeployUnitTests(unittest.TestCase):
                 self.assertIn(f"{env_prefix}_GID=", bootstrap)
                 self.assertIn(f"ensure_group {app.linux_user}", bootstrap)
                 self.assertIn(f"ensure_user {app.linux_user} \"${env_prefix}_UID\" {app.linux_user} /nonexistent", bootstrap)
+                self.assertIn(
+                    f"ensure_group_member {app.linux_user} kern-app-backends", bootstrap
+                )
                 self.assertIn(f"local  kern_admin  {app.db_role}  peer", bootstrap)
                 self.assertIn(f"rolname = '{app.db_role}'", bootstrap)
                 self.assertIn(f'CREATE ROLE "{app.db_role}" LOGIN;', bootstrap)

@@ -51,7 +51,8 @@ class AwsSmokeTeardownTests(unittest.TestCase):
             if (method, path) == ("GET", f"{builder_base}/apps/app-1/state"):
                 return {
                     "app": {
-                        "revision": 0,
+                        "ui_revision": 0,
+                        "data_version": 0,
                         "html": "",
                         "css": "",
                         "javascript": "",
@@ -80,22 +81,12 @@ class AwsSmokeTeardownTests(unittest.TestCase):
                         }
                     ]
                 }
-            if (method, path) == ("POST", f"{builder_base}/apps/app-1/archive"):
-                return {"app": {"thread_id": "app-1", "archived": True}}
-            if (method, path) == ("GET", f"{builder_base}/apps?archived=true"):
-                return {"apps": [{"thread_id": "app-1", "archived": True}]}
             raise AssertionError((method, path, body))
 
-        with (
-            patch.object(smoke, "_api", side_effect=fake_api),
-            patch.object(smoke, "_api_status", return_value=(200, {})) as status,
-        ):
+        with patch.object(smoke, "_api", side_effect=fake_api):
             smoke.check_app_backends_without_providers()
 
         self.assertEqual(smoke.passed, 1)
-        status.assert_called_once_with(
-            "POST", f"{builder_base}/apps/app-1/archive"
-        )
 
     def test_precredential_bedrock_probe_runs_real_hermes_launcher(self) -> None:
         smoke = AwsSmoke()

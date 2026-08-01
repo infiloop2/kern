@@ -58,8 +58,25 @@ the root volume as root-owned code.
 - `run-claude-code` — runs the Claude Code CLI demoted to `kern-agent`,
   with the same proxy and CA environment, in a transient scope under the same
   slice.
-- `read-claude-account` — reads the agent user's Claude Code auth files and
-  prints only account metadata plus a SHA-256 hash of the OAuth bearer token.
+- `read-claude-account` — has two modes with different privilege levels. Its
+  default read mode demotes to `kern-agent` with `runuser` and prints only
+  account metadata plus a SHA-256 hash of the OAuth bearer token. Its
+  `--attest` mode is the exception to the demote-immediately rule above: it
+  runs its whole body **as root** and makes one outbound request to
+  `api.anthropic.com/api/oauth/profile` so the provider — not agent-writable
+  metadata — attests which account the current token belongs to. Root is
+  required because the agent uid can only reach the local proxy (which rejects
+  a just-rotated token) and the admin uid has no egress, and the raw token is
+  needed for the request, so it cannot be handed in by a demoted pass without
+  exposing the secret to the no-egress admin uid. Because root itself opens the
+  agent-owned credential file, that read is hardened the same way
+  `read-agent-file` is: it walks directory fds with `O_NOFOLLOW`, opens the
+  credential with `O_NOFOLLOW | O_NONBLOCK`, re-checks `S_ISREG` on the opened
+  fd, and caps the read — so an agent-swapped symlink, FIFO, `/dev/zero`, or
+  root-only path cannot redirect it, hang it, exhaust memory, or leak an
+  existence/size oracle. The raw token never leaves the helper process; only
+  the attested account uuid, optional email/organization uuid, and the token
+  hash are printed.
 - `run-hermes` — starts one Hermes query as `kern-agent`, passes the
   prompt over stdin, and uses the same dummy AWS and agent-slice boundary.
 - `stop-agent-thread` — SIGKILLs and stops the transient

@@ -38,6 +38,21 @@ def _git(cwd: Path, *args: str, stdin: bytes | None = None) -> bytes:
 
 
 class PktLineTests(unittest.TestCase):
+    def test_root_created_lock_is_owned_by_the_proxy_account(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            with (
+                patch.object(gate, "QUARANTINE_ROOT", Path(raw_root)),
+                patch.object(gate.os, "geteuid", return_value=0),
+                patch.object(gate.os, "fchown") as chown,
+                patch.object(gate.os, "fchmod") as chmod,
+                gate.quarantine_lock(),
+            ):
+                pass
+
+        proxy_uid = gate.SERVICE_ACCOUNTS["kern-proxy"]
+        self.assertEqual(chown.call_args.args[1:], (proxy_uid, proxy_uid))
+        self.assertEqual(chmod.call_args.args[1], 0o600)
+
     def test_parse_receive_pack_extracts_commands_caps_and_pack(self) -> None:
         zero, one = "0" * 40, "1" * 40
         body = (
@@ -394,6 +409,39 @@ class ChangeDetectionTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
         self.assertNotEqual(missing.returncode, 0)
+
+    def test_cleanup_prunes_after_pending_refs_are_deleted(self) -> None:
+        root = self.root / "quarantine"
+        mirror = root / "infiversehq" / "kern.git"
+        _git(self.root, "clone", "--bare", "--quiet", str(self.mirror), str(mirror))
+        gate.quarantine_pending(
+            mirror, [(gate.ZERO_OID, self.old, "refs/heads/main")], "abc123"
+        )
+        commands: list[list[str]] = []
+        original_run = approve_github_push._run
+
+        def record(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            commands.append(argv)
+            return original_run(argv, **kwargs)  # type: ignore[arg-type]
+
+        payload = {
+            "action": "cleanup",
+            "owner": "infiversehq",
+            "repo": "kern",
+            "push_id": "abc123",
+        }
+        with (
+            patch.object(gate, "QUARANTINE_ROOT", root),
+            patch.object(approve_github_push, "_run", side_effect=record),
+            patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+            patch.object(sys, "stdout", io.StringIO()),
+        ):
+            approve_github_push.main()
+
+        delete_index = next(i for i, argv in enumerate(commands) if "update-ref" in argv)
+        gc_index = next(i for i, argv in enumerate(commands) if "gc" in argv)
+        self.assertLess(delete_index, gc_index)
+        self.assertIn("--prune=now", commands[gc_index])
 
     def test_failed_pending_ref_delete_is_best_effort(self) -> None:
         # Ref deletion is housekeeping of the proxy-private mirror: a failed

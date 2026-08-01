@@ -114,6 +114,9 @@ class AppManifest(AppPackage):
     # dedicated worker. The worker remains under the app frame's CSP; no
     # other app gets blob worker execution by default.
     capability_worker: bool = False
+    # Opt-in for product-like app surfaces that should cover the host shell.
+    # The host still renders an unoccludable exit control above the iframe.
+    host_fullscreen: bool = False
 
     @property
     def api_route(self) -> str:
@@ -135,6 +138,7 @@ class AppManifest(AppPackage):
             "ui": {
                 "iframe_src": f"{self.ui_route}index.html",
                 "sandbox": ["allow-scripts", "allow-forms", "allow-modals"],
+                "host_fullscreen": self.host_fullscreen,
             },
         }
 
@@ -332,10 +336,15 @@ def _load_manifest(path: Path) -> AppPackage:
     backend = _required_object(data, "backend", path)
     ui = _required_object(data, "ui", path)
     _require_exact_keys(backend, {"entrypoint"}, path, "backend")
-    _require_exact_keys(ui, {"path"}, path, "ui", optional={"capability_worker"})
+    _require_exact_keys(
+        ui, {"path"}, path, "ui", optional={"capability_worker", "host_fullscreen"}
+    )
     capability_worker = ui.get("capability_worker", False)
     if not isinstance(capability_worker, bool):
         raise AppError(f"{path}: ui.capability_worker must be a boolean")
+    host_fullscreen = ui.get("host_fullscreen", False)
+    if not isinstance(host_fullscreen, bool):
+        raise AppError(f"{path}: ui.host_fullscreen must be a boolean")
     backend_entrypoint = _required_child(package_dir, backend, "entrypoint", path)
     ui_dir = _required_child(package_dir, ui, "path", path)
     if not backend_entrypoint.is_file():
@@ -354,6 +363,7 @@ def _load_manifest(path: Path) -> AppPackage:
         agent_instructions=agent_instructions,
         agent_api=agent_api,
         capability_worker=capability_worker,
+        host_fullscreen=host_fullscreen,
     )
     _validate_postgres_identifier(app.db_schema, "database schema", path)
     _validate_postgres_identifier(app.db_role, "database role", path)

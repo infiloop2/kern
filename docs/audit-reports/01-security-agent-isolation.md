@@ -11,17 +11,19 @@ anything available to it on the host?
 
 ## Reviewed commits
 
-Latest reviewed commit: `f28b50e87b61`.
+Latest reviewed commit: `6151eea5abb61590684c4cf667ae6f619d705231`.
 
 | Commit | Reviewed by |
 | --- | --- |
-| `f28b50e87b61` | Claude Opus 4.8; GPT-5.5 |
+| `6151eea5abb61590684c4cf667ae6f619d705231` | gpt-5.6-sol; Claude Opus 5 |
 
 ## Findings
 
 | Finding | Severity | Found at | Found by | Description | Resolution |
 | --- | --- | --- | --- | --- | --- |
-| ISO-001 | Info | `f28b50e87b61` | GPT-5.5 | `docs/architecture/filesystem.md` described policy-update, proxy-state-read, and provider-pin-sync helpers that did not exist, overstating the privileged helper surface and misdirecting reviewers. Align the inventory with the actual fixed sudo-helper allowlist. | Fixed at `fa6dc4ab5bc` |
+| ISO-002 | Medium | `fa6dc4ab5bcd` | Claude Opus 5 | `read-claude-account --attest` is the only sudo helper that reads agent-writable state without demoting to `kern-agent`: the `--attest` branch `exec`s `python3` as root and reads `/mnt/kern-agent/agent-home/.claude/.credentials.json` through `json.loads(path.read_text())` with no `O_NOFOLLOW`, no `S_ISREG` re-check, and no size bound, and the expected-token comparison runs only after the whole file has been read. The agent owns that 0700 directory and the credential is not among the six `chattr +i` managed files, so it can replace the name with a symlink between the unprivileged read and the root read that follows seconds later in the same refresh. Pointing it at a FIFO blocks the root helper forever, and because a `kern-admin` parent cannot signal a root child, `subprocess.run`'s 20 s `ATTEST_HELPER_TIMEOUT_SECONDS` is inert and the admin thread hangs holding the Claude refresh lock; pointing it at `/dev/zero` allocates without bound outside `kern_agent.slice`; pointing it at any root-only path makes root open and drain it, which yields an existence-and-size oracle today and direct disclosure under any future change that surfaces the parsed value. Read the credential through a directory fd with `O_NOFOLLOW`/`O_NONBLOCK`, re-check `S_ISREG`, and cap the read, as the sibling `read-agent-file` helper already does — or pipe the token already read by the unprivileged pass into the attest helper on stdin. | Fixed — the root --attest branch reads .credentials.json through a directory-fd walk with O_NOFOLLOW + O_NONBLOCK, an fstat S_ISREG re-check, and a size cap (mirroring read-agent-file), so the symlink swap, FIFO hang, /dev/zero exhaustion, and root-only-path oracle no longer apply. |
+| ISO-001 | Info | `f28b50e87b61` | GPT-5.5 | `docs/architecture/filesystem.md` described policy-update, proxy-state-read, and provider-pin-sync helpers that did not exist, overstating the privileged helper surface and misdirecting reviewers. Align the inventory with the actual fixed sudo-helper allowlist. | Fixed — the filesystem and helper inventories now match the actual fixed sudo-helper allowlist. |
+| ISO-003 | Info | `fa6dc4ab5bcd` | Claude Opus 5 | `docs/architecture/privilege-boundaries.md` states the root-helper pattern as "one bounded action, usually by immediately demoting with `runuser -u <target-user>`" and lists `read-claude-account` only as an agent-file read with its outputs. Neither mentions that the helper's `--attest` branch runs its entire body as root. A reviewer working from the document would not know that a root-privileged read of agent-writable state exists at all, which is how ISO-002 stayed unexamined. Document the attest mode and its privilege level beside the demoting modes. | Fixed — privilege-boundaries.md now documents that read-claude-account --attest runs its whole body as root (the exception to the demote-immediately pattern) alongside the demoting read mode, and records the hardened-read posture. |
 
 ## Threat model
 
@@ -89,84 +91,143 @@ below names it.
 
 ## Collaborative review
 
-### `f28b50e87b61`
+### `6151eea5abb61590684c4cf667ae6f619d705231`
 
-Reviewed by: Claude Opus 4.8 (claude-opus-4-8); GPT-5.5 (gpt-5.5)
+Reviewed by: gpt-5.6-sol; Claude Opus 5
 
-Methodology: static code reading of the bootstrap, the six sudo helpers, the
-admin API's agent-facing routes, and the nftables/pg_hba configuration.
-Reasoned about filesystem modes and socket reachability from the bootstrap
-source; did not run a live host or write exploit code.
+Methodology: repository-level least-privilege audit from generated identities
+and bootstrap artifacts through all privileged helpers, runtime launchers,
+local listeners, database roles, durable paths, and agent-controlled inputs.
+Each boundary was traced in source and against deployment verification/tests.
+Privileged surfaces were read whole-file rather than by grep excerpt:
+`bootstrap.sh` in full, all seventeen files under `host/bootstrap/helpers/`,
+the four root implementations under `host/runtime/root_helpers/`, and the
+push-gate engine. The nftables output-chain ordering was re-derived by hand
+from `bootstrap.sh:950-997` plus the rendered app and preview blocks in
+`render.py`. Three library behaviours the findings depend on were confirmed
+by running them locally: that `json.loads(Path(x).read_text())` on a non-JSON
+file leaks no file content in its traceback, that `Path('/dev/zero').read_text()`
+allocates without bound, and that `subprocess.run(..., timeout=1)` returns
+only after the child exits when `Popen.kill()` raises `PermissionError`.
+No kernel exploit, live-host uid probe, or post-deploy inode/firewall
+inspection was performed, and no exploit was executed end to end.
 
 #### What was reviewed
 
-- `host/bootstrap/bootstrap.sh`: service-user creation (stable uids), durable
-  volume ownership/mode fixups, the `/etc/sudoers.d/kern-host` grant,
-  the nftables ruleset, Postgres `pg_hba.conf`/`postgresql.conf`, the proxy CA
-  key/tunnel-token/agent-home modes, and the snapd masking.
-- All six helpers in `host/bootstrap/helpers/`: `read-agent-file.sh`,
-  `run-codex-app-server.sh`, `run-claude-code.sh`, `read-codex-account-id.sh`,
-  `read-claude-account.sh`, `reboot-host.sh`.
-- Agent-controlled content flowing into the admin service: the
-  `read-agent-file` list/read routes and their argument handling
-  (`host/runtime/admin_api/service.py` `_run_agent_file_helper`, `_agent_file_path`),
-  and the `agent-processes` `/proc` reader.
-- Runtime launch/shutdown and the environment handed to agent processes;
-  database roles/grants and proxy state access; architecture claims about
-  privilege, filesystem, and admin-state boundaries.
-
-#### Coverage details
-
-- The agent (`kern-agent`) has no sudo entry; the sudoers grant is
-  scoped to `kern-admin` and six fixed absolute helper paths with no
-  wildcards. Every helper either demotes to `kern-agent` via `runuser`
-  before doing work (so an admin-to-agent read/launch is a downward crossing
-  that hands the agent nothing new) or is a fixed command (`systemctl
-  reboot`). Executed directly by the agent the helpers fail, because
-  `runuser`/`systemctl reboot` need privileges the agent lacks.
-- `read-agent-file.sh` opens each path component with `O_NOFOLLOW`/
-  `O_DIRECTORY` under a directory fd, rejects symlinks and `..`, opens files
-  `O_NONBLOCK` and re-checks `S_ISREG`, and caps listing/scan/read work — and
-  it runs as the agent, so even a confinement slip could only read what the
-  agent already can.
-- Secret files are unreadable by the agent: proxy CA key `600 kern-proxy`
-  under `proxy-state` (`700`), tunnel token `640 root:cloudflared` under
-  `/etc/kern` (`0750`), admin-home/admin-state/agent-home each `700`,
-  pgdata `700 postgres` under a `711 root` parent.
-- nftables drops the agent's traffic to every loopback port except the proxy
-  port (so the admin API on `127.0.0.1:7443` is unreachable) and drops all
-  non-root DNS including to the local stub; the agent has no direct egress.
-
-The one cross-user endpoint the agent can still reach at the socket layer is
-the Postgres Unix socket (nftables filters IP, not `AF_UNIX`). Admin-state
-confidentiality/integrity holds regardless, because `pg_hba.conf` grants roles
-only to `kern-admin`/`kern-proxy`/`postgres` and rejects everyone
-else under peer auth, so the agent cannot read or write any table. Socket
-*reachability* is not an isolation break, but it is a denial-of-service vector
-— see `REL-001` in [08-reliability.md](08-reliability.md).
+- `host/bootstrap/bootstrap.sh`, `render.py`, `verify_deploy.py`, both user-data
+  entry points, and constants/config: every fixed Unix uid/gid, operator and
+  service home, app identity, volume mode repair, sudoers entry, systemd unit/
+  slice, environment, nftables rule, PostgreSQL role and `pg_hba` line.
+- All fixed helpers in `host/bootstrap/helpers/` and their Python
+  implementations/callers: runtime launch and stop, provider/account reads,
+  auth clearing, file read/upload, upgrade check, AWS and GitHub credential/
+  repository operations, `.github` push approval, and reboot.
+- Codex, Claude Code, and Hermes launch, session persistence, thread scope,
+  shutdown, and account/auth paths across the Admin API, orchestrator,
+  root-owned harness/shim configuration, and transient
+  `kern_agent.slice` scopes.
+- Every local crossing reachable by an agent: proxy and preview ports,
+  Postgres, tools/network/app Unix sockets, the app-backend socket and app
+  ports, Admin API, DNS, systemd/cgroup attribution, plus nftables and
+  `SO_PEERCRED`/peer-auth checks.
+- Durable and temporary agent/admin/proxy/tool/app/provider/GitHub paths,
+  secret material, `/proc` readers, event/error data, Git refs and objects,
+  filenames/bytes, helper stdin/argv grammars, subprocess invocation, and
+  database schema/grant boundaries.
 
 #### Coverage and confidence
 
-- Sudoers/helpers (checklist 1): all six helpers and the single sudoers line
-  reviewed line by line; argument handling for `run-claude-code`'s `"$@"` is
-  safe because the process runs as the agent regardless of arguments.
-- File modes (checklist 2): traced every `chown`/`chmod`/`install` in
-  bootstrap for the CA key, tunnel token, pgdata, and the three service homes;
-  all deny `other`. Not independently verified against a running host's
-  actual inode modes.
-- Sockets (checklist 3): Postgres socket peer-auth reject confirmed in
-  `pg_hba.conf`; agent→admin-API and agent→DNS drops confirmed in the nftables
-  output chain; snapd masked. I did **not** enumerate every systemd/DBus
-  endpoint the agent uid can reach beyond noting the container runtime is
-  absent and snapd is masked — a dedicated review of the agent's reachable
-  `/run` sockets would strengthen this.
-- Data flows (checklist 4): agent file names/paths reach the admin service
-  only through `read-agent-file` (path confined) and are rendered safely in
-  the UI (see [03-security-admin-ui.md](03-security-admin-ui.md)).
-- Environment (checklist 5): run-helpers set explicit `HOME`/proxy vars via
-  `env`; sudo's `env_reset` plus `runuser` bound what the agent inherits, and
-  no admin secret is passed as an argument or environment value to the agent
-  runtimes.
-- Out of scope, untested: kernel/setuid local-privilege-escalation and EC2
-  metadata credential theft (the latter depends on IMDS configuration set at
-  instance launch, outside this layer).
+- Checklist 1: stable identities, generated app identities, ownership/modes,
+  services/slices, PATH shims, and the one fixed `kern-admin` sudo allowlist
+  were enumerated. The agent has no sudo grant; helper installation and config
+  paths are root-owned and not sourced from its workspace.
+- Checklist 2: all three runtimes demote to `kern-agent`, receive bounded
+  explicit environments and root-owned harness/MCP configuration, and run in
+  per-thread scopes under `kern_agent.slice`; stop/exit cleanup and cgroup
+  attribution were traced. No inherited privileged descriptor or secret
+  argument/environment was found.
+- Checklist 3: every current sudo helper and Python implementation was
+  reviewed for fixed grammar, path/ref confinement, symlink/open-fd handling,
+  environment, subprocess form, timeout, and cleanup. File helpers operate as
+  the agent over dirfd/`O_NOFOLLOW` paths; credential/GitHub helpers bind
+  operator-owned state and fixed repositories/refs before privileged work.
+  A second pass over the same surface enumerated which helpers run as root
+  after demotion and which do not, and found one exception: the `--attest`
+  branch of `read-claude-account` (ISO-002), whose privilege level is also
+  undocumented (ISO-003). Verified negatives from that pass:
+  `check-for-upgrade` ignores caller arguments entirely; `reboot-host` is a
+  fixed command; `clear-agent-auth` accepts exactly `codex|claude`;
+  `upload_agent_file.py` links the final name `follow_symlinks=False`;
+  `mint-github-app-token` keeps the App private key on `openssl`'s stdin and
+  puts only the public JWT input in an `O_EXCL` temp file; `read-aws-account`
+  takes its credential from the environment and never prints it; and
+  `approve-github-push` operates only inside the `kern-proxy`-owned quarantine
+  mirror the agent cannot traverse.
+- Checklist 1, additional verified negative: the six root-owned files inside
+  the agent's own 0700 directories would otherwise be unlinkable by the agent,
+  because a directory owner may remove entries regardless of file ownership and
+  no sticky bit is set. `chattr +i` (`bootstrap.sh:870-876`) is what actually
+  prevents that, and `verify_deploy.check_immutable_agent_files` enforces it.
+  Separately, every lifecycle mode terminates the instance and boots a fresh
+  one (`host/cli/lifecycle.py:253-306`), so no agent process is alive between
+  `sanitize_durable_paths` and `install_agent_home_files`; the symlink-
+  replacement window that layout suggests does not exist.
+- Checklist 2, additional verified negative: `subprocess.Popen` defaults to
+  `close_fds=True`, so no admin-side database or listening-socket descriptor is
+  inherited by an agent process, and `/proc/<pid>/environ` of a root sudo child
+  is not readable by `kern-agent`. One lower-confidence point: Claude/Codex
+  session ids returned by an agent-controlled process are re-passed as
+  `--resume <id>` argv with no format check. That is not an isolation break —
+  anything smuggled still executes with agent privileges — but a format check
+  would be cheap.
+- Checklists 4 and 6: secret and durable paths deny the agent by ownership and
+  parent traversal; PostgreSQL uses Unix peer auth with explicit named roles
+  and rejects the agent. Scoped service/app grants and schemas were compared
+  with migrations. Actual deployed inode modes, grants, WAL paths, and
+  post-upgrade repair were not sampled.
+- Checklists 5 and 8: the agent reaches only the proxy and reserved preview
+  ports over loopback plus three peer-authenticated service sockets.
+  nftables blocks direct DNS/egress, metadata/private destinations, Admin/API/
+  app ports, and other service uids from using preview listeners as egress.
+  PostgreSQL's world-connectable socket still admits no agent role; its
+  availability consequence remains REL-001 rather than an isolation break.
+- Checklist 7: messages/events, file metadata and bytes, process/cgroup data,
+  proxy/tool/app calls, Git data, and structured errors were traced into
+  privileged parsers and subprocesses. No shell/SQL/unit injection, unsafe
+  deserialization, stronger route, or secret-bearing error path was found.
+- Checklist 9: generated artifacts and verification code cover identities,
+  permissions, sockets, roles, units, and firewall rules at deploy. This
+  repository-level sweep did not repeat those probes on a freshly deployed,
+  upgraded, recovered, and reconfigured host. Confidence is high for generated
+  policy and source boundaries, and medium for live-state drift or distro/
+  systemd behavior not exercised here. This is the weakest area of the axis:
+  no live or deployed Kern host existed in either review environment, so actual
+  inode modes, a live `nft list ruleset`, real socket modes, and real process
+  trees were never sampled. Naming the gaps in the deploy-time suite that
+  substitutes for them: `verify_deploy.py` has no enforced probe for
+  agent→app-backend port, agent→preview-port-from-another-uid, or a non-agent
+  principal dialling the preview range, though the ruleset intends all three to
+  be dropped; and no test exercises `read-claude-account --attest` against a
+  non-regular credential file (`tests/test_deploy.py` asserts only the helper's
+  presence in the sudoers line and the install list).
+- Checklist 5, lower-confidence area: the systemd/D-Bus surface was reasoned
+  about but not tested. `/run/dbus/system_bus_socket` is world-connectable on
+  stock Ubuntu, and the conclusion that the agent can only read unit properties
+  (polkit denying `manage-units` to a session-less daemon user) rests on stock
+  policy files not read on a live host. `snapd` is masked and no container
+  runtime is installed. Unprivileged user/network namespaces do not help the
+  agent: a fresh netns has no route to the host's loopback, and `meta skuid`
+  still resolves to the outer `kern-agent` kuid.
+- Two in-scope observations that are recorded here rather than as findings,
+  because neither had a reachable trigger at this commit. (a) `hermes-stdin.py`'s
+  `--activity-nonce` sits in the argv of a process the agent itself runs, so
+  `/proc/self/cmdline` gives a shell-capable agent the nonce; the "the model
+  never sees the nonce" rationale in that file's docstring does not hold against
+  this axis's adversary, but the consequence — forged activity cards — is
+  axis 03's. (b) An agent turn running while an app backend's loopback port is
+  momentarily free (a `RestartSec=3` crash window, or the gap between
+  `start_services` and `finalize_deploy`) could bind that port and receive the
+  admin API's browser-bridge requests for that app; `SO_REUSEADDR` does not let
+  two live sockets share a port and every agent process is SIGKILLed with its
+  thread scope at turn end, so this needs a second bug that crashes an app
+  backend mid-turn.

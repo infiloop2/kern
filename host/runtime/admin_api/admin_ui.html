@@ -242,6 +242,7 @@
 
       <div id="panel-network" class="tab-panel" hidden>
         <div id="preset-info-popover" class="info-popover" role="dialog" hidden></div>
+        <p class="muted">This tab configures network access rules only — the internet destinations and managed integrations the agent may reach. Credentials and whether a tool is enabled are set in each integration's own controls.</p>
         <section class="network-group" aria-labelledby="ai-inference-heading">
           <h2 id="ai-inference-heading" class="network-group-heading">AI Inference</h2>
           <div id="ai-inference-integrations" class="integration-list"></div>
@@ -340,6 +341,7 @@
               <div class="field">
                 <label class="field-label" for="policy-domain">Domain</label>
                 <input id="policy-domain" placeholder="api.example.com or *.example.com">
+                <p class="muted">A wildcard like <code>*.example.com</code> matches sub-domains only; it does not include the apex <code>example.com</code>. Add the apex as its own rule if you need it.</p>
               </div>
               <div class="field">
                 <label class="field-label" for="policy-methods">HTTP methods</label>
@@ -349,6 +351,10 @@
                 <label class="field-label" for="policy-path-guards">Path guards (optional)</label>
                 <textarea id="policy-path-guards" class="compact" placeholder="optional path regex per line"></textarea>
               </div>
+              <label class="check-row">
+                <input id="policy-allow-websocket" type="checkbox">
+                Allow WebSocket connections to this domain
+              </label>
               <div class="actions">
                 <button data-action="add-domain-rule">Add domain rule</button>
               </div>
@@ -375,7 +381,7 @@
       <div id="panel-net-log" class="tab-panel" hidden>
         <section>
           <h2>Network audit log</h2>
-          <p class="muted">Every request the agent makes to the internet, and whether the proxy allowed it.</p>
+          <p class="muted">Proxied agent internet requests and whether the proxy allowed each one. Bundled tools reach the internet outside this proxy — their egress is recorded in the Tool audit log.</p>
           <div class="audit-toolbar">
             <button class="ghost sm" id="net-filter-denied" data-action="toggle-net-denied">Show denied</button>
             <span class="muted" id="net-page-summary"></span>

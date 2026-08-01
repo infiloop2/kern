@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from host.config import NetworkControls
+from host.network_integrations.base import AccountAttestor
 from host.network_integrations.bedrock import guard as bedrock_guard
 from host.network_integrations.claude import guard as claude_guard
 from host.network_integrations.custom import guard as custom_guard
@@ -23,11 +24,24 @@ from host.network_integrations.registry import managed_domain_owner
 
 HostAllowed = Callable[[Any, str], bool]
 RequestDenied = Callable[
-    [Any, str, str, str, str, list[tuple[str, str]], bytes], str | None
+    [Any, str, str, str, str, list[tuple[str, str]], bytes, AccountAttestor | None],
+    str | None,
 ]
 RewriteRequestHeaders = Callable[
     [Any, str, str, str, str, list[tuple[str, str]], bytes], list[tuple[str, str]]
 ]
+WebSocketAllowed = Callable[[Any, str], bool]
+WebSocketMessageDenied = Callable[[bytes], str | None]
+
+
+def _websocket_denied(_config: Any, _host: str) -> bool:
+    """Default for integrations that do not support WebSockets."""
+    return False
+
+
+def _websocket_message_allowed(_payload: bytes) -> str | None:
+    """Default content policy for an explicitly allowed WebSocket."""
+    return None
 
 
 @dataclass(frozen=True)
@@ -42,8 +56,8 @@ class IntegrationGuard:
     request_denied: RequestDenied
     rewrite_request_headers: RewriteRequestHeaders | None = None
     gate_response: Callable[[Any, str, str, str, bytes], tuple[bytes | None, str | None]] | None = None
-    ws_inspection_required: Callable[[Any, str], bool] | None = None
-    ws_message_denied: Callable[[bytes], str | None] | None = None
+    websocket_allowed: WebSocketAllowed = _websocket_denied
+    ws_message_denied: WebSocketMessageDenied = _websocket_message_allowed
     response_meter: Callable[[Any, str, str, str, str, list[tuple[str, str]], bytes], Any] | None = None
 
 
@@ -51,7 +65,7 @@ GUARDS: dict[str, IntegrationGuard] = {
     "openai": IntegrationGuard(
         host_allowed=openai_guard.host_allowed,
         request_denied=openai_guard.request_denied,
-        ws_inspection_required=openai_guard.ws_inspection_required,
+        websocket_allowed=openai_guard.websocket_allowed,
         ws_message_denied=openai_guard.ws_message_denied,
     ),
     "claude": IntegrationGuard(
@@ -81,6 +95,7 @@ GUARDS: dict[str, IntegrationGuard] = {
     "custom": IntegrationGuard(
         host_allowed=custom_guard.host_allowed,
         request_denied=custom_guard.request_denied,
+        websocket_allowed=custom_guard.websocket_allowed,
     ),
 }
 
@@ -103,11 +118,14 @@ def request_denied(
     query: str,
     headers: list[tuple[str, str]],
     body: bytes,
+    account_attestor: AccountAttestor | None = None,
 ) -> str | None:
     guard, config = _selection(controls, host)
     if not config.enabled:
         return "network_policy_denied"
-    return guard.request_denied(config, method, host, path, query, headers, body)
+    return guard.request_denied(
+        config, method, host, path, query, headers, body, account_attestor
+    )
 
 
 def gate_response(
@@ -155,8 +173,24 @@ def response_meter(
 
 def ws_message_guard(
     controls: NetworkControls, host: str
-) -> Callable[[bytes], str | None] | None:
+) -> WebSocketMessageDenied:
+    """The owning integration's message-content decision.
+
+    This is always callable, like ``request_denied``. OpenAI overrides it with
+    its external-URL/tool guard; an explicitly opted-in custom domain uses the
+    default allow decision while the proxy still validates the frame stream.
+    Disabled integrations receive the same no-op decision, although the
+    upgrade gate means the tunnel cannot be entered in that state.
+    """
     guard, config = _selection(controls, host)
-    if not config.enabled or guard.ws_inspection_required is None or guard.ws_message_denied is None:
-        return None
-    return guard.ws_message_denied if guard.ws_inspection_required(config, host) else None
+    return guard.ws_message_denied if config.enabled else _websocket_message_allowed
+
+
+def websocket_allowed(controls: NetworkControls, host: str) -> bool:
+    """Whether the owning integration intentionally grants an upgrade.
+
+    OpenAI's guarded hosts opt in as part of that integration. Custom domains
+    opt in per rule; every other managed integration remains HTTP-only.
+    """
+    guard, config = _selection(controls, host)
+    return bool(config.enabled and guard.websocket_allowed(config, host))

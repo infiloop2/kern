@@ -19,12 +19,12 @@ import json
 import re
 from urllib.parse import parse_qs, parse_qsl, urlencode
 
-from host.network_integrations.base import request_param_denial
+from host.network_integrations.base import AccountAttestor, request_param_denial
 from host.network_integrations.github import push_gate
 from host.network_integrations.github.manifest import GitHubIntegration
 from host.param_guard import find_denial
 from host.runtime.core.network_policy import normalized_path, route_allowed
-from host.runtime.core.state import enqueue_pending_push, read_proxy_github_token
+from host.runtime.core.state import count_pending_pushes, enqueue_pending_push, read_proxy_github_token
 
 # The domains where the proxy injects the active GitHub credential after the
 # repo guard has passed, keyed by the auth scheme each host expects: git
@@ -42,6 +42,7 @@ GITHUB_STRIP_ONLY_DOMAINS = {
     "results-receiver.actions.githubusercontent.com",
 }
 GITHUB_ACTIONS_BLOB_APEX = "blob.core.windows.net"
+GITHUB_ACTIONS_BLOB_ACCOUNT_RE = re.compile(r"productionresultssa(?:[0-9]|1[0-9])")
 GITHUB_ACTIONS_BLOB_ROUTE = (("GET", "HEAD"), ())
 AZURE_SAS_SIGNATURE_RE = re.compile(r"[A-Za-z0-9+/]{43}=")
 ROUTES = {
@@ -60,10 +61,11 @@ GUARDED_HOSTS = frozenset({"github.com", "api.github.com", "uploads.github.com"}
 
 def _is_github_actions_blob_host(host: str) -> bool:
     lowered = host.lower()
-    return (
-        lowered != GITHUB_ACTIONS_BLOB_APEX
-        and lowered.endswith(f".{GITHUB_ACTIONS_BLOB_APEX}")
-    )
+    suffix = f".{GITHUB_ACTIONS_BLOB_APEX}"
+    if not lowered.endswith(suffix):
+        return False
+    account = lowered[: -len(suffix)]
+    return GITHUB_ACTIONS_BLOB_ACCOUNT_RE.fullmatch(account) is not None
 
 
 def _route(host: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
@@ -130,8 +132,10 @@ def request_denied(
     query: str,
     headers: list[tuple[str, str]],
     body: bytes,
+    account_attestor: AccountAttestor | None = None,
 ) -> str | None:
     """Apply the GitHub-owned route and repository write guard."""
+    del account_attestor
     route = _route(host)
     if route is None or not route_allowed(method, path, query, *route):
         return "network_policy_denied"
@@ -229,20 +233,24 @@ def gate_response(
         return None, None
     owner, repo = parts[0].lower(), parts[1].removesuffix(".git").lower()
     try:
-        result = push_gate.inspect(owner, repo, body, read_proxy_github_token())
+        with push_gate.quarantine_lock():
+            # inspect() runs index-pack, so the count must be checked first.
+            # The existing proxy body cap bounds each of these ten pushes.
+            if count_pending_pushes() >= push_gate.PENDING_PUSH_LIMIT:
+                return None, "github_push_queue_full"
+            result = push_gate.inspect(owner, repo, body, read_proxy_github_token())
+            if not result.touches_github:
+                return None, None  # nothing under .github/ changed: forward the push
+            push_id = push_gate.new_push_id()
+            try:
+                response = result.hold_for_approval(push_id)
+                enqueue_pending_push(push_id, owner, repo, result.ref_updates, sorted(result.paths))
+            except Exception:
+                result.cleanup_pending(push_id)
+                raise
     except push_gate.GateError:
         return None, "github_push_gate_unavailable"
-    if not result.touches_github:
-        return None, None  # nothing under .github/ changed: forward the push
-    push_id = push_gate.new_push_id()
-    try:
-        response = result.hold_for_approval(push_id)
-        enqueue_pending_push(push_id, owner, repo, result.ref_updates, sorted(result.paths))
-    except Exception:  # noqa: BLE001 - any quarantine/enqueue failure fails closed
-        try:
-            result.cleanup_pending(push_id)
-        except Exception:
-            pass
+    except Exception:  # noqa: BLE001 - count, lock, quarantine, and enqueue fail closed
         return None, "github_push_gate_unavailable"
     return response, "github_push_queued_for_approval"
 

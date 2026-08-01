@@ -234,6 +234,7 @@ export const MANAGED_INTEGRATIONS = {
       "Repository administration, GraphQL, Git LFS uploads, and other write paths that could reach beyond the configured repositories stay denied.",
       "Keep approval for `.github` pushes enabled. Workflow changes can make GitHub Actions run arbitrary code with network access and repository credentials.",
       "Search and read query values pass the host parameter guard: values shaped like a secret, credential, or sensitive identifier are denied before the request is sent.",
+      "GitHub Actions Azure downloads are limited to GitHub's documented productionresultssa0 through productionresultssa19 storage accounts.",
     ],
     setupSteps: [
       { title: "Choose a credential mode", description: "Use a fine-grained personal access token for the simplest personal setup. Use a GitHub App when you want repository installation scope and short-lived minted tokens." },
@@ -282,6 +283,7 @@ export const MANAGED_INTEGRATIONS = {
     },
     controls: [
       "Parameter guard: agent-authored read query values (search q= and filters) are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Repository paths and revision identifiers are exempt.",
+      "Azure account allowlist: only GitHub's documented productionresultssa0 through productionresultssa19 Blob storage accounts are eligible.",
       "Disabling GitHub clears the write-repository list; the independently stored credential can remain staged or be cleared separately.",
     ],
     networkScope: [
@@ -294,7 +296,7 @@ export const MANAGED_INTEGRATIONS = {
       ["github-cloud.githubusercontent.com", "GET and HEAD for signed download URLs only"],
       ["release-assets.githubusercontent.com", "GET and HEAD for signed release-asset URLs only"],
       ["results-receiver.actions.githubusercontent.com", "GET and HEAD for GitHub Actions result downloads; provider-signed URL only"],
-      ["*.blob.core.windows.net", "GET and HEAD for GitHub Actions logs, summaries, artifacts, and caches; exactly one validated Azure SAS signature required"],
+      ["productionresultssa{0..19}.blob.core.windows.net", "GET and HEAD for GitHub Actions logs, summaries, artifacts, and caches; exactly one validated Azure SAS signature required"],
     ],
   },
   python_packages: {
@@ -303,7 +305,7 @@ export const MANAGED_INTEGRATIONS = {
     protections: [
       "Access is read-only and limited to the public PyPI index, package metadata, and distribution download paths.",
       "Package publishing and arbitrary requests to PyPI or the download host remain denied.",
-      "Requested package names and URL values pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent.",
+      "Index and metadata reads on pypi.org pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent. The bulk download host files.pythonhosted.org is exempt — its distribution download paths are NOT scanned by the parameter guard.",
     ],
     setupSteps: [
       { title: "Enable Python packages", description: "Choose Enable in Internet Access and Tools. pip and compatible package clients can then resolve and download public distributions." },
@@ -347,7 +349,7 @@ export const MANAGED_INTEGRATIONS = {
       ],
     },
     controls: [
-      "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent.",
+      "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Distribution downloads from files.pythonhosted.org are exempt and are not scanned.",
     ],
     networkScope: [
       ["pypi.org", "GET and HEAD only under /simple and /pypi/<package>/json"],
@@ -360,7 +362,7 @@ export const MANAGED_INTEGRATIONS = {
     protections: [
       "Registry and Node.js distribution access is read-only; npm publishing and arbitrary Node.js website paths remain denied.",
       "Only public registry data and release files are available through this integration.",
-      "Requested package names and URL values pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent.",
+      "Requested package names and URL values pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent. The bulk paths are exempt — registry.npmjs.org carries no path guards, and every npm tarball path (any path containing `/-/`) is NOT scanned by the parameter guard.",
     ],
     setupSteps: [
       { title: "Enable NPM Packages", description: "Choose Enable in Internet Access and Tools. npm and compatible clients can then resolve and download public packages and Node.js distributions." },
@@ -405,7 +407,7 @@ export const MANAGED_INTEGRATIONS = {
       ],
     },
     controls: [
-      "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent.",
+      "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. registry.npmjs.org and npm tarball paths (any path containing /-/) are exempt and are not scanned.",
     ],
     networkScope: [
       ["registry.npmjs.org", "GET and HEAD only"],

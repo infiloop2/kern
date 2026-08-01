@@ -10,17 +10,22 @@ allow?
 
 ## Reviewed commits
 
-Latest reviewed commit: `f28b50e87b61`.
+Latest reviewed commit: `6151eea5abb61590684c4cf667ae6f619d705231`.
 
 | Commit | Reviewed by |
 | --- | --- |
-| `f28b50e87b61` | Claude Opus 4.8; GPT-5.5 |
+| `6151eea5abb61590684c4cf667ae6f619d705231` | gpt-5.6-sol; Claude Opus 5 |
 
 ## Findings
 
 | Finding | Severity | Found at | Found by | Description | Resolution |
 | --- | --- | --- | --- | --- | --- |
-| NET-001 | High | `f28b50e87b61` | Claude Opus 4.8 | Managed-provider account pins were derived repeatedly from agent-writable provider credentials. A malicious agent could replace those credentials with an attacker-controlled account, wait for the pin refresh, and then exfiltrate through an otherwise allowed provider domain. Anchor pins to operator-approved account state and attest refreshed credentials against that anchor. | Fixed at `fa6dc4ab5bc` |
+| NET-004 | Critical | `b88eee7224e7` | Claude Opus 5 | The proxy decides a connection is a WebSocket from the client's own request headers — `is_websocket = any(key.lower() == "upgrade" and value.lower() == "websocket" ...)` (`host/runtime/network_proxy/service.py:230`) — and never parses the upstream response to confirm a `101 Switching Protocols`. On that branch it drops the `Connection: close` single-request pin that every other request gets (`:459,464-465`), pushes whatever the client pipelined behind the request head straight to the upstream (`:280-286`, `initial_client_bytes=reader.drain()`), and enters `tunnel_websocket`, which relays bytes in both directions unmodified whenever `integrations.ws_message_guard` returns `None` (`:599-620`). That guard is `None` for every integration except OpenAI's two hosted domains, so one policy-passing request carrying `Upgrade: websocket` plus `Connection: keep-alive` — which an ordinary HTTP/1.1 server ignores while keeping the connection open — converts the tunnel to any host allowed by the custom, Claude, Bedrock, GitHub, PyPI, or npm integration into a plain TCP pipe. Every subsequent request on that connection escapes the method allowlist, path guards, body guards, the outbound parameter guard, and the `network_events` log. Parse the upstream response after forwarding a handshake and fall back to the ordinary single-request path unless it is `101`, and never forward `reader.drain()` bytes without the message guard. | Fixed — WebSockets now require explicit integration opt-in, pass normal request guards, verify a final upstream `101`, and always use the frame/message guard. |
+| NET-001 | High | `f28b50e87b61` | Claude Opus 4.8 | Managed-provider account pins were derived repeatedly from agent-writable provider credentials. A malicious agent could replace those credentials with an attacker-controlled account, wait for the pin refresh, and then exfiltrate through an otherwise allowed provider domain. Anchor pins to operator-approved account state and attest refreshed credentials against that anchor. | Fixed — provider pins derive from operator-approved account state and refreshed credentials are attested against it. |
+| NET-002 | High | `98f423bbfef4` | gpt-5.6-sol | The OpenAI and Claude body guards collapse duplicate request headers with last-value-wins while the proxy forwards every original header instance. A compressed request can therefore send `Content-Encoding: gzip` followed by `Content-Encoding: identity`: the guard inspects the still-compressed bytes as non-JSON and allows them, while an upstream that combines duplicate fields according to HTTP semantics can decode the gzip body and execute the denied hosted web/code/MCP declaration. Direct guard calls reproduced `None` for this duplicate form while each canonical gzip request was denied. Reject duplicate semantic headers and normalize one unambiguous content encoding/type before both inspection and forwarding. | Fixed — duplicate single-valued semantic headers are rejected before inspection and forwarding. |
+| NET-003 | High | `dcaa9c162717` | gpt-5.6-sol | Enabling GitHub makes every subdomain of `blob.core.windows.net` eligible for GET/HEAD when the query contains one syntactically Base64-shaped 44-character `sig`; the guard cannot establish that the Azure account or SAS URL came from GitHub. An agent with a SAS for an attacker-controlled Azure account can therefore use `attackercontrolledacct.blob.core.windows.net` as arbitrary third-party ingress/egress under a policy described as limited to GitHub Actions downloads. Bind Azure downloads to a short-lived capability learned from a validated GitHub response, or require an explicit operator-owned domain rule instead of accepting signature shape alone. | Fixed — Azure Blob access is limited to GitHub's documented `productionresultssa0` through `productionresultssa19` storage accounts. |
+| NET-005 | Medium | `b88eee7224e7` | Claude Opus 5 | `_serve_tls_request` derives its policy inputs with `urllib.parse.urlsplit(target)` and keeps only `parsed.path` and `parsed.query` (`host/runtime/network_proxy/service.py:222-227`), but forwards the original unmodified `target` string upstream (`:280`). `urlsplit` moves everything after a `#` into `fragment` and everything between a leading `//` and the next `/` into `netloc`, so bytes an agent places in either position are invisible to the path guards, invisible to the shared outbound parameter guard (`host/network_integrations/base.py:192-220`, reconstructed solely from `path` and `query`), and absent from the `network_events` row (`:251`) — yet they are transmitted verbatim in the request line. An exact guard such as `^/health$` therefore stops constraining what the origin resolves: the guard sees `/health` while the wire carries `/health#/../../admin`, and any origin or CDN that strips the fragment before collapsing dot segments (nginx and Apache both normalize dot segments) resolves a path the operator's rule forbade. This is a guard-fidelity and audit-record defect rather than a new exfiltration channel — arbitrary request headers on the same allowed request are already forwarded verbatim and equally unlogged. Validate the request-target as strict origin-form, rejecting any target containing `#` or beginning with `//`, or forward the reconstructed `path?query` instead of the raw target. | Fixed — the proxy rejects any TLS request-target that is not strict origin-form (no '//' prefix, no '#'), so the path guards, the outbound parameter guard, and the network_events row see exactly the bytes forwarded upstream. |
+| NET-006 | Medium | `98f423bbfef4` | Claude Opus 5 | For `api.openai.com` and `chatgpt.com` the guard requires a `chatgpt-account-id` header matching the pinned account (`host/network_integrations/openai/guard.py:64-77`), but nothing in the proxy examines, strips, or replaces `Authorization` on those hosts: only GitHub and Bedrock register `rewrite_request_headers` (`host/network_integrations/runtime.py:50-85`), and `send_http_request` strips only `Proxy-Authorization`/`Proxy-Connection` (`host/runtime/network_proxy/service.py:450-451`). The proxy therefore establishes no local binding between the pinned account and the credential the request actually authenticates with: an agent holding any other OpenAI credential can present it in `Authorization` while echoing the operator's pinned account id. The integration's own denial guidance states "Only the configured OpenAI account may be used" (`openai/manifest.py:44-47`), which the code does not enforce; the Claude integration avoids the asymmetry by hashing and pinning the bearer credential itself (`claude/guard.py:68-83`). Whether a foreign credential is accepted alongside a mismatched account id is upstream behaviour that cannot be established from this repository — plausible for a platform `sk-` key, for which the header is not an authentication input, and unlikely for a ChatGPT OAuth token — so the defect is recorded as the missing local binding. Pin the credential rather than the routing header, or strip and re-inject it proxy-side as the GitHub guard does. | Fixed — the OpenAI account pin now binds the Authorization bearer to the pinned account by reading the token's own chatgpt_account_id JWT claim locally (no signature check needed); a foreign, absent, duplicated, non-Bearer, or non-JWT credential fails closed with openai_token_account_mismatch. |
 
 ## Threat model
 
@@ -107,98 +112,98 @@ below names it.
 
 ## Collaborative review
 
-### `f28b50e87b61`
+### `6151eea5abb61590684c4cf667ae6f619d705231`
 
-Reviewed by: Claude Opus 4.8 (claude-opus-4-8); GPT-5.5 (gpt-5.5)
+Reviewed by: gpt-5.6-sol; Claude Opus 5
 
-Methodology: static code reading of the full proxy request lifecycle and the
-policy-matching/provider-guard code; one empirical check of Python's
-`ipaddress.is_global` behavior for IPv4-mapped IPv6 on the target interpreter.
-No live proxy run or PoC traffic.
+Methodology: repository-level, pre-DNS-to-upstream trace of the proxy protocol,
+typed integration registry, policy matcher, all integration guards/hooks,
+credential state, WebSocket inspection, and nftables backstop. Parser and
+guard edge cases were checked with focused unit tests and direct pure-function
+calls; no live internet destination, deployed firewall, or extended fuzzing
+was used. A second pass read `network_proxy/service.py` end to end as a single
+connection lifecycle rather than per-guard, which is what surfaced the two
+defects that live in the gap between what the policy layer inspects and what
+the socket layer actually transmits (NET-004, NET-005), and traced each guard's
+pinned value back to what it binds rather than only how it compares (NET-006).
+Guard behaviour was confirmed by calling `request_denied` directly with
+constructed header sets, including the duplicate `Content-Encoding` form that
+independently reproduced NET-002.
 
 #### What was reviewed
 
-- `host/runtime/network_proxy/service.py`: `do_CONNECT` + `_serve_tls_request` (TLS
-  interposition), `_proxy_http` (plain HTTP/WS, removed since — the proxy is
-  now HTTPS-only), `connect_public` (SSRF vet),
-  `host_header_denial`/target-vs-Host consistency, `read_request_head`,
-  `read_body`/`read_chunked_body` (smuggling, size caps), `send_http_request`
-  (single-request pinning, header stripping), the WebSocket frame guard, and
-  the `BoundedThreadingHTTPServer` connection cap.
-- `host/runtime/core/network_policy.py`: `domain_matches`/`find_domain_rule`
-  (wildcard precedence, apex exclusion), `decide_http_request` +
-  `_normalized_path` (method/path-guard semantics), `openai_request_denied`,
-  `anthropic_request_denied`, `_live_web_search_denial`, `_iter_tool_objects`,
-  and the bounded gzip/zlib/zstd/brotli decoders.
-- `host/config.py` `parse_network_controls`/`expand_network_controls`: method
-  uppercasing, domain validation, managed-domain expansion.
-- Policy and provider-pin storage, proxy database grants, network-event
-  writes, the nftables output chain as the independent backstop, and related
-  parser/policy/provider-guard tests.
-
-#### Coverage details
-
-- **SSRF / DNS rebinding / mapped-IPv6 (verified negative).** `connect_public`
-  resolves once, requires *every* resolved address to be `is_global`, then
-  connects to the vetted address rather than re-resolving. I specifically
-  tested the IPv4-mapped-IPv6 bypass (a malicious `AAAA` of
-  `::ffff:169.254.169.254` under a wildcard domain) on Python 3.10.12, the
-  Ubuntu 22.04 interpreter the proxy runs under: `is_global` returns `False`
-  for `::ffff:169.254.169.254`, `::ffff:127.0.0.1`, and `::ffff:10.0.0.1`, so
-  the mapped-address SSRF does not apply here. (This would regress on some
-  older 3.9.x/early-3.10 point releases, so it is worth re-checking if the base
-  image's Python changes.)
-- **Request smuggling / Host confusion.** CONNECT pins one `host` used for the
-  policy check, the minted cert, `connect_public`, the upstream SNI, and the
-  inner-request Host/target check; absolute-form and Host-header plain
-  requests must agree via `host_header_denial`; `send_http_request` strips
-  `Content-Length`/`Transfer-Encoding` and re-emits a single `Content-Length`
-  with forced `Connection: close`, so no CL.TE/TE.CL desync reaches upstream.
-- **Upstream TLS.** `ssl.create_default_context().wrap_socket(server_hostname=host)`
-  verifies the upstream certificate chain and hostname against the CONNECT
-  target, so a spoofed/look-alike upstream fails the handshake.
-- **Path guards.** `_normalized_path` percent-decodes and `posixpath.normpath`
-  s before `re.fullmatch`, closing `../` and `%2e%2e`/`%2f` traversal against
-  a restrictive guard; the dangerous direction (guard allows but origin
-  resolves elsewhere) did not materialize.
-- **Provider guards.** The *matching logic* is sound — OpenAI account-id header
-  required-and-matched; live web-search denied across gzip/zlib/zstd/brotli
-  (bounded, fail-closed decode) and by byte-marker anti-evasion; Anthropic
-  bearer-hash pin with a narrow pre-pin GET allowlist; all fail closed when the
-  pin/account is unavailable. But the *pinned value itself* comes from
-  agent-writable credential files, which is NET-001: the guard confines the header
-  to whatever account the agent is logged into, and the agent controls that, so
-  it does not confine traffic to an operator-approved account.
-- **Fail-closed states.** Missing policy row, unparseable policy, and database
-  outage all deny; a decision that cannot be logged fails that request.
+- `host/runtime/network_proxy/service.py`: CONNECT/TLS interposition, request
+  head/body/chunk parsing, host/authority agreement, body and connection
+  bounds, deny ordering, public-address resolution, upstream TLS/SNI,
+  credential/header rewrites, single-request forwarding, response metering,
+  WebSocket frame inspection, and bounded handler admission.
+- The integration registry/manifests and every guard for OpenAI, Claude,
+  Bedrock, GitHub, Python packages, npm packages, and custom domains,
+  including GitHub credential injection/push quarantine and the Azure Actions
+  download exception.
+- `host/config.py`, `host/runtime/core/network_policy.py`, the shared outbound
+  parameter guard, provider/GitHub credential and account anchors, policy/
+  decision persistence, database grants, and Admin UI typed controls.
+- Bootstrap nftables rules and deploy verification, plus parser, policy,
+  provider, GitHub, package, parameter-guard, proxy, and migration tests.
+  Direct calls reproduced both duplicate-encoding bypasses and an allowed
+  attacker-controlled Azure Blob account without making network traffic.
 
 #### Coverage and confidence
 
-- Checklist 1–3 (parsing/matching/deny paths): covered by reading; the
-  matching precedence (exact > longest wildcard) and empty-`allow_http_methods`
-  handling were traced against `host_allowed`/`decide_http_request`.
-- Checklist 4 (upstream): SSRF vet reproduced for the mapped-IPv6 case only;
-  IPv6/dual-stack ordering and redirect handling reviewed by reading (the
-  proxy does not follow redirects itself — it forwards the upstream response
-  bytes, and each new agent request is policy-checked).
-- Checklist 5–6 (WebSockets, provider guards): the client-frame guard (masking
-  required, RSV/extension denied, fragmentation, per-message size cap, opaque
-  tunnel only when inspection is not required) and both provider guards read in
-  full. Tracing the *provenance* of the account pin (not just its matching
-  logic) through `orchestrator.refresh_runtime_status` →
-  `read-codex-account-id.sh`/`read-claude-account.sh` → `proxy_provider_pins`
-  is what surfaced NET-001; an earlier draft of this report wrongly concluded the
-  provider guards hold, because I checked the comparison but not the source of
-  the pinned value.
-- Checklist 7 (overload): no policy path fails *open* under load; the closest
-  reliability concern is unbounded proxy memory (64 handlers × 128 MiB buffered
-  bodies, proxy not in a memory-limited cgroup) and unbounded per-host cert
-  minting under wildcards — both reported as `REL-005` and `REL-002` in
-  [08-reliability.md](08-reliability.md), not as policy bypasses.
-- Checklist 8 (nftables backstop): output-chain uid rules and non-root DNS drop
-  confirmed in bootstrap.
-- Low-confidence / not done: I did not drive live traffic or fuzz the header/
-  chunk parser, and I did not exhaustively test exotic percent-encoding vs a
-  real origin server's path resolution. A running-proxy fuzz of
-  `read_request_head`/`read_chunked_body` and the path-guard normalizer would
-  raise confidence most.
+- Checklist 1: manifest ids, denial codes, apex ownership/disjointness,
+  strict config parsing, disabled integration behavior, and custom-versus-
+  managed precedence were enumerated. NET-003 is the one over-broad owned
+  surface: signature syntax does not establish GitHub provenance.
+- Checklists 2–3: CONNECT/Host/SNI/destination agreement, HTTPS/443-only
+  routing, absolute/origin forms, header/body grammar, CL/TE handling, path
+  normalization, wildcard/apex precedence, methods, queries, encodings, and
+  parameter guards were traced. CL/TE is normalized before forwarding, but
+  duplicate content semantics are not, yielding NET-002. The request-target
+  itself is likewise not normalized before forwarding: policy, the parameter
+  guard, and the event log all read the `urlsplit`-parsed path and query while
+  the raw target goes on the wire, so fragment and `//authority` bytes are
+  inspected by nothing (NET-005). Worth recording as a bounding fact for that
+  finding: arbitrary agent-chosen request headers on the same allowed request
+  are also forwarded verbatim and absent from `network_events`
+  (`send_http_request` strips only six hop-by-hop names), so NET-005 is a
+  guard-fidelity defect, not a new egress capability.
+- Checklists 4–5: policy/credential/database/logging failures deny before
+  certificate/DNS/upstream work; all resolved addresses must be public and
+  the chosen address is pinned through verified TLS. The proxy does not
+  follow redirects. Mixed-address, mapped/private ranges, resolution and
+  certificate failures were covered in code/tests, not against live DNS.
+- Checklists 6–7: every provider/package/GitHub guard and supported body
+  decoder was reviewed, including account anchors, server tools, Bedrock
+  signing/metering, repo-scoped writes, `.github` approval, and package-name/
+  download restrictions. Canonical gzip and malformed/oversized bodies fail
+  closed; duplicate content headers are NET-002.
+- Checklist 8: WebSocket handshake headers, extension removal, masking, RSV,
+  fragmentation, control frames, message caps, close behavior, and which
+  integrations require message inspection were traced. Opaque tunneling
+  begins where no message-dependent guard applies — and a second pass
+  established that entering that mode is decided by the *client's* request
+  headers alone, with the upstream's `101` never checked, which is NET-004 and
+  the most serious defect on this axis. `ws_message_guard` returns `None` for
+  every integration except OpenAI's two hosted domains, so the opaque path is
+  reachable on custom, Claude, Bedrock, GitHub, PyPI, and npm hosts. The
+  frame-level guard itself (masking required, RSV/extensions denied,
+  fragmentation and per-message caps) is sound where it runs; the defect is
+  which connections reach it.
+- Checklist 9: provider, Bedrock, and GitHub secrets are stripped/injected or
+  re-signed after policy approval and are not returned to the agent.
+  Operator-anchored provider pins now keep NET-001 fixed; mutable credential/
+  push-gate state was included in race and failure review. Tracing what each
+  pinned value binds — rather than only that it is compared correctly —
+  distinguishes the two provider guards: Claude hashes and pins the bearer
+  credential itself, while OpenAI pins only the advisory `chatgpt-account-id`
+  routing header and leaves `Authorization` untouched on those hosts
+  (NET-006). GitHub and Bedrock are the only integrations registering
+  `rewrite_request_headers`.
+- Checklists 10–11: connection/body caps, slow reads, cert/quarantine errors,
+  policy replacement, restart fail-closed behavior, uid-scoped DNS/egress,
+  direct-loopback denial, and preview-port rules were reviewed. Durable and
+  aggregate resource failures are recorded under axis 08. No live proxy fuzz,
+  load test, DNS-rebinding service, or deployed nftables probe was run, so
+  confidence is high for deterministic guard logic and medium for unusual
+  upstream/parser interpretations beyond the reproduced duplicate-header case.

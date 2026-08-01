@@ -23,6 +23,12 @@ HostApi = Callable[[str, str, dict[str, list[str]], Any], dict[str, Any]]
 APP_API_RE = re.compile(r"^/v1/apps/([a-z][a-z0-9]*(?:_[a-z0-9]+)*)/api(?:/(.*))?$")
 APP_SMOKE_ROOT = REPO_ROOT / "tests" / "apps"
 _SMOKE_MODULES: dict[str, ModuleType | None] = {}
+_DEMO_MODE = False
+
+
+def set_demo_mode(enabled: bool) -> None:
+    global _DEMO_MODE
+    _DEMO_MODE = enabled
 
 
 def route_app_api(
@@ -59,5 +65,8 @@ def _load_app_smoke(app_id: str) -> ModuleType | None:
         raise RuntimeError(f"cannot load app smoke module: {smoke_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    configure = getattr(module, "configure_mock", None)
+    if configure is not None:
+        configure(demo_mode=_DEMO_MODE)
     _SMOKE_MODULES[app_id] = module
     return module

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from host.network_integrations.base import ManagedIntegration, request_param_denial
+from host.network_integrations.base import AccountAttestor, ManagedIntegration, request_param_denial
 from host.runtime.core.network_policy import route_allowed
 
 ROUTES = {
@@ -24,8 +24,9 @@ def request_denied(
     query: str,
     headers: list[tuple[str, str]],
     body: bytes,
+    account_attestor: AccountAttestor | None = None,
 ) -> str | None:
-    del config, headers, body
+    del config, headers, body, account_attestor
     route = ROUTES.get(host.lower())
     if not route or not route_allowed(method, path, query, *route):
         return "network_policy_denied"

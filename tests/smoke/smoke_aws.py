@@ -1232,69 +1232,54 @@ class AwsSmoke:
             raise AssertionError(f"App Builder returned invalid created app: {created}")
         app_id = created["thread_id"]
         encoded_id = quote(app_id, safe="")
-        try:
-            state = self._api("GET", f"{base}/apps/{encoded_id}/state").get("app")
-            if not isinstance(state, dict) or state.get("revision") != 0:
-                raise AssertionError(f"new App Builder state is invalid: {state}")
-            if any(state.get(field) for field in ("html", "css", "javascript")):
-                raise AssertionError(f"new App Builder UI should be empty: {state}")
-            if state.get("data") != {}:
-                raise AssertionError(f"new App Builder data should be empty: {state}")
+        state = self._api("GET", f"{base}/apps/{encoded_id}/state").get("app")
+        if (
+            not isinstance(state, dict)
+            or state.get("ui_revision") != 0
+            or state.get("data_version") != 0
+        ):
+            raise AssertionError(f"new App Builder state is invalid: {state}")
+        if any(state.get(field) for field in ("html", "css", "javascript")):
+            raise AssertionError(f"new App Builder UI should be empty: {state}")
+        if state.get("data") != {}:
+            raise AssertionError(f"new App Builder data should be empty: {state}")
 
-            conversation = self._api(
-                "GET", f"{base}/apps/{encoded_id}/conversation"
+        conversation = self._api(
+            "GET", f"{base}/apps/{encoded_id}/conversation"
+        )
+        if conversation != {"session": None, "status": "idle"}:
+            raise AssertionError(
+                f"new App Builder conversation is invalid: {conversation}"
             )
-            if conversation != {"session": None, "status": "idle"}:
-                raise AssertionError(
-                    f"new App Builder conversation is invalid: {conversation}"
-                )
-            events = self._api(
-                "GET", f"{base}/apps/{encoded_id}/conversation/events"
-            ).get("events")
-            if events != []:
-                raise AssertionError(
-                    f"new App Builder conversation should be empty: {events}"
-                )
+        events = self._api(
+            "GET", f"{base}/apps/{encoded_id}/conversation/events"
+        ).get("events")
+        if events != []:
+            raise AssertionError(
+                f"new App Builder conversation should be empty: {events}"
+            )
 
-            renamed = self._api(
-                "PUT",
-                f"{base}/apps/{encoded_id}/name",
-                {"name": "Provider-free smoke app"},
-            ).get("app")
-            if not isinstance(renamed, dict) or renamed.get("name") != "Provider-free smoke app":
-                raise AssertionError(f"App Builder rename failed: {renamed}")
+        renamed = self._api(
+            "PUT",
+            f"{base}/apps/{encoded_id}/name",
+            {"name": "Provider-free smoke app"},
+        ).get("app")
+        if not isinstance(renamed, dict) or renamed.get("name") != "Provider-free smoke app":
+            raise AssertionError(f"App Builder rename failed: {renamed}")
 
-            listed = self._api("GET", f"{base}/apps").get("apps")
-            if not any(
-                isinstance(app, dict)
-                and app.get("thread_id") == app_id
-                and app.get("name") == "Provider-free smoke app"
-                for app in (listed or [])
-            ):
-                raise AssertionError(f"App Builder list omitted renamed app: {listed}")
-
-            archived = self._api(
-                "POST", f"{base}/apps/{encoded_id}/archive"
-            ).get("app")
-            if not isinstance(archived, dict) or archived.get("archived") is not True:
-                raise AssertionError(f"App Builder archive failed: {archived}")
-            archived_list = self._api(
-                "GET", f"{base}/apps?archived=true"
-            ).get("apps")
-            if not any(
-                isinstance(app, dict) and app.get("thread_id") == app_id
-                for app in (archived_list or [])
-            ):
-                raise AssertionError(
-                    f"App Builder archived list omitted app: {archived_list}"
-                )
-        finally:
-            # Keep smoke repeatable if an assertion fails after app creation.
-            self._api_status("POST", f"{base}/apps/{encoded_id}/archive")
+        listed = self._api("GET", f"{base}/apps").get("apps")
+        if not any(
+            isinstance(app, dict)
+            and app.get("thread_id") == app_id
+            and app.get("name") == "Provider-free smoke app"
+            and "archived" not in app
+            for app in (listed or [])
+        ):
+            raise AssertionError(f"App Builder list omitted renamed app: {listed}")
 
         self._ok(
             "Agent Chat options/history and App Builder create, state, rename, "
-            "list, archive, and history paths worked without inference"
+            "persistent list, and history paths worked without inference"
         )
 
     def check_policy_validation_and_concurrency(self) -> None:
@@ -2179,14 +2164,14 @@ class AwsSmoke:
 
         claude_url = "https://api.anthropic.com/v1/messages"
         claude_payload = '{"model":"claude-sonnet-4-5","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}'
-        print(f"  POST {claude_url} before Claude account token hash is known", flush=True)
+        print(f"  POST {claude_url} before Claude account identity is known", flush=True)
         claude_response = self._ssh_code(
             f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
             f"curl -s --max-time 20 -X POST -H 'Content-Type: application/json' "
             f"--data {shlex.quote(claude_payload)} {shlex.quote(claude_url)}"
         )
         print(f"  -> {claude_response[:200]!r}", flush=True)
-        if "anthropic_token_unavailable" not in claude_response:
+        if "anthropic_account_unavailable" not in claude_response:
             raise AssertionError(f"Anthropic API request did not fail closed before login; proxy returned {claude_response!r}")
 
         def post_bedrock(
@@ -2273,10 +2258,10 @@ class AwsSmoke:
         if not any(
             event["host"] == "api.anthropic.com"
             and event["decision"] == "denied"
-            and event.get("reason_code") == "anthropic_token_unavailable"
+            and event.get("reason_code") == "anthropic_account_unavailable"
             for event in events
         ):
-            raise AssertionError("no token-missing api.anthropic.com network denial was logged")
+            raise AssertionError("no account-missing api.anthropic.com network denial was logged")
         if not any(
             event["host"] == "api.anthropic.com"
             and event["path"] == "/api/hello"
@@ -3543,12 +3528,10 @@ class AwsSmoke:
                 raise AssertionError(f"OpenAI proxy pin does not match admin account anchor: {snapshot}")
             if claude.get("pin_account_id") != claude.get("admin_account_id"):
                 raise AssertionError(f"Claude proxy account pin does not match admin account anchor: {snapshot}")
-            if claude.get("pin_token_sha256") != claude.get("admin_token_sha256"):
-                raise AssertionError(f"Claude proxy token pin does not match admin account anchor: {snapshot}")
         else:
-            if openai.get("pin_account_id") or openai.get("pin_token_sha256"):
+            if openai.get("pin_account_id"):
                 raise AssertionError(f"OpenAI live proxy pin survived provider deactivation: {snapshot}")
-            if claude.get("pin_account_id") or claude.get("pin_token_sha256"):
+            if claude.get("pin_account_id"):
                 raise AssertionError(f"Claude live proxy pin survived provider deactivation: {snapshot}")
 
     def _provider_account_pin_snapshot(self) -> dict:
@@ -3558,8 +3541,7 @@ SELECT jsonb_object_agg(
     jsonb_build_object(
         'admin_account_id', provider_accounts.account_id,
         'admin_token_sha256', provider_accounts.metadata->>'access_token_sha256',
-        'pin_account_id', proxy_provider_pins.account_id,
-        'pin_token_sha256', proxy_provider_pins.access_token_sha256
+        'pin_account_id', proxy_provider_pins.account_id
     )
 )::text
 FROM (VALUES ('openai'), ('claude')) AS providers(provider)

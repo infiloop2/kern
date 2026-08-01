@@ -225,7 +225,8 @@ and `.github` approval toggle:
   "raw.githubusercontent.com": {"allow_http_methods": ["GET", "HEAD"]},
   "objects.githubusercontent.com": {"allow_http_methods": ["GET", "HEAD"]},
   "release-assets.githubusercontent.com": {"allow_http_methods": ["GET", "HEAD"]},
-  "github-cloud.githubusercontent.com": {"allow_http_methods": ["GET", "HEAD"]}
+  "github-cloud.githubusercontent.com": {"allow_http_methods": ["GET", "HEAD"]},
+  "productionresultssa{0..19}.blob.core.windows.net": {"allow_http_methods": ["GET", "HEAD"]}
 }
 ```
 
@@ -236,6 +237,9 @@ of any repository, and the signed-URL domains have no owner/repo in their
 presigned S3 paths anyway — access control there is the signed URL itself,
 and downloads-only closes the other direction (a signed URL can also
 authorize an upload).
+
+GitHub Actions Azure Blob downloads are limited to GitHub's documented
+`productionresultssa0` through `productionresultssa19` storage accounts.
 
 ### Access Enforcement
 
@@ -317,12 +321,19 @@ directory, fetched with the working token) and uses real `git`
   reason `github_push_queued_for_approval`). The push fails cleanly; nothing
   reaches GitHub.
 
+At most ten pushes may await a decision. The proxy checks that global count
+before `index-pack`, so together with the existing 128 MiB request limit the
+live pending payload is bounded. When the queue is full, gated pushes fail with
+`github_push_queue_full` until the operator approves or rejects one. There is
+no expiry or automatic eviction.
+
 The operator lists, approves, or rejects held pushes through the admin API
 (`/v1/network-tools/github-pending-pushes`; see
 [AdminAPI.md](AdminAPI.md#network)). **Approve** replays the quarantined objects
 to GitHub with the working token via the `approve-github-push` root helper (the
-admin service has no egress); **reject** drops the pending refs (best-effort)
-and marks the row rejected. A replay failure marks the row `failed` with
+admin service has no egress); **reject** drops the pending refs. Both decisions
+immediately run `git gc` while pack indexing is locked out, reclaiming objects
+that are no longer held. A replay failure marks the row `failed` with
 detail; the recovery is a fresh agent push. Only pkt-line
 command framing is parsed in the proxy; pack objects are only ever read by
 `git`, and any framing, mirror, or git failure fails closed (the push is denied
@@ -487,7 +498,8 @@ sink.
 ```json
 {
   "allow_http_methods": ["GET", "HEAD"],
-  "path_guards": ["^/dist(?:/.*)?$"]
+  "path_guards": ["^/dist(?:/.*)?$"],
+  "allow_websocket": false
 }
 ```
 
@@ -495,17 +507,17 @@ sink.
 | --- | --- | --- | --- |
 | `allow_http_methods` | Yes | enum array | HTTP methods allowed for proxied requests to this domain. Valid values are `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, and `DELETE`. An empty array keeps HTTP/HTTPS closed for this domain. |
 | `path_guards` | No | string array | Python `re` regular expressions for allowed request targets, evaluated with `re.fullmatch` against the path plus query string when present. If omitted, paths are not restricted beyond the domain and method rule. |
+| `allow_websocket` | No | boolean | Defaults to `false`. When true, permits a WebSocket after the handshake method/path passes this rule and the upstream returns a final `101`. The proxy validates and bounds the client frame stream, but applies no provider-specific rule to message contents; enable this only for a destination the operator trusts with a long-lived bidirectional channel. |
 
-WebSockets use the same domain rule. A WebSocket connection starts with an HTTP
-`GET` request that includes an upgrade header, so `GET` must be present in
-`allow_http_methods` and the handshake path must pass `path_guards` when path
-guards are configured. For `wss://` URLs, proxy `CONNECT` handling is internal
-to the host and is not listed in `allow_http_methods`. After the upgrade
-succeeds, WebSocket frames continue on the approved connection; they are not
-separate HTTP requests. On managed OpenAI domains with the external URL request
-guard, each client-to-upstream WebSocket message is additionally inspected with
-the same guard as HTTP request bodies; a violating message
-closes the connection.
+WebSockets are not inferred from ordinary HTTP access. On a custom domain,
+`allow_websocket: true` is required in addition to `GET` and any matching
+`path_guards`. The option is intentionally explicit because custom-domain
+frames are opaque after the verified `101`; each frame is not a separate HTTP
+request. Managed integrations are HTTP-only except OpenAI's guarded API and
+ChatGPT hosts, where each client-to-upstream message is inspected with the same
+external-URL/tool guard as HTTP request bodies. A failed upgrade returns the
+fixed `websocket_upgrade_declined` proxy error rather than entering a second
+general-purpose HTTP response path.
 
 Path guards use Python `re` syntax and must match the full request target path.
 For example, `^/dist(?:/.*)?$` allows `/dist` and `/dist/index.js`. If query

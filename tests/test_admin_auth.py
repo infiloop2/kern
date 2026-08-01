@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from host.runtime.admin_api import admin_auth
 
@@ -147,18 +147,36 @@ class AdminAuthTests(unittest.TestCase):
             error.exception.set_cookies[0],
         )
 
-    def test_blocked_password_source_is_rejected_before_body_read(self) -> None:
-        loader = MagicMock(return_value="password")
-        with patch.object(admin_auth, "_now", return_value=0.0):
+    def test_blocked_password_source_is_rejected_before_password_comparison(self) -> None:
+        with (
+            patch.object(admin_auth, "_now", return_value=0.0),
+            patch.object(admin_auth, "_admin_password_hash") as password_hash,
+        ):
             for _ in range(admin_auth.MAX_FAILURES_PER_CLIENT):
                 admin_auth.register_attempt("source")
             with self.assertRaises(admin_auth.LoginRateLimited):
                 admin_auth.begin_password_login(
                     admin_auth.LOCAL_SSH_FORWARD,
                     client_key="source",
-                    password_loader=loader,
+                    password_loader=lambda: "password",
                 )
-        loader.assert_not_called()
+        password_hash.assert_not_called()
+
+    def test_malformed_login_body_never_charges_the_throttle(self) -> None:
+        # The throttle bucket is keyed on the browser's egress IP, so a
+        # cross-site page's bodiless POSTs must not consume the operator's
+        # attempt budget; only a valid-shaped body may charge it.
+        with patch.object(admin_auth, "_now", return_value=0.0):
+            for _ in range(admin_auth.MAX_FAILURES_PER_CLIENT + 1):
+                with self.assertRaises(admin_auth.InvalidPassword):
+                    admin_auth.begin_password_login(
+                        admin_auth.LOCAL_SSH_FORWARD,
+                        client_key="source",
+                        password_loader=lambda: None,
+                    )
+            self.assertNotIn("source", admin_auth._client_failures)
+            # The untouched budget is still available for real attempts.
+            self.assertTrue(admin_auth.register_attempt("source"))
 
     def test_request_context_encodes_the_https_hostname_invariant(self) -> None:
         with self.assertRaises(ValueError):

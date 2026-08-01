@@ -11,15 +11,19 @@ to a third party?
 
 ## Reviewed commits
 
-Latest reviewed commit: none.
+Latest reviewed commit: `6151eea5abb61590684c4cf667ae6f619d705231`.
 
 | Commit | Reviewed by |
 | --- | --- |
-| _None yet_ | _No completed review_ |
+| `6151eea5abb61590684c4cf667ae6f619d705231` | gpt-5.6-sol; Claude Opus 5 |
 
 ## Findings
 
-No findings recorded.
+| Finding | Severity | Found at | Found by | Description | Resolution |
+| --- | --- | --- | --- | --- | --- |
+| TOOL-001 | Medium | `47daf37e08a8` | gpt-5.6-sol | Gmail and Google Calendar load a stored Google credential, perform token-refresh or identity network calls, then unconditionally save or clear the credential they originally observed. If the operator disconnects or reconnects during that round trip, a stale refresh can overwrite the new account/secret and a stale invalid-grant, missing-scope, or identity result can delete it, causing later tool calls to fail or act under the unintended stored account until another reconnect. Use the same compare-before-save/clear generation checks already used by the newer OAuth tools so the operator's concurrent change always wins. | Fixed — the shared Google credential store compares account id and secret against the loaded credential before every save/clear in access_token and refresh_identity, so a concurrent operator disconnect/reconnect always wins and a stale refresh or invalid-grant result can no longer overwrite or delete the new credential. |
+| TOOL-002 | Medium | `47daf37e08a8` | Claude Opus 5 | `google_calendar.read_events` and `gmail.read_message`, plus the pre-approval preview leg of `google_calendar.event_change`, copy agent-supplied strings into third-party request URLs with no grammar check and no `api.outbound.guard_request_parameter_string` call. `_calendar_read_input` (`host/tools/google_calendar/__init__.py:232`) checks only `isinstance(value, str)` and non-empty before `_calendar_events` (`:246-258`) urlencodes the values into `timeMin`/`timeMax`; `read_message` passes `message_id` into `_format_gmail_api_path`, which percent-quotes it into the path. Each such field can carry up to the 64 KiB tool-input cap (`tools_host.PAYLOAD_MAX_BYTES`) of arbitrary agent prose off the host in a direct, no-approval action, and the host-wide 1,024-byte parameter floor described as "the floor that works when every other guard misses" never runs. `tests/test_param_guard_coverage.py:60-61` exempts every Gmail and Calendar field under blanket wildcards whose recorded reasons are `CONNECTED_ACCOUNT` ("the destination already holds the data") and `TYPED` ("enum/id/timestamp/cursor grammar is stricter than scanning") — but no grammar is enforced on these fields, and arbitrary prose is not data Google already holds. Gmail's own `search_messages` shows the intended pattern, guarded with `allow_identifiers=True` and parsing `start_time`/`end_time` through `datetime.fromisoformat`; Calendar's identical time fields are not parsed at all. Impact is bounded — values are percent-encoded, `_NoRedirectHandler` refuses 3xx, the destination stays pinned to Google, and the data lands in the operator's own connected account — so this is a missing-guard and misleading-disclosure defect rather than request injection, but `read_events`'s data policy tells the operator that "only the requested time range and fixed listing options go to Google". Parse the Calendar timestamps, constrain the Gmail id grammar, and narrow the exemption wildcards to fields that actually have one. | Fixed — Calendar time fields must parse as ISO-8601 (and are re-serialized) and every Gmail path id plus Calendar event_id must match a strict id grammar before entering a request URL, including the pre-approval preview legs; the blanket param-guard wildcard exemptions were replaced with per-field entries. |
+| TOOL-003 | Low | `ca99416ac9dd` | Claude Opus 5 | `_upload_staged_asset` streams a staged agent media file to whatever `uploadUrl` Runway returned, gated only by `_is_https_runway_url` (`host/tools/runway/__init__.py:583,601`). Despite its name and its failure message, that predicate (`:688-708`) checks only length ≤ 2048, scheme `https`, hostname is not an IP literal, hostname contains a dot, no userinfo, and port 443/None — every HTTPS host on the internet qualifies. The same predicate is aliased `_is_https_output_url` (`:684-685`) and decides both which URL `runway_save_video` downloads with the tools service's egress and which URL is handed to the agent as `video_url`/`image_url`/`audio_url`. The bundled Instagram package shows the tighter pattern for the same situation: `_is_meta_upload_uri` pins `rupload.facebook.com` and an `/ig-api-upload/` path prefix before sending bytes. The trigger is narrow — TLS verification is on and redirects are refused, so it requires control of the `api.dev.runwayml.com` endpoint itself rather than a stolen API key or a provider-side open redirect — and no credential is attached to the upload, but the data at stake is the operator's workspace media whose destination the manifest states as Runway plus named model providers. Constrain the accepted upload/download hosts to Runway's documented domains, and rename the predicate so it no longer implies a host check it does not make. | Wontfix — the upload and output URLs arrive only in Runway's own authenticated HTTPS API responses, and an operator who enables the Runway tool is already trusting Runway with their workspace media, so the destination Runway names is trusted by the same decision. Pinning hosts would also risk rejecting legitimate traffic, since Runway does not document which asset/CDN hosts these URLs use. The misleading predicate name was still corrected (_is_public_https_url), so it no longer implies a host check it does not make. |
 
 ## Threat model
 
@@ -122,4 +126,100 @@ binding; report any in-scope defect even if no item names it.
 
 ## Collaborative review
 
-No completed reviews yet.
+### `6151eea5abb61590684c4cf667ae6f619d705231`
+
+Reviewed by: gpt-5.6-sol; Claude Opus 5
+
+Methodology: repository-level inventory and end-to-end authority trace of the
+bundled-tool framework and all 11 packages. Manifests, discovery, schemas,
+direct/operator approval paths, OAuth/config state, secret storage, outbound
+clients, parameter guard, assets, hostile responses, operator delegation, and
+agent socket/shim routing were read with focused framework/package tests. No
+real provider account, OAuth callback, approved third-party mutation, or live
+streaming download was exercised.
+
+#### What was reviewed
+
+- Production discovery and manifests for Brave Search, Gmail, Google Calendar,
+  IBKR, Instagram, Instagram Discovery, LinkedIn, LinkedIn Discovery,
+  Polymarket, Runway, and Twitter: ids, connections, config, setup copy,
+  action schemas/descriptions, direct versus operator approval, data policies,
+  disclosure cards, protections, destinations, and implementation linkage.
+- `host/runtime/tools/{api,assets,service,tools_host}.py`,
+  `host/runtime/agent_shim/mcp_shim.py`, Admin tools client/routes/UI,
+  bootstrap identities/sockets/nftables/PostgreSQL grants, state tables,
+  `HostAPI`, secretbox, approval lifecycle, audit events, and cleanup.
+- Shared HTTP, OAuth2, Google, JSON/schema, parameter-guard, RSA and media/
+  streaming helpers; every package client, request builder, response parser,
+  credential refresh/revoke path, and error mapper.
+- Every direct action's fixed destination and outbound values; every approved
+  action's immutable stored payload, operator summary, credential/config
+  binding, decision token, execution path, staged asset use, and terminal
+  status. Google refresh races are TOOL-001.
+
+#### Coverage and confidence
+
+- Checklist 1: all 11 production packages loaded through discovery; ids,
+  action linkage, schema subset, connection type, declared disclosure, and
+  direct/approval classification were compared with code. Unknown, duplicate,
+  malformed, extra, and incomplete packages fail discovery/tests.
+- Checklists 2–3: the dedicated `kern-tools` uid has only DNS/HTTPS, its
+  scoped database grants and encrypted credential state, and peer-gated
+  agent/admin routes. MCP listing/call aggregation, enabled checks, socket
+  failure handling, body/result/stream bounds, read timeouts, and call slots
+  were traced. Connection admission before handler creation is a reliability
+  issue recorded as REL-007, not a tool-authority bypass. An independent pass
+  reached the same conclusion by a different route and adds two details worth
+  keeping with that row: `MAX_CONCURRENT_CALLS = 8` is acquired inside
+  `do_POST`, so it bounds in-flight executions and not connections or threads;
+  and the binding ceiling is the tools service's file-descriptor soft limit
+  (1024 by default on the target Ubuntu 22.04/systemd 249 platform), so roughly
+  a thousand stalled connections suffice rather than the far larger numbers a
+  memory-based estimate suggests. The operator-facing consequence is the
+  reason it matters here: approve/deny/disconnect calls are reverse-proxied to
+  the same server, so `host-integration.md:200-206`'s claim that "a busy agent
+  can never block the operator from deciding approvals or disconnecting a
+  tool" does not hold once that server cannot accept.
+- Checklist 4: host-side schema validation covers required/unknown/nested
+  fields, booleans versus numbers, finite values, enums/patterns, arrays, and
+  output variants before/after execution. Package code receives only validated
+  inputs; malformed results become bounded generic failures.
+- Checklists 5–8: every direct action's host, method, URL components, headers,
+  body, and file/prompt data were inventoried. Fixed HTTPS clients verify TLS,
+  refuse redirects, bound time/response work, and apply the shared decoded
+  parameter guard before connection/side effect. Provider-returned
+  destinations are either rejected or revalidated; no undeclared generic
+  egress helper was found. Two qualifications from auditing checklist 7's
+  identifier exemptions against the code rather than against their recorded
+  reasons. First, the exemption list is not self-consistent: every Gmail and
+  Calendar field is exempted as `TYPED` or `CONNECTED_ACCOUNT`, yet several of
+  those fields enforce no grammar at all and accept arbitrary agent prose up
+  to the 64 KiB payload cap, so the parameter floor never runs on them
+  (TOOL-002). Second, "provider-returned destinations are either rejected or
+  revalidated" holds in most packages but not uniformly: Runway's
+  revalidation predicate accepts any HTTPS host despite its name, where the
+  Instagram package pins host and path prefix (TOOL-003).
+- Checklist 9: approval creation performs no external side effect; opaque
+  single-use ids bind immutable action/input/summary, tool, account,
+  credential/config generation, staged assets, expiry, and decision state.
+  Execution revalidates mutable state and concurrent decisions fail closed.
+- Checklists 10–11: credentials/config are tool-scoped, encrypted at rest,
+  absent from agent-visible results/logs, and used only in fixed request
+  locations. OAuth state is signed, tool-bound, expiring, and callback/
+  redirect/scope/account checked. Newer OAuth packages compare the loaded
+  credential before mutation; the shared Google flow does not (TOOL-001).
+- Checklist 12: staged image/video files use agent-opened streams, private
+  opaque tool scope, byte/type/count/expiry bounds, hashes, startup/periodic
+  cleanup, and approval binding. Streaming results validate provider URL,
+  length/type/name, cap bytes, publish privately/atomically to the workspace,
+  and remove partial output.
+- Checklists 13–14: third-party JSON and media metadata are bounded, typed,
+  identifier/account checked, stripped to declared results, and mapped to
+  generic errors. UI descriptions, exact approval payloads, destinations,
+  retention, connection state, direct-action disclosure, and terminal
+  statuses were compared with behavior.
+- Checklist 15: framework and package tests were reviewed/run without live
+  credentials. No live OAuth, provider mutation, large streaming transfer,
+  socket flood, or deployed uid/database probe was performed. Confidence is
+  high for deterministic discovery/schema/approval/scoping logic and medium
+  for provider-specific behavior that mocks cannot establish.

@@ -21,6 +21,8 @@ from host.constants import (
     AGENT_PREVIEW_PORT_BASE,
     AGENT_PREVIEW_PORT_COUNT,
     APP_BACKEND_ADMIN_SOCKET_PATH,
+    APP_BACKEND_GROUP,
+    APP_BACKEND_GROUP_GID,
     APP_PORT_BASE,
     PROXY_PORT,
     PUBLIC_GITHUB_REPOSITORY,
@@ -117,6 +119,7 @@ def _service_account_constants() -> str:
         prefix = name.upper().replace("-", "_")
         lines.append(f"{prefix}_UID={uid}")
         lines.append(f"{prefix}_GID={uid}")
+    lines.append(f"KERN_APP_BACKENDS_GID={APP_BACKEND_GROUP_GID}")
     return "\n".join(lines)
 
 
@@ -209,6 +212,7 @@ def _render_app_bootstrap(template: str) -> str:
     ]
     ensure_group_lines: list[str] = []
     ensure_user_lines: list[str] = []
+    ensure_group_member_lines: list[str] = []
     pg_hba_lines: list[str] = []
     role_lines: list[str] = []
     schema_grant_lines: list[str] = []
@@ -228,6 +232,9 @@ def _render_app_bootstrap(template: str) -> str:
         ensure_group_lines.append(f"ensure_group {app.linux_user} \"$KERN_APP_{env}_GID\"")
         ensure_user_lines.append(
             f"ensure_user {app.linux_user} \"$KERN_APP_{env}_UID\" {app.linux_user} /nonexistent"
+        )
+        ensure_group_member_lines.append(
+            f"ensure_group_member {app.linux_user} {APP_BACKEND_GROUP}"
         )
         pg_hba_lines.append(f"local  kern_admin  {app.linux_user}  peer")
         role_lines.extend([
@@ -312,6 +319,7 @@ def _render_app_bootstrap(template: str) -> str:
         "@APP_PORT_CONSTANTS@": "\n".join(port_lines),
         "@APP_ENSURE_GROUPS@": "\n".join(ensure_group_lines),
         "@APP_ENSURE_USERS@": "\n".join(ensure_user_lines),
+        "@APP_ENSURE_GROUP_MEMBERS@": "\n".join(ensure_group_member_lines),
         "@APP_PG_HBA_LINES@": "\n".join(pg_hba_lines),
         "@APP_ROLE_SQL@": "\n".join(role_lines),
         "@APP_POSTGRES_SCHEMA_GRANTS@": "\n".join(schema_grant_lines),

@@ -457,6 +457,55 @@ class ToolTests(unittest.TestCase):
                 gmail.GMAIL_CREDENTIALS.access_token(api)
         self.assertIsNone(api.credentials.load())
 
+    def test_stale_refresh_does_not_overwrite_a_reconnected_credential(self) -> None:
+        # Compare-before-save: an operator disconnect/reconnect that lands
+        # during the token-refresh round trip must win over the stale result.
+        api = connected_google_api(gmail.MANIFEST.tool_id, gmail.REQUIRED_GMAIL_SCOPES)
+        stored = api.credentials.load()
+        assert stored is not None
+        api.credentials.save({**stored, "secret": {**stored["secret"], "expires_at": 1}})
+        reconnected = connected_google_api(gmail.MANIFEST.tool_id, gmail.REQUIRED_GMAIL_SCOPES)
+        reconnected_credential = reconnected.credentials.load()
+        assert reconnected_credential is not None
+        reconnected_credential["account"]["id"] = "google-sub-2"
+
+        def refresh_while_operator_reconnects(**kwargs: Any) -> dict[str, object]:
+            api.credentials.save(reconnected_credential)
+            return {"access_token": "stale-access-token", "expires_in": 3600}
+
+        with patch.object(
+            google_shared, "refresh_google_oauth_token", side_effect=refresh_while_operator_reconnects
+        ):
+            with self.assertRaises(google_shared.IntegrationReconnectRequired):
+                gmail.GMAIL_CREDENTIALS.access_token(api)
+        current = api.credentials.load()
+        assert current is not None
+        self.assertEqual(current["account"]["id"], "google-sub-2")
+        self.assertEqual(current["secret"]["access_token"], "gmail-access-token")
+
+    def test_stale_invalid_grant_does_not_clear_a_reconnected_credential(self) -> None:
+        # Compare-before-clear: a stale invalid_grant for a token the operator
+        # already rotated by reconnecting must not delete the new connection.
+        api = connected_google_api(gmail.MANIFEST.tool_id, gmail.REQUIRED_GMAIL_SCOPES)
+        stored = api.credentials.load()
+        assert stored is not None
+        api.credentials.save({**stored, "secret": {**stored["secret"], "expires_at": 1}})
+        reconnected_credential = copy.deepcopy(stored)
+        reconnected_credential["secret"]["refresh_token"] = "rotated-refresh-token"
+
+        def invalid_grant_while_operator_reconnects(**kwargs: Any) -> dict[str, object]:
+            api.credentials.save(reconnected_credential)
+            raise google_shared.GoogleOAuthInvalidGrantError("invalid_grant")
+
+        with patch.object(
+            google_shared, "refresh_google_oauth_token", side_effect=invalid_grant_while_operator_reconnects
+        ):
+            with self.assertRaises(google_shared.IntegrationReconnectRequired):
+                gmail.GMAIL_CREDENTIALS.access_token(api)
+        current = api.credentials.load()
+        assert current is not None
+        self.assertEqual(current["secret"]["refresh_token"], "rotated-refresh-token")
+
     def test_failed_reconnect_keeps_the_existing_credential(self) -> None:
         # An already-connected account survives a failed attempt to connect
         # another account: an insufficient new grant was never saved, so
@@ -497,7 +546,7 @@ class ToolTests(unittest.TestCase):
             operation = request["operation"]
             if operation == "users.messages.list":
                 self.assertEqual(request["parameters"]["q"], "from:alice@example.com")
-                return {"messages": [{"id": "msg-1"}]}
+                return {"messages": [{"id": "18c2f0d1a2b3c4d5"}]}
             if operation == "users.messages.get":
                 message_id = str(request["path"]).rsplit("/", 1)[-1]
                 return {
@@ -607,7 +656,7 @@ class ToolTests(unittest.TestCase):
                         "description": "Roadmap sync",
                         "end": {"dateTime": "2024-01-01T10:30:00Z"},
                         "htmlLink": "https://calendar.example/event",
-                        "id": "event-1",
+                        "id": "event1abc234",
                         "location": "Room 4",
                         "start": {"dateTime": "2024-01-01T10:00:00Z"},
                         "summary": "Planning",
@@ -625,6 +674,10 @@ class ToolTests(unittest.TestCase):
         self.assertIsInstance(result, ActionExecuted)
         self.assertEqual(calls[0][0], "GET")
         self.assertIn("/calendars/primary/events?", calls[0][1])
+        # The time range on the wire is a parsed-and-reserialized timestamp,
+        # never the agent's raw text.
+        self.assertIn("timeMin=2024-01-01T00%3A00%3A00%2B00%3A00", calls[0][1])
+        self.assertIn("timeMax=2024-01-02T00%3A00%3A00%2B00%3A00", calls[0][1])
         event = result.result["events"][0]
         self.assertEqual(event["summary"], "Planning")
         # The read action promises locations and descriptions, so surface them.
@@ -699,7 +752,7 @@ class ToolTests(unittest.TestCase):
         api = connected_google_api(google_calendar.MANIFEST.tool_id, google_calendar.REQUIRED_CALENDAR_SCOPES)
         tool = GoogleCalendarTool()
         event_state = {
-            "id": "event-1",
+            "id": "event1abc234",
             "start": {"dateTime": "2024-01-01T10:00:00Z"},
             "end": {"dateTime": "2024-01-01T10:30:00Z"},
             "status": "confirmed",
@@ -713,7 +766,7 @@ class ToolTests(unittest.TestCase):
             calls.append((method, url, body))
             if method == "GET":
                 return dict(event_state)
-            return {"htmlLink": "https://calendar.example/event-1", "id": "event-1"}
+            return {"htmlLink": "https://calendar.example/event1abc234", "id": "event1abc234"}
 
         with (
             patch.object(google_shared, "get_google_userinfo", return_value=google_userinfo()),
@@ -721,7 +774,7 @@ class ToolTests(unittest.TestCase):
         ):
             pending = tool.execute(
                 "event_change",
-                {"operation": "update", "event_id": "event-1", "summary": "Planning v2"},
+                {"operation": "update", "event_id": "event1abc234", "summary": "Planning v2"},
                 api,
             )
 
@@ -730,7 +783,7 @@ class ToolTests(unittest.TestCase):
         # payload captures the event state for re-verification.
         self.assertEqual(
             pending.summary,
-            'Update Google Calendar event "Planning" (starts 2024-01-01T10:00:00Z) [id event-1]: summary → Planning v2.',
+            'Update Google Calendar event "Planning" (starts 2024-01-01T10:00:00Z) [id event1abc234]: summary → Planning v2.',
         )
         approval = api.approvals.get(pending.approval_id)
         self.assertEqual(approval.payload["current_event"]["updated"], "2024-01-01T00:00:00.000Z")
@@ -742,14 +795,14 @@ class ToolTests(unittest.TestCase):
         ):
             executed = tool.execute_approved(approved_record, api)
         self.assertIsInstance(executed, ApprovalExecuted)
-        self.assertEqual(executed.message, "Updated Google Calendar event event-1.")
+        self.assertEqual(executed.message, "Updated Google Calendar event event1abc234.")
         self.assertEqual(calls[-1][0], "PATCH")
 
     def test_google_calendar_rejects_event_changed_after_approval(self) -> None:
         api = connected_google_api(google_calendar.MANIFEST.tool_id, google_calendar.REQUIRED_CALENDAR_SCOPES)
         tool = GoogleCalendarTool()
         event_state = {
-            "id": "event-1",
+            "id": "event1abc234",
             "start": {"dateTime": "2024-01-01T10:00:00Z"},
             "status": "confirmed",
             "summary": "Planning",
@@ -766,9 +819,9 @@ class ToolTests(unittest.TestCase):
             patch.object(google_shared, "get_google_userinfo", return_value=google_userinfo()),
             patch.object(google_calendar, "google_json_request", side_effect=fake_google_request),
         ):
-            pending = tool.execute("event_change", {"operation": "delete", "event_id": "event-1"}, api)
+            pending = tool.execute("event_change", {"operation": "delete", "event_id": "event1abc234"}, api)
         self.assertIsInstance(pending, ActionPendingApproval)
-        self.assertEqual(pending.summary, 'Delete Google Calendar event "Planning" (starts 2024-01-01T10:00:00Z) [id event-1].')
+        self.assertEqual(pending.summary, 'Delete Google Calendar event "Planning" (starts 2024-01-01T10:00:00Z) [id event1abc234].')
 
         event_state["updated"] = "2024-01-02T00:00:00.000Z"  # edited after approval was queued
         approved_record = api.approvals.approve(pending.approval_id)
@@ -785,7 +838,7 @@ class ToolTests(unittest.TestCase):
         tool = GoogleCalendarTool()
 
         event_preview = {
-            "id": "event-1",
+            "id": "event1abc234",
             "start": {"dateTime": "2024-01-01T10:00:00Z"},
             "status": "confirmed",
             "summary": "Planning",
@@ -799,7 +852,7 @@ class ToolTests(unittest.TestCase):
                 "event_change",
                 {
                     "operation": "delete",
-                    "event_id": "event-1",
+                    "event_id": "event1abc234",
                 },
                 api,
             )
@@ -1109,9 +1162,9 @@ class ToolTests(unittest.TestCase):
                 gmail._verify_label_matches_approval("token", {"label": {"id": "L1", "name": "x"}, "labelId": "L1"})
 
     def test_gmail_thread_truncation_reports_index_counts(self) -> None:
-        messages = [{"id": f"m{i}", "threadId": "t1"} for i in range(105)]
-        with patch.object(gmail, "execute_gmail_api_request", return_value={"id": "t1", "messages": messages, "attacker": {"nested": "payload"}}):
-            result = gmail.GmailTool()._execute_read("read_thread", {"thread_id": "t1"}, "token", FakeHostAPI())
+        messages = [{"id": f"m{i}", "threadId": "1234abcd5678ef90"} for i in range(105)]
+        with patch.object(gmail, "execute_gmail_api_request", return_value={"id": "1234abcd5678ef90", "messages": messages, "attacker": {"nested": "payload"}}):
+            result = gmail.GmailTool()._execute_read("read_thread", {"thread_id": "1234abcd5678ef90"}, "token", FakeHostAPI())
         thread = cast(dict, result["thread"])
         self.assertEqual(len(cast(list, thread["messages"])), 100)
         self.assertTrue(thread["messageIndexTruncated"])
@@ -1128,7 +1181,7 @@ class ToolTests(unittest.TestCase):
             operation = cast(str, request["operation"])
             message_calls.append(operation)
             if operation == "users.messages.list":
-                return {"messages": [{"id": f"m{index}"} for index in range(100)]}
+                return {"messages": [{"id": f"{index:016x}"} for index in range(100)]}
             return {"id": "message", "threadId": "thread"}
 
         with patch.object(gmail_api, "execute_gmail_api_request", side_effect=fake_message_request):
@@ -1140,7 +1193,7 @@ class ToolTests(unittest.TestCase):
             patch.object(
                 gmail,
                 "execute_gmail_api_request",
-                return_value={"drafts": [{"id": f"d{index}"} for index in range(100)]},
+                return_value={"drafts": [{"id": f"r{index}"} for index in range(100)]},
             ),
             patch.object(gmail, "gmail_draft_preview", return_value={"draftId": "d"}) as preview,
         ):
@@ -1175,13 +1228,13 @@ class ToolTests(unittest.TestCase):
         # An update may set description/location to "" to clear them, but every
         # other field (and clearing on create) still requires a non-empty string.
         proposal = google_calendar._calendar_change_proposal(
-            {"operation": "update", "event_id": "evt-1", "location": "", "description": ""}
+            {"operation": "update", "event_id": "evt1a2b3c", "location": "", "description": ""}
         )
         self.assertEqual(proposal["location"], "")
         self.assertEqual(proposal["description"], "")
         with self.assertRaises(google_calendar.ToolInputValidationError):
             google_calendar._calendar_change_proposal(
-                {"operation": "update", "event_id": "evt-1", "summary": ""}
+                {"operation": "update", "event_id": "evt1a2b3c", "summary": ""}
             )
         with self.assertRaises(google_calendar.ToolInputValidationError):
             google_calendar._calendar_change_proposal(
@@ -1190,13 +1243,13 @@ class ToolTests(unittest.TestCase):
 
     def test_calendar_change_summary_discloses_id_recurrence_and_guest_context(self) -> None:
         preview = {
-            "summary": "Team sync", "start_time": "2024-01-01T10:00:00Z", "event_id": "evt-123",
+            "summary": "Team sync", "start_time": "2024-01-01T10:00:00Z", "event_id": "evt123",
             "recurring": True, "is_guest": True, "attendee_count": 5, "location": "Room 4",
         }
         summary = google_calendar._calendar_summary(
-            {"operation": "update", "event_id": "evt-123", "summary": "Team sync v2"}, preview
+            {"operation": "update", "event_id": "evt123", "summary": "Team sync v2"}, preview
         )
-        for fragment in ("id evt-123", "recurring event", "you are a guest", "5 guests", "location Room 4"):
+        for fragment in ("id evt123", "recurring event", "you are a guest", "5 guests", "location Room 4"):
             self.assertIn(fragment, summary)
         # A worst-case update (every field long, full context) still fits the cap,
         # dropping location and clipping change previews as needed.

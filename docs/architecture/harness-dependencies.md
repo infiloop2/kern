@@ -194,7 +194,9 @@ Bootstrap also installs `/etc/codex/requirements.toml` to pin Codex web search
 to cached (`allowed_web_search_modes = ["cached"]`, which excludes `live` and
 `indexed`) and disable Codex app/plugin/browse feature surfaces (`apps`,
 `plugins`, `tool_search`, `tool_suggest`, `computer_use`, `remote_plugin`,
-`plugin_sharing`) so the agent does not attempt a proxy-denied tool, plus
+`plugin_sharing`) so the agent does not attempt a proxy-denied tool. It also
+pins `enable_request_compression = false`, keeping request JSON inspectable by
+the fail-closed proxy. Bootstrap additionally installs
 `/mnt/kern-agent/agent-home/.codex/config.toml` from
 `host/bootstrap/agent-home/.codex/config.toml`. That file must set
 `approval_policy = "never"`, `sandbox_mode = "danger-full-access"`, and trust
@@ -202,8 +204,8 @@ to cached (`allowed_web_search_modes = ["cached"]`, which excludes `live` and
 and immutable so the agent cannot edit or delete the active policy file. The
 proxy guard is still required as the web-search enforcement layer. The root-owned
 managed config layer `/etc/codex/managed_config.toml` also registers the bundled
-tools MCP server (`mcp_servers.kern` spawning `host.runtime.agent_shim.mcp_shim`),
-so Codex must keep reading both root-owned `/etc/codex` layers and spawning
+tools MCP server (`mcp_servers.kern` spawning `host.runtime.agent_shim.mcp_shim`).
+Codex must keep reading both root-owned `/etc/codex` layers and spawning
 configured stdio MCP servers as the runtime user.
 
 ## Claude Code harness expectations
@@ -248,9 +250,12 @@ immutable). It sets `permissions.defaultMode = "bypassPermissions"` and
 `skipDangerousModePermissionPrompt = true`. Its
 `env.FORCE_PROMPT_CACHING_5M = "1"` pins Claude Code to the five-minute prompt
 cache TTL used by the Infiverse development box, instead of allowing the CLI
-to select a longer cache policy. `--setting-sources user` keeps stale local or
-project settings out of the turn harness while still allowing `CLAUDE.md`
-instructions to load, and makes this file the only loaded settings source.
+to select a longer cache policy. `env.CLAUDE_CODE_NO_MODEL_FALLBACK = "1"`
+keeps each turn on its selected model: when that model is unavailable, Claude
+Code fails the turn instead of substituting another model.
+`--setting-sources user` keeps stale local or project settings out of the turn
+harness while still allowing `CLAUDE.md` instructions to load, and makes this
+file the only loaded settings source.
 
 WebSearch availability follows the operator's
 `network_integrations.claude.web_search` toggle (default off) and is
@@ -352,28 +357,29 @@ claude -p /usage --output-format json
 
 This live probe makes Claude Code authenticate and gives the CLI ownership of
 refreshing an expired access token. Kern reads the credential hash again
-after the probe. If refresh rotated it, the old proxy pin can safely deny that
-probe's first retry; the orchestrator notices the new hash, attests it through
-the profile endpoint below, and atomically replaces the pin. First capture and
-a rotation already visible at the start of a check use that same live profile
-attestation directly; the refresh then reads usage once, right after the new
-pin is published, so usage metadata is available immediately after login. A
-steady-token authentication failure becomes `awaiting_login`; another steady
-probe failure becomes `error`.
+after the probe. If refresh rotated it, the proxy provider-attests that bearer
+on its first request and allows it when its account uuid matches the approved
+account; existing parallel Claude processes keep working with their own cached,
+attested token hashes. The orchestrator also notices the new hash, attests it
+through the profile endpoint below, and updates its credential metadata. First
+capture and a rotation already visible at the start of a check use that same
+live profile attestation directly; the refresh then reads usage once so usage
+metadata is available immediately after login. A steady-token authentication
+failure becomes `awaiting_login`; another steady probe failure becomes `error`.
 
 The probe's verdict is memoized per token hash. Active runtimes are rechecked
 every five minutes, and each Claude turn enters the same refresh before spawn
-to converge a possibly rotated pin. Only a refresh whose memo has expired runs
-the probe, so turn-start convergence is normally memory-only. An
-`awaiting_login` verdict never expires: that token
-is rejected and no background retry can fix it. An explicit refresh probes
-once; an operator login (which mints a new token) or an account reset replaces
-the credential. An `error`
-verdict expires with the memo, so infrastructure failures recover on the next
-scheduled recheck. Attestation results are memoized per token hash the same
-way: a token's attested identity never changes, so one successful profile
-fetch answers every later recheck of that token. The explicit operator refresh
-bypasses verdict memory and probes immediately.
+to converge local credential metadata. Only a refresh whose memo has expired
+runs the probe, so turn-start convergence is normally memory-only. An
+`awaiting_login` verdict never expires: that token is rejected and no
+background retry can fix it. An explicit refresh probes once; an operator login
+(which mints a new token) or an account reset replaces the credential. An
+`error` verdict expires with the memo, so infrastructure failures recover on
+the next scheduled recheck. Orchestrator attestation results are memoized per
+token hash the same way. Separately, the proxy keeps a bounded cache of token
+hashes whose provider-attested account uuid matched the approved account; a
+cache miss performs one direct profile check before the original request can
+be forwarded.
 
 Login starts with:
 
@@ -415,10 +421,9 @@ this read, and the linked account is shown in the admin UI once pinned.
 
 ### Account identity attestation
 
-The Anthropic proxy pin is the bearer-token hash and follows token rotation, so
-the durable account anchor is attested against the token itself instead of
-being read from agent-writable files. Whenever the observed token hash differs
-from the anchored one — first operator login and every token rotation —
+The durable Anthropic account anchor is attested against the token itself
+instead of being read from agent-writable files. On first operator login and
+whenever the orchestrator observes a token rotation,
 `read-claude-account --attest` calls:
 
 ```text
@@ -439,19 +444,25 @@ Properties this depends on:
   bootstrap — it is one of the pre-pin allowlisted paths in
   `host/runtime/core/network_policy.py` — so the pinned harness version already
   requires it to exist and accept the OAuth bearer.
-- The attest call runs as root over direct host egress, not through the proxy:
+- The orchestrator's attest call runs as root over direct host egress, not
+  through the proxy:
   the agent uid can only reach the local proxy (whose account guard would
   reject a just-rotated token mid-attest), and the admin uid has no egress.
   The bearer token never leaves the helper process; only its hash and the
   attested identity are returned to admin code.
-- Anchored tokens skip the call entirely, so steady-state status refreshes
-  make no extra network requests.
+- The network proxy applies the same UUID rule to every bearer. Its first
+  request for a distinct token makes a fixed-endpoint profile call directly
+  from the trusted proxy; a successful `(approved account uuid, token hash)`
+  result is cached in bounded memory. Raw bearers are never cached or logged.
+- Cached tokens skip the proxy profile call, so steady traffic adds no extra
+  network requests. Parallel Claude processes may use independently rotated
+  tokens without racing one mutable hash pin.
 
-If Anthropic changes this endpoint's auth or response shape, Claude token
-rotations degrade to a retryable runtime `error` (with the attestation failure
-in the message) until this integration is updated; unchanged tokens keep
-working. Treat the endpoint like the other harness interfaces in this document
-during upgrade reviews.
+If Anthropic changes this endpoint's auth or response shape, uncached Claude
+tokens fail closed at the proxy and orchestrator token rotations degrade to a
+retryable runtime `error` until this integration is updated. Already cached
+tokens continue until the proxy restarts. Treat the endpoint like the other
+harness interfaces in this document during upgrade reviews.
 
 Kern also extracts the observed `subscriptionType` value from
 `claude auth status --json` into the common Admin API `plan_type` field.
@@ -495,14 +506,14 @@ request shapes:
 - `platform.claude.com` is the only managed Claude OAuth domain. It is allowed
   for `GET` and `POST`, and only for paths matching `^/v1/oauth(?:/.*)?$`.
 - `api.anthropic.com` is the only managed Anthropic API domain. It is allowed
-  for `GET` and `POST` and is account-pinned with the Claude OAuth bearer-token
-  hash.
+  for `GET` and `POST`; each distinct bearer token is provider-attested to the
+  approved Claude account uuid and successful token hashes are cached.
 - Claude Code must not require `claude.ai`, `claude.com`, wildcard Anthropic
   domains, or additional Anthropic API domains without updating the managed
   provider policy.
-- Data-plane Anthropic API calls carry `Authorization: Bearer <token>` matching
-  the OAuth token hash read from Claude Code credentials.
-- Before the token hash is known, only the narrow Claude Code bootstrap profile
+- Data-plane Anthropic API calls carry `Authorization: Bearer <token>` whose
+  profile identity must match the approved Claude account.
+- Before the account uuid is approved, only the narrow Claude Code bootstrap profile
   and settings endpoints listed in `host/runtime/core/network_policy.py` are allowed.
 
 If Claude Code changes its auth domain, token storage, bearer-token use, or
