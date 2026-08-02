@@ -2600,6 +2600,31 @@ a:hover { text-decoration: underline; }
 
 /* Tool rows and managed tool integrations share the same sorted list. */
 
+.access-notice {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin: 0 0 0.8rem;
+  padding: 0.65rem 0.8rem;
+}
+
+.access-notice strong { color: var(--text); }
+
+.access-notice-with-icon {
+  align-items: flex-start;
+  display: flex;
+  gap: 0.6rem;
+}
+
+.access-notice-icon {
+  color: var(--text-dim);
+  flex: 0 0 auto;
+  margin-top: 0.08rem;
+}
+
 .tool-config { display: grid; gap: 0.6rem; }
 
 .tool-config-row {

@@ -24,7 +24,11 @@ AGENT_PROMPT = "Refresh the dashboard analysis from its current structured data.
 LOAD_ONLY_PROMPT = "This load-only request must never start an agent task."
 APP_AGENT_INPUT = f"{builder_backend.REQUEST_PREFIXES['app']}\n{AGENT_PROMPT}"
 MOCK_TURN_SECONDS = 1.0
-MOCK_FIRST_TURN_SECONDS = 3.0
+# The first turn is the only one the smoke inspects *while* it runs (the agent
+# settings must be locked and the idle note shown). Those assertions are a
+# handful of round trips against a UI that polls every 3s, so the window has to
+# be comfortably wider than the poll rather than merely wider than a fast run.
+MOCK_FIRST_TURN_SECONDS = 6.0
 CONVERSATION_EVENTS_PAGE = builder_backend.CONVERSATION_EVENT_PAGE_LIMIT
 INTERIM_AGENT_MESSAGE = "Drafting the app structure and checking its saved data."
 LONG_MEDIA_CONDITION = " and ".join(["(min-width: 0px)"] * 40)
@@ -84,6 +88,11 @@ def _app_markup(count: int, title: str = "Weekly focus") -> str:
             <button data-action="increment">Add priority</button>
             <button data-action="refresh-analysis">Refresh analysis</button>
           </div>
+          <div class="drag-probe">
+            <button id="drag-source" data-drag-value="priority-ship">Drag Ship builder</button>
+            <div id="drop-target" data-drop-action="move-priority" data-drop-value="priority-review">Drop before Review security</div>
+            <button id="bad-drop-target" data-drop-action="bad action">Invalid drop target</button>
+          </div>
         </main>
       </form>
     """
@@ -118,6 +127,9 @@ def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
       #semantic-probe { filter:saturate(1); clip-path:inset(0 round 1px); text-shadow:0 1px 1px #000; }
       #semantic-probe::before { content:"Safe"; }
       .dashboard-actions { display:flex; flex-wrap:wrap; gap:.65rem; }
+      .drag-probe { display:flex; flex-wrap:wrap; gap:.65rem; }
+      [data-dragging] { opacity:.5; }
+      [data-drag-over] { outline:2px solid #7c3aed; }
       button { background-color:#202838; border:1px solid #3d485c; color:#f4f7fb; cursor:pointer; width:max-content; padding:.65rem .9rem; border-radius:10px; }
       @supports (display: grid) { .supports-surface { color: red; } }
       @media __LONG_MEDIA_CONDITION__ { .too-long-media { color: red; } }
@@ -156,6 +168,10 @@ def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
         renderDashboard(next);
       }});
       app.on('toggle-review', event => app.notify(event.checked ? 'Review marked complete' : 'Review reopened', 'success'));
+      app.on('move-priority', event => app.notify(
+        `Moved ${{event.draggedValue}} before ${{event.value}}`,
+        'success',
+      ));
       app.on('refresh-analysis', () => app.askAgent('{AGENT_PROMPT}'));
     """,
         "data": {"count": 2, "priorities": ["Ship builder", "Review security"]},
@@ -352,7 +368,7 @@ def _rename_app(
 def _conversation_events(
     workspace: dict[str, Any], query: dict[str, list[str]]
 ) -> dict[str, Any]:
-    unexpected = sorted(set(query) - {"since", "before"})
+    unexpected = sorted(set(query) - {"since", "before", "activity"})
     if unexpected:
         raise builder_backend.AppError(
             HTTPStatus.BAD_REQUEST,
@@ -360,6 +376,7 @@ def _conversation_events(
         )
     since_values = query.get("since") or []
     before_values = query.get("before") or []
+    activity_values = query.get("activity") or []
     if since_values and before_values:
         raise builder_backend.AppError(
             HTTPStatus.BAD_REQUEST, "since and before cannot be combined"
@@ -375,16 +392,28 @@ def _conversation_events(
                 HTTPStatus.BAD_REQUEST,
                 f"{name} must be a non-negative integer",
             )
+    if len(activity_values) > 1 or (
+        activity_values and activity_values[0] not in {"true", "false"}
+    ):
+        raise builder_backend.AppError(
+            HTTPStatus.BAD_REQUEST, "activity must be true or false"
+        )
+    include_activity = not activity_values or activity_values[0] == "true"
+    eligible_events = [
+        event
+        for event in workspace["events"]
+        if include_activity or event["event_type"] != "thread.activity"
+    ]
     if since_values:
         since = int(since_values[0])
         page = [
-            event for event in workspace["events"] if event["seq"] > since
+            event for event in eligible_events if event["seq"] > since
         ][:CONVERSATION_EVENTS_PAGE]
     else:
         before = int(before_values[0]) if before_values else None
         eligible = [
             event
-            for event in workspace["events"]
+            for event in eligible_events
             if before is None or event["seq"] < before
         ]
         page = eligible[-CONVERSATION_EVENTS_PAGE:]
@@ -901,6 +930,38 @@ def _create_message(
     _append_turn_event(
         workspace, "thread.message", {"message": input_message, "source": "user"}
     )
+    activity_id = f"mock-turn-{len(workspace['events'])}"
+    for activity in (
+        {
+            "provider": "kern",
+            "activity_id": activity_id,
+            "kind": "command",
+            "phase": "started",
+            "status": "running",
+            "title": "Inspecting app workspace",
+            "detail": "Read the current app files and structured data.",
+            "output": "Reading files.",
+        },
+        {
+            "provider": "kern",
+            "activity_id": activity_id,
+            "kind": "command",
+            "phase": "started",
+            "status": "running",
+            "title": "Command output",
+            "output": " Structured data loaded.",
+            "append_output": True,
+        },
+        {
+            "provider": "kern",
+            "activity_id": activity_id,
+            "kind": "command",
+            "phase": "completed",
+            "status": "exit 0",
+            "title": "Command output",
+        },
+    ):
+        _append_turn_event(workspace, "thread.activity", {"activity": activity})
     _append_turn_event(
         workspace, "thread.message", {"message": INTERIM_AGENT_MESSAGE, "source": "agent"}
     )
@@ -1040,8 +1101,12 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#admin-overlay")).to_be_visible()
     expect(frame.locator("#admin-close")).to_be_focused()
     expect(frame.get_by_text("App administration", exact=True)).to_be_visible()
-    expect(frame.locator("#admin-app-title")).to_have_text("app-1")
-    expect(frame.locator(".workspace-list-item.current")).to_contain_text("app-1")
+    # The generated name counts the mock's existing workspaces, so derive it
+    # instead of pinning app-1: any earlier flow that creates a workspace
+    # shifts the number.
+    expect(frame.locator("#admin-app-title")).to_have_text(re.compile(r"^app-[0-9]+$"))
+    first_app = frame.locator("#admin-app-title").inner_text().strip()
+    expect(frame.locator(".workspace-list-item.current")).to_contain_text(first_app)
     expect(frame.get_by_role("button", name="Close all apps", exact=True)).to_be_hidden()
     frame.locator("#admin-close").press("Escape")
     expect(frame.locator("#admin-overlay")).to_be_hidden()
@@ -1079,7 +1144,25 @@ def desktop_smoke(page: Any) -> None:
         "[User-uploaded file: user-files/20260722T120000.000000Z_weekly-focus.txt]"
     )
     expect(frame.locator("#chat-history")).to_contain_text(INTERIM_AGENT_MESSAGE)
-    expect(frame.locator(".dashboard")).to_be_visible(timeout=8_000)
+    activity_toggle = frame.get_by_role("switch", name="Activity", exact=True)
+    expect(activity_toggle).to_have_attribute("aria-checked", "true")
+    expect(activity_toggle).to_have_attribute("title", "Hide agent activity")
+    activity = frame.locator(".chat-activity", has_text="Inspecting app workspace")
+    expect(activity).to_have_count(1)
+    expect(activity).to_be_visible()
+    activity.locator("summary").click()
+    expect(activity).to_contain_text("Reading files. Structured data loaded.")
+    activity_toggle.click()
+    expect(activity_toggle).to_have_attribute("aria-checked", "false")
+    expect(activity_toggle).to_have_attribute("title", "Show agent activity")
+    expect(activity).to_be_hidden()
+    expect(frame.get_by_text(INTERIM_AGENT_MESSAGE, exact=True)).to_be_visible()
+    activity_toggle.click()
+    expect(activity_toggle).to_have_attribute("aria-checked", "true")
+    expect(activity).to_be_visible()
+    # The first turn runs MOCK_FIRST_TURN_SECONDS and the mock only completes
+    # it when a request arrives, so the bundle can land a whole 3s poll late.
+    expect(frame.locator(".dashboard")).to_be_visible(timeout=20_000)
     expect(frame.locator("#runtime")).to_be_enabled()
     expect(frame.locator("#model")).to_be_enabled()
     expect(frame.locator("#effort")).to_be_enabled()
@@ -1135,11 +1218,29 @@ def desktop_smoke(page: Any) -> None:
     )
     if form_action is not None:
         raise AssertionError(f"generated form retained a navigation action: {form_action}")
+    expect(frame.locator("#drag-source")).to_have_attribute("draggable", "true")
+    expect(frame.locator("#drag-source")).to_have_attribute(
+        "data-drag-value", "priority-ship"
+    )
+    expect(frame.locator("#drop-target")).to_have_attribute(
+        "data-drop-action", "move-priority"
+    )
+    expect(frame.locator("#drop-target")).to_have_attribute(
+        "data-drop-value", "priority-review"
+    )
+    expect(frame.locator("#bad-drop-target")).not_to_have_attribute(
+        "data-drop-action", re.compile(".+")
+    )
     page.wait_for_timeout(300)
     if leaked:
         raise AssertionError(f"agent-authored UI caused browser requests: {leaked}")
 
     reviewed = frame.get_by_role("checkbox", name="Reviewed", exact=True)
+    frame.locator("#drag-source").drag_to(frame.locator("#drop-target"))
+    expect(frame.locator("#runtime-status")).to_have_text(
+        "Moved priority-ship before priority-review"
+    )
+
     reviewed.click()
     expect(reviewed).to_be_checked()
     expect(frame.locator("#runtime-status")).to_have_text("Review marked complete")
@@ -1162,7 +1263,7 @@ def desktop_smoke(page: Any) -> None:
         "button", name="Agentic Web App", exact=True
     ).click()
     expect(frame.locator("#home-view")).to_be_visible()
-    frame.locator(".app-card", has_text="app-1").click()
+    frame.locator(".app-card", has_text=first_app).click()
     expect(frame.locator(".metric strong")).to_have_text("3")
     expect(frame.locator("#admin-overlay")).to_be_hidden()
 
@@ -1269,13 +1370,18 @@ def desktop_smoke(page: Any) -> None:
     # A second workspace has a separate thread, bundle, data, and drafts.
     frame.locator("#workspace-new-app").click()
     expect(frame.locator("#admin-overlay")).to_be_visible()
-    expect(frame.locator("#admin-app-title")).to_have_text("app-2")
+    # A new workspace takes the next generated name, whatever the counter is at.
+    expect(frame.locator("#admin-app-title")).to_have_text(re.compile(r"^app-[0-9]+$"))
+    second_app = frame.locator("#admin-app-title").inner_text().strip()
+    if second_app == first_app:
+        raise AssertionError(f"a new workspace reused the previous name: {second_app}")
     page.once("dialog", lambda dialog: dialog.accept("Scratch app"))
     frame.get_by_role("button", name="Rename app", exact=True).click()
     expect(frame.locator("#admin-app-title")).to_have_text("Scratch app")
     frame.locator("#message").fill("Build a separate scratch dashboard.")
     frame.get_by_role("button", name="Send message", exact=True).click()
-    expect(frame.locator(".dashboard h1")).to_have_text("Scratch app", timeout=8_000)
+    # A second first turn: same MOCK_FIRST_TURN_SECONDS plus poll budget.
+    expect(frame.locator(".dashboard h1")).to_have_text("Scratch app", timeout=20_000)
     frame.locator("#message").fill("Keep this scratch-app draft.")
     frame.locator(".workspace-list-item", has_text="Weekly focus").click()
     expect(frame.locator(".metric strong")).to_have_text("3")

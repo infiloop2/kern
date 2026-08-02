@@ -265,19 +265,29 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#status")).to_have_text("You can attach up to 10 files.")
     expect(frame.locator("#attachments")).to_be_hidden()
     assert len(upload_requests) == 3, "too many selections must not start an upload"
+    # Let the turn the previous Send started finish before sending again. A
+    # message delivered into a running turn only steers it and inherits its
+    # remaining wall clock, which can run out midway through the archive
+    # refusal below; sending into an idle thread starts a fresh turn whose full
+    # duration covers the few round trips that follow.
+    expect(frame.locator("#composer-running")).to_be_hidden(timeout=25_000)
     frame.locator("#new-task").fill("agent app smoke follow up")
     frame.get_by_role("button", name="Send").click()
     expect(frame.locator("#thread-detail")).to_contain_text("agent app smoke follow up")
     # A running thread cannot be archived (UX-014): archiving would hide it
-    # while the turn kept going, with Stop out of reach. Stop it first.
-    if frame.locator("#composer-running").is_visible():
-        frame.get_by_role("button", name="Archive", exact=True).click()
-        expect(frame.locator("#status")).to_have_text(
-            "Stop the agent before archiving this thread."
-        )
-        page.once("dialog", lambda dialog: dialog.accept())
-        frame.locator("#composer-running").get_by_role("button", name="Stop").click()
-        expect(frame.locator("#composer-running")).to_be_hidden()
+    # while the turn kept going, with Stop out of reach. Stop it first. The
+    # send above always starts a turn, so this is a state to wait for rather
+    # than a condition to sample: an is_visible() branch here would skip the
+    # refusal silently, or arm the dialog handler below for a Stop button that
+    # is no longer there.
+    expect(frame.locator("#composer-running")).to_be_visible()
+    frame.get_by_role("button", name="Archive", exact=True).click()
+    expect(frame.locator("#status")).to_have_text(
+        "Stop the agent before archiving this thread."
+    )
+    page.once("dialog", lambda dialog: dialog.accept())
+    frame.locator("#composer-running").get_by_role("button", name="Stop").click()
+    expect(frame.locator("#composer-running")).to_be_hidden()
     frame.get_by_role("button", name="Archive", exact=True).click()
     expect(frame.locator(".thread-title")).to_have_text("New thread")
     expect(frame.locator("#threads")).not_to_contain_text(generated_thread)
@@ -392,6 +402,9 @@ def _load_older_history(frame: Any, *, expected_turns: int) -> None:
             }"""
         )
     expect(button).to_be_hidden()
+    # count() is a point-in-time sample and the history pane is patched entry
+    # by entry, so wait for the last expected entry to exist before counting.
+    expect(frame.locator("#thread-detail .thread-entry").nth(expected_turns - 1)).to_be_attached()
     entry_count = frame.locator("#thread-detail .thread-entry").count()
     if entry_count < expected_turns:
         raise AssertionError(
@@ -551,6 +564,7 @@ def _assert_mobile_chat_scrolling(page: Any, frame: Any) -> None:
     from playwright.sync_api import expect
 
     scroller = frame.locator("#chat-scroll")
+    expect(frame.locator("#thread-detail .thread-entry").nth(4)).to_be_attached()
     if frame.locator("#thread-detail .thread-entry").count() < 5:
         raise AssertionError("thread-1 did not render enough flat history entries")
     metrics = scroller.evaluate(
@@ -593,6 +607,10 @@ def _assert_thread_view_memory(frame: Any) -> None:
     frame.get_by_role("button", name="Show thread list").click()
     frame.locator("#threads .thread-item", has_text="thread-1").click()
     expect(frame.locator(".thread-title")).to_have_text("thread-1")
+    # Selecting a thread swaps the title before its restored history renders,
+    # so gate the raw count() and the scroll read below on the restored window
+    # actually being back rather than on the title alone.
+    expect(frame.locator("#thread-detail .thread-entry").nth(4)).to_be_attached()
     if frame.locator("#thread-detail .thread-entry").count() < 5:
         raise AssertionError("restored thread lost its loaded history entries")
     expect(frame.get_by_role("button", name="Load earlier messages")).to_be_hidden()
@@ -822,10 +840,14 @@ def _assert_mobile_send_flow(page: Any, frame: Any) -> None:
     sent_bubble = frame.locator("#thread-detail .thread-user").last
     expect(sent_bubble).to_be_in_viewport()
     # A running thread cannot be archived (UX-014), so stop the turn first.
-    if frame.locator("#composer-running").is_visible():
-        page.once("dialog", lambda dialog: dialog.accept())
-        frame.locator("#composer-running").get_by_role("button", name="Stop").click()
-        expect(frame.locator("#composer-running")).to_be_hidden()
+    # The send above started this brand-new thread's first turn, so the running
+    # composer is a state to wait for, not one to sample: an is_visible() race
+    # would either skip the Stop and hit the archive refusal, or leave the
+    # dialog handler below armed for a later unrelated dialog.
+    expect(frame.locator("#composer-running")).to_be_visible()
+    page.once("dialog", lambda dialog: dialog.accept())
+    frame.locator("#composer-running").get_by_role("button", name="Stop").click()
+    expect(frame.locator("#composer-running")).to_be_hidden()
     frame.get_by_role("button", name="Archive", exact=True).click()
     expect(frame.locator(".thread-title")).to_have_text("New thread")
 

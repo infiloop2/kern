@@ -64,10 +64,17 @@ Wire interactivity with `data-action="name"` on clickable elements and
 `data-field="name"` on inputs whose values belong in events. The frozen `app`
 global:
 
+For drag and drop, put `data-drag-value="item-id"` on the source and
+`data-drop-action="name"` on the destination. The destination's handler gets
+`draggedValue` alongside `action`, `value`, `checked`, and `fields`.
+Use `data-drop-value="target-id"` when the handler also needs the destination
+id, and keep a click/keyboard alternative for accessibility.
+
 - `app.onLoad(handler)` — register the renderer; runs with durable data on
   load and after each revision. It cannot mutate data or ask the agent.
   Always register it and render from `app.data()`.
-- `app.on(action, handler)` — handler gets `{action, value, checked, fields}`.
+- `app.on(action, handler)` — handler gets
+  `{action, value, checked, draggedValue, fields}`.
 - `app.data()` — structured clone of durable data.
 - `app.render(html, css)` — re-render through the sanitizers.
 - `app.set(path, value)` / `app.delete(path)` / `app.append(path, value)` —

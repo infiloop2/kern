@@ -85,6 +85,7 @@ SEND_BUSY_RETRY_DELAY_SECONDS = 0.5
 CONVERSATION_EVENT_PAGE_LIMIT = 6
 CONVERSATION_EVENT_TYPES = (
     "thread.message",
+    "thread.activity",
     "thread.error",
     "thread.stopped",
 )
@@ -590,7 +591,7 @@ def browser_conversation_events(
     thread_id: str, query: dict[str, list[str]]
 ) -> dict[str, Any]:
     _require_web_app(thread_id)
-    unexpected = sorted(set(query) - {"since", "before"})
+    unexpected = sorted(set(query) - {"since", "before", "activity"})
     if unexpected:
         raise AppError(
             HTTPStatus.BAD_REQUEST,
@@ -598,8 +599,14 @@ def browser_conversation_events(
         )
     since_values = query.get("since") or []
     before_values = query.get("before") or []
+    activity_values = query.get("activity") or []
     if since_values and before_values:
         raise AppError(HTTPStatus.BAD_REQUEST, "since and before cannot be combined")
+    if len(activity_values) > 1 or (
+        activity_values and activity_values[0] not in {"true", "false"}
+    ):
+        raise AppError(HTTPStatus.BAD_REQUEST, "activity must be true or false")
+    include_activity = not activity_values or activity_values[0] == "true"
     for name, values in (("since", since_values), ("before", before_values)):
         if len(values) > 1:
             raise AppError(HTTPStatus.BAD_REQUEST, f"{name} must be provided once")
@@ -609,6 +616,7 @@ def browser_conversation_events(
         *(
             f"event_type={quote(event_type, safe='')}"
             for event_type in CONVERSATION_EVENT_TYPES
+            if include_activity or event_type != "thread.activity"
         ),
     ]
     cursor_name = "since" if since_values else "before" if before_values else None

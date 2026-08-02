@@ -361,7 +361,10 @@ class AppMigrationTests(unittest.TestCase):
                     ("name", "text"),
                 ],
             )
-            cur.execute("SELECT app_id, version, name FROM app_schema_migrations")
+            cur.execute(
+                "SELECT app_id, version, name FROM app_schema_migrations"
+                " ORDER BY app_id, version"
+            )
             self.assertEqual(
                 cur.fetchall(),
                 [
@@ -381,7 +384,10 @@ class AppMigrationTests(unittest.TestCase):
         self.assertEqual(_app_up("agent_chat"), [1, 2, 3])
 
         with db.transaction() as cur:
-            cur.execute("SELECT app_id, version, name FROM app_schema_migrations")
+            cur.execute(
+                "SELECT app_id, version, name FROM app_schema_migrations"
+                " ORDER BY app_id, version"
+            )
             self.assertEqual(
                 cur.fetchall(),
                 [
@@ -454,7 +460,10 @@ class AppMigrationTests(unittest.TestCase):
         with db.transaction() as cur:
             cur.execute("SELECT to_regclass('public.host_escape_attempt')")
             self.assertEqual(cur.fetchone(), (None,))
-            cur.execute("SELECT app_id, version, name FROM app_schema_migrations")
+            cur.execute(
+                "SELECT app_id, version, name FROM app_schema_migrations"
+                " ORDER BY app_id, version"
+            )
             self.assertEqual(cur.fetchall(), [])
 
 

@@ -805,26 +805,42 @@ time.sleep(120)
                 claude_code._login_process = original
 
     def test_run_turn_waits_for_result_after_delivered_steer(self) -> None:
+        # The fake CLI blocks on the steer rather than sleeping before it
+        # emits the first result. steer() increments the delivered-steer count
+        # under the same stdin lock it writes with, and take_delivered_steers()
+        # needs that lock, so once this script can read the steer line the host
+        # is guaranteed to observe the steer when it processes the result
+        # below. A wall-clock sleep here would only *usually* order the two.
         script = r"""
-import json, sys, time
+import json, sys
 
 session_id = "session-1"
-for index, line in enumerate(sys.stdin, start=1):
-    json.loads(line)
-    text = "FIRST" if index == 1 else "STEERED"
+
+
+def assistant(text):
     print(json.dumps({
         "type": "assistant",
         "session_id": session_id,
         "message": {"content": [{"type": "text", "text": text}]},
     }), flush=True)
-    if index == 1:
-        time.sleep(0.5)
+
+
+def result(text):
     print(json.dumps({
         "type": "result",
         "subtype": "success",
         "session_id": session_id,
         "result": text,
     }), flush=True)
+
+
+json.loads(sys.stdin.readline())  # initial message
+assistant("FIRST")
+json.loads(sys.stdin.readline())  # steer, delivered before the first result
+result("FIRST")
+assistant("STEERED")
+result("STEERED")
+sys.stdin.readline()  # stay alive like the real CLI until stdin EOF
 """
         original_cwd = claude_code.AGENT_CWD
         first_message = threading.Event()
@@ -833,6 +849,10 @@ for index, line in enumerate(sys.stdin, start=1):
             with tempfile.TemporaryDirectory() as tmp:
                 claude_code.AGENT_CWD = tmp
                 server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
+                # The fake CLI idles on stdin after the turn, so without this
+                # the child process, its pipes, and the reader threads outlive
+                # the test.
+                self.addCleanup(server.close)
                 worker = threading.Thread(
                     target=lambda: result.append(
                         claude_code.run_turn(
@@ -849,6 +869,7 @@ for index, line in enumerate(sys.stdin, start=1):
                 self.assertTrue(first_message.wait(timeout=10))
                 server.steer("steer")
                 worker.join(timeout=10)
+                self.assertFalse(worker.is_alive())
         finally:
             claude_code.AGENT_CWD = original_cwd
         self.assertEqual(len(result), 1)
@@ -893,6 +914,7 @@ for index, line in enumerate(sys.stdin, start=1):
             with tempfile.TemporaryDirectory() as tmp:
                 claude_code.AGENT_CWD = tmp
                 server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
+                self.addCleanup(server.close)
                 server.start()
                 session_id, output = claude_code.run_turn(
                     server,
@@ -943,6 +965,9 @@ sys.stdin.readline()  # stay alive like the real CLI until stdin EOF
             with tempfile.TemporaryDirectory() as tmp:
                 claude_code.AGENT_CWD = tmp
                 server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
+                # The script idles on stdin after the result; close it so the
+                # child and its reader threads do not outlive the test.
+                self.addCleanup(server.close)
                 with patch.object(claude_code, "STEER_SETTLE_TIMEOUT_SECONDS", 0.3):
                     worker = threading.Thread(
                         target=lambda: result.append(
@@ -960,6 +985,7 @@ sys.stdin.readline()  # stay alive like the real CLI until stdin EOF
                     self.assertTrue(ready.wait(timeout=10))
                     server.steer("steer")
                     worker.join(timeout=10)
+                    self.assertFalse(worker.is_alive())
         finally:
             claude_code.AGENT_CWD = original_cwd
         self.assertEqual(len(result), 1)
@@ -984,6 +1010,7 @@ print(json.dumps({
             with tempfile.TemporaryDirectory() as tmp:
                 claude_code.AGENT_CWD = tmp
                 server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
+                self.addCleanup(server.close)
                 server._messages.put({
                     "type": "result",
                     "subtype": "success",
@@ -1093,6 +1120,7 @@ print(json.dumps({
                     on_ready=lambda: True,
                     on_session_id=accepted_sessions.append,
                 )
+                self.addCleanup(server.close)
                 session_id, output = claude_code.run_turn(
                     server,
                     "initial",
@@ -1127,6 +1155,7 @@ print(json.dumps({
             claude_code.DEFAULT_COMMAND = [sys.executable, "-u", "-c", script]
             claude_code.AGENT_CWD = "/definitely/not-readable-by-admin"
             server = claude_code.ClaudeCodeSession()
+            self.addCleanup(server.close)
             with patch("host.runtime.core.state.read_claude_web_search", return_value=False):
                 session_id, output = claude_code.run_turn(
                     server,
@@ -1164,6 +1193,7 @@ print(json.dumps({
                     [sys.executable, "-u", "-c", script, str(argv_path)],
                     thread_id="sample_app__ws-3",
                 )
+                self.addCleanup(server.close)
                 server.app_instructions = "Use only the documented app routes."
                 with patch("host.runtime.core.state.read_claude_web_search", return_value=False):
                     claude_code.run_turn(
@@ -1221,9 +1251,11 @@ print(json.dumps({
                 # the decision exactly as the real launcher would.
                 command = [sys.executable, "-u", "-c", script, str(argv_path)]
                 for web_search, expected_token in ((False, "web-search=off"), (True, "web-search=on")):
+                    session = claude_code.ClaudeCodeSession(command)
+                    self.addCleanup(session.close)
                     with patch("host.runtime.core.state.read_claude_web_search", return_value=web_search):
                         claude_code.run_turn(
-                            claude_code.ClaudeCodeSession(command), "initial", None, "claude-opus-5", "high",
+                            session, "initial", None, "claude-opus-5", "high",
                             lambda _message: None,
                         )
                     argv = json.loads(argv_path.read_text())
@@ -1262,6 +1294,7 @@ print(json.dumps({
             with tempfile.TemporaryDirectory() as tmp:
                 claude_code.AGENT_CWD = tmp
                 server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
+                self.addCleanup(server.close)
                 server.start()
                 _session_id, output = claude_code.run_turn(
                     server,

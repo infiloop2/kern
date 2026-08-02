@@ -111,6 +111,11 @@ class PgClientTests(unittest.TestCase):
                 worker.start()
             for worker in workers:
                 worker.join(timeout=30)
+            # A worker that outlived the join would go on to acquire and
+            # release the *restored* module-level _ACTIVE semaphore once this
+            # patch exits, silently burning a permit for every later database
+            # test. Fail here instead of leaking the thread.
+            self.assertEqual([worker for worker in workers if worker.is_alive()], [])
             self.assertEqual(errors, [])
         db.close_pool()
 
@@ -140,6 +145,10 @@ class PgClientTests(unittest.TestCase):
             finally:
                 release.set()
                 thread.join(timeout=10)
+                # Same reasoning as above: a surviving holder would release the
+                # restored _ACTIVE semaphore and corrupt the budget for the
+                # rest of the process.
+                self.assertFalse(thread.is_alive())
         db.close_pool()
 
     def test_closed_connection_refuses_queries(self) -> None:

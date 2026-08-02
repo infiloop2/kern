@@ -41,11 +41,9 @@ let renderedAppsKey = "";
 let workspacePanelOpen = true;
 let snapshot = { app: null, session: null, status: "idle" };
 let conversationEvents = [];
-let conversationEventsOldestSeq = null;
-let conversationEventsNewestSeq = 0;
-let conversationEventsInitialized = false;
-let hasOlderConversationEvents = false;
+let conversationEventPages = freshConversationEventPages();
 let loadingOlderConversationEvents = false;
+let showingActivity = true;
 let lastChatScrollTop = 0;
 let restoredChatScrollTop = null;
 const conversationViewStates = new Map();
@@ -59,6 +57,7 @@ let bundleUrl = null;
 let lastRenderKey = "";
 let cssCacheKey = null;
 let cssCacheValue = "";
+let generatedDrag = null;
 let appsRefreshSequence = 0;
 const messageBusyApps = new Set();
 let selectedRefreshSequence = 0;
@@ -78,6 +77,19 @@ let memoriesIndex = [];
 let expandedMemory = null;
 let scheduleRequestPending = false;
 let runtimeStatusSequence = 0;
+
+const ACTIVITY_PRESENTATION = Object.freeze({
+  reasoning: { icon: "✦", label: "Reasoning", detail: "Thought process", output: "Result" },
+  plan: { icon: "✓", label: "Plan", detail: "Plan", output: "Result" },
+  command: { icon: "›_", label: "Command", detail: "Context", output: "Terminal output" },
+  file_change: { icon: "Δ", label: "File change", detail: "Changes", output: "Result" },
+  tool: { icon: "◇", label: "Tool", detail: "Input", output: "Tool output" },
+  agent: { icon: "◎", label: "Sub-agent", detail: "Assignment", output: "Result" },
+  search: { icon: "⌕", label: "Search", detail: "Query", output: "Results" },
+  image: { icon: "▧", label: "Image", detail: "Image details", output: "Output" },
+  wait: { icon: "◷", label: "Wait", detail: "Wait details", output: "Result" },
+  status: { icon: "•", label: "Status", detail: "Details", output: "Output" },
+});
 
 const $ = id => document.getElementById(id);
 const composerDrafts = loadComposerDrafts();
@@ -429,6 +441,7 @@ function cloneSafeNode(node, parent) {
   }
   const clean = document.createElement(node.tagName.toLowerCase());
   for (const attribute of node.attributes) copySafeAttribute(node, clean, attribute.name, attribute.value);
+  if (clean.hasAttribute("data-drag-value")) clean.draggable = true;
   if (node.tagName === "BUTTON") clean.type = "button";
   if (node.tagName === "INPUT") {
     const type = node.getAttribute("type") || "text";
@@ -458,6 +471,14 @@ function copySafeAttribute(source, target, name, value) {
   }
   if (lower === "data-action" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)) {
     target.setAttribute(lower, value);
+    return;
+  }
+  if (lower === "data-drop-action" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)) {
+    target.setAttribute(lower, value);
+    return;
+  }
+  if (lower === "data-drag-value" || lower === "data-drop-value") {
+    target.setAttribute(lower, clipEncodedText(value, MAX_EVENT_FIELD_BYTES));
     return;
   }
   if (lower === "data-field" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value)) {
@@ -532,6 +553,7 @@ function renderGenerated(html, css) {
   if (!generatedRoot) generatedRoot = host.attachShadow({ mode: "open" });
   const renderKey = `${html}\u0000${css}`;
   if (renderKey !== lastRenderKey || !generatedRoot.firstChild) {
+    clearGeneratedDrag();
     const fragment = sanitizeHtml(html);
     const safeCss = sanitizeCssCached(css);
     const styleText = `:host{display:block;min-height:100%;color:var(--text);background:var(--bg);font-family:system-ui,sans-serif}${safeCss}`;
@@ -633,6 +655,7 @@ function syncControlState(current, want) {
 }
 
 function clearGenerated() {
+  clearGeneratedDrag();
   if (generatedRoot) generatedRoot.replaceChildren();
   lastRenderKey = "";
   $("generated-host").hidden = true;
@@ -649,7 +672,7 @@ function syncCanvasState() {
   $("empty-primary").textContent = "Open agent chat";
 }
 
-function eventPayload(element) {
+function eventPayload(element, action = element.dataset.action, draggedValue = "") {
   const fields = Object.create(null);
   for (const field of Array.from(generatedRoot.querySelectorAll("[data-field]")).slice(0, MAX_EVENT_FIELDS)) {
     const key = field.dataset.field;
@@ -657,13 +680,16 @@ function eventPayload(element) {
     else fields[key] = clipEncodedText(String(field.value || ""), MAX_EVENT_FIELD_BYTES);
   }
   const payload = {
-    action: element.dataset.action,
-    value: "value" in element ? clipEncodedText(String(element.value || ""), MAX_EVENT_FIELD_BYTES) : "",
+    action,
+    value: clipEncodedText(String(
+      element.dataset.dropValue ?? ("value" in element ? element.value : "") ?? ""
+    ), MAX_EVENT_FIELD_BYTES),
     checked: "checked" in element ? Boolean(element.checked) : false,
+    draggedValue: clipEncodedText(String(draggedValue || ""), MAX_EVENT_FIELD_BYTES),
     fields,
   };
   if (jsonByteLength(payload) > MAX_EVENT_PAYLOAD_BYTES) {
-    return { action: element.dataset.action, value: "", checked: false, fields: {} };
+    return { action, value: "", checked: false, draggedValue: "", fields: {} };
   }
   return payload;
 }
@@ -698,6 +724,85 @@ function generatedInteraction(event) {
     return;
   }
   runCapabilityWorker({ action: target.dataset.action, event: eventPayload(target) });
+}
+
+function setGeneratedDropTarget(target) {
+  if (generatedDrag?.over === target) return;
+  if (generatedDrag?.over) generatedDrag.over.removeAttribute("data-drag-over");
+  if (target) target.setAttribute("data-drag-over", "true");
+  if (generatedDrag) generatedDrag.over = target;
+}
+
+function clearGeneratedDrag() {
+  if (!generatedDrag) return;
+  generatedDrag.source.removeAttribute("data-dragging");
+  setGeneratedDropTarget(null);
+  generatedDrag = null;
+}
+
+function generatedDragStart(event) {
+  if (!selectedAppId || !(event.target instanceof Element)) return;
+  const source = event.target.closest("[data-drag-value]");
+  if (!source || !generatedRoot.contains(source)) return;
+  clearGeneratedDrag();
+  generatedDrag = {
+    source,
+    over: null,
+    value: clipEncodedText(source.dataset.dragValue || "", MAX_EVENT_FIELD_BYTES),
+  };
+  source.setAttribute("data-dragging", "true");
+  if (event.dataTransfer) {
+    // The trusted frame retains the bounded value. Keep DataTransfer empty so
+    // generated data cannot leave the app through a cross-frame or OS drop.
+    try {
+      event.dataTransfer.clearData();
+      event.dataTransfer.setData("text/plain", "");
+      event.dataTransfer.effectAllowed = "move";
+    } catch (_error) {
+      // Some browsers expose a restricted DataTransfer; frame memory remains
+      // the authoritative drag state.
+    }
+  }
+}
+
+function generatedDragOver(event) {
+  if (!generatedDrag || !(event.target instanceof Element)) return;
+  const target = event.target.closest("[data-drop-action]");
+  if (!target || !generatedRoot.contains(target)) {
+    setGeneratedDropTarget(null);
+    return;
+  }
+  event.preventDefault();
+  setGeneratedDropTarget(target);
+  if (event.dataTransfer) {
+    try { event.dataTransfer.dropEffect = "move"; }
+    catch (_error) { /* Restricted DataTransfer; trusted drag state still works. */ }
+  }
+}
+
+function generatedDragLeave(event) {
+  if (!generatedDrag?.over) return;
+  if (!(event.relatedTarget instanceof Node) || !generatedDrag.over.contains(event.relatedTarget)) {
+    setGeneratedDropTarget(null);
+  }
+}
+
+function generatedDrop(event) {
+  if (!generatedDrag || !(event.target instanceof Element)) return;
+  const target = event.target.closest("[data-drop-action]");
+  if (!target || !generatedRoot.contains(target)) return;
+  event.preventDefault();
+  const action = target.dataset.dropAction;
+  const draggedValue = generatedDrag.value;
+  clearGeneratedDrag();
+  if (workerRun) {
+    showRuntimeStatus("Finishing the previous app action");
+    return;
+  }
+  runCapabilityWorker({
+    action,
+    event: eventPayload(target, action, draggedValue),
+  });
 }
 
 // --- Capability worker lifecycle ---------------------------------------------
@@ -1040,6 +1145,7 @@ function setAdminTab(tab) {
   $("panel-schedules").hidden = tab !== "schedules";
   $("panel-memory").hidden = tab !== "memory";
   $("panel-history").hidden = tab !== "history";
+  updateActivityToggle();
   // A freshly selected workspace has not loaded its instruction value yet.
   // Keep the editor inert until that read completes so a fast first edit
   // cannot be overwritten by the asynchronous panel load.
@@ -1047,6 +1153,39 @@ function setAdminTab(tab) {
     $("instructions-editor").disabled = true;
   }
   void refreshAdminPanel(true);
+}
+
+function updateActivityToggle() {
+  const button = $("activity-toggle");
+  button.hidden = !selectedAppId || adminTab !== "chat";
+  button.setAttribute("aria-checked", showingActivity ? "true" : "false");
+  button.title = showingActivity ? "Hide agent activity" : "Show agent activity";
+  $("panel-chat").classList.toggle("activity-hidden", !showingActivity);
+}
+
+function toggleActivity() {
+  const history = $("chat-history");
+  const historyTop = history.getBoundingClientRect().top;
+  const distanceFromBottom = history.scrollHeight - history.scrollTop - history.clientHeight;
+  const anchor = Array.from($("chat-turns").querySelectorAll(".chat-entry:not(.chat-activity)"))
+    .find(entry => entry.getBoundingClientRect().bottom > historyTop);
+  const anchorOffset = anchor ? anchor.getBoundingClientRect().top - historyTop : null;
+  showingActivity = !showingActivity;
+  updateActivityToggle();
+  if (distanceFromBottom < 48) {
+    history.scrollTop = history.scrollHeight;
+  } else if (anchor && anchorOffset !== null && anchor.isConnected) {
+    history.scrollTop += anchor.getBoundingClientRect().top - historyTop - anchorOffset;
+  }
+  if (selectedAppId) {
+    const threadId = selectedAppId;
+    const refreshSequence = selectedRefreshSequence;
+    void refreshConversationEvents(threadId, refreshSequence)
+      .then(() => {
+        if (selectedAppId === threadId && selectedRefreshSequence === refreshSequence) renderChat();
+      })
+      .catch(error => showChatStatus(error.message || "Could not load activity", true));
+  }
 }
 
 async function refreshAdminPanel(opened = false) {
@@ -1824,6 +1963,11 @@ function renderChat() {
   const entries = $("chat-turns");
   const nearBottom = history.scrollHeight - history.scrollTop - history.clientHeight < 48;
   const ordered = conversationEntries();
+  const openActivities = new Set(
+    Array.from(entries.querySelectorAll(".chat-activity-card[open]"))
+      .map(card => card.closest(".chat-entry")?.dataset.entryId)
+      .filter(Boolean),
+  );
   renderHistoryLoader();
   if (!ordered.length) {
     renderedChatEntries.clear();
@@ -1840,9 +1984,9 @@ function renderChat() {
     const renderedKey = JSON.stringify(entry);
     const current = entries.children[index];
     if (!current || current.dataset.entryId !== entry.key) {
-      entries.insertBefore(renderChatEntry(entry), current || null);
+      entries.insertBefore(renderChatEntry(entry, openActivities.has(entry.key)), current || null);
     } else if (renderedChatEntries.get(entry.key) !== renderedKey) {
-      entries.replaceChild(renderChatEntry(entry), current);
+      entries.replaceChild(renderChatEntry(entry, openActivities.has(entry.key)), current);
     }
     renderedChatEntries.set(entry.key, renderedKey);
   });
@@ -1891,6 +2035,14 @@ function conversationEntries() {
         kind: "stopped",
         message: "Agent stopped",
       });
+    } else if (event.event_type === "thread.activity") {
+      entries.push({
+        key: `event-${event.seq}`,
+        kind: "activity",
+        activity: payload.activity && typeof payload.activity === "object"
+          ? payload.activity
+          : {},
+      });
     } else if (
       event.event_type === "thread.message"
       && typeof payload.message === "string"
@@ -1907,11 +2059,84 @@ function conversationEntries() {
   return entries;
 }
 
-function renderChatEntry(entryData) {
+function renderActivityCard(activity, open) {
+  const requestedKind = String(activity.kind || "status").replace(/[^a-z_]/g, "");
+  const kind = Object.prototype.hasOwnProperty.call(ACTIVITY_PRESENTATION, requestedKind)
+    ? requestedKind
+    : "status";
+  const presentation = ACTIVITY_PRESENTATION[kind];
+  const detail = typeof activity.detail === "string" ? activity.detail : "";
+  const output = typeof activity.output === "string" ? activity.output : "";
+  const expandable = Boolean(detail || output);
+  const card = document.createElement(expandable ? "details" : "div");
+  card.className = `chat-activity-card activity-${kind}`;
+  if (expandable && open) card.open = true;
+  if (!expandable) card.classList.add("activity-static");
+  const title = typeof activity.title === "string" && activity.title
+    ? activity.title
+    : "Agent activity";
+  card.setAttribute("aria-label", `${presentation.label}: ${title}`);
+  const summary = document.createElement(expandable ? "summary" : "div");
+  summary.className = "chat-activity-summary";
+  const icon = document.createElement("span");
+  icon.className = "chat-activity-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = presentation.icon;
+  const heading = document.createElement("span");
+  heading.className = "chat-activity-heading";
+  const titleElement = document.createElement("span");
+  titleElement.className = "chat-activity-title";
+  titleElement.textContent = title;
+  const kindElement = document.createElement("span");
+  kindElement.className = "chat-activity-kind";
+  kindElement.textContent = presentation.label;
+  heading.append(titleElement, kindElement);
+  summary.append(icon, heading);
+  const rawStatus = typeof activity.status === "string" ? activity.status : "";
+  if (rawStatus && !["completed", "running"].includes(rawStatus.toLowerCase())) {
+    const status = document.createElement("span");
+    status.className = "chat-activity-status";
+    if (/(?:fail|error|denied|exit\s+[1-9])/i.test(rawStatus)) status.classList.add("failed");
+    status.textContent = rawStatus;
+    summary.append(status);
+  }
+  if (activity.phase === "started") {
+    const phase = document.createElement("span");
+    phase.className = "chat-activity-phase";
+    phase.textContent = "Started";
+    summary.append(phase);
+    card.classList.add("started");
+  }
+  card.append(summary);
+  if (expandable) {
+    const body = document.createElement("div");
+    body.className = "chat-activity-body";
+    for (const [label, value] of [
+      [presentation.detail, detail],
+      [presentation.output, output],
+    ]) {
+      if (!value) continue;
+      const section = document.createElement("section");
+      const labelElement = document.createElement("div");
+      labelElement.className = "chat-activity-label";
+      labelElement.textContent = label;
+      const pre = document.createElement("pre");
+      pre.textContent = value;
+      section.append(labelElement, pre);
+      body.append(section);
+    }
+    card.append(body);
+  }
+  return card;
+}
+
+function renderChatEntry(entryData, activityOpen = false) {
   const entry = document.createElement("article");
   entry.className = `chat-entry chat-${entryData.kind}`;
   entry.dataset.entryId = entryData.key;
-  if (entryData.kind === "agent") {
+  if (entryData.kind === "activity") {
+    entry.append(renderActivityCard(entryData.activity, activityOpen));
+  } else if (entryData.kind === "agent") {
     entry.classList.add("md-content");
     entry.innerHTML = KernRichText.renderMarkdown(entryData.message);
   } else {
@@ -1923,98 +2148,124 @@ function renderChatEntry(entryData) {
 
 function mergeConversationEvents(events) {
   const bySeq = new Map(conversationEvents.map(event => [event.seq, event]));
-  // This compact conversation renders only lifecycle and text messages.
-  // Tool/activity deltas are intentionally omitted instead of accumulating
-  // an unbounded stream the UI never displays.
-  for (const event of events) {
-    if (event.event_type !== "thread.activity") bySeq.set(event.seq, event);
-  }
-  conversationEvents = Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
+  for (const event of events) bySeq.set(event.seq, event);
+  const ordered = Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
+  conversationEvents = KernRichText.compactActivityEvents(ordered);
+}
+
+function freshConversationEventPages() {
+  const page = () => ({
+    oldestSeq: null,
+    newestSeq: 0,
+    initialized: false,
+    hasOlder: false,
+  });
+  return { all: page(), conversation: page() };
+}
+
+function activeConversationEventPage() {
+  return showingActivity
+    ? conversationEventPages.all
+    : conversationEventPages.conversation;
+}
+
+function conversationEventsPath(threadId, pageState, cursorName = null, cursor = null) {
+  const query = [];
+  if (pageState === conversationEventPages.conversation) query.push("activity=false");
+  if (cursorName !== null) query.push(`${cursorName}=${cursor}`);
+  const suffix = query.length ? `?${query.join("&")}` : "";
+  return `/apps/${encodeURIComponent(threadId)}/conversation/events${suffix}`;
 }
 
 async function refreshConversationEvents(threadId, refreshSequence) {
-  if (!conversationEventsInitialized) {
+  const pageState = activeConversationEventPage();
+  if (!pageState.initialized) {
     const response = await api(
       "GET",
-      `/apps/${encodeURIComponent(threadId)}/conversation/events`,
+      conversationEventsPath(threadId, pageState),
     );
     if (selectedAppId !== threadId || selectedRefreshSequence !== refreshSequence) return;
     const events = response.events || [];
     mergeConversationEvents(events);
     if (events.length) {
-      conversationEventsOldestSeq = events[0].seq;
-      conversationEventsNewestSeq = events[events.length - 1].seq;
+      pageState.oldestSeq = events[0].seq;
+      pageState.newestSeq = events[events.length - 1].seq;
     }
     let oldestPage = events;
     for (
       let page = 1;
       page < INITIAL_CONVERSATION_EVENT_PAGES
       && oldestPage.length === CONVERSATION_EVENTS_PAGE
-      && conversationEventsOldestSeq !== null;
+      && pageState.oldestSeq !== null;
       page += 1
     ) {
-      const before = conversationEventsOldestSeq;
+      const before = pageState.oldestSeq;
       const olderResponse = await api(
         "GET",
-        `/apps/${encodeURIComponent(threadId)}/conversation/events?before=${before}`,
+        conversationEventsPath(threadId, pageState, "before", before),
       );
       if (selectedAppId !== threadId || selectedRefreshSequence !== refreshSequence) return;
       oldestPage = (olderResponse.events || []).filter(event => event.seq < before);
       if (oldestPage.length) {
         mergeConversationEvents(oldestPage);
-        conversationEventsOldestSeq = oldestPage[0].seq;
+        pageState.oldestSeq = oldestPage[0].seq;
       }
     }
-    hasOlderConversationEvents = oldestPage.length === CONVERSATION_EVENTS_PAGE;
-    conversationEventsInitialized = true;
+    pageState.hasOlder = oldestPage.length === CONVERSATION_EVENTS_PAGE;
+    pageState.initialized = true;
     renderHistoryLoader();
     return;
   }
   for (;;) {
-    const since = conversationEventsNewestSeq;
+    const since = pageState.newestSeq;
     const response = await api(
       "GET",
-      `/apps/${encodeURIComponent(threadId)}/conversation/events?since=${since}`,
+      conversationEventsPath(threadId, pageState, "since", since),
     );
     if (selectedAppId !== threadId || selectedRefreshSequence !== refreshSequence) return;
     const events = response.events || [];
     const fresh = events.filter(event => event.seq > since);
     if (fresh.length) {
       mergeConversationEvents(fresh);
-      conversationEventsNewestSeq = fresh[fresh.length - 1].seq;
-      if (conversationEventsOldestSeq === null) conversationEventsOldestSeq = fresh[0].seq;
+      pageState.newestSeq = fresh[fresh.length - 1].seq;
+      if (pageState.oldestSeq === null) pageState.oldestSeq = fresh[0].seq;
     }
     if (fresh.length < CONVERSATION_EVENTS_PAGE) return;
   }
 }
 
 async function loadOlderConversationEvents() {
+  const pageState = activeConversationEventPage();
   if (
     !selectedAppId
-    || !conversationEventsInitialized
-    || !hasOlderConversationEvents
+    || !pageState.initialized
+    || !pageState.hasOlder
     || loadingOlderConversationEvents
-    || conversationEventsOldestSeq === null
+    || pageState.oldestSeq === null
   ) return;
   const threadId = selectedAppId;
-  const before = conversationEventsOldestSeq;
+  const before = pageState.oldestSeq;
   loadingOlderConversationEvents = true;
   renderHistoryLoader();
   try {
     const response = await api(
       "GET",
-      `/apps/${encodeURIComponent(threadId)}/conversation/events?before=${before}`,
+      conversationEventsPath(threadId, pageState, "before", before),
     );
-    if (selectedAppId !== threadId || conversationEventsOldestSeq !== before) return;
+    if (
+      selectedAppId !== threadId
+      || activeConversationEventPage() !== pageState
+      || pageState.oldestSeq !== before
+    ) return;
     const older = (response.events || []).filter(event => event.seq < before);
     const history = $("chat-history");
     const previousHeight = history.scrollHeight;
     const previousTop = history.scrollTop;
     if (older.length) {
       mergeConversationEvents(older);
-      conversationEventsOldestSeq = older[0].seq;
+      pageState.oldestSeq = older[0].seq;
     }
-    hasOlderConversationEvents = older.length === CONVERSATION_EVENTS_PAGE;
+    pageState.hasOlder = older.length === CONVERSATION_EVENTS_PAGE;
     renderChat();
     history.scrollTop = previousTop + (history.scrollHeight - previousHeight);
     lastChatScrollTop = history.scrollTop;
@@ -2028,10 +2279,11 @@ async function loadOlderConversationEvents() {
 
 function renderHistoryLoader() {
   const loader = $("history-loader");
-  loader.hidden = !selectedAppId || !hasOlderConversationEvents;
-  loader.dataset.oldestSeq = conversationEventsOldestSeq === null
+  const pageState = activeConversationEventPage();
+  loader.hidden = !selectedAppId || !pageState.hasOlder;
+  loader.dataset.oldestSeq = pageState.oldestSeq === null
     ? ""
-    : String(conversationEventsOldestSeq);
+    : String(pageState.oldestSeq);
   const button = $("load-earlier");
   button.disabled = loadingOlderConversationEvents;
   button.textContent = loadingOlderConversationEvents
@@ -2293,6 +2545,7 @@ function syncWorkspaceControls() {
   $("checkpoint-save").disabled = !hasApp;
   $("schedule-create").disabled = !hasApp || scheduleRequestPending;
   if (!hasApp) $("revision-label").textContent = "";
+  updateActivityToggle();
   setSessionOptions();
   syncCanvasState();
 }
@@ -2310,10 +2563,10 @@ function saveSelectedConversationView() {
     session: snapshot.session,
     status: snapshot.status,
     events: conversationEvents,
-    oldestSeq: conversationEventsOldestSeq,
-    newestSeq: conversationEventsNewestSeq,
-    initialized: conversationEventsInitialized,
-    hasOlder: hasOlderConversationEvents,
+    eventPages: {
+      all: { ...conversationEventPages.all },
+      conversation: { ...conversationEventPages.conversation },
+    },
     scrollTop: $("chat-history").scrollTop,
   });
   if (conversationViewStates.size > VIEW_STATE_LIMIT) {
@@ -2326,10 +2579,7 @@ function restoreConversationView(app) {
   if (!state) {
     snapshot = { app: null, session: app.session || null, status: app.status || "idle" };
     conversationEvents = [];
-    conversationEventsOldestSeq = null;
-    conversationEventsNewestSeq = 0;
-    conversationEventsInitialized = false;
-    hasOlderConversationEvents = false;
+    conversationEventPages = freshConversationEventPages();
     lastChatScrollTop = 0;
     restoredChatScrollTop = null;
   } else {
@@ -2339,10 +2589,10 @@ function restoreConversationView(app) {
       status: app.status || state.status || "idle",
     };
     conversationEvents = state.events;
-    conversationEventsOldestSeq = state.oldestSeq;
-    conversationEventsNewestSeq = state.newestSeq;
-    conversationEventsInitialized = state.initialized;
-    hasOlderConversationEvents = state.hasOlder;
+    conversationEventPages = {
+      all: { ...state.eventPages.all },
+      conversation: { ...state.eventPages.conversation },
+    };
     lastChatScrollTop = state.scrollTop;
     restoredChatScrollTop = state.scrollTop;
   }
@@ -2395,10 +2645,7 @@ function clearSelectedApp(force = false) {
   restoreComposerDraft();
   snapshot = { app: null, session: null, status: "idle" };
   conversationEvents = [];
-  conversationEventsOldestSeq = null;
-  conversationEventsNewestSeq = 0;
-  conversationEventsInitialized = false;
-  hasOlderConversationEvents = false;
+  conversationEventPages = freshConversationEventPages();
   loadingOlderConversationEvents = false;
   lastChatScrollTop = 0;
   restoredChatScrollTop = null;
@@ -2591,6 +2838,11 @@ async function initialize() {
   generatedRoot = $("generated-host").attachShadow({ mode: "open" });
   generatedRoot.addEventListener("click", generatedInteraction);
   generatedRoot.addEventListener("change", generatedInteraction);
+  generatedRoot.addEventListener("dragstart", generatedDragStart);
+  generatedRoot.addEventListener("dragover", generatedDragOver);
+  generatedRoot.addEventListener("dragleave", generatedDragLeave);
+  generatedRoot.addEventListener("drop", generatedDrop);
+  generatedRoot.addEventListener("dragend", clearGeneratedDrag);
   generatedRoot.addEventListener("submit", event => event.preventDefault());
   syncWorkspacePanel();
   try {
@@ -2711,6 +2963,7 @@ $("workspace-panel-backdrop").addEventListener("click", () => setWorkspacePanelO
 $("rename-app").addEventListener("click", () => renameSelectedApp().catch(error => showRuntimeStatus(error.message, "error")));
 $("admin-open").addEventListener("click", () => openAdmin());
 $("admin-close").addEventListener("click", () => closeAdmin());
+$("activity-toggle").addEventListener("click", toggleActivity);
 $("empty-primary").addEventListener("click", () => {
   if (!selectedAppId) return;
   openAdmin("chat");

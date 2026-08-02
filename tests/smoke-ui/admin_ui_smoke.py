@@ -69,7 +69,10 @@ def free_port() -> int:
 
 
 def wait_for_server(port: int, proc: subprocess.Popen[str]) -> None:
-    deadline = time.time() + 10
+    # Interpreter startup plus mock boot on a cold, loaded CI runner does not
+    # reliably fit in ten seconds; the loop exits early anyway once the server
+    # answers, and on process death immediately.
+    deadline = time.time() + 30
     url = f"http://127.0.0.1:{port}/"
     while time.time() < deadline:
         if proc.poll() is not None:
@@ -80,7 +83,9 @@ def wait_for_server(port: int, proc: subprocess.Popen[str]) -> None:
                 if response.status == 200:
                     return
         except OSError:
-            time.sleep(0.1)
+            pass
+        # Outside the handler: a non-200 answer must back off too, not spin.
+        time.sleep(0.1)
     raise TimeoutError(f"mock server did not become ready at {url}")
 
 
@@ -468,10 +473,11 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#file-viewer-title")).to_contain_text(hostile_name)
     expect(page.locator("#file-content")).to_contain_text("<script>window.__fileContentXss=1</script>")
     expect(page.locator("#file-content")).to_contain_text("Mock unsafe-looking file contents")
-    if page.locator("#file-list img").count() != 0:
-        raise AssertionError("hostile filename/type rendered as HTML in file list")
-    if page.locator("#file-content img").count() != 0:
-        raise AssertionError("hostile file content rendered as HTML")
+    # count() takes one sample and returns 0 for a list that is merely still
+    # rendering, which would pass these escaping checks without ever looking at
+    # the hostile row; to_have_count retries against the settled DOM.
+    expect(page.locator("#file-list img")).to_have_count(0)
+    expect(page.locator("#file-content img")).to_have_count(0)
     executed = page.evaluate(
         "() => [window.__fileNameXss, window.__fileTypeXss, "
         "window.__fileContentXss, window.__fileContentImageXss]"
@@ -485,6 +491,9 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#file-viewer-title")).to_contain_text("/workspace/screenshot.png")
     expect(page.locator("#file-image")).to_be_visible()
     expect(page.locator("#file-content")).to_be_hidden()
+    # Visible does not mean decoded: wait for the load to settle before reading
+    # naturalWidth, which is 0 on an image that is still in flight.
+    expect(page.locator("#file-image")).to_have_js_property("complete", True)
     if page.locator("#file-image").evaluate("(image) => image.naturalWidth") != 1:
         raise AssertionError("workspace image preview did not decode")
 
@@ -863,7 +872,9 @@ def desktop_smoke(page, url: str) -> None:
     counter_turn = counter_turn_response.json()
     if counter_turn.get("status") != "accepted" or counter_turn.get("thread", {}).get("status") != "running":
         raise AssertionError(f"unexpected thread message response: {counter_turn}")
-    expect(hermes_box).to_contain_text("1 running", timeout=8000)
+    # Same five-second toolbar poll as the clearing assertion below: budget a
+    # full cycle plus render, not most of one.
+    expect(hermes_box).to_contain_text("1 running", timeout=12000)
     stopped = page.request.post(
         f"{url.rstrip('/')}/v1/threads/toolbar-hermes-counter/stop",
         headers={"X-Kern-Csrf": "1"},
@@ -903,6 +914,11 @@ def desktop_smoke(page, url: str) -> None:
     expect(approval_disable).to_have_text("Disable")
     # Enabling expands the row with the repository controls.
     expect(page.locator("#github-expansion")).to_be_visible()
+    github_access_notice = page.locator("#github-expansion .access-notice")
+    expect(github_access_notice.locator(".access-notice-icon")).to_be_visible()
+    expect(github_access_notice).to_contain_text("Additional integrations connected to your repositories")
+    expect(github_access_notice).to_contain_text("Vercel")
+    expect(github_access_notice).to_contain_text("may expose it publicly")
     expect(page.locator("#github-repos")).to_contain_text("No write repositories configured")
     page.locator("#github-repo").fill("infiloop2/kern")
     page.get_by_role("button", name="Add write repository", exact=True).click()
@@ -1028,7 +1044,10 @@ def desktop_smoke(page, url: str) -> None:
     # 5-second poll, so allow two poll rounds for the flip to render.
     with page.expect_response(
         lambda response: "/v1/agent-runtime/account" in response.url and response.request.method == "GET",
-        timeout=8000,
+        # Nothing here triggers the request: it is purely the dashboard's own
+        # 5s poll noticing the out-of-band login. Two rounds is 10s, so 8s was
+        # under the budget this wait was written for.
+        timeout=12000,
     ):
         pass
     expect(openai_row.get_by_role("button", name="Start Codex login")).to_have_count(0, timeout=12000)
@@ -1077,7 +1096,10 @@ def desktop_smoke(page, url: str) -> None:
     expect(claude_row.locator("[data-integration-message='claude']")).to_contain_text("Claude Code login submitted")
     with page.expect_response(
         lambda response: "/v1/agent-runtime/account" in response.url and response.request.method == "GET",
-        timeout=8000,
+        # Nothing here triggers the request: it is purely the dashboard's own
+        # 5s poll noticing the out-of-band login. Two rounds is 10s, so 8s was
+        # under the budget this wait was written for.
+        timeout=12000,
     ):
         pass
     expect(claude_row.get_by_role("button", name="Start Claude Code login")).to_have_count(0)
@@ -1147,6 +1169,19 @@ def tools_smoke(page) -> None:
     expect(tools).to_contain_text("Gmail")
     expect(tools).to_contain_text("Google Calendar")
     expect(tools).to_contain_text("Brave Search")
+    cross_access_notice = page.locator("#tools-cross-access-notice")
+    expect(cross_access_notice).to_be_visible()
+    expect(cross_access_notice.locator(".access-notice-icon")).to_be_visible()
+    expect(cross_access_notice).to_contain_text("use information from one enabled tool")
+    expect(cross_access_notice).to_contain_text("Gmail, Google Calendar, or X")
+
+    # The advisory is about combined access, so one enabled tool is not enough
+    # to show it. Re-enabling the second tool restores it immediately.
+    calendar_row = page.locator("#tools .integration-row[data-tool-row='google_calendar']")
+    calendar_row.get_by_role("button", name="Disable", exact=True).click()
+    expect(cross_access_notice).to_be_hidden()
+    calendar_row.get_by_role("button", name="Enable", exact=True).click()
+    expect(cross_access_notice).to_be_visible()
 
     # Discovery is the inventory boundary: every bundled package must render
     # one row and one guide without adding a hand-maintained UI registry entry.
@@ -1297,7 +1332,7 @@ def tools_smoke(page) -> None:
     # An unused tool shows a plain empty state, not an empty table skeleton.
     expect(brave_row).to_contain_text("No approvals for this tool yet.")
     expect(brave_row.locator(".tool-approvals-table th")).to_have_count(0)
-    brave_row.get_by_role("button", name="Enable").click()
+    brave_row.get_by_role("button", name="Enable", exact=True).click()
     expect(brave_row).to_contain_text("enabled")
     expect(brave_row).to_contain_text("not set")
     expect(brave_row.locator("[data-tool-message='brave_search']")).to_contain_text("Brave Search enabled")
@@ -1318,7 +1353,7 @@ def tools_smoke(page) -> None:
     expect(gmail_row.locator(".detail-card-head", has_text="Connection")).to_have_count(0)
     gmail_row.get_by_role("button", name="Enable", exact=True).click()
     expect(gmail_row).to_contain_text("not connected")
-    gmail_row.get_by_role("button", name="Connect").click()
+    gmail_row.get_by_role("button", name="Connect", exact=True).click()
     expect(page.locator("#panel-network")).to_be_visible()
     expect(gmail_row.locator("[data-tool-message='gmail']")).to_contain_text("Connected gmail as operator@example.com")
     expect(page.locator("#notice")).to_have_text("")
@@ -1548,8 +1583,8 @@ def tools_smoke(page) -> None:
     expect(brave_row).to_contain_text("enabled")
 
     # Disable flips the row back to the enable state without expanding it.
-    brave_row.get_by_role("button", name="Disable").click()
-    expect(brave_row.get_by_role("button", name="Enable")).to_be_enabled()
+    brave_row.get_by_role("button", name="Disable", exact=True).click()
+    expect(brave_row.get_by_role("button", name="Enable", exact=True)).to_be_enabled()
     expect(brave_row).to_contain_text("disabled")
 
     # Tool events live on their own audit-log tab now, next to the network
@@ -1703,8 +1738,16 @@ def mobile_smoke(page, url: str) -> None:
     disabled_row = page.locator(".integration-row[data-integration='python_packages']")
     enabled_row = page.locator(".integration-row[data-tool-row='brave_search']")
     connected_row = page.locator(".integration-row[data-tool-row='google_calendar']")
-    if "disabled" in (enabled_row.locator(".status-chips").text_content() or ""):
+    # text_content() waits for attachment but not for content, and the tools
+    # list is rebuilt on the 5s poll, so a read can land on a freshly attached
+    # empty chip row. Wait for the chips to actually say something first, then
+    # confirm the click landed rather than letting the assertions below be the
+    # synchronization.
+    enabled_chips = enabled_row.locator(".status-chips")
+    expect(enabled_chips).to_contain_text(re.compile(r"enabled|disabled"))
+    if "disabled" in (enabled_chips.text_content() or ""):
         enabled_row.get_by_role("button", name="Enable", exact=True).click()
+        expect(enabled_chips).to_contain_text("enabled")
     state_rows = (disabled_row, enabled_row, connected_row)
     expect(state_rows[0].locator(".status-chips")).to_contain_text("disabled")
     expect(state_rows[1].locator(".status-chips")).to_contain_text("enabled")

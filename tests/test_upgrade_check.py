@@ -9,7 +9,11 @@ from host.runtime.admin_api import upgrade_check
 
 class UpgradeCheckTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Process-global memo: restore it on the way out too, so these tests
+        # cannot hand a stale "an upgrade is available" verdict to whatever
+        # runs next.
         upgrade_check._latest_version = None
+        self.addCleanup(setattr, upgrade_check, "_latest_version", None)
 
     def test_refresh_publishes_a_newer_valid_version(self) -> None:
         proc = subprocess.CompletedProcess(upgrade_check.HELPER_COMMAND, 0, "2.4.0\n", "")

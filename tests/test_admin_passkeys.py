@@ -57,8 +57,14 @@ def cbor_head(major: int, length: int) -> bytes:
 class AdminPasskeyTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
+        # Pending ceremonies are process-global and single-use; clear them on
+        # the way out as well as in, so an abandoned ceremony from these tests
+        # cannot survive into another module (test_admin_auth.py:13 uses the
+        # same symmetric pattern for its session/failure maps).
         admin_passkeys._login_ceremonies.clear()
         admin_passkeys._registration_ceremonies.clear()
+        self.addCleanup(admin_passkeys._login_ceremonies.clear)
+        self.addCleanup(admin_passkeys._registration_ceremonies.clear)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.private_key = Path(self.temporary.name) / "private.pem"
