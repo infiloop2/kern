@@ -180,9 +180,14 @@ class OrchestratorTests(unittest.TestCase):
         self.claude_account_patch.start()
         self.addCleanup(self.claude_account_patch.stop)
         # Live-validation verdicts are process-global memos; isolate tests.
+        # Reset on the way out too: the other classes in this file do not all
+        # clear these, so leaving a memo behind makes them order-dependent.
         orchestrator._CLAUDE_LIVE_PROBE = None
         orchestrator._CLAUDE_ATTESTATION_MEMO = None
         orchestrator.codex_app_server.clear_live_validation_failure()
+        self.addCleanup(orchestrator.codex_app_server.clear_live_validation_failure)
+        self.addCleanup(setattr, orchestrator, "_CLAUDE_ATTESTATION_MEMO", None)
+        self.addCleanup(setattr, orchestrator, "_CLAUDE_LIVE_PROBE", None)
         orchestrator._set_runtime_status("codex", "active")
         orchestrator._set_runtime_status("claude_code", "active")
 

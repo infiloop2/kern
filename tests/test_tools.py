@@ -5,6 +5,7 @@ import copy
 from contextlib import contextmanager
 import hashlib
 import io
+import time
 import unittest
 import urllib.error
 from dataclasses import dataclass, field
@@ -34,7 +35,12 @@ from host.tools.shared import google as google_shared
 from host.tools.shared.web import WebRequestError
 
 
-FRESH_EXPIRES_AT = 2_000_000_000
+# The OAuth freshness checks read the real clock — shared/oauth2.access_token_is_fresh
+# and shared/google.google_access_token_is_fresh both compare expires_at against
+# now() + ACCESS_TOKEN_REFRESH_SKEW_SECONDS — so anchor "fresh" to that same clock.
+# A fixed epoch would silently turn every connected fixture into an expired
+# credential on one specific future date.
+FRESH_EXPIRES_AT = int(time.time()) + 365 * 24 * 3600
 EXAMPLE_DATA_SUMMARY = DataSummary(
     cards=(
         DataSummaryCard(title="What leaves this host", description="Request data."),

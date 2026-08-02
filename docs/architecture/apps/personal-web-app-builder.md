@@ -95,7 +95,8 @@ life of the frame. Agent replies use the same escaped Markdown renderer. A
 running Codex or Claude turn accepts synchronous steering through the same
 composer; Hermes disables follow-ups until its turn ends. There is one
 thread-level Stop control in the composer. Provider activity events are
-omitted rather than rendered as tool cards. User bubbles retain the trusted
+shown by default as expandable cards; the Activity switch hides or restores
+those complete rows without removing ordinary conversation messages. User bubbles retain the trusted
 `Requested by user:` / `Requested by app:` / `Requested by schedule:` first
 line, because requests need visible provenance; the injected context block is
 stripped from display.
@@ -254,13 +255,26 @@ by polling runs one load turn to re-render, without tearing down the canvas.
 
 `app.on` binds a bounded action name to one handler. Generated HTML exposes an
 action with `data-action="name"`. A click or change on that element becomes a
-plain `{action, value, checked, fields}` event. Controls marked with
-`data-field="name"` contribute values to `fields`. No DOM node, Event object,
-selector API, or browser global crosses into the worker.
+plain `{action, value, checked, draggedValue, fields}` event. Controls marked
+with `data-field="name"` contribute values to `fields`. Ordinary events carry
+an empty `draggedValue`. No DOM node, Event object, selector API, or browser
+global crosses into the worker.
 
 Buttons and non-control action elements dispatch from click. Inputs, selects,
 and textareas ignore the preliminary click and dispatch only from their native
 change event, after the checked state or selected value has changed.
+
+Drag and drop uses two separate safe attributes. `data-drag-value="item-id"`
+makes the sanitized element natively draggable; `data-drop-action="move"`
+marks a destination and dispatches the registered `move` handler on drop.
+Optional `data-drop-value="target-id"` identifies the destination through the
+event's ordinary `value`, while `draggedValue` carries the bounded source
+value. The trusted frame keeps drag state in memory and puts only an empty
+plain-text entry in the browser `DataTransfer`, so generated values cannot
+leave the app through a cross-frame or operating-system drop. During a drag it
+adds the trusted-only `data-dragging` and `data-drag-over` attributes for CSS
+feedback. Generated apps should retain a click or keyboard reorder path because
+native browser drag and drop is not universally accessible.
 
 `app.data()` returns a structured clone. `app.set`, `app.delete`, and
 `app.append` accept a path array of string object keys and non-negative integer

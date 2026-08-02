@@ -134,8 +134,20 @@ class NetworkIntrospectionTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             text=True,
         )
-        self.addCleanup(shim.wait)
-        self.addCleanup(shim.stdin.close)
+        def stop_shim() -> None:
+            # Closing stdin is the exit signal; the wait is bounded so a
+            # wedged shim fails this test instead of hanging the suite; stdout
+            # is closed last so the pipe fd is not leaked into later tests.
+            shim.stdin.close()
+            try:
+                shim.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                shim.kill()
+                shim.wait(timeout=30)
+            finally:
+                shim.stdout.close()
+
+        self.addCleanup(stop_shim)
 
         shim.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n")
         shim.stdin.flush()

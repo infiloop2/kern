@@ -160,6 +160,15 @@ def save_attested_claude_account(account_id: str, **extra: Any) -> None:
     )
 
 
+def _without_last_used_at(response: dict[str, Any]) -> dict[str, Any]:
+    """A thread response with the wall-clock field dropped, so two responses
+    can be compared for equality without racing a second boundary."""
+    thread = {
+        key: value for key, value in response["thread"].items() if key != "last_used_at"
+    }
+    return {**response, "thread": thread}
+
+
 def _session_headers(token: str) -> dict[str, str]:
     """Cookie + CSRF headers for a request authenticated by an admin session."""
     return {"Cookie": f"tc_admin_session={token}", "X-Kern-Csrf": "1"}
@@ -2175,7 +2184,15 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
 
         self.assertEqual(first["status"], "accepted")
-        self.assertEqual(first, repeated)
+        # Both steers return the same response apart from last_used_at, which
+        # each send rewrites from the wall clock: comparing the whole payload
+        # fails whenever the two requests straddle a second boundary.
+        self.assertEqual(_without_last_used_at(first), _without_last_used_at(repeated))
+        for response in (first, repeated):
+            self.assertRegex(
+                response["thread"]["last_used_at"],
+                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+            )
         turn = orchestrator._LIVE["codex:agent_chat__durable-steer"]
         self.assertEqual(turn.server.messages, ["nudge", "nudge"])
         events = self.app_backend_request("GET", "/v1/threads/durable-steer/events")

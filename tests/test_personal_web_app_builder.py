@@ -81,7 +81,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('showChatStatus("Stopping…")', source)
         self.assertIn('"kern-app-upload-file"', source)
         self.assertIn("[User-uploaded file: ${attachment.file.path}]", source)
-        self.assertIn("/conversation/events?before=${before}", source)
+        self.assertIn('query.push("activity=false")', source)
+        self.assertIn("KernRichText.compactActivityEvents(ordered)", source)
         self.assertIn("loadOlderConversationEvents()", source)
         self.assertIn("refreshSequence !== appsRefreshSequence", source)
         self.assertIn("COMPOSER_DRAFTS_STORAGE_KEY", source)
@@ -156,6 +157,15 @@ class AgenticWebAppContractTests(unittest.TestCase):
         # Renders patch the shadow tree instead of replacing it wholesale.
         self.assertIn("function patchNode(", source)
         self.assertIn("sanitizeCssCached", source)
+        # Drag state stays in the trusted frame and only bounded plain values
+        # enter the worker event payload.
+        self.assertIn('lower === "data-drag-value"', source)
+        self.assertIn('lower === "data-drop-action"', source)
+        self.assertIn('lower === "data-drop-value"', source)
+        self.assertIn('event.dataTransfer.clearData()', source)
+        self.assertIn('event.dataTransfer.setData("text/plain", "")', source)
+        self.assertIn('draggedValue: clipEncodedText(', source)
+        self.assertIn('generatedRoot.addEventListener("drop", generatedDrop)', source)
         # Enter cannot bypass attachment/session validation represented by the
         # disabled composer action.
         self.assertIn('if (!fromGeneratedApp && $("send-message").disabled) return;', source)
@@ -164,6 +174,10 @@ class AgenticWebAppContractTests(unittest.TestCase):
         instructions = (APP_DIR / "agent.md").read_text()
         self.assertIn("This thread belongs\npermanently to this workspace", instructions)
         self.assertIn("app.askAgent(message)", instructions)
+        self.assertIn('data-drag-value="item-id"', instructions)
+        self.assertIn('data-drop-action="name"', instructions)
+        self.assertIn('data-drop-value="target-id"', instructions)
+        self.assertIn("draggedValue", instructions)
         self.assertIn('"action":"replace_ui","expected_ui_revision"', instructions)
         self.assertIn('"action":"set","expected_data_version"', instructions)
         self.assertIn("/agent/instructions", instructions)
@@ -450,7 +464,7 @@ class ConversationTests(unittest.TestCase):
         host.assert_called_once_with(
             "GET",
             "/v1/threads/app-6/events?since=2&limit=6&message_bytes=122880"
-            "&event_type=thread.message&event_type=thread.error"
+            "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
             "&event_type=thread.stopped",
         )
 
@@ -470,7 +484,7 @@ class ConversationTests(unittest.TestCase):
             (
                 "GET",
                 "/v1/threads/app-6/events?limit=6&message_bytes=122880"
-                "&event_type=thread.message&event_type=thread.error"
+                "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
                 "&event_type=thread.stopped",
             ),
         )
@@ -479,9 +493,28 @@ class ConversationTests(unittest.TestCase):
             (
                 "GET",
                 "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880"
-                "&event_type=thread.message&event_type=thread.error"
+                "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
                 "&event_type=thread.stopped",
             ),
+        )
+
+    def test_conversation_events_can_page_without_activity(self) -> None:
+        events = {"events": [{"seq": 5, "event_type": "thread.message"}]}
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "call_admin_api", return_value=events) as host,
+        ):
+            self.assertEqual(
+                backend.browser_conversation_events(
+                    "app-6", {"activity": ["false"], "before": ["5"]}
+                ),
+                events,
+            )
+        host.assert_called_once_with(
+            "GET",
+            "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880"
+            "&event_type=thread.message&event_type=thread.error"
+            "&event_type=thread.stopped",
         )
 
     def test_conversation_events_reject_mixed_cursors(self) -> None:
@@ -835,7 +868,11 @@ class AgenticWebAppMockTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            [event["event_type"] for event in events],
+            [
+                event["event_type"]
+                for event in events
+                if event["event_type"] != "thread.activity"
+            ],
             ["thread.message", "thread.message", "thread.message"],
         )
 
@@ -872,6 +909,7 @@ class AgenticWebAppMockTests(unittest.TestCase):
             event["payload"]["activity"]
             for event in builder_mock.WORKSPACES["app-1"]["events"]
             if event["event_type"] == "thread.activity"
+            and event["payload"]["activity"]["title"] == "Agent provider changed"
         ]
         self.assertEqual(len(activities), 1)
         self.assertEqual(activities[0]["title"], "Agent provider changed")

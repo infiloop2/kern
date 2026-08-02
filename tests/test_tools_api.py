@@ -500,9 +500,23 @@ class McpShimTests(ToolsApiTestCase):
             stdout=subprocess.PIPE,
             text=True,
         )
-        self.addCleanup(shim.wait)
-        self.addCleanup(shim.stdin.close)
+        self.addCleanup(self.stop_shim, shim)
         return shim
+
+    def stop_shim(self, shim: subprocess.Popen[str]) -> None:
+        """Shut the shim down deterministically. Closing stdin is the exit
+        signal; the wait is bounded so a wedged shim fails this test instead
+        of hanging the whole suite; stdout is closed last so the pipe fd is
+        never leaked into later tests (unclosed pipes show up as
+        ResourceWarning at interpreter exit)."""
+        shim.stdin.close()
+        try:
+            shim.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            shim.kill()
+            shim.wait(timeout=30)
+        finally:
+            shim.stdout.close()
 
     def rpc(self, shim: subprocess.Popen[str], message: dict) -> dict:
         shim.stdin.write(json.dumps(message) + "\n")

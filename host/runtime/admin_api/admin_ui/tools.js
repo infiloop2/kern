@@ -33,6 +33,7 @@ export async function refreshTools() {
 function renderTools() {
   // Re-rendering replaces the info buttons, so drop any open popover.
   closeIntegrationInfo();
+  $("tools-cross-access-notice").hidden = tools.filter(tool => tool.enabled).length < 2;
   $("tools-empty").hidden = tools.length > 0;
   if (!tools.length) {
     replaceIntegrationRows($("tools"), "[data-tool-row]", "");
