@@ -64,6 +64,10 @@ Wire interactivity with `data-action="name"` on clickable elements and
 `data-field="name"` on inputs whose values belong in events. The frozen `app`
 global:
 
+For Enter-to-submit controls, put `data-enter-action="name"` on an input or
+textarea. Plain Enter dispatches that action with the same bounded fields as a
+click; Shift+Enter remains available for multiline input.
+
 For drag and drop, put `data-drag-value="item-id"` on the source and
 `data-drop-action="name"` on the destination. The destination's handler gets
 `draggedValue` alongside `action`, `value`, `checked`, and `fields`.

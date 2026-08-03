@@ -88,6 +88,8 @@ def _app_markup(count: int, title: str = "Weekly focus") -> str:
             <button data-action="increment">Add priority</button>
             <button data-action="refresh-analysis">Refresh analysis</button>
           </div>
+          <label>Instruction <input id="enter-action" data-field="instruction" data-enter-action="submit-instruction"></label>
+          <input id="bad-enter-action" data-enter-action="bad action">
           <div class="drag-probe">
             <button id="drag-source" data-drag-value="priority-ship">Drag Ship builder</button>
             <div id="drop-target" data-drop-action="move-priority" data-drop-value="priority-review">Drop before Review security</div>
@@ -173,6 +175,10 @@ def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
         'success',
       ));
       app.on('refresh-analysis', () => app.askAgent('{AGENT_PROMPT}'));
+      app.on('submit-instruction', event => app.notify(
+        `Submitted ${{event.fields.instruction}}`,
+        'success',
+      ));
     """,
         "data": {"count": 2, "priorities": ["Ship builder", "Review security"]},
         "updated_at": "2026-07-22T10:00:00Z",
@@ -1231,6 +1237,12 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#bad-drop-target")).not_to_have_attribute(
         "data-drop-action", re.compile(".+")
     )
+    expect(frame.locator("#enter-action")).to_have_attribute(
+        "data-enter-action", "submit-instruction"
+    )
+    expect(frame.locator("#bad-enter-action")).not_to_have_attribute(
+        "data-enter-action", re.compile(".+")
+    )
     page.wait_for_timeout(300)
     if leaked:
         raise AssertionError(f"agent-authored UI caused browser requests: {leaked}")
@@ -1239,6 +1251,13 @@ def desktop_smoke(page: Any) -> None:
     frame.locator("#drag-source").drag_to(frame.locator("#drop-target"))
     expect(frame.locator("#runtime-status")).to_have_text(
         "Moved priority-ship before priority-review"
+    )
+
+    enter_action = frame.locator("#enter-action")
+    enter_action.fill("ship the update")
+    enter_action.press("Enter")
+    expect(frame.locator("#runtime-status")).to_have_text(
+        "Submitted ship the update"
     )
 
     reviewed.click()

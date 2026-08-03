@@ -264,6 +264,12 @@ Buttons and non-control action elements dispatch from click. Inputs, selects,
 and textareas ignore the preliminary click and dispatch only from their native
 change event, after the checked state or selected value has changed.
 
+An input or textarea may also carry `data-enter-action="name"`. Plain Enter
+dispatches the named action with the same bounded payload and `data-field`
+values as other generated interactions. Shift+Enter retains its native
+multiline behavior. Modified, repeated, and IME-composition key events do not
+dispatch an action.
+
 Drag and drop uses two separate safe attributes. `data-drag-value="item-id"`
 makes the sanitized element natively draggable; `data-drop-action="move"`
 marks a destination and dispatches the registered `move` handler on drop.
