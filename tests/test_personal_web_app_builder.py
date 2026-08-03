@@ -162,10 +162,12 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('lower === "data-drag-value"', source)
         self.assertIn('lower === "data-drop-action"', source)
         self.assertIn('lower === "data-drop-value"', source)
+        self.assertIn('lower === "data-enter-action"', source)
         self.assertIn('event.dataTransfer.clearData()', source)
         self.assertIn('event.dataTransfer.setData("text/plain", "")', source)
         self.assertIn('draggedValue: clipEncodedText(', source)
         self.assertIn('generatedRoot.addEventListener("drop", generatedDrop)', source)
+        self.assertIn('generatedRoot.addEventListener("keydown", generatedEnterInteraction)', source)
         # Enter cannot bypass attachment/session validation represented by the
         # disabled composer action.
         self.assertIn('if (!fromGeneratedApp && $("send-message").disabled) return;', source)
@@ -177,6 +179,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('data-drag-value="item-id"', instructions)
         self.assertIn('data-drop-action="name"', instructions)
         self.assertIn('data-drop-value="target-id"', instructions)
+        self.assertIn('data-enter-action="name"', instructions)
         self.assertIn("draggedValue", instructions)
         self.assertIn('"action":"replace_ui","expected_ui_revision"', instructions)
         self.assertIn('"action":"set","expected_data_version"', instructions)

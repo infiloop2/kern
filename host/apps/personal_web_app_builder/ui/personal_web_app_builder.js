@@ -473,6 +473,10 @@ function copySafeAttribute(source, target, name, value) {
     target.setAttribute(lower, value);
     return;
   }
+  if (lower === "data-enter-action" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)) {
+    target.setAttribute(lower, value);
+    return;
+  }
   if (lower === "data-drop-action" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)) {
     target.setAttribute(lower, value);
     return;
@@ -724,6 +728,23 @@ function generatedInteraction(event) {
     return;
   }
   runCapabilityWorker({ action: target.dataset.action, event: eventPayload(target) });
+}
+
+function generatedEnterInteraction(event) {
+  if (
+    !selectedAppId || event.key !== "Enter" || event.shiftKey || event.altKey
+    || event.ctrlKey || event.metaKey || event.repeat || event.isComposing
+    || !(event.target instanceof Element)
+  ) return;
+  const target = event.target.closest("input[data-enter-action], textarea[data-enter-action]");
+  if (!target || !generatedRoot.contains(target)) return;
+  event.preventDefault();
+  if (workerRun) {
+    showRuntimeStatus("Finishing the previous app action");
+    return;
+  }
+  const action = target.dataset.enterAction;
+  runCapabilityWorker({ action, event: eventPayload(target, action) });
 }
 
 function setGeneratedDropTarget(target) {
@@ -2838,6 +2859,7 @@ async function initialize() {
   generatedRoot = $("generated-host").attachShadow({ mode: "open" });
   generatedRoot.addEventListener("click", generatedInteraction);
   generatedRoot.addEventListener("change", generatedInteraction);
+  generatedRoot.addEventListener("keydown", generatedEnterInteraction);
   generatedRoot.addEventListener("dragstart", generatedDragStart);
   generatedRoot.addEventListener("dragover", generatedDragOver);
   generatedRoot.addEventListener("dragleave", generatedDragLeave);
