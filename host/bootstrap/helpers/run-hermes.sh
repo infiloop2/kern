@@ -64,6 +64,7 @@ exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   ALL_PROXY=http://127.0.0.1:@PROXY_PORT@ \
   NO_PROXY=127.0.0.1,localhost \
   SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+  REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
   AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
   AWS_EC2_METADATA_DISABLED=true \
   /usr/local/lib/hermes-venv/bin/python \

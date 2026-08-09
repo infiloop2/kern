@@ -128,7 +128,7 @@ def request_bytes(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     max_bytes: int = MAX_RESPONSE_BYTES,
 ) -> bytes:
-    body, _ = request_bytes_and_headers(
+    body, _ = _request_bytes_and_headers(
         method,
         url,
         headers=headers,
@@ -140,7 +140,7 @@ def request_bytes(
     return body
 
 
-def request_bytes_and_headers(
+def _request_bytes_and_headers(
     method: str,
     url: str,
     *,
@@ -150,7 +150,8 @@ def request_bytes_and_headers(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     max_bytes: int = MAX_RESPONSE_BYTES,
 ) -> tuple[bytes, dict[str, str]]:
-    """Like request_bytes, but also returns the response headers with
+    """The one urllib request path behind request_bytes and the json_request
+    entry points, also returning the response headers with
     lower-cased names — some providers return created-resource ids only in a
     header (e.g. LinkedIn's x-restli-id). Bodies over ``max_bytes`` fail with
     RESPONSE_TOO_LARGE_MESSAGE rather than being silently truncated; callers
@@ -278,7 +279,7 @@ def json_request_with_headers(
     elif form is not None:
         data = urllib.parse.urlencode(form).encode("utf-8")
         request_headers.setdefault("content-type", "application/x-www-form-urlencoded")
-    raw, response_headers = request_bytes_and_headers(
+    raw, response_headers = _request_bytes_and_headers(
         method,
         url,
         headers=request_headers,

@@ -7,7 +7,7 @@ resulting system state and fails the deploy listing every mismatch at once:
 - managed paths carry the expected owner, group, and mode,
 - the runtime services are active and each Unix socket exists with the
   owner and mode its one serving package binds it with,
-- the two loopback TCP listeners are owned by the expected service uids,
+- the three loopback TCP listeners are owned by the expected service uids,
 - the nftables ruleset is loaded fail-closed, and live probes confirm the
   permission boundary in both directions: allowed paths connect (or are
   refused by a listener, which proves the packet passed the firewall) and
@@ -33,26 +33,24 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from host.constants import (
     ADMIN_API_PORT,
-    AGENT_APP_SOCKET_PATH,
+    WORKSPACE_AGENT_SOCKET_PATH,
     AGENT_NETWORK_SOCKET_PATH,
-    APP_BACKEND_ADMIN_SOCKET_PATH,
+    WORKSPACE_ADMIN_SOCKET_PATH,
+    WORKSPACE_PORT,
     PROXY_PORT,
     SERVICE_ACCOUNTS,
     TOOLS_SOCKET_PATH,
 )
-from host.runtime.core import app_platform
 
 Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
 
 POSTGRES_SOCKET = "/var/run/postgresql/.s.PGSQL.5432"
 # A stable anycast address for external probes. Blocked expectations against
-# it can never false-fail (a down network also times out); positive
-# reachability to it is only ever advisory, because an egress-restricted
-# customer network may legitimately block it on a healthy deploy.
+# it can never false-fail (a down network also times out).
 EXTERNAL_PROBE_HOST = "1.1.1.1"
 PROBE_TIMEOUT_SECONDS = 3
 
@@ -61,9 +59,9 @@ CORE_UNITS = (
     "kern-network-proxy.service",
     "kern-tools.service",
     "kern-agent-network.service",
-    "kern-agent-app.service",
     "kern-host-errors.service",
     "kern-admin-api.service",
+    "kern-workspace.service",
 )
 
 MANAGED_AGENT_FILES = (
@@ -141,9 +139,9 @@ CLOUDFLARE_PATH_FACTS: tuple[PathFact, ...] = (
 # socket path -> owning service account
 SOCKET_OWNERS = {
     TOOLS_SOCKET_PATH: "kern-tools",
-    AGENT_APP_SOCKET_PATH: "kern-agent-app",
+    WORKSPACE_AGENT_SOCKET_PATH: "kern-workspace",
     AGENT_NETWORK_SOCKET_PATH: "kern-agent-network",
-    APP_BACKEND_ADMIN_SOCKET_PATH: "kern-admin",
+    WORKSPACE_ADMIN_SOCKET_PATH: "kern-admin",
     POSTGRES_SOCKET: "postgres",
 }
 
@@ -153,11 +151,8 @@ def _run(argv: list[str]) -> "subprocess.CompletedProcess[str]":
 
 
 def expected_accounts() -> dict[str, int]:
-    """Pinned core accounts plus migration-capable app package accounts."""
-    accounts = dict(SERVICE_ACCOUNTS)
-    for app in app_platform.migration_apps():
-        accounts[app.linux_user] = app.allocation.uid
-    return accounts
+    """Every pinned host service account."""
+    return dict(SERVICE_ACCOUNTS)
 
 
 def check_service_accounts(accounts: dict[str, int]) -> list[str]:
@@ -266,7 +261,11 @@ def check_tcp_listeners(
 ) -> list[str]:
     failures = []
     listeners = parse_tcp_listeners(read_text("/proc/net/tcp"))
-    for port, owner in ((ADMIN_API_PORT, "kern-admin"), (PROXY_PORT, "kern-proxy")):
+    for port, owner in (
+        (ADMIN_API_PORT, "kern-admin"),
+        (PROXY_PORT, "kern-proxy"),
+        (WORKSPACE_PORT, "kern-workspace"),
+    ):
         uid = resolve_uid(owner)
         if ("127.0.0.1", port, uid) not in listeners:
             matches = sorted(entry for entry in listeners if entry[1] == port)
@@ -338,10 +337,12 @@ def enforced_probes() -> list[Probe]:
         # The agent's entire network world is the loopback proxy port.
         ("kern-agent", "127.0.0.1", PROXY_PORT, "reachable", "agent to egress proxy"),
         ("kern-agent", "127.0.0.1", ADMIN_API_PORT, "blocked", "agent to admin API"),
+        ("kern-agent", "127.0.0.1", WORKSPACE_PORT, "blocked", "agent to Workspace service"),
         ("kern-agent", EXTERNAL_PROBE_HOST, 443, "blocked", "agent direct egress"),
         ("kern-agent", EXTERNAL_PROBE_HOST, 53, "blocked", "agent direct DNS"),
         ("kern-admin", EXTERNAL_PROBE_HOST, 443, "blocked", "admin service egress"),
-        ("kern-agent-app", EXTERNAL_PROBE_HOST, 443, "blocked", "agent-app egress"),
+        ("kern-workspace", EXTERNAL_PROBE_HOST, 443, "blocked", "Workspace service egress"),
+        ("kern-admin", "127.0.0.1", WORKSPACE_PORT, "reachable", "admin to Workspace service"),
         ("kern-agent-network", EXTERNAL_PROBE_HOST, 443, "blocked", "agent-network egress"),
         (
             "kern-agent-network",
@@ -350,16 +351,6 @@ def enforced_probes() -> list[Probe]:
             "blocked",
             "agent-network to egress proxy (loopback drop)",
         ),
-    ]
-
-
-def advisory_probes() -> list[Probe]:
-    """Positive external egress is liveness, not the trust boundary: an
-    egress-restricted customer network may legitimately block the probe
-    target while the deploy is healthy, so these warn instead of failing."""
-    return [
-        ("kern-tools", EXTERNAL_PROBE_HOST, 443, "reachable", "tools service egress"),
-        ("kern-proxy", EXTERNAL_PROBE_HOST, 443, "reachable", "proxy egress"),
     ]
 
 
@@ -453,10 +444,6 @@ def run_all_checks(cloudflare_enabled: bool, run: Runner = _run) -> list[str]:
     return failures
 
 
-def advisory_warnings(run: Runner = _run) -> list[str]:
-    return check_reachability(advisory_probes(), run)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -467,8 +454,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     failures = run_all_checks(cloudflare_enabled=args.cloudflare == "yes")
-    for warning in advisory_warnings():
-        print(f"warning (deploy continues): {warning}", file=sys.stderr)
     if failures:
         print(f"deploy verification failed with {len(failures)} finding(s):", file=sys.stderr)
         for failure in failures:

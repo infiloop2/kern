@@ -201,16 +201,16 @@ def main(argv: list[str] | None = None) -> int:
                     tuple(passed_runtimes)
                 ),
                 (
-                    "cross-provider switch with expanded activity handoff"
+                    "cross-provider switch with summarized activity handoff"
                     if len(passed_runtimes) > 1
-                    else "same-provider model switch with expanded activity handoff"
+                    else "same-provider model switch with summarized activity handoff"
                 ),
             )
             _record_check(
                 report,
                 "stable_apps",
                 lambda: stage.check_stable_app_basics(passed_runtimes[0]),
-                "Agent Chat messaging and App Builder generation through the cheapest configured model",
+                "Agent Chat messaging, typed retained history and memory clear, plus App Builder generation through the cheapest configured model",
             )
 
         if suite == "all":
@@ -254,6 +254,16 @@ def main(argv: list[str] | None = None) -> int:
 
         if availability.get("github") is None and "github" in availability:
             _record_check(report, "github", stage.check_github_write_e2e, "authenticated read/write and fail-closed guards")
+
+        # Needs no provider credential — real package clients against public
+        # registries — so it runs whenever the host is up, and is what catches
+        # a forwarded-header rule tightened past ordinary client traffic.
+        _record_check(
+            report,
+            "package_clients",
+            stage.check_package_client_headers_e2e,
+            "pip and npm registry traffic through the forwarded-header guard",
+        )
 
         for tool_id in selected_tools:
             if availability.get(tool_id) is not None:
@@ -526,7 +536,7 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
                 break
         if activity_uuid is None or source_activity_seq is None:
             raise AssertionError(
-                f"source turn retained no UUID-bearing expanded activity: {source_events}"
+                f"source turn retained no UUID-bearing activity: {source_events}"
             )
         agent_messages = [
             str((event.get("payload") or {}).get("message") or "")
@@ -574,7 +584,7 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
             replacement_done.get("output_message") or ""
         ).lower():
             raise AssertionError(
-                "replacement provider did not recover the UUID from expanded activity: "
+                "replacement provider did not recover the UUID from summarized activity: "
                 f"{replacement_done.get('output_message')!r}"
             )
 
@@ -635,7 +645,7 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
         )
 
     def check_stable_app_basics(self, runtime: str) -> None:
-        """Run one small real-inference flow through each stable app backend."""
+        """Run real app flows and pin retained-history behavior."""
         model = CHEAP_MODELS[runtime]
         self._step(
             f"stable app basics with {runtime} ({model}, {CHEAP_EFFORT})"
@@ -647,13 +657,15 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
             "thread.stopped",
         }
 
-        agent_base = "/v1/apps/agent_chat/api"
+        agent_base = "/v1/workspace/chat"
+        history_probe = f"stagehistory{time.time_ns()}"
         agent_result = self._api(
             "POST",
             f"{agent_base}/messages",
             {
                 "input_message": (
-                    "Reply with exactly STAGE_AGENT_CHAT_OK. Do not use tools."
+                    f"Remember marker {history_probe}, then reply with exactly "
+                    "STAGE_AGENT_CHAT_OK. Do not use tools."
                 ),
                 "agent_runtime": runtime,
                 "model": model,
@@ -693,22 +705,25 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
                 raise AssertionError(
                     f"Agent Chat did not retain the expected reply: {agent_events}"
                 )
+            self._check_agent_history_and_clear_memory(
+                agent_base, agent_thread, history_probe
+            )
         finally:
             self._api_status(
                 "POST", f"{agent_base}/threads/{encoded_agent_thread}/archive"
             )
 
-        builder_base = "/v1/apps/personal_web_app_builder/api"
+        builder_base = "/v1/workspace/web-apps"
         created = self._api("POST", f"{builder_base}/apps").get("app")
-        builder_thread = (
-            created.get("thread_id") if isinstance(created, dict) else None
+        builder_app = (
+            created.get("app_id") if isinstance(created, dict) else None
         )
-        if not isinstance(builder_thread, str) or not builder_thread:
+        if not isinstance(builder_app, str) or not builder_app:
             raise AssertionError(f"App Builder did not create a workspace: {created}")
-        encoded_builder_thread = quote(builder_thread, safe="")
+        encoded_builder_app = quote(builder_app, safe="")
         sent = self._api(
             "POST",
-            f"{builder_base}/apps/{encoded_builder_thread}/messages",
+            f"{builder_base}/apps/{encoded_builder_app}/messages",
             {
                 "content": (
                     "Create the smallest possible app whose visible heading is "
@@ -725,12 +740,12 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
             )
         builder_events = self._wait_for_app_thread_idle(
             status_path=(
-                f"{builder_base}/apps/{encoded_builder_thread}/conversation"
+                f"{builder_base}/apps/{encoded_builder_app}/conversation"
             ),
             events_path=(
-                f"{builder_base}/apps/{encoded_builder_thread}/conversation/events"
+                f"{builder_base}/apps/{encoded_builder_app}/conversation/events"
             ),
-            thread_id=builder_thread,
+            thread_id=builder_app,
             list_key=None,
             timeout=300,
         )
@@ -747,12 +762,11 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
                 f"App Builder agent did not complete successfully: {builder_events}"
             )
         state = self._api(
-            "GET", f"{builder_base}/apps/{encoded_builder_thread}/state"
+            "GET", f"{builder_base}/apps/{encoded_builder_app}/state"
         ).get("app")
         if (
             not isinstance(state, dict)
-            or int(state.get("ui_revision") or 0) < 1
-            or not isinstance(state.get("data_version"), int)
+            or int(state.get("revision") or 0) < 1
         ):
             raise AssertionError(
                 f"App Builder agent did not revise app state: {state}"
@@ -767,9 +781,111 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
             )
 
         self._ok(
-            "Agent Chat retained a real reply and App Builder used its agent API "
-            "to generate and persist a minimal app"
+            "Agent Chat retained a real reply, typed history stayed bounded and "
+            "untrusted across a working-memory clear, and App Builder used its "
+            "agent API to generate and persist a minimal app"
         )
+
+    def _check_agent_history_and_clear_memory(
+        self,
+        agent_base: str,
+        thread_id: str,
+        probe: str,
+    ) -> None:
+        """Prove the deployed typed MCP tools read retained app history safely."""
+        expected_metadata = {
+            "provenance": "retained_conversation_history",
+            "trust": "untrusted",
+            "instruction_authority": "none",
+        }
+        search = self._shim_tool_result(
+            "search_conversation_history",
+            {"query": probe, "roles": ["user"], "limit": 1},
+        )
+        if any(search.get(key) != value for key, value in expected_metadata.items()):
+            raise AssertionError(f"conversation search lost provenance metadata: {search}")
+        matches = search.get("matches")
+        match = next(
+            (
+                item
+                for item in matches
+                if isinstance(item, dict)
+                and item.get("thread_id") == thread_id
+                and item.get("role") == "user"
+                and probe in str(item.get("excerpt") or "")
+            ),
+            None,
+        ) if isinstance(matches, list) else None
+        if match is None or not isinstance(match.get("event_id"), str):
+            raise AssertionError(
+                f"conversation search did not find the unique retained user message: {search}"
+            )
+
+        read_arguments = {
+            "thread_id": thread_id,
+            "around_event_id": match["event_id"],
+            "include_activity": True,
+            "limit": 50,
+        }
+        history = self._shim_tool_result("read_thread_history", read_arguments)
+        if any(history.get(key) != value for key, value in expected_metadata.items()):
+            raise AssertionError(f"conversation read lost provenance metadata: {history}")
+        if history.get("thread") != {"thread_id": thread_id}:
+            raise AssertionError(f"conversation read returned the wrong thread: {history}")
+        events = history.get("events")
+        if not isinstance(events, list):
+            raise AssertionError(f"conversation read returned invalid events: {history}")
+        messages = [
+            event
+            for event in events
+            if isinstance(event, dict) and event.get("type") == "message"
+        ]
+        if not any(
+            event.get("role") == "user" and probe in str(event.get("content") or "")
+            for event in messages
+        ) or not any(
+            event.get("role") == "assistant"
+            and "STAGE_AGENT_CHAT_OK" in str(event.get("content") or "")
+            for event in messages
+        ):
+            raise AssertionError(
+                f"conversation read omitted retained user/assistant messages: {history}"
+            )
+        retained_message_ids = {
+            event.get("event_id") for event in messages if isinstance(event.get("event_id"), str)
+        }
+
+        encoded_thread = quote(thread_id, safe="")
+        cleared = self._api(
+            "POST", f"{agent_base}/threads/{encoded_thread}/clear-memory"
+        )
+        if cleared != {"status": "cleared"}:
+            raise AssertionError(f"Agent Chat working-memory clear failed: {cleared}")
+        display_events = self._api(
+            "GET", f"{agent_base}/threads/{encoded_thread}/events"
+        ).get("events")
+        if not isinstance(display_events, list) or not any(
+            isinstance(event, dict)
+            and event.get("event_type") == "thread.memory_cleared"
+            for event in display_events
+        ):
+            raise AssertionError(
+                f"Agent Chat did not expose the working-memory boundary: {display_events}"
+            )
+
+        retained = self._shim_tool_result("read_thread_history", read_arguments)
+        retained_events = retained.get("events")
+        retained_ids = {
+            event.get("event_id")
+            for event in retained_events
+            if isinstance(event, dict)
+            and event.get("type") == "message"
+            and isinstance(event.get("event_id"), str)
+        } if isinstance(retained_events, list) else set()
+        if not retained_message_ids or not retained_message_ids.issubset(retained_ids):
+            raise AssertionError(
+                f"working-memory clear removed retained conversation messages: {retained}"
+            )
 
     def _wait_for_app_thread_idle(
         self,

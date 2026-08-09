@@ -10,7 +10,13 @@ the persistent stage test.
 
 The smoke covers subnet/SG/IMDSv2/SSH provisioning, bootstrap on real Ubuntu,
 admin API access over the SSH tunnel, auth rejection, and the real admin UI in
-headless Chrome. The remaining checks cover all three runtime status/account
+headless Chrome. It also exercises Chat and Web Apps plus global Memory and
+Schedules against the real Workspace service before any provider login, and
+proves the typed conversation-history MCP tools return their bounded,
+explicitly untrusted contract and reject an oversized query. The installed
+agent guidance is checked for current host orientation, identity-keyed memory,
+history trust, and GitHub REST fallback instructions. The remaining checks
+cover all three runtime status/account
 records and real message admission, the Bedrock provider policy that governs
 Hermes, every Bedrock pre-credential denial
 (foreign access-key id, cross-region signature, presigned query, session token,

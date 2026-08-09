@@ -19,7 +19,11 @@ import json
 import re
 from urllib.parse import parse_qs, parse_qsl, urlencode
 
-from host.network_integrations.base import AccountAttestor, request_param_denial
+from host.network_integrations.base import (
+    AccountAttestor,
+    fixed_user_agent,
+    request_param_denial,
+)
 from host.network_integrations.github import push_gate
 from host.network_integrations.github.manifest import GitHubIntegration
 from host.param_guard import find_denial
@@ -102,6 +106,7 @@ def rewrite_request_headers(
     full request shape in the hook signature exists for integrations that
     re-sign bodies (Bedrock)."""
     del config, method, path, query, body
+    headers = fixed_user_agent(headers)
     lowered = host.lower()
     if (
         lowered not in GITHUB_BEARER_DOMAINS
@@ -111,7 +116,9 @@ def rewrite_request_headers(
     ):
         return headers
     headers = [(key, value) for key, value in headers if key.lower() != "authorization"]
-    if lowered in GITHUB_STRIP_ONLY_DOMAINS or _is_github_actions_blob_host(lowered):
+    if _is_github_actions_blob_host(lowered):
+        return headers
+    if lowered in GITHUB_STRIP_ONLY_DOMAINS:
         return headers
     token = read_proxy_github_token()
     if not token:
@@ -140,27 +147,27 @@ def request_denied(
     if route is None or not route_allowed(method, path, query, *route):
         return "network_policy_denied"
     if _is_github_actions_blob_host(host):
-        return _github_actions_blob_request_denied(path, query)
-    if host.lower() not in GUARDED_HOSTS:
-        return None
-    if query and method.upper() in ("GET", "HEAD"):
-        # Read queries (search q=, filters) can reach any public repository, so
-        # their agent-authored values pass the outbound parameter guard. Only
-        # the query is scanned - the reconstructed URL is `https://host?<query>`
-        # with an empty path, because owner/repo/file path segments are the
-        # read surface itself. Both token-shape rules are off: revision ids,
-        # blob shas, and cursors are legitimately long and machine-shaped here.
-        # Writes are not scanned: the guard below already confines them to
-        # configured repositories, so a value in a write query only reaches a
-        # repo you control - there is no public leak to catch.
-        param_denial = request_param_denial("", query, token_rules=False)
-        if param_denial is not None:
-            return param_denial
-    write_repos = {(item.owner, item.repo) for item in config.write_repositories}
-    require_approval = config.require_dot_github_approval
+        return _github_actions_blob_request_denied(path, query, headers)
     method = method.upper()
     host = host.lower()
     path = normalized_path(path)
+    guarded_host = host in GUARDED_HOSTS
+    # Headers are not inspected here. GitHub reflects nothing back, and the
+    # agent already has a sanctioned high-bandwidth path to it (a write to a
+    # configured repository, body unscanned), so a header adds no channel that
+    # is not already open by design. What does matter — the agent's
+    # Authorization — is stripped and replaced in rewrite_request_headers.
+    if guarded_host and method in {"GET", "HEAD"}:
+        # Query values on the REST/web hosts are agent-authored. Token rules
+        # stay off: revision ids, blob shas and ref names are legitimately
+        # machine-shaped here.
+        param_denial = request_param_denial("", query, token_rules=False)
+        if param_denial is not None:
+            return param_denial
+    if not guarded_host:
+        return None
+    write_repos = {(item.owner, item.repo) for item in config.write_repositories}
+    require_approval = config.require_dot_github_approval
     if host == "github.com":
         return _github_com_request_denied(write_repos, method, path, query, body)
     if host == "api.github.com":
@@ -170,7 +177,9 @@ def request_denied(
     return "github_repo_scope_required"
 
 
-def _github_actions_blob_request_denied(path: str, query: str) -> str | None:
+def _github_actions_blob_request_denied(
+    path: str, query: str, headers: list[tuple[str, str]]
+) -> str | None:
     """Guard GitHub Actions' provider-issued Azure Blob download query.
 
     The global parameter guard deliberately remains destination-agnostic and
@@ -207,7 +216,7 @@ def _github_actions_blob_request_denied(path: str, query: str) -> str | None:
         if AZURE_SAS_SIGNATURE_RE.fullmatch(value) is None:
             return "network_policy_denied"
         sanitized.append((key, "signedurlvalue"))
-    return request_param_denial(path, urlencode(sanitized), token_rules=True)
+    return request_param_denial(path, urlencode(sanitized))
 
 
 def gate_response(

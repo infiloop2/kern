@@ -157,8 +157,8 @@ class ToolManifest:
   write-only and never returns the value. Config is scoped per tool — two tools
   that declare the same key name each hold their own value.
 - **`protections`** are short operator-facing statements of the integration's
-  real safeguards. The compact info popover and full Integration Guides entry render
-  the same values.
+  real safeguards. The integration card status and focused Home integration
+  page render the same values.
 - **`setup_steps`** are the ordered provider-side and Kern steps needed to
   connect the tool. Each may link to an authoritative provider page and to one
   local, audited PNG under `/guide-assets/` with descriptive alt text. Provider

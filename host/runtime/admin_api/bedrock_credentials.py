@@ -54,20 +54,6 @@ class BedrockAuthenticationError(BedrockCredentialsError):
     pass
 
 
-def credential_env(credential: tuple[str, str] | None = None) -> dict[str, str] | None:
-    """The environment additions that carry the connected key
-    pair to the read-aws-account root helper, or None when nothing is
-    connected. Decrypts in the admin process (which owns the secretbox key).
-    The agent-side launcher never receives these: Hermes signs with the dummy
-    routing identity and the proxy re-signs."""
-    if credential is None:
-        credential = state.read_bedrock_credential_secret()
-    if credential is None:
-        return None
-    access_key_id, secret_access_key = credential
-    return {ACCESS_KEY_ID_ENV: access_key_id, SECRET_ACCESS_KEY_ENV: secret_access_key}
-
-
 def account_status() -> tuple[str, str | None, dict[str, Any] | None]:
     """The connected-credential state: (status, error message, account).
 
@@ -85,38 +71,24 @@ def account_status() -> tuple[str, str | None, dict[str, Any] | None]:
 def read_attested_identity(
     command: list[str] | None = None,
     *,
-    credential: tuple[str, str] | None = None,
+    credential: tuple[str, str],
 ) -> dict[str, Any]:
     """AWS-attested identity of the integration's connected credential.
 
     The root helper signs one ``sts:GetCallerIdentity`` with the key pair the
     admin service passes it, so the returned identity (account_id, arn,
     user_id, plus the access_key_id it belongs to) is bound to the credential
-    by AWS, and STS accepting the signature is the live validation. Raises
-    BedrockAuthenticationError when AWS rejected the credential and
-    BedrockCredentialsError for any other failure."""
-    value = _run_aws_helper(
-        command or [*DEFAULT_ACCOUNT_COMMAND, "--attest"],
-        "attest",
-        credential=credential,
-    )
-    if not isinstance(value.get("account_id"), str) or not isinstance(value.get("arn"), str):
-        raise BedrockCredentialsError("AWS account attestation response is incomplete")
-    return value
-
-
-def _run_aws_helper(
-    argv: list[str],
-    operation: str,
-    *,
-    credential: tuple[str, str] | None = None,
-) -> dict[str, Any]:
-    env = credential_env(credential)
-    if env is None:
-        raise BedrockCredentialsError("no AWS credentials are connected")
+    by AWS, and STS accepting the signature is the live validation. The key
+    pair reaches the helper only through its environment; the agent-side
+    launcher never receives it — Hermes signs with the dummy routing identity
+    and the proxy re-signs. Raises BedrockAuthenticationError when AWS
+    rejected the credential and BedrockCredentialsError for any other
+    failure."""
+    access_key_id, secret_access_key = credential
+    env = {ACCESS_KEY_ID_ENV: access_key_id, SECRET_ACCESS_KEY_ENV: secret_access_key}
     try:
         proc = subprocess.run(
-            argv,
+            command or [*DEFAULT_ACCOUNT_COMMAND, "--attest"],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -125,17 +97,19 @@ def _run_aws_helper(
             env={**os.environ, **env},
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise BedrockCredentialsError(f"could not {operation} AWS credentials: {exc}") from exc
+        raise BedrockCredentialsError(f"could not attest AWS credentials: {exc}") from exc
     if proc.returncode == AWS_CREDENTIAL_REJECTED_EXIT:
         detail = (proc.stderr or "").strip()[:500]
         raise BedrockAuthenticationError(detail or "AWS rejected the credential")
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()[:500]
-        raise BedrockCredentialsError(detail or f"AWS {operation} helper failed")
+        raise BedrockCredentialsError(detail or "AWS attest helper failed")
     try:
         value = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
-        raise BedrockCredentialsError(f"AWS {operation} helper returned invalid JSON") from exc
+        raise BedrockCredentialsError("AWS attest helper returned invalid JSON") from exc
     if not isinstance(value, dict) or not isinstance(value.get("access_key_id"), str):
-        raise BedrockCredentialsError(f"AWS {operation} helper response is incomplete")
+        raise BedrockCredentialsError("AWS attest helper response is incomplete")
+    if not isinstance(value.get("account_id"), str) or not isinstance(value.get("arn"), str):
+        raise BedrockCredentialsError("AWS account attestation response is incomplete")
     return value

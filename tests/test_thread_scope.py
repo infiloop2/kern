@@ -15,8 +15,8 @@ class ThreadScopeTests(unittest.TestCase):
             side_effect=subprocess.TimeoutExpired("stop-agent-thread", 3),
         ) as run:
             thread_scope.interrupt_thread_scope(
-                "agent_chat__thread-1",
-                ["/launcher", "--thread-scope", "agent_chat__thread-1"],
+                "thread-1",
+                ["/launcher", "--thread-scope", "thread-1"],
                 ["/launcher"],
             )
 
@@ -25,7 +25,7 @@ class ThreadScopeTests(unittest.TestCase):
             [
                 *thread_scope.STOP_COMMAND,
                 "--signal-only",
-                "agent_chat__thread-1",
+                "thread-1",
             ],
         )
         self.assertEqual(
@@ -43,14 +43,14 @@ class ThreadScopeTests(unittest.TestCase):
             ),
         ):
             thread_scope.stop_thread_scope(
-                "agent_chat__thread-1",
-                ["/launcher", "--thread-scope", "agent_chat__thread-1"],
+                "thread-1",
+                ["/launcher", "--thread-scope", "thread-1"],
                 ["/launcher"],
             )
 
         self.assertEqual(
             run.call_args.args[0],
-            [*thread_scope.STOP_COMMAND, "agent_chat__thread-1"],
+            [*thread_scope.STOP_COMMAND, "thread-1"],
         )
         self.assertEqual(
             run.call_args.kwargs["timeout"],

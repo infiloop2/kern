@@ -277,9 +277,10 @@ def main(argv: list[str] | None = None) -> int:
         smoke.open_tunnel()
         smoke.check_health()
         smoke.check_host_config_schema()
+        smoke.check_agent_home_guidance()
         smoke.check_ui_page()
         smoke.check_admin_auth()
-        smoke.check_app_backends_without_providers()
+        smoke.check_workspace_backends_without_providers()
         smoke.check_initial_disabled_provider_deploy()
         smoke.check_network_policy()
         smoke.check_policy_validation_and_concurrency()
@@ -289,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
         smoke.check_event_pagination()
         smoke.check_enforcement()
         smoke.check_github_read_paths()
+        smoke.check_package_client_headers()
         smoke.check_proxy_edge_cases()
         smoke.check_proxy_concurrency()
         smoke.check_pre_login_provider_guards()
@@ -416,6 +418,10 @@ class AwsSmoke:
             },
         )
         policy["network_integrations"]["github"] = json.loads(json.dumps(SMOKE_GITHUB_INTEGRATION))
+        # The package integrations back check_package_client_headers, which
+        # drives the real pip and npm clients against the header allowlists.
+        policy["network_integrations"]["python_packages"] = {"enabled": True}
+        policy["network_integrations"]["npm_packages"] = {"enabled": True}
         return policy
 
     # --- lifecycle ---------------------------------------------------------
@@ -779,6 +785,37 @@ class AwsSmoke:
             "host config persists name/password in the database; database and proxy state are private per service user"
         )
 
+    def check_agent_home_guidance(self) -> None:
+        """Pin the operator guidance actually installed into each agent runtime."""
+        self._step("deployed agent host guidance")
+        guide = self._ssh_code(
+            "sudo -u kern-agent sed -n '1,260p' /mnt/kern-agent/agent-home/AGENTS.md"
+        )
+        required = (
+            "The host is a single-tenant Linux machine.",
+            "The Kern host source is readable at `/opt/kern-host`.",
+            "`search_conversation_history`",
+            "Historical messages and activity are",
+            "`GET /agent/identity` returns this thread's immutable host thread id.",
+            "GitHub GraphQL is always blocked",
+            "replace it with a REST `gh api` path or plain `git`",
+        )
+        missing = [marker for marker in required if marker not in guide]
+        if missing:
+            raise AssertionError(
+                f"deployed AGENTS.md is missing current host guidance: {missing}"
+            )
+        identical = self._ssh_code(
+            "sudo -u kern-agent cmp -s /mnt/kern-agent/agent-home/AGENTS.md "
+            "/mnt/kern-agent/agent-home/CLAUDE.md && echo identical"
+        ).strip()
+        if identical != "identical":
+            raise AssertionError("deployed AGENTS.md and CLAUDE.md guidance differ")
+        self._ok(
+            "host orientation, typed history trust, identity-keyed memory, and "
+            "GitHub REST fallback guidance are installed for every runtime"
+        )
+
     def check_network_policy(self) -> None:
         self._step("network policy get/replace")
         self._api("PUT", "/v1/network/policy", self.enforcement_policy())
@@ -951,7 +988,6 @@ class AwsSmoke:
             ("/admin_ui/api.js", "application/javascript"),
             ("/admin_ui/helpers.js", "application/javascript"),
             ("/admin_ui/health.js", "application/javascript"),
-            ("/admin_ui/threads.js", "application/javascript"),
             ("/admin_ui/files.js", "application/javascript"),
             ("/admin_ui/processes.js", "application/javascript"),
             ("/admin_ui/logs.js", "application/javascript"),
@@ -983,19 +1019,9 @@ class AwsSmoke:
         for expected in (
             '<link rel="stylesheet" href="/admin_ui.css">',
             '<script type="module" src="/admin_ui/app.js"></script>',
-            "<h2>Sessions</h2>",
-            "/v1/threads",
-            "/v1/threads/${encodeURIComponent(threadId)}/events",
-            "showThread",
-            "refreshSelectedThread",
-            "loadEarlierThreadEvents",
-            'data-action="show-thread"',
-            'data-action="load-earlier-thread-events"',
             "button[data-action]",
-            "EVENT_PAGE_LIMIT",
             "active_thread_ids",
             'id="panel-home"',
-            'id="panel-agent"',
             'id="panel-processes"',
             'id="panel-network"',
             'id="processes"',
@@ -1022,15 +1048,15 @@ class AwsSmoke:
             'id="github-app-installation-id"',
             'id="github-app-private-key"',
             'id="github-credential-status"',
-            'id="preset-info-popover"',
-            "<span>Internet Access and Tools</span>",
+            'id="home-integration-groups"',
+            'data-action="open-home-integration"',
+            'data-action="open-home-view"',
+            'data-action="home-back"',
             "Reboot host",
             "Custom Domain Access",
             "Add domain rule",
             "MANAGED_INTEGRATIONS",
             "integration_catalog.js",
-            "toggleIntegrationInfo",
-            "renderIntegrationInfo",
             "objectValue",
             "!Array.isArray(value)",
             "activeNetworkPolicy",
@@ -1080,9 +1106,9 @@ class AwsSmoke:
             "registry.npmjs.org",
             "Add domain rule",
             'id="tools"',
-            'data-action="toggle-tool-expansion"',
-            "toggleToolExpansion",
-            "toggleInfoPopover",
+            'id="integration-detail-title"',
+            "selectToolDetail",
+            "selectIntegrationDetail",
             "tool-approvals-table",
             "refreshTools",
             "refreshExpandedToolApprovals",
@@ -1098,10 +1124,9 @@ class AwsSmoke:
             "Tool audit log",
             "/v1/tools/events",
             "tool-page",
-            'id="tab-connection-guide"',
-            'id="panel-connection-guide"',
+            'id="connection-guide-content"',
             "refreshConnectionGuide",
-            "View integration guide",
+            "Integration guide",
             "setup_steps",
         ):
             if expected not in page:
@@ -1188,37 +1213,25 @@ class AwsSmoke:
             raise AssertionError(f"admin API huge Content-Length was not rejected cleanly: {huge[:300]!r}")
         self._ok("401 without/with wrong credentials; UI served unauthenticated; malformed admin bodies fail closed")
 
-    def check_app_backends_without_providers(self) -> None:
-        """Exercise both stable app backends without requiring provider login."""
-        self._step("stable app backends work before provider login")
-        apps = self._api("GET", "/v1/apps").get("apps")
-        if not isinstance(apps, list):
-            raise AssertionError(f"app catalog has the wrong shape: {apps}")
-        active_ids = {
-            app.get("id")
-            for app in apps
-            if isinstance(app, dict) and app.get("deprecated") is not True
-        }
-        expected_ids = {"agent_chat", "personal_web_app_builder"}
-        if not expected_ids.issubset(active_ids):
-            raise AssertionError(
-                f"stable apps are missing from the app catalog: {active_ids}"
-            )
-
-        for app_id in sorted(expected_ids):
+    def check_workspace_backends_without_providers(self) -> None:
+        """Exercise every provider-free Workspace path on a fresh real host."""
+        self._step("Workspace resources work before provider login")
+        workspace_options: dict[str, dict] = {}
+        for base in ("/v1/workspace/chat", "/v1/workspace/web-apps"):
             options = self._api(
-                "GET", f"/v1/apps/{app_id}/api/session-options"
+                "GET", f"{base}/session-options"
             ).get("session_options")
             if not isinstance(options, dict) or set(options) != set(SMOKE_RUNTIMES):
                 raise AssertionError(
-                    f"{app_id} returned invalid session options: {options}"
+                    f"{base} returned invalid session options: {options}"
                 )
+            workspace_options[base] = options
 
         agent_threads = self._api(
-            "GET", "/v1/apps/agent_chat/api/threads"
+            "GET", "/v1/workspace/chat/threads"
         ).get("threads")
         archived_agent_threads = self._api(
-            "GET", "/v1/apps/agent_chat/api/threads?archived=true"
+            "GET", "/v1/workspace/chat/threads?archived=true"
         ).get("threads")
         if agent_threads != [] or archived_agent_threads != []:
             raise AssertionError(
@@ -1226,17 +1239,16 @@ class AwsSmoke:
                 f"{agent_threads}, {archived_agent_threads}"
             )
 
-        base = "/v1/apps/personal_web_app_builder/api"
+        base = "/v1/workspace/web-apps"
         created = self._api("POST", f"{base}/apps").get("app")
-        if not isinstance(created, dict) or not isinstance(created.get("thread_id"), str):
+        if not isinstance(created, dict) or not isinstance(created.get("app_id"), str):
             raise AssertionError(f"App Builder returned invalid created app: {created}")
-        app_id = created["thread_id"]
+        app_id = created["app_id"]
         encoded_id = quote(app_id, safe="")
         state = self._api("GET", f"{base}/apps/{encoded_id}/state").get("app")
         if (
             not isinstance(state, dict)
-            or state.get("ui_revision") != 0
-            or state.get("data_version") != 0
+            or state.get("revision") != 0
         ):
             raise AssertionError(f"new App Builder state is invalid: {state}")
         if any(state.get(field) for field in ("html", "css", "javascript")):
@@ -1270,16 +1282,102 @@ class AwsSmoke:
         listed = self._api("GET", f"{base}/apps").get("apps")
         if not any(
             isinstance(app, dict)
-            and app.get("thread_id") == app_id
+            and app.get("app_id") == app_id
             and app.get("name") == "Provider-free smoke app"
-            and "archived" not in app
+            and app.get("archived") is False
             for app in (listed or [])
         ):
             raise AssertionError(f"App Builder list omitted renamed app: {listed}")
 
+        memory_base = "/v1/workspace/memory"
+        if self._api("GET", memory_base).get("pages") != []:
+            raise AssertionError("fresh Workspace memory should be empty")
+        memory_page = self._api(
+            "PUT",
+            f"{memory_base}/pages/provider-free-smoke",
+            {
+                "description": "Provider-free smoke memory",
+                "content": "Fresh Workspace memory persists without a model.",
+                "expected_revision": 0,
+            },
+        ).get("page")
+        if (
+            not isinstance(memory_page, dict)
+            or memory_page.get("page_id") != "provider-free-smoke"
+            or memory_page.get("revision") != 1
+        ):
+            raise AssertionError(f"Workspace memory create returned invalid data: {memory_page}")
+        memory_matches = self._api(
+            "GET", f"{memory_base}/search?q={quote('provider free', safe='')}"
+        ).get("pages")
+        if not isinstance(memory_matches, list) or not any(
+            isinstance(page, dict) and page.get("page_id") == "provider-free-smoke"
+            for page in memory_matches
+        ):
+            raise AssertionError(f"Workspace memory search missed its saved page: {memory_matches}")
+        deleted_memory = self._api(
+            "DELETE",
+            f"{memory_base}/pages/provider-free-smoke?expected_revision=1",
+        )
+        if deleted_memory != {"ok": True, "revision": 2}:
+            raise AssertionError(f"Workspace memory delete returned invalid data: {deleted_memory}")
+
+        schedules_base = "/v1/workspace/schedules"
+        if self._api("GET", schedules_base).get("schedules") != []:
+            raise AssertionError("fresh Workspace schedules should be empty")
+        schedule_options = self._api(
+            "GET", f"{schedules_base}/session-options"
+        ).get("session_options")
+        if schedule_options != workspace_options["/v1/workspace/chat"]:
+            raise AssertionError(
+                f"Workspace schedules returned inconsistent session options: {schedule_options}"
+            )
+        runtime = SMOKE_RUNTIMES[0]
+        runtime_models = (schedule_options or {}).get(runtime)
+        if not isinstance(runtime_models, dict) or not runtime_models:
+            raise AssertionError(f"Workspace schedules omitted {runtime} models: {schedule_options}")
+        model, efforts = next(iter(runtime_models.items()))
+        if not isinstance(efforts, list) or not efforts:
+            raise AssertionError(f"Workspace schedules returned invalid efforts: {runtime_models}")
+        created_schedule = self._api(
+            "POST",
+            schedules_base,
+            {
+                "name": "Provider-free smoke schedule",
+                "message": "This future task must not run during fresh smoke.",
+                "cadence": "interval",
+                "interval_minutes": 7 * 24 * 60,
+                "agent_runtime": runtime,
+                "model": model,
+                "effort": efforts[0],
+            },
+        ).get("schedule")
+        if (
+            not isinstance(created_schedule, dict)
+            or not isinstance(created_schedule.get("id"), int)
+            or created_schedule.get("revision") != 1
+        ):
+            raise AssertionError(
+                f"Workspace schedule create returned invalid data: {created_schedule}"
+            )
+        schedule_id = created_schedule["id"]
+        scheduled = self._api("GET", schedules_base).get("schedules")
+        if not isinstance(scheduled, list) or not any(
+            isinstance(item, dict) and item.get("id") == schedule_id
+            for item in scheduled
+        ):
+            raise AssertionError(f"Workspace schedule list missed its saved task: {scheduled}")
+        deleted_schedule = self._api(
+            "DELETE", f"{schedules_base}/{schedule_id}?expected_revision=1"
+        )
+        if deleted_schedule != {"ok": True, "revision": 2}:
+            raise AssertionError(
+                f"Workspace schedule delete returned invalid data: {deleted_schedule}"
+            )
+
         self._ok(
-            "Agent Chat options/history and App Builder create, state, rename, "
-            "persistent list, and history paths worked without inference"
+            "Chat options/history, Web App create/state/rename, and global "
+            "Memory and Schedules create/search/list/delete paths worked without inference"
         )
 
     def check_policy_validation_and_concurrency(self) -> None:
@@ -1833,6 +1931,125 @@ class AwsSmoke:
             f"admin loopback blocked ({loopback_admin or 'no connection'}), "
             f"preview self-serve={preview_self} service-blocked={preview_tools or 'no connection'}, "
             f"github reads listed={gh_allowed} foreign={gh_foreign} graphql-denied={gh_graphql}, events logged"
+        )
+
+    def check_package_client_headers(self) -> None:
+        """Drive real pip and npm clients through the proxy.
+
+        The package integrations exist to make `pip install` and `npm install`
+        work, and the proxy removes credential headers and replaces User-Agent
+        before forwarding. Only a real client proves the resulting request is
+        still accepted by the public registry.
+
+        Public registries only, no credential, so it runs in ordinary smoke.
+        """
+        self._step("package clients (real pip and npm through the proxy)")
+        proxy = f"http://127.0.0.1:{PROXY_PORT}"
+        env = (
+            "sudo -u kern-agent env HOME=/mnt/kern-agent/agent-home "
+            f"HTTPS_PROXY={proxy} https_proxy={proxy} "
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt "
+            "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt "
+            "NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/kern-network-proxy.crt"
+        )
+
+        def agent_command(command: str) -> str:
+            return (
+                f"{env} sh -c "
+                + shlex.quote(f"cd /mnt/kern-agent/agent-home && {command}")
+            )
+
+        curl = "curl -s -o /dev/null -w '%{http_code}' --max-time 30"
+        baseline_seq = max((event["seq"] for event in self._network_events()), default=0)
+
+        # Kern deliberately has no system-wide pip module. Use the installed uv
+        # to create a seeded venv, exercising uv's proxy-CA path, then use that
+        # venv's real pip client for the registry request.
+        workdir = f"/tmp/kern-smoke-pip-{time.time_ns()}"
+        try:
+            venv_result = self._ssh_code(
+                agent_command(f"uv venv --seed {workdir}/venv")
+                + " 2>&1 && echo __KERN_VENV_OK__"
+            ).strip()
+            if not venv_result.endswith("__KERN_VENV_OK__"):
+                raise AssertionError(
+                    "could not create the temporary pip venv: "
+                    f"{venv_result[-2000:]!r}"
+                )
+            pip_result = self._ssh_code(
+                agent_command(
+                    f"{workdir}/venv/bin/python -m pip download --quiet --no-deps "
+                    f"--disable-pip-version-check --dest {workdir}/downloads certifi"
+                )
+                + " 2>&1 && echo __KERN_PIP_OK__"
+            ).strip()
+        finally:
+            self._ssh_code(f"sudo -u kern-agent rm -rf {workdir}")
+        if not pip_result.endswith("__KERN_PIP_OK__"):
+            raise AssertionError(
+                "pip download through the proxy failed: "
+                f"{pip_result[-2000:]!r}"
+            )
+
+        # npm's own client, when the host has it, plus a plain curl fetch so the
+        # check still exercises the registry when it does not.
+        # "npm is absent" and "npm ran and failed" must not collapse into the
+        # same answer: the second is the regression this check exists to catch.
+        npm_result = self._ssh_code(
+            agent_command(
+                "if command -v npm >/dev/null 2>&1; then "
+                "if npm view lodash version >/dev/null 2>&1; "
+                "then echo ok; else echo failed; fi; "
+                "else echo absent; fi"
+            )
+        ).strip()
+        if npm_result == "failed":
+            raise AssertionError(
+                "npm is installed on this host but `npm view` failed through the proxy; "
+                "the npm client's own request no longer works"
+            )
+        registry_status = self._ssh_code(
+            agent_command(f"{curl} https://registry.npmjs.org/lodash")
+        ).strip()
+        if registry_status not in {"200", "304"}:
+            raise AssertionError(
+                f"npm registry metadata read returned {registry_status!r} through the proxy"
+            )
+        tarball_status = self._ssh_code(
+            agent_command(
+                f"{curl} -r 0-1023 https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+            )
+        ).strip()
+        if tarball_status not in {"200", "206"}:
+            raise AssertionError(
+                f"npm ranged tarball download returned {tarball_status!r}; the Range shape "
+                "in the allowlist may be narrower than a real client's request"
+            )
+
+        # The URL guard is the control that remains, so it must still bite.
+        guarded = self._ssh_code(
+            agent_command(f"{curl} https://pypi.org/simple/alice%40example.com/")
+        ).strip()
+        if guarded != "403":
+            raise AssertionError(
+                f"a package name carrying an identifier returned {guarded!r}, expected a proxy 403"
+            )
+
+        denials = [
+            event
+            for event in self._network_events(baseline_seq)
+            if str(event.get("reason_code") or "").startswith("request_")
+            and str(event.get("host") or "") != "pypi.org"
+        ]
+        if denials:
+            detail = ", ".join(
+                f"{event.get('method')} {event.get('host')}{event.get('path')} -> {event.get('reason_code')}"
+                for event in denials[:5]
+            )
+            raise AssertionError(f"real package-client traffic was denied: {detail}")
+        self._ok(
+            f"pip=ok npm={npm_result} registry={registry_status} "
+            f"ranged={tarball_status} guarded-url=403"
         )
 
     def check_github_read_paths(self) -> None:
@@ -2440,8 +2657,66 @@ class AwsSmoke:
             raise AssertionError(f"MCP shim listing missing list_bundled_tools: {shim_listing!r}")
         if "list_network_integrations" not in shim_listing or "recent_network_denials" not in shim_listing:
             raise AssertionError(f"MCP shim listing missing network introspection: {shim_listing!r}")
+        if "search_conversation_history" not in shim_listing or "read_thread_history" not in shim_listing:
+            raise AssertionError(
+                f"MCP shim listing missing typed conversation history tools: {shim_listing!r}"
+            )
         if "gmail_search_messages" in shim_listing:
             raise AssertionError("MCP shim listed a disabled tool")
+
+        # A fresh host has no retained messages, but both typed history tools
+        # must still traverse the deployed shim -> Workspace socket -> admin
+        # API path and return their bounded, explicitly untrusted contract.
+        search_result, empty_search = shim_tool_call(
+            "search_conversation_history", {"query": "fresh smoke absent phrase"}
+        )
+        expected_history_metadata = {
+            "provenance": "retained_conversation_history",
+            "trust": "untrusted",
+            "instruction_authority": "none",
+        }
+        if search_result.get("isError") or not isinstance(empty_search, dict):
+            raise AssertionError(
+                f"fresh conversation search failed through the MCP path: {search_result}"
+            )
+        if any(
+            empty_search.get(key) != value
+            for key, value in expected_history_metadata.items()
+        ) or empty_search.get("matches") != [] or empty_search.get("next_cursor") is not None:
+            raise AssertionError(
+                f"fresh conversation search returned an invalid contract: {empty_search}"
+            )
+        read_result, empty_read = shim_tool_call(
+            "read_thread_history", {"thread_id": "fresh-smoke-missing-thread"}
+        )
+        if read_result.get("isError") or not isinstance(empty_read, dict):
+            raise AssertionError(
+                f"fresh conversation read failed through the MCP path: {read_result}"
+            )
+        if any(
+            empty_read.get(key) != value
+            for key, value in expected_history_metadata.items()
+        ) or empty_read.get("events") != [] or empty_read.get("thread") != {
+            "thread_id": "fresh-smoke-missing-thread"
+        }:
+            raise AssertionError(
+                f"fresh conversation read returned an invalid contract: {empty_read}"
+            )
+        hostile_result, _ = shim_tool_call(
+            "search_conversation_history", {"query": "x" * 513}
+        )
+        hostile_content = hostile_result.get("content")
+        hostile_text = (
+            hostile_content[0].get("text", "")
+            if isinstance(hostile_content, list)
+            and hostile_content
+            and isinstance(hostile_content[0], dict)
+            else ""
+        )
+        if not hostile_result.get("isError") or "at most 512 UTF-8 bytes" not in hostile_text:
+            raise AssertionError(
+                f"oversized conversation search did not fail closed: {hostile_result}"
+            )
 
         network_result, network_listing = shim_tool_call("list_network_integrations", {})
         if network_result.get("isError") or not isinstance(network_listing, dict):
@@ -2988,10 +3263,69 @@ class AwsSmoke:
 
     def check_agent_steering(self) -> None:
         """Mid-turn steering through the admin API: a second message posted
-        while the turn is running must be synchronously acknowledged and
-        delivered as a steer."""
+        while the turn is running must be synchronously flushed to the runtime
+        as a steer."""
         self._step(f"{self.agent_runtime} steering: redirect a running turn mid-turn")
         thread_id = f"smoke-steer-{self.agent_runtime}"
+        if self.agent_runtime == "claude_code":
+            # Do not wait for activity: this pins cancel_queued handling when
+            # the initial message is still queued or pending dispatch.
+            startup_thread_id = f"{thread_id}-startup"
+            startup_baseline = self._latest_thread_event_seq(startup_thread_id)
+            startup = self.send_message(
+                startup_thread_id,
+                "Write a detailed 5000-word essay about distributed systems.",
+            )
+            if startup.get("status") != "accepted":
+                raise AssertionError(
+                    f"startup steer target was not started: {startup}"
+                )
+            startup_deadline = time.time() + 30
+            while True:
+                # Measure only this POST. Time spent behind the host's normal
+                # STARTING fence is startup latency, not steering-delivery
+                # latency, and is bounded independently by startup_deadline.
+                startup_steer_started = time.monotonic()
+                try:
+                    startup_steer = self.send_follow_up(
+                        startup_thread_id,
+                        "Immediate update: reply with exactly STARTUP_STEERED.",
+                    )
+                    startup_elapsed = time.monotonic() - startup_steer_started
+                    break
+                except AssertionError as exc:
+                    if (
+                        "agent is starting; retry shortly" in str(exc)
+                        and time.time() < startup_deadline
+                    ):
+                        # Retry the host's STARTING fence only; deliberately do
+                        # not wait for provider activity, because queued/pending
+                        # dispatch is the race this check must exercise.
+                        time.sleep(0.05)
+                        continue
+                    raise
+            if startup_steer.get("status") != "accepted":
+                raise AssertionError(
+                    "immediate Claude startup steer was not delivered: "
+                    f"{startup_steer}"
+                )
+            if startup_elapsed >= 8:
+                raise AssertionError(
+                    "immediate Claude startup steer delivery was delayed: "
+                    f"{startup_elapsed:.2f}s"
+                )
+            startup_done = self._wait_for_turn(
+                startup_thread_id,
+                since=startup_baseline,
+                timeout=240,
+            )
+            if startup_done["status"] != "completed" or "STARTUP_STEERED" not in (
+                startup_done.get("output_message") or ""
+            ).upper():
+                raise AssertionError(
+                    "immediate Claude startup steer did not supersede the "
+                    f"initial prompt: {startup_done}"
+                )
         baseline = self._latest_thread_event_seq(thread_id)
         slow_prompt = (
             "Use the terminal tool to run "
@@ -3014,19 +3348,42 @@ class AwsSmoke:
         steer_elapsed = time.monotonic() - steer_started
         if steered.get("status") != "accepted":
             raise AssertionError(f"message on the running thread was not delivered as a steer: {steered}")
-        if self.agent_runtime == "codex" and steer_elapsed >= 8:
+        if self.agent_runtime in ("codex", "claude_code") and steer_elapsed >= 8:
             raise AssertionError(
-                "Codex steer acknowledgement was delayed behind activity: "
+                f"{self.agent_runtime} steer delivery was delayed "
+                "behind activity: "
                 f"{steer_elapsed:.2f}s"
             )
+        expected = "STEERED"
+        if self.agent_runtime == "claude_code":
+            # Exercise the queue/abort race that a single steer cannot cover:
+            # the second pair may reach Claude before it has begun processing
+            # the first replacement message.
+            second_started = time.monotonic()
+            second = self.send_follow_up(
+                thread_id,
+                "Final task update: reply with exactly the word DOUBLE_STEERED.",
+            )
+            second_elapsed = time.monotonic() - second_started
+            if second.get("status") != "accepted":
+                raise AssertionError(
+                    "second rapid Claude steer was not delivered: "
+                    f"{second}"
+                )
+            if second_elapsed >= 8:
+                raise AssertionError(
+                    "second rapid Claude steer delivery was delayed: "
+                    f"{second_elapsed:.2f}s"
+                )
+            expected = "DOUBLE_STEERED"
         done = self._wait_for_turn(thread_id, since=baseline, timeout=240)
         if done["status"] != "completed":
             raise AssertionError(f"steered turn ended {done['status']}: {self._thread_failure_detail(thread_id)}")
-        if "STEERED" not in (done.get("output_message") or "").upper():
+        if expected not in (done.get("output_message") or "").upper():
             raise AssertionError(f"steer did not take effect, output: {done.get('output_message')!r}")
         self._ok(
             f"{self.agent_runtime} steer redirected the running turn "
-            f"(acknowledged in {steer_elapsed:.2f}s)"
+            f"(delivered in {steer_elapsed:.2f}s)"
         )
 
     def check_agent_kill_and_thread_survival(self, *, expect_steering_denied: bool = False) -> None:

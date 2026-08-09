@@ -313,11 +313,43 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             deny(self.config, "GET", "pypi.org", "/simple/AKIAIOSFODNN7EXAMPLE/", "", [], b""),
             "request_param_secret_denied",
         )
+        # Headers are not inspected on these destinations: nothing reflects
+        # them back, so there is no reader for that channel.
+        self.assertIsNone(
+            deny(
+                self.config,
+                "GET",
+                "pypi.org",
+                "/simple/requests/",
+                "",
+                [("X-Request-Note", "alice@example.com")],
+                b"",
+            )
+        )
+        self.assertIsNone(
+            deny(
+                self.config,
+                "GET",
+                "pypi.org",
+                "/simple/requests/",
+                "",
+                [("If-None-Match", 'W/"x7Kp2mQv9zR4tYw8LbN3"')],
+                b"",
+            )
+        )
         # Download URLs are provider-echoed (index-response links): their hash
         # segments must not be scanned or pip installs would break.
         digest_path = "/packages/ab/cd/" + "e" * 64 + "/requests-2.31.0-py3-none-any.whl"
         self.assertIsNone(
-            deny(self.config, "GET", "files.pythonhosted.org", digest_path, "", [], b"")
+            deny(
+                self.config,
+                "GET",
+                "files.pythonhosted.org",
+                digest_path,
+                "",
+                [("X-Request-Note", "alice@example.com")],
+                b"",
+            )
         )
 
     def test_npm_packages_names_are_guarded(self) -> None:
@@ -331,6 +363,17 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             deny(self.config, "GET", "registry.npmjs.org", "/pkg-AKIAIOSFODNN7EXAMPLE", "", [], b""),
             "request_param_secret_denied",
         )
+        self.assertIsNone(
+            deny(
+                self.config,
+                "GET",
+                "registry.npmjs.org",
+                "/react",
+                "",
+                [("X-Request-Note", "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")],
+                b"",
+            )
+        )
 
     def test_github_reads_guard_query_values_without_token_rules(self) -> None:
         from host.network_integrations.github import guard
@@ -340,6 +383,23 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         deny = guard.request_denied
         self.assertIsNone(
             deny(config, "GET", "api.github.com", "/search/code", "q=fibonacci+language%3Apython", [], b"")
+        )
+        # A git fetch still passes with git's own protocol headers, which is
+        # what the allowlist is for.
+        self.assertIsNone(
+            deny(
+                config,
+                "POST",
+                "github.com",
+                "/o/r.git/git-upload-pack",
+                "",
+                [
+                    ("User-Agent", "git/2.43.0"),
+                    ("Content-Type", "application/x-git-upload-pack-request"),
+                    ("Git-Protocol", "version=2"),
+                ],
+                b"",
+            )
         )
         # Machine-shaped provider values stay legitimate: shas, refs, cursors.
         self.assertIsNone(
@@ -357,6 +417,28 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             deny(config, "GET", "api.github.com", "/search/users", "q=alice%40example.com", [], b""),
             "request_param_pii_denied",
         )
+        self.assertIsNone(
+            deny(
+                config,
+                "GET",
+                "api.github.com",
+                "/rate_limit",
+                "",
+                [("X-Request-Note", "alice@example.com")],
+                b"",
+            )
+        )
+        self.assertIsNone(
+            deny(
+                config,
+                "GET",
+                "api.github.com",
+                "/rate_limit",
+                "",
+                [("Authorization", "Bearer ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")],
+                b"",
+            )
+        )
         # The param guard applies to reads only; a write query is governed by
         # the write-repo rules, not scanned for public-leak shapes (it can only
         # reach a configured repo). A POST carrying an email-shaped query to an
@@ -366,6 +448,44 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             config, "POST", "api.github.com", "/repos/o/r/issues", "q=alice%40example.com", [], b"",
         )
         self.assertNotEqual(write_denial, "request_param_pii_denied")
+
+    def test_github_read_only_hosts_guard_forwarded_headers(self) -> None:
+        from host.network_integrations.github import guard
+        from host.network_integrations.github.manifest import GitHubIntegration
+
+        self.assertIsNone(
+            guard.request_denied(
+                GitHubIntegration(enabled=True),
+                "GET",
+                "raw.githubusercontent.com",
+                "/owner/repo/revision/file.txt",
+                "",
+                [("X-Request-Note", "alice@example.com")],
+                b"",
+            )
+        )
+        self.assertIsNone(
+            guard.request_denied(
+                GitHubIntegration(enabled=True),
+                "POST",
+                "github.com",
+                "/owner/repo.git/git-upload-pack",
+                "",
+                [("If-None-Match", "alice@example.com")],
+                b"git request",
+            )
+        )
+        self.assertIsNone(
+            guard.request_denied(
+                GitHubIntegration(enabled=True),
+                "POST",
+                "github.com",
+                "/owner/repo.git/git-upload-pack",
+                "",
+                [("X-Request-Note", "alice@example.com")],
+                b"git request",
+            )
+        )
 
     def test_github_actions_blob_allows_only_scoped_signed_downloads(self) -> None:
         from host.network_integrations.github import guard
@@ -403,6 +523,54 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         ):
             with self.subTest(unowned_host=unowned_host):
                 self.assertFalse(guard.host_allowed(config, unowned_host))
+        self.assertIsNone(
+            deny(
+                config,
+                "GET",
+                host,
+                "/actions-results/job/logs.zip",
+                sas_query,
+                [
+                    (
+                        "x-ms-client-request-id",
+                        "%61%6C%69%63%65%40%65%78%61%6D%70%6C%65%2E%63%6F%6D",
+                    )
+                ],
+                b"",
+            )
+        )
+        self.assertIsNone(
+            deny(
+                config,
+                "GET",
+                host,
+                "/actions-results/job/logs.zip",
+                sas_query,
+                [("User-Agent", "curl/8.10"), ("Authorization", "Bearer agent-secret")],
+                b"",
+            )
+        )
+        rewritten = guard.rewrite_request_headers(
+            config,
+            "GET",
+            host,
+            "/actions-results/job/logs.zip",
+            sas_query,
+            [
+                ("Host", "PrOdUcTiOnReSuLtSsA17.BlOb.CoRe.WiNdOwS.NeT:443"),
+                ("Authorization", "Bearer agent-secret"),
+            ],
+            b"",
+        )
+        self.assertNotIn("authorization", {key.lower() for key, _value in rewritten})
+        # Host is not rewritten here any more: the proxy forwards a canonical
+        # Host on every request, so the agent's case/port spelling never
+        # reaches Azure. Covered by
+        # test_network_proxy.WebSocketHandshakeTests.test_host_is_forwarded_canonically.
+        self.assertEqual(
+            [value for key, value in rewritten if key.lower() == "host"],
+            ["PrOdUcTiOnReSuLtSsA17.BlOb.CoRe.WiNdOwS.NeT:443"],
+        )
         for unsigned in (
             "",
             "sv=2025-07-05",
@@ -498,6 +666,86 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             "request_param_encoded_blob_denied",
         )
 
+    def test_managed_headers_forward_untouched_but_credentials_are_removed(self) -> None:
+        """Headers are forwarded as sent on the managed destinations.
+
+        These are first-party hosts that reflect nothing back, so a header is
+        not a channel anyone can read; guarding it bounds nothing. What the
+        proxy removes is what a header can *do* — an identity the destination
+        should not receive — plus the free text in User-Agent.
+        """
+        from host.network_integrations.base import ManagedIntegration
+        from host.network_integrations.npm_packages import guard as npm
+        from host.network_integrations.python_packages import guard as pypi
+
+        sent = [
+            ("User-Agent", 'pip/24.0 {"ci":null,"cpu":"x86_64"}'),
+            ("Authorization", "Bearer a-credential-the-registry-should-not-get"),
+            ("Cookie", "session=abcd1234"),
+            ("Accept", "text/html"),
+            ("X-Whatever", "an ordinary client header"),
+        ]
+        for guard in (pypi, npm):
+            with self.subTest(guard=guard.__name__):
+                forwarded = guard.rewrite_request_headers(
+                    None, "GET", "pypi.org", "/simple/x/", "", list(sent), b""
+                )
+                names = {key.lower() for key, _ in forwarded}
+                self.assertNotIn("authorization", names)
+                self.assertNotIn("cookie", names)
+                from host.network_integrations.base import PROXY_USER_AGENT
+
+                self.assertEqual(
+                    [value for key, value in forwarded if key.lower() == "user-agent"],
+                    [PROXY_USER_AGENT],
+                )
+                self.assertIn(("X-Whatever", "an ordinary client header"), forwarded)
+                self.assertIn(("Accept", "text/html"), forwarded)
+
+        # No header value denies on these destinations any more...
+        config = ManagedIntegration(True)
+        self.assertIsNone(
+            pypi.request_denied(
+                config,
+                "GET",
+                "pypi.org",
+                "/simple/requests/",
+                "",
+                [("X-Request-Note", "alice@example.com")],
+                b"",
+            )
+        )
+        # ...but the URL still does, because npm and PyPI publish per-package
+        # download statistics, which is a channel someone can actually read.
+        self.assertEqual(
+            pypi.request_denied(
+                config, "GET", "pypi.org", "/simple/alice@example.com/", "", [], b""
+            ),
+            "request_param_pii_denied",
+        )
+
+    def test_user_agent_is_replaced_with_the_host_value(self) -> None:
+        """The one field where the no-reader argument does not hold: PyPI's
+        public download dataset derives the installer name and version from
+        User-Agent, so an agent-chosen product token there is readable."""
+        from host.network_integrations.base import PROXY_USER_AGENT, fixed_user_agent
+
+        for sent in (
+            'pip/24.0 {"ci":null,"cpu":"x86_64"}',
+            "pip/x7Kp2mQv9zR4tYw8LbN3",
+            "npm/10.5.0 node/v20.12.2 linux x64",
+        ):
+            with self.subTest(sent=sent):
+                self.assertEqual(
+                    fixed_user_agent([("User-Agent", sent)]),
+                    [("User-Agent", PROXY_USER_AGENT)],
+                )
+        # Added when absent, so the destination always sees one.
+        self.assertEqual(
+            fixed_user_agent([("Accept", "text/html")]),
+            [("Accept", "text/html"), ("User-Agent", PROXY_USER_AGENT)],
+        )
+
     def test_proxy_guard_catches_credential_query_keys_via_whole_url(self) -> None:
         from host.network_integrations.base import request_param_denial
 
@@ -532,7 +780,8 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         self.assertIsNone(
             guard.request_denied(
                 config, "GET", "registry.npmjs.org",
-                "/somepkg/-/somepkg-1.0.0-alpha.20240315123456.tgz", "", [], b"",
+                "/somepkg/-/somepkg-1.0.0-alpha.20240315123456.tgz", "",
+                [("X-Request-Note", "alice@example.com")], b"",
             )
         )
 
@@ -628,7 +877,14 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         ):
             self.assertIsNone(google_calendar.CALENDAR_EVENT_ID_RE.fullmatch(prose_id))
 
-    def test_custom_domain_requests_are_parameter_guarded(self) -> None:
+    def test_custom_domains_are_not_inspected(self) -> None:
+        """A custom domain's contract is the operator's rule and nothing else.
+
+        The operator names the domain, methods and paths; the host inspects
+        nothing inside the request. There is no knowable client, header set or
+        URL grammar to check against, and request bodies were never scanned, so
+        on any write-capable domain a content guard was never a boundary.
+        """
         from host.network_integrations.custom import guard
         from host.network_integrations.custom.manifest import (
             CustomDomainRule,
@@ -636,16 +892,44 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         )
 
         config = CustomIntegration(
-            domains={"api.example.com": CustomDomainRule(allow_http_methods=("GET", "POST"))}
+            domains={
+                "api.example.com": CustomDomainRule(
+                    allow_http_methods=("GET", "POST", "PUT"),
+                    path_guards=(r"^/v1(?:/.*)?$",),
+                )
+            }
         )
         deny = guard.request_denied
-        self.assertIsNone(
-            deny(config, "GET", "api.example.com", "/v1/lookup", "q=weather", [], b"")
+        # The operator's rule is enforced: method and path, nothing else.
+        self.assertIsNone(deny(config, "GET", "api.example.com", "/v1/lookup", "", [], b""))
+        self.assertEqual(
+            deny(config, "DELETE", "api.example.com", "/v1/lookup", "", [], b""),
+            "network_policy_denied",
         )
         self.assertEqual(
-            deny(config, "GET", "api.example.com", "/v1/lookup", "q=alice%40example.com", [], b""),
-            "request_param_pii_denied",
+            deny(config, "GET", "api.example.com", "/admin", "", [], b""),
+            "network_policy_denied",
         )
+        self.assertEqual(
+            deny(config, "GET", "other.example.com", "/v1/lookup", "", [], b""),
+            "network_policy_denied",
+        )
+        # Inside an allowed route nothing is inspected: the headers and URL
+        # values that a managed integration would refuse all pass here, which
+        # is what makes the operator's act of adding the domain the decision.
+        for label, headers, query in (
+            ("opaque session cookie", [("Cookie", "session=abcd1234abcd1234")], ""),
+            ("agent-held credential", [("Authorization", "Bearer sk-live-x7Kp2m")], ""),
+            ("entity-tag precondition", [("If-Match", 'W/"x7Kp2mQv9zR4tYw8LbN3"')], ""),
+            ("idempotency key", [("Idempotency-Key", "550e8400-e29b-41d4-a716-446655440000")], ""),
+            ("bespoke header", [("X-Request-Note", "alice@example.com")], ""),
+            ("identifier in query", [], "q=alice%40example.com"),
+        ):
+            with self.subTest(case=label):
+                self.assertIsNone(
+                    deny(config, "GET", "api.example.com", "/v1/lookup", query, headers, b"")
+                )
+
 
     def test_shared_reason_codes_are_in_the_proxy_catalog(self) -> None:
         from host.network_integrations.registry import denial_reason_catalog

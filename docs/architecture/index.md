@@ -19,14 +19,14 @@ so operators and contributors can jump to the trust boundary they need.
 | [Agent provider lifecycle](agent-provider-lifecycle.md) | Runtime status lifecycle, refresh triggers, live credential validation, account anchoring, proxy pinning, and operator recovery. |
 | [Runtime harness dependencies](harness-dependencies.md) | Codex and Claude Code interfaces, auth files, request shapes, and upgrade review points. |
 | [Admin API architecture](admin-api.md) | Local API security, turn orchestration, and maintenance. |
-| [Apps](apps/apps.md) | App services, storage and migrations, embedded admin UI surfaces, and app security boundaries. |
-| [App: Agent Chat](apps/agent-chat.md) | The threaded chat app: thread index, event stream views, and its display-only agent surface. |
-| [App: Agentic Web App](apps/personal-web-app-builder.md) | Multiple isolated agent-built web-app workspaces and preview surfaces. |
-| [Agent App API](apps/agent-app-api.md) | The `app_api` tool: kernel-attributed agent → app backend calls through the dedicated agent-app service. |
+| [Chat and Web Apps workspaces](workspaces/workspaces.md) | The fixed Workspace service, UI mounting, schemas, migration, and generated-code sandbox. |
+| [Chat workspace](workspaces/agent-chat.md) | Thread index, event views, composer, and archive behavior. |
+| [Web Apps workspace](workspaces/personal-web-app-builder.md) | Isolated agent-generated workspaces and preview capabilities. |
+| [Workspace agent API](workspaces/workspace-agent-api.md) | Peer-authenticated agent calls through the main Workspace service; Web Apps are its current agent-callable resource. |
 | [Network controls](network-controls.md) | nftables, typed integration guards (AI providers, GitHub, packages, custom domains), agent introspection, and fail-closed behavior. |
 | [GitHub write-path controls](github-write-path-controls.md) | The implemented `.github` push-inspection, quarantine, approval, replay, and failure model. |
 | [Tools](tools/README.md) | Bundled tool framework: the host-neutral tool contract, this host's integration, approvals, and the bundled tool packages. |
-| [Local sockets](local-sockets.md) | Peer-credentialed Unix-domain sockets (tools, agent-app, app-backend, Postgres) and their trust boundaries. |
+| [Local sockets](local-sockets.md) | Peer-credentialed Unix-domain sockets (tools, Workspace agent/admin, network introspection, Postgres) and their trust boundaries. |
 | [Agent preview ports](agent-preview-ports.md) | The loopback port range the agent may serve HTTP on and test against, and the operator's SSH-forward path to view it. |
 | [IAM policy notes](iam-policy.md) | Why each deploy IAM statement exists and why its scope is constrained. |
 
@@ -40,7 +40,7 @@ instance and its root EBS volume carry the
 terminate, and recreate them when the operator upgrades or recovers the host.
 
 Kern's Python runtime uses only the Python 3 standard library. Admin,
-network, app, and tool state live in a local Postgres database on the durable
+network, workspace, and tool state live in a local Postgres database on the durable
 admin volume, spoken to by an in-repo wire-protocol client
 (`host/runtime/core/pgclient.py`). The proxy keeps only file-oriented TLS and Git
 quarantine state in its own durable directory.

@@ -64,16 +64,6 @@ def session_config_error(runtime: str, model: object, effort: object) -> str | N
     return None
 
 
-def offered_session_configs() -> list[tuple[str, str, str]]:
-    """Every (runtime, model, effort) the matrix currently offers."""
-    return [
-        (runtime, model, effort)
-        for runtime, models in SESSION_OPTIONS.items()
-        for model, efforts in models.items()
-        for effort in efforts
-    ]
-
-
 def recorded_session_config(payload: Mapping[str, Any]) -> tuple[str, str, str] | None:
     """Read a recorded configuration back, or None when the shape is wrong.
 
@@ -82,9 +72,16 @@ def recorded_session_config(payload: Mapping[str, Any]) -> tuple[str, str, str] 
     the current matrix. Callers raise their own error for the None case so the
     status code stays theirs.
     """
-    values = tuple(payload.get(field) for field in ("agent_runtime", "model", "effort"))
-    if not all(isinstance(value, str) and value for value in values):
+    runtime = payload.get("agent_runtime")
+    model = payload.get("model")
+    effort = payload.get("effort")
+    if not (
+        isinstance(runtime, str)
+        and runtime
+        and isinstance(model, str)
+        and model
+        and isinstance(effort, str)
+        and effort
+    ):
         return None
-    runtime, model, effort = values
-    assert isinstance(runtime, str) and isinstance(model, str) and isinstance(effort, str)
     return runtime, model, effort

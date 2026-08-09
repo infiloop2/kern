@@ -151,12 +151,13 @@ the next send. The configuration update, provider-session clear, durable user
 event, and new run admission share one mutation, guarded by the row's
 `run_status = 'idle'` predicate and the ordinary same-thread send lock. The
 new runtime therefore cannot race admitted or shutting-down work. It receives
-one synthetic first prompt containing the newest retained public events (at
-most 250,000 transcript characters) followed by the new user message.
-Activities serialize their complete stored payload, including expanded detail
-and output. An existing thread whose provider session id is already absent
-uses the same handoff on its next idle run even without another configuration
-change; a new thread with no retained history does not need one.
+one synthetic first prompt with independent retained-history sections: up to
+100,000 characters of the newest user/agent conversation and up to 150,000
+characters of the newest activity summaries, followed by the new user message.
+Each activity is capped at 8,000 characters so tool output cannot consume the
+conversation allowance. An existing thread whose provider session id is
+already absent uses the same handoff on its next idle run even without another
+configuration change; a new thread with no retained history does not need one.
 That wrapper is not appended to the public event stream. Instead, a completed
 `thread.activity` records the old and new runtime/model/effort immediately
 before the visible user message. This is deliberately a lossy provider

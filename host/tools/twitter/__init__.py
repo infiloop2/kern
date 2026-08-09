@@ -28,7 +28,7 @@ from host.tools.tool import (
     OAuthStartConnectResult,
 )
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI, StoredCredential
-from host.tools.shared.google import clip_text
+from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
     access_token_is_fresh,
@@ -72,19 +72,6 @@ X_PERSONALIZED_TRENDS_POLICY = (
     "call is billed to the deployment's X API pay-per-use credits and requires X Premium. "
     "Runs directly with no approval."
 )
-
-
-class ToolInputValidationError(ValueError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
-def _schema(properties: JSONObject, required: list[str] | None = None) -> JSONObject:
-    schema: JSONObject = {"type": "object", "properties": properties, "additionalProperties": False}
-    if required:
-        schema["required"] = cast(list[JSONValue], required)
-    return schema
 
 
 X_OUTPUT_SCHEMA: JSONObject = {
@@ -205,7 +192,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and connect Kern",
             show_config=True,
-            description="Expand X in Internet Access and Tools. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, choose Connect, sign in as the account the agent may read and publish from, and approve the four displayed scopes. Confirm the row shows the expected @username.",
+            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, choose Connect, sign in as the account the agent may read and publish from, and approve the four displayed scopes. Confirm the page shows the expected @username.",
         ),
     ),
     data_summary=DataSummary(
@@ -451,20 +438,6 @@ class XCredentialStore:
 X_CREDENTIALS = XCredentialStore()
 
 
-class XCredentialFlow(CredentialFlow):
-    def start_connect(self, params: OAuthStartConnectParams, api: HostAPI) -> OAuthStartConnectResult:
-        return X_CREDENTIALS.start_connect(params, api)
-
-    def complete_connect(self, params: OAuthCompleteConnectParams, api: HostAPI) -> OAuthCompleteConnectResult:
-        return X_CREDENTIALS.complete_connect(params, api)
-
-    def disconnect(self, api: HostAPI) -> None:
-        X_CREDENTIALS.disconnect(api)
-
-    def connection_status(self, api: HostAPI) -> ConnectionStatus:
-        return X_CREDENTIALS.connection_status(api)
-
-
 def _api_get(access_token: str, path_and_query: str, *, what: str) -> JSONObject:
     try:
         return json_request(
@@ -488,24 +461,6 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     if exc.status:
         return RuntimeError(f"X API returned HTTP {exc.status}.")
     return RuntimeError(f"X {what} request failed.")
-
-
-def _int_field(tool_input: JSONObject, key: str, *, default: int, low: int, high: int) -> int:
-    value = tool_input.get(key)
-    if value is None:
-        return default
-    if isinstance(value, str) and value.strip().isascii() and value.strip().isdecimal():
-        digits = value.strip()
-        if len(digits) > 10:
-            raise ToolInputValidationError(
-                f"X tool_input.{key} must be between {low} and {high}."
-            )
-        value = int(digits)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ToolInputValidationError(f"X tool_input.{key} must be an integer or digit string.")
-    if not low <= value <= high:
-        raise ToolInputValidationError(f"X tool_input.{key} must be between {low} and {high}.")
-    return value
 
 
 def _usernames_by_id(response: JSONObject) -> dict[str, str]:
@@ -545,7 +500,7 @@ def _search_tweets(access_token: str, tool_input: JSONObject, api: HostAPI) -> J
         raise ToolInputValidationError(
             f"X search query must be at most {MAX_QUERY_CHARS} characters."
         )
-    max_results = _int_field(tool_input, "max_results", default=10, low=10, high=100)
+    max_results = int_field(tool_input, "max_results", provider="X", default=10, low=10, high=100)
     params = encode_query(
         {
             "query": api.outbound.guard_request_parameter_string(query),
@@ -611,7 +566,7 @@ def _user_tweets(access_token: str, tool_input: JSONObject) -> JSONObject:
             return {"status": "success_executed", "message": "X user was not found.", "tweets": []}
         resolved_id = resolved
         resolved_username = handle
-    max_results = _int_field(tool_input, "max_results", default=10, low=5, high=100)
+    max_results = int_field(tool_input, "max_results", provider="X", default=10, low=5, high=100)
     params = encode_query({"max_results": str(max_results), "tweet.fields": TWEET_FIELDS})
     response = _api_get(access_token, f"/users/{resolved_id}/tweets?{params}", what="user posts")
     data = response.get("data")
@@ -638,7 +593,7 @@ def _get_trends(api: HostAPI, tool_input: JSONObject) -> JSONObject:
         woeid = WORLDWIDE_WOEID
     if not isinstance(woeid, str) or not WOEID_RE.fullmatch(woeid.strip()):
         raise ToolInputValidationError("X tool_input.woeid must be a numeric WOEID string.")
-    max_trends = _int_field(tool_input, "max_trends", default=20, low=1, high=50)
+    max_trends = int_field(tool_input, "max_trends", provider="X", default=20, low=1, high=50)
     params = encode_query({"max_trends": str(max_trends), "trend.fields": "trend_name,tweet_count"})
     # Trends lookups accept only app-only auth, so this action uses the
     # configured app Bearer token instead of the connected user's token. A 401
@@ -655,7 +610,7 @@ def _get_trends(api: HostAPI, tool_input: JSONObject) -> JSONObject:
     except WebRequestError as exc:
         if exc.status == 401:
             raise RuntimeError(
-                "X rejected the configured Bearer token. Update X_BEARER_TOKEN in the admin UI's Tools tab."
+                "X rejected the configured Bearer token. Update X_BEARER_TOKEN under Home > Integrations in the admin UI."
             ) from exc
         raise _mapped_web_error(exc, "trends") from exc
     data = response.get("data")
@@ -790,7 +745,8 @@ class XTool:
 
     @property
     def credentials(self) -> CredentialFlow:
-        return XCredentialFlow()
+        # XCredentialStore implements the CredentialFlow protocol directly.
+        return X_CREDENTIALS
 
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
         try:

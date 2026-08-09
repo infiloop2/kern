@@ -195,6 +195,31 @@ class AdminPasskeyTests(unittest.TestCase):
         self.assertEqual(stored[0]["transports"], ["hybrid", "internal"])
         self.assertIsNotNone(stored[0]["last_used_at"])
 
+    def test_second_admin_passkey_registration_is_rejected(self) -> None:
+        self.register()
+        with self.assertRaisesRegex(
+            admin_passkeys.PasskeyError,
+            "already has an admin passkey",
+        ):
+            admin_passkeys.begin_registration(
+                "second-session",
+                rp_id=RP_ID,
+                origin=ORIGIN,
+                agent_name="Kern",
+            )
+
+        with self.assertRaises(state.AdminPasskeyLimitError):
+            state.save_admin_passkey(
+                user_handle=state.admin_passkey_config()["user_handle"],
+                credential_id="another-credential",
+                rp_id=RP_ID,
+                public_key_spki=b64(self.public_key.read_bytes()),
+                sign_count=0,
+                transports=[],
+                backed_up=False,
+                created_at=state.utc_now(),
+            )
+
     def test_signature_counter_cannot_regress_from_nonzero_to_zero(self) -> None:
         self.register()
         token, options = admin_passkeys.begin_login(

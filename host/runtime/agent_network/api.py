@@ -9,26 +9,23 @@ this socket with the independent tools and app sockets.
 from __future__ import annotations
 
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import json
 import os
-from pathlib import Path
-import pwd
-import socket
-import struct
 import threading
 from typing import Any
 
 from host.constants import AGENT_NETWORK_SOCKET_PATH
 from host.network_integrations import registry
 from host.runtime.core import host_errors, network_policy, state
+from host.runtime.core.unix_socket_service import (
+    UnixSocketRequestHandler,
+    UnixSocketServer,
+    peer_uids,
+)
 
-DEFAULT_SOCKET_PATH = AGENT_NETWORK_SOCKET_PATH
-SOCKET_PATH = os.environ.get("KERN_AGENT_NETWORK_SOCKET", DEFAULT_SOCKET_PATH)
+SOCKET_PATH = os.environ.get("KERN_AGENT_NETWORK_SOCKET", AGENT_NETWORK_SOCKET_PATH)
 AGENT_PEER_USER = "kern-agent"
 MAX_REQUEST_BODY_BYTES = 16 * 1024
 MAX_CONCURRENT_CALLS = 8
-REQUEST_READ_TIMEOUT_SECONDS = 30
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
 
 LIST_NETWORK_INTEGRATIONS_TOOL = {
@@ -128,36 +125,14 @@ def _recent_network_denials(tool_input: Any) -> dict[str, Any]:
 
 
 def _agent_peer_uids() -> frozenset[int]:
-    try:
-        return frozenset({pwd.getpwnam(AGENT_PEER_USER).pw_uid})
-    except KeyError:
-        return frozenset({os.getuid()})
+    return peer_uids(AGENT_PEER_USER)
 
 
-class NetworkIntrospectionRequestHandler(BaseHTTPRequestHandler):
+class NetworkIntrospectionRequestHandler(UnixSocketRequestHandler):
     server: "NetworkIntrospectionServer"
-    timeout = REQUEST_READ_TIMEOUT_SECONDS
-
-    def address_string(self) -> str:
-        return "local"
-
-    def log_message(self, format: str, *args: object) -> None:
-        pass
 
     def _peer_allowed(self) -> bool:
-        credentials = self.connection.getsockopt(
-            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
-        )
-        _pid, uid, _gid = struct.unpack("3i", credentials)
-        return uid in self.server.agent_uids
-
-    def _send_json(self, status: HTTPStatus | int, body: dict[str, Any]) -> None:
-        payload = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        return self._peer()[1] in self.server.agent_uids
 
     def do_GET(self) -> None:
         if not self._peer_allowed():
@@ -174,24 +149,15 @@ class NetworkIntrospectionRequestHandler(BaseHTTPRequestHandler):
         if self.path != "/call":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown path."})
             return
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            length = -1
-        if length < 0 or length > MAX_REQUEST_BODY_BYTES:
-            self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "Request too large."})
+        length = self.bounded_content_length(MAX_REQUEST_BODY_BYTES)
+        if length is None:
             return
         if not _CALL_SLOTS.acquire(blocking=False):
             self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Too many concurrent calls."})
             return
         try:
-            try:
-                body = json.loads(self.rfile.read(length).decode() or "{}")
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body must be JSON."})
-                return
-            if not isinstance(body, dict):
-                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body must be a JSON object."})
+            body = self.read_json_object_body(length)
+            if body is None:
                 return
             try:
                 result = call_action(body.get("name"), body.get("input"))
@@ -205,19 +171,10 @@ class NetworkIntrospectionRequestHandler(BaseHTTPRequestHandler):
             _CALL_SLOTS.release()
 
 
-class NetworkIntrospectionServer(ThreadingHTTPServer):
-    address_family = socket.AF_UNIX
-    daemon_threads = True
-
+class NetworkIntrospectionServer(UnixSocketServer):
     def __init__(self, socket_path: str, agent_uids: frozenset[int]) -> None:
         self.agent_uids = agent_uids
-        super().__init__(socket_path, NetworkIntrospectionRequestHandler)  # type: ignore[arg-type]
-
-    def server_bind(self) -> None:
-        path = Path(str(self.server_address))
-        path.unlink(missing_ok=True)
-        self.socket.bind(str(path))
-        path.chmod(0o666)
+        super().__init__(socket_path, NetworkIntrospectionRequestHandler)
 
 
 def serve_forever(socket_path: str = SOCKET_PATH) -> None:

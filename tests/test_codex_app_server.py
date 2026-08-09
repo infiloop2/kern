@@ -10,10 +10,10 @@ import threading
 import time
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from host.constants import APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS
-from host.runtime.admin_api import app_api_proxy, thread_scope
+from host.constants import WORKSPACE_ADMIN_API_TIMEOUT_SECONDS
+from host.runtime.admin_api import workspace_proxy, thread_scope
 from host.runtime.admin_api import codex_app_server as codex_app_server_module
 from host.runtime.admin_api.codex_app_server import (
     CodexAppServer,
@@ -47,8 +47,8 @@ for line in sys.stdin:
     elif method == "thread/resume":
         assert msg["params"]["threadId"] == "thread_existing"
         assert msg["params"]["model"] == "gpt-5.6-sol"
-        assert msg["params"]["developerInstructions"].endswith(
-            "App instructions:\nUse only /agent/workspace."
+        assert msg["params"]["developerInstructions"].startswith(
+            "You are running inside Kern."
         )
         assert "effort" not in msg["params"]
         send({"id": msg["id"], "result": {"thread": {"id": "thread_existing"}}})
@@ -412,19 +412,19 @@ def parked_server() -> Any:
 
 
 class CodexAppServerTests(unittest.TestCase):
-    def test_steer_ack_deadline_precedes_app_backend_deadline(self) -> None:
+    def test_steer_ack_deadline_precedes_workspace_backend_deadline(self) -> None:
         self.assertLess(
             codex_app_server_module.CODEX_STEER_TIMEOUT_SECONDS,
-            APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS,
+            WORKSPACE_ADMIN_API_TIMEOUT_SECONDS,
         )
         self.assertLess(
-            APP_BACKEND_ADMIN_API_TIMEOUT_SECONDS,
-            app_api_proxy.APP_API_PROXY_TIMEOUT_SECONDS,
+            WORKSPACE_ADMIN_API_TIMEOUT_SECONDS,
+            workspace_proxy.PROXY_TIMEOUT_SECONDS,
         )
         repo_root = Path(__file__).resolve().parents[1]
         frame_sources = (
-            repo_root / "host/apps/agent_chat/ui/agent_chat.js",
-            repo_root / "host/apps/personal_web_app_builder/ui/personal_web_app_builder.js",
+            repo_root / "host/runtime/workspace/chat/ui/agent_chat.js",
+            repo_root / "host/runtime/workspace/web_apps/ui/personal_web_app_builder.js",
         )
         for source_path in frame_sources:
             source = source_path.read_text()
@@ -436,7 +436,7 @@ class CodexAppServerTests(unittest.TestCase):
             assert match is not None
             self.assertGreater(
                 int(match.group(1)) * 1000,
-                app_api_proxy.APP_API_PROXY_TIMEOUT_SECONDS * 1000,
+                workspace_proxy.PROXY_TIMEOUT_SECONDS * 1000,
             )
             self.assertGreaterEqual(source.count("AGENT_DELIVERY_TIMEOUT_MS"), 3)
 
@@ -495,7 +495,7 @@ class CodexAppServerTests(unittest.TestCase):
         server = codex_app_server_module.CodexAppServer(
             command=codex_app_server_module.DEFAULT_COMMAND, thread_id="stage-1-smoke-kill-codex"
         )
-        with patch.object(thread_scope.subprocess, "run") as run:
+        with patch.object(thread_scope.subprocess, "run", return_value=MagicMock(returncode=0)) as run:
             server.close()
         run.assert_called_once()
         self.assertEqual(
@@ -530,7 +530,7 @@ class CodexAppServerTests(unittest.TestCase):
         threading.Thread(target=server._read_stderr, args=(proc.stderr,), daemon=True).start()
 
         returned = threading.Event()
-        with patch.object(thread_scope.subprocess, "run") as run, patch.object(
+        with patch.object(thread_scope.subprocess, "run", return_value=MagicMock(returncode=0)) as run, patch.object(
             proc, "kill", side_effect=PermissionError(1, "Operation not permitted")
         ):
             closer = threading.Thread(
@@ -552,7 +552,7 @@ class CodexAppServerTests(unittest.TestCase):
                 command=codex_app_server_module.DEFAULT_COMMAND, thread_id=None
             ),
         ):
-            with patch.object(thread_scope.subprocess, "run") as run:
+            with patch.object(thread_scope.subprocess, "run", return_value=MagicMock(returncode=0)) as run:
                 server.close()
             run.assert_not_called()
 
@@ -1339,12 +1339,10 @@ for line in sys.stdin:
         self.assertNotIn("output", completed)
         self.assertEqual(output, "Done")
 
-    def test_new_app_thread_receives_manifest_instructions_as_developer_instructions(self) -> None:
+    def test_new_thread_receives_host_developer_instructions(self) -> None:
         calls: list[tuple[str, dict[str, Any]]] = []
 
         class RecordingServer:
-            app_instructions = "Use only /agent/workspace."
-
             def call(self, method: str, params: dict[str, Any], timeout: float) -> dict[str, Any]:
                 calls.append((method, params))
                 return {"thread": {"id": "thread_1"}}
@@ -1355,11 +1353,10 @@ for line in sys.stdin:
         self.assertEqual(calls[0][0], "thread/start")
         instructions = calls[0][1]["developerInstructions"]
         self.assertIn("You are running inside Kern", instructions)
-        self.assertIn("App instructions:\nUse only /agent/workspace.", instructions)
+        self.assertNotIn("workspace instructions", instructions)
 
     def test_run_turn_refreshes_instructions_and_model_when_resuming_a_thread(self) -> None:
         with CodexAppServer([sys.executable, "-u", "-c", FAKE_APP_SERVER]) as server:
-            server.app_instructions = "Use only /agent/workspace."
             thread_id, output = run_turn(
                 server,
                 "continue",
@@ -1381,7 +1378,6 @@ for line in sys.stdin:
         accepted_sessions: list[str] = []
 
         class ResumeFallbackServer:
-            app_instructions = None
             last_known_session_id: str | None = None
             _on_ready = None
             _on_session_id = accepted_sessions.append

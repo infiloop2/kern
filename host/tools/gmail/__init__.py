@@ -32,7 +32,8 @@ from host.tools.results import (
 from host.tools.tool import CredentialFlow
 from host.param_guard import ParamGuardDenied
 from host.tools.host_api import ApprovalRecord, HostAPI
-from host.tools.shared.google import GoogleCredentialStore, IntegrationReconnectRequired, clip_text
+from host.tools.shared.google import GoogleCredentialStore, IntegrationReconnectRequired, google_oauth_setup_steps
+from host.tools.shared.inputs import clip_text, schema as _schema
 
 from .api import (
     GMAIL_DRAFT_ATTACHMENT_UNSUPPORTED_MESSAGE,
@@ -119,13 +120,6 @@ GMAIL_LABEL_BACKGROUND_COLORS = {
     "gray": "#666666",
 }
 GMAIL_LABEL_TEXT_COLORS = {"black": "#000000", "white": "#ffffff"}
-
-
-def _schema(properties: JSONObject, required: list[str] | None = None) -> JSONObject:
-    schema: JSONObject = {"type": "object", "properties": properties, "additionalProperties": False}
-    if required:
-        schema["required"] = cast(list[JSONValue], required)
-    return schema
 
 
 GMAIL_OUTPUT_SCHEMA: JSONObject = {
@@ -315,28 +309,15 @@ MANIFEST = ToolManifest(
         "Reads run directly. Sending mail or changing messages, labels, and drafts waits for explicit operator approval.",
         "Mailbox search queries pass the host parameter guard: values shaped like a secret or credential are denied before the request is sent.",
     ),
-    setup_steps=(
-        SetupStep(
-            title="Create or select a Google Cloud project",
-            description="Open Google Cloud Console, choose the project picker, and create a dedicated project if you do not already have one for Kern.",
-            link_url="https://console.cloud.google.com/projectcreate",
-            link_label="Open Google Cloud project creation",
-        ),
-        SetupStep(
+    setup_steps=google_oauth_setup_steps(
+        project_step_description="Open Google Cloud Console, choose the project picker, and create a dedicated project if you do not already have one for Kern.",
+        enable_api_step=SetupStep(
             title="Enable the Gmail API",
             description="Open APIs and Services > Library, search for Gmail API, open it, and choose Enable.",
             link_url="https://console.cloud.google.com/apis/library/gmail.googleapis.com",
             link_label="Open the Gmail API library page",
         ),
-        SetupStep(
-            title="Configure the OAuth consent screen",
-            description="Open Google Auth Platform > Branding and choose Get Started. Enter an app name such as Kern, a support email, External audience unless you use a Workspace-internal app, and your contact email. Then publish the app to Production; an app left in Testing needs your Google account under Audience > Test users and must be reconnected every week.",
-            link_url="https://developers.google.com/workspace/guides/configure-oauth-consent",
-            link_label="View Google's consent-screen guide",
-            image_path="/guide-assets/google-auth-app-information.png",
-            image_alt="Google Auth Platform app information form with App name and User support email fields.",
-        ),
-        SetupStep(
+        scopes_step=SetupStep(
             title="Declare Gmail permissions",
             description="Under Google Auth Platform > Data Access, add openid, email, gmail.readonly, gmail.send, gmail.compose, gmail.labels, and gmail.modify. Google can show an unverified-app warning when you connect; that is expected for a personal app you created yourself. The screenshot locates the control; use this exact scope list rather than the example selection pictured.",
             link_url="https://developers.google.com/workspace/gmail/api/auth/scopes",
@@ -344,20 +325,7 @@ MANIFEST = ToolManifest(
             image_path="/guide-assets/google-auth-data-access.png",
             image_alt="Google Auth Platform Data Access screen for adding OAuth scopes manually.",
         ),
-        SetupStep(
-            title="Create a Web application OAuth client",
-            description="Open Google Auth Platform > Clients, choose Create Client, and select Web application. Give the client a recognizable name. Leave Authorized JavaScript origins empty. Under Authorized redirect URIs, choose Add URI and enter this host's callback URI shown below. Then create the client and copy the client ID and client secret for the final step. The screenshot shows where the two URI sections appear.",
-            link_url="https://developers.google.com/workspace/guides/create-credentials#web-application",
-            link_label="View Google's web-client instructions",
-            image_path="/guide-assets/google-auth-web-client.png",
-            image_alt="Google Auth Platform Web application client form with Authorized JavaScript origins and Authorized redirect URIs sections.",
-            show_callback=True,
-        ),
-        SetupStep(
-            title="Configure Kern and connect",
-            description="Expand Gmail in Internet Access and Tools and save the client ID and client secret you copied from the Web application client in the previous step under the two configuration keys below. Enable Gmail, then choose Connect and approve the requested Google permissions. Confirm that the row shows the expected connected email. A read can run immediately; a send should appear under Approvals before Google receives it. The same client can also serve Google Calendar.",
-            show_config=True,
-        ),
+        connect_step_description="Open Gmail under Home > Integrations and save the client ID and client secret you copied from the Web application client in the previous step under the two configuration keys below. Enable Gmail, then choose Connect and approve the requested Google permissions. Confirm that the page shows the expected connected email. A read can run immediately; a send should appear under Approvals before Google receives it. The same client can also serve Google Calendar.",
     ),
 )
 
@@ -782,8 +750,8 @@ def _draft_send_summary_impl(draft: JSONObject, *, include_attachment_names: boo
     # The draft is sent as-is, so a body preview can understate what is sent:
     # it may be truncated to the first bodyLimit chars of a longer body, and a
     # note can flag an unrendered HTML alternative. These caveats are mandatory
-    # (an operator must not approve a benign-looking preview while the full body
-    # or HTML part goes out) and short, so they always fit. The preview text
+    # (an operator must not approve a benign preview while the full body or
+    # HTML part goes out) and short, so they always fit. The preview text
     # itself is the one flexible part: it takes whatever budget remains under
     # the host summary cap after every recipient, routing, attachment, and
     # caveat disclosure, so a draft is never blocked from sending by the very

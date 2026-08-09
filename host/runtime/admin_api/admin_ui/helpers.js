@@ -58,14 +58,6 @@ export function esc(value) {
   return div.innerHTML.replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
-export function informationIcon() {
-  return `<svg class="integration-info-icon" viewBox="0 0 20 20" aria-hidden="true">
-    <circle cx="10" cy="10" r="7.25" fill="none" stroke="currentColor" stroke-width="1.5"/>
-    <circle cx="10" cy="6.55" r="1" fill="currentColor"/>
-    <path d="M10 9.35v4.1" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round"/>
-  </svg>`;
-}
-
 // Catalog copy can mark short path names with backticks. Escape every segment
 // before wrapping those marked spans, so manifests cannot inject markup.
 export function inlineCode(value) {

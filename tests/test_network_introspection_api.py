@@ -154,7 +154,13 @@ class NetworkIntrospectionTests(unittest.TestCase):
         listed = json.loads(shim.stdout.readline())
         self.assertEqual(
             [tool["name"] for tool in listed["result"]["tools"]],
-            ["list_network_integrations", "recent_network_denials", "app_api"],
+            [
+                "list_network_integrations",
+                "recent_network_denials",
+                "search_conversation_history",
+                "read_thread_history",
+                "workspace_api",
+            ],
         )
 
         shim.stdin.write(json.dumps({

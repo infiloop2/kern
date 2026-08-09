@@ -42,6 +42,7 @@ CHECK_LABELS = {
     "thread_admin_api": "Thread admin API",
     "thread_session_switch": "Thread session switch",
     "stable_apps": "Stable apps",
+    "package_clients": "Package clients",
 }
 
 STAGE_BEDROCK_ENV = (

@@ -489,7 +489,7 @@ def _ensure_security_group(
         group_id = created["GroupId"]
     _reset_security_group_rules(env, group_id)
     if ssh_ingress:
-        _authorize_if_missing(env, "authorize-security-group-ingress", group_id, SSH_INGRESS)
+        _aws(env, "ec2", "authorize-security-group-ingress", "--group-id", group_id, "--ip-permissions", json.dumps([SSH_INGRESS]))
     # Egress is pinned to HTTP, HTTPS, and NTP: bootstrap downloads and all
     # proxied agent traffic use 80/443, timesync uses UDP 123, and DNS to the
     # VPC resolver bypasses security groups. The Cloudflare Tunnel connector
@@ -500,7 +500,7 @@ def _ensure_security_group(
         {"IpProtocol": "udp", "FromPort": 123, "ToPort": 123, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
         *(CLOUDFLARE_TUNNEL_EGRESS if cloudflare_egress else ()),
     ):
-        _authorize_if_missing(env, "authorize-security-group-egress", group_id, egress)
+        _aws(env, "ec2", "authorize-security-group-egress", "--group-id", group_id, "--ip-permissions", json.dumps([egress]))
     return group_id
 
 
@@ -535,10 +535,7 @@ def _security_group_access_state(
     return ssh_ingress, cloudflare_egress
 
 
-def _set_security_group_ssh_ingress(env: dict[str, str], group_id: str, *, enabled: bool) -> None:
-    if enabled:
-        _authorize_if_missing(env, "authorize-security-group-ingress", group_id, SSH_INGRESS)
-        return
+def _close_security_group_ssh_ingress(env: dict[str, str], group_id: str) -> None:
     group = _aws(env, "ec2", "describe-security-groups", "--group-ids", group_id)["SecurityGroups"][0]
     matching = [
         permission
@@ -587,15 +584,6 @@ def _reset_security_group_rules(env: dict[str, str], group_id: str) -> None:
             "--ip-permissions",
             json.dumps(group["IpPermissionsEgress"]),
         )
-
-
-def _authorize_if_missing(env: dict[str, str], command: str, group_id: str, permission: dict[str, Any]) -> None:
-    try:
-        _aws(env, "ec2", command, "--group-id", group_id, "--ip-permissions", json.dumps([permission]))
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode()
-        if "InvalidPermission.Duplicate" not in stderr:
-            raise
 
 
 def _ubuntu_ami(env: dict[str, str]) -> str:

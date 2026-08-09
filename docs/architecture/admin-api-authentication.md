@@ -83,7 +83,7 @@ is then required before the same private mint can be reached.
 
 | Route | Before session auth | SSH forward | Public HTTPS |
 | --- | --- | --- | --- |
-| Static admin/app assets | Yes | Served | Served after exact public boundary classification |
+| Static admin/workspace assets | Yes | Served | Served after exact public boundary classification |
 | `POST /v1/login` | Yes | Password mints a local session | Password starts passkey assertion when enrolled; otherwise mints a public session |
 | `POST /v1/login/passkey` | Yes | `404` | Completes the second factor and mints the public session |
 | `GET /v1/login/status` | Yes | `404` without a database read | Returns only `{"passkey_configured": bool}` with `no-store` |
@@ -104,28 +104,22 @@ identifier, public key, user handle, count, or authenticator metadata.
 
 ## Complete request paths
 
-There are three ways code can reach an Admin API handler. Only the first is a
-general operator API:
+There are two callers of the shared Admin API dispatcher.
 
 ```text
 operator browser
   -> loopback TCP listener
-  -> classify SSH_FORWARD or PUBLIC_HTTPS
-  -> enforce HTTPS-only route availability and app-bridge scope
-  -> static/pre-auth handler, or session + CSRF authentication
-  -> Admin API route
+  -> transport classification
+  -> session + CSRF authentication
+  -> operator principal
+  -> shared route
 
-sandboxed app iframe
-  -> postMessage to the authenticated admin shell
-  -> same loopback TCP pipeline with X-Kern-App-Bridge: <app_id>
-  -> only /v1/apps/<app_id>/api/... is permitted
-  -> that installed app's loopback backend
-
-installed app backend
-  -> dedicated Unix socket
-  -> SO_PEERCRED Linux uid + matching X-Kern-App-Backend claim
-  -> fixed host-route allowlist + app thread-id namespace
-  -> selected shared Admin API handler
+kern-workspace backend
+  -> /run/kern-admin-api/workspace.sock
+  -> socket mode/group + SO_PEERCRED fixed uid
+  -> fixed thread-route allowlist
+  -> workspace principal
+  -> shared route
 ```
 
 ### Authentication precedes shared dispatch
@@ -138,7 +132,7 @@ are exactly two production call sites:
 | Caller | Principal established before dispatch | Call into shared code |
 | --- | --- | --- |
 | `service.Handler._handle()` on the operator TCP listener | `RequestAuthContext`, then the matching session cookie and CSRF header; `_authenticate()` returns `OperatorPrincipal` | `service.route(..., principal=operator)` |
-| `app_backend_api.Handler` on the app-backend Unix socket | Kernel `SO_PEERCRED` uid resolved to an installed app and matched to its claimed app id, then the fixed method/path allowlist creates `AppBackendPrincipal(app_id)` | `service.route(..., principal=app)` after app thread ids are prefixed |
+| `workspace_api.Handler` on the fixed Unix socket | Kernel `SO_PEERCRED` uid matched to `kern-workspace` and the fixed method/path allowlist create `WorkspacePrincipal()` | `service.route(..., principal=workspace)` with unchanged thread ids |
 
 The TCP handler processes static assets and the explicit pre-session
 login/status operations before its session gate; those operations do not call
@@ -147,53 +141,51 @@ also have specialized handler methods, but only after the same operator
 session authentication where required. Every ordinary operator route reaches
 the shared dispatcher only after authentication.
 
-The Unix-socket handler does not call `service.Handler` and does not manufacture
-an operator session. It independently authenticates the app service process,
-checks `APP_BACKEND_ALLOWED_ADMIN_ROUTES`, and only then reuses
-`service.route()` for the selected business logic. The required `principal`
-argument has no default: an omitted value can never silently mean operator.
-`service.route()` derives the app namespace only from
-`AppBackendPrincipal.app_id`; the read-only tool catalog and network-policy
-routes do not need a resource namespace. A request header sent to the TCP
-listener cannot substitute for Unix peer credentials.
+The Unix-socket handler does not call `service.Handler` and does not
+manufacture an operator session. It independently authenticates the fixed
+Workspace process, checks its route allowlist, and only then reuses
+`service.route()` for selected thread business logic. The required `principal`
+argument has no default: an omitted value can never silently mean operator. A
+request header sent to the TCP listener cannot substitute for Unix peer
+credentials.
 
 Consequently, adding a third production caller of `service.route()` is a
 security-boundary change: that caller must establish its principal and
 authorization before dispatch and needs corresponding boundary tests. Merely
 knowing a `/v1/...` path never grants access to the shared function.
 
-The iframe bridge does not grant an app access to the Admin API. App UI assets
-run under a sandboxed CSP with no direct network connection. The trusted admin
-shell turns an iframe `postMessage` into one cookie-authenticated request and
-adds `X-Kern-App-Bridge`. `service.py` checks that marker before static,
-authentication, or application dispatch; a marked request is rejected unless
-its literal path begins with that same app's
-`/v1/apps/<app_id>/api/` prefix. `app_api_proxy.py` then forwards only the
-suffix to the installed app's declared loopback port with an
-`X-Kern-App-Proxy` identity.
+The authenticated browser calls `/v1/workspace/chat/...` or
+`/v1/workspace/web-apps/...` through the normal TCP pipeline. The admin API
+authenticates the operator cookie and CSRF header before forwarding only the
+JSON body and query to path-prefixed `/chat/...` or `/apps/...` routes on the
+fixed backend port 7450. No identity header or arbitrary backend target is
+accepted. Fixed Workspace files under `/workspace/` are release assets, not
+an API authority. The capability-worker sandbox has a separate restrictive
+CSP and no network access.
 
-The app backend's Unix-socket API is a different, non-browser boundary and does
-not use `RequestAuthContext`, cookies, or the operator password. The peer's
-kernel-reported uid must resolve to an installed app service account and must
-match its claimed app id. `app_backend_api.py` then permits only:
+The Workspace Unix-socket API is a different, non-browser boundary and does
+not use `RequestAuthContext`, cookies, or the operator password. It permits
+only:
 
-| Method and path | App-visible capability |
+| Method and path | Workspace capability |
 | --- | --- |
-| `GET /v1/tools` | Read the host tool catalog and enablement metadata |
-| `GET /v1/network/policy` | Read the effective network policy |
-| `GET /v1/threads` | List only this app's threads |
-| `GET /v1/threads/:thread_id` | Read one thread in this app's namespace |
-| `POST /v1/threads/:thread_id/messages` | Send or steer work in this app's namespace |
-| `POST /v1/threads/:thread_id/stop` | Stop work in this app's namespace |
-| `GET /v1/threads/:thread_id/events` | Read events in this app's namespace |
+| `GET /v1/threads` | List host threads, optionally filtered by a product-owned id prefix |
+| `GET /v1/threads/:thread_id` | Read one direct thread id |
+| `POST /v1/threads/:thread_id/messages` | Send or steer one direct thread id |
+| `POST /v1/threads/:thread_id/stop` | Stop one direct thread id |
+| `GET /v1/threads/:thread_id/events` | Read events for one direct thread id |
 
-Thread ids are mechanically prefixed with the authenticated app id before the
-shared handler runs, list results are filtered to that prefix, and the prefix
-is removed from responses. An app backend cannot call login, passkey,
-credential, network mutation, tool mutation, host-control, file, event-log, or
-another app's thread routes through this socket. Adding a route requires an
-explicit entry in `APP_BACKEND_ALLOWED_ADMIN_ROUTES`; merely adding a normal
-Admin API route does not expose it to apps.
+Thread ids pass through unchanged. Chat and Web Apps choose disjoint direct ids
+(`thread-N` and `app-N`) and join/filter them inside the Workspace backend; the admin
+API treats the optional list prefix as a query optimization, not authority.
+The former generic-app socket also exposed `GET /v1/tools` and
+`GET /v1/network/policy`. Neither fixed Workspace backend calls those routes,
+so they are deliberately absent rather than retained as unused authority; the
+authenticated operator API continues to serve both resources to admin UI
+features that need them.
+Login, passkeys, credentials, network policy, tools, files, host controls, and
+audit logs remain unreachable. Adding a normal Admin API route does not expose
+it to the Workspace socket.
 
 ## Operator-facing route policy
 
@@ -203,8 +195,7 @@ the [Admin API reference](../api/AdminAPI.md).
 
 | Route group | Session policy | Additional boundary |
 | --- | --- | --- |
-| `GET /`, `/oauth/callback`, fixed admin modules/styles/icons, and bundled guide assets | No session | Still classified first; fixed release files only |
-| `GET /v1/apps/<app_id>/ui/<asset>` | No session | Installed-app lookup, fixed package files, sandboxed app CSP |
+| `GET /`, `/oauth/callback`, fixed admin modules/styles/icons, bundled guide assets, and fixed `/workspace/` assets | No session | Still classified first; fixed release files only |
 | `POST /v1/login` | Pre-session | Password throttle and verification; public HTTPS starts WebAuthn when enrolled |
 | `GET /v1/login/status` | Pre-session, public HTTPS only | Exact public Host; non-secret enrollment boolean only |
 | `POST /v1/login/passkey` | Pre-session, public HTTPS only | Password-issued single-use pre-auth cookie plus WebAuthn verification |
@@ -213,18 +204,18 @@ the [Admin API reference](../api/AdminAPI.md).
 | `GET /v1/health` | Session + CSRF | No unauthenticated health exception on the admin listener |
 | `GET /v1/agent-runtime/{status,account}`, runtime refresh, OAuth login/completion, Bedrock credential, and linked-account reset routes | Session + CSRF | Normal shared handler on both operator paths |
 | `GET /v1/threads`, `/v1/threads/<id>`, thread message/stop/event routes, and `GET /v1/events` | Session + CSRF | Operator sees the host-wide thread namespace |
+| `GET\|POST\|PUT\|DELETE /v1/workspace/{chat,web-apps}/...` | Session + CSRF | Proxy targets only the fixed Workspace backend and adds a fixed route prefix without forwarding credentials |
 | `GET /v1/agent-files`, file read/content/upload routes, and `GET /v1/agent-processes` | Session + CSRF | Content and upload use bounded streaming handlers after authentication |
 | `GET\|PUT /v1/network/policy`, `GET /v1/network/events`, and GitHub credential/audit/pending-push routes under `/v1/network-tools/` | Session + CSRF | Method-specific mutation validation and root-helper boundaries still apply |
 | Tool catalog/config/enablement/OAuth/approval routes and tool events under `/v1/tools` | Session + CSRF | Tool-specific authorization and approval state run after operator authentication |
-| `GET /v1/apps` | Session + CSRF | Lists installed app manifests |
-| `GET\|POST\|PUT\|DELETE /v1/apps/<app_id>/api/<path>` | Session + CSRF | If bridge-marked, marker must match `<app_id>`; proxy targets only that installed app |
 | `GET /v1/host-errors[/<seq>]` and `POST /v1/host-runtime/reboot` | Session + CSRF | Diagnostic read or fixed privileged helper after authentication |
 | Any unlisted method/path | Not dispatched | `404`; route prefixes do not confer access by themselves |
 
-This grouping is deliberate. Transport-specific behavior ends at
-classification, cookie selection, and the explicit HTTPS-only authentication
-routes. After `Handler._authenticate()` succeeds, ordinary operator routes use
-the same implementation for SSH-forward and public-HTTPS sessions.
+This grouping is unchanged for external operator access. Transport-specific
+behavior ends at classification, cookie selection, and the explicit HTTPS-only
+authentication routes. After `Handler._authenticate()` succeeds, ordinary
+operator routes use the same implementation for SSH-forward and public-HTTPS
+sessions.
 
 ## Session invariants
 
@@ -258,12 +249,12 @@ Unit tests must cover the boundary independently from route behavior:
 - the shared dispatcher requires an explicit authenticated principal with no
   default, and both production entrypoints pass the principal their boundary
   established;
-- an app-bridge marker is scoped before static, pre-session, and authenticated
-  dispatch, including non-normalized paths;
-- the app-backend Unix socket rejects an unknown or mismatched peer identity
-  and every route outside its fixed allowlist; and
-- app-backend thread lists, ids, requests, and nested response ids remain
-  mechanically confined to the authenticated app namespace.
+- Workspace static assets remain read-only and Workspace API requests still pass
+  through the authenticated browser dispatcher;
+- the workspace Unix socket rejects an unknown peer and every route outside
+  its fixed thread allowlist; and
+- workspace product ids pass through unchanged while product filtering and writable
+  state remain enforced by the Workspace backend.
 
 Deployment smoke tests should verify the external HTTP-to-HTTPS redirect and an
 unauthenticated `401` from an authenticated API route over HTTPS. They should

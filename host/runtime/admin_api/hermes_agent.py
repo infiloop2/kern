@@ -82,10 +82,6 @@ class HermesSession:
         self._thread_id = thread_id
         self._on_ready = on_ready
         self._on_session_id = on_session_id
-        # The orchestrator sets this only for an app-created turn; delivered
-        # as an ephemeral system-prompt addition so it stays distinct from the
-        # user message.
-        self.app_instructions: str | None = None
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
         self._closed = False
@@ -185,12 +181,6 @@ class HermesSession:
         argv = [*self._command, f"region={region}"]
         if self._thread_id is not None:
             argv.extend(["--thread-scope", self._thread_id])
-        if self.app_instructions and not session_id:
-            # The headless chat CLI has no system-prompt flag that survives
-            # Hermes's env handling, so host-validated app instructions are
-            # prepended once, when the session starts; the session history
-            # carries them on resume.
-            prompt = f"[Host app instructions]\n{self.app_instructions}\n\n[User message]\n{prompt}"
         argv.extend(["--model", model, "--activity-nonce", nonce])
         if session_id:
             argv.extend(["--resume", session_id])

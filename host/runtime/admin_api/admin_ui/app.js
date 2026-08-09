@@ -12,26 +12,22 @@ import {
   refreshProviderUsage, rebootHost, startLogin, toggleRuntimeOverview,
 } from "./health.js";
 import {
-  loadEarlierThreadEvents, loadThreads, refreshSelectedThread,
-  renderThreadHistory, showThread,
-} from "./threads.js";
-import {
   ensureFilesLoaded, goToFilePath, loadParentDirectory, openAgentPath,
   refreshFiles,
 } from "./files.js";
 import { refreshAgentProcesses } from "./processes.js";
 import { agentLog, hostErrorLog, netLog, toolLog, toggleNetDeniedFilter } from "./logs.js";
 import {
-  addDomainRule, addGithubRepo, approveGithubPush, closeIntegrationInfo, deleteGithubCredential,
-  loadPolicy, openProvider, recheckGithubAudit, rejectGithubPush, removeDomainRule,
+  addDomainRule, addGithubRepo, approveGithubPush, deleteGithubCredential,
+  loadPolicy, recheckGithubAudit, rejectGithubPush, removeDomainRule,
   removeGithubRepo, resetLinkedAccount, connectBedrockCredentials, setClaudeWebSearch, setGithubCredential, setGithubRequireApproval,
-  setIntegrationEnabled, positionIntegrationInfo, refreshPendingGithubPushes, toggleGithubCredentialMode, toggleIntegrationExpansion,
-  toggleCustomDomainAccess, toggleGithubRepoAudit, toggleIntegrationInfo,
+  setIntegrationEnabled, refreshPendingGithubPushes, toggleGithubCredentialMode,
+  selectIntegrationDetail, toggleGithubRepoAudit,
 } from "./network.js";
 import {
   completeToolConnect, connectTool, decideToolApproval, disconnectTool,
   refreshExpandedToolApprovals, refreshTools, saveToolConfig, setToolEnabled,
-  toggleToolExpansion, toggleToolInfo,
+  selectToolDetail,
 } from "./tools.js";
 import {
   copyCallbackUri, dismissCallbackCopyFeedback, openConnectionGuide, refreshConnectionGuide,
@@ -42,18 +38,25 @@ import {
 } from "./passkeys.js";
 
 let activeTab = "home";
-let installedApps = [];
-const appFrames = new Map();
-const staticTabs = ["home", "agent", "processes", "agent-log", "files", "network", "connection-guide", "net-log", "tool-log", "host-errors"];
-const HERO_APP_ID = "agent_chat";
-const HERO_CTA = "Begin chat";
+let activeTabRefresh = Promise.resolve();
+const staticTabs = ["home", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-errors"];
+const homeDetailTabs = new Set(staticTabs.filter(name => name !== "home"));
 const MOBILE_NAV_QUERY = "(max-width: 860px)";
 let mobileNavOpen = false;
 let uploadPickerOpen = false;
 let nextUploadSelectionId = 1;
 const APP_UPLOAD_SELECTION_LIMIT = 10;
 const pendingAppUploads = new Map();
-let betaAppsExpanded = false;
+let chatNavArchived = false;
+let webAppsNavArchived = false;
+let chatNavItems = [];
+let webAppNavItems = [];
+let workspaceNavigationRefreshSequence = 0;
+let workspaceNavigationActionSequence = 0;
+const workspacePendingMutations = new Set();
+// Login preload and an immediate navigation click share the same mount.
+const workspaceMounts = new Map();
+window.KernWorkspaceRoots = {};
 
 function showLoginError(message) {
   const element = $("login-error");
@@ -62,9 +65,7 @@ function showLoginError(message) {
 }
 
 function clearLegacyPasswordCookie() {
-  // Pre-0.44 UIs stored the cleartext admin password in this JavaScript-readable
-  // cookie. Expire it on every load so an upgraded browser never keeps the
-  // password readable or keeps sending it to the origin until it ages out.
+  // Pre-0.44 UIs stored the cleartext admin password in this readable cookie.
   document.cookie = "kern_admin=; path=/; max-age=0; samesite=strict";
 }
 
@@ -155,50 +156,107 @@ function toggleMobileNav() {
   setMobileNavOpen(!mobileNavOpen, mobileNavOpen);
 }
 
+function resetPageScroll() {
+  window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+}
+
 function showLogin() {
   setMobileNavOpen(false);
-  document.body.classList.remove("connection-guide-open");
-  document.body.classList.remove("app-tab-open");
   document.body.classList.remove("viewport-panel-open");
-  document.body.classList.remove("host-fullscreen-app-open");
   $("login").hidden = false;
   $("app").hidden = true;
   $("logout-button").hidden = true;
   $("agent-name").hidden = true;
   $("runtime-overview").hidden = true;
   $("passkey-status-control").hidden = true;
-  $("upgrade-notice").hidden = true;
   $("mobile-nav-toggle").hidden = true;
   refreshLoginPasskeyStatus();
 }
 
-function showTab(name) {
+function showTab(name, workspaceActionSequence = null) {
+  if (workspaceActionSequence === null) {
+    workspaceNavigationActionSequence += 1;
+  } else if (workspaceActionSequence !== workspaceNavigationActionSequence) {
+    return false;
+  }
   const closeDrawer = mobileNavOpen;
   activeTab = name;
-  const connectionGuideOpen = name === "connection-guide";
-  const appTabOpen = name.startsWith("app:");
-  const fullscreenAppOpen = appTabOpen && installedApps.some(
-    app => name === `app:${app.id}` && app.ui?.host_fullscreen === true,
-  );
-  const viewportPanelOpen = connectionGuideOpen || appTabOpen;
-  if (viewportPanelOpen) window.scrollTo(0, 0);
-  document.body.classList.toggle("connection-guide-open", connectionGuideOpen);
-  document.body.classList.toggle("app-tab-open", appTabOpen);
+  const workspaceOpen = name === "workspace-chat" || name === "workspace-web-apps"
+    || name === "workspace-global";
+  const viewportPanelOpen = workspaceOpen;
   document.body.classList.toggle("viewport-panel-open", viewportPanelOpen);
-  document.body.classList.toggle("host-fullscreen-app-open", fullscreenAppOpen);
   for (const tabName of staticTabs) {
-    $(`tab-${tabName}`).classList.toggle("active-tab", tabName === name);
+    const tab = document.getElementById(`tab-${tabName}`);
+    if (tab) tab.classList.toggle("active-tab", tabName === name || (tabName === "home" && homeDetailTabs.has(name)));
     $(`panel-${tabName}`).hidden = tabName !== name;
   }
-  for (const app of installedApps) {
-    const selected = name === `app:${app.id}`;
-    $(`tab-app-${app.id}`)?.classList.toggle("active-tab", selected);
-    const panel = $(`panel-app-${app.id}`);
-    if (panel) panel.hidden = !selected;
-    if (selected) loadAppFrame(app);
-  }
+  $("panel-workspace-chat").hidden = name !== "workspace-chat";
+  $("panel-workspace-web-apps").hidden = name !== "workspace-web-apps";
+  $("panel-workspace-global").hidden = name !== "workspace-global";
+  renderWorkspaceNavigation();
   setMobileNavOpen(false, closeDrawer);
-  refreshVisibleTab(name).catch(() => {});
+  if (viewportPanelOpen || name === "home" || homeDetailTabs.has(name)) resetPageScroll();
+  activeTabRefresh = refreshVisibleTab(name).catch(() => {});
+  return true;
+}
+
+function homeRouteUrl(view = "home", guideId = "") {
+  if (view === "network" && guideId) return `#home/integrations/${encodeURIComponent(guideId)}`;
+  return view === "home" ? "#home" : `#home/${encodeURIComponent(view)}`;
+}
+
+function homeRouteFromLocation() {
+  const integrationMatch = location.hash.match(/^#home\/integrations\/(.+)$/);
+  if (integrationMatch) {
+    try {
+      return { view: "network", guideId: decodeURIComponent(integrationMatch[1]) };
+    } catch (_) {
+      return { view: "home", guideId: "" };
+    }
+  }
+  const viewMatch = location.hash.match(/^#home\/([^/]+)$/);
+  if (viewMatch) {
+    try {
+      const view = decodeURIComponent(viewMatch[1]);
+      if (homeDetailTabs.has(view)) return { view, guideId: "" };
+    } catch (_) {}
+  }
+  return { view: "home", guideId: "" };
+}
+
+function recordHomeRoute(view, guideId = "", replace = false) {
+  const state = { kernHomeRoute: view, guideId };
+  history[replace ? "replaceState" : "pushState"](state, "", homeRouteUrl(view, guideId));
+}
+
+function openHomeView(view, guideId = "", updateHistory = true) {
+  if (!homeDetailTabs.has(view)) return;
+  if (view === "network") {
+    selectToolDetail(guideId);
+    selectIntegrationDetail(guideId);
+    openConnectionGuide(guideId);
+  }
+  if (updateHistory) {
+    if (!history.state?.kernHomeRoute) recordHomeRoute("home", "", true);
+    recordHomeRoute(view, guideId);
+  }
+  showTab(view);
+}
+
+function openHomeIntegration(guideId, updateHistory = true) {
+  if (!guideId) return;
+  openHomeView("network", guideId, updateHistory);
+}
+
+function backToHome(workspaceActionSequence = null) {
+  if (
+    workspaceActionSequence !== null
+    && workspaceActionSequence !== workspaceNavigationActionSequence
+  ) return false;
+  if (history.state?.kernHomeRoute !== "home" || location.hash !== "#home") {
+    recordHomeRoute("home");
+  }
+  return showTab("home", workspaceActionSequence);
 }
 
 function openPasskeyGuidance() {
@@ -207,49 +265,52 @@ function openPasskeyGuidance() {
     showPasskeyGuidance();
     return;
   }
-  showTab("home");
+  backToHome();
   showPasskeyGuidance();
   setupPasskey();
 }
 
+// Each tab's refreshers: "enter" runs when the tab is shown, "tick" runs on
+// the 5-second poll while the tab stays visible. Log tabs refresh on the tick
+// only while their first page is showing, so paging back stays stable. Tool
+// rows hold config inputs, so they refresh on tab entry and after actions
+// only, never on the tick (that would wipe half-typed values); expanded
+// approvals carry no inputs and also refresh on the tick.
+const tabRefreshers = {
+  "home": { enter: [refreshConnectionGuide], tick: [] },
+  "agent-log": {
+    enter: [() => agentLog.showFirstPage()],
+    tick: [() => agentLog.page === 1 && agentLog.showFirstPage()],
+  },
+  "net-log": {
+    enter: [() => netLog.showFirstPage()],
+    tick: [() => netLog.page === 1 && netLog.showFirstPage()],
+  },
+  "tool-log": {
+    enter: [() => toolLog.showFirstPage()],
+    tick: [() => toolLog.page === 1 && toolLog.showFirstPage()],
+  },
+  "host-errors": {
+    enter: [() => hostErrorLog.showFirstPage()],
+    tick: [() => hostErrorLog.page === 1 && hostErrorLog.showFirstPage()],
+  },
+  "processes": { enter: [refreshAgentProcesses], tick: [refreshAgentProcesses] },
+  "files": { enter: [ensureFilesLoaded], tick: [refreshFiles] },
+  "network": {
+    enter: [loadPolicy, refreshTools, refreshExpandedToolApprovals, refreshConnectionGuide],
+    tick: [refreshPendingGithubPushes, refreshExpandedToolApprovals],
+  },
+};
+
 async function refreshVisibleTab(name) {
-  if (name === "agent-log") {
-    await agentLog.showFirstPage();
-  } else if (name === "net-log") {
-    await netLog.showFirstPage();
-  } else if (name === "tool-log") {
-    await toolLog.showFirstPage();
-  } else if (name === "host-errors") {
-    await hostErrorLog.showFirstPage();
-  } else if (name === "processes") {
-    await refreshAgentProcesses();
-  } else if (name === "files") {
-    await ensureFilesLoaded();
-  } else if (name === "network") {
-    // Tool rows hold config inputs, so they refresh on tab entry and after
-    // actions only, never on the 5-second tick (that would wipe half-typed
-    // values). Expanded approvals carry no inputs and also refresh on the
-    // tick below.
-    await refreshTools();
-    await refreshExpandedToolApprovals();
-  } else if (name === "connection-guide") {
-    await refreshConnectionGuide();
-  }
+  for (const refresh of tabRefreshers[name]?.enter || []) await refresh();
 }
 
 async function tick() {
   await refreshOrSkip(refreshHealth);
   await refreshOrSkip(refreshProviderAccounts);
-  await refreshOrSkip(loadThreads);
-  await refreshOrSkip(refreshSelectedThread);
-  if (activeTab === "agent-log" && agentLog.page === 1) await refreshOrSkip(() => agentLog.showFirstPage());
-  if (activeTab === "net-log" && netLog.page === 1) await refreshOrSkip(() => netLog.showFirstPage());
-  if (activeTab === "network") await refreshOrSkip(refreshPendingGithubPushes);
-  if (activeTab === "processes") await refreshOrSkip(refreshAgentProcesses);
-  if (activeTab === "files") await refreshOrSkip(refreshFiles);
-  if (activeTab === "network") await refreshOrSkip(refreshExpandedToolApprovals);
-  if (activeTab === "tool-log" && toolLog.page === 1) await refreshOrSkip(() => toolLog.showFirstPage());
-  if (activeTab === "host-errors" && hostErrorLog.page === 1) await refreshOrSkip(() => hostErrorLog.showFirstPage());
+  await refreshOrSkip(refreshWorkspaceNavigation);
+  for (const refresh of tabRefreshers[activeTab]?.tick || []) await refreshOrSkip(refresh);
 }
 
 async function refreshOrSkip(work) {
@@ -283,15 +344,37 @@ function showApp() {
   $("mobile-nav-toggle").hidden = false;
   $("runtime-overview").hidden = false;
   setMobileNavOpen(false);
-  loadApps().catch(error => notice(error.message, "error"));
+  mountWorkspaces().then(refreshWorkspaceNavigation).catch(error => notice(error.message, "error"));
   refreshPasskeySetup();
-  renderThreadHistory();
   loadPolicy().catch(() => {});
-  // The provider redirects a tool OAuth connect back to /oauth/callback; land
-  // on the network tab and finish the token exchange the operator started.
+  // The provider redirects a tool OAuth connect back to /oauth/callback;
+  // finish the exchange and return to that integration's Home detail page.
   if (location.pathname === "/oauth/callback") {
-    showTab("network");
-    completeToolConnect().catch(error => notice(error.message, "error"));
+    const callbackSearch = location.search;
+    const pendingTool = sessionStorage.getItem("kern_tool_connect");
+    history.replaceState(null, "", "/");
+    if (pendingTool) {
+      const guideId = `tool:${pendingTool}`;
+      recordHomeRoute("network", guideId, true);
+      openHomeIntegration(guideId, false);
+    } else {
+      recordHomeRoute("home", "", true);
+      showTab("home");
+    }
+    activeTabRefresh
+      .then(() => completeToolConnect(callbackSearch))
+      .catch(error => notice(error.message, "error"));
+  } else {
+    if (!history.state?.kernHomeRoute) {
+      const route = homeRouteFromLocation();
+      recordHomeRoute(route.view, route.guideId, true);
+    }
+    const route = history.state?.kernHomeRoute;
+    if (route && route !== "home" && homeDetailTabs.has(route)) {
+      openHomeView(route, history.state.guideId || "", false);
+    } else {
+      showTab("home");
+    }
   }
   // Guard the recurring tick so a re-login within the same page load (the login
   // screen never reloads on success) cannot stack a second interval.
@@ -301,368 +384,234 @@ function showApp() {
   setInterval(tick, 5000);
 }
 
-async function loadApps() {
-  const response = await api("GET", "/v1/apps");
-  installedApps = response.apps || [];
-  renderAppTabs();
-}
-
-function renderAppTabs() {
-  const stableContainer = $("stable-app-tabs");
-  const betaContainer = $("beta-app-tabs");
-  stableContainer.innerHTML = "";
-  betaContainer.innerHTML = "";
-  document.querySelectorAll(".app-tab-panel").forEach(panel => panel.remove());
-  appFrames.clear();
-  // Agent Chat gets the Home navigator, but remains an ordinary stable app in
-  // the sidebar.
-  const heroApp = installedApps.find(app => app.id === HERO_APP_ID) || null;
-  renderHomeHero(heroApp);
-  const stableApps = installedApps.filter(app => app.release_stage !== "beta");
-  const betaApps = installedApps.filter(app => app.release_stage === "beta");
-  $("sidebar-stable-apps").hidden = !stableApps.length;
-  $("sidebar-apps").hidden = !betaApps.length;
-  betaAppsExpanded = false;
-  $("sidebar-apps-toggle").setAttribute("aria-expanded", "false");
-  betaContainer.hidden = true;
-  const main = document.querySelector("main");
-  for (const app of installedApps) {
-    const button = document.createElement("button");
-    button.id = `tab-app-${app.id}`;
-    button.className = "tab-button";
-    button.dataset.action = "show-tab";
-    button.dataset.tab = `app:${app.id}`;
-    button.innerHTML = `${appIconSvg()}<span></span>`;
-    button.querySelector("span").textContent = app.title || app.id;
-    (app.release_stage === "beta" ? betaContainer : stableContainer).appendChild(button);
-
-    const panel = document.createElement("div");
-    panel.id = `panel-app-${app.id}`;
-    panel.className = "tab-panel app-tab-panel";
-    panel.hidden = activeTab !== `app:${app.id}`;
-    const section = document.createElement("section");
-    section.className = "app-frame-section";
-    panel.appendChild(section);
-    if (app.ui.host_fullscreen === true) {
-      const exit = document.createElement("button");
-      exit.className = "host-app-exit";
-      exit.dataset.action = "show-tab";
-      exit.dataset.tab = "home";
-      exit.setAttribute("aria-label", "Back to host");
-      exit.innerHTML = `
-        <svg viewBox="0 0 20 20" aria-hidden="true">
-          <path d="m5 5 10 10M15 5 5 15" fill="none" stroke="currentColor"
-            stroke-width="1.7" stroke-linecap="round"/>
-        </svg>
-        <span>Back to host</span>`;
-      panel.appendChild(exit);
-    }
-    main.appendChild(panel);
-    if (activeTab === `app:${app.id}`) loadAppFrame(app);
-  }
-  // Login can resume within the same page after showLogin cleared viewport
-  // classes. Reapply the selected app's host presentation once its manifest
-  // is available again.
-  if (activeTab.startsWith("app:")) showTab(activeTab);
-}
-
-function toggleBetaApps() {
-  betaAppsExpanded = !betaAppsExpanded;
-  $("sidebar-apps-toggle").setAttribute("aria-expanded", String(betaAppsExpanded));
-  $("beta-app-tabs").hidden = !betaAppsExpanded;
-}
-
-function loadAppFrame(app) {
-  if (appFrames.has(app.id)) return;
-  const section = $(`panel-app-${app.id}`)?.querySelector(".app-frame-section");
-  if (!section) return;
-  const iframe = document.createElement("iframe");
-  iframe.className = "app-frame";
-  iframe.title = app.title || app.id;
-  iframe.setAttribute("sandbox", app.ui.sandbox.join(" "));
-  iframe.src = app.ui.iframe_src;
-  section.appendChild(iframe);
-  appFrames.set(app.id, iframe);
-}
-
-function renderHomeHero(heroApp) {
-  const hero = $("home-hero");
-  hero.hidden = !heroApp;
-  hero.innerHTML = "";
-  if (!heroApp) return;
-  const card = document.createElement("section");
-  card.className = "home-hero-card";
-  card.innerHTML = `
-    <div class="home-hero-copy">
-      <span class="home-hero-icon">${chatIconSvg()}</span>
-      <h1></h1>
-    </div>
-    <button class="home-hero-cta" data-action="show-tab"></button>`;
-  card.querySelector("h1").textContent = heroApp.title || heroApp.id;
-  const cta = card.querySelector(".home-hero-cta");
-  cta.dataset.tab = `app:${heroApp.id}`;
-  cta.textContent = HERO_CTA;
-  hero.appendChild(card);
-}
-
-function appIconSvg() {
-  return `<svg width="19" height="19" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h9A1.5 1.5 0 0 1 16 5.5v9a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 4 14.5v-9Z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 8h6M7 11h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
-}
-
-function chatIconSvg() {
-  return `<svg width="19" height="19" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4.5h12A1.5 1.5 0 0 1 17.5 6v6a1.5 1.5 0 0 1-1.5 1.5H9.4L6 16.5v-3H4A1.5 1.5 0 0 1 2.5 12V6A1.5 1.5 0 0 1 4 4.5Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M6.5 8h7M6.5 10.6h4.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
-}
-
-window.addEventListener("message", event => {
-  const message = event.data;
-  if (!message || ![
-    "kern-app-api",
-    "kern-app-copy-text",
-    "kern-app-open-file",
-    "kern-app-upload-file",
-  ].includes(message.type)) return;
-  const app = installedApps.find(candidate => appFrames.get(candidate.id)?.contentWindow === event.source);
-  if (!app) return;
-  if (message.type === "kern-app-open-file") {
-    const path = typeof message.path === "string" ? message.path : "";
-    if (!path.startsWith("/") || path.split("/").includes("..")) return;
-    showTab("files");
-    openAgentPath(path, "file").catch(error => notice(error.message, true));
-    return;
-  }
-  if (message.type === "kern-app-copy-text") {
-    handleAppCopyTextMessage(event.source, message).catch(error => {
-      event.source.postMessage({
-        type: "kern-app-copy-text-result",
-        request_id: String(message.request_id || ""),
-        ok: false,
-        error: error.message,
-      }, "*");
+window.KernHost = {
+  api,
+  apiUpload,
+  refreshNavigation() {
+    return refreshWorkspaceNavigation();
+  },
+  chooseFiles(maximum = 10) {
+    return new Promise(resolve => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.multiple = maximum > 1;
+      input.className = "host-file-picker";
+      document.body.append(input);
+      const finish = files => {
+        input.remove();
+        // Return the complete selection so the owning workspace can reject
+        // an over-limit choice instead of silently accepting its first files.
+        // `maximum` still controls whether the native picker permits multiple
+        // selection when only one slot remains.
+        resolve(files && files.length ? files : null);
+      };
+      input.addEventListener("change", () => finish(Array.from(input.files || [])), { once: true });
+      input.addEventListener("cancel", () => finish(null), { once: true });
+      input.click();
     });
-    return;
+  },
+};
+
+async function mountWorkspaces() {
+  await mountWorkspace("chat", "panel-workspace-chat", "/workspace/chat.html");
+  await mountWorkspace("web-apps", "panel-workspace-web-apps", "/workspace/web-apps.html");
+  await mountWorkspace("global", "panel-workspace-global", "/workspace/global.html");
+}
+
+async function mountWorkspace(name, panelId, htmlPath) {
+  let mounting = workspaceMounts.get(name);
+  if (!mounting) {
+    mounting = performWorkspaceMount(name, panelId, htmlPath);
+    workspaceMounts.set(name, mounting);
   }
-  if (message.type === "kern-app-upload-file") {
-    handleAppUploadMessage(app, event.source, message).catch(error => {
-      event.source.postMessage({
-        type: "kern-app-upload-file-result",
-        request_id: String(message.request_id || ""),
-        ok: false,
-        error: error.message,
-      }, "*");
-    });
-    return;
+  await mounting;
+}
+
+async function performWorkspaceMount(name, panelId, htmlPath) {
+  const response = await fetch(htmlPath, { credentials: "same-origin" });
+  if (!response.ok) throw new Error(`Could not load workspace ${name}`);
+  const parsed = new DOMParser().parseFromString(await response.text(), "text/html");
+  const root = parsed.body.firstElementChild;
+  if (!root) throw new Error(`workspace ${name} UI is empty`);
+  const shadow = $(panelId).shadowRoot || $(panelId).attachShadow({ mode: "open" });
+  addWorkspaceStyle(shadow, "/admin_ui.css");
+  addWorkspaceStyle(shadow, "/workspace/rich_text.css");
+  const assetName = name === "chat" ? "chat" : name === "web-apps" ? "web-apps" : "global";
+  addWorkspaceStyle(shadow, `/workspace/${assetName}.css`);
+  shadow.append(root);
+  window.KernWorkspaceRoots[name] = shadow;
+  if (!window.KernRichText) {
+    await loadWorkspaceScript("/workspace/rich_text.js");
   }
-  handleAppApiMessage(app, event.source, message).catch(error => {
-    event.source.postMessage({
-      type: "kern-app-api-result",
-      request_id: message.request_id,
-      ok: false,
-      error: error.message,
-    }, "*");
+  await loadWorkspaceScript(`/workspace/${assetName}.js`);
+}
+
+function addWorkspaceStyle(root, href) {
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = href;
+  root.append(link);
+}
+
+function loadWorkspaceScript(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.addEventListener("load", resolve, { once: true });
+    script.addEventListener("error", () => reject(new Error(`Could not load ${src}`)), { once: true });
+    document.body.append(script);
   });
-});
-
-async function handleAppCopyTextMessage(source, message) {
-  const text = typeof message.text === "string" ? message.text : "";
-  if (!text || new TextEncoder().encode(text).length > 2 * 1024 * 1024) {
-    throw new Error("app clipboard text must be between 1 byte and 2 MiB");
-  }
-  let copied = false;
-  if (navigator.clipboard && window.isSecureContext) {
-    try {
-      await navigator.clipboard.writeText(text);
-      copied = true;
-    } catch (_error) {
-      // Fall through to the selection-based copy path for browsers that
-      // expose the API but deny it in this embedding context.
-    }
-  }
-  if (!copied) {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.setAttribute("readonly", "");
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.append(area);
-    area.select();
-    copied = document.execCommand("copy");
-    area.remove();
-    if (!copied) throw new Error("copy failed");
-  }
-  source.postMessage({
-    type: "kern-app-copy-text-result",
-    request_id: String(message.request_id || ""),
-    ok: true,
-    body: { copied: true },
-  }, "*");
 }
 
-async function handleAppUploadMessage(app, source, message) {
-  const action = message.action;
-  if (action === "select") {
-    const maximum = message.max_files === undefined ? APP_UPLOAD_SELECTION_LIMIT : message.max_files;
-    if (!Number.isInteger(maximum) || maximum < 1 || maximum > APP_UPLOAD_SELECTION_LIMIT) {
-      throw new Error(`an app can select between 1 and ${APP_UPLOAD_SELECTION_LIMIT} files`);
-    }
-    if (uploadPickerOpen) throw new Error("another file selection is already open");
-    uploadPickerOpen = true;
-    try {
-      const files = await chooseUploadFiles();
-      if (files === null) {
-        source.postMessage({
-          type: "kern-app-upload-file-result",
-          request_id: String(message.request_id || ""),
-          ok: true,
-          cancelled: true,
-        }, "*");
-        return;
-      }
-      const appSelections = appUploadSelections(app.id);
-      if (files.length > maximum || appSelections.size + files.length > APP_UPLOAD_SELECTION_LIMIT) {
-        throw new Error(`You can attach up to ${APP_UPLOAD_SELECTION_LIMIT} files.`);
-      }
-      const selections = files.map(file => {
-        const selectionId = String(nextUploadSelectionId++);
-        appSelections.set(selectionId, file);
-        return {
-          selection_id: selectionId,
-          original_name: file.name,
-          size_bytes: file.size,
-        };
-      });
-      source.postMessage({
-        type: "kern-app-upload-file-result",
-        request_id: String(message.request_id || ""),
-        ok: true,
-        body: { selections },
-      }, "*");
-    } finally {
-      uploadPickerOpen = false;
-    }
-    return;
-  }
-
-  const selectionId = String(message.selection_id || "");
-  const appSelections = pendingAppUploads.get(app.id);
-  const selected = appSelections && appSelections.get(selectionId);
-  if (!selected) {
-    throw new Error("file selection is no longer available");
-  }
-  if (action === "discard") {
-    removeAppUploadSelection(app.id, selectionId);
-    source.postMessage({
-      type: "kern-app-upload-file-result",
-      request_id: String(message.request_id || ""),
-      ok: true,
-      body: { discarded: true },
-    }, "*");
-    return;
-  }
-  if (action !== "upload") throw new Error("file upload action is not allowed");
-
-  // Consume the in-memory selection before starting I/O so duplicate bridge
-  // requests cannot publish the same local file twice. Restore it after a
-  // failed upload while keeping the per-app selection bound.
-  removeAppUploadSelection(app.id, selectionId);
-  let body;
+async function refreshWorkspaceNavigation() {
+  const sequence = ++workspaceNavigationRefreshSequence;
+  const chatArchived = chatNavArchived;
+  const webAppsArchived = webAppsNavArchived;
+  let chat;
+  let webApps;
   try {
-    body = await apiUpload(selected);
+    [chat, webApps] = await Promise.all([
+      api("GET", chatArchived ? "/v1/workspace/chat/threads?archived=true" : "/v1/workspace/chat/threads"),
+      api("GET", webAppsArchived ? "/v1/workspace/web-apps/apps?archived=true" : "/v1/workspace/web-apps/apps"),
+    ]);
   } catch (error) {
-    const current = appUploadSelections(app.id);
-    if (current.size < APP_UPLOAD_SELECTION_LIMIT) current.set(selectionId, selected);
+    if (
+      sequence !== workspaceNavigationRefreshSequence
+      || chatArchived !== chatNavArchived
+      || webAppsArchived !== webAppsNavArchived
+    ) return;
     throw error;
   }
-  source.postMessage({
-    type: "kern-app-upload-file-result",
-    request_id: String(message.request_id || ""),
-    ok: true,
-    body,
-  }, "*");
-}
-
-function appUploadSelections(appId) {
-  let selections = pendingAppUploads.get(appId);
-  if (!selections) {
-    selections = new Map();
-    pendingAppUploads.set(appId, selections);
-  }
-  return selections;
-}
-
-function removeAppUploadSelection(appId, selectionId) {
-  const selections = pendingAppUploads.get(appId);
-  if (!selections) return;
-  selections.delete(selectionId);
-  if (!selections.size) pendingAppUploads.delete(appId);
-}
-
-function chooseUploadFiles() {
-  return new Promise(resolve => {
-    // A file picker requires transient user activation. An app can post this
-    // message at any time, so settle a non-user-initiated request instead of
-    // leaving the global picker lock held when the browser ignores click().
-    if (navigator.userActivation && !navigator.userActivation.isActive) {
-      resolve(null);
-      return;
-    }
-    const input = document.createElement("input");
-    input.type = "file";
-    input.multiple = true;
-    input.className = "host-file-picker";
-    document.body.appendChild(input);
-    let settled = false;
-    const finish = files => {
-      if (settled) return;
-      settled = true;
-      input.remove();
-      resolve(files);
-    };
-    const currentFiles = () => {
-      const files = input.files ? Array.from(input.files) : [];
-      return files.length ? files : null;
-    };
-    input.addEventListener("change", () => finish(currentFiles()), { once: true });
-    input.addEventListener("cancel", () => finish(null), { once: true });
-    // Safari versions without the cancel event return focus to the page when
-    // the picker closes. Give a selected file's change event one tick to run.
-    window.addEventListener(
-      "focus",
-      () => setTimeout(() => finish(currentFiles()), 0),
-      { once: true },
-    );
-    try {
-      input.click();
-    } catch (_error) {
-      finish(null);
-    }
-  });
-}
-
-async function handleAppApiMessage(app, source, message) {
-  // Friendly pre-check only: the admin API enforces the bridge scope
-  // server-side (a bridge-tagged request outside the app's own API is 403).
-  const route = app && app.backend && app.backend.api_route;
   if (
-    !["GET", "POST", "PUT", "DELETE"].includes(message.method) ||
-    typeof message.path !== "string" ||
-    typeof route !== "string" ||
-    !message.path.startsWith(route)
-  ) {
-    throw new Error("app API route is not allowed");
+    sequence !== workspaceNavigationRefreshSequence
+    || chatArchived !== chatNavArchived
+    || webAppsArchived !== webAppsNavArchived
+  ) return;
+  chatNavItems = chat.threads || [];
+  webAppNavItems = webApps.apps || [];
+  renderWorkspaceNavigation();
+}
+
+function renderWorkspaceNavigation() {
+  renderWorkspaceRows("chat-nav-items", chatNavItems, "open-chat", chatNavArchived);
+  renderWorkspaceRows("web-apps-nav-items", webAppNavItems, "open-web-app", webAppsNavArchived);
+  const chatArchive = document.querySelector('[data-action="show-chat-archive"]');
+  const appArchive = document.querySelector('[data-action="show-web-app-archive"]');
+  if (chatArchive) {
+    chatArchive.textContent = chatNavArchived ? "Active" : "Archived";
+    chatArchive.setAttribute("aria-pressed", String(chatNavArchived));
   }
-  const body = await api(message.method, message.path, message.body, { "X-Kern-App-Bridge": app.id });
-  source.postMessage({
-    type: "kern-app-api-result",
-    request_id: String(message.request_id || ""),
-    ok: true,
-    body,
-  }, "*");
+  if (appArchive) {
+    appArchive.textContent = webAppsNavArchived ? "Active" : "Archived";
+    appArchive.setAttribute("aria-pressed", String(webAppsNavArchived));
+  }
+  for (const resource of ["memory", "schedules"]) {
+    $(`tab-workspace-${resource}`).classList.toggle(
+      "active-tab",
+      activeTab === "workspace-global" && window.KernWorkspaceGlobal?.resource === resource,
+    );
+  }
+}
+
+async function openWorkspaceGlobal(resource) {
+  const actionSequence = ++workspaceNavigationActionSequence;
+  await mountWorkspaces();
+  if (actionSequence !== workspaceNavigationActionSequence) return;
+  if (!showTab("workspace-global", actionSequence)) return;
+  await window.KernWorkspaceGlobal.open(resource);
+  renderWorkspaceNavigation();
+}
+
+function renderWorkspaceRows(containerId, items, action, archived) {
+  const container = $(containerId);
+  container.replaceChildren();
+  for (const item of items) {
+    const kind = action === "open-chat" ? "chat" : "web-apps";
+    const itemId = kind === "chat" ? item.thread_id : item.app_id;
+    const pending = workspacePendingMutations.has(`${kind}:${itemId}`);
+    const row = document.createElement("div");
+    row.className = "workspace-nav-row";
+    const button = document.createElement("button");
+    button.className = "workspace-nav-item";
+    button.dataset.action = action;
+    button.dataset.itemId = itemId;
+    button.title = item.name || itemId;
+    button.disabled = pending;
+    if (item.status === "running") {
+      const dot = document.createElement("span");
+      dot.className = "workspace-nav-running";
+      dot.setAttribute("aria-label", "Agent running");
+      button.append(dot);
+    }
+    const label = document.createElement("span");
+    label.textContent = item.name || itemId;
+    button.append(label);
+    row.append(button);
+    if (archived) {
+      const restore = document.createElement("button");
+      restore.className = "workspace-nav-row-action";
+      restore.dataset.action = action === "open-chat" ? "unarchive-chat" : "unarchive-web-app";
+      restore.dataset.itemId = itemId;
+      restore.disabled = pending;
+      restore.title = "Restore";
+      restore.setAttribute("aria-label", `Restore ${item.name || itemId}`);
+      restore.textContent = "↩";
+      row.append(restore);
+    }
+    container.append(row);
+  }
+}
+
+async function openWorkspaceChat(threadId) {
+  if (workspacePendingMutations.has(`chat:${threadId}`)) return;
+  const actionSequence = ++workspaceNavigationActionSequence;
+  await mountWorkspaces();
+  if (actionSequence !== workspaceNavigationActionSequence) return;
+  const thread = chatNavItems.find(item => item.thread_id === threadId);
+  if (!thread) return;
+  if (!showTab("workspace-chat", actionSequence)) return;
+  try {
+    await window.KernChat.openThread(thread);
+  } catch (error) {
+    if (actionSequence === workspaceNavigationActionSequence) throw error;
+  }
+}
+
+async function openWorkspaceWebApp(appId) {
+  if (workspacePendingMutations.has(`web-apps:${appId}`)) return;
+  const actionSequence = ++workspaceNavigationActionSequence;
+  await mountWorkspaces();
+  if (actionSequence !== workspaceNavigationActionSequence) return;
+  const app = webAppNavItems.find(item => item.app_id === appId);
+  if (!app) return;
+  if (!showTab("workspace-web-apps", actionSequence)) return;
+  try {
+    await window.KernWebApps.open(app, webAppsNavArchived);
+  } catch (error) {
+    if (actionSequence === workspaceNavigationActionSequence) throw error;
+  }
+}
+
+async function setWorkspaceArchived(kind, threadId, archived) {
+  const pendingKey = `${kind}:${threadId}`;
+  if (workspacePendingMutations.has(pendingKey)) return;
+  const actionSequence = ++workspaceNavigationActionSequence;
+  const base = kind === "chat" ? "/v1/workspace/chat/threads" : "/v1/workspace/web-apps/apps";
+  workspacePendingMutations.add(pendingKey);
+  renderWorkspaceNavigation();
+  try {
+    await api("POST", `${base}/${encodeURIComponent(threadId)}/${archived ? "archive" : "unarchive"}`, {});
+    await refreshWorkspaceNavigation();
+    if (archived) backToHome(actionSequence);
+  } finally {
+    workspacePendingMutations.delete(pendingKey);
+    renderWorkspaceNavigation();
+  }
 }
 
 document.addEventListener("click", event => {
   const target = event.target;
   if (!(target instanceof Element)) return;
-  if (!target.closest(".info-button, #preset-info-popover")) closeIntegrationInfo();
   if (!target.closest(".guide-copy-button")) dismissCallbackCopyFeedback();
   // The expanded usage panel is a floating overlay; a tap anywhere outside it
   // (the pill's own tap is handled by its action) dismisses it like a menu.
@@ -670,10 +619,10 @@ document.addEventListener("click", event => {
   const button = target.closest("button[data-action]");
   if (!button) return;
   const { action } = button.dataset;
-  const threadId = button.dataset.threadId;
   const runtime = button.dataset.runtime;
   const path = button.dataset.path;
   const fileType = button.dataset.fileType;
+  const itemId = button.dataset.itemId;
   const actions = {
     "login": () => login(),
     "logout": () => logout(),
@@ -681,24 +630,61 @@ document.addEventListener("click", event => {
     "show-passkey-guidance": () => openPasskeyGuidance(),
     "toggle-mobile-nav": () => toggleMobileNav(),
     "close-mobile-nav": () => setMobileNavOpen(false, true),
-    "toggle-beta-apps": () => toggleBetaApps(),
-    "show-tab": () => showTab(button.dataset.tab),
-    "open-provider": () => { collapseRuntimeOverview(); showTab("network"); openProvider(button.dataset.provider); },
+    "new-chat": async () => {
+      const actionSequence = ++workspaceNavigationActionSequence;
+      await mountWorkspaces();
+      if (actionSequence !== workspaceNavigationActionSequence) return;
+      chatNavArchived = false;
+      if (!showTab("workspace-chat", actionSequence)) return;
+      window.KernChat.newThread();
+      await refreshWorkspaceNavigation();
+    },
+    "new-web-app": async () => {
+      const actionSequence = ++workspaceNavigationActionSequence;
+      await mountWorkspaces();
+      if (actionSequence !== workspaceNavigationActionSequence) return;
+      webAppsNavArchived = false;
+      if (!showTab("workspace-web-apps", actionSequence)) return;
+      await window.KernWebApps.create();
+      await refreshWorkspaceNavigation();
+    },
+    "open-chat": () => openWorkspaceChat(itemId),
+    "open-web-app": () => openWorkspaceWebApp(itemId),
+    "open-workspace-global": () => openWorkspaceGlobal(button.dataset.resource),
+    "unarchive-chat": () => setWorkspaceArchived("chat", itemId, false),
+    "unarchive-web-app": () => setWorkspaceArchived("web-apps", itemId, false),
+    "show-chat-archive": async () => {
+      const actionSequence = ++workspaceNavigationActionSequence;
+      chatNavArchived = !chatNavArchived;
+      await refreshWorkspaceNavigation();
+      if (actionSequence !== workspaceNavigationActionSequence) return;
+      backToHome(actionSequence);
+    },
+    "show-web-app-archive": async () => {
+      const actionSequence = ++workspaceNavigationActionSequence;
+      webAppsNavArchived = !webAppsNavArchived;
+      await refreshWorkspaceNavigation();
+      if (actionSequence !== workspaceNavigationActionSequence) return;
+      backToHome(actionSequence);
+    },
+    "show-tab": () => button.dataset.tab === "home" ? backToHome() : showTab(button.dataset.tab),
+    "open-home-view": () => openHomeView(button.dataset.view),
+    "open-home-integration": () => openHomeIntegration(button.dataset.guide),
+    "home-back": () => backToHome(),
+    "open-provider": () => {
+      collapseRuntimeOverview();
+      openHomeIntegration(button.dataset.provider);
+    },
     "start-login": () => startLogin(runtime),
     "reset-linked-account": () => resetLinkedAccount(button.dataset.provider),
     "complete-claude-login": () => completeClaudeLogin(),
     "refresh-provider-usage": () => refreshProviderUsage(),
     "toggle-runtime-overview": () => toggleRuntimeOverview(),
     "reboot-host": () => rebootHost(),
-    "show-thread": () => showThread(threadId, runtime),
-    "load-earlier-thread-events": () => loadEarlierThreadEvents(),
     "file-up": () => loadParentDirectory(),
     "file-go": () => goToFilePath(),
     "open-file-path": () => openAgentPath(path, fileType),
     "load-policy": () => loadPolicy(),
-    "toggle-integration-info": () => toggleIntegrationInfo(button.dataset.info, button),
-    "toggle-integration-expansion": () => toggleIntegrationExpansion(button.dataset.integration),
-    "toggle-custom-domain-access": () => toggleCustomDomainAccess(),
     "toggle-github-repo-audit": () => toggleGithubRepoAudit(button.dataset.repoKey),
     "enable-integration": () => setIntegrationEnabled(button.dataset.integration, true),
     "disable-integration": () => setIntegrationEnabled(button.dataset.integration, false),
@@ -726,39 +712,34 @@ document.addEventListener("click", event => {
     "save-tool-config": () => saveToolConfig(button.dataset.tool, button.dataset.key),
     "connect-tool": () => connectTool(button.dataset.tool),
     "disconnect-tool": () => disconnectTool(button.dataset.tool),
-    "toggle-tool-info": () => toggleToolInfo(button.dataset.tool, button),
-    "toggle-tool-expansion": () => toggleToolExpansion(button.dataset.tool),
     "decide-approval": () => decideToolApproval(button.dataset.tool, button.dataset.approvalId, button.dataset.decision),
-    "open-connection-guide": () => {
-      closeIntegrationInfo();
-      openConnectionGuide(button.dataset.guide);
-      showTab("connection-guide");
-    },
-    "jump-connection-guide": () => openConnectionGuide(button.dataset.guide),
     "copy-callback-uri": () => copyCallbackUri(button),
   };
   const handler = actions[action];
-  if (handler) handler();
+  if (!handler) return;
+  try {
+    Promise.resolve(handler()).catch(error => notice(error.message, "error"));
+  } catch (error) {
+    notice(error.message, "error");
+  }
 });
 
 setUnauthorizedHandler(showLogin);
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
-  if (document.body.classList.contains("host-fullscreen-app-open")) {
-    showTab("home");
-    return;
-  }
-  closeIntegrationInfo();
   collapseRuntimeOverview();
   if (mobileNavOpen) setMobileNavOpen(false, true);
 });
-window.addEventListener("resize", () => {
-  positionIntegrationInfo();
-  setMobileNavOpen(mobileNavOpen);
+window.addEventListener("resize", () => setMobileNavOpen(mobileNavOpen));
+window.addEventListener("popstate", event => {
+  const route = event.state?.kernHomeRoute;
+  if (route && route !== "home" && homeDetailTabs.has(route)) {
+    openHomeView(route, event.state.guideId || "", false);
+  } else {
+    showTab("home");
+  }
 });
-document.addEventListener("scroll", positionIntegrationInfo, true);
 $("github-credential-mode").addEventListener("change", toggleGithubCredentialMode);
-$("connection-guide-select").addEventListener("change", event => openConnectionGuide(event.target.value));
 $("password").addEventListener("keydown", event => { if (event.key === "Enter") login(); });
 $("file-path").addEventListener("keydown", event => { if (event.key === "Enter") goToFilePath(); });
 start();

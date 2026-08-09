@@ -43,6 +43,7 @@ from host.runtime.core.state import (
     save_proxy_openai_account_id,
 )
 
+
 # The default (model, effort) per runtime for seeded threads and turns.
 DEFAULT_SESSION = {
     "codex": ("gpt-5.6-terra", "high"),
@@ -72,10 +73,6 @@ class FakeServer:
         self.on_session_id = on_session_id
         self.steered: list[str] = []
         self._delivered_steers = 0
-        # Mirrors ClaudeCodeSession.last_known_session_id: a test can set this
-        # mid-turn to simulate the provider having already reported a
-        # session_id before the turn ends (e.g. before it gets stopped).
-        self.last_known_session_id: str | None = None
         FakeServer.instances.append(self)
 
     def start(self, init_timeout: float = 60.0) -> None:
@@ -1103,45 +1100,33 @@ class OrchestratorTests(unittest.TestCase):
             )
         )
 
-    def test_app_turn_server_receives_its_scoped_thread_and_instructions(self) -> None:
-        # App ownership is encoded directly in the host thread passed to the
-        # runtime scope; no per-turn attribution state is registered.
-        from test_agent_app_api import write_app_package
-
-        apps_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(apps_dir.cleanup)
-        write_app_package(Path(apps_dir.name), "workbench", host_slot=91, agent_api=True)
-        app_root = patch.object(orchestrator.app_platform, "APP_ROOT", Path(apps_dir.name))
-        app_root.start()
-        self.addCleanup(app_root.stop)
-
+    def test_app_turn_server_receives_its_direct_thread_id(self) -> None:
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
-            self.start_turn("workbench__ws-1")
-            self.wait_until_idle("workbench__ws-1")
-        self.assertEqual(FakeServer.instances[-1].thread_id, "workbench__ws-1")
-        self.assertEqual(FakeServer.instances[-1].app_instructions, "Instructions for workbench.")
+            self.start_turn("app-1")
+            self.wait_until_idle("app-1")
+        self.assertEqual(FakeServer.instances[-1].thread_id, "app-1")
+        self.assertFalse(hasattr(FakeServer.instances[-1], "workspace_instructions"))
 
         def failing_run_turn(server, input_message, provider_session_id, model, effort, on_message):
             raise RuntimeError("turn exploded")
 
         with patch.object(orchestrator.codex_app_server, "run_turn", failing_run_turn):
-            self.start_turn("workbench__ws-1")
-            self.wait_until_idle("workbench__ws-1")
-        self.assertEqual(event_summary(thread_events("workbench__ws-1"))[-1], ("thread.error", None))
+            self.start_turn("app-1")
+            self.wait_until_idle("app-1")
+        self.assertEqual(event_summary(thread_events("app-1"))[-1], ("thread.error", None))
 
     def test_non_app_thread_is_still_passed_to_its_runtime_scope(self) -> None:
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
             self.send_message("chat", "hi")
             self.wait_until_idle("chat")
         self.assertEqual(FakeServer.instances[-1].thread_id, "chat")
-        self.assertIsNone(FakeServer.instances[-1].app_instructions)
+        self.assertFalse(hasattr(FakeServer.instances[-1], "workspace_instructions"))
 
-    def test_app_instructions_apply_without_an_agent_api(self) -> None:
+    def test_chat_threads_use_their_direct_thread_id(self) -> None:
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
-            self.start_turn("agent_chat__chat")
-            self.wait_until_idle("agent_chat__chat")
-        self.assertEqual(FakeServer.instances[-1].thread_id, "agent_chat__chat")
-        self.assertIn("You are working in Agent Chat", FakeServer.instances[-1].app_instructions)
+            self.start_turn("thread-1")
+            self.wait_until_idle("thread-1")
+        self.assertEqual(FakeServer.instances[-1].thread_id, "thread-1")
 
     def test_failed_turn_records_turn_failed_and_closes_the_server(self) -> None:
         def failing_run_turn(server, input_message, provider_session_id, model, effort, on_message):
@@ -1307,7 +1292,7 @@ class OrchestratorTests(unittest.TestCase):
 
                 provider.run_turn.side_effect = blocking_run_turn
                 with (
-                    patch.object(orchestrator, "_runtime_network_enabled", return_value=True),
+                    patch.object(orchestrator, "runtime_network_enabled", return_value=True),
                     patch.object(orchestrator, "runtime_status", return_value="active"),
                     patch.object(orchestrator, "refresh_runtime_status", return_value="active"),
                     patch.object(
@@ -1399,7 +1384,7 @@ class OrchestratorTests(unittest.TestCase):
         codex_turn = self.register_live_turn("codex", "codex-running", codex_busy)
         self.register_live_turn("claude_code", "claude-running", claude_busy)
 
-        orchestrator.deactivate_runtime("codex", "provider disabled")
+        orchestrator._stop_runtime_processes("codex", "provider disabled")
 
         # The turn is failed and its process closed, but only the owning turn
         # thread releases the fence (after persisting any mid-turn session id).
@@ -1963,57 +1948,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(read_claude_account(), {})
         self.assertIsNone(read_proxy_claude_account_id())
 
-    def test_all_runtimes_persist_a_failed_turns_session_for_the_next_turn(self) -> None:
-        # The production shape is a mid-turn rate limit: the CLI reports a
-        # session_id, works for a while, then one request is refused and the
-        # turn raises. The turn fails, but the CLI session is intact, so the
-        # thread's next turn must resume it instead of starting a fresh
-        # conversation with none of the turn's history.
-        for runtime in ("codex", "claude_code", "hermes"):
-            with self.subTest(runtime=runtime):
-                thread_id = f"{runtime}-chat"
-                session_id = f"{runtime}-rate-limited"
-                provider = MagicMock()
-
-                def rate_limited_run_turn(server, *_args, **_kwargs):
-                    server.last_known_session_id = session_id
-                    raise RuntimeError("You've hit your session limit")
-
-                resumed: list[str | None] = []
-
-                def follow_up_run_turn(server, input_message, provider_session_id, *_args, **_kwargs):
-                    resumed.append(provider_session_id)
-                    return f"{runtime}-next", "done"
-
-                provider.run_turn.side_effect = rate_limited_run_turn
-                with (
-                    patch.object(orchestrator, "_runtime_network_enabled", return_value=True),
-                    patch.object(orchestrator, "runtime_status", return_value="active"),
-                    patch.object(orchestrator, "refresh_runtime_status", return_value="active"),
-                    patch.object(
-                        orchestrator,
-                        "_new_agent_server",
-                        side_effect=lambda _runtime, thread, on_ready, on_session_id: FakeServer(
-                            thread_id=thread,
-                            on_ready=on_ready,
-                            on_session_id=on_session_id,
-                        ),
-                    ),
-                    patch.object(orchestrator, "_provider_module", return_value=provider),
-                ):
-                    self.start_turn(thread_id, runtime)
-                    self.wait_until_idle(thread_id)
-                    self.assertEqual(thread_events(thread_id)[-1]["event_type"], "thread.error")
-                    session = state.thread_session_config(thread_id)
-                    assert session is not None
-                    self.assertEqual(session["provider_session_id"], session_id)
-                    # What the operator actually feels: the follow-up turn
-                    # resumes the same CLI session.
-                    provider.run_turn.side_effect = follow_up_run_turn
-                    self.start_turn(thread_id, runtime)
-                    self.wait_until_idle(thread_id)
-                self.assertEqual(resumed, [session_id])
-
     def test_a_turn_that_fails_before_a_session_id_keeps_the_threads_earlier_one(self) -> None:
         # A turn can fail before the CLI ever announces a session (deactivated
         # runtime, boot failure). Persisting that None would erase the thread's
@@ -2300,7 +2234,7 @@ class OrchestratorTests(unittest.TestCase):
                 "account_status",
                 return_value=("active", None, {"account_id": "acct-trusted", "access_token_sha256": "1" * 64}),
             ),
-            patch.object(orchestrator, "_runtime_network_enabled", side_effect=[True, False]),
+            patch.object(orchestrator, "runtime_network_enabled", side_effect=[True, False]),
             patch.object(
                 orchestrator.claude_code,
                 "read_attested_identity",
@@ -2411,7 +2345,7 @@ class OrchestratorTests(unittest.TestCase):
 
         with (
             patch.object(orchestrator.codex_app_server, "account_status", return_value=("active", None, "acct-new")),
-            patch.object(orchestrator, "_runtime_network_enabled", side_effect=[True, False]),
+            patch.object(orchestrator, "runtime_network_enabled", side_effect=[True, False]),
         ):
             self.assertEqual(orchestrator.refresh_runtime_status("codex"), "deactivated")
 
@@ -2689,7 +2623,8 @@ class OrchestratorTests(unittest.TestCase):
     def test_bedrock_disconnect_deletes_the_one_credential(self) -> None:
         self.enable_bedrock()
         self.connect_bedrock()
-        state.save_bedrock_account({"account_id": "123456789012", "access_key_id": "AKIAOPERATORKEY00001"})
+        with state.mutation() as cur:
+            state.save_bedrock_account({"account_id": "123456789012", "access_key_id": "AKIAOPERATORKEY00001"}, cur)
         orchestrator.disconnect_bedrock_connection()
         self.assertEqual(state.read_bedrock_account(), {})
         self.assertIsNone(state.read_bedrock_proxy_credential())

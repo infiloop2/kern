@@ -7,10 +7,12 @@ from typing import cast
 
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import ActionSpec, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
-from host.tools.results import ActionExecuted, ActionFailed, ActionResult, ApprovalResult
+from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL, ParamGuardDenied
-from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.host_api import HostAPI
+from host.tools.shared.inputs import ToolInputValidationError, clip as _clip, int_field, schema as _schema
 from host.tools.shared.web import WebRequestError, encode_query, json_request
+from host.tools.tool import Tool
 
 GAMMA_API_BASE_URL = "https://gamma-api.polymarket.com"
 CLOB_API_BASE_URL = "https://clob.polymarket.com"
@@ -30,19 +32,6 @@ POLYMARKET_READ_POLICY = (
     "credential to send) and returns public market data into active model context. Runs directly with no "
     "approval."
 )
-
-
-class ToolInputValidationError(ValueError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
-def _schema(properties: JSONObject, required: list[str] | None = None) -> JSONObject:
-    schema: JSONObject = {"type": "object", "properties": properties, "additionalProperties": False}
-    if required:
-        schema["required"] = cast(list[JSONValue], required)
-    return schema
 
 
 POLYMARKET_OUTPUT_SCHEMA: JSONObject = {
@@ -125,7 +114,7 @@ MANIFEST = ToolManifest(
     setup_steps=(
         SetupStep(
             title="Enable Polymarket",
-            description="Enable the Polymarket bundled tool in Internet Access and Tools. No Polymarket account, wallet, API key, OAuth connection, or provider-side setup is required.",
+            description="Open Polymarket under Home > Integrations and enable it. No Polymarket account, wallet, API key, OAuth connection, or provider-side setup is required.",
             link_url="https://docs.polymarket.com/",
             link_label="Review Polymarket API documentation",
         ),
@@ -188,35 +177,10 @@ def _string_field(tool_input: JSONObject, key: str, *, max_chars: int, required:
     return value
 
 
-def _int_field(tool_input: JSONObject, key: str, *, default: int, low: int, high: int) -> int:
-    """Accept a digit string (or raw int) and reject out-of-range values."""
-    value = tool_input.get(key)
-    if value is None:
-        return default
-    if isinstance(value, str) and value.strip().isascii() and value.strip().isdecimal():
-        digits = value.strip()
-        if len(digits) > 10:
-            raise ToolInputValidationError(
-                f"Polymarket tool_input.{key} must be between {low} and {high}."
-            )
-        value = int(digits)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ToolInputValidationError(f"Polymarket tool_input.{key} must be an integer or digit string.")
-    if not low <= value <= high:
-        raise ToolInputValidationError(
-            f"Polymarket tool_input.{key} must be between {low} and {high}."
-        )
-    return value
-
-
 def _reject_unknown_fields(tool_input: JSONObject, allowed: frozenset[str]) -> None:
     extra = set(tool_input) - allowed
     if extra:
         raise ToolInputValidationError(f"Polymarket tool input only supports {', '.join(sorted(allowed))}.")
-
-
-def _clip(value: JSONValue, max_chars: int = MAX_TEXT_CHARS) -> str:
-    return value.strip()[:max_chars] if isinstance(value, str) else ""
 
 
 def _number(value: JSONValue) -> JSONValue:
@@ -297,8 +261,8 @@ def _records(response: JSONObject) -> list[JSONObject]:
 
 
 def _listing_params(tool_input: JSONObject) -> dict[str, str]:
-    limit = _int_field(tool_input, "limit", default=DEFAULT_LIMIT, low=1, high=MAX_LIMIT)
-    offset = _int_field(tool_input, "offset", default=0, low=0, high=10_000)
+    limit = int_field(tool_input, "limit", provider="Polymarket", default=DEFAULT_LIMIT, low=1, high=MAX_LIMIT)
+    offset = int_field(tool_input, "offset", provider="Polymarket", default=0, low=0, high=10_000)
     order = _string_field(tool_input, "order", max_chars=40) or "volume24hr"
     if order not in {"volume24hr", "volume", "liquidity", "startDate", "endDate"}:
         raise ToolInputValidationError("Polymarket tool_input.order is not a supported ordering.")
@@ -349,7 +313,7 @@ def _search(tool_input: JSONObject, api: HostAPI) -> JSONObject:
     query = api.outbound.guard_request_parameter_string(
         _string_field(tool_input, "query", max_chars=MAX_QUERY_CHARS, required=True)
     )
-    limit_per_type = _int_field(tool_input, "limit_per_type", default=10, low=1, high=50)
+    limit_per_type = int_field(tool_input, "limit_per_type", provider="Polymarket", default=10, low=1, high=50)
     response = _gamma_request(
         "/public-search",
         {"q": query, "limit_per_type": str(limit_per_type), "events_status": "active"},
@@ -484,7 +448,7 @@ def _price_history(tool_input: JSONObject) -> JSONObject:
     }
 
 
-class PolymarketTool:
+class PolymarketTool(Tool):
     @property
     def manifest(self) -> ToolManifest:
         return MANIFEST
@@ -526,10 +490,6 @@ class PolymarketTool:
             # Curated errors are handled above; an unexpected exception must not
             # leak its raw text to the agent.
             return ActionFailed("Polymarket tool request failed.")
-
-    def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
-        del approval, api
-        return ActionFailed("Polymarket has no approval-gated actions.")
 
 
 # The instance the host discovers (see host.runtime.tools.tools_host).

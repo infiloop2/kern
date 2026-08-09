@@ -8,9 +8,11 @@ import unittest
 import unittest.mock
 from unittest.mock import call, patch
 
-from host.apps.agent_chat import backend
+from host.runtime.workspace import service as workspace_service
+from host.runtime.workspace import host_api
+from host.runtime.workspace.chat import backend
 
-APP_DIR = Path(__file__).resolve().parents[1] / "host" / "apps" / "agent_chat"
+CHAT_DIR = Path(__file__).resolve().parents[1] / "host" / "runtime" / "workspace" / "chat"
 
 
 class AgentChatBackendTests(unittest.TestCase):
@@ -22,14 +24,13 @@ class AgentChatBackendTests(unittest.TestCase):
         self.addCleanup(client.close)
         payload = b"" if body is None else json.dumps(body).encode()
         lines = [
-            f"{method} {path} HTTP/1.1",
+            f"{method} /chat{path} HTTP/1.1",
             "Host: agent-chat",
-            "X-Kern-App-Proxy: agent_chat",
         ]
         if payload:
             lines.append(f"Content-Length: {len(payload)}")
         client.sendall("\r\n".join(lines).encode() + b"\r\n\r\n" + payload)
-        backend.Handler(server_side, ("127.0.0.1", 0), None)
+        workspace_service.Handler(server_side, ("127.0.0.1", 0), None)
         server_side.close()
         raw = b""
         while chunk := client.recv(65536):
@@ -68,12 +69,12 @@ class AgentChatBackendTests(unittest.TestCase):
         text_budget = backend.THREAD_EVENT_PAGE * backend.THREAD_EVENT_MESSAGE_BYTES
         self.assertLessEqual(
             text_budget,
-            backend.MAX_ADMIN_RESPONSE_BYTES - 256 * 1024,
+            host_api.MAX_REQUEST_BODY_BYTES - 256 * 1024,
         )
 
     def test_composer_uses_send_button_spinner_without_process_phases(self) -> None:
-        source = (APP_DIR / "ui" / "agent_chat.js").read_text()
-        css = (APP_DIR / "ui" / "agent_chat.css").read_text()
+        source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
+        css = (CHAT_DIR / "ui" / "agent_chat.css").read_text()
         self.assertNotIn('attachmentActivity = "Sending…"', source)
         self.assertIn('sendButton.classList.toggle("sending", sendingMessage)', source)
         self.assertIn(".send-button.sending::after", css)
@@ -84,32 +85,43 @@ class AgentChatBackendTests(unittest.TestCase):
             10,
         )
 
+    def test_failed_upload_keeps_the_local_file_available_for_retry(self) -> None:
+        source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
+        upload = source.split("async function requestFileUpload", 1)[1].split(
+            "\nasync function", 1
+        )[0]
+        self.assertLess(
+            upload.index("await window.KernHost.apiUpload(file)"),
+            upload.rindex("localFiles.delete(selectionId)"),
+        )
+
+    def test_polling_fences_stale_thread_lists_and_event_pages(self) -> None:
+        source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
+        self.assertIn("let refreshSequence = 0;", source)
+        self.assertIn("let selectedRefreshSequence = 0;", source)
+        self.assertIn("const sequence = ++refreshSequence;", source)
+        self.assertIn("sequence !== refreshSequence", source)
+        self.assertIn("const sequence = ++selectedRefreshSequence;", source)
+        self.assertIn("refreshSequence !== selectedRefreshSequence", source)
+
     def test_composer_restores_the_new_thread_draft_on_startup(self) -> None:
-        source = (APP_DIR / "ui" / "agent_chat.js").read_text()
+        source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
         startup = source.rsplit("setSessionOptions();", 1)[1]
         self.assertLess(
             startup.index("restoreComposerDraft();"),
             startup.index("updateComposer();"),
         )
 
-    def test_message_listener_rejects_a_forged_bridge_reply_source(self) -> None:
-        # APP-003: request ids are sequential and guessable, so the frame must
-        # accept bridge replies only from its own parent window. Without the
-        # source check a sibling app frame could forge a kern-app-*-result.
-        source = (APP_DIR / "ui" / "agent_chat.js").read_text()
-        handler = source.split('addEventListener("message"', 1)[1].split(
-            "\nfunction ", 1
-        )[0]
-        self.assertIn("event.source !== parent", handler)
-        self.assertLess(
-            handler.index("event.source !== parent"),
-            handler.index("pending.get(message.request_id)"),
-        )
+    def test_workspace_chat_calls_its_fixed_authenticated_route_directly(self) -> None:
+        source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
+        self.assertTrue(source.startswith('(() => {\n"use strict";'))
+        self.assertTrue(source.rstrip().endswith("})();"))
+        self.assertIn('window.KernHost.api(method, "/v1/workspace/chat" + path, body)', source)
 
     def test_a_running_thread_cannot_be_archived(self) -> None:
         # UX-014: archiving does not stop a running turn and the archived view
         # hides Stop, so the UI refuses to archive until the turn ends.
-        source = (APP_DIR / "ui" / "agent_chat.js").read_text()
+        source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
         archive_fn = source.split(
             "async function setSelectedThreadArchived()", 1
         )[1].split("\nasync function", 1)[0]
@@ -119,8 +131,17 @@ class AgentChatBackendTests(unittest.TestCase):
             archive_fn.index("await api("),
         )
 
+    def test_stop_is_serialized_after_an_in_flight_send(self) -> None:
+        source = (CHAT_DIR / "backend.py").read_text()
+        stop_route = source.split('path.endswith("/stop")', 1)[1]
+        self.assertIn("with MESSAGE_SEND_LOCK:", stop_route)
+        self.assertLess(
+            stop_route.index("with MESSAGE_SEND_LOCK:"),
+            stop_route.index("call_admin_api("),
+        )
+
     def test_composer_omits_unchanged_session_configuration(self) -> None:
-        source = (APP_DIR / "ui" / "agent_chat.js").read_text()
+        source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
         self.assertIn("const changingSession = sessionConfigurationChanged();", source)
         self.assertIn("if (startingNewThread || changingSession)", source)
         self.assertIn("const preservingRecordedSession =", source)
@@ -132,29 +153,29 @@ class AgentChatBackendTests(unittest.TestCase):
     def test_follow_up_forwards_selected_session_configuration(self) -> None:
         response = {
             "status": "accepted",
-            "thread": {"thread_id": "existing", "status": "running"},
+            "thread": {"thread_id": "thread-7", "status": "running"},
         }
         with (
-            patch("host.apps.agent_chat.backend._require_sendable_thread") as require,
-            patch("host.apps.agent_chat.backend.call_admin_api", return_value=response) as admin_call,
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread") as require,
+            patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=response) as admin_call,
         ):
             self.assertEqual(
-                backend.send_app_message(
+                backend.send_chat_message(
                     {
                         "input_message": "continue",
-                        "thread_id": "existing",
+                        "thread_id": "thread-7",
                         "agent_runtime": "codex",
                         "model": "gpt-5.6-sol",
                         "effort": "high",
                     }
                 ),
-                {"action": "accepted", "thread_id": "existing"},
+                {"action": "accepted", "thread_id": "thread-7"},
             )
 
-        require.assert_called_once_with("existing")
+        require.assert_called_once_with("thread-7")
         admin_call.assert_called_once_with(
             "POST",
-            "/v1/threads/existing/messages",
+            "/v1/threads/thread-7/messages",
             {
                 "message": "continue",
                 "agent_runtime": "codex",
@@ -175,12 +196,12 @@ class AgentChatBackendTests(unittest.TestCase):
             "thread": {"thread_id": "thread-4", "status": "running"},
         }
         with (
-            patch("host.apps.agent_chat.backend._reserve_generated_thread_id", return_value="thread-4") as reserve,
-            patch("host.apps.agent_chat.backend._require_sendable_thread") as require,
-            patch("host.apps.agent_chat.backend.call_admin_api", return_value=response) as admin_call,
+            patch("host.runtime.workspace.chat.backend._reserve_generated_thread_id", return_value="thread-4") as reserve,
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread") as require,
+            patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=response) as admin_call,
         ):
             self.assertEqual(
-                backend.send_app_message(request),
+                backend.send_chat_message(request),
                 {"action": "accepted", "thread_id": "thread-4"},
             )
 
@@ -203,16 +224,16 @@ class AgentChatBackendTests(unittest.TestCase):
             "the agent is finishing; retry shortly",
         ):
             with self.subTest(message=message):
-                busy = backend.AppError(HTTPStatus.CONFLICT, message)
+                busy = backend.WorkspaceError(HTTPStatus.CONFLICT, message)
                 with (
-                    patch("host.apps.agent_chat.backend._require_sendable_thread"),
+                    patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
                     patch(
-                        "host.apps.agent_chat.backend.call_admin_api",
+                        "host.runtime.workspace.chat.backend.call_admin_api",
                         side_effect=(busy, busy, {"status": "accepted"}),
                     ) as admin_call,
                     patch.object(backend, "SEND_BUSY_RETRY_DELAY_SECONDS", 0),
                 ):
-                    result = backend.send_app_message(
+                    result = backend.send_chat_message(
                         {"thread_id": "thread-1", "input_message": "go"}
                     )
 
@@ -220,47 +241,47 @@ class AgentChatBackendTests(unittest.TestCase):
                 self.assertEqual(admin_call.call_count, 3)
 
     def test_send_surfaces_a_persistently_busy_thread(self) -> None:
-        busy = backend.AppError(
+        busy = backend.WorkspaceError(
             HTTPStatus.CONFLICT,
             "the agent is finishing; retry shortly",
         )
         with (
-            patch("host.apps.agent_chat.backend._require_sendable_thread"),
-            patch("host.apps.agent_chat.backend.call_admin_api", side_effect=busy) as admin_call,
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend.call_admin_api", side_effect=busy) as admin_call,
             patch.object(backend, "SEND_BUSY_RETRY_DELAY_SECONDS", 0),
-            self.assertRaises(backend.AppError) as error,
+            self.assertRaises(backend.WorkspaceError) as error,
         ):
-            backend.send_app_message({"thread_id": "thread-1", "input_message": "go"})
+            backend.send_chat_message({"thread_id": "thread-1", "input_message": "go"})
 
         self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
         self.assertIn(backend.SEND_RETRY_MARKER, error.exception.message)
         self.assertEqual(admin_call.call_count, backend.SEND_BUSY_RETRIES)
 
     def test_send_does_not_retry_other_conflicts(self) -> None:
-        conflict = backend.AppError(
+        conflict = backend.WorkspaceError(
             HTTPStatus.CONFLICT,
             "Hermes cannot accept another message while running; wait for it to finish",
         )
         with (
-            patch("host.apps.agent_chat.backend._require_sendable_thread"),
-            patch("host.apps.agent_chat.backend.call_admin_api", side_effect=conflict) as admin_call,
-            self.assertRaises(backend.AppError) as error,
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend.call_admin_api", side_effect=conflict) as admin_call,
+            self.assertRaises(backend.WorkspaceError) as error,
         ):
-            backend.send_app_message({"thread_id": "thread-1", "input_message": "go"})
+            backend.send_chat_message({"thread_id": "thread-1", "input_message": "go"})
 
         self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
         self.assertEqual(admin_call.call_count, 1)
 
     def test_send_rejects_an_invalid_host_send_status(self) -> None:
         with (
-            patch("host.apps.agent_chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
             patch(
-                "host.apps.agent_chat.backend.call_admin_api",
+                "host.runtime.workspace.chat.backend.call_admin_api",
                 return_value={"status": "bogus"},
             ),
-            self.assertRaises(backend.AppError) as error,
+            self.assertRaises(backend.WorkspaceError) as error,
         ):
-            backend.send_app_message({"thread_id": "thread-1", "input_message": "go"})
+            backend.send_chat_message({"thread_id": "thread-1", "input_message": "go"})
 
         self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
 
@@ -270,11 +291,11 @@ class AgentChatBackendTests(unittest.TestCase):
         transaction.__enter__.return_value = cursor
         cursor.fetchone.return_value = (True,)
         with (
-            patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction),
-            patch("host.apps.agent_chat.backend.call_admin_api") as admin_call,
-            self.assertRaises(backend.AppError) as error,
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch("host.runtime.workspace.chat.backend.call_admin_api") as admin_call,
+            self.assertRaises(backend.WorkspaceError) as error,
         ):
-            backend.send_app_message(
+            backend.send_chat_message(
                 {"thread_id": "thread-1", "input_message": "revive?"}
             )
 
@@ -287,26 +308,33 @@ class AgentChatBackendTests(unittest.TestCase):
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
         cursor.fetchone.return_value = (False,)
-        with patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction):
+        with (
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch("host.runtime.workspace.chat.backend._require_chat_thread"),
+            patch(
+                "host.runtime.workspace.chat.backend.call_admin_api",
+                return_value={"thread": {"status": "idle"}},
+            ),
+        ):
             backend._require_sendable_thread("thread-1")
 
         insert = next(
             item for item in cursor.execute.call_args_list
-            if "INSERT INTO threads" in item.args[0]
+            if "INSERT INTO chat_threads" in item.args[0]
         )
         self.assertIn("ON CONFLICT (thread_id) DO NOTHING", insert.args[0])
-        self.assertEqual(insert.args[1], ("thread-1",))
+        self.assertEqual(insert.args[1], ("thread-1", backend.MAX_CHAT_THREADS))
 
-    def test_app_session_options_must_be_provided_together(self) -> None:
+    def test_chat_session_options_must_be_provided_together(self) -> None:
         with (
-            patch("host.apps.agent_chat.backend._require_sendable_thread"),
-            patch("host.apps.agent_chat.backend.call_admin_api") as admin_call,
-            self.assertRaises(backend.AppError) as error,
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend.call_admin_api") as admin_call,
+            self.assertRaises(backend.WorkspaceError) as error,
         ):
-            backend.send_app_message(
+            backend.send_chat_message(
                 {
                     "input_message": "start",
-                    "thread_id": "partial",
+                    "thread_id": "thread-8",
                     "agent_runtime": "codex",
                 }
             )
@@ -317,14 +345,14 @@ class AgentChatBackendTests(unittest.TestCase):
 
     def test_host_send_errors_pass_through_unchanged(self) -> None:
         with (
-            patch("host.apps.agent_chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
             patch(
-                "host.apps.agent_chat.backend.call_admin_api",
-                side_effect=backend.AppError(HTTPStatus.BAD_REQUEST, "session configuration required"),
+                "host.runtime.workspace.chat.backend.call_admin_api",
+                side_effect=backend.WorkspaceError(HTTPStatus.BAD_REQUEST, "session configuration required"),
             ),
-            self.assertRaises(backend.AppError) as error,
+            self.assertRaises(backend.WorkspaceError) as error,
         ):
-            backend.send_app_message({"input_message": "start", "thread_id": "unknown"})
+            backend.send_chat_message({"input_message": "start", "thread_id": "thread-99"})
 
         self.assertEqual(error.exception.status, 400)
         self.assertEqual(error.exception.message, "session configuration required")
@@ -339,12 +367,30 @@ class AgentChatBackendTests(unittest.TestCase):
         ):
             cursor.fetchall.return_value = rows
             cursor.fetchone.return_value = (expected,)
-            with patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction):
+            with patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction):
                 self.assertEqual(backend._reserve_generated_thread_id(), expected)
             insert_args, _kwargs = cursor.execute.call_args
             self.assertIn("ON CONFLICT (thread_id) DO NOTHING", insert_args[0])
             self.assertEqual(insert_args[1], (expected,))
             cursor.reset_mock()
+
+    def test_generated_thread_creation_stops_at_durable_quota(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchall.return_value = [("thread-1",)]
+        with (
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch.object(backend, "MAX_CHAT_THREADS", 1),
+            self.assertRaises(backend.WorkspaceError) as error,
+        ):
+            backend._reserve_generated_thread_id()
+
+        self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("already retains 1 Chat threads", error.exception.message)
+        self.assertFalse(
+            any("INSERT INTO chat_threads" in item.args[0] for item in cursor.execute.call_args_list)
+        )
 
     def test_generated_thread_name_retries_past_a_concurrent_reservation(self) -> None:
         """A lost insert race means another request took the name: the next
@@ -354,14 +400,20 @@ class AgentChatBackendTests(unittest.TestCase):
         transaction.__enter__.return_value = cursor
         cursor.fetchall.side_effect = ([("thread-1",)], [("thread-1",), ("thread-2",)])
         cursor.fetchone.side_effect = (None, ("thread-3",))
-        with patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction):
+        with (
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch(
+                "host.runtime.workspace.chat.backend.call_admin_api",
+                return_value={"thread": {"status": "idle"}},
+            ),
+        ):
             self.assertEqual(backend._reserve_generated_thread_id(), "thread-3")
 
-    def test_list_app_threads_joins_host_status_against_recorded_names(self) -> None:
+    def test_list_chat_threads_joins_host_status_against_recorded_names(self) -> None:
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
-        # thread-orphan is known to the host but has no app thread row (its
+        # thread-orphan is known to the host but has no Chat thread row (its
         # reservation was archived or never recorded here); it must stay out
         # of the index even though the host returns a summary for it.
         cursor.fetchall.return_value = [
@@ -402,22 +454,22 @@ class AgentChatBackendTests(unittest.TestCase):
             ]
         }
         with (
-            patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction),
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
             patch(
-                "host.apps.agent_chat.backend.call_admin_api",
+                "host.runtime.workspace.chat.backend.call_admin_api",
                 side_effect=(first_page, second_page),
             ) as admin_call,
         ):
-            response = backend.list_app_threads()
+            response = backend.list_chat_threads()
 
         self.assertEqual(
             admin_call.call_args_list,
             [
-                call("GET", "/v1/threads?limit=100"),
-                call("GET", "/v1/threads?limit=100&before=next-token"),
+                call("GET", "/v1/threads?limit=100&prefix=thread-"),
+                call("GET", "/v1/threads?limit=100&prefix=thread-&before=next-token"),
             ],
         )
-        # Only threads recorded by the app, newest-first by last_used_at.
+        # Only threads recorded by Chat, newest-first by last_used_at.
         self.assertEqual(
             [thread["thread_id"] for thread in response["threads"]],
             ["thread-1", "thread-2"],
@@ -428,7 +480,7 @@ class AgentChatBackendTests(unittest.TestCase):
         self.assertFalse(first["archived"])
         self.assertEqual(response["threads"][1]["status"], "idle")
 
-    def test_list_app_threads_can_select_archived_threads(self) -> None:
+    def test_list_chat_threads_can_select_archived_threads(self) -> None:
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
@@ -444,10 +496,10 @@ class AgentChatBackendTests(unittest.TestCase):
             }]
         }
         with (
-            patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction),
-            patch("host.apps.agent_chat.backend.call_admin_api", return_value=summaries),
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=summaries),
         ):
-            response = backend.list_app_threads(archived=True)
+            response = backend.list_chat_threads(archived=True)
 
         self.assertTrue(response["threads"][0]["archived"])
         archived_query = next(
@@ -456,7 +508,7 @@ class AgentChatBackendTests(unittest.TestCase):
         )
         self.assertEqual(archived_query.args[1], (True,))
 
-    def test_list_app_threads_keeps_threads_on_a_superseded_model(self) -> None:
+    def test_list_chat_threads_keeps_threads_on_a_superseded_model(self) -> None:
         # A thread started under an earlier catalog stays listed with the model
         # it recorded; the option matrix only gates what may be created.
         cursor = unittest.mock.MagicMock()
@@ -476,14 +528,14 @@ class AgentChatBackendTests(unittest.TestCase):
             ]
         }
         with (
-            patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction),
-            patch("host.apps.agent_chat.backend.call_admin_api", return_value=summaries),
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=summaries),
         ):
-            response = backend.list_app_threads()
+            response = backend.list_chat_threads()
 
         self.assertEqual(response["threads"][0]["model"], "opus")
 
-    def test_list_app_threads_rejects_an_invalid_host_status(self) -> None:
+    def test_list_chat_threads_rejects_an_invalid_host_status(self) -> None:
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
@@ -499,21 +551,21 @@ class AgentChatBackendTests(unittest.TestCase):
             }]
         }
         with (
-            patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction),
-            patch("host.apps.agent_chat.backend.call_admin_api", return_value=summaries),
-            self.assertRaises(backend.AppError) as error,
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=summaries),
+            self.assertRaises(backend.WorkspaceError) as error,
         ):
-            backend.list_app_threads()
+            backend.list_chat_threads()
 
         self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
 
-    def test_list_app_thread_events_proxies_with_since(self) -> None:
+    def test_list_chat_thread_events_proxies_with_since(self) -> None:
         events = {"events": [{"seq": 5, "thread_id": "thread-1", "event_type": "thread.message"}]}
         with (
-            patch("host.apps.agent_chat.backend._require_app_thread"),
-            patch("host.apps.agent_chat.backend.call_admin_api", return_value=events) as admin_call,
+            patch("host.runtime.workspace.chat.backend._require_chat_thread"),
+            patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=events) as admin_call,
         ):
-            response = backend.list_app_thread_events("thread-1", {"since": ["2"]})
+            response = backend.list_chat_thread_events("thread-1", {"since": ["2"]})
 
         admin_call.assert_called_once_with(
             "GET",
@@ -524,19 +576,20 @@ class AgentChatBackendTests(unittest.TestCase):
             "&event_type=thread.activity"
             "&event_type=thread.error"
             "&event_type=thread.stopped"
+            "&event_type=thread.memory_cleared"
             "&since=2",
         )
         self.assertEqual(response, events)
 
-    def test_list_app_thread_events_opens_latest_and_pages_before(self) -> None:
+    def test_list_chat_thread_events_opens_latest_and_pages_before(self) -> None:
         events = {"events": [{"seq": 5, "thread_id": "thread-1", "event_type": "thread.message"}]}
         with (
-            patch("host.apps.agent_chat.backend._require_app_thread"),
-            patch("host.apps.agent_chat.backend.call_admin_api", return_value=events) as admin_call,
+            patch("host.runtime.workspace.chat.backend._require_chat_thread"),
+            patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=events) as admin_call,
         ):
-            self.assertEqual(backend.list_app_thread_events("thread-1", {}), events)
+            self.assertEqual(backend.list_chat_thread_events("thread-1", {}), events)
             self.assertEqual(
-                backend.list_app_thread_events("thread-1", {"before": ["5"]}),
+                backend.list_chat_thread_events("thread-1", {"before": ["5"]}),
                 events,
             )
 
@@ -551,7 +604,8 @@ class AgentChatBackendTests(unittest.TestCase):
                     "&event_type=thread.message"
                     "&event_type=thread.activity"
                     "&event_type=thread.error"
-                    "&event_type=thread.stopped",
+                    "&event_type=thread.stopped"
+                    "&event_type=thread.memory_cleared",
                 ),
                 call(
                     "GET",
@@ -562,25 +616,26 @@ class AgentChatBackendTests(unittest.TestCase):
                     "&event_type=thread.activity"
                     "&event_type=thread.error"
                     "&event_type=thread.stopped"
+                    "&event_type=thread.memory_cleared"
                     "&before=5",
                 ),
             ],
         )
 
-    def test_list_app_thread_events_can_page_conversation_without_activity(self) -> None:
+    def test_list_chat_thread_events_can_page_conversation_without_activity(self) -> None:
         events = {
             "events": [
                 {"seq": 5, "thread_id": "thread-1", "event_type": "thread.message"}
             ]
         }
         with (
-            patch("host.apps.agent_chat.backend._require_app_thread"),
+            patch("host.runtime.workspace.chat.backend._require_chat_thread"),
             patch(
-                "host.apps.agent_chat.backend.call_admin_api",
+                "host.runtime.workspace.chat.backend.call_admin_api",
                 return_value=events,
             ) as admin_call,
         ):
-            response = backend.list_app_thread_events(
+            response = backend.list_chat_thread_events(
                 "thread-1",
                 {"activity": ["false"], "before": ["5"]},
             )
@@ -593,25 +648,26 @@ class AgentChatBackendTests(unittest.TestCase):
             "&event_type=thread.message"
             "&event_type=thread.error"
             "&event_type=thread.stopped"
+            "&event_type=thread.memory_cleared"
             "&before=5",
         )
         self.assertEqual(response, events)
 
-    def test_list_app_thread_events_rejects_non_numeric_since(self) -> None:
+    def test_list_chat_thread_events_rejects_non_numeric_since(self) -> None:
         with (
-            patch("host.apps.agent_chat.backend._require_app_thread"),
-            self.assertRaises(backend.AppError) as error,
+            patch("host.runtime.workspace.chat.backend._require_chat_thread"),
+            self.assertRaises(backend.WorkspaceError) as error,
         ):
-            backend.list_app_thread_events("thread-1", {"since": ["nope"]})
+            backend.list_chat_thread_events("thread-1", {"since": ["nope"]})
 
         self.assertEqual(error.exception.status, 400)
 
-    def test_list_app_thread_events_rejects_combined_cursors(self) -> None:
+    def test_list_chat_thread_events_rejects_combined_cursors(self) -> None:
         with (
-            patch("host.apps.agent_chat.backend._require_app_thread"),
-            self.assertRaises(backend.AppError) as error,
+            patch("host.runtime.workspace.chat.backend._require_chat_thread"),
+            self.assertRaises(backend.WorkspaceError) as error,
         ):
-            backend.list_app_thread_events(
+            backend.list_chat_thread_events(
                 "thread-1",
                 {"since": ["2"], "before": ["5"]},
             )
@@ -620,9 +676,9 @@ class AgentChatBackendTests(unittest.TestCase):
 
     def test_stop_route_proxies_to_the_host_thread_stop(self) -> None:
         with (
-            patch("host.apps.agent_chat.backend._require_app_thread") as require,
+            patch("host.runtime.workspace.chat.backend._require_chat_thread") as require,
             patch(
-                "host.apps.agent_chat.backend.call_admin_api",
+                "host.runtime.workspace.chat.backend.call_admin_api",
                 return_value={"status": "accepted"},
             ) as admin_call,
         ):
@@ -647,19 +703,26 @@ class AgentChatBackendTests(unittest.TestCase):
             ("thread-1", True),
             ("thread-1", False),
         ]
-        with patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction):
+        with (
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch("host.runtime.workspace.chat.backend._require_chat_thread"),
+            patch(
+                "host.runtime.workspace.chat.backend.call_admin_api",
+                return_value={"thread": {"status": "idle"}},
+            ),
+        ):
             self.assertEqual(
-                backend.archive_app_thread("thread-1"),
+                backend.archive_chat_thread("thread-1"),
                 {"thread_id": "thread-1", "archived": True},
             )
             self.assertEqual(
-                backend.unarchive_app_thread("thread-1"),
+                backend.unarchive_chat_thread("thread-1"),
                 {"thread_id": "thread-1", "archived": False},
             )
 
         update_calls = [
             item for item in cursor.execute.call_args_list
-            if "UPDATE threads SET archived" in item.args[0]
+            if "UPDATE chat_threads SET archived" in item.args[0]
         ]
         self.assertEqual(
             [item.args[1] for item in update_calls],
@@ -671,22 +734,22 @@ class AgentChatBackendTests(unittest.TestCase):
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
         cursor.fetchone.return_value = ("thread-1", "Release planning")
-        with patch("host.apps.agent_chat.backend.db.transaction", return_value=transaction):
+        with patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction):
             self.assertEqual(
-                backend.rename_app_thread("thread-1", {"name": "  Release planning  "}),
+                backend.rename_chat_thread("thread-1", {"name": "  Release planning  "}),
                 {"thread_id": "thread-1", "name": "Release planning"},
             )
 
         update = next(
             item for item in cursor.execute.call_args_list
-            if "UPDATE threads SET name" in item.args[0]
+            if "UPDATE chat_threads SET name" in item.args[0]
         )
         self.assertEqual(update.args[1], ("Release planning", "thread-1"))
 
     def test_thread_name_must_be_nonempty_and_bounded(self) -> None:
         for name in ("   ", "x" * (backend.THREAD_NAME_MAX_CHARS + 1)):
-            with self.subTest(name=name), self.assertRaises(backend.AppError) as error:
-                backend.rename_app_thread("thread-1", {"name": name})
+            with self.subTest(name=name), self.assertRaises(backend.WorkspaceError) as error:
+                backend.rename_chat_thread("thread-1", {"name": name})
             self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
 
 

@@ -28,7 +28,7 @@ from host.tools.tool import (
     OAuthStartConnectResult,
 )
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI
-from host.tools.shared.google import clip_text
+from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
     access_token_is_fresh,
@@ -64,12 +64,6 @@ IG_READ_POLICY = (
     "media data from Instagram and returns it to the host and active model context. "
     "Runs directly with no approval."
 )
-
-
-class ToolInputValidationError(ValueError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
 
 
 IG_OUTPUT_SCHEMA: JSONObject = {
@@ -173,7 +167,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and connect Kern",
             show_config=True,
-            description="Expand Instagram in Internet Access and Tools. Save the Instagram App ID as INSTAGRAM_APP_ID and Instagram App Secret as INSTAGRAM_APP_SECRET, enable the tool, choose Connect, sign in to the intended professional account, and approve the displayed scopes. The row shows the connected username automatically; confirm it matches the username recorded above.",
+            description="Open Instagram under Home > Integrations. Save the Instagram App ID as INSTAGRAM_APP_ID and Instagram App Secret as INSTAGRAM_APP_SECRET, enable the tool, choose Connect, sign in to the intended professional account, and approve the displayed scopes. The page shows the connected username automatically; confirm it matches the username recorded above.",
         ),
     ),
     data_summary=DataSummary(
@@ -444,40 +438,6 @@ def _short_lived_token(token_response: JSONObject) -> str:
 IG_CREDENTIALS = InstagramCredentialStore()
 
 
-class InstagramCredentialFlow(CredentialFlow):
-    def start_connect(self, params: OAuthStartConnectParams, api: HostAPI) -> OAuthStartConnectResult:
-        return IG_CREDENTIALS.start_connect(params, api)
-
-    def complete_connect(self, params: OAuthCompleteConnectParams, api: HostAPI) -> OAuthCompleteConnectResult:
-        return IG_CREDENTIALS.complete_connect(params, api)
-
-    def disconnect(self, api: HostAPI) -> None:
-        IG_CREDENTIALS.disconnect(api)
-
-    def connection_status(self, api: HostAPI) -> ConnectionStatus:
-        return IG_CREDENTIALS.connection_status(api)
-
-
-def _int_field(tool_input: JSONObject, key: str, *, default: int, low: int, high: int) -> int:
-    value = tool_input.get(key)
-    if value is None:
-        return default
-    if isinstance(value, str) and value.strip().isascii() and value.strip().isdecimal():
-        digits = value.strip()
-        if len(digits) > 10:
-            raise ToolInputValidationError(
-                f"Instagram tool_input.{key} must be between {low} and {high}."
-            )
-        value = int(digits)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ToolInputValidationError(f"Instagram tool_input.{key} must be an integer or digit string.")
-    if not low <= value <= high:
-        raise ToolInputValidationError(
-            f"Instagram tool_input.{key} must be between {low} and {high}."
-        )
-    return value
-
-
 def _profile_result(me: JSONObject) -> JSONObject:
     return {
         "status": "success_executed",
@@ -494,7 +454,7 @@ def _recent_media(access_token: str, tool_input: JSONObject) -> JSONObject:
     extra = set(tool_input) - {"limit"}
     if extra:
         raise ToolInputValidationError("Instagram recent media tool input only supports limit.")
-    limit = _int_field(tool_input, "limit", default=10, low=1, high=25)
+    limit = int_field(tool_input, "limit", provider="Instagram", default=10, low=1, high=25)
     response = _graph_get(
         access_token,
         "/me/media",
@@ -727,7 +687,8 @@ class InstagramTool:
 
     @property
     def credentials(self) -> CredentialFlow:
-        return InstagramCredentialFlow()
+        # InstagramCredentialStore implements the CredentialFlow protocol directly.
+        return IG_CREDENTIALS
 
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
         try:

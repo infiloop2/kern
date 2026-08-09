@@ -206,7 +206,7 @@ class ToolsSocketTests(ToolsApiTestCase):
         server = tools_api.ToolsServer(
             socket_path,
             agent_uids if agent_uids is not None else frozenset({os.getuid()}),
-            admin_uids,
+            admin_uids if admin_uids is not None else frozenset({os.getuid()}),
         )
         self.last_server = server
         import threading
@@ -434,6 +434,13 @@ class ToolsSocketTests(ToolsApiTestCase):
         spool = Path(socket_path).parent / "assets"
         self.assertFalse(spool.exists() and any(spool.iterdir()))
 
+    def test_streaming_result_rejects_invalid_filename_metadata(self) -> None:
+        for filename in ("", ".", "../escape.mp4", "nested/clip.mp4", "bad\nname.mp4", "x" * 256):
+            with self.subTest(filename=filename), self.assertRaisesRegex(ValueError, "invalid filename"):
+                tools_api.ToolsRequestHandler._validated_stream_metadata(
+                    OpenedStreamingAsset(filename, "video/mp4", 1, io.BytesIO(b"v"))
+                )
+
     def test_streaming_result_removes_partial_file_when_source_ends_early(self) -> None:
         socket_path = self.start_server()
 
@@ -490,6 +497,12 @@ class McpShimTests(ToolsApiTestCase):
     def start_shim(self, socket_path: str) -> subprocess.Popen[str]:
         env = os.environ.copy()
         env["KERN_TOOLS_SOCKET"] = socket_path
+        # Keep this unit test independent of sockets on the developer host.
+        # Tests that do not start an agent-network service must observe the
+        # same unavailable-socket behavior locally and in CI.
+        env["KERN_AGENT_NETWORK_SOCKET"] = str(
+            Path(socket_path).parent / "missing-agent-network.sock"
+        )
         env["PYTHONPATH"] = str(REPO_ROOT)
         env["HOME"] = str(Path(socket_path).parent)
         shim = subprocess.Popen(
@@ -555,7 +568,7 @@ class McpShimTests(ToolsApiTestCase):
         self.assertIn("check_tool_approval", names)
         self.assertIn("stage_image", names)
         self.assertIn("stage_video", names)
-        self.assertIn("app_api", names)
+        self.assertIn("workspace_api", names)
         self.assertTrue(all("inputSchema" in tool for tool in listed["result"]["tools"]))
         by_name = {tool["name"]: tool for tool in listed["result"]["tools"]}
         save_schema = by_name["runway_save_video"]["inputSchema"]
@@ -652,10 +665,17 @@ class McpShimTests(ToolsApiTestCase):
         unknown = self.rpc(shim, {"jsonrpc": "2.0", "id": 6, "method": "bogus/method"})
         self.assertEqual(unknown["error"]["code"], -32601)
 
-    def test_shim_lists_only_stable_app_api_when_tools_socket_is_missing(self) -> None:
+    def test_shim_lists_only_stable_workspace_api_when_tools_socket_is_missing(self) -> None:
         shim = self.start_shim("/nonexistent/tools.sock")
         listed = self.rpc(shim, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        self.assertEqual([tool["name"] for tool in listed["result"]["tools"]], ["app_api"])
+        self.assertEqual(
+            [tool["name"] for tool in listed["result"]["tools"]],
+            [
+                "search_conversation_history",
+                "read_thread_history",
+                "workspace_api",
+            ],
+        )
         called = self.rpc(shim, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "x", "arguments": {}}})
         self.assertTrue(called["result"]["isError"])
 

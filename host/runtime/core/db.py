@@ -1,18 +1,20 @@
 """Connection layer for the local host-state Postgres database.
 
-The admin, proxy, tools, and app processes use this module under distinct
-database roles. They connect over the local Unix socket through the in-repo
+The admin, proxy, tools, network-introspection, host-error, and Workspace processes
+use this module under peer-authenticated database roles. They connect over the
+local Unix socket through the in-repo
 protocol client (``host.runtime.core.pgclient``; standard library only, with no
 driver dependency) and authenticate with Postgres ``peer`` auth. Access
 therefore starts from the operating system identity, then table and schema
 grants narrow each non-owner role. No role exists for the agent user,
 ``pg_hba.conf`` rejects every unlisted peer, and no database passwords exist.
 
-The admin role owns host tables; the proxy writes network events and held
-pushes; the tools role writes tool credentials, approvals, and events; and
-each app role owns only its schema. MVCC transactions, constraints, and
-conditional updates carry cross-process correctness. Schema and app
-migrations serialize under advisory locks.
+The admin role owns every table; the proxy writes network events and
+held pushes; the tools role writes tool credentials, approvals, and events;
+the network-introspection role reads its narrow policy view; and the Workspace role
+has DML-only access to five named tables in `public`. MVCC transactions,
+constraints, and conditional updates carry cross-process correctness. Schema
+migrations serialize under an advisory lock.
 
 Connections are pooled process-wide. A caller gets a connection for exactly
 the span of one ``transaction()`` block; nested ``transaction()`` blocks on the
@@ -47,11 +49,11 @@ DEFAULT_DB_NAME = "kern_admin"
 # over loopback; a couple of warm connections cover the request handler plus
 # the worker threads without holding dozens of server slots.
 POOL_LIMIT = 4
-# Cap on this process's *active* database sessions. The three core database
-# clients and two bundled apps use at most 5 x 14 = 70 of the server's 100
-# slots, leaving 30 for operator access, the superuser reserve, and deployment
-# work. Sessions are millisecond-lived (slow work happens outside
-# transactions), so a burst,
+# Cap on this process's *active* database sessions. The six long-running
+# database client processes use at most 6 x 14 = 84 of the server's 300 slots,
+# leaving ample room for operator access, the superuser reserve, deployment
+# work, and future fixed host services. Sessions are millisecond-lived (slow
+# work happens outside transactions), so a burst,
 # such as the proxy's 64 concurrent handlers each logging a decision, queues
 # here briefly instead of failing at the server.
 # Must be at least 2: a nested read inside a mutation holds a second session.
@@ -69,13 +71,11 @@ def jsonb(value: Any) -> pgclient.Jsonb:
     return pgclient.Jsonb(value)
 
 
-def connect_kwargs(*, user: str | None = None) -> dict[str, Any]:
+def connect_kwargs() -> dict[str, Any]:
     kwargs: dict[str, Any] = {"dbname": os.environ.get("KERN_DB_NAME", DEFAULT_DB_NAME)}
     if os.environ.get("KERN_DB_SOCKET_DIR"):
         kwargs["socket_dir"] = os.environ["KERN_DB_SOCKET_DIR"]
-    if user is not None:
-        kwargs["user"] = user
-    elif os.environ.get("KERN_DB_USER"):
+    if os.environ.get("KERN_DB_USER"):
         kwargs["user"] = os.environ["KERN_DB_USER"]
     return kwargs
 
@@ -97,7 +97,7 @@ def _checkout() -> pgclient.Connection:
         # A full server (operator psql sessions share its budget) surfaces as
         # one failed request with a clear error; the caller retries. The
         # semaphore above is the real backpressure.
-        return pgclient.connect(**connect_kwargs())
+        return pgclient.Connection(**connect_kwargs())
     except BaseException:
         _ACTIVE.release()
         raise
@@ -133,14 +133,11 @@ def close_pool() -> None:
 
 
 @contextmanager
-def transaction(*, user: str | None = None) -> Iterator[pgclient.Cursor]:
+def transaction() -> Iterator[pgclient.Cursor]:
     """One database transaction: yields a cursor, commits on normal exit,
     rolls back on exception. Reentrant per thread by taking a second
-    connection, never by nesting on one connection. A ``user`` override (app
-    schema migrations) bypasses the pool: it opens a dedicated connection and
-    closes it on exit — it runs a handful of times per deploy."""
-    pooled = user is None
-    conn = _checkout() if pooled else pgclient.connect(**connect_kwargs(user=user))
+    connection, never by nesting on one connection."""
+    conn = _checkout()
     try:
         conn.execute("BEGIN")
         with pgclient.Cursor(conn) as cur:
@@ -154,7 +151,4 @@ def transaction(*, user: str | None = None) -> Iterator[pgclient.Cursor]:
             _close_quietly(conn)
         raise
     finally:
-        if pooled:
-            _checkin(conn)
-        else:
-            _close_quietly(conn)
+        _checkin(conn)

@@ -29,6 +29,7 @@ from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult, ApprovalResult
 from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.shared.inputs import ToolInputValidationError, schema as _schema
 from host.tools.shared.rsa_pkcs1 import (
     RSAKeyError,
     RSAPrivateKey,
@@ -77,12 +78,6 @@ IBKR_UNAUTHORIZED_MESSAGE = (
 )
 
 
-class ToolInputValidationError(ValueError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
 IBKR_OUTPUT_SCHEMA: JSONObject = {
     "type": "object",
     "required": ["status"],
@@ -96,10 +91,6 @@ _ACCOUNT_INPUT: JSONObject = {
         "description": "IBKR account id (e.g. U1234567); any account the connected username can access. Call get_accounts to list them.",
     }
 }
-
-
-def _schema(properties: JSONObject) -> JSONObject:
-    return {"type": "object", "properties": properties, "additionalProperties": False}
 
 
 MANIFEST = ToolManifest(
@@ -191,7 +182,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Paste the six values into Kern",
             show_config=True,
-            description="Expand Interactive Brokers in Internet Access and Tools. Set IBKR_OAUTH_CONSUMER_KEY to the nine-letter key, IBKR_OAUTH_ACCESS_TOKEN and IBKR_OAUTH_ACCESS_TOKEN_SECRET to the portal values, IBKR_SIGNATURE_KEY to the complete private_signature.pem contents, IBKR_ENCRYPTION_KEY to the complete private_encryption.pem contents, and IBKR_DH_PRIME to the cleaned hex prime. Save each write-only value, then enable the tool. Kern has no IBKR Connect button; its side is only this value paste and request signing.",
+            description="Open Interactive Brokers under Home > Integrations. Set IBKR_OAUTH_CONSUMER_KEY to the nine-letter key, IBKR_OAUTH_ACCESS_TOKEN and IBKR_OAUTH_ACCESS_TOKEN_SECRET to the portal values, IBKR_SIGNATURE_KEY to the complete private_signature.pem contents, IBKR_ENCRYPTION_KEY to the complete private_encryption.pem contents, and IBKR_DH_PRIME to the cleaned hex prime. Save each write-only value, then enable the tool. Kern has no IBKR Connect button; its side is only this value paste and request signing.",
         ),
     ),
     data_summary=DataSummary(

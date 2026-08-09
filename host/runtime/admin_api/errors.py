@@ -3,7 +3,7 @@
 ``ApiError`` lives here, not in ``admin_api``, so it is a single class no matter
 how ``admin_api`` is loaded. The admin service runs as ``python3 -m
 host.runtime.admin_api.service`` (module name ``__main__``), while modules it dispatches
-to -- ``tools_admin_api``, ``app_backend_admin_api`` -- reach it with ``from
+to -- ``tools_admin_api``, ``workspace_api`` -- reach it with ``from
 host.runtime import admin_api`` (module name ``host.runtime.admin_api.service``), which is
 a second instance. If each defined its own ``ApiError``, an ``ApiError`` raised in
 one and caught by the other's ``except ApiError`` would not match, and the request

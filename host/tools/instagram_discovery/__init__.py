@@ -10,11 +10,13 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
-from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
-from host.tools.results import ActionExecuted, ActionFailed, ActionResult, ApprovalResult
+from host.tools.results import ActionExecuted, ActionFailed, ActionResult
+from host.tools.shared.inputs import bounded_int, clip as _text
 from host.tools.shared.web import WebRequestError, json_request
+from host.tools.tool import Tool
 
 API_ORIGIN = "https://api.scrapecreators.com"
 SEARCH_REELS_PATH = "/v2/instagram/reels/search"
@@ -236,7 +238,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and enable Instagram Discovery",
             show_config=True,
-            description="Copy the API key from the ScrapeCreators dashboard. Expand Instagram Discovery in Internet Access and Tools, save it as SCRAPECREATORS_API_KEY, then enable the tool. There is no Instagram OAuth, cookie, password, or account connection step; never paste an Instagram session into this field.",
+            description="Copy the API key from the ScrapeCreators dashboard. Open Instagram Discovery under Home > Integrations, save it as SCRAPECREATORS_API_KEY, then enable the tool. There is no Instagram OAuth, cookie, password, or account connection step; never paste an Instagram session into this field.",
         ),
     ),
     data_summary=DataSummary(
@@ -284,10 +286,6 @@ MANIFEST = ToolManifest(
 )
 
 
-def _text(value: object, *, limit: int = 2_048) -> str:
-    return value.strip()[:limit] if isinstance(value, str) else ""
-
-
 def _integer(value: object) -> str:
     if isinstance(value, bool):
         return "0"
@@ -319,23 +317,6 @@ def _number(value: object) -> str:
             return "0"
         return str(number) if math.isfinite(number) else "0"
     return "0"
-
-
-def _bounded_int(value: JSONValue | None, *, name: str, default: int, maximum: int) -> int:
-    if value is None or value == "":
-        return default
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise ValueError(f"{name} must be an integer from 1 to {maximum}.")
-    if isinstance(value, str):
-        digits = value.strip()
-        if not digits.isascii() or not digits.isdecimal() or len(digits) > 3:
-            raise ValueError(f"{name} must be an integer from 1 to {maximum}.")
-        number = int(digits)
-    else:
-        number = value
-    if not 1 <= number <= maximum:
-        raise ValueError(f"{name} must be an integer from 1 to {maximum}.")
-    return number
 
 
 def _date_window(value: JSONValue | None) -> str:
@@ -621,7 +602,7 @@ def _list_result(response: JSONObject, *, limit: int, label: str) -> ActionExecu
     return ActionExecuted(result)
 
 
-class InstagramDiscoveryTool:
+class InstagramDiscoveryTool(Tool):
     @property
     def manifest(self) -> ToolManifest:
         return MANIFEST
@@ -633,9 +614,9 @@ class InstagramDiscoveryTool:
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
         try:
             api_key = api.config["SCRAPECREATORS_API_KEY"]
-            limit = _bounded_int(tool_input.get("limit"), name="limit", default=10, maximum=MAX_RESULTS)
+            limit = bounded_int(tool_input.get("limit"), name="limit", default=10, minimum=1, maximum=MAX_RESULTS)
             if action == "search_reels":
-                params = {"query": api.outbound.guard_request_parameter_string(_query(tool_input.get("query"))), "page": str(_bounded_int(tool_input.get("page"), name="page", default=1, maximum=100))}
+                params = {"query": api.outbound.guard_request_parameter_string(_query(tool_input.get("query"))), "page": str(bounded_int(tool_input.get("page"), name="page", default=1, minimum=1, maximum=100))}
                 date_posted = _date_window(tool_input.get("date_posted"))
                 if date_posted:
                     params["date_posted"] = date_posted
@@ -685,10 +666,6 @@ class InstagramDiscoveryTool:
             return ActionFailed(str(exc) or "Instagram Discovery request failed.")
         except Exception:
             return ActionFailed("Instagram Discovery request failed.")
-
-    def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
-        del approval, api
-        return ActionFailed("Instagram Discovery has no approval-gated actions.")
 
 
 BUNDLED_TOOL = InstagramDiscoveryTool()

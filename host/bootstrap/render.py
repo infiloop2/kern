@@ -20,15 +20,12 @@ from host.constants import (
     ADMIN_API_PORT,
     AGENT_PREVIEW_PORT_BASE,
     AGENT_PREVIEW_PORT_COUNT,
-    APP_BACKEND_ADMIN_SOCKET_PATH,
-    APP_BACKEND_GROUP,
-    APP_BACKEND_GROUP_GID,
-    APP_PORT_BASE,
+    WORKSPACE_ADMIN_GROUP_GID,
+    WORKSPACE_PORT,
     PROXY_PORT,
     PUBLIC_GITHUB_REPOSITORY,
     SERVICE_ACCOUNTS,
 )
-from host.runtime.core import app_platform
 
 TEMPLATE_DIR = Path(__file__).resolve().parent
 
@@ -119,7 +116,7 @@ def _service_account_constants() -> str:
         prefix = name.upper().replace("-", "_")
         lines.append(f"{prefix}_UID={uid}")
         lines.append(f"{prefix}_GID={uid}")
-    lines.append(f"KERN_APP_BACKENDS_GID={APP_BACKEND_GROUP_GID}")
+    lines.append(f"KERN_WORKSPACE_API_GID={WORKSPACE_ADMIN_GROUP_GID}")
     return "\n".join(lines)
 
 
@@ -160,7 +157,7 @@ def _agent_preview_nftables_rules() -> str:
       compromised service that bound a preview port from completing a handshake
       the agent originated — which would let a prompt-injected agent POST
       workspace data straight to that service, bypassing the policy proxy. It
-      also subsumes the per-app source-port drop.
+      also subsumes the workspace source-port drop.
 
     Net: only agent<->agent traffic and the operator's forward touch the range;
     every other principal is denied both directions before the broad accept."""
@@ -172,7 +169,7 @@ def _agent_preview_nftables_rules() -> str:
         "    # may reach a preview server. Every other principal is dropped in both",
         "    # directions (dport: nobody else may dial the range; sport: nobody but",
         "    # the agent may answer on it) before the broad loopback accept, so no",
-        "    # service account, app, or future user can reach an agent preview",
+        "    # service account or future user can reach an agent preview",
         "    # server or receive a connection the agent originated.",
         f'    oif lo tcp dport {first}-{last} meta skuid "kern-agent" accept',
         f'    oif lo ct state established,related tcp sport {first}-{last} meta skuid "kern-agent" accept',
@@ -183,155 +180,14 @@ def _agent_preview_nftables_rules() -> str:
 
 
 def _render_bootstrap() -> str:
-    rendered = (
+    return (
         BOOTSTRAP_TEMPLATE
         .replace("@ADMIN_PORT@", str(ADMIN_API_PORT))
-        .replace("@APP_PORT_BASE@", str(APP_PORT_BASE))
+        .replace("@WORKSPACE_PORT@", str(WORKSPACE_PORT))
         .replace("@PROXY_PORT@", str(PROXY_PORT))
         .replace("@AGENT_PREVIEW_NFTABLES_RULES@", _agent_preview_nftables_rules())
         .replace("@SERVICE_ACCOUNT_CONSTANTS@", _service_account_constants())
     )
-    return _render_app_bootstrap(rendered)
-
-
-def _render_app_bootstrap(template: str) -> str:
-    apps = app_platform.migration_apps()
-
-    def env_prefix(app_id: str) -> str:
-        return app_id.upper()
-
-    def port_name(app_id: str) -> str:
-        return f"APP_{env_prefix(app_id)}_PORT"
-
-    uid_lines = [
-        "# App package host_slot values generate stable UID/GID assignments in",
-        "# the reserved 48000-48099 range. Existing slots must not change.",
-    ]
-    port_lines = [
-        "# App ports are generated from the same package-local host_slot values.",
-    ]
-    ensure_group_lines: list[str] = []
-    ensure_user_lines: list[str] = []
-    ensure_group_member_lines: list[str] = []
-    pg_hba_lines: list[str] = []
-    role_lines: list[str] = []
-    schema_grant_lines: list[str] = []
-    connect_grant_lines: list[str] = []
-    migration_lines: list[str] = []
-    nftables_lines: list[str] = []
-    unit_blocks: list[str] = []
-    enable_start_lines: list[str] = []
-
-    for app in apps:
-        allocation = app.allocation
-        env = env_prefix(app.id)
-        uid_lines.extend([
-            f"KERN_APP_{env}_UID={allocation.uid}",
-            f"KERN_APP_{env}_GID={allocation.gid}",
-        ])
-        ensure_group_lines.append(f"ensure_group {app.linux_user} \"$KERN_APP_{env}_GID\"")
-        ensure_user_lines.append(
-            f"ensure_user {app.linux_user} \"$KERN_APP_{env}_UID\" {app.linux_user} /nonexistent"
-        )
-        ensure_group_member_lines.append(
-            f"ensure_group_member {app.linux_user} {APP_BACKEND_GROUP}"
-        )
-        pg_hba_lines.append(f"local  kern_admin  {app.linux_user}  peer")
-        role_lines.extend([
-            f"  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{app.linux_user}') THEN",
-            f"    CREATE ROLE \"{app.linux_user}\" LOGIN;",
-            "  END IF;",
-        ])
-        schema_grant_lines.append(
-            f"  -c \"CREATE SCHEMA IF NOT EXISTS {app.db_schema} AUTHORIZATION \\\"{app.db_role}\\\";\" \\"
-        )
-        connect_grant_lines.append(
-            f"  -c \"GRANT CONNECT ON DATABASE kern_admin TO \\\"{app.db_role}\\\";\""
-        )
-        pending_var = f"app_{app.id}_pending"
-        migration_lines.extend([
-            f"{pending_var}=\"$(runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.app_migrate pending {app.id})\"",
-            "while IFS= read -r app_migration_version; do",
-            "  [ -n \"$app_migration_version\" ] || continue",
-            f"  runuser -u {app.linux_user} -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.app_migrate apply-sql {app.id} \"$app_migration_version\"",
-            f"  runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.app_migrate record {app.id} \"$app_migration_version\"",
-            f"done <<< \"${pending_var}\"",
-        ])
-        if isinstance(app, app_platform.DeprecatedAppManifest):
-            continue
-
-        if not isinstance(app, app_platform.AppManifest):
-            raise TypeError(f"unsupported app package: {app.id}")
-        backend_entrypoint = app.backend_entrypoint.relative_to(app.package_dir)
-        port = port_name(app.id)
-        port_lines.append(f"{port}={app.port}")
-        # New connections to an app port are allowed from exactly two uids:
-        # the admin service (browser-bridge reverse proxy) and the agent-app
-        # service (agent app_api reverse proxy). Everything else — agent
-        # runtimes, other app users, ordinary local users — hits the drop.
-        # (An app that bound a port in the agent preview range cannot answer an
-        # agent-originated connection there: the preview block above drops all
-        # non-agent source ports in the range before these app rules, so no
-        # unmediated agent<->app channel exists. See _agent_preview_nftables_rules.)
-        nftables_lines.extend([
-            f"    oif lo ct state established,related meta skuid \"{app.linux_user}\" accept",
-            f"    oif lo meta skuid \"{app.linux_user}\" drop",
-            f"    oif lo tcp dport ${port} meta skuid \"kern-admin\" accept",
-            f"    oif lo tcp dport ${port} meta skuid \"kern-agent-app\" accept",
-            f"    oif lo tcp dport ${port} drop",
-        ])
-        unit_blocks.append(
-            "\n".join([
-                f"cat > /etc/systemd/system/{app.service_name} <<'UNIT'",
-                "[Unit]",
-                f"Description=Kern App: {app.title}",
-                "After=network-online.target kern-admin-api.service kern-postgres.service",
-                "Wants=network-online.target kern-admin-api.service kern-postgres.service",
-                "StartLimitIntervalSec=0",
-                "",
-                "[Service]",
-                f"User={app.linux_user}",
-                "Slice=kern_app.slice",
-                "UMask=0077",
-                "Environment=PYTHONPATH=/opt/kern-host",
-                "Environment=KERN_APP_HOST=127.0.0.1",
-                f"Environment=KERN_APP_PORT={app.port}",
-                f"Environment=KERN_APP_DB_SCHEMA={app.db_schema}",
-                f"Environment=KERN_APP_ADMIN_API_SOCKET={APP_BACKEND_ADMIN_SOCKET_PATH}",
-                f"WorkingDirectory=/opt/kern-host/host/apps/{app.id}",
-                f"ExecStart=/usr/bin/python3 /opt/kern-host/host/apps/{app.id}/{backend_entrypoint}",
-                f"ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit {app.service_name.removesuffix('.service')}",
-                "Restart=always",
-                "RestartSec=3",
-                "",
-                "[Install]",
-                "WantedBy=multi-user.target",
-                "UNIT",
-            ])
-        )
-        enable_start_lines.extend([
-            f"systemctl enable {app.service_name}",
-            f"systemctl start {app.service_name}",
-        ])
-
-    replacements = {
-        "@APP_UID_GID_CONSTANTS@": "\n".join(uid_lines),
-        "@APP_PORT_CONSTANTS@": "\n".join(port_lines),
-        "@APP_ENSURE_GROUPS@": "\n".join(ensure_group_lines),
-        "@APP_ENSURE_USERS@": "\n".join(ensure_user_lines),
-        "@APP_ENSURE_GROUP_MEMBERS@": "\n".join(ensure_group_member_lines),
-        "@APP_PG_HBA_LINES@": "\n".join(pg_hba_lines),
-        "@APP_ROLE_SQL@": "\n".join(role_lines),
-        "@APP_POSTGRES_SCHEMA_GRANTS@": "\n".join(schema_grant_lines),
-        "@APP_POSTGRES_CONNECT_GRANTS@": " \\\n".join(connect_grant_lines),
-        "@APP_MIGRATION_COMMANDS@": "\n".join(migration_lines),
-        "@APP_NFTABLES_RULES@": "\n".join(nftables_lines),
-        "@APP_SYSTEMD_UNITS@": "\n\n".join(unit_blocks),
-        "@APP_ENABLE_START_COMMANDS@": "\n".join(enable_start_lines),
-    }
-    for placeholder, value in replacements.items():
-        template = template.replace(placeholder, value)
-    return template
 
 
 # SSH delivery, stage 1 EC2 user data: base-account hardening, the single-use

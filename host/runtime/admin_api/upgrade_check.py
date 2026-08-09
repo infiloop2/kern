@@ -32,10 +32,7 @@ def status() -> dict[str, Any]:
     if current is None:
         latest = None
     elif latest is not None:
-        try:
-            available = compare_versions(latest, current) > 0
-        except ValueError:
-            latest = None
+        available = compare_versions(latest, current) > 0
     return {"available": available, "latest": latest}
 
 

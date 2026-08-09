@@ -16,9 +16,10 @@ from host.tools.manifest import (
     SetupStep,
     ToolManifest,
 )
-from host.tools.results import ActionExecuted, ActionFailed, ActionResult, ApprovalResult
-from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.results import ActionExecuted, ActionFailed, ActionResult
+from host.tools.host_api import HostAPI
 from host.tools.shared.web import WebRequestError, json_request
+from host.tools.tool import Tool
 
 BRAVE_LLM_CONTEXT_ENDPOINT = "https://api.search.brave.com/res/v1/llm/context"
 DEFAULT_COUNT = 8
@@ -127,7 +128,7 @@ MANIFEST = ToolManifest(
         ),
         SetupStep(
             title="Configure and enable Brave Search",
-            description="Expand Brave Search in Internet Access and Tools, save the token under the configuration key below, then enable the tool. There is no separate OAuth connection step. Run one web-grounded request and confirm a successful search_web call in the Tool audit log.",
+            description="Open Brave Search under Home > Integrations, save the token under the configuration key below, then enable the tool. There is no separate OAuth connection step. Run one web-grounded request and confirm a successful search_web call in Tool audit under Home.",
             show_config=True,
         ),
     ),
@@ -226,7 +227,7 @@ def _grounding_results(raw_response: dict[str, Any]) -> list[JSONObject]:
     return results
 
 
-class BraveSearchTool:
+class BraveSearchTool(Tool):
     @property
     def manifest(self) -> ToolManifest:
         return MANIFEST
@@ -252,10 +253,6 @@ class BraveSearchTool:
             return ActionExecuted(result)
         except Exception as exc:
             return ActionFailed(str(exc) or "Brave Search tool request failed.")
-
-    def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
-        del approval, api
-        return ActionFailed("Brave Search has no approval-gated actions.")
 
 
 # The instance the host discovers (see host.runtime.tools.tools_host).

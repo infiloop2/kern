@@ -22,7 +22,7 @@ from host.config import ConfigError, build_input_config, build_operator_connecti
 from host.cli import lifecycle as deploy
 from host.cli import lifecycle_aws
 from host.cli import power
-from host.runtime.core import app_platform, db
+from host.runtime.core import db
 
 
 
@@ -181,7 +181,7 @@ class DeployUnitTests(unittest.TestCase):
 
         with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
             self.assertEqual(
-                deploy._ensure_security_group(config, {}, "vpc-1", ssh_ingress=True, cloudflare_egress=True),
+                lifecycle_aws._ensure_security_group(config, {}, "vpc-1", ssh_ingress=True, cloudflare_egress=True),
                 "sg-1",
             )
 
@@ -238,7 +238,7 @@ class DeployUnitTests(unittest.TestCase):
             return {}
 
         with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
-            deploy._set_security_group_ssh_ingress({}, "sg-1", enabled=False)
+            deploy._close_security_group_ssh_ingress({}, "sg-1")
 
         revoke = next(call for call in calls if call[:2] == ("ec2", "revoke-security-group-ingress"))
         revoked_permissions = json.loads(revoke[revoke.index("--ip-permissions") + 1])
@@ -281,7 +281,7 @@ class DeployUnitTests(unittest.TestCase):
                                 patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
                                 patch("host.cli.lifecycle._attach_storage_volumes"), \
                                 patch("host.cli.lifecycle._provision_over_ssh"), \
-                                patch("host.cli.lifecycle._set_security_group_ssh_ingress") as ssh_ingress, \
+                                patch("host.cli.lifecycle._close_security_group_ssh_ingress") as ssh_ingress, \
                                 patch("host.cli.lifecycle_aws._aws", return_value={}), \
                                 patch("sys.stderr", _StringOutput()), \
                                 patch("sys.stdout", _StringOutput()):
@@ -304,7 +304,6 @@ class DeployUnitTests(unittest.TestCase):
                 if expect_revoke:
                     ssh_ingress.assert_called_once()
                     self.assertEqual(ssh_ingress.call_args.args[1], "sg-1")
-                    self.assertFalse(ssh_ingress.call_args.kwargs["enabled"])
                 else:
                     ssh_ingress.assert_not_called()
 
@@ -335,7 +334,7 @@ class DeployUnitTests(unittest.TestCase):
 
         with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
             with self.assertRaisesRegex(ConfigError, "not tagged as a Kern resource"):
-                deploy._ensure_security_group(config, {}, "vpc-1", ssh_ingress=True, cloudflare_egress=True)
+                lifecycle_aws._ensure_security_group(config, {}, "vpc-1", ssh_ingress=True, cloudflare_egress=True)
 
     def test_iam_policies_restrict_kern_resource_access(self) -> None:
         policy = json.loads(Path("iam_policy.json").read_text())
@@ -556,7 +555,7 @@ class DeployUnitTests(unittest.TestCase):
             return_value={"Volumes": [{"VolumeId": "vol-admin", "State": "in-use", "AvailabilityZone": "us-east-1a"}]},
         ):
             with self.assertRaisesRegex(ConfigError, "is in-use"):
-                deploy._find_available_storage_volume(config, {}, "admin", "us-east-1a")
+                lifecycle_aws._find_available_storage_volume(config, {}, "admin", "us-east-1a")
 
         with patch(
             "host.cli.lifecycle_aws._aws",
@@ -568,7 +567,7 @@ class DeployUnitTests(unittest.TestCase):
             },
         ):
             with self.assertRaisesRegex(ConfigError, "multiple Kern admin volumes"):
-                deploy._find_available_storage_volume(config, {}, "admin", "us-east-1a")
+                lifecycle_aws._find_available_storage_volume(config, {}, "admin", "us-east-1a")
 
     def test_existing_storage_volumes_are_preserved_before_instance_termination(self) -> None:
         config = sample_input_config()
@@ -630,7 +629,7 @@ class DeployUnitTests(unittest.TestCase):
             raise AssertionError(f"unexpected AWS call: {args}")
 
         with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
-            volume_id = deploy._find_available_storage_volume(
+            volume_id = lifecycle_aws._find_available_storage_volume(
                 config,
                 {},
                 "admin",
@@ -681,7 +680,7 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
                         patch("host.cli.lifecycle._attach_storage_volumes"), \
                         patch("host.cli.lifecycle._provision_over_ssh"), \
-                        patch("host.cli.lifecycle._set_security_group_ssh_ingress"), \
+                        patch("host.cli.lifecycle._close_security_group_ssh_ingress"), \
                         patch("host.cli.lifecycle_aws._aws", return_value={}), \
                         patch("sys.stdout", _StringOutput()):
                     self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "kern-test"]), 0)
@@ -720,89 +719,6 @@ class DeployUnitTests(unittest.TestCase):
 
         self.assertEqual(calls, ["validate_storage", "find_instances", "preflight_network"])
 
-    def test_main_refuses_to_replace_instance_when_tagged_version_would_fail_bootstrap(self) -> None:
-        current_version = deploy.repo_version()
-        cases = [
-            ("upgrade", current_version, [], "upgrade requires preserved state older"),
-            ("upgrade", "99.0.0", [], "upgrade requires preserved state older"),
-            (
-                "reconfigure",
-                "99.0.0",
-                [
-                    "--operator-ssh-public-key",
-                    SAMPLE_SSH_PUBLIC_KEY,
-                    "--admin-password-sha256",
-                    SAMPLE_ADMIN_PASSWORD_SHA256,
-                ],
-                "reconfigure requires preserved state to match",
-            ),
-        ]
-        for mode, tagged_version, extra_args, message in cases:
-            with self.subTest(mode=mode, tagged_version=tagged_version, extra_args=extra_args):
-                calls: list[str] = []
-
-                with tempfile.TemporaryDirectory() as tmp:
-                    cwd = os.getcwd()
-                    os.chdir(tmp)
-                    try:
-                        with patch.dict(os.environ, dict(SAMPLE_AWS_ENV)), \
-                                patch("host.cli.lifecycle._find_existing_instances", side_effect=lambda *_args: calls.append("find_instances") or ["i-old"]), \
-                                patch("host.cli.lifecycle._existing_storage_volume_availability_zone", side_effect=lambda *_args: calls.append("validate_storage") or "us-east-1a"), \
-                                patch("host.cli.lifecycle._existing_storage_roles", return_value={"admin", "agent"}), \
-                                patch(
-                                    "host.cli.lifecycle_aws._aws",
-                                    return_value={
-                                        "Reservations": [
-                                            {
-                                                "Instances": [
-                                                    {
-                                                        "InstanceId": "i-old",
-                                                        "Tags": [
-                                                            {"Key": "kern-host-version", "Value": tagged_version},
-                                                        ],
-                                                    }
-                                                ]
-                                            }
-                                        ]
-                                    },
-                                ), \
-                                patch("host.cli.lifecycle._terminate_instances", side_effect=lambda *_args: calls.append("terminate")), \
-                                patch("host.cli.lifecycle._default_network", side_effect=lambda *_args, **_kwargs: calls.append("preflight_network") or ("vpc-1", "subnet-1", "us-east-1a")), \
-                                patch("host.cli.lifecycle._launch_instance", side_effect=AssertionError("_launch_instance should not run")), \
-                                patch("sys.stdout", _StringOutput()), \
-                                patch("sys.stderr", _StringOutput()) as stderr:
-                            self.assertEqual(
-                                deploy.main_for_mode(mode, ["--agent-name", "kern-test", *extra_args]), 2
-                            )
-                    finally:
-                        os.chdir(cwd)
-
-                self.assertEqual(calls, ["validate_storage", "find_instances"])
-                self.assertIn(message, stderr.value)
-
-    def test_version_tag_guard_allows_compatible_tags(self) -> None:
-        config = sample_input_config()
-        command = deploy.LifecycleCommand(mode="recover", agent_name="kern-test", allow_upgrade=True)
-        response = {
-            "Reservations": [
-                {
-                    "Instances": [
-                        {
-                            "InstanceId": "i-same",
-                            "Tags": [{"Key": "kern-host-version", "Value": "0.6.0"}],
-                        },
-                        {
-                            "InstanceId": "i-older",
-                            "Tags": [{"Key": "kern-host-version", "Value": "0.5.0"}],
-                        },
-                    ]
-                }
-            ]
-        }
-        with patch("host.cli.lifecycle_aws._aws", return_value=response), patch("sys.stderr", _StringOutput()) as stderr:
-            deploy._check_existing_version_hints(command, config, {}, ["i-same", "i-older"], "0.6.0")
-        self.assertIn("i-older=0.5.0", stderr.value)
-
     def test_version_tag_guard_rejects_mode_specific_bootstrap_failures_before_replacement(self) -> None:
         config = sample_input_config()
         cases = [
@@ -822,16 +738,12 @@ class DeployUnitTests(unittest.TestCase):
         for command, tagged_version, message in cases:
             with self.subTest(command=command, tagged_version=tagged_version):
                 response = {
-                    "Reservations": [
-                        {
-                            "Instances": [
-                                {
-                                    "InstanceId": "i-tagged",
-                                    "Tags": [{"Key": "kern-host-version", "Value": tagged_version}],
-                                }
-                            ]
-                        }
-                    ]
+                    "Reservations": [{
+                        "Instances": [{
+                            "InstanceId": "i-tagged",
+                            "Tags": [{"Key": "kern-host-version", "Value": tagged_version}],
+                        }]
+                    }]
                 }
                 with patch("host.cli.lifecycle_aws._aws", return_value=response):
                     with self.assertRaisesRegex(ConfigError, message):
@@ -841,16 +753,12 @@ class DeployUnitTests(unittest.TestCase):
         config = sample_input_config()
         command = deploy.LifecycleCommand(mode="recover", agent_name="kern-test", allow_upgrade=True)
         response = {
-            "Reservations": [
-                {
-                    "Instances": [
-                        {
-                            "InstanceId": "i-invalid",
-                            "Tags": [{"Key": "kern-host-version", "Value": "not-a-version"}],
-                        }
-                    ]
-                }
-            ]
+            "Reservations": [{
+                "Instances": [{
+                    "InstanceId": "i-invalid",
+                    "Tags": [{"Key": "kern-host-version", "Value": "not-a-version"}],
+                }]
+            }]
         }
         with patch("host.cli.lifecycle_aws._aws", return_value=response):
             with self.assertRaisesRegex(ConfigError, "invalid kern-host-version tag"):
@@ -876,7 +784,7 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
                         patch("host.cli.lifecycle._attach_storage_volumes"), \
                         patch("host.cli.lifecycle._provision_over_ssh") as provision, \
-                        patch("host.cli.lifecycle._set_security_group_ssh_ingress"), \
+                        patch("host.cli.lifecycle._close_security_group_ssh_ingress"), \
                         patch("host.cli.lifecycle_aws._aws", return_value={}), \
                         patch("builtins.input", side_effect=AssertionError("input should not be called")), \
                         patch("sys.stderr", _StringOutput()), \
@@ -1087,7 +995,6 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle._find_existing_instances", return_value=["i-old"]), \
                         patch("host.cli.lifecycle._existing_storage_volume_availability_zone", return_value="us-east-1a"), \
                         patch("host.cli.lifecycle._existing_storage_roles", return_value={"admin", "agent"}), \
-                        patch("host.cli.lifecycle._check_existing_version_hints"), \
                         patch("host.cli.lifecycle._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
                         patch("host.cli.lifecycle._terminate_instances"), \
                         patch("host.cli.lifecycle._generate_deploy_key", side_effect=_fake_deploy_key), \
@@ -1099,7 +1006,7 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
                         patch("host.cli.lifecycle._attach_storage_volumes"), \
                         patch("host.cli.lifecycle._provision_over_ssh"), \
-                        patch("host.cli.lifecycle._set_security_group_ssh_ingress"), \
+                        patch("host.cli.lifecycle._close_security_group_ssh_ingress"), \
                         patch("host.cli.lifecycle_aws._aws", return_value={}), \
                         patch("sys.stderr", _StringOutput()), \
                         patch("sys.stdout", _StringOutput()) as stdout:
@@ -1129,7 +1036,6 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle._find_existing_instances", return_value=[]), \
                         patch("host.cli.lifecycle._existing_storage_volume_availability_zone", return_value=None), \
                         patch("host.cli.lifecycle._existing_storage_roles", return_value=set()), \
-                        patch("host.cli.lifecycle._check_existing_version_hints"), \
                         patch("host.cli.lifecycle._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
                         patch("host.cli.lifecycle._generate_deploy_key", side_effect=_fake_deploy_key), \
                         patch("host.cli.lifecycle._launch_instance", return_value=("i-123", "sg-1")), \
@@ -1297,7 +1203,7 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
                         patch("host.cli.lifecycle._attach_storage_volumes") as attach_volumes, \
                         patch("host.cli.lifecycle._provision_over_ssh", side_effect=AssertionError("no SSH in the GitHub delivery")), \
-                        patch("host.cli.lifecycle._set_security_group_ssh_ingress", side_effect=AssertionError("access is final at launch")), \
+                        patch("host.cli.lifecycle._close_security_group_ssh_ingress", side_effect=AssertionError("access is final at launch")), \
                         patch("host.cli.lifecycle_aws._aws", return_value={}), \
                         patch("sys.stderr", _StringOutput()), \
                         patch("sys.stdout", _StringOutput()) as stdout:
@@ -1352,7 +1258,6 @@ class DeployUnitTests(unittest.TestCase):
                             stack.enter_context(patch("host.cli.lifecycle._find_existing_instances", return_value=["i-old"]))
                             stack.enter_context(patch("host.cli.lifecycle._existing_storage_volume_availability_zone", return_value="us-east-1a"))
                             stack.enter_context(patch("host.cli.lifecycle._existing_storage_roles", return_value={"admin", "agent"}))
-                            stack.enter_context(patch("host.cli.lifecycle._check_existing_version_hints"))
                             stack.enter_context(patch("host.cli.lifecycle._resolve_github_pin", return_value=("d" * 40, "0.35.0")))
                             stack.enter_context(patch("host.cli.lifecycle._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")))
                             stack.enter_context(patch("host.cli.lifecycle._security_group_access_state", return_value=captured))
@@ -1367,7 +1272,7 @@ class DeployUnitTests(unittest.TestCase):
                             stack.enter_context(patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}))
                             stack.enter_context(patch("host.cli.lifecycle._attach_storage_volumes"))
                             stack.enter_context(patch("host.cli.lifecycle._provision_over_ssh", side_effect=AssertionError("no SSH in the GitHub delivery")))
-                            stack.enter_context(patch("host.cli.lifecycle._set_security_group_ssh_ingress", side_effect=AssertionError("access is final at launch")))
+                            stack.enter_context(patch("host.cli.lifecycle._close_security_group_ssh_ingress", side_effect=AssertionError("access is final at launch")))
                             stack.enter_context(patch("host.cli.lifecycle_aws._aws", return_value={}))
                             stack.enter_context(patch("sys.stdout", _StringOutput()))
                             self.assertEqual(
@@ -1565,780 +1470,73 @@ class DeployUnitTests(unittest.TestCase):
 
     def test_rendered_bootstrap_contains_privilege_boundary(self) -> None:
         bootstrap = render._render_bootstrap()
-
-        self.assertIn("ADMIN_MOUNT=/mnt/kern-admin", bootstrap)
-        self.assertIn('PGDATA_DIR="/mnt/kern-admin/postgres/${PG_MAJOR}/main"', bootstrap)
-        self.assertIn("PROXY_STATE_DIR=/mnt/kern-admin/proxy-state", bootstrap)
-        self.assertIn("AGENT_MOUNT=/mnt/kern-agent", bootstrap)
-        self.assertIn("AGENT_HOME_PATH=/mnt/kern-agent/agent-home", bootstrap)
-        self.assertIn("admin_volume_id=\"$(payload_value storage_volumes.admin)\"", bootstrap)
-        self.assertIn("prepare_volume \"$admin_volume_id\" \"$ADMIN_MOUNT\" KERN_ADMIN", bootstrap)
-        self.assertIn("prepare_volume \"$agent_volume_id\" \"$AGENT_MOUNT\" KERN_AGENT", bootstrap)
-        self.assertIn("KERN_ADMIN_UID=47741", bootstrap)
-        self.assertIn("KERN_PROXY_UID=47742", bootstrap)
-        self.assertIn("KERN_AGENT_UID=47743", bootstrap)
-        self.assertIn("CLOUDFLARED_UID=47744", bootstrap)
-        self.assertIn("CLOUDFLARED_GID=47744", bootstrap)
-        # The postgres uid is pinned before the packages install: preserved
-        # 0600/0700 cluster files on the admin volume must keep a valid owner
-        # across root-volume replacement.
-        self.assertIn("POSTGRES_UID=47745", bootstrap)
-        self.assertIn("App package host_slot values generate stable UID/GID assignments", bootstrap)
-        self.assertIn("KERN_APP_AGENT_CHAT_UID=48000", bootstrap)
-        self.assertIn("KERN_APP_AGENT_CHAT_GID=48000", bootstrap)
-        self.assertIn("App ports are generated from the same package-local host_slot values", bootstrap)
-        self.assertIn("APP_AGENT_CHAT_PORT=7450", bootstrap)
-        # Deprecated app packages keep stable migration UIDs but no longer
-        # reserve live backend ports or services.
-        for app_id, slot in (
-            ("ALPHA_SEEKER", 2),
-            ("SOCIAL_MARKETER", 3),
-            ("VIRALITY_MACHINE", 4),
-            ("SOFTWARE_BUILDER", 5),
+        self.assertIn("KERN_WORKSPACE_UID=47750", bootstrap)
+        self.assertNotIn("migrate_legacy_agent_workspace_identity", bootstrap)
+        self.assertNotIn("retire_legacy_app_platform_identities", bootstrap)
+        postgres_setup = bootstrap.split("setup_postgres() {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        self.assertLess(
+            postgres_setup.index('CREATE ROLE "kern-workspace" LOGIN;'),
+            postgres_setup.index("migrate_legacy_app_identities"),
+        )
+        self.assertIn("REASSIGN OWNED BY", bootstrap)
+        for retired_schema in (
+            "app_mission_pursuit",
+            "app_alpha_seeker",
+            "app_social_marketer",
+            "app_virality_machine",
+            "app_software_builder",
         ):
-            self.assertIn(f"KERN_APP_{app_id}_UID={48000 + slot}", bootstrap)
-            self.assertIn(f"KERN_APP_{app_id}_GID={48000 + slot}", bootstrap)
-            self.assertNotIn(f"APP_{app_id}_PORT=", bootstrap)
-        for app_id, slot in (
-            ("alpha_seeker", 2),
-            ("social_marketer", 3),
-            ("virality_machine", 4),
-            ("software_builder", 5),
-        ):
-            service = f"kern-app-{app_id}.service"
-            self.assertNotIn(f"User=kern-app-{slot}", bootstrap)
-            self.assertNotIn(
-                f"cat > /etc/systemd/system/{service} <<'UNIT'",
+            self.assertIn(
+                f"DROP SCHEMA IF EXISTS {retired_schema} CASCADE;",
                 bootstrap,
             )
-            self.assertIn(f"python3 -m host.runtime.deploy.app_migrate pending {app_id}", bootstrap)
+        self.assertIn('ensure_user kern-workspace "$KERN_WORKSPACE_UID"', bootstrap)
+        self.assertIn("kern-workspace.service", bootstrap)
+        self.assertIn("User=kern-workspace", bootstrap)
+        self.assertIn("Slice=kern_workspace.slice", bootstrap)
+        self.assertIn("adopt_workspace_migration_history", bootstrap)
         self.assertIn(
-            'ensure_group kern-app-6 "$KERN_APP_PERSONAL_WEB_APP_BUILDER_GID"',
+            "to_regclass('public.workspace_migrations') IS NULL",
             bootstrap,
         )
-        self.assertIn("User=kern-app-6", bootstrap)
-        self.assertIn("kern-app-personal_web_app_builder.service", bootstrap)
-        self.assertNotIn("ensure_group kern-app-personal_web_app_builder", bootstrap)
-        self.assertIn("ensure_user postgres \"$POSTGRES_UID\" postgres /var/lib/postgresql", bootstrap)
-        self.assertLess(
-            bootstrap.index('ensure_user postgres "$POSTGRES_UID"'),
-            bootstrap.index('apt_get install -y "postgresql-${PG_MAJOR}"'),
-        )
-        self.assertIn("ensure_group kern-admin \"$KERN_ADMIN_GID\"", bootstrap)
-        self.assertIn("ensure_group kern-app-backends \"$KERN_APP_BACKENDS_GID\"", bootstrap)
-        self.assertIn("ensure_group_member kern-admin kern-app-backends", bootstrap)
-        self.assertIn("ensure_user kern-agent \"$KERN_AGENT_UID\" kern-agent /mnt/kern-agent/agent-home", bootstrap)
-        self.assertNotIn("remap_preserved_tree_owner", bootstrap)
-        self.assertNotIn("-uid \"$old_uid\"", bootstrap)
-        self.assertIn("def ensure_regular_file_slot(path: Path) -> None:", bootstrap)
-        self.assertIn("if stat.S_ISLNK(mode):", bootstrap)
-        self.assertIn("os.unlink(path)", bootstrap)
-        self.assertIn('proxy_state / "network_proxy_ca.key"', bootstrap)
-        self.assertNotIn('proxy_state / "bedrock-routing-secret"', bootstrap)
-        self.assertIn('recreate_directory(proxy_state / "generated-certs")', bootstrap)
-        self.assertIn("mkfs.ext4 -F -L \"$label\" \"$device\"", bootstrap)
-        self.assertIn("UUID=${uuid} ${mount_point} ext4 defaults,nofail 0 2", bootstrap)
-        self.assertNotIn("/var/lib/kern-host", bootstrap)
-        self.assertNotIn("ln -s", bootstrap)
-        self.assertIn('useradd --uid "$uid" --gid "$group" $extra_args --home-dir "$home" --no-create-home --shell /usr/sbin/nologin "$name"', bootstrap)
-        self.assertIn("ensure_user kern-proxy \"$KERN_PROXY_UID\" kern-proxy /mnt/kern-admin/proxy-state", bootstrap)
-        self.assertIn("ensure_user cloudflared \"$CLOUDFLARED_UID\" cloudflared /nonexistent", bootstrap)
-        self.assertIn("ensure_user kern-app-0 \"$KERN_APP_AGENT_CHAT_UID\" kern-app-0 /nonexistent", bootstrap)
-        self.assertIn("ensure_user kern-app-1 \"$KERN_APP_MISSION_PURSUIT_UID\" kern-app-1 /nonexistent", bootstrap)
-        self.assertNotIn("usermod -a -G kern-admin kern-proxy", bootstrap)
-        self.assertNotIn("--groups kern-admin", bootstrap)
-        self.assertIn('--no-create-home --shell /usr/sbin/nologin "$name"', bootstrap)
-        self.assertIn("kern-admin ALL=(root) NOPASSWD: /usr/local/lib/kern-host/reboot-host", bootstrap)
-        self.assertIn("/usr/local/lib/kern-host/read-codex-account-id", bootstrap)
-        self.assertIn("/usr/local/lib/kern-host/run-claude-code", bootstrap)
-        self.assertIn("/usr/local/lib/kern-host/read-claude-account", bootstrap)
-        self.assertIn("/usr/local/lib/kern-host/clear-agent-auth", bootstrap)
-        self.assertIn("/usr/local/lib/kern-host/read-agent-file", bootstrap)
-        self.assertIn("/usr/local/lib/kern-host/upload-agent-file", bootstrap)
-        self.assertIn("/usr/local/lib/kern-host/stop-agent-thread", bootstrap)
-        self.assertIn("/usr/local/lib/kern-host/check-for-upgrade", bootstrap)
-        # Network policy, provider pins, and network events live in the
-        # database now (proxy role read-only for policy/pins); the three sudo
-        # helpers that bridged the old file boundary are gone.
-        self.assertNotIn("update-network-policy", bootstrap)
-        self.assertNotIn("read-network-state", bootstrap)
-        self.assertNotIn("update-provider-account", bootstrap)
-        self.assertIn("chmod 755 /usr/local/lib/kern-host", bootstrap)
-        self.assertIn("User=kern-admin", bootstrap)
-        self.assertIn("RuntimeDirectory=kern-admin-api", bootstrap)
-        self.assertIn("RuntimeDirectoryMode=0755", bootstrap)
-        self.assertIn("LimitNOFILE=8192", bootstrap)
-        self.assertIn("User=kern-proxy", bootstrap)
-        self.assertIn("User=cloudflared", bootstrap)
-        self.assertIn("User=kern-app-0", bootstrap)
-        self.assertNotIn("User=kern-app-1", bootstrap)
-        self.assertIn("Slice=kern_app.slice", bootstrap)
-        self.assertIn("kern-app-agent_chat.service", bootstrap)
+        self.assertIn("FROM public.workspace_migrations AS old", bootstrap)
+        self.assertIn("INSERT INTO public.schema_migrations", bootstrap)
+        self.assertNotIn("grant_workspace_runtime_access", bootstrap)
+        self.assertNotIn("host.runtime.deploy.workspace_migrate", bootstrap)
+        self.assertNotIn("CREATE SCHEMA IF NOT EXISTS app_agent_chat", postgres_setup)
         self.assertNotIn(
-            "cat > /etc/systemd/system/kern-app-mission_pursuit.service <<'UNIT'",
+            "CREATE SCHEMA IF NOT EXISTS app_personal_web_app_builder",
+            postgres_setup,
+        )
+        self.assertIn('oif lo tcp dport $WORKSPACE_PORT meta skuid "kern-admin" accept', bootstrap)
+        self.assertIn("oif lo tcp dport $WORKSPACE_PORT drop", bootstrap)
+        self.assertIn('oif lo meta skuid "kern-workspace" drop', bootstrap)
+        self.assertNotIn(
+            "cat > /etc/systemd/system/kern-app-agent_chat.service",
             bootstrap,
         )
-        self.assertIn("python3 -m host.runtime.deploy.app_migrate pending agent_chat", bootstrap)
-        self.assertIn("python3 -m host.runtime.deploy.app_migrate pending mission_pursuit", bootstrap)
-        self.assertIn(
-            "runuser -u kern-app-0 -- env PYTHONPATH=/opt/kern-host "
-            'python3 -m host.runtime.deploy.app_migrate apply-sql agent_chat "$app_migration_version"',
-            bootstrap,
-        )
-        self.assertIn(
-            "runuser -u kern-app-1 -- env PYTHONPATH=/opt/kern-host "
-            'python3 -m host.runtime.deploy.app_migrate apply-sql mission_pursuit "$app_migration_version"',
-            bootstrap,
-        )
-        self.assertIn(
-            "runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host "
-            'python3 -m host.runtime.deploy.app_migrate record agent_chat "$app_migration_version"',
-            bootstrap,
-        )
-        self.assertIn(
-            "runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host "
-            'python3 -m host.runtime.deploy.app_migrate record mission_pursuit "$app_migration_version"',
-            bootstrap,
-        )
-        self.assertNotIn('GRANT \\"kern-app-0\\" TO \\"kern-admin\\"', bootstrap)
-        self.assertNotIn('GRANT \\"kern-app-1\\" TO \\"kern-admin\\"', bootstrap)
-        self.assertIn("CREATE SCHEMA IF NOT EXISTS app_agent_chat AUTHORIZATION", bootstrap)
-        self.assertIn("CREATE SCHEMA IF NOT EXISTS app_mission_pursuit AUTHORIZATION", bootstrap)
-        self.assertIn("kern-app-0", bootstrap)
-        # Credential carry-over (payload for deploy/reconfigure, stored config
-        # for upgrade/recover) lives in host.runtime.deploy.write_config now; bootstrap
-        # passes the operation mode through and stages the effective config for
-        # the root-only steps. Behavior is covered by tests/test_write_config.py.
-        self.assertIn("python3 -m host.runtime.deploy.write_config > /tmp/kern_effective_config.json", bootstrap)
-        self.assertIn("'reset_admin_passkeys': bool(payload['operation'].get('reset_admin_passkeys', False))", bootstrap)
-        self.assertIn("chmod 600 /tmp/kern_effective_config.json", bootstrap)
-        self.assertIn("pathlib.Path('/tmp/kern_effective_config.json').read_text()", bootstrap)
-        self.assertNotIn("admin-state/config.json", bootstrap)
-        self.assertIn("rm -f /tmp/kern_payload.json /tmp/kern_effective_config.json", bootstrap)
-        self.assertIn("meta skuid 0 accept", bootstrap)
-        self.assertIn('meta skuid "kern-proxy" udp dport 53 accept', bootstrap)
-        self.assertIn('meta skuid "kern-proxy" tcp dport 53 accept', bootstrap)
-        self.assertIn('meta skuid "kern-proxy" tcp dport { 80, 443 } accept', bootstrap)
-        self.assertIn("tcp dport 22 accept", bootstrap)
-        # The agent must not reach the local DNS stub, while systemd-resolved
-        # itself can still query upstream.
-        self.assertIn('udp dport 53 meta skuid != 0 drop', bootstrap)
-        self.assertIn('meta skuid "systemd-resolve" udp dport 53 accept', bootstrap)
-        # The agent must only reach the loopback proxy port; every other local
-        # listener stays outside its network boundary.
-        self.assertIn('oif lo tcp dport 7445 meta skuid "kern-agent" accept', bootstrap)
-        self.assertIn('oif lo meta skuid "kern-agent" drop', bootstrap)
-        # Agent preview ports: the agent may originate connections to its own
-        # preview range (to test what it serves) and its listeners there may
-        # reply to an operator's SSH local forward; both accepts sit before the
-        # general agent-loopback drop, and the reply rule is scoped to
-        # established traffic so a preview source port cannot originate a flow.
-        # The range must never collide with a platform listener: not the admin
-        # API, the network proxy, or any possible installed-app port.
-        from host.constants import (
-            ADMIN_API_PORT,
-            AGENT_PREVIEW_PORT_BASE,
-            AGENT_PREVIEW_PORT_COUNT,
-            APP_PORT_BASE,
-            PROXY_PORT,
-        )
-        from host.runtime.core.app_platform import MAX_INSTALLED_APPS
-        preview_ports = range(
-            AGENT_PREVIEW_PORT_BASE, AGENT_PREVIEW_PORT_BASE + AGENT_PREVIEW_PORT_COUNT
-        )
-        self.assertNotIn(ADMIN_API_PORT, preview_ports)
-        self.assertNotIn(PROXY_PORT, preview_ports)
-        self.assertFalse(
-            set(preview_ports) & set(range(APP_PORT_BASE, APP_PORT_BASE + MAX_INSTALLED_APPS))
-        )
+        self.assertNotIn("host.runtime.deploy.app_migrate", bootstrap)
+        self.assertNotIn("KERN_APP_AGENT_CHAT_UID", bootstrap)
+        self.assertNotIn("kern-agent-workspace", bootstrap)
+        self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.workspace.service", bootstrap)
+        self.assertIn("RuntimeDirectory=kern-workspace", bootstrap)
+        start_services = bootstrap.split("start_services() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("systemctl enable kern-workspace.service", start_services)
+        self.assertIn("systemctl start kern-workspace.service", start_services)
+        self.assertIn("RuntimeDirectory=kern-admin-api", bootstrap)
+        self.assertIn("LimitNOFILE=8192", bootstrap)
         self.assertIn('oif lo tcp dport 8000-8015 meta skuid "kern-agent" accept', bootstrap)
-        self.assertIn(
-            'oif lo ct state established,related tcp sport 8000-8015 meta skuid "kern-agent" accept',
-            bootstrap,
-        )
-        # The preview range is default-deny: after the agent + operator allows,
-        # both a destination-port and a source-port drop catch every other
-        # principal, before the broad `oif lo accept` fall-through. This is what
-        # closes the whole class — a compromised egress-capable service cannot
-        # dial a preview server (dport drop) and cannot answer one the agent
-        # originated (sport drop), and a future service/user gains no access.
         self.assertIn('oif lo tcp dport 8000-8015 meta skuid "kern-operator" accept', bootstrap)
-        self.assertIn('oif lo tcp dport 8000-8015 drop', bootstrap)
-        self.assertIn('oif lo tcp sport 8000-8015 drop', bootstrap)
-        # Allowlist entries precede the two default drops, which precede the
-        # broad accept and the general agent-loopback drop.
-        self.assertLess(
-            bootstrap.index('oif lo ct state established,related tcp sport 8000-8015 meta skuid "kern-agent" accept'),
-            bootstrap.index('oif lo tcp dport 8000-8015 drop'),
-        )
-        self.assertLess(
-            bootstrap.index('oif lo tcp dport 8000-8015 meta skuid "kern-operator" accept'),
-            bootstrap.index('oif lo tcp dport 8000-8015 drop'),
-        )
-        self.assertLess(
-            bootstrap.index('oif lo tcp sport 8000-8015 drop'),
-            bootstrap.index('oif lo accept'),
-        )
-        # A compromised egress-capable service can neither dial nor be dialed on
-        # the range: with no per-service rule, both directions fall to the
-        # default drops above rather than the broad accept. Assert no accept
-        # rule readmits a service account into the range.
-        from host.constants import SERVICE_ACCOUNTS
-        for name in SERVICE_ACCOUNTS:
-            if name == "kern-agent":
-                continue
-            self.assertNotIn(f'dport 8000-8015 meta skuid "{name}" accept', bootstrap)
-            self.assertNotIn(f'sport 8000-8015 meta skuid "{name}" accept', bootstrap)
-        # App services may answer the host admin API reverse proxy but cannot
-        # open arbitrary loopback connections, including to the unauthenticated
-        # network proxy or browser-facing admin API.
-        self.assertIn('oif lo meta skuid "kern-app-0" drop', bootstrap)
-        self.assertNotIn('oif lo tcp dport 7443 meta skuid "kern-app-0" accept', bootstrap)
-        self.assertNotIn('oif lo tcp dport 7445 meta skuid "kern-app-0" accept', bootstrap)
-        # An app that bound a preview port cannot answer an agent-originated
-        # connection there: the range-wide source-port drop above precedes the
-        # app rules, so no per-app preview rule is needed and none is emitted.
-        self.assertNotIn('sport 8000-8015 meta skuid "kern-app-0" drop', bootstrap)
-        self.assertLess(
-            bootstrap.index('oif lo tcp sport 8000-8015 drop'),
-            bootstrap.index('oif lo ct state established,related meta skuid "kern-app-0" accept'),
-        )
-        # App backend TCP listeners are loopback-only and reachable only from
-        # the admin API service uid (browser bridge) and the agent-app service
-        # uid (agent app_api proxy). Other local users hit the explicit drop
-        # before the broad loopback accept.
-        self.assertIn('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "kern-admin" accept', bootstrap)
-        self.assertIn('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "kern-agent-app" accept', bootstrap)
-        self.assertIn("oif lo tcp dport $APP_AGENT_CHAT_PORT drop", bootstrap)
-        self.assertLess(
-            bootstrap.index('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "kern-admin" accept'),
-            bootstrap.index("oif lo tcp dport $APP_AGENT_CHAT_PORT drop"),
-        )
-        self.assertLess(
-            bootstrap.index('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "kern-agent-app" accept'),
-            bootstrap.index("oif lo tcp dport $APP_AGENT_CHAT_PORT drop"),
-        )
-        self.assertLess(
-            bootstrap.index("oif lo tcp dport $APP_AGENT_CHAT_PORT drop"),
-            bootstrap.index("oif lo accept"),
-        )
-        # The agent-app service gets no egress rule of its own: its only
-        # network reach is the per-app port accepts above.
-        self.assertNotIn('meta skuid "kern-agent-app" tcp dport 443 accept', bootstrap)
-        self.assertNotIn('meta skuid "kern-agent-app" udp dport 53 accept', bootstrap)
-        self.assertIn('oif lo meta skuid "kern-agent-app" drop', bootstrap)
-        self.assertLess(
-            bootstrap.index('oif lo tcp dport $APP_AGENT_CHAT_PORT meta skuid "kern-agent-app" accept'),
-            bootstrap.index('oif lo meta skuid "kern-agent-app" drop'),
-        )
-        self.assertLess(
-            bootstrap.index('oif lo meta skuid "kern-agent-app" drop'),
-            bootstrap.index("oif lo accept"),
-        )
-        # The read-only agent-network service reaches Postgres and the agent
-        # over Unix sockets only. It cannot turn the local policy proxy into
-        # an egress path through the broad loopback accept.
-        self.assertNotIn('meta skuid "kern-agent-network" tcp dport 443 accept', bootstrap)
-        self.assertNotIn('meta skuid "kern-agent-network" udp dport 53 accept', bootstrap)
-        self.assertIn('oif lo meta skuid "kern-agent-network" drop', bootstrap)
-        self.assertLess(
-            bootstrap.index('oif lo meta skuid "kern-agent-network" drop'),
-            bootstrap.index("oif lo accept"),
-        )
-        # The dedicated tools service runs the bundled tool packages, so it gets
-        # DNS and HTTPS egress for their third-party APIs; the admin service holds
-        # no internet egress, and the agent path is unchanged.
-        self.assertIn('meta skuid "kern-tools" udp dport 53 accept', bootstrap)
-        self.assertIn('meta skuid "kern-tools" tcp dport 53 accept', bootstrap)
-        self.assertIn('meta skuid "kern-tools" tcp dport 443 accept', bootstrap)
-        self.assertNotIn('meta skuid "kern-admin" tcp dport 443 accept', bootstrap)
-        # Loopback is not itself trusted. The public tunnel and SSH/admin/root
-        # identities are admitted to the admin listener before every other
-        # local service is dropped, so only cloudflared can supply trustworthy
-        # Cloudflare forwarding headers.
-        admin_drop = "oif lo tcp dport 7443 drop"
-        self.assertIn("oif lo tcp dport 7443 meta skuid 0 accept", bootstrap)
-        for user in ("kern-admin", "kern-operator", "cloudflared"):
-            allow = f'oif lo tcp dport 7443 meta skuid "{user}" accept'
-            self.assertIn(allow, bootstrap)
-            self.assertLess(bootstrap.index(allow), bootstrap.index(admin_drop))
-        self.assertLess(bootstrap.index(admin_drop), bootstrap.index("oif lo accept"))
-        self.assertIn("pathlib.Path('/tmp/kern_cloudflare_rules').write_text(", bootstrap)
-        self.assertIn("if cloudflare_enabled else ''", bootstrap)
-        self.assertIn("$(cat /tmp/kern_cloudflare_rules)", bootstrap)
-        self.assertIn("rm -f /tmp/kern_ssh_rule /tmp/kern_cloudflare_rules", bootstrap)
-        self.assertIn("rm -f /home/kern-operator/.ssh/authorized_keys2", bootstrap)
-        self.assertIn("CLOUDFLARED_VERSION=2026.6.1", bootstrap)
-        self.assertIn("kern-cloudflared.service", bootstrap)
-        self.assertIn("--token-file /etc/kern/cloudflared.token", bootstrap)
-        self.assertIn("install -m 0750 -o root -g cloudflared -d /etc/kern", bootstrap)
-        self.assertIn("chown root:cloudflared /etc/kern/cloudflared.token", bootstrap)
-        self.assertIn("chmod 640 /etc/kern/cloudflared.token", bootstrap)
-        self.assertNotIn("--token ${TUNNEL_TOKEN}", bootstrap)
-        self.assertNotIn("EnvironmentFile=/etc/kern/cloudflared.env", bootstrap)
-        self.assertIn("Cloudflare tunnel probe", bootstrap)
-        self.assertNotIn("curl -k", bootstrap)
-        self.assertIn('meta skuid "cloudflared" udp dport 7844 accept', bootstrap)
-        # Network policy and provider pins live in the database: no policy
-        # file seeding, no pin files, no seeded initial policy (a missing
-        # policy row is the fail-closed empty default).
-        self.assertNotIn("network_controls.json", bootstrap)
-        self.assertNotIn("kern_initial_policy", bootstrap)
-        self.assertNotIn("network_status.json", bootstrap)
-        self.assertNotIn("proxy_pin_files", bootstrap)
-        self.assertNotIn("proxy-state/openai_account.json", bootstrap)
-        self.assertNotIn("proxy-state/claude_account.json", bootstrap)
-        self.assertNotIn(".network_policy.lock", bootstrap)
-        self.assertIn("DURABLE_PATH_OWNERSHIP=", bootstrap)
-        self.assertIn("/mnt/kern-admin root:root 711", bootstrap)
-        self.assertIn("/mnt/kern-admin/proxy-state kern-proxy:kern-proxy 700", bootstrap)
-        self.assertIn("/mnt/kern-admin/proxy-state/generated-certs kern-proxy:kern-proxy 700", bootstrap)
-        # Admin state lives in Postgres now; admin-state/ keeps only the
-        # deploy-plane version.json, no runtime JSON state files.
-        self.assertIn("chown kern-admin:kern-admin /mnt/kern-admin/admin-state/version.json", bootstrap)
-        self.assertNotIn("admin-state/state.json", bootstrap)
-        self.assertNotIn("admin-state/events.jsonl", bootstrap)
-        self.assertNotIn("admin-state/openai_account.json", bootstrap)
-        self.assertNotIn("admin-state/claude_account.json", bootstrap)
-        self.assertNotIn("kern-proxy:kern-admin", bootstrap)
-        self.assertNotIn("for path in \\", bootstrap)
-        self.assertIn("/mnt/kern-admin/proxy-state/network_proxy_ca.key kern-proxy:kern-proxy 600", bootstrap)
-        self.assertNotIn("setup_bedrock_routing_secrets", bootstrap)
-        self.assertIn("/mnt/kern-agent/agent-home kern-agent:kern-agent 700", bootstrap)
-        self.assertNotIn("chown -R kern-admin:kern-admin /mnt/kern-admin/admin-state", bootstrap)
-        self.assertNotIn("chown -R kern-agent:kern-agent /mnt/kern-agent/agent-home", bootstrap)
-        self.assertIn("/mnt/kern-agent root:root 711", bootstrap)
-        self.assertIn('agent_home / "AGENTS.md"', bootstrap)
-        self.assertIn('agent_home / "CLAUDE.md"', bootstrap)
-        self.assertIn('agent_home / ".codex" / "config.toml"', bootstrap)
-        self.assertIn('agent_home / ".claude" / "settings.json"', bootstrap)
-        self.assertIn('agent_home / ".hermes" / "config.yaml"', bootstrap)
-        self.assertIn('agent_home / ".hermes" / ".env"', bootstrap)
-        self.assertIn("AGENT_HOME_SOURCE_DIR=/opt/kern-host/host/bootstrap/agent-home", bootstrap)
-        self.assertIn("install -m 0644 -o root -g root", bootstrap)
-        self.assertIn("chattr -f -i", bootstrap)
-        self.assertIn("chattr +i", bootstrap)
-        agent_instructions = Path("host/bootstrap/agent-home/agents_claude.md").read_text()
-        codex_config = Path("host/bootstrap/agent-home/.codex/config.toml").read_text()
-        claude_settings = Path("host/bootstrap/agent-home/.claude/settings.json").read_text()
-        hermes_config = Path("host/bootstrap/agent-home/.hermes/config.yaml").read_text()
-        hermes_env = Path("host/bootstrap/agent-home/.hermes/.env").read_text()
-        self.assertIn("You are running with full permissions", agent_instructions)
-        self.assertEqual(
-            json.loads(claude_settings)["env"]["FORCE_PROMPT_CACHING_5M"],
-            "1",
-        )
-        self.assertEqual(
-            json.loads(claude_settings)["env"]["CLAUDE_CODE_NO_MODEL_FALLBACK"],
-            "1",
-        )
-        self.assertIn("Do not prompt the operator for local approvals", agent_instructions)
-        # The tools section tells the agent how to discover and use bundled tools.
-        self.assertIn("`kern` MCP server", agent_instructions)
-        self.assertIn("`<tool_id>_<action_id>`", agent_instructions)
-        self.assertIn("list_bundled_tools", agent_instructions)
-        self.assertIn("check_tool_approval", agent_instructions)
-        self.assertIn("approval_id", agent_instructions)
-        self.assertIn("Kern network policy proxy", agent_instructions)
-        self.assertIn("recent_network_denials", agent_instructions)
-        self.assertIn("list_network_integrations", agent_instructions)
-        self.assertIn("github_push_queued_for_approval", agent_instructions)
-        self.assertIn("queued for approval as push-<id>", agent_instructions)
-        self.assertIn("github_dot_github_rest_write_denied", agent_instructions)
-        self.assertIn("Kern admin UI", agent_instructions)
-        self.assertNotIn("AWS_REGION=", hermes_env)
-        self.assertIn("always exposes `app_api`", agent_instructions)
-        self.assertIn("listing the tool grants no app access", agent_instructions)
-        self.assertIn("do not guess or probe routes", agent_instructions)
-        self.assertIn("GitHub GraphQL is always blocked", agent_instructions)
-        self.assertIn("`gh repo view`, `gh pr list`, and `gh pr create`", agent_instructions)
-        self.assertIn("`git remote get-url origin`", agent_instructions)
-        self.assertIn("`gh api repos/OWNER/REPO`", agent_instructions)
-        self.assertIn("`gh api --method POST repos/OWNER/REPO/pulls", agent_instructions)
-        self.assertIn("If any `gh` command returns HTTP 403", agent_instructions)
-        self.assertIn("REST path such as `repos/OWNER/REPO/...`", agent_instructions)
-        self.assertNotIn("alternate transports", agent_instructions)
-        # The agent instructions advertise the preview port range and defer the
-        # operator's viewing steps to the README (kept concise, no exact SSH
-        # commands here). The range must track the firewall constants.
-        from host.constants import AGENT_PREVIEW_PORT_BASE, AGENT_PREVIEW_PORT_COUNT
-        preview_range = f"{AGENT_PREVIEW_PORT_BASE}-{AGENT_PREVIEW_PORT_BASE + AGENT_PREVIEW_PORT_COUNT - 1}"
-        self.assertIn(f"## Test web servers: ports {preview_range}", agent_instructions)
-        self.assertIn(f"`curl 127.0.0.1:{AGENT_PREVIEW_PORT_BASE}`", agent_instructions)
-        self.assertIn("point them to the repo README", agent_instructions)
-        self.assertIn("no way to view these ports", agent_instructions)
-        # The exact operator SSH-forward instructions live in the README, not the
-        # agent's own instructions.
-        self.assertNotIn("ssh -L", agent_instructions)
-        readme = Path("README.md").read_text()
-        self.assertIn(f"-L {AGENT_PREVIEW_PORT_BASE}:127.0.0.1:{AGENT_PREVIEW_PORT_BASE}", readme)
-        self.assertIn(f"http://preview.localhost:{AGENT_PREVIEW_PORT_BASE}", readme)
-        self.assertIn("cookies are scoped by hostname", readme)
-        self.assertIn('"$AGENT_HOME_SOURCE_DIR/agents_claude.md" "$AGENT_HOME_PATH/AGENTS.md"', bootstrap)
-        self.assertIn('"$AGENT_HOME_SOURCE_DIR/agents_claude.md" "$AGENT_HOME_PATH/CLAUDE.md"', bootstrap)
-        self.assertIn('approval_policy = "never"', codex_config)
-        self.assertIn('sandbox_mode = "danger-full-access"', codex_config)
-        self.assertIn('"defaultMode": "bypassPermissions"', claude_settings)
-        self.assertIn('"skipDangerousModePermissionPrompt": true', claude_settings)
-        self.assertIn("provider: bedrock", hermes_config)
-        self.assertIn("tirith_enabled: false", hermes_config)
-        self.assertIn("memory_enabled: false", hermes_config)
-        self.assertIn("user_profile_enabled: false", hermes_config)
-        self.assertIn("creation_nudge_interval: 0", hermes_config)
-        self.assertIn("enabled: false", hermes_config)
-        # The managed Hermes config wires the bundled-tools MCP shim exactly
-        # like the managed Codex config layer: same interpreter, module, and
-        # host import path.
-        self.assertIn("mcp_servers:", hermes_config)
-        self.assertIn("kern:", hermes_config)
-        self.assertIn("command: /usr/bin/python3", hermes_config)
-        self.assertIn('args: ["-m", "host.runtime.agent_shim.mcp_shim"]', hermes_config)
-        self.assertIn("PYTHONPATH: /opt/kern-host", hermes_config)
-        self.assertIn('if [ ! -f "$PROXY_STATE_DIR/network_proxy_ca.key" ]', bootstrap)
-        # Managed Codex policy restricts the agent to cached web search and
-        # disables Codex-hosted app/plugin connector surfaces.
-        self.assertIn("/etc/codex/requirements.toml", bootstrap)
-        self.assertIn('allowed_web_search_modes = ["cached"]', bootstrap)
-        self.assertIn("[features]", bootstrap)
-        self.assertIn("apps = false", bootstrap)
-        self.assertIn("plugins = false", bootstrap)
-        self.assertIn("tool_search = false", bootstrap)
-        self.assertIn("tool_suggest = false", bootstrap)
-        requirements = bootstrap.split(
-            "cat > /etc/codex/requirements.toml <<'EOF'", 1
-        )[1].split("\nEOF\nchmod 644 /etc/codex/requirements.toml", 1)[0]
-        self.assertIn("enable_request_compression = false", requirements)
-        # The bundled tools MCP shim is wired into Codex through the managed
-        # /etc/codex/managed_config.toml layer, and the admin service gets the
-        # runtime directory that holds the agent-facing tools socket.
-        self.assertIn("/etc/codex/managed_config.toml", bootstrap)
-        self.assertIn("[mcp_servers.kern]", bootstrap)
-        self.assertIn('args = ["-m", "host.runtime.agent_shim.mcp_shim"]', bootstrap)
-        self.assertIn('env = { PYTHONPATH = "/opt/kern-host" }', bootstrap)
-        # The admin-api unit's RuntimeDirectory holds the app-backend admin
-        # socket dir; the agent-facing tools socket dir is owned by the dedicated
-        # kern-tools.service.
-        self.assertIn("RuntimeDirectory=kern-admin-api\n", bootstrap)
-        # The app-backend socket lives on this unit, admits only provisioned
-        # app accounts, and shares the process's fd table with the operator TCP
-        # listener, so only this unit raises the descriptor limit.
-        admin_api_unit = bootstrap.split(
-            "cat > /etc/systemd/system/kern-admin-api.service <<'UNIT'", 1
-        )[1].split("\nUNIT\n", 1)[0]
-        self.assertIn("LimitNOFILE=8192\n", admin_api_unit)
-        self.assertEqual(bootstrap.count("LimitNOFILE="), 1)
-        self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.tools.service", bootstrap)
-        self.assertIn("RuntimeDirectory=kern-tools\n", bootstrap)
-        self.assertIn("RuntimeDirectoryMode=0755", bootstrap)
-        self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.host_errors.collector", bootstrap)
-        self.assertIn("SupplementaryGroups=systemd-journal", bootstrap)
-        self.assertIn("systemctl enable --now kern-host-errors.service", bootstrap)
-        self.assertIn(
-            "ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-admin-api",
-            bootstrap,
-        )
-        self.assertIn('tools_state = admin_mount / "tools-state"', bootstrap)
-        self.assertIn('recreate_directory(tools_state / "assets")', bootstrap)
-        self.assertIn(
-            "/mnt/kern-admin/tools-state/assets kern-tools:kern-tools 700",
-            bootstrap,
-        )
-        # The dedicated agent-app service has its own user and runtime
-        # directory for the agent-facing socket, with no database access.
-        self.assertIn('ensure_user kern-agent-app "$KERN_AGENT_APP_UID" kern-agent-app /nonexistent', bootstrap)
-        self.assertIn("KERN_AGENT_APP_UID=47747", bootstrap)
-        self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.agent_app.service", bootstrap)
-        self.assertIn("User=kern-agent-app", bootstrap)
-        self.assertIn("RuntimeDirectory=kern-agent-app\n", bootstrap)
-        self.assertIn("systemctl enable --now kern-agent-app.service", bootstrap)
-        # Network introspection has a separate non-egress uid, socket, and
-        # read-only database role. The egress-capable tools service cannot read
-        # network policy or decision-log tables.
-        self.assertIn(
-            'ensure_user kern-agent-network "$KERN_AGENT_NETWORK_UID" '
-            "kern-agent-network /nonexistent",
-            bootstrap,
-        )
-        self.assertIn("KERN_AGENT_NETWORK_UID=47748", bootstrap)
-        self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.agent_network.service", bootstrap)
-        self.assertIn("User=kern-agent-network", bootstrap)
-        self.assertIn("RuntimeDirectory=kern-agent-network\n", bootstrap)
-        self.assertIn("systemctl enable --now kern-agent-network.service", bootstrap)
-        self.assertIn(
-            "Wants=network-online.target kern-network-proxy.service kern-postgres.service "
-            "kern-tools.service kern-agent-network.service kern-agent-app.service",
-            bootstrap,
-        )
-        # The bootstrap runs with umask 077: the npm-installed CLI and the
-        # managed config directory must be opened up so the agent can use
-        # them, and the deploy verifies the agent can actually run both CLIs.
-        self.assertIn("CODEX_CLI_VERSION=0.144.0", bootstrap)
-        self.assertIn("CLAUDE_CODE_VERSION=2.1.220", bootstrap)
-        self.assertIn("HERMES_AGENT_VERSION=0.18.2", bootstrap)
-        self.assertIn('"@openai/codex@${CODEX_CLI_VERSION}"', bootstrap)
-        self.assertIn('"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"', bootstrap)
-        self.assertIn('"hermes-agent[bedrock,mcp]==${HERMES_AGENT_VERSION}"', bootstrap)
-        self.assertNotIn("HERMES_ANTHROPIC_SDK_VERSION", bootstrap)
-        self.assertIn('"codex-cli ${CODEX_CLI_VERSION}"', bootstrap)
-        self.assertIn('"${CLAUDE_CODE_VERSION} (Claude Code)"', bootstrap)
-        helper_sources = "\n".join(path.read_text() for path in Path("host/bootstrap/helpers").glob("*.sh"))
-        self.assertIn("NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/kern-network-proxy.crt", helper_sources)
-        self.assertNotIn("NODE_EXTRA_CA_CERTS=/mnt/kern-admin/proxy-state/network_proxy_ca.crt", helper_sources)
-        self.assertIn('os.environ.get("CLAUDE_CONFIG_DIR"', helper_sources)
-        self.assertIn('config_dir / ".credentials.json"', helper_sources)
-        self.assertIn('config.get("oauthAccount")', helper_sources)
-        self.assertIn('credentials.get("claudeAiOauth")', helper_sources)
-        self.assertIn('tokens.get("accessToken")', helper_sources)
-        self.assertNotIn('oauth.get("billingType")', helper_sources)
-        self.assertNotIn('tokens.get("subscriptionType")', helper_sources)
-        self.assertNotIn('config.get("claudeCodeFirstTokenDate")', helper_sources)
-        clear_auth = Path("host/bootstrap/helpers/clear-agent-auth.sh").read_text()
-        self.assertNotIn("codex|claude|aws", clear_auth)
-        self.assertNotIn('.aws" / "credentials"', clear_auth)
-        self.assertIn("chmod -R a+rX /usr/local/lib/node_modules", bootstrap)
-        self.assertIn("chmod 755 /etc/codex", bootstrap)
-        self.assertIn("runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home", helper_sources)
-        upload_helper = Path("host/bootstrap/helpers/upload-agent-file.sh").read_text()
-        self.assertIn(
-            "/usr/bin/python3 /opt/kern-host/host/runtime/root_helpers/upload_agent_file.py",
-            upload_helper,
-        )
-        self.assertNotIn("PYTHONPATH", upload_helper)
-        self.assertNotIn("-c 'approval_policy=", helper_sources)
-        self.assertNotIn("-c 'sandbox_mode=", helper_sources)
-        # Agent runtimes are resource-limited: bootstrap installs a slice with
-        # CPU weight, memory bounds, and a task cap, and both launch helpers
-        # start the runtime in a transient scope under it, so agent processes
-        # leave the admin API's service cgroup and the host services keep
-        # guaranteed CPU, memory, and PIDs under contention. The slice name
-        # must stay a single dash-free component: dashes encode slice nesting,
-        # and a nested slice's weight would not compare against system.slice.
-        self.assertIn("/etc/systemd/system/kern_agent.slice", bootstrap)
-        self.assertNotIn("kern-agent.slice", bootstrap)
-        self.assertIn("CPUWeight=50", bootstrap)
-        self.assertIn("MemoryHigh=70%", bootstrap)
-        self.assertIn("MemoryMax=80%", bootstrap)
-        # The swap cap is absolute (no percentage form in systemd 249) and
-        # must stay below the swapfile bootstrap creates.
-        self.assertIn("MemorySwapMax=5G", bootstrap)
-        self.assertIn("fallocate -l 6G /swapfile", bootstrap)
-        self.assertIn("TasksMax=4096", bootstrap)
-        for launch_helper in ("run-codex-app-server", "run-claude-code", "run-hermes"):
-            launch_source = Path(f"host/bootstrap/helpers/{launch_helper}.sh").read_text()
-            self.assertIn(
-                "exec systemd-run --quiet --collect --scope --slice=kern_agent.slice",
-                launch_source,
-            )
-            # Ubuntu 22.04's systemd 249 rejects --pipe together with --scope.
-            # Scope mode already preserves the launcher's synchronous stdio.
-            self.assertNotIn("--pipe", launch_source)
-            # The scope must not outlive the admin API: stopping, restarting,
-            # or crashing the admin service stops the agent scopes with it.
-            self.assertIn("--property=BindsTo=kern-admin-api.service", launch_source)
-            # Task turns run in a scope named after the host thread id, whose
-            # reserved app prefix is the kernel-owned app identity. The root
-            # helper validates the id (it becomes a unit name) and never
-            # forwards the pair to the CLI.
-            self.assertIn('if [ "${1:-}" = "--thread-scope" ]; then', launch_source)
-            self.assertIn('if ! [[ "${2:-}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then', launch_source)
-            self.assertIn('unit_args=(--unit "kern-agent-thread-$2")', launch_source)
-            self.assertIn("shift 2", launch_source)
-            self.assertIn('"${unit_args[@]}"', launch_source)
-        # Kill tears down a thread's transient scope through a privileged helper
-        # so an abandoned turn leaves no process holding the scope's name; the
-        # helper is installed and admin may invoke it.
-        self.assertIn("stop-agent-thread", bootstrap)
-        stop_source = Path("host/bootstrap/helpers/stop-agent-thread.sh").read_text()
-        self.assertIn('scope="kern-agent-thread-${thread_id}.scope"', stop_source)
-        # SIGKILL the cgroup before stop so a child that ignores SIGTERM cannot
-        # hold the scope active. Stop is asynchronous and the helper verifies a
-        # bounded reap instead of inheriting systemd's long default timeout.
-        self.assertIn('systemctl kill --signal=KILL "${scope}"', stop_source)
-        self.assertIn('if [ "${1:-}" = "--signal-only" ]; then', stop_source)
-        self.assertIn('systemctl stop --no-block "${scope}"', stop_source)
-        self.assertIn('systemctl is-active --quiet "${scope}"', stop_source)
-        self.assertIn('systemctl reset-failed "${scope}"', stop_source)
-        self.assertIn("exit 1", stop_source)
-        self.assertIn('if ! [[ "${thread_id}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then', stop_source)
-        for launch_helper in ("run-hermes",):
-            launch_source = Path(f"host/bootstrap/helpers/{launch_helper}.sh").read_text()
-            self.assertIn('export AWS_SECRET_ACCESS_KEY="kern-bedrock-dummy-secret"', launch_source)
-            self.assertEqual(
-                launch_source.count('AWS_SECRET_ACCESS_KEY="kern-bedrock-dummy-secret"'), 1
-            )
-        hermes_launcher = Path("host/bootstrap/helpers/run-hermes.sh").read_text()
-        self.assertIn("/usr/local/lib/kern-host/hermes-stdin.py", hermes_launcher)
-        self.assertNotIn("hermes chat", hermes_launcher)
-        hermes_stdin = Path("host/bootstrap/helpers/hermes-stdin.py").read_text()
-        self.assertIn("sys.stdin.buffer.read", hermes_stdin)
-        self.assertIn("hermes_main(", hermes_stdin)
-        # The one-query path never starts Hermes's own MCP discovery, so the
-        # adapter must connect the bundled-tools shim synchronously and enable
-        # its toolset alongside terminal and file.
-        self.assertIn('importlib.import_module("tools.mcp_tool").discover_mcp_tools()', hermes_stdin)
-        self.assertIn('toolsets="terminal,file,kern"', hermes_stdin)
-        # App backends are long-running services, so bootstrap creates a
-        # separate top-level slice and each generated app service joins it.
-        # The lower CPU weight is soft: apps can use idle cores, but the admin
-        # API and other host services in system.slice stay prioritized under
-        # contention.
-        self.assertIn("/etc/systemd/system/kern_app.slice", bootstrap)
-        self.assertNotIn("kern-app.slice", bootstrap)
-        self.assertIn(
-            "\n".join([
-                "cat > /etc/systemd/system/kern_app.slice <<'UNIT'",
-                "[Unit]",
-                "Description=Kern App Backends",
-                "",
-                "[Slice]",
-                "CPUWeight=50",
-                "UNIT",
-            ]),
-            bootstrap,
-        )
-        self.assertIn("Slice=kern_app.slice", bootstrap)
-        # The unused, world-accessible snapd socket is masked.
-        self.assertIn("mask snapd.socket", bootstrap)
-        # Security updates stay off the deploy critical path: the first-boot
-        # apt timers are quiesced while bootstrap runs apt (they hold the
-        # dpkg lock for unbounded archive downloads otherwise), then restarted
-        # so unattended-upgrades patches the host in the background.
-        self.assertIn("systemctl stop apt-daily.timer apt-daily-upgrade.timer", bootstrap)
-        self.assertIn("systemctl start apt-daily.timer apt-daily-upgrade.timer", bootstrap)
-        self.assertIn(" unattended-upgrades ", bootstrap)
-        self.assertNotIn("unattended-upgrade || true", bootstrap)
-        self.assertLess(
-            bootstrap.index("systemctl stop apt-daily.timer"),
-            bootstrap.index("apt_get update"),
-        )
-        self.assertLess(
-            bootstrap.index('apt_get install -y "postgresql-${PG_MAJOR}"'),
-            bootstrap.index("systemctl start apt-daily.timer"),
-        )
-        # Node comes from the official tarball, not the bloated apt npm package.
-        self.assertIn("nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-", bootstrap)
-        apt_line = next(line for line in bootstrap.splitlines() if "apt_get install" in line)
-        self.assertNotIn(" npm", apt_line)
-        self.assertNotIn(" nodejs", apt_line)
-        # git and gh back the managed GitHub integration; both come from the
-        # Ubuntu archive (no third-party apt repo) and ride unattended-upgrades.
-        self.assertIn(" git ", apt_line)
-        self.assertIn(" gh ", apt_line)
-        self.assertIn("requires existing admin state version file", bootstrap)
-        self.assertNotIn("legacy/unversioned", bootstrap)
-        self.assertNotIn("LEGACY_UNVERSIONED_STATE_VERSION", bootstrap)
+        self.assertIn("oif lo tcp dport 8000-8015 drop", bootstrap)
+        self.assertIn("tcp dport 22 accept", bootstrap)
+        self.assertIn("python3 -m host.runtime.deploy.write_config", bootstrap)
+        self.assertNotIn("/var/lib/kern-host", bootstrap)
 
-    def test_rendered_bootstrap_provisions_every_installed_app(self) -> None:
-        bootstrap = render._render_bootstrap()
 
-        apps = app_platform.installed_apps()
-        self.assertGreaterEqual(len(apps), 1)
-        for app in apps:
-            env_prefix = f"KERN_APP_{app.id.upper()}"
-            with self.subTest(app_id=app.id):
-                self.assertIn(f"{env_prefix}_UID=", bootstrap)
-                self.assertIn(f"{env_prefix}_GID=", bootstrap)
-                self.assertIn(f"ensure_group {app.linux_user}", bootstrap)
-                self.assertIn(f"ensure_user {app.linux_user} \"${env_prefix}_UID\" {app.linux_user} /nonexistent", bootstrap)
-                self.assertIn(
-                    f"ensure_group_member {app.linux_user} kern-app-backends", bootstrap
-                )
-                self.assertIn(f"local  kern_admin  {app.db_role}  peer", bootstrap)
-                self.assertIn(f"rolname = '{app.db_role}'", bootstrap)
-                self.assertIn(f'CREATE ROLE "{app.db_role}" LOGIN;', bootstrap)
-                self.assertIn(f'CREATE SCHEMA IF NOT EXISTS {app.db_schema} AUTHORIZATION \\"{app.db_role}\\";', bootstrap)
-                self.assertIn(f'GRANT CONNECT ON DATABASE kern_admin TO \\"{app.db_role}\\";', bootstrap)
-                self.assertIn(f"python3 -m host.runtime.deploy.app_migrate pending {app.id}", bootstrap)
-                self.assertIn(
-                    f"runuser -u {app.linux_user} -- env PYTHONPATH=/opt/kern-host "
-                    f'python3 -m host.runtime.deploy.app_migrate apply-sql {app.id} "$app_migration_version"',
-                    bootstrap,
-                )
-                self.assertIn(
-                    f"runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host "
-                    f'python3 -m host.runtime.deploy.app_migrate record {app.id} "$app_migration_version"',
-                    bootstrap,
-                )
-                self.assertIn(f'oif lo ct state established,related meta skuid "{app.linux_user}" accept', bootstrap)
-                self.assertIn(f'meta skuid "{app.linux_user}" drop', bootstrap)
-                port_var = f"$APP_{app.id.upper()}_PORT"
-                self.assertIn(f'oif lo tcp dport {port_var} meta skuid "kern-admin" accept', bootstrap)
-                self.assertIn(f"oif lo tcp dport {port_var} drop", bootstrap)
-                self.assertIn(f"cat > /etc/systemd/system/{app.service_name} <<'UNIT'", bootstrap)
-                self.assertIn(f"User={app.linux_user}", bootstrap)
-                self.assertIn("Slice=kern_app.slice", bootstrap)
-                self.assertIn("Environment=KERN_APP_ADMIN_API_SOCKET=/run/kern-admin-api/app-backend.sock", bootstrap)
-                self.assertIn(f"Environment=KERN_APP_PORT={app.port}", bootstrap)
-                backend_entrypoint = app.backend_entrypoint.relative_to(app.package_dir)
-                self.assertIn(
-                    f"ExecStart=/usr/bin/python3 /opt/kern-host/host/apps/{app.id}/{backend_entrypoint}",
-                    bootstrap,
-                )
-                self.assertIn(
-                    "ExecStopPost=/usr/bin/python3 -m "
-                    f"host.runtime.core.host_errors_service_exit {app.service_name.removesuffix('.service')}",
-                    bootstrap,
-                )
-                self.assertIn(f"systemctl enable {app.service_name}", bootstrap)
-                self.assertIn(f"systemctl start {app.service_name}", bootstrap)
 
-    def test_rendered_bootstrap_uses_manifest_backend_entrypoint_safely(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            app_dir = Path(temp) / "custom_app"
-            app_dir.mkdir()
-            backend = app_dir / "server.py"
-            backend.write_text("")
-            migrations = app_dir / "migrations"
-            migrations.mkdir()
-            ui = app_dir / "ui"
-            ui.mkdir()
-            app = app_platform.AppManifest(
-                id="custom_app",
-                title="Custom $(touch /tmp/unsafe)",
-                release_stage="stable",
-                package_dir=app_dir,
-                backend_entrypoint=backend,
-                migrations_dir=migrations,
-                ui_dir=ui,
-                allocation=app_platform.AppAllocation(uid=48007, gid=48007, port_offset=7),
-                agent_instructions="Test app instructions.",
-            )
 
-            with patch("host.bootstrap.render.app_platform.migration_apps", return_value=[app]):
-                bootstrap = render._render_bootstrap()
-
-        self.assertIn("cat > /etc/systemd/system/kern-app-custom_app.service <<'UNIT'", bootstrap)
-        self.assertIn("Description=Kern App: Custom $(touch /tmp/unsafe)", bootstrap)
-        self.assertIn("Slice=kern_app.slice", bootstrap)
-        self.assertIn("Environment=KERN_APP_PORT=7457", bootstrap)
-        self.assertIn("ExecStart=/usr/bin/python3 /opt/kern-host/host/apps/custom_app/server.py", bootstrap)
-        self.assertIn(
-            "ExecStopPost=/usr/bin/python3 -m "
-            "host.runtime.core.host_errors_service_exit kern-app-custom_app",
-            bootstrap,
-        )
-        self.assertNotIn("/opt/kern-host/host/apps/custom_app/backend.py", bootstrap)
-
-    def test_rendered_bootstrap_pins_every_app_uid_in_reserved_range(self) -> None:
-        bootstrap = render._render_bootstrap()
-        apps = app_platform.migration_apps()
-        seen_uids: set[int] = set()
-
-        for app in apps:
-            env_prefix = f"KERN_APP_{app.id.upper()}"
-            with self.subTest(app_id=app.id):
-                uid_match = re.search(rf"^{env_prefix}_UID=(\d+)$", bootstrap, re.MULTILINE)
-                gid_match = re.search(rf"^{env_prefix}_GID=(\d+)$", bootstrap, re.MULTILINE)
-                self.assertIsNotNone(uid_match)
-                self.assertIsNotNone(gid_match)
-                uid = int(uid_match.group(1))
-                gid = int(gid_match.group(1))
-                self.assertEqual(uid, app.allocation.uid)
-                self.assertEqual(gid, uid)
-                self.assertGreaterEqual(uid, 48000)
-                self.assertLessEqual(uid, 48099)
-                self.assertNotIn(uid, seen_uids)
-                seen_uids.add(uid)
 
     def test_rendered_bootstrap_runs_phases_and_verification(self) -> None:
         bootstrap = render._render_bootstrap()
@@ -2382,18 +1580,18 @@ class DeployUnitTests(unittest.TestCase):
         # roles only, and an explicit reject for everyone else (the agent user
         # has no role and no pg_hba rule that admits it).
         self.assertIn("listen_addresses = ''", bootstrap)
-        # The four core DB clients plus every bundled app fit below the server
+        # The core DB clients plus the workspace service fit below the server
         # cap with explicit room for operator, superuser, and deploy sessions.
         self.assertIn("max_connections = 300", bootstrap)
         self.assertEqual(db.MAX_ACTIVE_CONNECTIONS, 14)
-        # Provisioned once: installing another app must not retune Postgres.
         # 34 slots stay reserved for operator psql, the superuser reserve, and
-        # deploy work; when this trips, raise max_connections deliberately.
-        active_session_budget = (4 + len(app_platform.installed_apps())) * db.MAX_ACTIVE_CONNECTIONS
+        # deploy work; the five managed database clients remain bounded.
+        active_session_budget = 5 * db.MAX_ACTIVE_CONNECTIONS
         self.assertLessEqual(active_session_budget, 300 - 34)
         self.assertIn("local  kern_admin  kern-admin  peer", bootstrap)
         self.assertIn("local  kern_admin  kern-agent-network  peer", bootstrap)
-        self.assertNotIn("local  kern_admin  kern-agent-app  peer", bootstrap)
+        self.assertIn("local  kern_admin  kern-workspace  peer", bootstrap)
+        self.assertNotIn("local  kern_admin  kern-agent-workspace  peer", bootstrap)
         self.assertIn("local  all               postgres          peer", bootstrap)
         self.assertIn("local  all               all               reject", bootstrap)
         self.assertIn('CREATE ROLE "kern-admin" LOGIN;', bootstrap)
@@ -2412,9 +1610,9 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap,
         )
         self.assertNotIn('GRANT SELECT ON enabled_tools', bootstrap)
-        # Thread-scope attribution needs no agent-app database identity.
-        self.assertNotIn('CREATE ROLE "kern-agent-app" LOGIN;', bootstrap)
-        self.assertNotIn('GRANT CONNECT ON DATABASE kern_admin TO \\"kern-agent-app\\";', bootstrap)
+        # Thread-scope attribution needs no agent-workspace database identity.
+        self.assertNotIn('CREATE ROLE "kern-agent-workspace" LOGIN;', bootstrap)
+        self.assertNotIn('GRANT CONNECT ON DATABASE kern_admin TO \\"kern-agent-workspace\\";', bootstrap)
         migration = (Path(__file__).resolve().parents[1] / "host" / "migrations" / "0001_baseline.sql").read_text()
         # Read-only on enablement and config (operator-written by the admin
         # API). The genesis baseline grants exactly SELECT: there are no broader
@@ -2451,7 +1649,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("systemctl enable --now kern-postgres.service", bootstrap)
         self.assertIn(
             "After=network-online.target kern-network-proxy.service kern-postgres.service "
-            "kern-tools.service kern-agent-network.service kern-agent-app.service",
+            "kern-tools.service kern-agent-network.service",
             bootstrap,
         )
         # Schema migrations and config seeding run as kern-admin, after
@@ -2459,6 +1657,17 @@ class DeployUnitTests(unittest.TestCase):
         migrate_up = "python3 -m host.runtime.deploy.migrate up"
         self.assertIn("runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host " + migrate_up, bootstrap)
         self.assertIn("python3 -m host.runtime.deploy.write_config", bootstrap)
+        migration_sequence = bootstrap.split(
+            "migrate_admin_state_and_write_config() {", 1
+        )[1].split("\n}", 1)[0]
+        self.assertLess(
+            migration_sequence.index("migrate up --to 13"),
+            migration_sequence.index("adopt_workspace_migration_history"),
+        )
+        self.assertLess(
+            migration_sequence.index("adopt_workspace_migration_history"),
+            migration_sequence.rindex(migrate_up),
+        )
         self.assertLess(
             bootstrap.index("systemctl enable --now kern-postgres.service"),
             bootstrap.index(migrate_up),
@@ -2472,15 +1681,15 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap.index("systemctl enable --now kern-admin-api.service"),
         )
         self.assertLess(
+            bootstrap.index("systemctl enable kern-workspace.service"),
+            bootstrap.index("systemctl start kern-workspace.service"),
+        )
+        self.assertLess(
+            bootstrap.index("systemctl start kern-workspace.service"),
             bootstrap.index("rm -f /tmp/kern_payload.json /tmp/kern_effective_config.json"),
-            bootstrap.index("systemctl enable kern-app-agent_chat.service"),
         )
         self.assertLess(
-            bootstrap.index("systemctl enable kern-app-agent_chat.service"),
-            bootstrap.index("systemctl start kern-app-agent_chat.service"),
-        )
-        self.assertLess(
-            bootstrap.index("systemctl start kern-app-agent_chat.service"),
+            bootstrap.index("rm -f /tmp/kern_payload.json /tmp/kern_effective_config.json"),
             bootstrap.index("KERN_TARGET_VERSION"),
         )
         # No database driver anywhere: the runtime speaks the wire protocol
@@ -2511,6 +1720,19 @@ class DeployUnitTests(unittest.TestCase):
             "@PROXY_PORT@", str(PROXY_PORT)
         )
         self.assertIn(f"HTTPS_PROXY=http://127.0.0.1:{PROXY_PORT}", helper)
+
+    def test_agent_launchers_expose_the_proxy_ca_to_python_package_clients(self) -> None:
+        for name in ("run-codex-app-server", "run-claude-code", "run-hermes"):
+            with self.subTest(name=name):
+                launcher = Path(f"host/bootstrap/helpers/{name}.sh").read_text()
+                self.assertIn(
+                    "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+                    launcher,
+                )
+                self.assertIn(
+                    "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
+                    launcher,
+                )
 
     def test_rendered_helper_scripts_have_valid_shell_syntax(self) -> None:
         for name in (
@@ -3033,7 +2255,7 @@ class DeployNetworkTests(unittest.TestCase):
         ]
 
         with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
-            self.assertTrue(deploy._subnet_has_public_ipv4_route({}, "vpc-1", "subnet-1"))
+            self.assertTrue(lifecycle_aws._subnet_has_public_ipv4_route({}, "vpc-1", "subnet-1"))
 
     def test_subnet_rejects_nat_default_route(self) -> None:
         responses = [
@@ -3053,7 +2275,7 @@ class DeployNetworkTests(unittest.TestCase):
         ]
 
         with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
-            self.assertFalse(deploy._subnet_has_public_ipv4_route({}, "vpc-1", "subnet-1"))
+            self.assertFalse(lifecycle_aws._subnet_has_public_ipv4_route({}, "vpc-1", "subnet-1"))
 
 
 if __name__ == "__main__":

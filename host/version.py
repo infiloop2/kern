@@ -9,7 +9,7 @@ from typing import Any
 
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 REPO_VERSION_PATH = Path(__file__).resolve().parents[1] / "VERSION"
-ROOT_VERSION_PATH = Path(os.environ.get("KERN_ROOT_VERSION_PATH", "/opt/kern-host/VERSION"))
+ROOT_VERSION_PATH = Path("/opt/kern-host/VERSION")
 STATE_VERSION_FILENAME = "version.json"
 
 
@@ -30,12 +30,6 @@ def repo_version(path: Path = REPO_VERSION_PATH) -> str:
     return _validate_version(path.read_text().strip())
 
 
-def state_version_path(state_dir: Path | None = None) -> Path:
-    if state_dir is None:
-        state_dir = Path(os.environ.get("KERN_STATE_DIR", "/mnt/kern-admin/admin-state"))
-    return state_dir / STATE_VERSION_FILENAME
-
-
 def read_root_version(path: Path = ROOT_VERSION_PATH) -> str | None:
     try:
         return _validate_version(path.read_text().strip())
@@ -43,8 +37,9 @@ def read_root_version(path: Path = ROOT_VERSION_PATH) -> str | None:
         return None
 
 
-def read_state_version(path: Path | None = None) -> str | None:
-    version_path = path or state_version_path()
+def read_state_version() -> str | None:
+    state_dir = Path(os.environ.get("KERN_STATE_DIR", "/mnt/kern-admin/admin-state"))
+    version_path = state_dir / STATE_VERSION_FILENAME
     try:
         payload: Any = json.loads(version_path.read_text())
     except FileNotFoundError:

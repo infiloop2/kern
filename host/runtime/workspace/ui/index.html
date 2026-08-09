@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<body>
+<div class="global-workspace">
+  <header class="global-head">
+    <div>
+      <span class="global-eyebrow">Workspace</span>
+      <h1 id="global-title">Memory</h1>
+      <p id="global-intro">Durable pages available to every agent thread.</p>
+    </div>
+    <div class="global-head-actions">
+      <button id="global-archive-toggle" class="ghost">Show deleted</button>
+      <button id="global-new" class="soft-primary">New page</button>
+    </div>
+  </header>
+
+  <div class="global-layout">
+    <aside class="global-index" aria-label="Items">
+      <label id="memory-search-wrap" class="global-search">
+        <span class="sr-only">Search memory</span>
+        <input id="memory-search" type="search" maxlength="200" placeholder="Search memory">
+      </label>
+      <div id="global-list" class="global-list"></div>
+      <button id="global-load-more" class="ghost sm" hidden>Load more</button>
+    </aside>
+
+    <main class="global-detail">
+      <p id="global-status" class="global-status" role="status"></p>
+      <div id="global-empty" class="global-empty">
+        <h2>No item selected</h2>
+        <p>Select an item or create a new one.</p>
+      </div>
+
+      <form id="memory-form" class="resource-form" hidden>
+        <div class="form-grid">
+          <label><span>Page ID</span><input id="memory-page-id" maxlength="64" pattern="[a-z0-9][a-z0-9-]*" required></label>
+          <label class="wide"><span>When to use this page</span><input id="memory-description" maxlength="100" required></label>
+          <label class="wide"><span>Content</span><textarea id="memory-content" maxlength="1000" rows="12"></textarea></label>
+        </div>
+        <div class="resource-meta" id="memory-meta"></div>
+        <div class="link-grid">
+          <div><strong>Links</strong><div id="memory-links" class="chip-list"></div></div>
+          <div><strong>Backlinks</strong><div id="memory-backlinks" class="chip-list"></div></div>
+        </div>
+        <div class="form-actions">
+          <button id="memory-delete" class="danger ghost" type="button">Delete</button>
+          <span class="spacer"></span>
+          <button id="memory-cancel" class="ghost" type="button">Cancel</button>
+          <button id="memory-save" class="primary" type="submit">Save page</button>
+        </div>
+        <section class="resource-history">
+          <h2>History</h2>
+          <div id="memory-history"></div>
+        </section>
+      </form>
+
+      <form id="schedule-form" class="resource-form" hidden>
+        <div class="form-grid">
+          <label class="wide"><span>Name</span><input id="schedule-name" maxlength="100" required></label>
+          <label class="wide"><span>Message</span><textarea id="schedule-message" maxlength="4000" rows="7" required></textarea></label>
+          <label><span>Agent</span><select id="schedule-runtime"></select></label>
+          <label><span>Model</span><select id="schedule-model"></select></label>
+          <label><span>Level</span><select id="schedule-effort"></select></label>
+          <label><span>Cadence</span><select id="schedule-cadence"><option value="interval">Every N minutes</option><option value="daily">Daily (UTC)</option></select></label>
+          <label id="schedule-interval-wrap"><span>Minutes</span><input id="schedule-interval" type="number" min="5" max="10080" value="60"></label>
+          <label id="schedule-time-wrap" hidden><span>Time (UTC)</span><input id="schedule-time" type="time" value="09:00"></label>
+        </div>
+        <div class="resource-meta" id="schedule-meta"></div>
+        <div class="form-actions">
+          <button id="schedule-delete" class="danger ghost" type="button">Delete</button>
+          <span class="spacer"></span>
+          <button id="schedule-cancel" class="ghost" type="button">Cancel</button>
+          <button id="schedule-save" class="primary" type="submit">Save schedule</button>
+        </div>
+        <div class="schedule-columns">
+          <section class="resource-history"><h2>Definition history</h2><div id="schedule-history"></div></section>
+          <section class="resource-history"><h2>Runs</h2><div id="schedule-runs"></div></section>
+        </div>
+      </form>
+    </main>
+  </div>
+</div>
+</body>
+</html>

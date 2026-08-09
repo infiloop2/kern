@@ -418,7 +418,7 @@ class ExecuteActionTests(ToolsHostTestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(
             result["error"],
-            "Tool config FAKE_NOTES_TOKEN is not set. The operator must set it in the admin UI's Tools tab.",
+            "Tool config FAKE_NOTES_TOKEN is not set. The operator must set it under Home > Integrations in the admin UI.",
         )
 
     def test_write_action_queues_exact_payload(self) -> None:

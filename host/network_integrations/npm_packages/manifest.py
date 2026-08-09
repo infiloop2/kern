@@ -6,13 +6,7 @@ GET/HEAD-only, path-guarded rules are the whole control.
 
 from __future__ import annotations
 
-from typing import Any
-
-from host.network_integrations.base import (
-    IntegrationManifest,
-    ManagedIntegration,
-    parse_simple_integration,
-)
+from host.network_integrations.base import IntegrationManifest, simple_integration_parser
 
 MANIFEST = IntegrationManifest(
     integration_id="npm_packages",
@@ -24,6 +18,4 @@ MANIFEST = IntegrationManifest(
     owned_apexes=("npmjs.org", "nodejs.org"),
 )
 
-
-def parse(raw: dict[str, Any]) -> ManagedIntegration:
-    return parse_simple_integration(raw, "network_integrations.npm_packages")
+parse = simple_integration_parser("network_integrations.npm_packages")

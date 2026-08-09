@@ -4,7 +4,7 @@ The supported endpoint paths are SSH port forwarding and the optional
 Cloudflare Tunnel. The admin login is the authentication boundary: the tunnel
 carries transport and Cloudflare's edge (DDoS) protection only, with no
 Cloudflare Access gate in front, so the login is hardened to stand alone. API
-routes require an authenticated caller; only static admin/app assets, the
+routes require an authenticated caller; only static release assets, the
 side-effect-free OAuth callback shell, and the non-secret public-login status
 are unauthenticated.
 
@@ -28,9 +28,12 @@ brute-forced over the public tunnel.
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timedelta, timezone
+import hashlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -47,11 +50,11 @@ from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PRO
 from host.network_integrations.bedrock.manifest import SUPPORTED_REGIONS as BEDROCK_REGIONS
 from host.network_integrations.github.push_gate import pending as github_pending_push
 from host.session_options import session_config_error
-# app_backend_admin_api imports this module back to dispatch through route().
+# workspace_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
 # object and reads its attributes only at request time, never during import.
-from host.runtime.admin_api import admin_auth, admin_passkeys, agent_activity, app_api_proxy, app_backend_api as app_backend_admin_api, bedrock_credentials, claude_code, codex_app_server, github_credential, github_repo_audit, orchestrator, tools_client as tools_admin_api, upgrade_check
-from host.runtime.core import app_platform, host_errors, network_policy, state
+from host.runtime.admin_api import admin_auth, admin_passkeys, agent_activity, workspace_api as workspace_admin_api, workspace_proxy, bedrock_credentials, claude_code, codex_app_server, github_credential, github_repo_audit, orchestrator, tools_client as tools_admin_api, upgrade_check
+from host.runtime.core import host_errors, network_policy, pgclient, state
 from host.runtime.tools import tools_host
 from host.runtime.admin_api.orchestrator import agent_runtime_status
 from host.runtime.core.state import (
@@ -70,18 +73,17 @@ class OperatorPrincipal(NamedTuple):
     session_token_hash: str
 
 
-class AppBackendPrincipal(NamedTuple):
-    """An installed app authenticated by the Unix peer boundary."""
-
-    app_id: str
+class WorkspacePrincipal(NamedTuple):
+    """The fixed Workspace service authenticated by the Unix peer boundary."""
 
 
-RoutePrincipal = OperatorPrincipal | AppBackendPrincipal
+RoutePrincipal = OperatorPrincipal | WorkspacePrincipal
 
 
 HOST = LOOPBACK
 PORT = ADMIN_API_PORT
 RUNTIME_DIR = Path(__file__).parent
+ADMIN_UI_DIR = RUNTIME_DIR / "admin_ui"
 TOOLS_DIR = RUNTIME_DIR.parents[1] / "tools"
 
 
@@ -96,21 +98,37 @@ def _tool_guide_assets() -> dict[str, tuple[Path, str]]:
 
 
 UI_ASSETS = {
-    "/": (RUNTIME_DIR / "admin_ui.html", "text/html; charset=utf-8"),
+    "/": (ADMIN_UI_DIR / "index.html", "text/html; charset=utf-8"),
     # The page the operator registers as the OAuth redirect URI for tool
     # connect flows; the SPA reads the code/state query parameters on load.
-    "/oauth/callback": (RUNTIME_DIR / "admin_ui.html", "text/html; charset=utf-8"),
-    "/admin_ui.css": (RUNTIME_DIR / "admin_ui.css", "text/css; charset=utf-8"),
-    "/favicon.ico": (RUNTIME_DIR / "admin_favicon.svg", "image/svg+xml"),
-    "/favicon.svg": (RUNTIME_DIR / "admin_favicon.svg", "image/svg+xml"),
+    "/oauth/callback": (ADMIN_UI_DIR / "index.html", "text/html; charset=utf-8"),
+    "/admin_ui.css": (ADMIN_UI_DIR / "admin_ui.css", "text/css; charset=utf-8"),
+    "/favicon.ico": (ADMIN_UI_DIR / "favicon.svg", "image/svg+xml"),
+    "/favicon.svg": (ADMIN_UI_DIR / "favicon.svg", "image/svg+xml"),
 }
-# The admin UI ships as native ES modules in host/runtime/admin_ui/. The
+# The admin UI ships as native ES modules in host/runtime/admin_api/admin_ui/. The
 # served set is fixed at startup from the files present, so any other
 # /admin_ui/ path stays a 404.
 UI_ASSETS.update({
     f"/admin_ui/{module.name}": (module, "application/javascript; charset=utf-8")
-    for module in sorted((RUNTIME_DIR / "admin_ui").glob("*.js"))
+    for module in sorted(ADMIN_UI_DIR.glob("*.js"))
 })
+WORKSPACE_UI_ASSETS = {
+    "/workspace/chat.html": (RUNTIME_DIR.parent / "workspace/chat/ui/index.html", "text/html; charset=utf-8"),
+    "/workspace/chat.js": (RUNTIME_DIR.parent / "workspace/chat/ui/agent_chat.js", "application/javascript; charset=utf-8"),
+    "/workspace/chat.css": (RUNTIME_DIR.parent / "workspace/chat/ui/agent_chat.css", "text/css; charset=utf-8"),
+    "/workspace/rich_text.js": (RUNTIME_DIR.parent / "workspace/chat/ui/rich_text.js", "application/javascript; charset=utf-8"),
+    "/workspace/rich_text.css": (RUNTIME_DIR.parent / "workspace/chat/ui/rich_text.css", "text/css; charset=utf-8"),
+    "/workspace/web-apps.html": (RUNTIME_DIR.parent / "workspace/web_apps/ui/index.html", "text/html; charset=utf-8"),
+    "/workspace/web-apps.js": (RUNTIME_DIR.parent / "workspace/web_apps/ui/personal_web_app_builder.js", "application/javascript; charset=utf-8"),
+    "/workspace/web-apps.css": (RUNTIME_DIR.parent / "workspace/web_apps/ui/personal_web_app_builder.css", "text/css; charset=utf-8"),
+    "/workspace/global.html": (RUNTIME_DIR.parent / "workspace/ui/index.html", "text/html; charset=utf-8"),
+    "/workspace/global.js": (RUNTIME_DIR.parent / "workspace/ui/workspace.js", "application/javascript; charset=utf-8"),
+    "/workspace/global.css": (RUNTIME_DIR.parent / "workspace/ui/workspace.css", "text/css; charset=utf-8"),
+    "/workspace/capability-worker-sandbox.html": (RUNTIME_DIR.parent / "workspace/web_apps/ui/capability_worker_sandbox.html", "text/html; charset=utf-8"),
+    "/workspace/capability-worker-sandbox.js": (RUNTIME_DIR.parent / "workspace/web_apps/ui/capability_worker_sandbox.js", "application/javascript; charset=utf-8"),
+}
+UI_ASSETS.update(WORKSPACE_UI_ASSETS)
 # Provider setup screenshots live with their owning tool integration. They are
 # audited release assets and never load from provider domains in the operator's
 # browser. Public filenames are unique across tools so manifests stay portable.
@@ -142,17 +160,69 @@ UNTRUSTED_FILE_SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
 }
 THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+UTC_TIMESTAMP_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+RFC3339_TIMESTAMP_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.(?P<fraction>[0-9]+))?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+    re.IGNORECASE,
+)
 SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 MESSAGE_LIMIT = 50_000
-THREAD_HANDOFF_CHARACTER_LIMIT = 250_000
+# A fresh provider session gets independent recent-conversation and activity
+# budgets. Tool output can therefore never crowd user or assistant messages
+# out of the handoff prompt.
+THREAD_HANDOFF_MESSAGE_CHARACTER_LIMIT = 100_000
+THREAD_HANDOFF_ACTIVITY_CHARACTER_LIMIT = 150_000
+THREAD_HANDOFF_CHARACTER_LIMIT = (
+    THREAD_HANDOFF_MESSAGE_CHARACTER_LIMIT + THREAD_HANDOFF_ACTIVITY_CHARACTER_LIMIT
+)
+THREAD_HANDOFF_ACTIVITY_DETAIL_LIMIT = 1_000
+THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT = 8_000
+THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT = 8_000
 MAINTENANCE_INTERVAL_SECONDS = 3600  # scheduled state cleanup cadence (not per-request)
 THREAD_EVENT_MESSAGE_BYTES_LIMIT = 200_000
+# The in-thread boundary text. It states what survives, because "cleared"
+# otherwise reads as deleted history and operators clear again looking for an
+# effect that already happened. Carried as a plain message rather than an
+# activity payload: the Chat renderer merges events that share an activity id,
+# so a fixed id would collapse a second clear onto the first one's position.
+WORKING_MEMORY_CLEARED_NOTICE = (
+    "Working memory cleared. The agent starts fresh from here. Earlier "
+    "messages stay visible but are no longer sent to it."
+)
 THREAD_DISPLAY_EVENT_TYPES = frozenset({
     "thread.message",
     "thread.activity",
     "thread.error",
     "thread.stopped",
+    "thread.memory_cleared",
 })
+CONVERSATION_SEARCH_LIMIT = 25
+CONVERSATION_SEARCH_EXCERPT_BYTES = 2 * 1024
+CONVERSATION_READ_LIMIT = 50
+CONVERSATION_QUERY_BYTES = 512
+CONVERSATION_VARIANT_BYTES = 256
+CONVERSATION_VARIANT_LIMIT = 8
+CONVERSATION_CURSOR_BYTES = 512
+CONVERSATION_MESSAGE_BYTES = 16 * 1024
+CONVERSATION_RESPONSE_BYTES = 256 * 1024
+CONVERSATION_EVENT_TYPES = ("thread.message", "thread.activity")
+HISTORY_PROVENANCE = "retained_conversation_history"
+HISTORY_TRUST = "untrusted"
+HISTORY_INSTRUCTION_AUTHORITY = "none"
+POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807
+EVENT_ID_RE = re.compile(r"^event_([1-9][0-9]{0,18})$")
+CONVERSATION_ACTIVITY_FIELDS = (
+    ("activity_id", 128),
+    ("provider", 128),
+    ("kind", 128),
+    ("phase", 128),
+    ("title", 256),
+    ("status", 128),
+    ("detail", 768),
+    ("output", 1024),
+    ("error", 1024),
+)
 THREAD_MAP_LIMIT = 100_000  # user thread -> runtime session mappings kept before LRU pruning
 OAUTH_LOGIN_LOCK_TIMEOUT_SECONDS = 5
 # OAuth login can start while awaiting login or in error: error states (a
@@ -180,7 +250,6 @@ AGENT_AUTH_CLEAR_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-h
 AGENT_CGROUP_ROOT = Path("/sys/fs/cgroup/kern_agent.slice")
 PROC_ROOT = Path("/proc")
 AGENT_PROCESS_LIMIT = 1000
-APP_SCOPED_ID_SEPARATOR = app_platform.APP_SCOPED_ID_SEPARATOR
 # Lock inventory for this module (each request runs on its own handler
 # thread, so every handler is concurrent with every other and with the
 # orchestrator's workers):
@@ -248,20 +317,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._auth_context, method, path.path
             ):
                 raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
-            # The shell adds this marker only when forwarding an embedded
-            # app's postMessage request. Scope it before every dispatch,
-            # including unauthenticated login and static routes, so URL
-            # normalization can never turn an app request into a host action.
-            bridge_app_id = self.headers.get("X-Kern-App-Bridge", "") or None
-            _enforce_app_bridge_scope(path.path, bridge_app_id)
             if method == "GET" and path.path in UI_ASSETS:
-                self._send_ui_asset(path.path)
+                if path.path == "/workspace/capability-worker-sandbox.html":
+                    self._send_capability_sandbox()
+                else:
+                    self._send_ui_asset(path.path)
                 return
-            if method == "GET":
-                app_asset = app_platform.ui_asset(path.path)
-                if app_asset is not None:
-                    self._send_app_ui_asset(*app_asset)
-                    return
             # The login flow establishes the session, so it is reachable
             # before session authentication.
             if method == "POST" and path.path == "/v1/login":
@@ -292,7 +353,6 @@ class Handler(BaseHTTPRequestHandler):
                 parse_qs(path.query),
                 self._read_body(),
                 principal=principal,
-                bridge_app_id=bridge_app_id,
             )
             self._send_json(HTTPStatus.OK, response)
         except admin_auth.PublicHttpsRequired as exc:
@@ -310,8 +370,6 @@ class Handler(BaseHTTPRequestHandler):
             )
         except ApiError as exc:
             self._send_json(exc.status, {"error": {"message": exc.message}})
-        except app_platform.AppError as exc:
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": {"message": str(exc)}})
         except (BrokenPipeError, ConnectionResetError):
             # The client closed the connection while the response was being
             # written: expected transport termination, not a service fault.
@@ -340,16 +398,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_app_ui_asset(self, app: app_platform.AppManifest, asset: Path, content_type: str) -> None:
-        data = asset.read_bytes()
-        self.send_response(HTTPStatus.OK.value)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self._send_ui_cache_headers()
-        self._send_app_ui_security_headers(app)
-        self.end_headers()
-        self.wfile.write(data)
-
     def _send_ui_cache_headers(self) -> None:
         self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Pragma", "no-cache")
@@ -359,37 +407,24 @@ class Handler(BaseHTTPRequestHandler):
         for name, value in SECURITY_HEADERS.items():
             self.send_header(name, value)
 
-    def _send_app_ui_security_headers(self, app: app_platform.AppManifest) -> None:
-        asset_origin = self._app_ui_asset_origin()
-        worker_policy = "; worker-src blob:; webrtc 'block'" if app.capability_worker else ""
+    def _send_capability_sandbox(self) -> None:
+        asset, content_type = UI_ASSETS["/workspace/capability-worker-sandbox.html"]
+        data = asset.read_bytes()
+        self.send_response(HTTPStatus.OK.value)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self._send_ui_cache_headers()
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'none'; "
-            "base-uri 'none'; "
-            "connect-src 'none'; "
-            f"font-src 'self' {asset_origin} data:; "
-            "form-action 'none'; "
-            "frame-ancestors 'self'; "
-            "frame-src 'none'; "
-            f"img-src 'self' {asset_origin} data:; "
-            "navigate-to 'self'; "
-            "object-src 'none'; "
-            "sandbox allow-scripts allow-forms allow-modals; "
-            f"script-src 'self' {asset_origin}; "
-            f"style-src 'self' 'unsafe-inline' {asset_origin}"
-            f"{worker_policy}",
+            "default-src 'none'; base-uri 'none'; connect-src 'none'; "
+            "form-action 'none'; frame-ancestors 'self'; object-src 'none'; "
+            "script-src 'self'; worker-src blob:; sandbox allow-scripts",
         )
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
-
-    def _app_ui_asset_origin(self) -> str:
-        if self._auth_context.passkey_context is not None:
-            return self._auth_context.passkey_context[1]
-        host = self.headers.get("Host", "")
-        if not re.fullmatch(r"[A-Za-z0-9.:-]+", host):
-            host = f"{LOOPBACK}:{ADMIN_API_PORT}"
-        return f"http://{host}"
+        self.end_headers()
+        self.wfile.write(data)
 
     def _authenticate(self) -> OperatorPrincipal:
         # The session cookie minted by the completed login flow is the only
@@ -588,7 +623,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
         try:
             return json.loads(self.rfile.read(length))
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             raise ApiError(HTTPStatus.BAD_REQUEST, f"invalid JSON: {exc}") from exc
 
     def _send_https_redirect(self, hostname: str) -> None:
@@ -789,12 +824,6 @@ class Handler(BaseHTTPRequestHandler):
         return length
 
 
-def _enforce_app_bridge_scope(path: str, bridge_app_id: str | None) -> None:
-    """Keep an iframe bridge inside its own app API before any dispatch."""
-    if bridge_app_id is not None and not path.startswith(f"/v1/apps/{bridge_app_id}/api/"):
-        raise ApiError(HTTPStatus.FORBIDDEN, "app bridge requests may only target the app's own API")
-
-
 def route(
     method: str,
     path: str,
@@ -802,23 +831,22 @@ def route(
     body: Any,
     *,
     principal: RoutePrincipal,
-    bridge_app_id: str | None = None,
 ) -> Any:
     # Authentication belongs to the two transport boundaries. Requiring their
     # resulting principal here (with no operator-like default) makes any new
     # in-process caller an explicit security-boundary decision.
-    if isinstance(principal, OperatorPrincipal):
-        app_backend_id = None
-    elif isinstance(principal, AppBackendPrincipal):
-        app_backend_id = principal.app_id
-    else:
+    is_operator = isinstance(principal, OperatorPrincipal)
+    if not is_operator and not isinstance(principal, WorkspacePrincipal):
         raise TypeError("route principal is invalid")
-    # A bridge-tagged request (the admin shell forwarding an app iframe's
-    # postMessage) may only target that app's own API surface — enforced here,
-    # before any route dispatch, so no host route is reachable through the
-    # bridge. Un-normalized dot-segment paths that pass the literal prefix
-    # check are proxied into the app's own backend, which 404s them.
-    _enforce_app_bridge_scope(path, bridge_app_id)
+    if (
+        not is_operator
+        and not workspace_admin_api.is_allowed_workspace_admin_route(method, path)
+    ):
+        # The Unix-socket handler enforces the same allowlist before dispatch.
+        # Keep the principal check here as defense in depth so a future
+        # in-process caller cannot accidentally turn WorkspacePrincipal into
+        # general admin authority.
+        raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
     if method == "GET" and path == "/v1/health":
         return health()
     if method == "GET" and path == "/v1/agent-runtime/status":
@@ -829,10 +857,22 @@ def route(
         return current_agent_accounts()
     if method == "POST" and path == "/v1/agent-runtime/refresh":
         return refresh_agent_runtime_accounts(body)
-    if path == "/v1/apps" and method == "GET":
-        return list_apps()
-    if path.startswith("/v1/apps/"):
-        return app_api_proxy.route_app_request(method, path, query, body)
+    if path == "/v1/workspace/chat" or path.startswith("/v1/workspace/chat/"):
+        if not is_operator:
+            raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
+        return workspace_proxy.route_request(method, path, query, body)
+    if path == "/v1/workspace/web-apps" or path.startswith("/v1/workspace/web-apps/"):
+        if not is_operator:
+            raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
+        return workspace_proxy.route_request(method, path, query, body)
+    if path == "/v1/workspace/memory" or path.startswith("/v1/workspace/memory/"):
+        if not is_operator:
+            raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
+        return workspace_proxy.route_request(method, path, query, body)
+    if path == "/v1/workspace/schedules" or path.startswith("/v1/workspace/schedules/"):
+        if not is_operator:
+            raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
+        return workspace_proxy.route_request(method, path, query, body)
     if path == "/v1/agent-runtime/codex-oauth-login":
         if method == "POST":
             return start_codex_oauth_login()
@@ -855,10 +895,26 @@ def route(
     if path == "/v1/agent-runtime/reset-linked-account" and method == "POST":
         return reset_linked_account(body)
     if path == "/v1/threads" and method == "GET":
-        _reject_query_keys(query, {"before", "limit"}, "thread list")
-        return list_threads(query, app_backend_id=app_backend_id)
+        _reject_query_keys(query, {"before", "limit", "prefix"}, "thread list")
+        return list_threads(query)
+    if path == "/v1/conversation-history/search" and method == "POST":
+        return search_conversation_history(body)
+    if path == "/v1/conversation-history/read" and method == "POST":
+        return read_conversation_history(body)
     if path.startswith("/v1/threads/"):
-        return thread_route(method, path, query, body, app_backend_id=app_backend_id)
+        if (
+            is_operator
+            and method == "POST"
+            and re.fullmatch(
+                r"/v1/threads/(?:thread-[1-9][0-9]*|app-[1-9][0-9]*|schedule-[^/]+)/messages",
+                path,
+            )
+        ):
+            raise ApiError(
+                HTTPStatus.FORBIDDEN,
+                "Workspace-owned threads are reserved for the Workspace service",
+            )
+        return thread_route(method, path, query, body)
     if path == "/v1/events" and method == "GET":
         _reject_query_keys(query, {"before", "limit"}, "event")
         return {
@@ -956,10 +1012,6 @@ def route(
     if path == "/v1/host-runtime/reboot" and method == "POST":
         return reboot_host()
     raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
-
-
-def list_apps() -> dict[str, Any]:
-    return {"apps": [app.public() for app in app_platform.installed_apps()]}
 
 
 def resolve_pending_push(push_id: str, action: str) -> dict[str, Any]:
@@ -1231,8 +1283,6 @@ def thread_route(
     path: str,
     query: dict[str, list[str]],
     body: Any,
-    *,
-    app_backend_id: str | None = None,
 ) -> Any:
     parts = path.strip("/").split("/")
     if len(parts) < 3 or not THREAD_ID_RE.fullmatch(parts[2]):
@@ -1243,9 +1293,11 @@ def thread_route(
             raise ApiError(HTTPStatus.BAD_REQUEST, "thread detail does not accept query parameters")
         return {"thread": get_thread(thread_id)}
     if len(parts) == 4 and parts[3] == "messages" and method == "POST":
-        return send_thread_message(thread_id, body, app_backend_id=app_backend_id)
+        return send_thread_message(thread_id, body)
     if len(parts) == 4 and parts[3] == "stop" and method == "POST":
         return stop_thread(thread_id)
+    if len(parts) == 4 and parts[3] == "clear-memory" and method == "POST":
+        return clear_thread_memory(thread_id)
     if len(parts) == 4 and parts[3] == "events" and method == "GET":
         _reject_query_keys(
             query,
@@ -1288,7 +1340,7 @@ def thread_route(
                         payload[field] = _clip_json_encoded_text(value, message_bytes)
                 activity = payload.get("activity")
                 if isinstance(activity, dict):
-                    # A single event must stay below the app bridge's 1 MiB
+                    # A single event must stay below the Workspace proxy's 1 MiB
                     # response cap. Keep the useful command/tool output large,
                     # but bound both rich text fields and mark every clip.
                     detail_budget = min(message_bytes, 24 * 1024)
@@ -1320,6 +1372,7 @@ def health() -> dict[str, Any]:
         "agent_runtime": runtime,
         "network_controls": {"status": network_status},
         "host_runtime": host_metrics(),
+        "history": state.agent_history_counts(),
     }
 
 
@@ -1335,26 +1388,33 @@ def proxy_alive() -> bool:
 
 
 def prune_state() -> None:
-    """Bound admin-state growth: cap the thread->session maps. Runs on a
-    schedule (maintenance_loop), never on the request path; the deletes are
-    indexed and touch only rows beyond the caps. The audit logs prune
-    themselves on their own append cadence."""
+    """Apply every time-based or append-only PostgreSQL retention policy."""
+    now = datetime.now(timezone.utc)
     with state.mutation() as cur:
+        state.prune_event_logs(cur)
+        state.prune_host_errors(cur)
+        state.prune_pending_pushes(cur)
+        state.prune_bedrock_usage(
+            cur,
+            (now - timedelta(days=state.BEDROCK_USAGE_RETAIN_DAYS))
+            .date()
+            .isoformat(),
+        )
         # Threads with retained events keep their canonical row; unreferenced
         # mappings use the ordinary per-runtime LRU cap.
         for runtime_type in AGENT_RUNTIME_TYPES:
             state.prune_thread_sessions(cur, runtime_type, THREAD_MAP_LIMIT)
-    # Approval expiry and history pruning use their own short mutations.
     tools_host.maintain_approvals()
 
 
 def maintenance_loop() -> None:
+    """Prune bounded state on a schedule, never on the request path."""
     while True:
-        time.sleep(MAINTENANCE_INTERVAL_SECONDS)
         try:
             prune_state()
         except Exception as exc:
             host_errors.report_unexpected("admin_api.maintenance", exc)
+        time.sleep(MAINTENANCE_INTERVAL_SECONDS)
 
 
 def _mint_codex_login() -> tuple[dict[str, str], dict[str, str]]:
@@ -1672,24 +1732,14 @@ def _current_agent_account(statuses: dict[str, dict[str, Any]], runtime_type: st
     if runtime_type == "claude_code":
         response = {"agent_runtime": "claude_code", "provider": "claude", "status": status}
         account = read_claude_account()
-        if not _claude_account_is_operator_approved(account):
+        if account.get("identity_attestation") != orchestrator.CLAUDE_IDENTITY_ATTESTATION:
             account = {}
     else:
         response = {"agent_runtime": "codex", "provider": "openai", "status": status}
         account = read_openai_account()
-        if not _openai_account_is_operator_approved(account):
+        if account.get("operator_approval") != orchestrator.OPENAI_OPERATOR_APPROVAL:
             account = {}
-    if status == "active":
-        response.update(_account_response_metadata(account, runtime_type))
-        return response
-    # The account anchor outlives sessions and deactivation; expose its
-    # identity (never plan/usage) so the UI can show which account is linked
-    # while the runtime is logged out or in error.
-    for key in ("account_id", "email", "arn"):
-        value = account.get(key)
-        if isinstance(value, str) and value:
-            response[key] = value
-    return response
+    return _account_response_tail(response, account, status, runtime_type)
 
 
 def _current_bedrock_account(statuses: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1706,10 +1756,22 @@ def _current_bedrock_account(statuses: dict[str, dict[str, Any]]) -> dict[str, A
     # Credential and display metadata are stored or cleared atomically, so the
     # account is meaningful only while the validated credential remains.
     account = state.read_bedrock_account() if state.read_bedrock_access_key_id() else {}
+    return _account_response_tail(response, account, status, "bedrock")
+
+
+def _account_response_tail(
+    response: dict[str, Any],
+    account: dict[str, Any],
+    status: str,
+    runtime_type: str,
+) -> dict[str, Any]:
     if status == "active":
-        response.update(_account_response_metadata(account, "bedrock"))
+        response.update(_account_response_metadata(account, runtime_type))
         return response
-    for key in ("account_id", "arn"):
+    # The account anchor outlives sessions and deactivation; expose its
+    # identity (never plan/usage) so the UI can show which account is linked
+    # while the runtime is logged out or in error.
+    for key in ("account_id", "email", "arn"):
         value = account.get(key)
         if isinstance(value, str) and value:
             response[key] = value
@@ -1752,14 +1814,6 @@ def _bedrock_live_usage() -> dict[str, Any]:
     return usage
 
 
-def _openai_account_is_operator_approved(account: dict[str, Any]) -> bool:
-    return account.get("operator_approval") == orchestrator.OPENAI_OPERATOR_APPROVAL
-
-
-def _claude_account_is_operator_approved(account: dict[str, Any]) -> bool:
-    return account.get("identity_attestation") == orchestrator.CLAUDE_IDENTITY_ATTESTATION
-
-
 # Bedrock is absent on purpose: its usage is computed live from the proxy's
 # token counters (_bedrock_live_usage), never stored on the account row.
 _RUNTIME_USAGE_KEYS = {
@@ -1798,15 +1852,12 @@ def _account_response_metadata(account: dict[str, Any], runtime_type: str) -> di
 def send_thread_message(
     thread_id: str,
     body: Any,
-    *,
-    app_backend_id: str | None = None,
 ) -> dict[str, Any]:
     """The one write path for agent work: start a turn on an idle thread
     (creating the thread on its first message) or steer the thread's running
     turn. There is no queue — a message that cannot run now is rejected with
     a retry hint and the caller decides."""
-    message = _message(body, "message")
-    _validate_thread_id_not_reserved_by_app(thread_id, app_backend_id)
+    message = _message(body)
     with _thread_send_lock(thread_id):
         session_config = state.thread_session_config(thread_id)
         agent_runtime, model, effort = _resolve_session_config(body, session_config)
@@ -1840,7 +1891,13 @@ def send_thread_message(
                     handoff_events = state.recent_thread_handoff_events(
                         cur,
                         thread_id,
-                        character_limit=THREAD_HANDOFF_CHARACTER_LIMIT,
+                        message_character_limit=THREAD_HANDOFF_MESSAGE_CHARACTER_LIMIT,
+                        activity_character_limit=THREAD_HANDOFF_ACTIVITY_CHARACTER_LIMIT,
+                        activity_event_character_limit=THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT,
+                        # A cleared thread has no provider session, so it takes
+                        # the handoff path; the floor is what keeps that path
+                        # from handing back the context that was cleared.
+                        after_seq=int((session_config or {}).get("context_cleared_seq") or 0),
                     )
                 if switching_session:
                     assert session_config is not None
@@ -1883,7 +1940,12 @@ def send_thread_message(
                         model,
                         effort,
                     )
-                if switching_session or (missing_provider_context and handoff_events):
+                # Only when there is history to hand over. Both paths above can
+                # produce none — a cleared thread by its floor, a first-message
+                # switch by having no events — and the prompt tells the new
+                # session it is continuing a thread, which is exactly wrong for
+                # a run that starts fresh.
+                if handoff_events:
                     launch_message = _session_handoff_message(handoff_events, message)
                 turn = orchestrator.admit_turn(
                     cur,
@@ -1923,18 +1985,532 @@ def stop_thread(thread_id: str) -> dict[str, str]:
     return {"status": "accepted"}
 
 
+def clear_thread_memory(thread_id: str) -> dict[str, str]:
+    """Drop the thread's provider session so its next run starts fresh.
+
+    This deletes nothing. Retained events stay readable in the thread and in
+    conversation history; they simply stop being replayed into the provider.
+    The visible marker is committed with the state change, so a thread can
+    never show a clear that did not take effect.
+    """
+    # Take the same lock a send does: the clear must land either wholly before
+    # or wholly after a send, never between that send's session snapshot and
+    # its launch, which would strip context the run was admitted with. Holding
+    # it also means no new turn can be admitted between the live check below
+    # and the write.
+    with _thread_send_lock(thread_id):
+        session_config = state.thread_session_config(thread_id)
+        if session_config is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
+        if session_config["status"] != "idle":
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "working memory can be cleared only while the thread is idle",
+            )
+        # A stopped turn returns the thread to durable idle while its process
+        # is still closing, and that finishing worker may still report a
+        # provider session for its run number. Clearing on the persisted status
+        # alone would let that late write restore the session just cleared, so
+        # the fence is the live set: once a thread leaves it, no worker can
+        # still write for it.
+        if thread_id in orchestrator.live_thread_ids():
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "the thread is still finishing; retry shortly",
+            )
+        with state.mutation() as cur:
+            session_config = state.thread_session_config(thread_id, cur)
+            if session_config is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
+            if session_config["status"] != "idle":
+                raise ApiError(
+                    HTTPStatus.CONFLICT,
+                    "working memory can be cleared only while the thread is idle",
+                )
+            cleared_seq = state.append_agent_event(
+                cur,
+                # Its own display type, not thread.activity: the Chat UI can
+                # hide activity, and the boundary must stay visible when it is.
+                "thread.memory_cleared",
+                thread_id,
+                {"message": WORKING_MEMORY_CLEARED_NOTICE},
+                run_number=session_config["run_number"],
+            )
+            try:
+                state.clear_thread_context(cur, thread_id, cleared_seq, utc_now())
+            except ValueError as exc:
+                raise ApiError(
+                    HTTPStatus.CONFLICT,
+                    "working memory can be cleared only while the thread is idle",
+                ) from exc
+    return {"status": "cleared"}
+
+
+def _conversation_utf8_bytes(value: str, field: str) -> bytes:
+    try:
+        return value.encode()
+    except UnicodeEncodeError as exc:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"{field} must be valid UTF-8",
+        ) from exc
+
+
+def _optional_conversation_text(value: Any, field: str, maximum: int) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be a non-empty string")
+    if "\x00" in value:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must not contain NUL")
+    normalized = value.strip()
+    if len(_conversation_utf8_bytes(normalized, field)) > maximum:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"{field} must be at most {maximum} UTF-8 bytes",
+        )
+    return normalized
+
+
+def _optional_conversation_timestamp(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an RFC 3339 timestamp")
+    if len(_conversation_utf8_bytes(value, field)) > 64:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an RFC 3339 timestamp")
+    timestamp_match = RFC3339_TIMESTAMP_RE.fullmatch(value)
+    if timestamp_match is None:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an RFC 3339 timestamp")
+    try:
+        fraction = timestamp_match.group("fraction")
+        parse_value = value
+        if fraction is not None and len(fraction) > 6:
+            parse_value = (
+                value[: timestamp_match.start("fraction") + 6]
+                + value[timestamp_match.end("fraction") :]
+            )
+        parsed = datetime.fromisoformat(
+            parse_value[:-1] + "+00:00"
+            if parse_value.endswith(("Z", "z"))
+            else parse_value
+        )
+        parsed = parsed.astimezone(timezone.utc)
+        if fraction is not None and any(digit != "0" for digit in fraction):
+            parsed = parsed.replace(microsecond=0) + timedelta(seconds=1)
+    except (ValueError, OverflowError) as exc:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"{field} must be an RFC 3339 timestamp",
+        ) from exc
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _conversation_limit(value: Any, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"limit must be between 1 and {maximum}",
+        )
+    return value
+
+
+def _conversation_event_seq(value: Any, field: str) -> int:
+    if not isinstance(value, str) or (match := EVENT_ID_RE.fullmatch(value)) is None:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an event id")
+    seq = int(match.group(1))
+    if seq > POSTGRES_BIGINT_MAX:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an event id")
+    return seq
+
+
+def _conversation_search_fingerprint(
+    queries: list[str],
+    from_timestamp: str | None,
+    to_timestamp: str | None,
+    thread_id: str | None,
+    roles: list[str],
+) -> str:
+    encoded = json.dumps(
+        [queries, from_timestamp, to_timestamp, thread_id, roles],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def _encode_conversation_search_cursor(
+    fingerprint: str,
+    relevance: bool,
+    value: dict[str, Any],
+) -> str:
+    fields = (
+        [fingerprint, "rank", value.get("rank"), value.get("seq")]
+        if relevance
+        else [fingerprint, "time", value.get("timestamp"), value.get("seq")]
+    )
+    raw = json.dumps(fields, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_conversation_search_cursor(
+    value: Any,
+    fingerprint: str,
+    relevance: bool,
+) -> tuple[float, int] | tuple[str, int] | None:
+    if value is None:
+        return None
+    try:
+        if not isinstance(value, str) or not value:
+            raise ValueError
+        encoded = _conversation_utf8_bytes(value, "cursor")
+        if len(encoded) > CONVERSATION_CURSOR_BYTES:
+            raise ValueError
+        padded = encoded + b"=" * (-len(encoded) % 4)
+        decoded = json.loads(
+            base64.b64decode(padded, altchars=b"-_", validate=True)
+        )
+        if not isinstance(decoded, list) or len(decoded) != 4:
+            raise ValueError
+        cursor_fingerprint, mode, position, seq = decoded
+        if (
+            cursor_fingerprint != fingerprint
+            or mode != ("rank" if relevance else "time")
+            or not isinstance(seq, int)
+            or isinstance(seq, bool)
+            or seq < 1
+            or seq > POSTGRES_BIGINT_MAX
+        ):
+            raise ValueError
+        if relevance:
+            if (
+                not isinstance(position, (int, float))
+                or isinstance(position, bool)
+            ):
+                raise ValueError
+            try:
+                rank = float(position)
+            except OverflowError as exc:
+                raise ValueError from exc
+            if not math.isfinite(rank) or rank < 0:
+                raise ValueError
+            return rank, seq
+        if not isinstance(position, str) or UTC_TIMESTAMP_RE.fullmatch(position) is None:
+            raise ValueError
+        try:
+            datetime.strptime(position, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError as exc:
+            raise ValueError from exc
+        return position, seq
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "cursor is invalid or belongs to different search filters",
+        ) from exc
+
+
+def search_conversation_history(body: Any) -> dict[str, Any]:
+    """Validate and execute one public, bounded history-search request."""
+    if not isinstance(body, dict):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "conversation search must be an object")
+    allowed = {
+        "query",
+        "query_variants",
+        "from",
+        "to",
+        "thread_id",
+        "roles",
+        "limit",
+        "cursor",
+    }
+    unexpected = sorted(set(body) - allowed)
+    if unexpected:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"unsupported conversation search field: {unexpected[0]}",
+        )
+    query = _optional_conversation_text(body.get("query"), "query", CONVERSATION_QUERY_BYTES)
+    variants = body.get("query_variants", [])
+    if not isinstance(variants, list) or len(variants) > CONVERSATION_VARIANT_LIMIT:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"query_variants must contain at most {CONVERSATION_VARIANT_LIMIT} strings",
+        )
+    normalized_variants: list[str] = []
+    for value in variants:
+        variant = _optional_conversation_text(
+            value, "query variant", CONVERSATION_VARIANT_BYTES
+        )
+        if variant is None:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "query variants must be non-empty")
+        if variant not in normalized_variants:
+            normalized_variants.append(variant)
+    if normalized_variants and query is None:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "query_variants require query")
+    queries = ([] if query is None else [query]) + [
+        variant for variant in normalized_variants if variant != query
+    ]
+    from_timestamp = _optional_conversation_timestamp(body.get("from"), "from")
+    to_timestamp = _optional_conversation_timestamp(body.get("to"), "to")
+    if (
+        from_timestamp is not None
+        and to_timestamp is not None
+        and from_timestamp >= to_timestamp
+    ):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "from must be earlier than to")
+    thread_id = body.get("thread_id")
+    if thread_id is not None and (
+        not isinstance(thread_id, str) or THREAD_ID_RE.fullmatch(thread_id) is None
+    ):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "thread_id is invalid")
+    if query is None and from_timestamp is None and to_timestamp is None and thread_id is None:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "provide query, from, to, or thread_id",
+        )
+    roles = body.get("roles", ["user", "assistant"])
+    if (
+        not isinstance(roles, list)
+        or not roles
+        or not all(isinstance(role, str) for role in roles)
+        or set(roles) - {"user", "assistant"}
+    ):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "roles must contain user and/or assistant")
+    roles = list(dict.fromkeys(roles))
+    limit = _conversation_limit(body.get("limit", 10), CONVERSATION_SEARCH_LIMIT)
+    fingerprint = _conversation_search_fingerprint(
+        queries, from_timestamp, to_timestamp, thread_id, roles
+    )
+    before = _decode_conversation_search_cursor(
+        body.get("cursor"), fingerprint, bool(queries)
+    )
+
+    try:
+        rows = state.search_thread_messages(
+            tuple(queries),
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            thread_id=thread_id,
+            sources=tuple("user" if role == "user" else "agent" for role in roles),
+            limit=limit + 1,
+            before=before,
+        )
+    except pgclient.Error as exc:
+        if exc.sqlstate == "57014":
+            raise ApiError(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "conversation search exceeded its work limit; narrow the query or time range",
+            ) from exc
+        raise
+    page = rows[:limit]
+    matches = []
+    for row in page:
+        excerpt = _clip_json_encoded_text(
+            row["excerpt"], CONVERSATION_SEARCH_EXCERPT_BYTES
+        )
+        matches.append(
+            {
+                "thread_id": row["thread_id"],
+                "event_id": row["event_id"],
+                "timestamp": row["timestamp"],
+                "role": "user" if row["source"] == "user" else "assistant",
+                "excerpt": excerpt,
+                "excerpt_truncated": row["excerpt_truncated"] or excerpt != row["excerpt"],
+            }
+        )
+    response: dict[str, Any] = {
+        "provenance": HISTORY_PROVENANCE,
+        "trust": HISTORY_TRUST,
+        "instruction_authority": HISTORY_INSTRUCTION_AUTHORITY,
+        "matches": matches,
+        "next_cursor": None,
+    }
+    if len(rows) > limit and page:
+        last = page[-1]
+        next_value = (
+            {"rank": last["search_rank"], "seq": last["seq"]}
+            if queries
+            else {"timestamp": last["timestamp"], "seq": last["seq"]}
+        )
+        response["next_cursor"] = _encode_conversation_search_cursor(
+            fingerprint, bool(queries), next_value
+        )
+    return response
+
+
+def read_conversation_history(body: Any) -> dict[str, Any]:
+    """Validate and execute one public, bounded thread-history request."""
+    if not isinstance(body, dict):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "conversation read must be an object")
+    allowed = {
+        "thread_id",
+        "before",
+        "after",
+        "around_event_id",
+        "include_activity",
+        "limit",
+    }
+    unexpected = sorted(set(body) - allowed)
+    if unexpected:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"unsupported conversation read field: {unexpected[0]}",
+        )
+    thread_id = body.get("thread_id")
+    if not isinstance(thread_id, str) or THREAD_ID_RE.fullmatch(thread_id) is None:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "thread_id is invalid")
+    cursors: dict[str, int] = {}
+    for public_name, internal_name in (
+        ("before", "before"),
+        ("after", "after"),
+        ("around_event_id", "around"),
+    ):
+        value = body.get(public_name)
+        if value is None:
+            continue
+        cursors[internal_name] = _conversation_event_seq(value, public_name)
+    if len(cursors) > 1:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "before, after, and around_event_id cannot be combined",
+        )
+    include_activity = body.get("include_activity", False)
+    if not isinstance(include_activity, bool):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "include_activity must be a boolean")
+    limit = _conversation_limit(body.get("limit", 20), CONVERSATION_READ_LIMIT)
+    event_types = CONVERSATION_EVENT_TYPES if include_activity else ("thread.message",)
+    if "around" in cursors:
+        raw_events = state.page_thread_events_around(
+            thread_id,
+            cursors["around"],
+            limit,
+            event_types=event_types,
+        )
+        if raw_events is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "anchor event not found in thread")
+        mode = "around"
+    elif "after" in cursors:
+        raw_events = state.page_thread_events(
+            thread_id,
+            cursors["after"],
+            limit,
+            event_types=event_types,
+        )
+        mode = "after"
+    else:
+        raw_events = state.page_thread_events(
+            thread_id,
+            None,
+            limit,
+            before=cursors.get("before"),
+            event_types=event_types,
+        )
+        mode = "before"
+
+    projected = [_conversation_event(event) for event in raw_events]
+    events = _bounded_conversation_events(projected, mode, cursors.get("around"))
+    response: dict[str, Any] = {
+        "provenance": HISTORY_PROVENANCE,
+        "trust": HISTORY_TRUST,
+        "instruction_authority": HISTORY_INSTRUCTION_AUTHORITY,
+        "thread": {"thread_id": thread_id},
+        "events": events,
+        "older_cursor": None,
+        "newer_cursor": None,
+    }
+    if events:
+        oldest = _event_seq(events[0]["event_id"])
+        newest = _event_seq(events[-1]["event_id"])
+        has_older, has_newer = state.thread_event_page_bounds(
+            thread_id,
+            oldest,
+            newest,
+            event_types=event_types,
+        )
+        if has_older:
+            response["older_cursor"] = f"event_{oldest}"
+        if has_newer:
+            response["newer_cursor"] = f"event_{newest}"
+    return response
+
+
+def _conversation_event(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    if event.get("event_type") == "thread.message":
+        content = payload.get("message")
+        content = content if isinstance(content, str) else ""
+        clipped = _clip_json_encoded_text(content, CONVERSATION_MESSAGE_BYTES)
+        return {
+            "event_id": event["event_id"],
+            "timestamp": event["timestamp"],
+            "type": "message",
+            "role": "user" if payload.get("source") == "user" else "assistant",
+            "content": clipped,
+            "truncated": clipped != content,
+        }
+    activity = payload.get("activity")
+    activity = activity if isinstance(activity, dict) else {}
+    summary: dict[str, Any] = {}
+    truncated = False
+    for field, budget in CONVERSATION_ACTIVITY_FIELDS:
+        value = activity.get(field)
+        if not isinstance(value, str) or not value:
+            continue
+        clipped = _clip_json_encoded_text(value, budget)
+        summary[field] = clipped
+        truncated = truncated or clipped != value
+    return {
+        "event_id": event["event_id"],
+        "timestamp": event["timestamp"],
+        "type": "activity",
+        "activity": summary,
+        "truncated": truncated or bool(set(activity) - set(summary)),
+    }
+
+
+def _bounded_conversation_events(
+    events: list[dict[str, Any]], mode: str, anchor: int | None
+) -> list[dict[str, Any]]:
+    """Keep a contiguous page within the exact encoded response budget."""
+    if not events:
+        return []
+    if mode == "after":
+        order = list(range(len(events)))
+    elif mode == "around" and anchor is not None:
+        anchor_index = next(
+            (index for index, event in enumerate(events) if _event_seq(event["event_id"]) == anchor),
+            len(events) - 1,
+        )
+        order = [anchor_index]
+        distance = 1
+        while len(order) < len(events):
+            if anchor_index - distance >= 0:
+                order.append(anchor_index - distance)
+            if anchor_index + distance < len(events):
+                order.append(anchor_index + distance)
+            distance += 1
+    else:
+        order = list(reversed(range(len(events))))
+    selected: set[int] = set()
+    for index in order:
+        candidate = [events[item] for item in sorted((*selected, index))]
+        if len(json.dumps({"events": candidate}).encode()) > CONVERSATION_RESPONSE_BYTES - 4096:
+            break
+        selected.add(index)
+    return [events[index] for index in sorted(selected)]
+
+
+def _event_seq(event_id: str) -> int:
+    return int(event_id.removeprefix("event_"))
+
+
 def list_threads(
     query: dict[str, list[str]],
-    *,
-    app_backend_id: str | None = None,
 ) -> dict[str, Any]:
     limit = _event_page_limit(query)
     before = _thread_list_cursor(query)
-    prefix = (
-        f"{app_backend_id}{APP_SCOPED_ID_SEPARATOR}"
-        if app_backend_id is not None
-        else None
-    )
+    prefix = _thread_list_prefix(query)
     summaries = state.page_thread_summaries(
         before,
         limit + 1,
@@ -1958,14 +2534,11 @@ def _public_thread(
     effort: str,
     *,
     last_used_at: str | None = None,
-    status: str | None = None,
 ) -> dict[str, Any]:
-    if last_used_at is None or status is None:
-        config = state.thread_session_config(thread_id)
-        if last_used_at is None:
-            last_used_at = config.get("last_used_at") if config else None
-        if status is None:
-            status = str(config.get("status") if config else "idle")
+    config = state.thread_session_config(thread_id)
+    if last_used_at is None:
+        last_used_at = config.get("last_used_at") if config else None
+    status = str(config.get("status") if config else "idle")
     if thread_id in orchestrator.live_thread_ids():
         status = "running"
     return {
@@ -2092,47 +2665,27 @@ def _proc_meminfo() -> dict[str, int]:
     return values
 
 
-def _validate_thread_id_not_reserved_by_app(thread_id: str, app_backend_id: str | None) -> None:
-    app_id, separator, visible_thread_id = thread_id.partition(APP_SCOPED_ID_SEPARATOR)
-    if not separator:
-        return
-    if app_backend_id == app_id and visible_thread_id:
-        return
-    raise ApiError(
-        HTTPStatus.BAD_REQUEST,
-        f"thread_id prefix {app_id}{APP_SCOPED_ID_SEPARATOR} is reserved for app backend threads",
-    )
-
-
-def _message(body: Any, key: str) -> str:
+def _message(body: Any) -> str:
+    """The one request-body validation for a thread message send; the session
+    configuration readers below trust the dict this establishes."""
     if not isinstance(body, dict):
         raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
-    value = body.get(key)
+    value = body.get("message")
     if not isinstance(value, str) or not value:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be a non-empty string")
+        raise ApiError(HTTPStatus.BAD_REQUEST, "message must be a non-empty string")
     if len(value) > MESSAGE_LIMIT:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be at most {MESSAGE_LIMIT} characters")
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"message must be at most {MESSAGE_LIMIT} characters")
     return value
 
 
-def _agent_runtime(body: Any) -> str:
-    if not isinstance(body, dict):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
+def _agent_runtime(body: dict[str, Any]) -> str:
     value = body.get("agent_runtime")
-    if not isinstance(value, str):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "agent_runtime must be one of " + ", ".join(sorted(AGENT_RUNTIMES)))
-    return _agent_runtime_value(value)
-
-
-def _agent_runtime_value(value: str) -> str:
-    if value not in AGENT_RUNTIMES:
+    if not isinstance(value, str) or value not in AGENT_RUNTIMES:
         raise ApiError(HTTPStatus.BAD_REQUEST, "agent_runtime must be one of " + ", ".join(sorted(AGENT_RUNTIMES)))
     return value
 
 
-def _session_config(body: Any, runtime: str) -> tuple[str, str]:
-    if not isinstance(body, dict):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
+def _session_config(body: dict[str, Any], runtime: str) -> tuple[str, str]:
     model = body.get("model")
     effort = body.get("effort")
     error = session_config_error(runtime, model, effort)
@@ -2143,7 +2696,7 @@ def _session_config(body: Any, runtime: str) -> tuple[str, str]:
 
 
 def _resolve_session_config(
-    body: Any,
+    body: dict[str, Any],
     session_config: dict[str, Any] | None,
 ) -> tuple[str, str, str]:
     stored = None
@@ -2154,7 +2707,6 @@ def _resolve_session_config(
             session_config["effort"],
         )
 
-    assert isinstance(body, dict)
     fields = ("agent_runtime", "model", "effort")
     supplied = [field for field in fields if field in body]
     if stored is not None:
@@ -2249,21 +2801,38 @@ def _handoff_event_block(event: dict[str, Any]) -> str:
         label = "User" if payload.get("source") == "user" else "Agent"
         return f"{label}:\n{payload.get('message', '')}"
     if event_type == "thread.activity":
-        return (
-            "Agent activity (expanded):\n"
-            + json.dumps(payload.get("activity", {}), ensure_ascii=False, indent=2, default=str)
+        activity = payload.get("activity")
+        activity = activity if isinstance(activity, dict) else {}
+        summary = {
+            key: activity[key]
+            for key in ("provider", "kind", "phase", "title", "status")
+            if key in activity
+        }
+        for key, limit in (
+            ("detail", THREAD_HANDOFF_ACTIVITY_DETAIL_LIMIT),
+            ("output", THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT),
+            ("error", THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT),
+        ):
+            value = activity.get(key)
+            if isinstance(value, str) and value:
+                summary[key] = agent_activity.clip_text(value, limit)
+        block = "Agent activity (summary):\n" + json.dumps(
+            summary, ensure_ascii=False, indent=2, default=str
         )
-    if event_type == "thread.error":
-        return f"Host error:\n{payload.get('error_message', '')}"
-    if event_type == "thread.stopped":
-        return "Agent work was stopped."
+        return agent_activity.clip_text(
+            block, THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT
+        )
     return ""
 
 
-def _session_handoff_message(history: list[dict[str, Any]], message: str) -> str:
-    """Build a bounded retained transcript for a fresh provider session."""
+def _bounded_handoff_section(
+    history: list[dict[str, Any]], character_limit: int
+) -> str:
+    """Newest event blocks within one exact model-facing character budget."""
+    if character_limit <= 0:
+        return ""
     blocks_reversed: list[str] = []
-    remaining = THREAD_HANDOFF_CHARACTER_LIMIT
+    remaining = character_limit
     omitted = False
     for event in reversed(history):
         separator_size = 2 if blocks_reversed else 0
@@ -2292,15 +2861,37 @@ def _session_handoff_message(history: list[dict[str, Any]], message: str) -> str
         omitted = True
     transcript = "\n\n".join(reversed(blocks_reversed))
     if omitted:
-        transcript = "[Older retained thread events were omitted.]\n\n" + transcript
+        marker = "[Older retained thread events were omitted.]"
+        if len(marker) >= character_limit:
+            return marker[:character_limit]
+        content_limit = character_limit - len(marker) - 2
+        if len(transcript) > content_limit:
+            transcript = transcript[-content_limit:]
+        transcript = marker + ("\n\n" + transcript if transcript else "")
+    return transcript
+
+
+def _session_handoff_message(history: list[dict[str, Any]], message: str) -> str:
+    """Build independently bounded conversation and activity handoff sections."""
+    conversation = _bounded_handoff_section(
+        [event for event in history if event.get("event_type") == "thread.message"],
+        THREAD_HANDOFF_MESSAGE_CHARACTER_LIMIT,
+    )
+    activity = _bounded_handoff_section(
+        [event for event in history if event.get("event_type") == "thread.activity"],
+        THREAD_HANDOFF_ACTIVITY_CHARACTER_LIMIT,
+    )
     return (
         "You are a new agent session continuing a thread previously handled by another "
         "agent session. Your provider-side context and cache are not available. Use the "
-        "retained transcript below as conversation history, then respond to the current "
+        "retained conversation and activity below, then respond to the current "
         "user message. Do not mention this handoff unless it is relevant.\n\n"
-        "--- RETAINED THREAD TRANSCRIPT ---\n"
-        f"{transcript or '[No retained messages.]'}\n"
-        "--- END RETAINED THREAD TRANSCRIPT ---\n\n"
+        "--- RETAINED CONVERSATION ---\n"
+        f"{conversation or '[No retained messages.]'}\n"
+        "--- END RETAINED CONVERSATION ---\n\n"
+        "--- RECENT AGENT ACTIVITY ---\n"
+        f"{activity or '[No retained activity.]'}\n"
+        "--- END RECENT AGENT ACTIVITY ---\n\n"
         "--- CURRENT USER MESSAGE ---\n"
         f"{message}\n"
         "--- END CURRENT USER MESSAGE ---"
@@ -2357,15 +2948,14 @@ def _optional_non_negative_int(query: dict[str, list[str]], key: str) -> int | N
     return parsed
 
 
-def _bounded_positive_query_int(
+def _optional_bounded_positive_query_int(
     query: dict[str, list[str]],
     key: str,
-    default: int,
     maximum: int,
-) -> int:
+) -> int | None:
     value = _one(query, key)
     if value is None:
-        return default
+        return None
     try:
         parsed = int(value)
     except ValueError as exc:
@@ -2375,29 +2965,6 @@ def _bounded_positive_query_int(
     if parsed > maximum:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be at most {maximum}")
     return parsed
-
-
-def _optional_bounded_positive_query_int(
-    query: dict[str, list[str]],
-    key: str,
-    maximum: int,
-) -> int | None:
-    if _one(query, key) is None:
-        return None
-    return _bounded_positive_query_int(query, key, maximum, maximum)
-
-
-def _clip_encoded_text(value: str, maximum: int | None) -> str:
-    if maximum is None:
-        return value
-    encoded = value.encode()
-    if len(encoded) <= maximum:
-        return value
-    suffix_text = "\n… (truncated)"
-    suffix = suffix_text.encode()
-    if maximum < len(suffix):
-        return encoded[:maximum].decode(errors="ignore")
-    return encoded[: maximum - len(suffix)].decode(errors="ignore") + suffix_text
 
 
 def _clip_json_encoded_text(value: str, maximum: int) -> str:
@@ -2414,7 +2981,7 @@ def _clip_json_encoded_text(value: str, maximum: int) -> str:
         return value
     suffix = "\n… (truncated)"
     if encoded_size(suffix) > maximum:
-        return _clip_encoded_text(value, maximum)
+        return agent_activity.clip_text(value, maximum)
     low = 0
     high = len(value)
     while low < high:
@@ -2448,6 +3015,18 @@ def _event_page_limit(query: dict[str, list[str]]) -> int:
     if parsed > state.EVENT_PAGE_LIMIT:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"limit must be at most {state.EVENT_PAGE_LIMIT}")
     return parsed
+
+
+def _thread_list_prefix(query: dict[str, list[str]]) -> str | None:
+    prefix = _one(query, "prefix")
+    if prefix is None:
+        return None
+    if THREAD_ID_RE.fullmatch(prefix) is None:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "prefix must contain 1 to 64 thread-id characters",
+        )
+    return prefix
 
 
 def _encode_thread_list_cursor(thread: dict[str, Any]) -> str:
@@ -2560,7 +3139,7 @@ def main() -> int:
     # so the bind is the single-instance gate. A second instance must fail here
     # rather than fail the live instance's running turn first.
     httpd = BoundedThreadingHTTPServer((HOST, PORT), Handler)
-    app_backend_httpd = app_backend_admin_api.create_app_backend_admin_server()
+    workspace_httpd = workspace_admin_api.create_workspace_admin_server()
     initialize_state()
     # Cache the admin password hash once so the login path never touches the
     # database (reconfigure restarts this service, which reloads it).
@@ -2571,12 +3150,12 @@ def main() -> int:
     orchestrator.start_background_loops()
     threading.Thread(target=maintenance_loop, daemon=True).start()
     threading.Thread(target=upgrade_check.poll, daemon=True).start()
-    threading.Thread(target=app_backend_httpd.serve_forever, daemon=True).start()
+    threading.Thread(target=workspace_httpd.serve_forever, daemon=True).start()
     try:
         httpd.serve_forever()
     finally:
-        app_backend_httpd.server_close()
-        app_backend_admin_api.unlink_app_backend_admin_socket()
+        workspace_httpd.server_close()
+        workspace_admin_api.unlink_workspace_admin_socket()
     return 0
 
 

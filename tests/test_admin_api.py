@@ -28,12 +28,12 @@ import pg_harness
 
 from host.config import parse_network_controls
 from host.network_integrations.github.push_gate import pending as github_pending_push
-from host.runtime.admin_api import app_api_proxy, app_backend_api as app_backend_admin_api, service as admin_api, github_credential, orchestrator, tools_client as tools_admin_api
+from host.runtime.admin_api import workspace_proxy as workspace_api_proxy, workspace_api as workspace_admin_api, service as admin_api, github_credential, orchestrator, tools_client as tools_admin_api
 from host.runtime.tools import api as tools_api
 from host.runtime.core.network_policy import load_policy
 from host.runtime.core.state import save_network_policy as save_policy
 from host.runtime.core.state import save_github_credential
-from host.runtime.core import state
+from host.runtime.core import pgclient, state
 from host.runtime.core.state import (
     append_network_event,
     read_claude_account,
@@ -44,6 +44,7 @@ from host.runtime.core.state import (
     save_claude_account,
     save_openai_account,
 )
+
 
 def save_approved_openai_account(account_id: str, **extra: Any) -> None:
     save_openai_account(
@@ -262,7 +263,7 @@ class AdminUiStaticTests(unittest.TestCase):
         # unavailable, but this method reads static assets only. Run the same
         # assertions here so exact UI-copy and domain-list contracts are always
         # exercised before CI.
-        AdminApiIntegrationTests.test_admin_ui_has_thread_event_smoke_path(self)
+        AdminApiIntegrationTests.test_admin_ui_has_activity_and_diagnostic_views(self)
 
     def test_session_activity_is_centralized_and_excludes_background_polls(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui"
@@ -277,9 +278,68 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn("setInterval", api)
         self.assertNotIn("markSessionActivity", app)
 
+    def test_workspace_mounts_are_single_flight_and_query_the_whole_shadow_tree(self) -> None:
+        root = Path(__file__).parents[1]
+        app = (root / "host/runtime/admin_api/admin_ui/app.js").read_text()
+        admin_css = (root / "host/runtime/admin_api/admin_ui/admin_ui.css").read_text()
+        chat_css = (
+            root / "host/runtime/workspace/chat/ui/agent_chat.css"
+        ).read_text()
+        web_apps_css = (
+            root
+            / "host/runtime/workspace/web_apps/ui/personal_web_app_builder.css"
+        ).read_text()
+        self.assertIn("const workspaceMounts = new Map();", app)
+        self.assertIn("mounting = performWorkspaceMount(name, panelId, htmlPath);", app)
+        self.assertIn("window.KernWorkspaceRoots[name] = shadow;", app)
+        self.assertNotIn("window.KernWorkspaceRoots[name] = root;", app)
+        # Each shadow host and root must be allowed to shrink below its
+        # intrinsic content height. Otherwise a long conversation expands the
+        # whole mounted surface instead of scrolling inside its own pane.
+        self.assertIn(":host {", chat_css)
+        self.assertIn(":host {", web_apps_css)
+        self.assertRegex(chat_css, r"\.chat-app\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;")
+        self.assertRegex(web_apps_css, r"\.builder-shell\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;")
+        self.assertNotIn(".workspace-panel > *", admin_css)
+        self.assertIn(
+            "body.viewport-panel-open .workspace-panel {\n    height: 100%;",
+            admin_css,
+        )
+
+    def test_workspace_navigation_fences_stale_fetches_and_actions(self) -> None:
+        app = (
+            Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui/app.js"
+        ).read_text()
+        web_apps = (
+            Path(__file__).parents[1]
+            / "host/runtime/workspace/web_apps/ui/personal_web_app_builder.js"
+        ).read_text()
+        self.assertIn("let workspaceNavigationRefreshSequence = 0;", app)
+        self.assertIn("let workspaceNavigationActionSequence = 0;", app)
+        self.assertIn("const sequence = ++workspaceNavigationRefreshSequence;", app)
+        self.assertIn("sequence !== workspaceNavigationRefreshSequence", app)
+        self.assertIn("const actionSequence = ++workspaceNavigationActionSequence;", app)
+        self.assertIn("actionSequence !== workspaceNavigationActionSequence", app)
+        self.assertIn("backToHome(actionSequence)", app)
+        self.assertEqual(app.count("backToHome(actionSequence)"), 3)
+        self.assertRegex(
+            app,
+            r"function backToHome\(workspaceActionSequence = null\) \{\s*"
+            r"if \(\s*workspaceActionSequence !== null\s*"
+            r"&& workspaceActionSequence !== workspaceNavigationActionSequence\s*"
+            r"\) return false;\s*if \(history\.state",
+        )
+        self.assertIn("const workspacePendingMutations = new Set();", app)
+        self.assertIn("button.disabled = pending;", app)
+        self.assertIn("const initializationPromise = initialize();", web_apps)
+        self.assertIn("return initializationPromise.then(() => action(...args));", web_apps)
+        self.assertIn("create: (...args) => afterInitialization(createApp, ...args)", web_apps)
+        self.assertIn("open: (...args) => afterInitialization(showApp, ...args)", web_apps)
+        self.assertNotIn("initialize();\n})();", web_apps)
+
     def test_admin_passkey_ui_keeps_password_as_factor_one(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
-        html = (runtime / "admin_ui.html").read_text()
+        html = (runtime / "admin_ui/index.html").read_text()
         app = (runtime / "admin_ui/app.js").read_text()
         passkeys = (runtime / "admin_ui/passkeys.js").read_text()
         self.assertIn('id="passkey-setup"', html)
@@ -306,23 +366,41 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_agent_chat_uses_one_backend_authoritative_composer(self) -> None:
         script = (
-            Path(__file__).parents[1] / "host/apps/agent_chat/ui/agent_chat.js"
+            Path(__file__).parents[1] / "host/runtime/workspace/chat/ui/agent_chat.js"
         ).read_text()
         stylesheet = (
-            Path(__file__).parents[1] / "host/apps/agent_chat/ui/agent_chat.css"
+            Path(__file__).parents[1] / "host/runtime/workspace/chat/ui/agent_chat.css"
         ).read_text()
         self.assertIn(
             'api("POST", "/messages", request, AGENT_DELIVERY_TIMEOUT_MS)',
             script,
         )
         self.assertIn(
-            '["thread.message", "thread.activity", "thread.error", "thread.stopped"]',
+            '["thread.message", "thread.activity", "thread.error", "thread.stopped",\n'
+            '      "thread.memory_cleared"].includes(event.event_type)',
             script,
         )
+        # A clear made while scrolled up must bring its own confirmation into
+        # view; the marker is the only signal the action took effect.
+        self.assertIn(
+            "await api(\"POST\", `/threads/${encodeURIComponent(selectedThreadId)}/clear-memory`);",
+            script,
+        )
+        self.assertIn("forceScrollBottom = true;\n  await refresh();", script)
         self.assertIn('let showingActivity = true;', script)
         self.assertIn('classList.toggle("activity-hidden", !showingActivity)', script)
+        self.assertIn('"--activity-anchor-space"', script)
+        self.assertIn("toggleSequence !== activityToggleSequence", script)
+        self.assertIn("const atTail = distanceFromBottom <= 1;", script)
+        self.assertNotIn("activityAnchorState", script)
+        clear_selected = script.split("function clearSelectedThread()", 1)[1].split(
+            "function startNewThread()", 1
+        )[0]
+        self.assertIn("activityToggleSequence += 1;", clear_selected)
+        self.assertIn("clearActivityAnchorSpace();", clear_selected)
+        self.assertIn("var(--activity-anchor-space, 0px)", stylesheet)
         self.assertIn('id="activity-toggle"', (
-            Path(__file__).parents[1] / "host/apps/agent_chat/ui/index.html"
+            Path(__file__).parents[1] / "host/runtime/workspace/chat/ui/index.html"
         ).read_text())
         self.assertIn(".chat-app.activity-hidden .thread-activity", stylesheet)
         self.assertIn('class="thread-entry thread-activity"', script)
@@ -361,32 +439,32 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('"/threads?archived=true"', script)
         self.assertIn('"unarchive"', script)
 
-    def test_app_upload_bridge_uses_a_host_owned_file_picker(self) -> None:
+    def test_workspace_use_host_owned_file_and_api_helpers(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui"
         app = (runtime / "app.js").read_text()
         api = (runtime / "api.js").read_text()
         chat = (
-            Path(__file__).parents[1] / "host/apps/agent_chat/ui/agent_chat.js"
+            Path(__file__).parents[1] / "host/runtime/workspace/chat/ui/agent_chat.js"
         ).read_text()
-        css = (runtime.parent / "admin_ui.css").read_text()
-        self.assertIn('message.type === "kern-app-upload-file"', app)
-        self.assertIn('message.type === "kern-app-copy-text"', app)
-        self.assertIn('"kern-app-copy-text-result"', app)
-        self.assertIn("navigator.clipboard.writeText(text)", app)
+        web_apps = (
+            Path(__file__).parents[1]
+            / "host/runtime/workspace/web_apps/ui/personal_web_app_builder.js"
+        ).read_text()
+        self.assertIn("window.KernHost", app)
         self.assertIn('input.type = "file"', app)
-        self.assertIn("input.multiple = true", app)
-        self.assertIn('input.className = "host-file-picker"', app)
-        self.assertNotIn("input.hidden = true", app)
-        self.assertIn(".host-file-picker", css)
-        self.assertIn("opacity: 0", css)
-        self.assertIn("navigator.userActivation && !navigator.userActivation.isActive", app)
-        self.assertIn("catch (_error)", app)
-        self.assertIn("const APP_UPLOAD_SELECTION_LIMIT = 10", app)
-        self.assertIn("appSelections.set(selectionId, file)", app)
-        self.assertIn('if (action !== "upload")', app)
-        self.assertIn("body = await apiUpload(selected)", app)
+        self.assertIn("input.multiple = maximum > 1", app)
+        self.assertNotIn("files.slice(0, maximum)", app)
+        self.assertIn("chooseFiles", app)
+        self.assertIn("apiUpload", app)
+        self.assertIn("refreshNavigation()", app)
         self.assertIn("upload failed (${response.status})", api)
         self.assertIn("/v1/agent-files/upload?filename=", api)
+        self.assertIn("window.KernHost.chooseFiles", chat)
+        self.assertIn("window.KernHost.refreshNavigation()", chat)
+        self.assertIn("window.KernHost.chooseFiles", web_apps)
+        self.assertIn("window.KernHost.refreshNavigation()", web_apps)
+        self.assertNotIn("postMessage", chat)
+        self.assertNotIn("kern-app-upload-file", web_apps)
         self.assertIn("const ATTACHMENT_LIMIT = 10", chat)
         self.assertIn("const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024", chat)
         self.assertIn(
@@ -402,7 +480,7 @@ class AdminUiStaticTests(unittest.TestCase):
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
         catalog = (runtime / "admin_ui" / "integration_catalog.js").read_text()
         guide = (runtime / "admin_ui" / "connection_guide.js").read_text()
-        html = (runtime / "admin_ui.html").read_text()
+        html = (runtime / "admin_ui/index.html").read_text()
 
         for required_text in (
             "GraphQL denied",
@@ -430,7 +508,9 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn("guide.connection", guide)
         self.assertNotIn("guides.map(renderGuide)", guide)
         self.assertNotIn("scrollIntoView", guide)
-        self.assertIn("Integration Guides", html)
+        self.assertIn('id="home-integration-groups"', html)
+        self.assertIn("Integration guide", html)
+        self.assertNotIn('id="panel-connection-guide"', html)
         self.assertNotIn("What each integration enables", html)
 
     def test_bedrock_ui_copy_and_toolbar_contract(self) -> None:
@@ -439,7 +519,7 @@ class AdminUiStaticTests(unittest.TestCase):
         guide = (runtime / "admin_ui" / "connection_guide.js").read_text()
         health = (runtime / "admin_ui" / "health.js").read_text()
         network = (runtime / "admin_ui" / "network.js").read_text()
-        css = (runtime / "admin_ui.css").read_text()
+        css = (runtime / "admin_ui/admin_ui.css").read_text()
         combined = "\n".join((catalog, guide, health, network, css))
 
         self.assertIn('label: "Hermes (AWS Bedrock)"', catalog)
@@ -472,7 +552,7 @@ class AdminUiStaticTests(unittest.TestCase):
         network = (
             Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui/network.js"
         ).read_text()
-        html = (Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui.html").read_text()
+        html = (Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui/index.html").read_text()
         self.assertIn('id="policy-allow-websocket"', html)
         self.assertIn("if (allowWebsocket) rule.allow_websocket = true", network)
 
@@ -491,11 +571,24 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('route = f"/guide-assets/{asset.name}"', mock)
         self.assertFalse((repo / "host/runtime/admin_ui/guide_assets").exists())
 
+    def test_mock_capability_sandbox_is_embeddable_but_networkless(self) -> None:
+        mock = (
+            Path(__file__).parents[1] / "tests/smoke-ui/run_admin_ui_mock.py"
+        ).read_text()
+        handler = mock.split("def _send_capability_sandbox", 1)[1].split(
+            "def _send", 1
+        )[0]
+        self.assertIn("frame-ancestors 'self'", handler)
+        self.assertIn("connect-src 'none'", handler)
+        self.assertIn("worker-src blob:", handler)
+        self.assertIn('"X-Frame-Options", "SAMEORIGIN"', handler)
+        self.assertNotIn('"X-Frame-Options", "DENY"', handler)
+
     def test_disabled_integrations_omit_irrelevant_connection_state(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
         network_js = (runtime / "admin_ui" / "network.js").read_text()
         tools_js = (runtime / "admin_ui" / "tools.js").read_text()
-        css = (runtime / "admin_ui.css").read_text()
+        css = (runtime / "admin_ui/admin_ui.css").read_text()
 
         self.assertIn('if (!enabled) {\n      setHtml(node, "");', network_js)
         self.assertIn('const summary = !enabled && !linked', network_js)
@@ -512,9 +605,9 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_mobile_navigation_uses_an_accessible_drawer(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
-        html = (runtime / "admin_ui.html").read_text()
+        html = (runtime / "admin_ui/index.html").read_text()
         app_js = (runtime / "admin_ui" / "app.js").read_text()
-        css = (runtime / "admin_ui.css").read_text()
+        css = (runtime / "admin_ui/admin_ui.css").read_text()
 
         self.assertIn('id="mobile-nav-toggle"', html)
         self.assertIn('aria-controls="sidebar"', html)
@@ -528,7 +621,7 @@ class AdminUiStaticTests(unittest.TestCase):
     def test_provider_usage_rings_have_warning_and_critical_thresholds(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
         health_js = (runtime / "admin_ui" / "health.js").read_text()
-        css = (runtime / "admin_ui.css").read_text()
+        css = (runtime / "admin_ui/admin_ui.css").read_text()
 
         self.assertIn('percent > 90 ? " usage-critical" : percent > 80 ? " usage-warning"', health_js)
         # The rings use the muted usage-* palette so they read quietly in the
@@ -538,7 +631,7 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_runtime_usage_is_legible_without_hover_magnification(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
-        css = (runtime / "admin_ui.css").read_text()
+        css = (runtime / "admin_ui/admin_ui.css").read_text()
         health_js = (runtime / "admin_ui" / "health.js").read_text()
 
         self.assertNotIn("button.runtime-summary:hover > .runtime-usage", css)
@@ -560,7 +653,7 @@ class AdminUiStaticTests(unittest.TestCase):
     def test_provider_usage_rings_show_compact_reset_countdowns(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
         health_js = (runtime / "admin_ui" / "health.js").read_text()
-        css = (runtime / "admin_ui.css").read_text()
+        css = (runtime / "admin_ui/admin_ui.css").read_text()
 
         self.assertIn("function resetCountdown(value, now = Date.now())", health_js)
         self.assertIn("current_session_resets_at", health_js)
@@ -574,34 +667,39 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn(".usage-reset {", css)
         self.assertIn(".usage-window {", css)
 
-    def test_upgrade_notice_is_compact_accessible_and_version_driven(self) -> None:
+    def test_upgrade_notice_is_descriptive_and_shown_with_home_version(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
-        html = (runtime / "admin_ui.html").read_text()
+        html = (runtime / "admin_ui/index.html").read_text()
         health_js = (runtime / "admin_ui" / "health.js").read_text()
-        css = (runtime / "admin_ui.css").read_text()
+        css = (runtime / "admin_ui/admin_ui.css").read_text()
 
-        self.assertIn('id="upgrade-notice"', html)
-        self.assertIn('id="upgrade-popover"', html)
+        self.assertNotIn('id="upgrade-notice"', html)
+        self.assertNotIn('id="upgrade-popover"', html)
         self.assertNotIn('href="https://github.com/infiloop2/kern', html)
-        self.assertIn("renderUpgradeNotice(health.upgrade)", health_js)
-        self.assertIn('"Your Kern is at the latest version."', health_js)
-        self.assertIn('"Use your operator plane to upgrade."', health_js)
-        self.assertIn('notice.setAttribute("aria-label", label)', health_js)
-        self.assertIn(".upgrade-notice {", css)
-        self.assertIn("background: var(--ok-soft);", css)
-        self.assertIn("border-radius: 999px;", css)
+        self.assertIn("renderVersion(health.version)", health_js)
+        self.assertIn("renderHomeUpgrade(health.upgrade)", health_js)
+        self.assertIn('"stat-wide version-tile"', health_js)
+        self.assertNotIn("renderUpgradeNotice", health_js)
+        self.assertIn("Use your operator plane to upgrade.", health_js)
+        self.assertNotIn('class="muted">runtime', health_js)
+        self.assertNotIn('class="muted">state', health_js)
+        self.assertNotIn(".upgrade-notice {", css)
+        self.assertIn(".home-upgrade-notice {", css)
         self.assertIn(".upgrade-popover {", css)
-        self.assertIn(".upgrade-notice:hover .upgrade-popover", css)
+        self.assertNotIn(".upgrade-notice:hover .upgrade-popover", css)
 
     def test_icons_have_intrinsic_sizes_and_share_the_favicon_asset(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
-        html = (runtime / "admin_ui.html").read_text()
-        css = (runtime / "admin_ui.css").read_text()
+        html = (runtime / "admin_ui/index.html").read_text()
+        css = (runtime / "admin_ui/admin_ui.css").read_text()
+        app_js = (runtime / "admin_ui" / "app.js").read_text()
 
         favicon_src = '/favicon.svg'
         self.assertIn(f'<img class="brand-mark" width="30" height="30" src="{favicon_src}" alt="">', html)
         self.assertIn(f'<img class="login-mark" width="44" height="44" src="{favicon_src}" alt="">', html)
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 10)
+        # Home owns integration and diagnostic navigation. Memory and
+        # Schedules remain first-class Workspace destinations.
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 3)
         self.assertIn('/favicon.svg', html)
         self.assertIn('/favicon.ico', html)
         self.assertIn('/admin_ui.css', html)
@@ -611,82 +709,76 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn(".tab-button svg { display: block; height: 19px; width: 19px; }", css)
         self.assertIn(".memory-swap-values", css)
         self.assertIn("button.icon-button svg", css)
+        self.assertEqual(html.count('<span class="home-card-icon'), 6)
+        self.assertEqual(html.count('<svg viewBox="0 0 20 20" aria-hidden="true">'), 6)
+        self.assertIn(".home-card-icon svg {", css)
+        self.assertIn("const runtime = button.dataset.runtime;", app_js)
+        self.assertIn('"start-login": () => startLogin(runtime)', app_js)
         self.assertNotIn("animation: panel-in", css)
         self.assertIn("position: fixed", css)
-        self.assertIn('id="tab-processes"', html)
+        self.assertNotIn('id="tab-processes"', html)
+        self.assertIn('data-action="open-home-view" data-view="processes"', html)
         self.assertIn('id="processes"', html)
         self.assertIn('id="file-image" class="file-image" alt="" hidden', html)
         self.assertIn("img-src 'self' data: blob:", admin_api.SECURITY_HEADERS["Content-Security-Policy"])
-        self.assertIn('id="sidebar-apps" class="sidebar-section" hidden', html)
-        self.assertIn('id="sidebar-stable-apps"', html)
-        self.assertIn('<div class="sidebar-section-title">Apps</div>', html)
-        self.assertIn('id="stable-app-tabs"', html)
-        self.assertIn('id="beta-app-tabs" hidden', html)
-        self.assertIn('data-action="toggle-beta-apps"', html)
-        self.assertIn("under development and may not function properly", html)
-        app_js = (runtime / "admin_ui" / "app.js").read_text()
-        self.assertIn("kern-app-api", app_js)
-        self.assertIn("kern-app-open-file", app_js)
-        self.assertIn('"X-Kern-App-Bridge": app.id', app_js)
-        # The bridge scope is enforced server-side (route() 403s any
-        # bridge-tagged request outside the app's own API); the shell keeps
-        # only a friendly prefix pre-check.
-        bridge_code = app_js.split("async function handleAppApiMessage", 1)[1].split("document.addEventListener", 1)[0]
-        self.assertIn("app.backend.api_route", bridge_code)
-        self.assertNotIn("/v1/tasks", bridge_code)
-        self.assertNotIn("host-runtime", bridge_code)
-        self.assertNotIn("network/policy", bridge_code)
-        self.assertNotIn("agent-files", bridge_code)
+        self.assertIn('id="chat-nav-items"', html)
+        self.assertIn('id="web-apps-nav-items"', html)
+        self.assertIn("window.KernHost", app_js)
+        self.assertIn("attachShadow", app_js)
         files_js = (runtime / "admin_ui" / "files.js").read_text()
         self.assertNotIn(".innerHTML", files_js)
         self.assertIn("button.textContent", files_js)
+        logos_js = (runtime / "admin_ui" / "connection_guide.js").read_text()
+        self.assertIn('openai: `<svg viewBox="0 0 512 512">', logos_js)
+        self.assertNotIn('openai: `<svg viewBox="0 0 32 32"><g', logos_js)
+        self.assertIn('"tool:ibkr": `<svg viewBox="0 0 775 1511">', logos_js)
+        self.assertNotIn('m6 18 5.4-5', logos_js)
         self.assertIn("video.src = activeFileUrl", files_js)
         self.assertIn("image.src = activeFileUrl", files_js)
         self.assertIn('["image/jpeg", "image/png", "image/webp"]', files_js)
         self.assertNotIn("window.open", files_js)
         self.assertNotIn("location.", files_js)
 
-    def test_app_backend_auth_maps_peer_uid_to_installed_app(self) -> None:
+    def test_workspace_auth_uses_one_fixed_peer_uid(self) -> None:
         class User:
             pw_uid = 12345
 
-        with patch("host.runtime.admin_api.app_backend_api.pwd.getpwnam", return_value=User()):
-            self.assertEqual(app_backend_admin_api.app_id_for_peer_uid(12345), "agent_chat")
-            self.assertIsNone(app_backend_admin_api.app_id_for_peer_uid(54321))
+        with patch("host.runtime.admin_api.workspace_api.pwd.getpwnam", return_value=User()):
+            self.assertEqual(workspace_admin_api._workspace_uid(), 12345)
 
-    def test_app_backend_auth_rejects_claimed_app_id_mismatch(self) -> None:
+    def test_workspace_auth_rejects_a_non_service_peer(self) -> None:
         class Request:
             pass
 
         class Handler:
-            headers = {"X-Kern-App-Backend": "agent_chat"}
             request = Request()
 
         with (
-            patch("host.runtime.admin_api.app_backend_api._peer_uid", return_value=12345),
-            patch("host.runtime.admin_api.app_backend_api.app_id_for_peer_uid", return_value="other_app"),
+            patch("host.runtime.admin_api.workspace_api._peer_uid", return_value=12346),
+            patch("host.runtime.admin_api.workspace_api._workspace_uid", return_value=12345),
             self.assertRaises(admin_api.ApiError) as error,
         ):
-            app_backend_admin_api.Handler._authenticate_app_backend_id(Handler())  # type: ignore[arg-type]
+            workspace_admin_api.Handler._authenticate_workspace(Handler())  # type: ignore[arg-type]
 
         self.assertEqual(error.exception.status, HTTPStatus.UNAUTHORIZED)
 
-    def test_app_backend_route_allowlist_is_thread_scoped(self) -> None:
+    def test_workspace_route_allowlist_contains_thread_and_history_operations(self) -> None:
         allowed = [
-            ("GET", "/v1/tools"),
-            ("GET", "/v1/network/policy"),
             ("GET", "/v1/threads"),
             ("GET", "/v1/threads/thread_1"),
             ("POST", "/v1/threads/thread_1/messages"),
             ("POST", "/v1/threads/thread_1/stop"),
+            ("POST", "/v1/threads/thread_1/clear-memory"),
             ("GET", "/v1/threads/thread_1/events"),
+            ("POST", "/v1/conversation-history/search"),
+            ("POST", "/v1/conversation-history/read"),
         ]
 
         for method, path in allowed:
             with self.subTest(method=method, path=path):
-                app_backend_admin_api._require_app_backend_route(method, path)
+                workspace_admin_api._require_workspace_route(method, path)
 
-    def test_app_backend_route_allowlist_rejects_host_admin_and_removed_task_routes(self) -> None:
+    def test_workspace_route_allowlist_rejects_host_admin_and_removed_task_routes(self) -> None:
         denied = [
             ("POST", "/v1/tasks"),
             ("GET", "/v1/tasks"),
@@ -697,8 +789,10 @@ class AdminUiStaticTests(unittest.TestCase):
             ("POST", "/v1/tasks/task_1/steer"),
             ("GET", "/v1/threads/thread_1/tasks"),
             ("GET", "/v1/health"),
+            ("GET", "/v1/network/policy"),
             ("PUT", "/v1/network/policy"),
             ("GET", "/v1/agent-files"),
+            ("GET", "/v1/tools"),
             ("POST", "/v1/tools/brave_search/enable"),
             ("GET", "/v1/tools/brave_search/approvals"),
             ("GET", "/v1/network-tools/github-credential"),
@@ -709,83 +803,78 @@ class AdminUiStaticTests(unittest.TestCase):
         for method, path in denied:
             with self.subTest(method=method, path=path):
                 with self.assertRaises(admin_api.ApiError) as error:
-                    app_backend_admin_api._require_app_backend_route(method, path)
+                    workspace_admin_api._require_workspace_route(method, path)
                 self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
 
-    def test_app_backend_prefixes_thread_ids_and_strips_responses(self) -> None:
-        for visible, internal in (
-            ("/v1/threads/chat", "/v1/threads/agent_chat__chat"),
-            ("/v1/threads/chat/messages", "/v1/threads/agent_chat__chat/messages"),
-            ("/v1/threads/chat/stop", "/v1/threads/agent_chat__chat/stop"),
-            ("/v1/threads/chat/events", "/v1/threads/agent_chat__chat/events"),
-        ):
-            with self.subTest(path=visible):
-                self.assertEqual(
-                    app_backend_admin_api._internal_path("agent_chat", visible), internal
-                )
-
-        response = app_backend_admin_api._visible_response(
-            "agent_chat",
-            {"thread": {"thread_id": "agent_chat__chat", "status": "running"}},
-        )
-        self.assertEqual(response["thread"]["thread_id"], "chat")
-        self.assertEqual(response["thread"]["status"], "running")
-
-    def test_app_backend_thread_detail_and_stop_use_app_prefixed_thread_path(self) -> None:
+    def test_workspace_thread_ids_pass_through_unchanged(self) -> None:
         with patch(
-            "host.runtime.admin_api.app_backend_api.admin_api.route",
-            return_value={"thread": {"thread_id": "agent_chat__chat", "status": "idle"}},
+            "host.runtime.admin_api.workspace_api.admin_api.route",
+            return_value={"thread": {"thread_id": "thread-1", "status": "running"}},
         ) as route:
-            response = app_backend_admin_api.route_app_backend_request(
-                "agent_chat", "GET", "/v1/threads/chat", {}, None
+            response = workspace_admin_api.route_workspace_request(
+                "GET", "/v1/threads/thread-1", {}, None
+            )
+        route.assert_called_once_with(
+            "GET", "/v1/threads/thread-1", {}, None,
+            principal=admin_api.WorkspacePrincipal(),
+        )
+        self.assertEqual(response["thread"]["thread_id"], "thread-1")
+
+    def test_workspace_thread_detail_and_stop_use_direct_thread_path(self) -> None:
+        with patch(
+            "host.runtime.admin_api.workspace_api.admin_api.route",
+            return_value={"thread": {"thread_id": "thread-1", "status": "idle"}},
+        ) as route:
+            response = workspace_admin_api.route_workspace_request(
+                "GET", "/v1/threads/thread-1", {}, None
             )
 
         route.assert_called_once_with(
             "GET",
-            "/v1/threads/agent_chat__chat",
+            "/v1/threads/thread-1",
             {},
             None,
-            principal=admin_api.AppBackendPrincipal("agent_chat"),
+            principal=admin_api.WorkspacePrincipal(),
         )
-        self.assertEqual(response["thread"], {"thread_id": "chat", "status": "idle"})
+        self.assertEqual(response["thread"], {"thread_id": "thread-1", "status": "idle"})
 
         with patch(
-            "host.runtime.admin_api.app_backend_api.admin_api.route",
+            "host.runtime.admin_api.workspace_api.admin_api.route",
             return_value={"status": "accepted"},
         ) as stop_route:
-            response = app_backend_admin_api.route_app_backend_request(
-                "agent_chat", "POST", "/v1/threads/chat/stop", {}, None
+            response = workspace_admin_api.route_workspace_request(
+                "POST", "/v1/threads/thread-1/stop", {}, None
             )
 
         stop_route.assert_called_once_with(
             "POST",
-            "/v1/threads/agent_chat__chat/stop",
+            "/v1/threads/thread-1/stop",
             {},
             None,
-            principal=admin_api.AppBackendPrincipal("agent_chat"),
+            principal=admin_api.WorkspacePrincipal(),
         )
         self.assertEqual(response, {"status": "accepted"})
 
-    def test_app_backend_thread_events_use_app_prefixed_thread_path(self) -> None:
+    def test_workspace_thread_events_use_direct_thread_path(self) -> None:
         with patch(
-            "host.runtime.admin_api.app_backend_api.admin_api.route",
-            return_value={"events": [{"seq": 4, "thread_id": "agent_chat__chat", "event_type": "thread.message"}]},
+            "host.runtime.admin_api.workspace_api.admin_api.route",
+            return_value={"events": [{"seq": 4, "thread_id": "thread-1", "event_type": "thread.message"}]},
         ) as route:
-            response = app_backend_admin_api.route_app_backend_request(
-                "agent_chat", "GET", "/v1/threads/chat/events", {"since": ["2"]}, None
+            response = workspace_admin_api.route_workspace_request(
+                "GET", "/v1/threads/thread-1/events", {"since": ["2"]}, None
             )
 
         route.assert_called_once_with(
             "GET",
-            "/v1/threads/agent_chat__chat/events",
+            "/v1/threads/thread-1/events",
             {"since": ["2"]},
             None,
-            principal=admin_api.AppBackendPrincipal("agent_chat"),
+            principal=admin_api.WorkspacePrincipal(),
         )
         self.assertEqual(response["events"][0]["seq"], 4)
-        self.assertEqual(response["events"][0]["thread_id"], "chat")
+        self.assertEqual(response["events"][0]["thread_id"], "thread-1")
 
-    def test_thread_events_bound_page_and_message_bytes_before_app_proxying(self) -> None:
+    def test_thread_events_bound_page_and_message_bytes_before_workspace_proxying(self) -> None:
         message_bytes = 12 * 1024
         events = [
             {
@@ -1022,81 +1111,496 @@ class AdminUiStaticTests(unittest.TestCase):
         ))
         self.assertLess(len(json.dumps(response).encode()), admin_api.MAX_REQUEST_BODY_BYTES)
 
-    def test_app_backend_bulk_thread_list_is_filtered_to_the_calling_app(self) -> None:
+    def test_conversation_search_projects_bounded_public_matches_and_cursor(self) -> None:
+        rows = [
+            {
+                "seq": 8,
+                "event_id": "event_8",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "thread_id": "thread-2",
+                "source": "agent",
+                "search_rank": 0.5,
+                "excerpt": "x" * 3000,
+                "excerpt_truncated": True,
+            },
+            {
+                "seq": 7,
+                "event_id": "event_7",
+                "timestamp": "2026-06-30T00:00:00Z",
+                "thread_id": "thread-1",
+                "source": "user",
+                "search_rank": 0.25,
+                "excerpt": "older",
+                "excerpt_truncated": False,
+            },
+        ]
+        with patch.object(admin_api.state, "search_thread_messages", return_value=rows) as search:
+            response = admin_api.search_conversation_history(
+                {
+                    "query": " tunnel status ",
+                    "thread_id": "app-2",
+                    "limit": 1,
+                }
+            )
+
+        search.assert_called_once_with(
+            ("tunnel status",),
+            from_timestamp=None,
+            to_timestamp=None,
+            thread_id="app-2",
+            sources=("user", "agent"),
+            limit=2,
+            before=None,
+        )
+        self.assertEqual(response["matches"][0]["role"], "assistant")
+        self.assertTrue(response["matches"][0]["excerpt_truncated"])
+        self.assertLessEqual(
+            len(json.dumps(response["matches"][0]["excerpt"]).encode()),
+            admin_api.CONVERSATION_SEARCH_EXCERPT_BYTES,
+        )
+        self.assertEqual(response["provenance"], "retained_conversation_history")
+        self.assertEqual(response["trust"], "untrusted")
+        self.assertEqual(response["instruction_authority"], "none")
+        self.assertIsInstance(response["next_cursor"], str)
+
+    def test_conversation_search_normalizes_filters_and_resumes_its_cursor(self) -> None:
+        row = {
+            "seq": 8,
+            "event_id": "event_8",
+            "timestamp": "2026-07-01T00:00:00Z",
+            "thread_id": "schedule-daily",
+            "source": "agent",
+            "search_rank": 0.5,
+            "excerpt": "A degraded tunnel can still serve traffic.",
+            "excerpt_truncated": False,
+        }
+        with patch.object(
+            admin_api.state,
+            "search_thread_messages",
+            side_effect=[[row, {**row, "seq": 7}], []],
+        ) as search:
+            request = {
+                "query": " degraded tunnel ",
+                "query_variants": ["serving traffic", "serving traffic"],
+                "from": "2026-07-01T01:00:00+01:00",
+                "roles": ["assistant"],
+                "limit": 1,
+            }
+            first = admin_api.search_conversation_history(request)
+            second = admin_api.search_conversation_history(
+                {**request, "cursor": first["next_cursor"]}
+            )
+
+        self.assertIsNone(second["next_cursor"])
+        first_call = search.call_args_list[0]
+        self.assertEqual(first_call.args[0], ("degraded tunnel", "serving traffic"))
+        self.assertEqual(first_call.kwargs["from_timestamp"], "2026-07-01T00:00:00Z")
+        self.assertEqual(first_call.kwargs["sources"], ("agent",))
+        self.assertEqual(search.call_args_list[1].kwargs["before"], (0.5, 8))
+
+    def test_conversation_search_rejects_missing_filter_and_cursor_reuse(self) -> None:
+        with self.assertRaises(admin_api.ApiError) as missing:
+            admin_api.search_conversation_history({})
+        self.assertEqual(missing.exception.status, HTTPStatus.BAD_REQUEST)
+
+        with self.assertRaises(admin_api.ApiError) as nul:
+            admin_api.search_conversation_history({"query": "tunnel\x00status"})
+        self.assertIn("must not contain NUL", nul.exception.message)
+
+        cursor = admin_api._encode_conversation_search_cursor(
+            "different",
+            True,
+            {"rank": 1.0, "seq": 2},
+        )
+        with self.assertRaises(admin_api.ApiError) as invalid:
+            admin_api.search_conversation_history(
+                {"query": "deployment", "cursor": cursor}
+            )
+        self.assertIn("different search filters", invalid.exception.message)
+
+        fingerprint = admin_api._conversation_search_fingerprint(
+            ["deployment"], None, None, None, ["user", "assistant"]
+        )
+        oversized_cursor = admin_api._encode_conversation_search_cursor(
+            fingerprint,
+            True,
+            {"rank": 1.0, "seq": admin_api.POSTGRES_BIGINT_MAX + 1},
+        )
+        with self.assertRaises(admin_api.ApiError) as oversized:
+            admin_api.search_conversation_history(
+                {"query": "deployment", "cursor": oversized_cursor}
+            )
+        self.assertIn("cursor is invalid", oversized.exception.message)
+
+    def test_conversation_search_rejects_hostile_cursor_values(self) -> None:
+        rank_fingerprint = admin_api._conversation_search_fingerprint(
+            ["deployment"], None, None, None, ["user", "assistant"]
+        )
+        time_fingerprint = admin_api._conversation_search_fingerprint(
+            [], "2026-01-01T00:00:00Z", None, None, ["user", "assistant"]
+        )
+        cases = (
+            (
+                {"query": "deployment"},
+                admin_api._encode_conversation_search_cursor(
+                    rank_fingerprint,
+                    True,
+                    {"rank": 10**320, "seq": 1},
+                ),
+            ),
+            (
+                {"from": "2026-01-01T00:00:00Z"},
+                admin_api._encode_conversation_search_cursor(
+                    time_fingerprint,
+                    False,
+                    {"timestamp": "2026-99-31T00:00:00Z", "seq": 1},
+                ),
+            ),
+            ({"query": "deployment"}, "not-base64!"),
+        )
+        with patch.object(admin_api.state, "search_thread_messages") as search:
+            for request, cursor in cases:
+                with self.subTest(cursor=cursor[:40]), self.assertRaises(
+                    admin_api.ApiError
+                ) as error:
+                    admin_api.search_conversation_history(
+                        {**request, "cursor": cursor}
+                    )
+                self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+
+        search.assert_not_called()
+
+    def test_conversation_history_rejects_hostile_public_shapes_before_database(self) -> None:
+        search_requests = (
+            {"query": {"$ne": None}},
+            {"query": "ok", "query_variants": ["ok"] * 9},
+            {"query": "ok", "query_variants": [{"nested": "value"}]},
+            {"query": "ok", "thread_id": "../thread-1"},
+            {"query": "ok", "roles": ["user", {"role": "assistant"}]},
+            {"query": "ok", "limit": float("nan")},
+            {"query": "ok", "limit": 10**5_000},
+            {"query": "ok", "unexpected": {"deeply": ["nested"]}},
+        )
+        read_requests = (
+            {"thread_id": {"$ne": None}},
+            {"thread_id": "../thread-1"},
+            {"thread_id": "thread-1", "before": "event_0"},
+            {"thread_id": "thread-1", "include_activity": 1},
+            {"thread_id": "thread-1", "limit": float("inf")},
+            {"thread_id": "thread-1", "unexpected": []},
+        )
+        with (
+            patch.object(admin_api.state, "search_thread_messages") as search,
+            patch.object(admin_api.state, "page_thread_events") as page,
+            patch.object(admin_api.state, "page_thread_events_around") as around,
+        ):
+            for request in search_requests:
+                with self.subTest(search=request), self.assertRaises(
+                    admin_api.ApiError
+                ) as error:
+                    admin_api.search_conversation_history(request)
+                self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+            for request in read_requests:
+                with self.subTest(read=request), self.assertRaises(
+                    admin_api.ApiError
+                ) as error:
+                    admin_api.read_conversation_history(request)
+                self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+
+        search.assert_not_called()
+        page.assert_not_called()
+        around.assert_not_called()
+
+    def test_conversation_search_rejects_timestamps_outside_utc_range(self) -> None:
+        for timestamp in (
+            "9999-12-31T23:59:59.9Z",
+            "0001-01-01T00:00:00+14:00",
+            "2026-01-01 00:00:00Z",
+            "2026-01-01T00:00:00+00:00:00",
+        ):
+            with (
+                self.subTest(timestamp=timestamp),
+                patch.object(admin_api.state, "search_thread_messages") as search,
+                self.assertRaises(admin_api.ApiError) as error,
+            ):
+                admin_api.search_conversation_history({"from": timestamp})
+
+            self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+            self.assertIn("RFC 3339", error.exception.message)
+            search.assert_not_called()
+
+    def test_conversation_search_rounds_sub_microsecond_filters_up(self) -> None:
+        with patch.object(
+            admin_api.state, "search_thread_messages", return_value=[]
+        ) as search:
+            admin_api.search_conversation_history(
+                {
+                    "from": "2026-07-01T00:00:00.0000001Z",
+                    "to": "2026-07-02T00:00:00.0000000Z",
+                }
+            )
+
+        self.assertEqual(
+            search.call_args.kwargs["from_timestamp"], "2026-07-01T00:00:01Z"
+        )
+        self.assertEqual(
+            search.call_args.kwargs["to_timestamp"], "2026-07-02T00:00:00Z"
+        )
+
+    def test_conversation_search_accepts_lowercase_rfc3339_separators(self) -> None:
+        with patch.object(
+            admin_api.state, "search_thread_messages", return_value=[]
+        ) as search:
+            admin_api.search_conversation_history(
+                {"from": "2026-07-01t01:00:00+01:00", "to": "2026-07-02t00:00:00z"}
+            )
+
+        self.assertEqual(
+            search.call_args.kwargs["from_timestamp"], "2026-07-01T00:00:00Z"
+        )
+        self.assertEqual(
+            search.call_args.kwargs["to_timestamp"], "2026-07-02T00:00:00Z"
+        )
+
+    def test_conversation_search_rejects_non_utf8_public_strings(self) -> None:
+        for request in (
+            {"query": "\ud800"},
+            {"query": "valid", "query_variants": ["\ud800"]},
+            {"from": "\ud800"},
+            {"query": "valid", "cursor": "\ud800"},
+        ):
+            with (
+                self.subTest(field=next(iter(request))),
+                patch.object(admin_api.state, "search_thread_messages") as search,
+                self.assertRaises(admin_api.ApiError) as error,
+            ):
+                admin_api.search_conversation_history(request)
+
+            self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+            self.assertIn("valid UTF-8", error.exception.message)
+            search.assert_not_called()
+
+    def test_conversation_search_reports_the_relevance_work_limit(self) -> None:
+        cancelled = pgclient.Error(
+            "canceling statement due to statement timeout",
+            {"C": "57014"},
+        )
+        with (
+            patch.object(
+                admin_api.state,
+                "search_thread_messages",
+                side_effect=cancelled,
+            ),
+            self.assertRaises(admin_api.ApiError) as raised,
+        ):
+            admin_api.search_conversation_history(
+                {
+                    "query": "the",
+                }
+            )
+
+        self.assertEqual(raised.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
+        self.assertIn("narrow the query", raised.exception.message)
+
+    def test_conversation_read_bounds_messages_and_summarizes_activity(self) -> None:
+        raw = [
+            {
+                "seq": 1,
+                "event_id": "event_1",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "event_type": "thread.message",
+                "payload": {"source": "user", "message": "\x01" * 100_000},
+            },
+            {
+                "seq": 2,
+                "event_id": "event_2",
+                "timestamp": "2026-07-01T00:00:01Z",
+                "event_type": "thread.activity",
+                "payload": {
+                    "activity": {
+                        "kind": "command",
+                        "title": "test",
+                        "output": "o" * 10_000,
+                        "private_provider_shape": {"large": "secret"},
+                    }
+                },
+            },
+        ]
+        with (
+            patch.object(admin_api.state, "page_thread_events", return_value=raw) as page,
+            patch.object(
+                admin_api.state,
+                "thread_event_page_bounds",
+                return_value=(True, True),
+            ),
+        ):
+            response = admin_api.read_conversation_history(
+                {
+                    "thread_id": "thread-1",
+                    "include_activity": True,
+                    "limit": 20,
+                }
+            )
+
+        page.assert_called_once_with(
+            "thread-1",
+            None,
+            20,
+            before=None,
+            event_types=("thread.message", "thread.activity"),
+        )
+        self.assertEqual([event["type"] for event in response["events"]], ["message", "activity"])
+        self.assertTrue(response["events"][0]["truncated"])
+        self.assertNotIn(
+            "private_provider_shape", response["events"][1]["activity"]
+        )
+        self.assertTrue(response["events"][1]["truncated"])
+        self.assertEqual(
+            (response["older_cursor"], response["newer_cursor"]),
+            ("event_1", "event_2"),
+        )
+        self.assertEqual(response["thread"], {"thread_id": "thread-1"})
+        self.assertLess(
+            len(json.dumps(response).encode()),
+            admin_api.CONVERSATION_RESPONSE_BYTES,
+        )
+
+    def test_conversation_read_rejects_an_anchor_outside_the_thread(self) -> None:
+        with (
+            patch.object(admin_api.state, "page_thread_events_around", return_value=None),
+            self.assertRaises(admin_api.ApiError) as error,
+        ):
+            admin_api.read_conversation_history(
+                {
+                    "thread_id": "app-1",
+                    "around_event_id": "event_99",
+                    "include_activity": False,
+                }
+            )
+        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
+
+    def test_conversation_read_rejects_combined_public_cursors(self) -> None:
+        with self.assertRaises(admin_api.ApiError) as error:
+            admin_api.read_conversation_history(
+                {
+                    "thread_id": "app-1",
+                    "before": "event_2",
+                    "after": "event_3",
+                }
+            )
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertIn("around_event_id", error.exception.message)
+
+    def test_conversation_read_rejects_event_ids_outside_bigint(self) -> None:
+        for event_id in (
+            "event_9223372036854775808",
+            "event_" + "9" * 5_000,
+        ):
+            with (
+                self.subTest(event_id=event_id[:32]),
+                patch.object(admin_api.state, "page_thread_events") as page,
+                self.assertRaises(admin_api.ApiError) as error,
+            ):
+                admin_api.read_conversation_history(
+                    {"thread_id": "app-1", "before": event_id}
+                )
+
+            self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+            self.assertIn("event id", error.exception.message)
+            page.assert_not_called()
+
+    def test_workspace_bulk_thread_list_forwards_optional_prefix_filter(self) -> None:
         with patch(
-            "host.runtime.admin_api.app_backend_api.admin_api.route",
+            "host.runtime.admin_api.workspace_api.admin_api.route",
             return_value={
                 "threads": [
-                    {"thread_id": "agent_chat__chat", "status": "running"},
-                    {"thread_id": "other_app__notes", "status": "idle"},
-                    {"thread_id": "agent_chat__docs", "status": "idle"},
+                    {"thread_id": "thread-1", "status": "running"},
+                    {"thread_id": "thread-2", "status": "idle"},
                 ]
             },
         ) as route:
-            response = app_backend_admin_api.route_app_backend_request(
-                "agent_chat", "GET", "/v1/threads", {}, None
+            response = workspace_admin_api.route_workspace_request(
+                "GET", "/v1/threads", {"prefix": ["thread-"]}, None
             )
 
         route.assert_called_once_with(
             "GET",
             "/v1/threads",
-            {},
+            {"prefix": ["thread-"]},
             None,
-            principal=admin_api.AppBackendPrincipal("agent_chat"),
+            principal=admin_api.WorkspacePrincipal(),
         )
-        # Only this app's threads survive, and the prefix is stripped from each.
         self.assertEqual(
             response["threads"],
-            [{"thread_id": "chat", "status": "running"}, {"thread_id": "docs", "status": "idle"}],
+            [{"thread_id": "thread-1", "status": "running"}, {"thread_id": "thread-2", "status": "idle"}],
         )
 
-    def test_app_backend_visible_response_rejects_unscoped_thread_ids(self) -> None:
-        with self.assertRaises(admin_api.ApiError) as error:
-            app_backend_admin_api._visible_response(
-                "agent_chat",
-                {"threads": [{"thread_id": "other_app__chat"}]},
-            )
-
-        self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
-
-    def test_admin_messages_reject_app_reserved_thread_prefixes(self) -> None:
-        with self.assertRaises(admin_api.ApiError) as error:
-            admin_api._validate_thread_id_not_reserved_by_app("agent_chat__chat", None)
-
-        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
-
+    def test_thread_prefix_is_a_query_filter_not_an_authority_claim(self) -> None:
+        self.assertEqual(admin_api._thread_list_prefix({"prefix": ["app-"]}), "app-")
         with self.assertRaises(admin_api.ApiError):
-            admin_api._validate_thread_id_not_reserved_by_app("future_app__chat", None)
-        admin_api._validate_thread_id_not_reserved_by_app("agent_chat__chat", "agent_chat")
-        with self.assertRaises(admin_api.ApiError):
-            admin_api._validate_thread_id_not_reserved_by_app("agent_chat__", "agent_chat")
+            admin_api._thread_list_prefix({"prefix": ["bad prefix"]})
 
-    def test_app_bridge_marker_cannot_leave_the_apps_own_api(self) -> None:
-        # A bridge-tagged request is scoped server-side before any dispatch:
-        # another app's API, host thread routes, and the network policy are all
-        # 403 with nothing executed.
-        for path in (
-            "/v1/apps/agent_chat/api/health",
-            "/v1/threads",
-            "/v1/network/policy",
-        ):
-            with self.subTest(path=path):
-                with self.assertRaises(admin_api.ApiError) as error:
-                    admin_api.route(
-                        "GET",
-                        path,
-                        {},
-                        None,
-                        principal=admin_api.OperatorPrincipal("test-session"),
-                        bridge_app_id="other-app",
-                    )
-                self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
 
     def test_shared_route_requires_a_valid_explicit_principal(self) -> None:
         with self.assertRaises(TypeError):
             admin_api.route("GET", "/v1/health", {}, None)  # type: ignore[call-arg]
         with self.assertRaisesRegex(TypeError, "route principal is invalid"):
             admin_api.route("GET", "/v1/health", {}, None, principal=None)  # type: ignore[arg-type]
+        for path in ("/v1/health", "/v1/network/policy", "/v1/tools"):
+            with self.subTest(path=path):
+                with self.assertRaises(admin_api.ApiError) as denied:
+                    admin_api.route(
+                        "GET",
+                        path,
+                        {},
+                        None,
+                        principal=admin_api.WorkspacePrincipal(),
+                    )
+                self.assertEqual(denied.exception.status, HTTPStatus.FORBIDDEN)
+
+    def test_workspace_thread_creation_is_reserved_for_workspace_service(self) -> None:
+        body = {
+            "message": "scheduled work",
+            "agent_runtime": "codex",
+            "model": "gpt-5.2-codex",
+            "effort": "medium",
+        }
+        for path in (
+            "/v1/threads/thread-17/messages",
+            "/v1/threads/app-17/messages",
+            "/v1/threads/schedule-17-run-23/messages",
+            "/v1/threads/schedule-custom/messages",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaises(admin_api.ApiError) as denied:
+                    admin_api.route(
+                        "POST",
+                        path,
+                        {},
+                        body,
+                        principal=admin_api.OperatorPrincipal("test-session"),
+                    )
+                self.assertEqual(denied.exception.status, HTTPStatus.FORBIDDEN)
+
+        for path in (
+            "/v1/threads/thread-17/messages",
+            "/v1/threads/app-17/messages",
+            "/v1/threads/schedule-17-run-23/messages",
+            "/v1/threads/schedule-custom/messages",
+        ):
+            with self.subTest(path=path), patch(
+                "host.runtime.admin_api.service.thread_route",
+                return_value={"status": "accepted"},
+            ) as thread_route:
+                response = admin_api.route(
+                    "POST",
+                    path,
+                    {},
+                    body,
+                    principal=admin_api.WorkspacePrincipal(),
+                )
+                self.assertEqual(response, {"status": "accepted"})
+                thread_route.assert_called_once_with("POST", path, {}, body)
 
     def test_http_service_cannot_mint_auth_cookies_or_sessions(self) -> None:
         source = Path(admin_api.__file__).read_text()
@@ -1204,7 +1708,7 @@ class AgentFileUploadHttpTests(unittest.TestCase):
                     self.assertIn(b" 400 ", response)
             popen.assert_not_called()
 
-    def test_upload_cap_and_app_bridge_scope_are_enforced_before_body_read(self) -> None:
+    def test_upload_cap_is_enforced_before_body_read(self) -> None:
         auth = f"Cookie: tc_admin_session={self.session_token}\r\nX-Kern-Csrf: 1\r\n"
         oversized = self.raw_request(
             b"POST /v1/agent-files/upload?filename=photo.png HTTP/1.1\r\n"
@@ -1214,71 +1718,6 @@ class AgentFileUploadHttpTests(unittest.TestCase):
         )
         self.assertIn(b" 413 ", oversized)
         self.assertIn(b"upload exceeds", oversized)
-
-        bridge = urllib.request.Request(
-            f"{self.base_url}/v1/agent-files/upload?filename=photo.png",
-            data=b"bytes",
-            method="POST",
-            headers={
-                **_session_headers(self.session_token),
-                "X-Kern-App-Bridge": "agent_chat",
-            },
-        )
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(bridge, timeout=5)
-        self.assertEqual(error.exception.code, 403)
-        self.assertIn("only target the app's own API", error.exception.read().decode())
-
-    def test_app_bridge_scope_is_enforced_before_passkey_dispatch(self) -> None:
-        token = admin_api.admin_auth._create_session()
-        request = urllib.request.Request(
-            f"{self.base_url}/v1/admin-passkeys",
-            method="GET",
-            headers={
-                "Cookie": (
-                    f"{admin_api.admin_auth.HOST_SESSION_COOKIE_NAME}={token}"
-                ),
-                admin_api.admin_auth.CSRF_HEADER_NAME: "1",
-                "Host": "admin.example.com",
-                "X-Forwarded-Proto": "https",
-                "X-Kern-App-Bridge": "agent_chat",
-            },
-        )
-        with (
-            patch(
-                "host.runtime.admin_api.service.state.load_cloudflare_hostname",
-                return_value="admin.example.com",
-            ),
-            patch("host.runtime.admin_api.service.admin_passkeys.status") as status,
-            self.assertRaises(urllib.error.HTTPError) as error,
-        ):
-            urllib.request.urlopen(request, timeout=5)
-
-        self.assertEqual(error.exception.code, 403)
-        self.assertIn("only target the app's own API", error.exception.read().decode())
-        status.assert_not_called()
-
-    def test_app_bridge_scope_is_enforced_before_login_dispatch(self) -> None:
-        request = urllib.request.Request(
-            f"{self.base_url}/v1/login",
-            data=json.dumps({"password": "wrong"}).encode(),
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-Kern-App-Bridge": "agent_chat",
-            },
-        )
-        with (
-            patch(
-                "host.runtime.admin_api.service.admin_auth.register_attempt"
-            ) as register_attempt,
-            self.assertRaises(urllib.error.HTTPError) as error,
-        ):
-            urllib.request.urlopen(request, timeout=5)
-
-        self.assertEqual(error.exception.code, 403)
-        self.assertIn("only target the app's own API", error.exception.read().decode())
-        register_attempt.assert_not_called()
 
     def test_ssh_forward_does_not_expose_any_passkey_management_route(self) -> None:
         request = urllib.request.Request(
@@ -1501,11 +1940,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
     def raw_request(self, request: bytes) -> bytes:
         return raw_admin_request(self.admin_socket_path, request)
 
-    def health(self, proxy_alive: bool = True):
+    def health(self, proxy_alive: bool = True, version: dict[str, str] | None = None):
+        reported_version = version or {"status": "ok", "runtime": "0.2.0", "state": "0.2.0"}
         with (
             patch("host.runtime.admin_api.service.host_metrics", return_value={"cpu": {}, "memory": {}, "filesystem": {}, "swap": {}}),
             patch("host.runtime.admin_api.service.proxy_alive", return_value=proxy_alive),
-            patch("host.runtime.admin_api.service.version_status", return_value={"status": "ok", "runtime": "0.2.0", "state": "0.2.0"}),
+            patch("host.runtime.admin_api.service.version_status", return_value=reported_version),
             patch(
                 "host.runtime.admin_api.service.upgrade_check.status",
                 return_value={"available": True, "latest": "0.3.0"},
@@ -1517,14 +1957,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         runtimes = body["agent_runtime"]["runtimes"]  # type: ignore[index]
         return next(item for item in runtimes if item["type"] == runtime_type)  # type: ignore[union-attr]
 
-    def app_backend_request(
+    def workspace_request(
         self,
         method: str,
         path: str,
         body: object | None = None,
     ) -> dict[str, Any]:
-        return app_backend_admin_api.route_app_backend_request(
-            "agent_chat",
+        return workspace_admin_api.route_workspace_request(
             method,
             path,
             {},
@@ -1545,32 +1984,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(body["network_controls"]["status"], "active")
         self.assertEqual(body["version"], {"status": "ok", "runtime": "0.2.0", "state": "0.2.0"})
         self.assertEqual(body["upgrade"], {"available": True, "latest": "0.3.0"})
-
-    def test_apps_endpoint_requires_auth_and_lists_agent_chat(self) -> None:
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request("GET", "/v1/apps", auth=False)
-        self.assertEqual(error.exception.code, 401)
-
-        status, body = self.request("GET", "/v1/apps")
-
-        self.assertEqual(status, 200)
         self.assertEqual(
-            {item["id"] for item in body["apps"]},
-            {"agent_chat", "personal_web_app_builder"},
+            body["history"],
+            {"threads": 0, "messages": 0, "activities": 0},
         )
-        app = next(item for item in body["apps"] if item["id"] == "agent_chat")
-        self.assertEqual(app["title"], "Agent Chat")
-        self.assertEqual(app["ui"]["iframe_src"], "/v1/apps/agent_chat/ui/index.html")
-        self.assertEqual(app["backend"]["api_route"], "/v1/apps/agent_chat/api/")
+
 
     def test_agent_file_content_route_requires_operator_auth(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.request("GET", "/v1/agent-files/content?path=%2Fworkspace%2Freel.mp4", auth=False)
         self.assertEqual(error.exception.code, 401)
 
-    def test_app_backend_header_does_not_authenticate_tcp_admin_api(self) -> None:
+    def test_workspace_header_does_not_authenticate_tcp_admin_api(self) -> None:
         request = urllib.request.Request(f"{self.base_url}/v1/threads", method="GET")
-        request.add_header("X-Kern-App-Backend", "agent_chat")
 
         with self.assertRaises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(request, timeout=5)
@@ -1667,9 +2093,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(token)
         assert token is not None
 
-        status, apps = self.cookie_request("GET", "/v1/apps", token)
+        status, health = self.cookie_request("GET", "/v1/health", token)
         self.assertEqual(status, 200)
-        self.assertTrue(any(app["id"] == "agent_chat" for app in apps["apps"]))
+        self.assertIn("status", health)
 
     def test_public_password_requires_passkey_but_ssh_forward_does_not(self) -> None:
         self.seed_public_passkey()
@@ -1785,7 +2211,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, headers, _ = self.login()
         token = self.session_token_from_headers(headers)
         assert token is not None
-        status, body = self.cookie_request("GET", "/v1/apps", token, csrf=False)
+        status, body = self.cookie_request("GET", "/v1/health", token, csrf=False)
         self.assertEqual(status, 403)
 
     def test_session_cookie_name_is_bound_to_its_transport(self) -> None:
@@ -1794,7 +2220,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # The public tunnel accepts only the un-tossable __Host- cookie.
         status, _ = self.cookie_request(
             "GET",
-            "/v1/apps",
+            "/v1/health",
             token,
             cookie_name=admin_api.admin_auth.HOST_SESSION_COOKIE_NAME,
             forwarded_proto="https",
@@ -1802,7 +2228,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         status, _ = self.cookie_request(
             "GET",
-            "/v1/apps",
+            "/v1/health",
             token,
             cookie_name=admin_api.admin_auth.SESSION_COOKIE_NAME,
             forwarded_proto="https",
@@ -1811,7 +2237,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # The plain loopback transport never accepts the public cookie.
         status, _ = self.cookie_request(
             "GET",
-            "/v1/apps",
+            "/v1/health",
             token,
             cookie_name=admin_api.admin_auth.HOST_SESSION_COOKIE_NAME,
         )
@@ -1827,14 +2253,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "_now",
             return_value=start + admin_api.admin_auth.SESSION_IDLE_TIMEOUT_SECONDS - 1,
         ):
-            status, _ = self.cookie_request("GET", "/v1/apps", token)
+            status, _ = self.cookie_request("GET", "/v1/health", token)
             self.assertEqual(status, 200)
         with patch.object(
             admin_api.admin_auth,
             "_now",
             return_value=start + admin_api.admin_auth.SESSION_IDLE_TIMEOUT_SECONDS + 1,
         ):
-            status, _ = self.cookie_request("GET", "/v1/apps", token)
+            status, _ = self.cookie_request("GET", "/v1/health", token)
             self.assertEqual(status, 401)
 
     def test_recent_operator_activity_refreshes_the_idle_session(self) -> None:
@@ -1846,13 +2272,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with patch.object(admin_api.admin_auth, "_now", return_value=start + idle - 1):
             status, _ = self.cookie_request(
                 "GET",
-                "/v1/apps",
+                "/v1/health",
                 token,
                 session_activity=True,
             )
             self.assertEqual(status, 200)
         with patch.object(admin_api.admin_auth, "_now", return_value=start + (2 * idle) - 2):
-            status, _ = self.cookie_request("GET", "/v1/apps", token)
+            status, _ = self.cookie_request("GET", "/v1/health", token)
             self.assertEqual(status, 200)
 
     def test_login_rejects_a_wrong_password_without_a_cookie(self) -> None:
@@ -1866,7 +2292,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         assert token is not None
         status, _ = self.cookie_request("POST", "/v1/logout", token)
         self.assertEqual(status, 200)
-        status, _ = self.cookie_request("GET", "/v1/apps", token)
+        status, _ = self.cookie_request("GET", "/v1/health", token)
         self.assertEqual(status, 401)
 
     def test_a_source_is_blocked_past_the_limit_even_with_the_correct_password(self) -> None:
@@ -2086,13 +2512,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertNotIn(b"<title>Kern</title>", wrong_host)
         self.assertNotIn(b"<title>Kern</title>", duplicate_marker)
 
-    def test_app_backend_message_threads_are_internally_app_prefixed(self) -> None:
+    def test_workspace_messages_use_direct_host_thread_ids(self) -> None:
         with patch.object(
             orchestrator, "launch_turn", side_effect=attach_recording_steer_server
         ):
-            started = self.app_backend_request(
+            started = self.workspace_request(
                 "POST",
-                "/v1/threads/chat/messages",
+                "/v1/threads/thread-1/messages",
                 {
                     "message": "from app",
                     "agent_runtime": "codex",
@@ -2102,48 +2528,33 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
 
             self.assertEqual(started["status"], "accepted")
-            self.assertEqual(started["thread"]["thread_id"], "chat")
+            self.assertEqual(started["thread"]["thread_id"], "thread-1")
             self.assertEqual(started["thread"]["status"], "running")
-            stored = state.thread_session_config("agent_chat__chat")
+            stored = state.thread_session_config("thread-1")
             self.assertIsNotNone(stored)
             assert stored is not None
             self.assertEqual(stored["agent_runtime"], "codex")
-            self.assertIsNone(state.thread_session_config("chat"))
 
-            # A host-visible thread of the same visible name is a different
-            # thread entirely; the app's bulk listing never shows it.
-            self.request(
-                "POST",
-                "/v1/threads/chat/messages",
-                {"message": "host-visible chat", "agent_runtime": "codex"},
-            )
-
-        # Ownership is applied before pagination: the newer host-global
-        # thread must not consume this app's one-row page.
-        listed = app_backend_admin_api.route_app_backend_request(
-            "agent_chat",
+        listed = workspace_admin_api.route_workspace_request(
             "GET",
             "/v1/threads",
-            {"limit": ["1"]},
+            {"limit": ["1"], "prefix": ["thread-"]},
             None,
         )
-        self.assertEqual([item["thread_id"] for item in listed["threads"]], ["chat"])
+        self.assertEqual([item["thread_id"] for item in listed["threads"]], ["thread-1"])
 
-        detail = self.app_backend_request("GET", "/v1/threads/chat")
-        self.assertEqual(detail["thread"]["thread_id"], "chat")
+        detail = self.workspace_request("GET", "/v1/threads/thread-1")
+        self.assertEqual(detail["thread"]["thread_id"], "thread-1")
         self.assertEqual(detail["thread"]["agent_runtime"], "codex")
 
-        events = self.app_backend_request("GET", "/v1/threads/chat/events")
+        events = self.workspace_request("GET", "/v1/threads/thread-1/events")
         self.assertEqual(
             [(event["event_type"], event["thread_id"]) for event in events["events"]],
-            [("thread.message", "chat")],
+            [("thread.message", "thread-1")],
         )
         self.assertEqual(events["events"][0]["payload"]["message"], "from app")
 
-        _, host_thread = self.request("GET", "/v1/threads/agent_chat__chat")
-        self.assertEqual(host_thread["thread"]["thread_id"], "agent_chat__chat")
-
-    def test_app_backend_repeated_message_steers_the_running_turn(self) -> None:
+    def test_workspace_repeated_message_steers_the_running_turn(self) -> None:
         request = {
             "message": "from app",
             "agent_runtime": "codex",
@@ -2153,20 +2564,20 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with patch.object(
             orchestrator, "launch_turn", side_effect=attach_recording_steer_server
         ):
-            first = self.app_backend_request("POST", "/v1/threads/repeated-send/messages", request)
-            repeated = self.app_backend_request("POST", "/v1/threads/repeated-send/messages", request)
+            first = self.workspace_request("POST", "/v1/threads/repeated-send/messages", request)
+            repeated = self.workspace_request("POST", "/v1/threads/repeated-send/messages", request)
 
         self.assertEqual(first["status"], "accepted")
         self.assertEqual(repeated["status"], "accepted")
         self.assertEqual(repeated["thread"]["thread_id"], "repeated-send")
-        turn = orchestrator._LIVE["codex:agent_chat__repeated-send"]
+        turn = orchestrator._LIVE["codex:repeated-send"]
         self.assertEqual(turn.server.messages, ["from app"])
 
-    def test_app_backend_repeated_steer_appends_again(self) -> None:
+    def test_workspace_repeated_steer_appends_again(self) -> None:
         with patch.object(
             orchestrator, "launch_turn", side_effect=attach_recording_steer_server
         ):
-            self.app_backend_request(
+            self.workspace_request(
                 "POST",
                 "/v1/threads/durable-steer/messages",
                 {
@@ -2176,10 +2587,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
                     "effort": "high",
                 },
             )
-            first = self.app_backend_request(
+            first = self.workspace_request(
                 "POST", "/v1/threads/durable-steer/messages", {"message": "nudge"}
             )
-            repeated = self.app_backend_request(
+            repeated = self.workspace_request(
                 "POST", "/v1/threads/durable-steer/messages", {"message": "nudge"}
             )
 
@@ -2193,15 +2604,15 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 response["thread"]["last_used_at"],
                 r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
             )
-        turn = orchestrator._LIVE["codex:agent_chat__durable-steer"]
+        turn = orchestrator._LIVE["codex:durable-steer"]
         self.assertEqual(turn.server.messages, ["nudge", "nudge"])
-        events = self.app_backend_request("GET", "/v1/threads/durable-steer/events")
+        events = self.workspace_request("GET", "/v1/threads/durable-steer/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
             ["thread.message", "thread.message", "thread.message"],
         )
 
-    def test_app_backend_task_routes_are_forbidden(self) -> None:
+    def test_workspace_task_routes_are_forbidden(self) -> None:
         for method, path in (
             ("POST", "/v1/tasks"),
             ("GET", "/v1/tasks/task_1"),
@@ -2212,14 +2623,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
         ):
             with self.subTest(method=method, path=path):
                 with self.assertRaises(admin_api.ApiError) as error:
-                    self.app_backend_request(method, path)
+                    self.workspace_request(method, path)
                 self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
 
-    def test_app_backend_thread_id_limit_includes_hidden_prefix(self) -> None:
+    def test_workspace_thread_id_limit_matches_the_host_limit(self) -> None:
         with self.assertRaises(admin_api.ApiError) as error:
-            self.app_backend_request(
+            self.workspace_request(
                 "POST",
-                f"/v1/threads/{'a' * 64}/messages",
+                f"/v1/threads/{'a' * 65}/messages",
                 {
                     "message": "too long",
                     "agent_runtime": "codex",
@@ -2228,44 +2639,28 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
-        self.assertIn("too long", error.exception.message)
+        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
 
-    def test_app_ui_asset_is_frameable_static_content(self) -> None:
-        request = urllib.request.Request(f"{self.base_url}/v1/apps/agent_chat/ui/index.html", method="GET")
+    def test_workspace_assets_are_static_host_content(self) -> None:
+        request = urllib.request.Request(f"{self.base_url}/workspace/chat.html", method="GET")
         with urllib.request.urlopen(request, timeout=5) as response:
             body = response.read().decode()
 
         self.assertEqual(response.status, 200)
         self.assertIn("Agent Chat", body)
-        self.assertIn('href="agent_chat.css"', body)
-        self.assertIn('src="agent_chat.js"', body)
-        self.assertEqual(response.headers["X-Frame-Options"], "SAMEORIGIN")
+        self.assertNotIn("<script", body)
+        self.assertNotIn("<link", body)
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         csp = response.headers["Content-Security-Policy"]
-        self.assertIn("frame-ancestors 'self'", csp)
-        self.assertIn("frame-src 'none'", csp)
-        img_src = next((directive for directive in csp.split("; ") if directive.startswith("img-src ")), "")
-        self.assertIn("'self'", img_src)
-        self.assertIn("data:", img_src)
-        self.assertIn("navigate-to 'self'", csp)
-        self.assertNotIn("media-src", csp)
-        self.assertIn("sandbox allow-scripts allow-forms allow-modals", csp)
-        self.assertNotIn("allow-same-origin", csp)
-        script_src = next((directive for directive in csp.split("; ") if directive.startswith("script-src ")), "")
-        self.assertIn("'self'", script_src)
-        self.assertNotIn("'unsafe-inline'", script_src)
-        self.assertIn("style-src 'self' 'unsafe-inline'", csp)
-        self.assertNotIn("img-src *", csp)
-        self.assertNotIn("style-src *", csp)
         self.assertNotIn("worker-src", csp)
 
-        for asset_name, content_type, expected in (
-            ("agent_chat.css", "text/css", ".chat-app"),
-            ("agent_chat.js", "application/javascript", "kern-app-api"),
-            ("rich_text.css", "text/css", ".md-content"),
-            ("rich_text.js", "application/javascript", "renderMarkdown"),
+        for asset_path, content_type, expected in (
+            ("/workspace/chat.css", "text/css", ".chat-app"),
+            ("/workspace/chat.js", "application/javascript", "window.KernHost"),
+            ("/workspace/rich_text.css", "text/css", ".md-content"),
+            ("/workspace/rich_text.js", "application/javascript", "renderMarkdown"),
         ):
-            request = urllib.request.Request(f"{self.base_url}/v1/apps/agent_chat/ui/{asset_name}", method="GET")
+            request = urllib.request.Request(f"{self.base_url}{asset_path}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
                 asset_body = response.read().decode()
 
@@ -2273,22 +2668,22 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.assertTrue(response.headers["Content-Type"].startswith(content_type))
             self.assertIn(expected, asset_body)
 
-    def test_capability_worker_csp_is_scoped_to_personal_web_app_builder(self) -> None:
+    def test_generated_capability_worker_runs_in_an_opaque_networkless_frame(self) -> None:
         request = urllib.request.Request(
-            f"{self.base_url}/v1/apps/personal_web_app_builder/ui/index.html",
+            f"{self.base_url}/workspace/capability-worker-sandbox.html",
             method="GET",
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             body = response.read().decode()
 
-        self.assertIn("Agentic Web App", body)
+        self.assertIn("capability-worker-sandbox.js", body)
         csp = response.headers["Content-Security-Policy"]
         self.assertIn("connect-src 'none'", csp)
         self.assertIn("worker-src blob:", csp)
-        self.assertIn("webrtc 'block'", csp)
+        self.assertIn("sandbox allow-scripts", csp)
         self.assertNotIn("allow-same-origin", csp)
 
-    def test_app_api_proxy_does_not_forward_admin_bearer_to_app_backend(self) -> None:
+    def test_workspace_proxy_uses_backend_path_without_identity_headers(self) -> None:
         captured: dict[str, Any] = {}
 
         class FakeResponse:
@@ -2316,17 +2711,21 @@ class AdminApiIntegrationTests(unittest.TestCase):
             def close(self) -> None:
                 captured["closed"] = True
 
-        app = admin_api.app_platform.app_by_id("agent_chat")
-        if app is None:
-            self.fail("agent_chat app should be installed")
-        with patch("host.runtime.admin_api.app_api_proxy.http.client.HTTPConnection", FakeConnection):
-            body = app_api_proxy.proxy_app_api(app, "GET", "/health", {}, None)
+        with patch("host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection", FakeConnection):
+            body = workspace_api_proxy.route_request("GET", "/v1/workspace/chat/health", {}, None)
 
         self.assertEqual(body, {"status": "ok"})
         self.assertEqual(captured["connect"][1], 7450)
+        self.assertEqual(captured["request"][1], "/chat/health")
         headers = captured["request"][3]
-        self.assertEqual(headers["X-Kern-App-Proxy"], "agent_chat")
-        self.assertNotIn("Authorization", headers)
+        self.assertEqual(headers, {})
+
+        with patch("host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection", FakeConnection):
+            body = workspace_api_proxy.route_request(
+                "GET", "/v1/workspace/memory", {"limit": ["50"]}, None
+            )
+        self.assertEqual(body, {"status": "ok"})
+        self.assertEqual(captured["request"][1], "/memory?limit=50")
 
     def test_filesystem_metrics_reports_root_and_data_mounts(self) -> None:
         class Usage:
@@ -2370,9 +2769,37 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn(b"413", huge)
         self.assertIn(b"request body too large", huge)
 
+    def test_admin_json_decoders_reject_hostile_documents_as_bad_requests(self) -> None:
+        payloads = (
+            b"\xff",
+            b'{"nested":' + b"[" * 1_100 + b"0" + b"]" * 1_100 + b"}",
+        )
+
+        class Request:
+            def __init__(self, payload: bytes) -> None:
+                self.headers = {"Content-Length": str(len(payload))}
+                self.rfile = io.BytesIO(payload)
+
+        for handler in (admin_api.Handler, workspace_admin_api.Handler):
+            for payload in payloads:
+                with (
+                    self.subTest(handler=handler.__name__, payload=payload[:16]),
+                    self.assertRaises(admin_api.ApiError) as error,
+                ):
+                    handler._read_body(Request(payload))  # type: ignore[arg-type]
+                self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+                self.assertIn("invalid JSON", error.exception.message)
+
     def test_health_reports_error_when_proxy_is_down(self) -> None:
         _, body = self.health(proxy_alive=False)
         self.assertEqual(body["network_controls"]["status"], "error")
+        self.assertEqual(body["status"], "degraded")
+
+    def test_health_is_degraded_when_runtime_and_state_versions_differ(self) -> None:
+        _, body = self.health(
+            version={"status": "mismatch", "runtime": "1.8.0", "state": "1.7.0"}
+        )
+        self.assertEqual(body["version"]["status"], "mismatch")
         self.assertEqual(body["status"], "degraded")
 
     def test_health_never_spawns_codex(self) -> None:
@@ -2967,7 +3394,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("new agent session continuing", launch_message)
         self.assertIn("User:\noriginal question", launch_message)
         self.assertIn("Agent:\noriginal answer", launch_message)
-        self.assertIn("Agent activity (expanded)", launch_message)
+        self.assertIn("Agent activity (summary)", launch_message)
         self.assertIn('"detail": "command context"', launch_message)
         self.assertIn('"output": "complete command output"', launch_message)
         self.assertIn("CURRENT USER MESSAGE ---\ncontinue here", launch_message)
@@ -2999,7 +3426,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(accepted["thread"]["agent_runtime"], "claude_code")
 
-    def test_session_handoff_keeps_newest_history_with_a_250k_character_cap(self) -> None:
+    def test_session_handoff_reserves_100k_for_newest_conversation(self) -> None:
         history = [
             {
                 "event_type": "thread.message",
@@ -3013,16 +3440,89 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         handoff = admin_api._session_handoff_message(history, "next")
         transcript = handoff.split(
-            "--- RETAINED THREAD TRANSCRIPT ---\n", 1
-        )[1].split("\n--- END RETAINED THREAD TRANSCRIPT ---", 1)[0]
+            "--- RETAINED CONVERSATION ---\n", 1
+        )[1].split("\n--- END RETAINED CONVERSATION ---", 1)[0]
 
         self.assertLessEqual(
             len(transcript),
-            admin_api.THREAD_HANDOFF_CHARACTER_LIMIT + 100,
+            admin_api.THREAD_HANDOFF_MESSAGE_CHARACTER_LIMIT,
         )
         self.assertLess(transcript.count("a"), 150_000)
-        self.assertEqual(transcript.count("b"), 150_000)
+        self.assertGreater(transcript.count("b"), 90_000)
+        self.assertLess(transcript.count("b"), 150_000)
         self.assertIn("Older retained thread events were omitted", transcript)
+
+    def test_session_handoff_summarizes_large_activity_fields(self) -> None:
+        history = [
+            {
+                "event_type": "thread.activity",
+                "payload": {
+                    "activity": {
+                        "provider": "codex",
+                        "activity_id": "not-needed-by-the-replacement",
+                        "kind": "command",
+                        "phase": "completed",
+                        "title": "Build app",
+                        "detail": "d" * 20_000,
+                        "output": "o" * 100_000,
+                        "image": "base64-is-never-forwarded",
+                    }
+                },
+            }
+        ]
+
+        block = admin_api._handoff_event_block(history[0])
+
+        self.assertIn("Agent activity (summary)", block)
+        self.assertIn('"title": "Build app"', block)
+        self.assertIn("truncated", block)
+        self.assertNotIn("activity_id", block)
+        self.assertNotIn("base64-is-never-forwarded", block)
+        self.assertLessEqual(
+            len(block), admin_api.THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT
+        )
+        self.assertGreater(block.count("o"), 6_000)
+
+    def test_session_handoff_reserves_a_separate_150k_activity_section(self) -> None:
+        history: list[dict[str, Any]] = [
+            {
+                "event_type": "thread.message",
+                "payload": {"source": "user", "message": "important decision"},
+            }
+        ]
+        history.extend(
+            {
+                "event_type": "thread.activity",
+                "payload": {
+                    "activity": {
+                        "kind": "command",
+                        "phase": "completed",
+                        "title": f"Command {index}",
+                        "output": str(index) + "o" * 20_000,
+                    }
+                },
+            }
+            for index in range(30)
+        )
+
+        handoff = admin_api._session_handoff_message(history, "next")
+        conversation = handoff.split(
+            "--- RETAINED CONVERSATION ---\n", 1
+        )[1].split("\n--- END RETAINED CONVERSATION ---", 1)[0]
+        activity = handoff.split(
+            "--- RECENT AGENT ACTIVITY ---\n", 1
+        )[1].split("\n--- END RECENT AGENT ACTIVITY ---", 1)[0]
+
+        self.assertIn("important decision", conversation)
+        self.assertLessEqual(
+            len(conversation), admin_api.THREAD_HANDOFF_MESSAGE_CHARACTER_LIMIT
+        )
+        self.assertLessEqual(
+            len(activity), admin_api.THREAD_HANDOFF_ACTIVITY_CHARACTER_LIMIT
+        )
+        self.assertIn("Command 29", activity)
+        self.assertNotIn("Command 0\"", activity)
+        self.assertIn("Older retained thread events were omitted", activity)
 
     def test_missing_provider_session_replays_retained_history_without_a_config_change(
         self,
@@ -3297,6 +3797,210 @@ class AdminApiIntegrationTests(unittest.TestCase):
         assert config is not None
         self.assertEqual(config["provider_session_id"], "sess-9")
 
+    def test_prune_state_caps_thread_maps_but_keeps_event_referenced_threads(self) -> None:
+        map_limit = 6
+        with state.mutation() as cur:
+            for n in range(map_limit + 5):
+                state.save_thread_session(
+                    cur, "codex", f"codex-chat-{n}", f"thread_{n}",
+                    f"2026-06-08T{n // 60:02d}:{n % 60:02d}:00Z", "gpt-5.6-terra", "high",
+                )
+                state.save_thread_session(
+                    cur, "claude_code", f"claude-chat-{n}", f"session_{n}",
+                    f"2026-06-09T{n // 60:02d}:{n % 60:02d}:00Z", "claude-opus-5", "high",
+                )
+            state.append_agent_event(
+                cur,
+                "thread.message",
+                "codex-chat-0",
+                {"message": "retained", "source": "user"},
+            )
+
+        with patch.object(admin_api, "THREAD_MAP_LIMIT", map_limit):
+            admin_api.prune_state()
+
+        remaining = {thread["thread_id"] for thread in state.page_thread_summaries(None, 100)}
+        codex_history = {thread for thread in remaining if thread.startswith("codex-chat-")}
+        claude_history = {thread for thread in remaining if thread.startswith("claude-chat-")}
+        self.assertEqual(
+            codex_history,
+            {"codex-chat-0", *(f"codex-chat-{n}" for n in range(5, map_limit + 5))},
+        )
+        self.assertEqual(
+            claude_history,
+            {f"claude-chat-{n}" for n in range(5, map_limit + 5)},
+        )
+
+    def test_clearing_working_memory_starts_the_next_run_without_a_handoff(self) -> None:
+        seed_thread_session("cleared", "codex", provider_session_id="codex-session")
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur, "thread.message", "cleared", {"message": "secret plan", "source": "user"}
+            )
+            state.append_agent_event(
+                cur, "thread.message", "cleared", {"message": "acknowledged", "source": "agent"}
+            )
+
+        _, cleared = self.request("POST", "/v1/threads/cleared/clear-memory")
+        self.assertEqual(cleared["status"], "cleared")
+
+        config = state.thread_session_config("cleared")
+        assert config is not None
+        self.assertIsNone(config["provider_session_id"])
+        # Runtime configuration survives; only the provider conversation goes.
+        self.assertEqual(config["agent_runtime"], "codex")
+
+        _, events = self.request("GET", "/v1/threads/cleared/events?since=0")
+        marker = events["events"][-1]
+        self.assertEqual(marker["event_type"], "thread.memory_cleared")
+        self.assertEqual(
+            marker["payload"]["message"], admin_api.WORKING_MEMORY_CLEARED_NOTICE
+        )
+        # No activity payload: the Chat renderer merges events by activity id,
+        # so a fixed id would collapse a second clear onto the first.
+        self.assertIsNone(marker["payload"].get("activity"))
+        # The prior conversation is still readable; clearing is not deletion.
+        self.assertEqual(events["events"][0]["payload"]["message"], "secret plan")
+
+        with patch.object(orchestrator, "launch_turn") as launch:
+            self.request(
+                "POST", "/v1/threads/cleared/messages", {"message": "fresh start", "agent_runtime": "codex"}
+            )
+        _, launch_message, provider_session_id = launch.call_args.args
+        self.assertIsNone(provider_session_id)
+        # The missing provider session would normally trigger a replay. The
+        # cleared floor is what keeps the launch message bare.
+        self.assertEqual(launch_message, "fresh start")
+        self.assertNotIn("new agent session continuing", launch_message)
+        self.assertNotIn("secret plan", launch_message)
+
+    def test_clearing_then_switching_session_still_sends_a_raw_message(self) -> None:
+        """Switching runtime after a clear must not resurrect the handoff.
+
+        The floor empties the retained history, but the switch path would
+        still wrap the message in a prompt telling the new session it is
+        continuing a thread — the opposite of what a clear just established.
+        """
+        seed_thread_session(
+            "switched",
+            "codex",
+            model="gpt-5.6-terra",
+            effort="high",
+            provider_session_id="codex-session",
+        )
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur, "thread.message", "switched", {"message": "old plan", "source": "user"}
+            )
+        self.request("POST", "/v1/threads/switched/clear-memory")
+
+        with patch.object(orchestrator, "launch_turn") as launch:
+            self.request(
+                "POST",
+                "/v1/threads/switched/messages",
+                {
+                    "message": "fresh start",
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-sol",
+                    "effort": "max",
+                },
+            )
+        _, launch_message, provider_session_id = launch.call_args.args
+        self.assertIsNone(provider_session_id)
+        self.assertEqual(launch_message, "fresh start")
+        self.assertNotIn("continuing a thread", launch_message)
+        self.assertNotIn("old plan", launch_message)
+
+    def test_repeated_clears_each_keep_their_own_boundary(self) -> None:
+        """Chat merges events that share an activity id, regardless of type.
+
+        A marker carrying a fixed activity id would collapse the second clear
+        onto the first one's position, so the transcript would stop showing
+        where the latest clear actually happened.
+        """
+        seed_thread_session("twice", "codex", provider_session_id="codex-session")
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur, "thread.message", "twice", {"message": "first", "source": "user"}
+            )
+        self.request("POST", "/v1/threads/twice/clear-memory")
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur, "thread.message", "twice", {"message": "second", "source": "user"}
+            )
+        self.request("POST", "/v1/threads/twice/clear-memory")
+
+        _, events = self.request("GET", "/v1/threads/twice/events?since=0")
+        markers = [
+            event for event in events["events"]
+            if event["event_type"] == "thread.memory_cleared"
+        ]
+        self.assertEqual(len(markers), 2)
+        # Distinct seqs and no activity payload, so nothing can merge them.
+        self.assertNotEqual(markers[0]["seq"], markers[1]["seq"])
+        for marker in markers:
+            self.assertIsNone(marker["payload"].get("activity"))
+        # The newest floor is the later marker, so the earlier one is not
+        # resurrected as handoff context.
+        self.assertEqual(
+            state.thread_session_config("twice")["context_cleared_seq"],
+            markers[1]["seq"],
+        )
+
+    def test_clearing_working_memory_rejects_unknown_and_running_threads(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError) as missing:
+            self.request("POST", "/v1/threads/unknown-thread/clear-memory")
+        self.assertEqual(missing.exception.code, 404)
+
+        seed_thread_session("busy", "codex", provider_session_id="codex-session")
+        with patch.object(orchestrator, "launch_turn"):
+            self.request(
+                "POST", "/v1/threads/busy/messages", {"message": "long turn", "agent_runtime": "codex"}
+            )
+        with self.assertRaises(urllib.error.HTTPError) as running:
+            self.request("POST", "/v1/threads/busy/clear-memory")
+        self.assertEqual(running.exception.code, 409)
+        self.assertIn("only while the thread is idle", running.exception.read().decode())
+        # A refused clear leaves the live session mapping intact.
+        self.assertEqual(
+            state.thread_session_config("busy")["provider_session_id"], "codex-session"
+        )
+
+    def test_clearing_working_memory_waits_for_a_finishing_turn_to_close(self) -> None:
+        """A stopped turn is durably idle while its process is still closing.
+
+        That worker can still report its provider session for the same run
+        number, which would restore the mapping the clear just dropped, so the
+        clear has to wait for the turn to leave the live set.
+        """
+        seed_thread_session("finishing", "codex", provider_session_id="codex-session")
+        turn = register_live_turn("finishing")
+        turn.phase = orchestrator.ExecutionPhase.FINISHING
+        # Stopping returns the thread to durable idle; the turn stays live
+        # until its process closes, which is exactly the window at issue.
+        with state.mutation() as cur:
+            state.finish_thread_run(cur, "finishing", turn.run_number)
+        self.assertEqual(state.thread_session_config("finishing")["status"], "idle")
+
+        with self.assertRaises(urllib.error.HTTPError) as finishing:
+            self.request("POST", "/v1/threads/finishing/clear-memory")
+        self.assertEqual(finishing.exception.code, 409)
+        self.assertIn("still finishing", finishing.exception.read().decode())
+        self.assertEqual(
+            state.thread_session_config("finishing")["provider_session_id"],
+            "codex-session",
+        )
+        # No marker is written for a refused clear.
+        _, events = self.request("GET", "/v1/threads/finishing/events?since=0")
+        self.assertEqual(events["events"], [])
+
+        orchestrator._LIVE.clear()
+        _, cleared = self.request("POST", "/v1/threads/finishing/clear-memory")
+        self.assertEqual(cleared["status"], "cleared")
+        self.assertIsNone(
+            state.thread_session_config("finishing")["provider_session_id"]
+        )
+
     def test_stop_rejects_threads_without_a_stoppable_turn(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as missing:
             self.request("POST", "/v1/threads/unknown-thread/stop")
@@ -3399,16 +4103,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(accepted["thread"]["thread_id"], "used-by-codex")
 
-    def test_admin_ui_has_thread_event_smoke_path(self) -> None:
+    def test_admin_ui_has_activity_and_diagnostic_views(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
-        html = (runtime / "admin_ui.html").read_text()
+        html = (runtime / "admin_ui/index.html").read_text()
         ui = "\n".join(
             path.read_text()
-            for path in [runtime / "admin_ui.html", runtime / "admin_ui.css",
+            for path in [runtime / "admin_ui/index.html", runtime / "admin_ui/admin_ui.css",
                          *sorted((runtime / "admin_ui").glob("*.js"))]
         )
         api = (runtime / "service.py").read_text()
-        self.assertIn("<h2>Sessions</h2>", html)
+        self.assertNotIn("<h2>Sessions</h2>", html)
+        self.assertNotIn("Agent sessions", html)
+        self.assertNotIn('id="panel-agent"', html)
+        self.assertFalse((runtime / "admin_ui" / "threads.js").exists())
         self.assertIn('<link rel="stylesheet" href="/admin_ui.css">', html)
         self.assertIn('<link rel="icon" type="image/svg+xml" href="/favicon.svg">', html)
         self.assertIn('<script type="module" src="/admin_ui/app.js"></script>', html)
@@ -3416,11 +4123,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("no-store, max-age=0", api)
         self.assertIn('<img class="brand-mark" width="30" height="30" src="/favicon.svg" alt="">', html)
         self.assertIn('<img class="login-mark" width="44" height="44" src="/favicon.svg" alt="">', html)
-        self.assertIn("admin_favicon.svg", api)
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 10)
-        self.assertIn('id="tab-processes"', html)
-        self.assertIn('id="tab-host-errors"', html)
-        self.assertLess(html.index('id="tab-tool-log"'), html.index('id="tab-host-errors"'))
+        self.assertIn('ADMIN_UI_DIR / "favicon.svg"', api)
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 3)
+        self.assertNotIn('id="tab-processes"', html)
+        self.assertNotIn('id="tab-host-errors"', html)
+        self.assertIn('data-action="open-home-view" data-view="processes"', html)
+        self.assertIn('data-action="open-home-view" data-view="host-errors"', html)
+        self.assertLess(html.index('data-view="tool-log"'), html.index('data-view="host-errors"'))
         self.assertIn("should be investigated by a Kern developer, newest first", html)
         self.assertIn('id="host-error-pager"', html)
         self.assertIn('endpoint: "/v1/host-errors"', ui)
@@ -3434,10 +4143,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('`Host: ${health.agent_name}`', ui)
         self.assertNotIn("animation: panel-in", ui)
         self.assertIn("refreshVisibleTab(name).catch(() => {})", ui)
-        self.assertIn('if (name === "agent-log")', ui)
-        self.assertIn('await agentLog.showFirstPage();', ui)
-        self.assertIn('if (name === "net-log")', ui)
-        self.assertIn('await netLog.showFirstPage();', ui)
+        self.assertIn('"agent-log": {', ui)
+        self.assertIn("enter: [() => agentLog.showFirstPage()]", ui)
+        self.assertIn('"net-log": {', ui)
+        self.assertIn("enter: [() => netLog.showFirstPage()]", ui)
         self.assertIn('data-action="toggle-net-denied"', html)
         self.assertIn('id="net-event-pager"', html)
         self.assertIn('id="agent-event-pager"', html)
@@ -3452,7 +4161,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("/v1/login", ui)
         self.assertIn("/v1/logout", ui)
         self.assertIn('"X-Kern-Csrf"', ui)
-        # The legacy password cookie is only ever expired, never stored or read.
+        # Upgraded browsers must expire the pre-0.44 cleartext password cookie.
         self.assertIn("kern_admin=; path=/; max-age=0", ui)
         self.assertNotIn("getPassword", ui)
         self.assertIn("Memory", ui)
@@ -3466,26 +4175,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertNotIn("Provider usage", html)
         self.assertIn("usageRing", ui)
         self.assertIn("/v1/agent-runtime/refresh", ui)
-        self.assertIn("/v1/threads", ui)
-        self.assertIn("THREAD_LIST_PAGE_LIMIT", ui)
-        self.assertIn("listed.next_before", ui)
-        self.assertIn("seenBefore.has(nextBefore)", ui)
-        self.assertIn("/v1/threads/${encodeURIComponent(threadId)}/events", ui)
-        self.assertIn("events?since=${threadEventsNewestSeq}", ui)
-        self.assertIn("events?before=${before}", ui)
-        self.assertIn("earlierThreadEventsRequest !== null", ui)
-        self.assertIn("event.seq < before", ui)
-        self.assertIn('data-action="load-earlier-thread-events"', ui)
-        self.assertIn("renderThreadHistory", ui)
-        self.assertIn("function threadEventsHtml()", ui)
-        self.assertIn('thread.status === "running"', ui)
         self.assertIn("active_thread_ids", ui)
         self.assertIn("runtime-running-badge", ui)
-        self.assertIn("Agent session log", html)
-        self.assertNotIn("Agent thread log", html)
-        self.assertLess(html.index("Agent workspace"), html.index("Agent session log"))
-        self.assertLess(html.index("Agent session log"), html.index("Agent audit log"))
-        self.assertIn('data-action="show-thread"', ui)
+        self.assertNotIn('data-action="show-thread"', ui)
         self.assertNotIn('data-action="show-task-events"', ui)
         self.assertNotIn('data-action="refresh-task"', ui)
         self.assertNotIn('data-action="refresh-task-events"', ui)
@@ -3523,17 +4215,15 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("renderGithubAudit", ui)
         self.assertIn("recheckGithubAudit", ui)
         self.assertIn("refreshPendingGithubPushes", ui)
-        self.assertIn('activeTab === "network"', ui)
+        self.assertIn('"network": {', ui)
+        self.assertIn("tick: [refreshPendingGithubPushes, refreshExpandedToolApprovals]", ui)
         self.assertIn("audit-banner", ui)
         self.assertIn("repoAuditSummary", ui)
         self.assertIn('data-action="toggle-github-repo-audit"', ui)
         self.assertIn("/v1/network-tools/github-audit", ui)
-        self.assertIn("toggleIntegrationInfo", ui)
-        self.assertIn("closeIntegrationInfo", ui)
-        self.assertIn("positionIntegrationInfo", ui)
-        self.assertIn("renderIntegrationInfo", ui)
-        self.assertIn('id="preset-info-popover"', html)
-        self.assertIn('role="dialog"', html)
+        self.assertNotIn("toggleIntegrationInfo", ui)
+        self.assertNotIn("closeIntegrationInfo", ui)
+        self.assertNotIn('id="preset-info-popover"', html)
         # Per-integration rows publish immediately; there is no proposal state.
         self.assertIn("MANAGED_INTEGRATIONS", ui)
         self.assertIn("integration_catalog.js", ui)
@@ -3555,9 +4245,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertNotIn("Managed integrations", html)
         self.assertNotIn("Curated access bundles", html)
         self.assertIn('<section class="integration-row"', ui)
-        # Popovers stay high-level and link to the complete guide.
-        self.assertIn("Protections", ui)
-        self.assertIn("View integration guide", ui)
+        # Home cards open the focused configuration and complete guide page.
+        self.assertIn('data-action="open-home-integration"', ui)
+        self.assertIn("function sortHomeIntegrationCards()", ui)
+        self.assertIn('leftEnabled ? -1 : 1', ui)
+        self.assertIn('leftLabel.localeCompare(rightLabel', ui)
+        self.assertIn("Integration guide", ui)
         self.assertIn("Authenticated traffic for another account is denied", ui)
         self.assertIn("writes work only for the repositories you configure", ui)
         self.assertNotIn("iconTile", ui)
@@ -3566,15 +4259,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('connected: <span class="chip-label">${esc(identity)}</span>', ui)
         self.assertIn('Start ${esc(runtimeLabel)} login', ui)
         self.assertIn('>Disconnect</button>', ui)
-        self.assertIn('aria-haspopup="dialog"', ui)
         self.assertIn('<h2>${esc(meta.label)}</h2>', ui)
-        self.assertIn('data-action="toggle-integration-expansion"', ui)
-        self.assertIn("toggleCustomDomainAccess", ui)
+        self.assertNotIn('data-action="toggle-integration-expansion"', ui)
+        self.assertNotIn("toggleCustomDomainAccess", ui)
         self.assertIn("Custom Domain Access", html)
         self.assertIn('class="status disabled">0 domains enabled', html)
         self.assertIn('id="domain-rule-count"', html)
         self.assertIn('id="custom-domain-details"', html)
-        self.assertIn('data-action="toggle-custom-domain-access"', html)
+        self.assertNotIn('data-action="toggle-custom-domain-access"', html)
         self.assertIn("api.openai.com", ui)
         self.assertIn("pinned-account and external-URL request guards", ui)
         self.assertIn("auth.openai.com", ui)
@@ -3605,18 +4297,20 @@ class AdminApiIntegrationTests(unittest.TestCase):
         ):
             self.assertIn(domain, ui)
         self.assertIn("addDomainRule", ui)
-        self.assertIn('id="tab-connection-guide"', html)
-        self.assertIn('id="panel-connection-guide"', html)
-        self.assertIn('id="connection-guide-index"', html)
-        self.assertIn('id="connection-guide-select"', html)
-        self.assertIn("connection-guide-open", ui)
+        self.assertNotIn('id="tab-connection-guide"', html)
+        self.assertNotIn('id="panel-connection-guide"', html)
+        self.assertNotIn('id="connection-guide-index"', html)
+        self.assertNotIn('id="connection-guide-select"', html)
+        self.assertIn('id="connection-guide-content"', html)
+        self.assertIn('data-action="home-back"', html)
+        self.assertIn('data-action="open-home-integration"', ui)
         self.assertIn("overflow-y: auto", ui)
         self.assertNotIn('id="policy-message"', html)
         self.assertNotIn('id="tools-message"', html)
         self.assertIn('data-integration-message="${esc(name)}"', ui)
         self.assertIn('data-tool-message="${esc(tool.tool_id)}"', ui)
         self.assertIn("refreshConnectionGuide", ui)
-        self.assertIn('data-action="open-connection-guide"', ui)
+        self.assertNotIn('data-action="open-connection-guide"', ui)
         self.assertIn("guide-protections", ui)
         self.assertIn("Exact network boundary", ui)
         self.assertIn("guide-assets", api)
@@ -5024,8 +5718,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "arn": "arn:aws:iam::123456789012:user/kern-bedrock",
             "access_key_id": "AKIAOPERATORKEY00001",
         }
-        state.save_bedrock_credential("AKIAOPERATORKEY00001", "S" * 40, "us-east-1")
-        state.save_bedrock_account(account)
+        with state.mutation() as cur:
+            state.save_bedrock_credential("AKIAOPERATORKEY00001", "S" * 40, "us-east-1", cur)
+        with state.mutation() as cur:
+            state.save_bedrock_account(account, cur)
         statuses = {"hermes": {"status": "active"}}
         bedrock = admin_api._current_bedrock_account(statuses)
         self.assertEqual(bedrock["provider"], "bedrock")
@@ -5166,8 +5862,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
             }},
             "2026-06-08T00:00:00Z",
         )
-        state.save_bedrock_credential("AKIAOPERATORKEY00001", "S" * 40, "us-east-1")
-        state.save_bedrock_account({"account_id": "123456789012", "access_key_id": "AKIAOPERATORKEY00001"})
+        with state.mutation() as cur:
+            state.save_bedrock_credential("AKIAOPERATORKEY00001", "S" * 40, "us-east-1", cur)
+        with state.mutation() as cur:
+            state.save_bedrock_account({"account_id": "123456789012", "access_key_id": "AKIAOPERATORKEY00001"}, cur)
 
         with patch(
             "host.runtime.admin_api.orchestrator._stop_runtime_processes"
@@ -5399,50 +6097,6 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first["status"], "awaiting_code")
         self.assertEqual(start.call_count, 1)
-
-    def test_prune_state_caps_thread_maps_but_keeps_event_referenced_threads(self) -> None:
-        # The production cap is six figures; the trimming behavior is pinned
-        # with a small patched limit so the test stays fast.
-        map_limit = 6
-        with state.mutation() as cur:
-            for n in range(map_limit + 5):
-                state.save_thread_session(
-                    cur, "codex", f"codex-chat-{n}", f"thread_{n}",
-                    f"2026-06-08T{n // 60:02d}:{n % 60:02d}:00Z", "gpt-5.6-terra", "high",
-                )
-                state.save_thread_session(
-                    cur, "claude_code", f"claude-chat-{n}", f"session_{n}",
-                    f"2026-06-09T{n // 60:02d}:{n % 60:02d}:00Z", "claude-opus-5", "high",
-                )
-            # The oldest codex thread still has retained events, so its
-            # canonical row must survive the LRU cap.
-            state.append_agent_event(
-                cur,
-                "thread.message",
-                "codex-chat-0",
-                {"message": "retained", "source": "user"},
-            )
-
-        with patch.object(admin_api, "THREAD_MAP_LIMIT", map_limit):
-            admin_api.prune_state()
-
-        # The oldest unreferenced mappings are dropped and the most recently
-        # used kept, per runtime; event-referenced rows do not consume that
-        # allowance.
-        remaining = {
-            thread["thread_id"]
-            for thread in state.page_thread_summaries(None, 100)
-        }
-        codex_history = {t for t in remaining if t.startswith("codex-chat-")}
-        claude_history = {t for t in remaining if t.startswith("claude-chat-")}
-        self.assertEqual(
-            codex_history,
-            {"codex-chat-0", *(f"codex-chat-{n}" for n in range(5, map_limit + 5))},
-        )
-        self.assertEqual(
-            claude_history,
-            {f"claude-chat-{n}" for n in range(5, map_limit + 5)},
-        )
 
     def test_network_events_are_read_from_the_database_with_cursor_paging(self) -> None:
         # Network events live in the database now (the proxy writes them under
@@ -5990,14 +6644,14 @@ class ToolRoutesTests(unittest.TestCase):
             self.assertIn(b"Kern", response.read())
 
 
-class AppBackendAdminSocketImportTests(unittest.TestCase):
+class WorkspaceAdminSocketImportTests(unittest.TestCase):
     def test_service_imports_when_it_is_the_entry_module(self) -> None:
-        # service.py imports app_backend_api partway through its own import,
-        # so anything app_backend_api reads off service at module scope is not
+        # service.py imports workspace_api partway through its own import,
+        # so anything workspace_api reads off service at module scope is not
         # defined yet. Importing service first is the shape that catches it.
         for entry in (
             "host.runtime.admin_api.service",
-            "host.runtime.admin_api.app_backend_api",
+            "host.runtime.admin_api.workspace_api",
         ):
             with self.subTest(entry=entry):
                 root = Path(__file__).resolve().parents[1]
@@ -6009,13 +6663,13 @@ class AppBackendAdminSocketImportTests(unittest.TestCase):
                 )
 
 
-class AppBackendAdminSocketTests(unittest.TestCase):
-    """The socket path is world-connectable, but only an installed app uid may
+class WorkspaceAdminSocketTests(unittest.TestCase):
+    """The socket path is group-connectable, but only the Workspace service uid may
     occupy a handler slot in the admin API process."""
 
     def setUp(self) -> None:
         self.app_peer = patch.object(
-            app_backend_admin_api, "app_id_for_peer_uid", return_value="test-app"
+            workspace_admin_api, "_workspace_uid", return_value=os.getuid()
         )
         self.app_peer.start()
         self.addCleanup(self.app_peer.stop)
@@ -6023,29 +6677,29 @@ class AppBackendAdminSocketTests(unittest.TestCase):
     def socket_path(self) -> Path:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        return Path(directory.name) / "app-backend.sock"
+        return Path(directory.name) / "workspace.sock"
 
-    def created_server(self, path: Path) -> app_backend_admin_api.ThreadingUnixHTTPServer:
-        # KERN_APP_BACKEND_ADMIN_SOCKET is read into this constant at import,
+    def created_server(self, path: Path) -> workspace_admin_api.ThreadingUnixHTTPServer:
+        # KERN_WORKSPACE_ADMIN_SOCKET is read into this constant at import,
         # so patching it is the same override the service unit uses.
         with (
-            patch.object(app_backend_admin_api, "APP_BACKEND_ADMIN_SOCKET", path),
+            patch.object(workspace_admin_api, "WORKSPACE_ADMIN_SOCKET", path),
             patch.object(
-                app_backend_admin_api.grp,
+                workspace_admin_api.grp,
                 "getgrnam",
                 return_value=MagicMock(gr_gid=os.getgid()),
             ),
         ):
-            return app_backend_admin_api.create_app_backend_admin_server()
+            return workspace_admin_api.create_workspace_admin_server()
 
-    def serve(self, server: app_backend_admin_api.ThreadingUnixHTTPServer) -> None:
+    def serve(self, server: workspace_admin_api.ThreadingUnixHTTPServer) -> None:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
 
     def test_created_socket_is_app_group_connectable_and_unlinkable(self) -> None:
         path = self.socket_path()
-        with patch.object(app_backend_admin_api, "APP_BACKEND_ADMIN_SOCKET", path):
+        with patch.object(workspace_admin_api, "WORKSPACE_ADMIN_SOCKET", path):
             server = self.created_server(path)
             self.addCleanup(server.server_close)
             mode = path.lstat().st_mode
@@ -6054,19 +6708,19 @@ class AppBackendAdminSocketTests(unittest.TestCase):
             self.assertTrue(stat.S_ISSOCK(mode))
             self.assertEqual(stat.S_IMODE(mode), 0o660)
             self.assertEqual(path.stat().st_gid, os.getgid())
-            app_backend_admin_api.unlink_app_backend_admin_socket()
+            workspace_admin_api.unlink_workspace_admin_socket()
             self.assertFalse(path.exists())
             # Shutdown may unlink a socket a restart already removed.
-            app_backend_admin_api.unlink_app_backend_admin_socket()
+            workspace_admin_api.unlink_workspace_admin_socket()
 
     def test_creation_refuses_to_replace_a_non_socket_path(self) -> None:
         path = self.socket_path()
         path.write_text("not a socket")
         with (
-            patch.object(app_backend_admin_api, "APP_BACKEND_ADMIN_SOCKET", path),
+            patch.object(workspace_admin_api, "WORKSPACE_ADMIN_SOCKET", path),
             self.assertRaises(OSError),
         ):
-            app_backend_admin_api.create_app_backend_admin_server()
+            workspace_admin_api.create_workspace_admin_server()
 
     def test_stalled_request_is_closed_by_the_read_timeout(self) -> None:
         # A peer that connects and never finishes its request must not pin a
@@ -6074,7 +6728,7 @@ class AppBackendAdminSocketTests(unittest.TestCase):
         path = self.socket_path()
         self.serve(self.created_server(path))
         with (
-            patch.object(app_backend_admin_api.Handler, "timeout", 0.3),
+            patch.object(workspace_admin_api.Handler, "timeout", 0.3),
             socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection,
         ):
             connection.settimeout(5)
@@ -6084,13 +6738,13 @@ class AppBackendAdminSocketTests(unittest.TestCase):
             self.assertEqual(connection.recv(65536), b"")
 
 
-    def test_non_app_peer_is_rejected_before_it_takes_a_slot(self) -> None:
+    def test_non_workspace_peer_is_rejected_before_it_takes_a_slot(self) -> None:
         path = self.socket_path()
         server = self.created_server(path)
         self.serve(server)
 
         with (
-            patch.object(app_backend_admin_api, "app_id_for_peer_uid", return_value=None),
+            patch.object(workspace_admin_api, "_workspace_uid", return_value=os.getuid() + 1),
             socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection,
         ):
             connection.settimeout(5)
@@ -6109,13 +6763,13 @@ class AppBackendAdminSocketTests(unittest.TestCase):
         handling = threading.Event()
         finish = threading.Event()
 
-        class BlockingHandler(app_backend_admin_api.Handler):
+        class BlockingHandler(workspace_admin_api.Handler):
             def handle(self) -> None:
                 handling.set()
                 finish.wait(5)
 
         path = self.socket_path()
-        server = app_backend_admin_api.ThreadingUnixHTTPServer(
+        server = workspace_admin_api.ThreadingUnixHTTPServer(
             str(path), BlockingHandler, max_connections=1
         )
         self.serve(server)
@@ -6134,8 +6788,8 @@ class AppBackendAdminSocketTests(unittest.TestCase):
 
     def test_connection_slot_is_released_when_the_handler_thread_cannot_start(self) -> None:
         path = self.socket_path()
-        server = app_backend_admin_api.ThreadingUnixHTTPServer(
-            str(path), app_backend_admin_api.Handler, max_connections=1
+        server = workspace_admin_api.ThreadingUnixHTTPServer(
+            str(path), workspace_admin_api.Handler, max_connections=1
         )
         self.addCleanup(server.server_close)
         client, request = socket.socketpair()
@@ -6153,7 +6807,7 @@ class AppBackendAdminSocketTests(unittest.TestCase):
             server.process_request(request, ("local", 0))
 
         # process_request_thread, the normal release point, never ran; a leak
-        # here would make the socket refuse every app backend from now on.
+        # here would make the socket refuse the Workspace backend from now on.
         self.assertTrue(server._connection_slots.acquire(blocking=False))
 
 
