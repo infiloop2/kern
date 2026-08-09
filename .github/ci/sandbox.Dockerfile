@@ -34,7 +34,7 @@ RUN python3.11 -m venv /opt/kern-ci-venv \
   && /opt/kern-ci-venv/bin/python -m pip install -r /tmp/test-requirements.txt \
   && /opt/kern-ci-venv/bin/python -m mypy --version \
   && /opt/kern-ci-venv/bin/python -m pyright --version \
-  && /opt/kern-ci-venv/bin/python -m playwright install --with-deps chromium \
+  && /opt/kern-ci-venv/bin/python -m playwright install --with-deps chromium webkit \
   && rm -f /tmp/test-requirements.txt
 
 ENV PATH="/opt/kern-ci-venv/bin:${PATH}"

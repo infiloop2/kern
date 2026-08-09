@@ -823,6 +823,51 @@ def stylesheet_fallback_smoke(page: Any) -> None:
         raise AssertionError(f"generated app did not use its blob stylesheet fallback: {stylesheet!r}")
 
 
+def worker_startup_smoke(page: Any) -> None:
+    """A real generated App starts through the isolated worker bridge."""
+    from playwright.sync_api import expect
+
+    leaked: list[str] = []
+    page.on(
+        "request",
+        lambda request: leaked.append(request.url)
+        if "browser-leak.invalid" in request.url else None,
+    )
+    page.evaluate("""() => {
+      globalThis.__kernCapabilityRenderCount = 0;
+      const NativeWorker = globalThis.Worker;
+      globalThis.Worker = function(...args) {
+        const worker = new NativeWorker(...args);
+        if (String(args[0]).endsWith("/workspace/capability-worker-sandbox.js")) {
+          worker.addEventListener("message", event => {
+            const message = event.data;
+            if (
+              message?.type === "capability-worker-message"
+              && message.data?.type === "render"
+            ) globalThis.__kernCapabilityRenderCount += 1;
+          });
+        }
+        return worker;
+      };
+      globalThis.Worker.prototype = NativeWorker.prototype;
+      Object.setPrototypeOf(globalThis.Worker, NativeWorker);
+    }""")
+    _start_host_app(page)
+    frame = page.locator("#panel-workspace-web-apps")
+    frame.locator("#message").fill("Build a small weekly focus dashboard.")
+    frame.get_by_role("button", name="Send message", exact=True).click()
+    page.wait_for_function(
+        "() => globalThis.__kernCapabilityRenderCount > 0", timeout=20_000
+    )
+    expect(frame.locator(".dashboard")).to_be_visible(timeout=20_000)
+    expect(frame.locator(".dashboard")).to_have_css("display", "grid")
+    expect(frame.locator("#runtime-status")).not_to_contain_text(
+        "could not start", timeout=5_000
+    )
+    if leaked:
+        raise AssertionError(f"generated worker escaped its networkless CSP: {leaked}")
+
+
 def desktop_smoke(page: Any) -> None:
     from playwright.sync_api import expect
 

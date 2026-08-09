@@ -11,7 +11,6 @@
   overflow: hidden;
   position: relative;
 }
-.capability-worker-sandbox { display: none; }
 
 /* The shared admin stylesheet supplies the theme. These local focus rings
    stay deliberately explicit because the generated canvas

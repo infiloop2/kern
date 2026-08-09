@@ -87,25 +87,27 @@ In the local mock only, click the green version-status badge in the toolbar to
 toggle between the upgrade-available and latest-version states.
 
 To run type checks or the automated browser smoke locally, install the
-development-only test dependencies once. If no cached Chromium is available,
-install the browser too:
+development-only test dependencies once. If no cached browser builds are
+available, install Chromium and WebKit too:
 
 ```bash
 python3 -m pip install -r tests/requirements.txt
-python3 -m playwright install chromium
+python3 -m playwright install chromium webkit
 ```
 
 Then run:
 
 ```bash
-python3 tests/smoke-ui/admin_ui_smoke.py --port 3100
+python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --webkit
 ```
 
-The smoke starts the mock server, opens Chromium, and exercises the core
+The smoke starts the mock server, exercises the core flows in Chromium, and
+runs the generated Web App worker-startup regression in WebKit. The Chromium
+coverage includes
 operator flows across thread/session views, network and GitHub controls, files,
 processes, bundled tools and approvals, audit logs, and workspaces
-at desktop and mobile dimensions. CI installs Playwright and
-Chromium during the Docker image build, then runs this smoke through
+at desktop and mobile dimensions. CI installs Playwright, Chromium, and WebKit
+during the Docker image build, then runs this smoke through
 `.github/ci/run-in-sandbox.sh` with `--network none`. On development boxes with
 a preinstalled Playwright browser cache, the smoke reuses the newest cached
 Chromium automatically. To use a specific browser binary, set

@@ -1260,9 +1260,10 @@ operator-only deleted/history/restore and schedule-run views. Validation and
 response envelopes are owned by the Workspace service.
 
 Trusted UI assets are served at `/workspace/...` and mounted by the admin page in
-Shadow DOM. The special
-`/workspace/capability-worker-sandbox.html` asset has an opaque sandbox/CSP boundary
-for generated Web App JavaScript; it is not a general workspace API.
+Shadow DOM. The special `/workspace/capability-worker-sandbox.js` asset is a
+trusted Worker broker with a networkless CSP. It starts generated Web App
+JavaScript only in an opaque `data:` child worker; it is not a general workspace
+API.
 
 The Workspace service reaches its narrow host-thread API over a peer-authenticated
 Unix socket. See [Chat and Web Apps workspaces](../architecture/workspaces/workspaces.md).

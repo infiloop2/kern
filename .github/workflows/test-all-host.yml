@@ -50,4 +50,4 @@ jobs:
         shell: bash
         run: |
           .github/ci/run-in-sandbox.sh kern-ci:${{ github.run_id }} \
-            'python3 tests/smoke-ui/admin_ui_smoke.py --port 3100'
+            'python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --webkit'

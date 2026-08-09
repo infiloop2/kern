@@ -65,7 +65,6 @@ UI_ASSETS.update({
     "/workspace/global.html": (WORKSPACE_DIR / "ui/index.html", "text/html; charset=utf-8"),
     "/workspace/global.js": (WORKSPACE_DIR / "ui/workspace.js", "application/javascript; charset=utf-8"),
     "/workspace/global.css": (WORKSPACE_DIR / "ui/workspace.css", "text/css; charset=utf-8"),
-    "/workspace/capability-worker-sandbox.html": (WORKSPACE_DIR / "web_apps/ui/capability_worker_sandbox.html", "text/html; charset=utf-8"),
     "/workspace/capability-worker-sandbox.js": (WORKSPACE_DIR / "web_apps/ui/capability_worker_sandbox.js", "application/javascript; charset=utf-8"),
 })
 for asset in sorted(TOOLS_DIR.glob("**/guide_assets/**/*.png")):
@@ -929,8 +928,8 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and parsed.path in UI_ASSETS:
                 asset, content_type = UI_ASSETS[parsed.path]
                 data = asset.read_bytes()
-                if parsed.path == "/workspace/capability-worker-sandbox.html":
-                    self._send_capability_sandbox(data, content_type)
+                if parsed.path == "/workspace/capability-worker-sandbox.js":
+                    self._send_capability_worker(data, content_type)
                     return
                 self._send(HTTPStatus.OK, data, content_type)
                 return
@@ -1146,7 +1145,7 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, status: HTTPStatus, data: dict[str, Any], set_cookie: str | None = None) -> None:
         self._send(status, json.dumps(data).encode(), "application/json", set_cookie=set_cookie)
 
-    def _send_capability_sandbox(self, data: bytes, content_type: str) -> None:
+    def _send_capability_worker(self, data: bytes, content_type: str) -> None:
         self.send_response(HTTPStatus.OK.value)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -1156,12 +1155,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; base-uri 'none'; connect-src 'none'; "
-            "form-action 'none'; frame-ancestors 'self'; object-src 'none'; "
-            "script-src 'self'; worker-src blob:; sandbox allow-scripts",
+            "object-src 'none'; script-src 'none'; worker-src data:",
         )
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(data)
 

@@ -154,11 +154,12 @@ async function requestFileUpload(action, selectionId, maximumFiles) {
 
 function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
   "use strict";
-  // The frame CSP is authoritative. Function.prototype.constructor can still
+  // The trusted broker's CSP is authoritative. Function.prototype.constructor can still
   // recover the real Function constructor and WebAssembly remains available,
-  // so script-src must keep unsafe-eval and wasm-unsafe-eval absent. The blob
-  // worker inherits that policy and connect-src 'none'. Scrubbing common
-  // globals below is defense in depth, not the code-execution or egress bound.
+  // so script-src must keep unsafe-eval and wasm-unsafe-eval absent. The
+  // generated data worker inherits that policy and connect-src 'none'.
+  // Scrubbing common globals below is defense in depth, not the code-execution
+  // or egress bound.
   // Timers and message channels are denied so a pre-armed worker waiting for
   // its event turn has no way to schedule background work: with an empty event
   // loop, only trusted frame messages can wake generated code.
@@ -835,24 +836,26 @@ function generatedDrop(event) {
 // --- Capability worker lifecycle ---------------------------------------------
 // Every turn still runs in a worker that is terminated when the turn ends —
 // that contract is unchanged. Two things move off the interaction's critical
-// path: the bundle's blob URL is cached per UI revision (so the engine can
-// reuse its compiled script), and after each completed turn the next worker
-// is spawned and initialized ahead of time ("armed"), so a user event starts
-// its handler immediately instead of paying spawn + parse + init round trips.
-
-const sandboxWorkers = new Map();
-let nextSandboxWorkerId = 0;
-let capabilitySandboxReady = false;
-const capabilitySandboxQueue = [];
+// path: the generated source is cached per UI revision, and after each
+// completed turn the next worker is spawned and initialized ahead of time
+// ("armed"), so a user event starts its handler immediately instead of paying
+// spawn + parse + init round trips.
 
 class SandboxedCapabilityWorker {
   constructor(source) {
-    this.workerId = `worker-${++nextSandboxWorkerId}`;
     this.listeners = { message: new Set(), error: new Set() };
-    sandboxWorkers.set(this.workerId, this);
-    sendCapabilitySandbox({
-      type: "create", worker_id: this.workerId, source,
+    this.bridge = new Worker("/workspace/capability-worker-sandbox.js");
+    this.bridge.addEventListener("message", event => {
+      const message = event.data;
+      if (!message || typeof message !== "object") return;
+      if (message.type === "capability-worker-message") this.dispatch("message", message.data);
+      if (message.type === "capability-worker-error") this.dispatch("error", message);
     });
+    this.bridge.addEventListener("error", event => {
+      event.preventDefault();
+      this.dispatch("error", { reason: "worker-create" });
+    });
+    this.bridge.postMessage({ type: "create", source });
   }
 
   addEventListener(type, listener) {
@@ -860,24 +863,11 @@ class SandboxedCapabilityWorker {
   }
 
   postMessage(data) {
-    sendCapabilitySandbox({
-      type: "worker-post", worker_id: this.workerId, data,
-    });
+    this.bridge.postMessage({ type: "worker-post", data });
   }
 
   terminate() {
-    if (!sandboxWorkers.delete(this.workerId)) return;
-    if (!capabilitySandboxReady) {
-      for (let index = capabilitySandboxQueue.length - 1; index >= 0; index -= 1) {
-        if (capabilitySandboxQueue[index].worker_id === this.workerId) {
-          capabilitySandboxQueue.splice(index, 1);
-        }
-      }
-      return;
-    }
-    sendCapabilitySandbox({
-      type: "terminate", worker_id: this.workerId,
-    });
+    this.bridge.terminate();
   }
 
   dispatch(type, data) {
@@ -887,38 +877,6 @@ class SandboxedCapabilityWorker {
     for (const listener of this.listeners[type] || []) listener(event);
   }
 }
-
-function capabilitySandboxWindow() {
-  const frame = $("capability-worker-sandbox");
-  if (!frame.contentWindow) throw new Error("Generated behavior sandbox is unavailable");
-  return frame.contentWindow;
-}
-
-function sendCapabilitySandbox(message) {
-  if (!capabilitySandboxReady) {
-    capabilitySandboxQueue.push(message);
-    return;
-  }
-  capabilitySandboxWindow().postMessage(message, "*");
-}
-
-window.addEventListener("message", event => {
-  if (event.source !== $("capability-worker-sandbox").contentWindow) return;
-  const message = event.data;
-  if (!message || typeof message !== "object") return;
-  if (message.type === "capability-sandbox-ready") {
-    capabilitySandboxReady = true;
-    for (const queued of capabilitySandboxQueue.splice(0)) {
-      capabilitySandboxWindow().postMessage(queued, "*");
-    }
-    return;
-  }
-  if (typeof message.worker_id !== "string") return;
-  const worker = sandboxWorkers.get(message.worker_id);
-  if (!worker) return;
-  if (message.type === "capability-worker-message") worker.dispatch("message", message.data);
-  if (message.type === "capability-worker-error") worker.dispatch("error", message);
-});
 
 function workerSourceFor(appId, revision) {
   if (bundleUrl && bundleUrl.appId === appId && bundleUrl.revision === revision) {
@@ -1016,6 +974,7 @@ function armCapabilityWorker() {
 }
 
 async function runCapabilityWorker(pendingEvent = null) {
+  clearRuntimeStatus();
   if (appWritesBlocked() || !selectedAppId || !snapshot.app || !snapshot.app.javascript) return;
   if (workerRun) workerRun.finish("restarted");
   const appId = selectedAppId;
@@ -1059,13 +1018,31 @@ async function runCapabilityWorker(pendingEvent = null) {
       const current = workerRun === this;
       if (current) workerRun = null;
       if (current && reason === "timeout" && stage === "starting") {
-        showRuntimeStatus("This app could not start its isolated renderer. Refresh and try again.", "error");
+        showRuntimeStatus(
+          "This app could not start its isolated renderer. Refresh and try again.",
+          "error",
+          true,
+        );
       } else if (current && reason === "timeout") {
         showRuntimeStatus("This app action took too long and was stopped. Ask the agent to fix it.", "error");
       } else if (current && reason === "error" && stage === "render") {
-        showRuntimeStatus("This app could not render safely. Ask the agent to fix its interface.", "error");
+        showRuntimeStatus(
+          "This app could not render safely. Ask the agent to fix its interface.",
+          "error",
+          true,
+        );
       } else if (current && reason === "error" && stage === "worker-create") {
-        showRuntimeStatus("This browser could not start the app sandbox. Refresh or update the browser.", "error");
+        showRuntimeStatus(
+          "This browser could not start the app sandbox. Refresh or update the browser.",
+          "error",
+          true,
+        );
+      } else if (current && reason === "error" && !this.event) {
+        showRuntimeStatus(
+          "This app could not start its live interface. Refresh and try again.",
+          "error",
+          true,
+        );
       } else if (current && reason === "error") {
         showRuntimeStatus("This app action failed. Ask the agent to fix it.", "error");
       }
@@ -1216,13 +1193,20 @@ function validDataPath(path) {
   ));
 }
 
-function showRuntimeStatus(message, level = "info") {
+function clearRuntimeStatus() {
+  runtimeStatusSequence += 1;
+  $("runtime-status").hidden = true;
+  $("builder-shell").classList.remove("runtime-status-visible");
+}
+
+function showRuntimeStatus(message, level = "info", persistent = false) {
   const status = $("runtime-status");
   const sequence = ++runtimeStatusSequence;
   status.textContent = message;
   status.className = `runtime-status ${level}`;
   status.hidden = false;
   $("builder-shell").classList.add("runtime-status-visible");
+  if (persistent) return;
   setTimeout(() => {
     if (runtimeStatusSequence !== sequence) return;
     status.hidden = true;

@@ -571,18 +571,17 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('route = f"/guide-assets/{asset.name}"', mock)
         self.assertFalse((repo / "host/runtime/admin_ui/guide_assets").exists())
 
-    def test_mock_capability_sandbox_is_embeddable_but_networkless(self) -> None:
+    def test_mock_capability_worker_is_networkless(self) -> None:
         mock = (
             Path(__file__).parents[1] / "tests/smoke-ui/run_admin_ui_mock.py"
         ).read_text()
-        handler = mock.split("def _send_capability_sandbox", 1)[1].split(
+        handler = mock.split("def _send_capability_worker", 1)[1].split(
             "def _send", 1
         )[0]
-        self.assertIn("frame-ancestors 'self'", handler)
         self.assertIn("connect-src 'none'", handler)
-        self.assertIn("worker-src blob:", handler)
-        self.assertIn('"X-Frame-Options", "SAMEORIGIN"', handler)
-        self.assertNotIn('"X-Frame-Options", "DENY"', handler)
+        self.assertIn("worker-src data:", handler)
+        self.assertIn("script-src 'none'", handler)
+        self.assertIn('"X-Frame-Options", "DENY"', handler)
 
     def test_disabled_integrations_omit_irrelevant_connection_state(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
@@ -2669,20 +2668,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.assertTrue(response.headers["Content-Type"].startswith(content_type))
             self.assertIn(expected, asset_body)
 
-    def test_generated_capability_worker_runs_in_an_opaque_networkless_frame(self) -> None:
+    def test_generated_capability_worker_uses_a_networkless_broker(self) -> None:
         request = urllib.request.Request(
-            f"{self.base_url}/workspace/capability-worker-sandbox.html",
+            f"{self.base_url}/workspace/capability-worker-sandbox.js",
             method="GET",
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             body = response.read().decode()
 
-        self.assertIn("capability-worker-sandbox.js", body)
+        self.assertIn("data:application/javascript", body)
         csp = response.headers["Content-Security-Policy"]
         self.assertIn("connect-src 'none'", csp)
-        self.assertIn("worker-src blob:", csp)
-        self.assertIn("sandbox allow-scripts", csp)
-        self.assertNotIn("allow-same-origin", csp)
+        self.assertIn("worker-src data:", csp)
+        self.assertIn("script-src 'none'", csp)
 
     def test_workspace_proxy_uses_backend_path_without_identity_headers(self) -> None:
         captured: dict[str, Any] = {}

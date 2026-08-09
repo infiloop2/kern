@@ -107,14 +107,19 @@ class AgenticWebAppContractTests(unittest.TestCase):
             10,
         )
 
-    def test_capability_sandbox_accepts_messages_only_from_its_parent(self) -> None:
+    def test_capability_worker_uses_one_trusted_networkless_broker(self) -> None:
         source = (APP_DIR / "ui" / "capability_worker_sandbox.js").read_text()
-        handler = source.split('addEventListener("message"', 1)[1]
-        self.assertIn("event.source !== parent", handler)
-        self.assertIn("new Worker(url)", handler)
-        self.assertIn('reason: "worker-create"', handler)
-        self.assertIn('reason: "worker-runtime"', handler)
-        self.assertIn('parent.postMessage({ type: "capability-sandbox-ready" }', source)
+        builder = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
+        index = (APP_DIR / "ui" / "index.html").read_text()
+        self.assertIn('new Worker("/workspace/capability-worker-sandbox.js")', builder)
+        self.assertIn('this.bridge.postMessage({ type: "create", source })', builder)
+        self.assertIn(
+            "`data:application/javascript;charset=utf-8,${encodeURIComponent(message.source)}`",
+            source,
+        )
+        self.assertNotIn("Blob", source)
+        self.assertNotIn("iframe", index)
+
     def test_frame_does_not_render_a_conversation_transcript(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
         self.assertNotIn("[Workspace context]", source)
@@ -125,9 +130,9 @@ class AgenticWebAppContractTests(unittest.TestCase):
     def test_generated_worker_is_pinned_to_its_workspace(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
         sandbox = (APP_DIR / "ui" / "capability_worker_sandbox.js").read_text()
-        self.assertNotIn("new Worker(", source)
         self.assertIn("new SandboxedCapabilityWorker", source)
-        self.assertIn("new Worker(url)", sandbox)
+        self.assertIn('new Worker("/workspace/capability-worker-sandbox.js")', source)
+        self.assertIn("new Worker(", sandbox)
         self.assertIn("selectedAppId !== run.appId", source)
         self.assertIn("stopCapabilityWorker()", source)
         self.assertIn("encodeURIComponent(run.appId)", source)
@@ -137,7 +142,6 @@ class AgenticWebAppContractTests(unittest.TestCase):
             source,
         )
         self.assertIn("MAX_WORKER_MUTATIONS_PER_TURN = 16", source)
-        self.assertIn("capabilitySandboxQueue.splice(index, 1)", source)
         self.assertIn('"fetch", "XMLHttpRequest", "WebSocket"', source)
         self.assertNotIn("window.open", source)
         self.assertNotIn("location.href", source)
@@ -158,6 +162,15 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('else if (current && reason === "error")', source)
         self.assertIn("This app action failed.", source)
         self.assertNotIn("Generated behavior stopped safely", source)
+        self.assertIn("function clearRuntimeStatus()", source)
+        self.assertIn("showRuntimeStatus(message, level = \"info\", persistent = false)", source)
+        self.assertIn("if (persistent) return;", source)
+        self.assertIn("This app could not start its live interface.", source)
+        worker_run = source.split("async function runCapabilityWorker", 1)[1]
+        self.assertLess(
+            worker_run.index("clearRuntimeStatus();"),
+            worker_run.index("if (appWritesBlocked()"),
+        )
         self.assertIn("armCapabilityWorker", source)
         self.assertIn("armed.timer = setTimeout(discard, WORKER_TURN_TIMEOUT_MS)", source)
         self.assertIn("clearTimeout(armed.timer);", source)
@@ -182,7 +195,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
         # The bundle source survives across turns for one App revision.
         self.assertIn("bundleUrl.revision === revision", source)
         sandbox = (APP_DIR / "ui" / "capability_worker_sandbox.js").read_text()
-        self.assertIn("URL.revokeObjectURL", sandbox)
+        self.assertIn("data:application/javascript", sandbox)
+        self.assertNotIn("URL.createObjectURL", sandbox)
         # Renders patch the shadow tree instead of replacing it wholesale.
         self.assertIn("function patchNode(", source)
         self.assertIn("sanitizeCssCached", source)
