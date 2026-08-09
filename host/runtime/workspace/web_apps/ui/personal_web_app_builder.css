@@ -452,6 +452,11 @@ button.app-toolbar-button {
   padding: 0.35rem 0.55rem;
 }
 button.app-toolbar-button:hover { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+button.app-toolbar-button.lock-agent-updates.active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  color: var(--accent);
+}
 button.app-toolbar-button.archive:hover { color: var(--danger); }
 button.app-toolbar-button svg { height: 15px; width: 15px; }
 
@@ -538,6 +543,7 @@ button.latest-agent-stop svg { height: 12px; width: 12px; }
   border-color: transparent;
   color: #061616;
   height: 2rem;
+  margin-block: 0.2rem;
   margin-right: 0.85rem;
   min-height: 2rem;
   min-width: 4.6rem;

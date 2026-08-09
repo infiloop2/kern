@@ -67,14 +67,17 @@ responses, correcting and retrying validation failures.
 ### Web Apps Workspace API
 
 Web Apps have immutable ids such as `app-1`, separate from their editable
-display names. `GET /agent/apps` lists active and archived apps. Any agent may
-read an app by id and may update an active app; archived apps are read-only.
+display names. `GET /agent/apps` lists active and archived apps, including each
+app's `agent_updates_locked` state. Any agent may read an app by id and may
+update an active, unlocked app; archived apps and agent-locked apps are
+read-only to agents.
 Use the id the operator gives you, or list apps and confirm the immutable id;
 never choose an app from its editable name alone.
 
 For an app id `{app_id}`, read only what the task needs:
 
-- `GET /agent/apps/{app_id}/state/meta` — revision, update time, byte sizes.
+- `GET /agent/apps/{app_id}/state/meta` — revision, update time, byte sizes, and
+  `agent_updates_locked`.
 - `GET /agent/apps/{app_id}/state/ui` — `revision`, HTML, CSS, and JavaScript.
 - `GET /agent/apps/{app_id}/state/data` — `revision` and full JSON data.
 - `POST /agent/apps/{app_id}/state/data/read` with `{"path":["projects",0]}`
@@ -95,6 +98,11 @@ re-reading. A 409 means another writer changed the App: read the relevant
 resource and retry. Paths are object keys and non-negative array indexes,
 1–16 segments. Limits: 128 KiB HTML, 64 KiB CSS, 128 KiB JavaScript, and
 256 KiB data.
+
+An agent write may return 423 when the user has temporarily locked agent
+updates while using the App. Do not keep retrying immediately or attempt a
+different write route. Tell the user the App is locked and retry again in a
+while after they unlock it; generated-App user actions remain available.
 
 Generated JavaScript runs in a capability worker with no DOM, network,
 storage, navigation, timers, imports, nested workers, or parent access. The

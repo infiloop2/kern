@@ -30,6 +30,8 @@ const WORKSPACE_API_TIMEOUT_MS = 12000;
 const AGENT_DELIVERY_TIMEOUT_MS = 60 * 1000;
 const COMPOSER_DRAFTS_STORAGE_KEY = "kern.agentic-web-app.composer-drafts.v1";
 const COMPOSER_DRAFT_LIMIT = 50;
+const DISMISSED_AGENT_MESSAGES_STORAGE_KEY = "kern.agentic-web-app.dismissed-agent-messages.v1";
+const DISMISSED_AGENT_MESSAGE_LIMIT = 50;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 let requestCounter = 0;
@@ -38,6 +40,8 @@ let sessionOptions = {};
 let apps = [];
 let selectedAppId = null;
 let selectedAppName = null;
+let selectedAgentUpdatesLocked = false;
+let agentUpdateLockBusy = false;
 let selectedAppOutsideActiveIndex = false;
 let snapshot = { app: null, session: null, status: "idle" };
 let conversationEvents = [];
@@ -74,6 +78,7 @@ let transientAgentStatus = null;
 const webAppsRoot = window.KernWorkspaceRoots["web-apps"];
 const $ = id => webAppsRoot.querySelector(`#${CSS.escape(id)}`);
 const composerDrafts = loadComposerDrafts();
+const dismissedAgentMessages = loadDismissedAgentMessages();
 
 function loadComposerDrafts() {
   try {
@@ -116,6 +121,42 @@ function clearComposerDraft(appId, submittedDraft) {
   delete composerDrafts[key];
   persistComposerDrafts();
   return true;
+}
+
+function loadDismissedAgentMessages() {
+  try {
+    const stored = JSON.parse(
+      localStorage.getItem(DISMISSED_AGENT_MESSAGES_STORAGE_KEY) || "{}"
+    );
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
+    return Object.fromEntries(
+      Object.entries(stored).filter(([, key]) => typeof key === "string")
+    );
+  } catch (_error) {
+    return {};
+  }
+}
+
+function persistDismissedAgentMessages() {
+  try {
+    localStorage.setItem(
+      DISMISSED_AGENT_MESSAGES_STORAGE_KEY,
+      JSON.stringify(dismissedAgentMessages),
+    );
+  } catch (_error) {
+    // Dismissal persistence is best-effort when browser storage is unavailable.
+  }
+}
+
+function setDismissedAgentMessage(appId, key) {
+  if (!appId) return;
+  delete dismissedAgentMessages[appId];
+  if (key) dismissedAgentMessages[appId] = key;
+  while (Object.keys(dismissedAgentMessages).length > DISMISSED_AGENT_MESSAGE_LIMIT) {
+    delete dismissedAgentMessages[Object.keys(dismissedAgentMessages)[0]];
+  }
+  persistDismissedAgentMessages();
+  if (selectedAppId === appId) dismissedAgentMessageKey = key || null;
 }
 
 function api(method, path, body, timeoutMs = WORKSPACE_API_TIMEOUT_MS) {
@@ -1498,9 +1539,9 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
     return;
   }
   if (!fromGeneratedApp) saveComposerDraft();
-  dismissedAgentMessageKey = conversationEntries()
+  setDismissedAgentMessage(appId, conversationEntries()
     .filter(entry => ["agent", "error", "stopped"].includes(entry.kind))
-    .at(-1)?.key || null;
+    .at(-1)?.key || null);
   $("latest-agent-card").hidden = true;
   messageBusyApps.add(appId);
   setSessionOptions();
@@ -1870,6 +1911,18 @@ function syncWorkspaceControls() {
   $("chat-composer").hidden = !hasApp || readOnly;
   $("rename-app").disabled = !hasApp || readOnly;
   $("settings-open").disabled = !hasApp || readOnly;
+  const lockButton = $("lock-agent-updates");
+  lockButton.disabled = !hasApp || readOnly || agentUpdateLockBusy;
+  lockButton.classList.toggle("active", selectedAgentUpdatesLocked);
+  lockButton.setAttribute("aria-pressed", String(selectedAgentUpdatesLocked));
+  lockButton.setAttribute(
+    "aria-label",
+    selectedAgentUpdatesLocked ? "Unlock agent updates" : "Lock agent updates",
+  );
+  lockButton.title = selectedAgentUpdatesLocked
+    ? "Allow agents to change this app again"
+    : "Temporarily stop agents from changing this app";
+  lockButton.querySelector("span").textContent = selectedAgentUpdatesLocked ? "Unlock" : "Lock";
   $("archive-app").disabled = !hasApp || readOnly || snapshot.status === "running";
   $("archive-app").querySelector("span").textContent = readOnly ? "Archived" : "Archive";
   $("archive-app").setAttribute("aria-label", readOnly ? "Archived app" : "Archive app");
@@ -1992,6 +2045,8 @@ function clearSelectedApp() {
   panelRefreshSequence += 1;
   selectedAppId = null;
   selectedAppName = null;
+  selectedAgentUpdatesLocked = false;
+  agentUpdateLockBusy = false;
   selectedAppOutsideActiveIndex = false;
   recoveryPoints = [];
   dismissedAgentMessageKey = null;
@@ -2022,9 +2077,10 @@ async function showApp(app, outsideActiveIndex = false) {
   panelRefreshSequence += 1;
   selectedAppId = app.app_id;
   selectedAppName = app.name;
+  selectedAgentUpdatesLocked = Boolean(app.agent_updates_locked);
   selectedAppOutsideActiveIndex = outsideActiveIndex;
   recoveryPoints = [];
-  dismissedAgentMessageKey = null;
+  dismissedAgentMessageKey = dismissedAgentMessages[app.app_id] || null;
   transientAgentStatus = null;
   restoreComposerDraft();
   restoreConversationView(app);
@@ -2056,6 +2112,7 @@ async function refreshSelectedApp(appId = selectedAppId) {
     session: conversationResponse.session || listedSession || snapshot.session || null,
     status: conversationResponse.status || "idle",
   };
+  selectedAgentUpdatesLocked = Boolean(next.app.agent_updates_locked);
   await refreshConversationEvents(appId, refreshSequence);
   if (appId !== selectedAppId || selectedRefreshSequence !== refreshSequence) return;
   const knownApp = pendingApp || snapshot.app;
@@ -2087,6 +2144,7 @@ async function refresh() {
     const selected = apps.find(app => app.app_id === selectedAppId);
     if (selected) {
       selectedAppName = selected.name;
+      selectedAgentUpdatesLocked = Boolean(selected.agent_updates_locked);
       selectedAppOutsideActiveIndex = false;
     } else if (selectedAppId && !selectedAppOutsideActiveIndex) {
       clearSelectedApp();
@@ -2150,6 +2208,36 @@ async function renameSelectedApp() {
   if (selectedAppId === appId) selectedAppName = response.app.name;
   syncWorkspaceControls();
   await window.KernHost.refreshNavigation();
+}
+
+async function toggleAgentUpdateLock() {
+  if (!selectedAppId || selectedAppOutsideActiveIndex || agentUpdateLockBusy) return;
+  const appId = selectedAppId;
+  const locked = !selectedAgentUpdatesLocked;
+  agentUpdateLockBusy = true;
+  syncWorkspaceControls();
+  try {
+    const response = await api(
+      "PUT",
+      `/apps/${encodeURIComponent(appId)}/agent-updates`,
+      { locked },
+    );
+    apps = apps.map(app => app.app_id === appId ? {
+      ...app,
+      agent_updates_locked: Boolean(response.app.agent_updates_locked),
+    } : app);
+    if (selectedAppId !== appId) return;
+    selectedAgentUpdatesLocked = Boolean(response.app.agent_updates_locked);
+    showRuntimeStatus(
+      selectedAgentUpdatesLocked
+        ? "Agent updates locked. Agents will be asked to retry later."
+        : "Agent updates unlocked.",
+      "success",
+    );
+  } finally {
+    agentUpdateLockBusy = false;
+    if (selectedAppId === appId) syncWorkspaceControls();
+  }
 }
 
 async function archiveSelectedApp() {
@@ -2221,6 +2309,7 @@ webAppsRoot.addEventListener("click", event => {
   }
 });
 $("rename-app").addEventListener("click", () => renameSelectedApp().catch(error => showRuntimeStatus(error.message, "error")));
+$("lock-agent-updates").addEventListener("click", () => toggleAgentUpdateLock().catch(error => showRuntimeStatus(error.message, "error")));
 $("archive-app").addEventListener("click", () => archiveSelectedApp().catch(error => showRuntimeStatus(error.message, "error")));
 $("app-refresh").addEventListener("click", applyPendingAppVersion);
 $("settings-open").addEventListener("click", () => {
@@ -2241,9 +2330,9 @@ $("latest-agent-dismiss").addEventListener("click", () => {
     renderChat();
     return;
   }
-  dismissedAgentMessageKey = conversationEntries()
+  setDismissedAgentMessage(selectedAppId, conversationEntries()
     .filter(entry => ["agent", "error", "stopped"].includes(entry.kind))
-    .at(-1)?.key || null;
+    .at(-1)?.key || null);
   $("latest-agent-card").hidden = true;
 });
 $("runtime").addEventListener("change", () => setSessionOptions());
