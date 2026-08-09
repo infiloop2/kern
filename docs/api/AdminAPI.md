@@ -24,12 +24,14 @@ refuses cleartext). Repeated failed logins are throttled and return `429`; see
 [admin login sessions](../architecture/admin-api.md#admin-login-sessions).
 
 API responses are JSON. Static UI assets are the exception: `GET /`,
-`GET /oauth/callback`, the admin CSS/JavaScript/favicon paths, and installed app
-UI assets under `/v1/apps/{app_id}/ui/` are served without authentication.
+`GET /oauth/callback`, the admin CSS/JavaScript/favicon paths, and the trusted
+Chat and Web Apps UI modules under `/workspace/` are served by the admin service
+without authentication. `/workspace/` is an asset namespace within the admin UI,
+not a separate server or trust boundary.
 They return only static files and perform no state change. The sole
 unauthenticated JSON read is `GET /v1/login/status` on the configured public
 HTTPS hostname; it returns only whether a passkey is enrolled. Every other API
-route, including `GET /v1/apps` and every app backend proxy request, requires
+route, including every workspace proxy request, requires
 an authenticated caller.
 
 ## Errors
@@ -56,12 +58,12 @@ Error status codes:
 | --- | --- |
 | `400` | Request JSON, query string, or field value is invalid. |
 | `401` | Missing or invalid admin password or session. |
-| `403` | A cookie-authenticated request is missing the `X-Kern-Csrf` header, an authenticated app bridge attempted to target a different app, or an app backend attempted a disallowed host route. |
+| `403` | A cookie-authenticated request is missing the `X-Kern-Csrf` header, or the Workspace service attempted a disallowed host route. |
 | `404` | Requested resource or route does not exist. |
 | `409` | Request conflicts with current runtime, thread, approval, or credential state. |
 | `413` | Request body exceeds the 1 MiB admin API limit. |
 | `429` | Too many failed admin logins from this source (retry after the lockout window), or the selected runtime is already running its maximum concurrent threads (retry when one finishes). |
-| `502` | An installed app backend or delegated tools service is unavailable or returned an invalid response. |
+| `502` | The workspace backend or delegated tools service is unavailable or returned an invalid response. |
 | `500` | Host-side error. |
 
 ## Session
@@ -155,6 +157,11 @@ Response:
     "available": true,
     "latest": "x.y.z"
   },
+  "history": {
+    "threads": 24,
+    "messages": 1286,
+    "activities": 9431
+  },
   "host_runtime": {
     "cpu": {
       "usage_percent": 12.5
@@ -203,6 +210,9 @@ Response fields:
 | `version.state` | string or null |  | Kern preserved-state version from admin disk `version.json`. |
 | `upgrade.available` | boolean |  | Whether the public `infiloop2/kern` main-branch version is newer than the running version. This advisory check does not affect overall health. |
 | `upgrade.latest` | string or null |  | Latest valid version returned by a successful public-repository check, or `null` until the first check succeeds after service start. A failed later check preserves the last successful value. |
+| `history.threads` | integer |  | Monotonic number of agent threads recorded on this host. |
+| `history.messages` | integer |  | Monotonic number of user messages recorded on this host. |
+| `history.activities` | integer |  | Monotonic number of agent messages and activity records, including tool calls, commands, reasoning, and other agent work. |
 | `host_runtime.cpu.usage_percent` | number | 0-100 | Current host CPU usage percentage. |
 | `host_runtime.memory.used_bytes` | integer |  | Current host memory used, in bytes. |
 | `host_runtime.memory.total_bytes` | integer |  | Total host memory, in bytes. |
@@ -480,6 +490,7 @@ POST /v1/threads/{thread_id}/messages
 GET  /v1/threads
 GET  /v1/threads/{thread_id}
 POST /v1/threads/{thread_id}/stop
+POST /v1/threads/{thread_id}/clear-memory
 GET  /v1/threads/{thread_id}/events?since=<seq>&limit=<n>&message_bytes=<b>
 ```
 
@@ -494,10 +505,12 @@ Codex resumes the thread's provider conversation by id on a fresh app-server;
 Claude Code and Hermes resume by their recorded provider session ids. An idle
 thread may replace all three configuration fields atomically on its next
 message. That clears the old provider session and starts a fresh one with a
-handoff containing the newest retained public thread events, bounded to
-250,000 characters. Activity records include their complete stored detail and
-output, as shown by an expanded activity card. The durable thread id and
-visible history do not change.
+handoff that independently reserves up to 100,000 characters for the newest
+retained user and agent messages and up to 150,000 characters for the newest
+activity records. Activity records become compact summaries capped at 8,000
+characters each, so large command results or generated source cannot displace
+the retained conversation. The durable thread id and visible history do not
+change.
 
 **There is no queue.** A message is synchronously accepted into an idle or
 running thread, or rejected with a descriptive `409` or `429`; the caller
@@ -516,10 +529,16 @@ Thread endpoints:
 | Method | Path | Request | Response | Behavior |
 | --- | --- | --- | --- | --- |
 | `POST` | `/v1/threads/{thread_id}/messages` | Send message request | Send message response | Durably admits an idle thread's initial message or synchronously delivers a running thread's steer, creating the thread on its first message. Rejected with `409`/`429` when it cannot be accepted; there is no queue. |
-| `GET` | `/v1/threads?before=<cursor>&limit=<n>` | query parameters optional | Thread list response | Lists one newest-first page of threads with their session configuration and live status. |
+| `GET` | `/v1/threads?before=<cursor>&limit=<n>&prefix=<text>` | query parameters optional | Thread list response | Lists one newest-first page of threads with their session configuration and live status. `prefix` is an optional filter/query optimization and conveys no ownership or authorization. |
 | `GET` | `/v1/threads/{thread_id}` | none | `{"thread": {...}}` | Returns one thread (the same shape as a thread list entry). `404` when no thread row exists. Accepts no query parameters. |
 | `POST` | `/v1/threads/{thread_id}/stop` | none | `{"status": "accepted"}` | Stops the thread's running work: the thread returns durably to `idle`, a `thread.stopped` event is appended, and process interruption is requested. `404` for an unknown thread; `409` (`the thread has no running work`) when the thread is idle. The thread survives and a later message resumes the conversation, but sends receive a retryable `409` until the old process has fully shut down. |
+| `POST` | `/v1/threads/{thread_id}/clear-memory` | none | `{"status": "cleared"}` | Clears the thread's working memory: the provider session mapping is dropped so the next run opens a new provider conversation, a `thread.memory_cleared` event is appended, and that event's seq becomes the thread's handoff floor so the next run is not handed the cleared context. Nothing is deleted — retained events stay readable here and in conversation history. `404` for an unknown thread; `409` (`working memory can be cleared only while the thread is idle`) while a turn is running. A thread stopped moments earlier reads as idle while its process is still closing, and clearing then returns the retryable `409` `the thread is still finishing; retry shortly` until that worker is gone — the fence that stops it restoring the session just cleared. Retry that one rather than treating it as a failure; the Workspace proxy does this for Chat. |
 | `GET` | `/v1/threads/{thread_id}/events?since=<seq>&limit=<n>&message_bytes=<b>` | query parameters optional | Event list response | One chronological page of the thread's event stream. See [Events](#events). |
+
+The operator transport rejects message sends to Workspace-owned `thread-*`,
+`app-*`, and `schedule-*` ids with `403`. Only the peer-authenticated Workspace
+service may create or continue those threads. Their detail, stop, and event
+routes remain available to the operator for host inspection and recovery.
 
 Stop has no mailbox or deferred delivery. The HTTP request synchronizes
 directly with steering and provider event writes, commits `thread.stopped`,
@@ -551,8 +570,9 @@ Send message request fields:
 | `effort` | New thread or configuration change | enum | Effort for this session. Codex accepts `high`, `max`, or `ultra`, except Luna accepts only `high` or `max`. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
 
 The path's `thread_id` must be 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `-`,
-or `_`; other values are `404` (no such route). Ids containing the app-scoped
-separator (`<app_id>__...`) are reserved for app backends and return `400`.
+or `_`; other values are `404` (no such route). The admin API does not reserve,
+prepend, strip, or authorize product prefixes. Chat and Web Apps choose their
+own direct ids (`thread-N` and `app-N`) in the Workspace backend.
 The first message requires all three configuration fields. Later messages may
 omit all three or repeat the complete matching triple. A different complete
 triple rotates an idle thread to a new provider session in the same admission
@@ -560,12 +580,13 @@ transaction; a partial triple returns `400`, and a change while running
 returns `409`. The synthetic handoff is sent only to the new provider: the
 visible event stream records a completed `thread.activity` describing the old
 and new session configuration, followed by the operator's new message, but not
-the transcript wrapper. The handoff preserves the newest events and may omit
-older retained history, so provider-side context and cache reads from the
-previous session are not available. Thread rows referenced by retained events
-are preserved; otherwise the host retains the 100,000 most recently used
-mappings per runtime. Once a thread is no longer retained, supplying a
-configuration starts a fresh provider conversation.
+the transcript wrapper. The handoff independently preserves up to 100,000
+characters of newest conversation and 150,000 characters of newest bounded
+activity summaries; older retained history may be omitted. Provider-side
+context and cache reads from the previous session are not available. Thread
+rows referenced by retained events are preserved; otherwise the host retains
+the 100,000 most recently used mappings per runtime. Once a thread is no longer
+retained, supplying a configuration starts a fresh provider conversation.
 
 The same bounded handoff is used without a configuration change when an
 existing thread has retained events but no provider session id—for example,
@@ -630,7 +651,7 @@ caller retries):
 | Status | Condition | `error.message` |
 | --- | --- | --- |
 | `409` | The thread's runtime is not `active` (its status is `loading`, `awaiting_login`, or `error`). | `<Runtime> runtime is <status>; messages run only while it is active` |
-| `409` | The thread's runtime is disabled in the network policy. | `<Runtime> runtime is deactivated; enable its provider under Internet Access and Tools` |
+| `409` | The thread's runtime is disabled in the network policy. | `<Runtime> runtime is deactivated; enable its provider under Home > Integrations` |
 | `409` | The admitted process has not yet accepted its initial message. This private startup phase is normally brief; retry the same request. | `the agent is starting; retry shortly` |
 | `409` | The previous work is durably final but its runtime process is still shutting down. The live fence remains so a new message never races the dying process; retry the same request. | `the agent is finishing; retry shortly` |
 | `409` | Hermes has no mid-run input channel. | `Hermes cannot accept another message while running; wait for it to finish` |
@@ -778,6 +799,7 @@ thread.message
 thread.activity
 thread.error
 thread.stopped
+thread.memory_cleared
 agent_runtime.active
 agent_runtime.login_completed
 agent_runtime.linked_account_reset
@@ -790,6 +812,17 @@ agent_runtime.deactivated
 | --- | --- | --- | --- |
 | `message` | string |  | Message text: every accepted user message and every completed agent message including the final one. |
 | `source` | enum | `agent`, `user` | Message source. |
+
+`thread.memory_cleared` payload fields:
+
+| Field | Type | Values | Meaning |
+| --- | --- | --- | --- |
+| `message` | string |  | The operator-facing boundary notice. Deliberately not an `activity` payload: clients that collapse events by `activity.activity_id` would merge repeated clears onto one position. |
+
+A client that requests explicit `event_type` filters must include
+`thread.memory_cleared` to render the boundary. It is a display event only:
+it is never handed to a provider, and a conversation-only view that drops
+`thread.activity` is still expected to fetch it.
 
 `thread.activity` payload fields:
 
@@ -1203,60 +1236,36 @@ Network event fields:
 | `decision` | enum | `allowed`, `denied` | Network decision. |
 | `reason_code` | string | optional | Present only on denied events: the stable snake_case code for the denial class. The agent-facing `recent_network_denials` tool joins it against per-integration guidance. |
 
-## Apps
+## Workspace
 
 ```text
-GET                 /v1/apps
-GET                 /v1/apps/{app_id}/ui/{asset_path}
-GET|POST|PUT|DELETE /v1/apps/{app_id}/api/{backend_path}
+GET|POST|PUT|DELETE /v1/workspace/chat/{backend_path}
+GET|POST|PUT|DELETE /v1/workspace/web-apps/{backend_path}
+GET|POST|PUT|DELETE /v1/workspace/memory/{backend_path}
+GET|POST|PUT|DELETE /v1/workspace/schedules/{backend_path}
 ```
 
-`GET /v1/apps` lists active app packages installed with this host release and
-the host-derived resources assigned to each one. Migration-only manifests with
-`"deprecated": true` are intentionally absent and have no UI or API routes:
+These authenticated, CSRF-protected prefixes expose Kern's fixed Workspace
+resources. They are not a package registry: there is no package listing, manifest,
+generic UI route, or arbitrary app id. The admin API consumes the operator
+session and proxies JSON plus query parameters to the single workspace
+listener without forwarding cookies or authorization headers. It adds the
+fixed backend path prefix and no identity header.
 
-```json
-{
-  "apps": [
-    {
-      "id": "agent_chat",
-      "title": "Agent Chat",
-      "release_stage": "stable",
-      "backend": {
-        "api_route": "/v1/apps/agent_chat/api/"
-      },
-      "ui": {
-        "iframe_src": "/v1/apps/agent_chat/ui/index.html",
-        "sandbox": ["allow-scripts", "allow-forms", "allow-modals"],
-        "host_fullscreen": false
-      }
-    }
-  ]
-}
-```
+Chat backend paths include `/threads`, `/threads/{thread_id}`, messages, events,
+stop, rename, archive, and unarchive. Web App backend paths include `/apps`,
+state/conversation/messages, whole-App revisions/restore, runtime actions, stop, rename,
+archive, and unarchive. Global Memory and Schedules expose ordinary CRUD plus
+operator-only deleted/history/restore and schedule-run views. Validation and
+response envelopes are owned by the Workspace service.
 
-| Field | Meaning |
-| --- | --- |
-| `apps[].id`, `title` | Stable manifest id and operator-facing title. |
-| `apps[].release_stage` | Required manifest stage: `stable` or `beta`. The admin shell places stable apps in the always-visible Apps section and beta apps in a collapsed Apps (Beta) group; this field grants no additional authority. |
-| `apps[].backend.api_route` | Authenticated admin API prefix that reverse-proxies to this app backend. |
-| `apps[].ui.iframe_src` | Static entry point mounted by the admin API. |
-| `apps[].ui.sandbox` | iframe permissions the admin shell applies. `allow-same-origin` is deliberately absent, so the app frame has an opaque origin. |
-| `apps[].ui.host_fullscreen` | Whether the host displays the app over its full shell with an unoccludable host-owned exit control. |
+Trusted UI assets are served at `/workspace/...` and mounted by the admin page in
+Shadow DOM. The special
+`/workspace/capability-worker-sandbox.html` asset has an opaque sandbox/CSP boundary
+for generated Web App JavaScript; it is not a general workspace API.
 
-App UI assets under `/v1/apps/{app_id}/ui/` are static and do not require
-authentication. They carry a restrictive CSP and no-store cache headers, expose
-no state by themselves, and cannot make browser network connections directly.
-The admin shell loads the entry point in a sandboxed iframe.
-
-App backend routes require the normal admin session. The admin API consumes that
-session itself and forwards no operator credential onward: it sends the JSON
-request and query string to the app's host-assigned loopback port with an
-`X-Kern-App-Proxy` marker and accepts a JSON response of at most 1 MiB. The browser app bridge pins a request to its own `app_id`;
-attempting to bridge to another app returns `403`. App backend failures are
-returned through the standard error envelope. App-backend-to-host calls use a
-separate peer-authenticated Unix socket and narrow thread-route allowlist,
-documented in [Apps architecture](../architecture/apps/apps.md).
+The Workspace service reaches its narrow host-thread API over a peer-authenticated
+Unix socket. See [Chat and Web Apps workspaces](../architecture/workspaces/workspaces.md).
 
 ## Tools
 
@@ -1393,7 +1402,7 @@ tool. Each tool object has:
 | `enabled` | Whether the operator has enabled the tool for agent calls. |
 | `actions[]` | Each action's stable `id`, `description`, per-action `data_policy`, `approval` (`direct` or `operator`), `input_schema`, and `output_schema` (empty `{}` for approval-gated actions, which return a user-visible message rather than a JSON result). |
 | `config[]` | This tool's declared config keys with `description` and `set`. All config is secret and scoped per tool; values are never returned (see `PUT /v1/tools/{tool_id}/config`). |
-| `protections[]` | Short operator-facing safeguards rendered in the tool's info popover and full Integration Guides entry. |
+| `protections[]` | Short operator-facing safeguards rendered on the focused Home integration page. |
 | `setup_steps[]` | Ordered provider-side and Kern setup steps. A step may include a provider documentation link and a local audited screenshot with alt text; `show_callback`/`show_config` render this host's OAuth callback URI or the tool's config keys inside that step. |
 | `data_summary` | The operator-facing data story as exactly four `cards`, in order: what leaves this host, where it can go, what the third party can do with it, and how long it retains it. Each card has a `description` and/or labeled `points`, plus authoritative policy `links`. |
 | `connection_status` | OAuth tools only: `{"connected": bool, "account"?: ConnectionAccount}`; never contains tokens or client secrets. |

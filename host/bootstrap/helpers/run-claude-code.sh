@@ -46,10 +46,9 @@ fi
 # runtime keeps mutating agent-home after its task was recovered as failed.
 #
 # A leading "--thread-scope <thread_id>" pair (consumed here, never passed to
-# the CLI) names the scope kern-agent-thread-<thread_id>.scope. The
-# agent-app service derives app ownership from the host-reserved app prefix in
-# that kernel-owned scope name, so the name comes from this root helper and is
-# validated as a host thread id.
+# the CLI) names the scope kern-agent-thread-<thread_id>.scope. The name comes
+# from this root helper and is validated as a host thread id. Web App API
+# targeting is explicit and independent of this process scope.
 unit_args=()
 if [ "${1:-}" = "--thread-scope" ]; then
   if ! [[ "${2:-}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
@@ -70,6 +69,8 @@ exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   ALL_PROXY=http://127.0.0.1:@PROXY_PORT@ \
   NO_PROXY=127.0.0.1,localhost \
   NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/kern-network-proxy.crt \
+  SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+  REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
   CLAUDE_CODE_CERT_STORE=system \
   "${claude_environment[@]}" \
   /usr/local/bin/claude "${web_search_settings[@]}" "$@"

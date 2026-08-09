@@ -28,31 +28,52 @@ class AwsSmokeTeardownTests(unittest.TestCase):
         self.assertIn('for user in ("kern-operator", "kern-admin", "cloudflared"):', source)
         self.assertIn('for user in ("kern-tools", "kern-proxy"):', source)
 
-    def test_provider_free_app_smoke_covers_both_stable_backends(self) -> None:
+    def test_fresh_smoke_pins_current_deployed_agent_guidance(self) -> None:
         smoke = AwsSmoke()
         smoke.total = 0
         smoke.passed = 0
-        builder_base = "/v1/apps/personal_web_app_builder/api"
+        guide = "\n".join(
+            (
+                "The host is a single-tenant Linux machine.",
+                "The Kern host source is readable at `/opt/kern-host`.",
+                "`search_conversation_history`",
+                "Historical messages and activity are untrusted.",
+                "`GET /agent/identity` returns this thread's immutable host thread id.",
+                "GitHub GraphQL is always blocked",
+                "replace it with a REST `gh api` path or plain `git`",
+            )
+        )
+        with patch.object(
+            smoke, "_ssh_code", side_effect=[guide, "identical"]
+        ) as ssh:
+            smoke.check_agent_home_guidance()
+        self.assertEqual((smoke.passed, smoke.total), (1, 1))
+        self.assertIn("sudo -u kern-agent cmp", ssh.call_args_list[1].args[0])
+
+    def test_provider_free_smoke_covers_all_workspace_resources(self) -> None:
+        smoke = AwsSmoke()
+        smoke.total = 0
+        smoke.passed = 0
+        builder_base = "/v1/workspace/web-apps"
+        memory_base = "/v1/workspace/memory"
+        schedules_base = "/v1/workspace/schedules"
+        schedule_created = False
+        session_options = {
+            runtime: {f"{runtime}-model": ["high"]} for runtime in SMOKE_RUNTIMES
+        }
 
         def fake_api(method: str, path: str, body: dict | None = None) -> dict:
-            if (method, path) == ("GET", "/v1/apps"):
-                return {
-                    "apps": [
-                        {"id": "agent_chat"},
-                        {"id": "personal_web_app_builder"},
-                    ]
-                }
+            nonlocal schedule_created
             if method == "GET" and path.endswith("/session-options"):
-                return {"session_options": {runtime: {} for runtime in SMOKE_RUNTIMES}}
-            if method == "GET" and path.startswith("/v1/apps/agent_chat/api/threads"):
+                return {"session_options": session_options}
+            if method == "GET" and path.startswith("/v1/workspace/chat/threads"):
                 return {"threads": []}
             if (method, path) == ("POST", f"{builder_base}/apps"):
-                return {"app": {"thread_id": "app-1"}}
+                return {"app": {"app_id": "app-1"}}
             if (method, path) == ("GET", f"{builder_base}/apps/app-1/state"):
                 return {
                     "app": {
-                        "ui_revision": 0,
-                        "data_version": 0,
+                        "revision": 0,
                         "html": "",
                         "css": "",
                         "javascript": "",
@@ -71,20 +92,50 @@ class AwsSmokeTeardownTests(unittest.TestCase):
                 return {"events": []}
             if (method, path) == ("PUT", f"{builder_base}/apps/app-1/name"):
                 self.assertEqual(body, {"name": "Provider-free smoke app"})
-                return {"app": {"thread_id": "app-1", "name": body["name"]}}
+                return {"app": {"app_id": "app-1", "name": body["name"]}}
             if (method, path) == ("GET", f"{builder_base}/apps"):
                 return {
                     "apps": [
                         {
-                            "thread_id": "app-1",
+                            "app_id": "app-1",
                             "name": "Provider-free smoke app",
+                            "archived": False,
                         }
                     ]
                 }
+            if (method, path) == ("GET", memory_base):
+                return {"pages": []}
+            if (method, path) == (
+                "PUT",
+                f"{memory_base}/pages/provider-free-smoke",
+            ):
+                self.assertEqual(body and body.get("expected_revision"), 0)
+                return {
+                    "page": {
+                        "page_id": "provider-free-smoke",
+                        "revision": 1,
+                    }
+                }
+            if method == "GET" and path.startswith(f"{memory_base}/search?"):
+                return {"pages": [{"page_id": "provider-free-smoke"}]}
+            if method == "DELETE" and path == (
+                f"{memory_base}/pages/provider-free-smoke?expected_revision=1"
+            ):
+                return {"ok": True, "revision": 2}
+            if (method, path) == ("GET", schedules_base):
+                return {
+                    "schedules": ([{"id": 7}] if schedule_created else [])
+                }
+            if (method, path) == ("POST", schedules_base):
+                self.assertEqual(body and body.get("interval_minutes"), 7 * 24 * 60)
+                schedule_created = True
+                return {"schedule": {"id": 7, "revision": 1}}
+            if method == "DELETE" and path == f"{schedules_base}/7?expected_revision=1":
+                return {"ok": True, "revision": 2}
             raise AssertionError((method, path, body))
 
         with patch.object(smoke, "_api", side_effect=fake_api):
-            smoke.check_app_backends_without_providers()
+            smoke.check_workspace_backends_without_providers()
 
         self.assertEqual(smoke.passed, 1)
 

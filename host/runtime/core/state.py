@@ -57,10 +57,8 @@ PRUNE_EVERY = 500
 # Bound each stored message, not just the row count: a pathological multi-
 # megabyte streamed message would otherwise grow durable Postgres storage far
 # past the apparent MAX_EVENTS cap. The bound sits well above any normal
-# assistant message and below THREAD_HANDOFF_CHARACTER_LIMIT, so the already
-# character-budgeted history reconstruction is unaffected in practice; an over-
-# limit value is truncated with a marker rather than dropped so replay stays
-# coherent.
+# assistant message; an over-limit value is truncated with a marker rather
+# than dropped so replay stays coherent.
 MAX_EVENT_MESSAGE_CHARS = 128 * 1024
 # The audit logs page newest-first in pages of EVENT_PAGE_LIMIT rows; the
 # limit query parameter can only shrink a page.
@@ -70,6 +68,25 @@ EVENT_PAGE_LIMIT = 100
 HOST_ERROR_LIMIT = 10_000
 HOST_ERROR_PRUNE_EVERY = 100
 HOST_ERROR_COALESCE_SECONDS = 60
+ADMIN_PASSKEY_LIMIT = 1
+# Resolved GitHub push approvals are useful operator history, but their JSON
+# payloads can be much larger than ordinary audit rows. Pending pushes have
+# separate admission backpressure and are never removed by retention.
+PENDING_PUSH_HISTORY_LIMIT = 100
+# The admin UI reads current-month Bedrock totals. Keep a little over a year of
+# daily source counters for diagnosis without accumulating one row per model
+# per day for the lifetime of the host.
+BEDROCK_USAGE_RETAIN_DAYS = 400
+# Full-text ranking can otherwise sort up to the complete retained event log
+# for a very common token. Keep each relevance query inside a fixed database
+# execution budget; callers turn a cancellation into an actionable narrow-
+# the-query response.
+CONVERSATION_SEARCH_STATEMENT_TIMEOUT_MS = 2_000
+_AGENT_HISTORY_COUNTERS = {
+    "threads": "agent_history_threads",
+    "messages": "agent_history_messages",
+    "activities": "agent_history_activities",
+}
 
 def _proxy_state_dir() -> Path:
     return Path(os.environ.get("KERN_PROXY_STATE_DIR", str(DEFAULT_PROXY_STATE_DIR)))
@@ -265,6 +282,10 @@ def admin_passkeys(rp_id: str | None = None) -> list[dict[str, Any]]:
     ]
 
 
+class AdminPasskeyLimitError(ValueError):
+    """The single administrator already has a durable passkey."""
+
+
 def save_admin_passkey(
     *,
     user_handle: str,
@@ -278,6 +299,10 @@ def save_admin_passkey(
 ) -> None:
     """Create one credential and its singleton user handle atomically."""
     with mutation() as cur:
+        cur.execute("SELECT COUNT(*) FROM admin_passkeys")
+        count_row = cur.fetchone()
+        if count_row is not None and int(count_row[0]) >= ADMIN_PASSKEY_LIMIT:
+            raise AdminPasskeyLimitError("admin passkey limit reached")
         cur.execute(
             "INSERT INTO admin_passkey_config (singleton, user_handle, created_at)"
             " VALUES (TRUE, %s, %s)"
@@ -349,6 +374,30 @@ def reset_admin_passkeys() -> int:
 # -- threads --------------------------------------------------------------------
 
 
+def _increment_counter(cur: Any, name: str) -> None:
+    cur.execute(
+        "UPDATE counters SET value = value + 1 WHERE name = %s RETURNING value",
+        (name,),
+    )
+    if cur.fetchone() is None:
+        raise RuntimeError(f"counter {name!r} is not initialized")
+
+
+def agent_history_counts() -> dict[str, int]:
+    """Monotonic thread, user-message, and agent-activity totals shown on Home."""
+    names = tuple(_AGENT_HISTORY_COUNTERS.values())
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT name, value FROM counters WHERE name IN (%s, %s, %s)",
+            names,
+        )
+        stored = {str(name): int(value) for name, value in cur.fetchall()}
+    if stored.keys() != set(names):
+        missing = sorted(set(names) - stored.keys())
+        raise RuntimeError(f"agent history counters are not initialized: {missing}")
+    return {field: stored[name] for field, name in _AGENT_HISTORY_COUNTERS.items()}
+
+
 def page_thread_summaries(
     before: tuple[str, str] | None,
     limit: int,
@@ -357,9 +406,9 @@ def page_thread_summaries(
 ) -> list[dict[str, Any]]:
     """One newest-first keyset page of canonical thread session rows.
 
-    ``before`` is the last page's ``(last_used_at, thread_id)`` sort
-    key. App-backend callers pass their internal thread prefix so ownership is
-    applied before the limit, never by filtering a host-global page.
+    ``before`` is the last page's ``(last_used_at, thread_id)`` sort key. A
+    caller may request a prefix filter as a query optimization; it conveys no
+    ownership or authorization.
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -407,26 +456,6 @@ def recover_interrupted_thread_runs(cur: Any) -> list[tuple[str, int]]:
 # -- thread -> provider session maps ---------------------------------------------
 
 
-def thread_session(cur: Any, runtime: str, thread_id: str) -> dict[str, Any] | None:
-    cur.execute(
-        "SELECT provider_session_id, last_used_at, model, effort, run_status, run_number"
-        " FROM thread_sessions"
-        " WHERE agent_runtime = %s AND thread_id = %s",
-        (runtime, thread_id),
-    )
-    row = cur.fetchone()
-    if row is None:
-        return None
-    return {
-        "provider_session_id": row[0],
-        "last_used_at": row[1],
-        "model": str(row[2]),
-        "effort": str(row[3]),
-        "status": str(row[4]),
-        "run_number": int(row[5]),
-    }
-
-
 def save_thread_session(
     cur: Any,
     runtime: str,
@@ -436,6 +465,11 @@ def save_thread_session(
     model: str,
     effort: str,
 ) -> None:
+    # The admin process is the sole thread-session writer and callers hold the
+    # mutation lock, so this pre-read and the insert/update below are one
+    # creation decision. Count only the first durable row for a thread.
+    cur.execute("SELECT 1 FROM thread_sessions WHERE thread_id = %s", (thread_id,))
+    creating = cur.fetchone() is None
     cur.execute(
         "INSERT INTO thread_sessions (agent_runtime, thread_id, provider_session_id, last_used_at, model, effort)"
         " VALUES (%s, %s, %s, %s, %s, %s)"
@@ -450,6 +484,8 @@ def save_thread_session(
     )
     if cur.fetchone() is None:
         raise ValueError(f"thread {thread_id!r} already has another session configuration")
+    if creating:
+        _increment_counter(cur, _AGENT_HISTORY_COUNTERS["threads"])
 
 
 def rotate_thread_session(
@@ -476,6 +512,34 @@ def rotate_thread_session(
         " WHERE thread_id = %s AND run_status = 'idle'"
         " RETURNING 1",
         (runtime, last_used_at, model, effort, thread_id),
+    )
+    if cur.fetchone() is None:
+        raise ValueError(f"thread {thread_id!r} is running or does not exist")
+
+
+def clear_thread_context(
+    cur: Any,
+    thread_id: str,
+    cleared_seq: int,
+    last_used_at: str,
+) -> None:
+    """Drop one idle thread's provider session and fence its handoff history.
+
+    The next run opens a new provider conversation. ``cleared_seq`` becomes the
+    handoff floor so that run is not handed back the events the operator just
+    cleared; without it, the missing provider session would itself trigger the
+    replay. Nothing is deleted: the events stay readable and only stop being
+    forwarded. The idle predicate is the durable race fence, and the floor
+    never moves backwards, so a stale caller cannot restore cleared context.
+    """
+    cur.execute(
+        "UPDATE thread_sessions SET"
+        " provider_session_id = NULL,"
+        " context_cleared_seq = GREATEST(context_cleared_seq, %s),"
+        " last_used_at = %s"
+        " WHERE thread_id = %s AND run_status = 'idle'"
+        " RETURNING 1",
+        (cleared_seq, last_used_at, thread_id),
     )
     if cur.fetchone() is None:
         raise ValueError(f"thread {thread_id!r} is running or does not exist")
@@ -550,7 +614,7 @@ def thread_session_config(thread_id: str, cur: Any = None) -> dict[str, Any] | N
     with _read(cur) as cur:
         cur.execute(
             "SELECT agent_runtime, provider_session_id, last_used_at, model, effort,"
-            " run_status, run_number"
+            " run_status, run_number, context_cleared_seq"
             " FROM thread_sessions WHERE thread_id = %s",
             (thread_id,),
         )
@@ -565,6 +629,7 @@ def thread_session_config(thread_id: str, cur: Any = None) -> dict[str, Any] | N
         "effort": str(row[4]),
         "status": str(row[5]),
         "run_number": int(row[6]),
+        "context_cleared_seq": int(row[7]),
     }
 
 
@@ -658,12 +723,8 @@ def read_bedrock_account(cur: Any = None) -> dict[str, Any]:
 # -- Bedrock connected credential (one admin-written, proxy-readable row) ------------
 
 
-def save_bedrock_credential(access_key_id: str, secret_access_key: str, region: str, cur: Any = None) -> None:
+def save_bedrock_credential(access_key_id: str, secret_access_key: str, region: str, cur: Any) -> None:
     """Store a synchronously validated AWS key pair."""
-    if cur is None:
-        with mutation() as fresh:
-            save_bedrock_credential(access_key_id, secret_access_key, region, fresh)
-        return
     cur.execute(
         "INSERT INTO bedrock_credentials (singleton, access_key_id, secret_access_key_encrypted, region)"
         " VALUES (TRUE, %s, %s, %s)"
@@ -673,11 +734,7 @@ def save_bedrock_credential(access_key_id: str, secret_access_key: str, region: 
     )
 
 
-def delete_bedrock_credential(cur: Any = None) -> None:
-    if cur is None:
-        with mutation() as fresh:
-            delete_bedrock_credential(fresh)
-        return
+def delete_bedrock_credential(cur: Any) -> None:
     cur.execute("DELETE FROM bedrock_credentials")
 
 
@@ -837,6 +894,15 @@ def append_agent_event(
         (utc_now(), event_type, thread_id, run_number, *values),
     )
     seq = int(cur.fetchone()[0])
+    counter = None
+    if event_type == "thread.activity":
+        counter = _AGENT_HISTORY_COUNTERS["activities"]
+    elif event_type == "thread.message" and payload.get("source") == "user":
+        counter = _AGENT_HISTORY_COUNTERS["messages"]
+    elif event_type == "thread.message" and payload.get("source") == "agent":
+        counter = _AGENT_HISTORY_COUNTERS["activities"]
+    if counter is not None:
+        _increment_counter(cur, counter)
     if seq % PRUNE_EVERY == 0:
         prune_agent_events(cur)
     return seq
@@ -884,6 +950,12 @@ def _page_before(
 
 def prune_agent_events(cur: Any) -> None:
     _prune_events(cur, "agent_events")
+
+
+def prune_event_logs(cur: Any) -> None:
+    """Apply all append-only event caps independent of insert cadence."""
+    for table in ("agent_events", "network_events", "tool_events"):
+        _prune_events(cur, table)
 
 
 def page_agent_events_before(
@@ -945,41 +1017,258 @@ def page_thread_events(
         return [_event_dict(row) for row in cur.fetchall()]
 
 
+def page_thread_events_around(
+    thread_id: str,
+    anchor: int,
+    limit: int,
+    *,
+    event_types: tuple[str, ...],
+) -> list[dict[str, Any]] | None:
+    """One chronological page centered on an event in ``thread_id``.
+
+    ``None`` means the anchor is not an event in this thread. Selecting each
+    side independently keeps both queries on ``(thread_id, seq)`` and avoids a
+    distance sort over the full retained history.
+    """
+    if not event_types:
+        return []
+    placeholders = ", ".join(["%s"] * len(event_types))
+    older_target = (limit + 1) // 2
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT 1 FROM agent_events WHERE thread_id = %s AND seq = %s"
+            f" AND event_type IN ({placeholders})",
+            (thread_id, anchor, *event_types),
+        )
+        if cur.fetchone() is None:
+            return None
+        cur.execute(
+            f"SELECT {_EVENT_FIELDS} FROM agent_events"
+            " WHERE thread_id = %s AND seq <= %s"
+            f" AND event_type IN ({placeholders})"
+            " ORDER BY seq DESC LIMIT %s",
+            (thread_id, anchor, *event_types, limit),
+        )
+        older_desc = cur.fetchall()
+        cur.execute(
+            f"SELECT {_EVENT_FIELDS} FROM agent_events"
+            " WHERE thread_id = %s AND seq > %s"
+            f" AND event_type IN ({placeholders})"
+            " ORDER BY seq LIMIT %s",
+            (thread_id, anchor, *event_types, limit),
+        )
+        newer = cur.fetchall()
+    selected_older = older_desc[:older_target]
+    selected_newer = newer[: limit - len(selected_older)]
+    remaining = limit - len(selected_older) - len(selected_newer)
+    if remaining:
+        selected_older.extend(
+            older_desc[len(selected_older) : len(selected_older) + remaining]
+        )
+    rows = (*reversed(selected_older), *selected_newer)
+    return [_event_dict(row) for row in rows]
+
+
+def thread_event_page_bounds(
+    thread_id: str,
+    oldest: int,
+    newest: int,
+    *,
+    event_types: tuple[str, ...],
+) -> tuple[bool, bool]:
+    """Whether matching retained events exist outside a returned page."""
+    if not event_types:
+        return False, False
+    placeholders = ", ".join(["%s"] * len(event_types))
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT"
+            " EXISTS(SELECT 1 FROM agent_events WHERE thread_id = %s AND seq < %s"
+            f" AND event_type IN ({placeholders})),"
+            " EXISTS(SELECT 1 FROM agent_events WHERE thread_id = %s AND seq > %s"
+            f" AND event_type IN ({placeholders}))",
+            (
+                thread_id,
+                oldest,
+                *event_types,
+                thread_id,
+                newest,
+                *event_types,
+            ),
+        )
+        row = cur.fetchone()
+    return (bool(row[0]), bool(row[1])) if row is not None else (False, False)
+
+
+def search_thread_messages(
+    query_variants: tuple[str, ...],
+    *,
+    from_timestamp: str | None,
+    to_timestamp: str | None,
+    thread_id: str | None,
+    sources: tuple[str, ...],
+    limit: int,
+    before: tuple[float, int] | tuple[str, int] | None,
+) -> list[dict[str, Any]]:
+    """Search retained thread messages with indexed relevance or time paging.
+
+    Natural-language variants are ORed into one ``tsquery``. The caller owns
+    validation and cursor mode; this accessor keeps every filter parameterized
+    and returns one extra row when asked so it never needs to count all hits.
+    """
+    clauses = ["events.event_type = 'thread.message'", "events.message IS NOT NULL"]
+    params: list[Any] = []
+    if thread_id is not None:
+        clauses.append("events.thread_id = %s")
+        params.append(thread_id)
+    if from_timestamp is not None:
+        clauses.append("events.created_at >= %s")
+        params.append(from_timestamp)
+    if to_timestamp is not None:
+        clauses.append("events.created_at < %s")
+        params.append(to_timestamp)
+    if sources:
+        placeholders = ", ".join(["%s"] * len(sources))
+        clauses.append(f"events.source IN ({placeholders})")
+        params.extend(sources)
+    else:
+        return []
+    where = " AND ".join(clauses)
+
+    if query_variants:
+        query_expression = " || ".join(
+            ["websearch_to_tsquery('simple', %s)"] * len(query_variants)
+        )
+        cursor_clause = ""
+        cursor_params: tuple[Any, ...] = ()
+        if before is not None:
+            rank, seq = before
+            cursor_clause = (
+                " WHERE search_rank < %s OR (search_rank = %s AND seq < %s)"
+            )
+            cursor_params = (rank, rank, seq)
+        sql = (
+            f"WITH search_query AS (SELECT ({query_expression}) AS value),"
+            " ranked AS ("
+            " SELECT events.seq, events.created_at, events.thread_id, events.source,"
+            " ts_rank_cd(to_tsvector('simple', COALESCE(events.message, '')), search_query.value)::float8"
+            " AS search_rank,"
+            " events.message,"
+            " LEFT(ts_headline('simple', events.message, search_query.value,"
+            " 'MaxWords=64, MinWords=16, ShortWord=1, MaxFragments=2, StartSel=[[,'"
+            " || ' StopSel=]]'), 4096) AS excerpt"
+            " FROM agent_events AS events"
+            " CROSS JOIN search_query"
+            f" WHERE {where}"
+            " AND to_tsvector('simple', COALESCE(events.message, '')) @@ search_query.value"
+            ")"
+            " SELECT seq, created_at, thread_id, source, search_rank, excerpt,"
+            " to_tsvector('simple', message) <> to_tsvector('simple', excerpt)"
+            " AS excerpt_truncated"
+            f" FROM ranked{cursor_clause}"
+            " ORDER BY search_rank DESC, seq DESC LIMIT %s"
+        )
+        execute_params = (*query_variants, *params, *cursor_params, limit)
+    else:
+        cursor_clause = ""
+        cursor_params = ()
+        if before is not None:
+            timestamp, seq = before
+            cursor_clause = " AND (created_at, seq) < (%s, %s)"
+            cursor_params = (timestamp, seq)
+        sql = (
+            "SELECT events.seq, events.created_at, events.thread_id, events.source,"
+            " NULL::float8 AS search_rank,"
+            " LEFT(events.message, 4096) AS excerpt,"
+            " events.message <> LEFT(events.message, 4096) AS excerpt_truncated"
+            " FROM agent_events AS events"
+            f" WHERE {where}{cursor_clause}"
+            " ORDER BY created_at DESC, seq DESC LIMIT %s"
+        )
+        execute_params = (*params, *cursor_params, limit)
+
+    with db.transaction() as cur:
+        if query_variants:
+            cur.execute(
+                "SET LOCAL statement_timeout ="
+                f" '{CONVERSATION_SEARCH_STATEMENT_TIMEOUT_MS}ms'"
+            )
+        cur.execute(sql, execute_params)
+        rows = cur.fetchall()
+    return [
+        {
+            "seq": int(seq),
+            "event_id": f"event_{seq}",
+            "timestamp": str(created_at),
+            "thread_id": str(result_thread_id),
+            "source": str(source),
+            "search_rank": search_rank,
+            "excerpt": str(excerpt),
+            "excerpt_truncated": bool(excerpt_truncated),
+        }
+        for (
+            seq,
+            created_at,
+            result_thread_id,
+            source,
+            search_rank,
+            excerpt,
+            excerpt_truncated,
+        ) in rows
+    ]
+
+
 def recent_thread_handoff_events(
     cur: Any,
     thread_id: str,
     *,
-    character_limit: int,
+    message_character_limit: int,
+    activity_character_limit: int,
+    activity_event_character_limit: int,
+    after_seq: int = 0,
 ) -> list[dict[str, Any]]:
-    """Newest retained public thread events that fit a bounded handoff.
+    """Newest retained events selected under independent handoff budgets.
 
-    The window is returned chronologically. Activity JSON is counted in full,
-    so provider detail/output shown by an expanded UI card is available to the
-    replacement session. PostgreSQL returns only the bounded suffix rather
-    than transferring the full event history to Python.
+    Messages and activities have separate newest-first windows, so tool output
+    cannot consume the conversation budget. Activity uses the same per-event
+    bound as the serialized prompt. Results are merged back into chronological
+    order without transferring the full event history. ``after_seq`` is the
+    thread's cleared-working-memory floor: events at or below it are excluded
+    before the budgets are measured, so a cleared thread hands over nothing.
     """
-    if character_limit <= 0:
+    if message_character_limit <= 0 and activity_character_limit <= 0:
         return []
     cur.execute(
         f"SELECT {_EVENT_FIELDS} FROM ("
         f" SELECT {_EVENT_FIELDS},"
         " COALESCE(SUM(CASE"
         "   WHEN event_type = 'thread.message' THEN char_length(message)"
-        "   WHEN event_type = 'thread.activity' THEN char_length(activity::text)"
-        "   WHEN event_type = 'thread.error' THEN char_length(error_message)"
-        "   ELSE 1"
+        "   ELSE 0"
         " END) OVER ("
         "   ORDER BY seq DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING"
-        " ), 0) AS newer_characters"
+        " ), 0) AS newer_message_characters,"
+        " COALESCE(SUM(CASE"
+        "   WHEN event_type = 'thread.activity'"
+        "     THEN LEAST(char_length(activity::text), %s)"
+        "   ELSE 0"
+        " END) OVER ("
+        "   ORDER BY seq DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING"
+        " ), 0) AS newer_activity_characters"
         " FROM agent_events"
         " WHERE thread_id = %s"
-        " AND event_type IN ("
-        "   'thread.message', 'thread.activity', 'thread.error', 'thread.stopped'"
-        " )"
+        " AND seq > %s"
+        " AND event_type IN ('thread.message', 'thread.activity')"
         ") AS history"
-        " WHERE newer_characters < %s"
+        " WHERE (event_type = 'thread.activity' AND newer_activity_characters < %s)"
+        " OR (event_type = 'thread.message' AND newer_message_characters < %s)"
         " ORDER BY seq",
-        (thread_id, character_limit),
+        (
+            max(1, activity_event_character_limit),
+            thread_id,
+            max(0, after_seq),
+            max(0, activity_character_limit),
+            max(0, message_character_limit),
+        ),
     )
     return [_event_dict(row) for row in cur.fetchall()]
 
@@ -1043,15 +1332,11 @@ def network_policy_record() -> dict[str, Any] | None:
 def read_claude_web_search() -> bool:
     """Whether the operator enabled Anthropic server-side web search for Claude
     Code. Read by the orchestrator to tell the root launcher whether to expose
-    the WebSearch tool; the proxy enforces the same toggle independently. Any
-    read failure returns False (fail closed — web search stays off)."""
-    try:
-        with db.transaction() as cur:
-            cur.execute("SELECT web_search FROM claude_settings")
-            row = cur.fetchone()
-            return bool(row and row[0])
-    except Exception:
-        return False
+    the WebSearch tool; the proxy enforces the same toggle independently."""
+    with db.transaction() as cur:
+        cur.execute("SELECT web_search FROM claude_settings")
+        row = cur.fetchone()
+        return bool(row and row[0])
 
 
 # -- Bedrock live usage (proxy-written token counters) ------------------------
@@ -1135,19 +1420,20 @@ def read_bedrock_usage(since_day: str) -> list[dict[str, Any]]:
     ]
 
 
+def prune_bedrock_usage(cur: Any, cutoff_day: str) -> None:
+    """Drop daily counters older than the configured reporting horizon."""
+    cur.execute("DELETE FROM bedrock_usage WHERE day < %s", (cutoff_day,))
+
+
 def read_bedrock_region() -> str | None:
     """The shared operator-configured Bedrock region, or None without a
     connected credential. Read by the orchestrator to tell each Bedrock
     launcher which regional endpoint to use; the proxy enforces the
-    same region independently. Any read failure returns None (fail closed —
-    no region means the turn fails before any Bedrock traffic)."""
-    try:
-        with db.transaction() as cur:
-            cur.execute("SELECT region FROM bedrock_credentials WHERE singleton = TRUE")
-            row = cur.fetchone()
-            return str(row[0]) if row and row[0] else None
-    except Exception:
-        return None
+    same region independently."""
+    with db.transaction() as cur:
+        cur.execute("SELECT region FROM bedrock_credentials WHERE singleton = TRUE")
+        row = cur.fetchone()
+        return str(row[0]) if row and row[0] else None
 
 
 def save_network_policy(controls: dict[str, Any], updated_at: str) -> None:
@@ -1430,10 +1716,14 @@ def read_github_repo_audits() -> dict[tuple[str, str], dict[str, Any]]:
 def prune_github_repo_audits(keep: set[tuple[str, str]]) -> None:
     """Drop audits for repositories no longer in the policy."""
     with mutation() as cur:
-        cur.execute("SELECT owner, repo FROM github_repo_audit")
-        for owner, repo in cur.fetchall():
-            if (str(owner), str(repo)) not in keep:
-                cur.execute("DELETE FROM github_repo_audit WHERE owner = %s AND repo = %s", (owner, repo))
+        if not keep:
+            cur.execute("DELETE FROM github_repo_audit")
+            return
+        placeholders = ", ".join(["(%s, %s)"] * len(keep))
+        cur.execute(
+            f"DELETE FROM github_repo_audit WHERE (owner, repo) NOT IN ({placeholders})",
+            [value for pair in sorted(keep) for value in pair],
+        )
 
 
 # -- github .github push-approval gate (pending_pushes) ------------------------
@@ -1515,6 +1805,16 @@ def resolve_pending_push(push_id: str, status: str, detail: str | None = None) -
     if row is None:
         raise RuntimeError(f"pending push {push_id} vanished mid-resolve")
     return _pending_push_row(row)
+
+
+def prune_pending_pushes(cur: Any, keep: int = PENDING_PUSH_HISTORY_LIMIT) -> None:
+    """Keep every pending push and only the newest resolved history rows."""
+    cur.execute(
+        "DELETE FROM pending_pushes WHERE status <> 'pending' AND id IN ("
+        " SELECT id FROM pending_pushes WHERE status <> 'pending'"
+        " ORDER BY COALESCE(resolved_at, requested_at) DESC, id DESC OFFSET %s)",
+        (keep,),
+    )
 
 
 def read_github_credential_metadata() -> dict[str, Any]:
@@ -1939,14 +2239,19 @@ def ingest_host_error(
             assert inserted is not None
             error_id, seq = int(inserted[0]), int(inserted[1])
         if seq % HOST_ERROR_PRUNE_EVERY == 0:
-            cur.execute(
-                "DELETE FROM host_errors WHERE"
-                " seq < COALESCE(("
-                " SELECT seq FROM host_errors ORDER BY seq DESC OFFSET %s LIMIT 1"
-                "), 0)",
-                (HOST_ERROR_LIMIT - 1,),
-            )
+            prune_host_errors(cur)
     return error_id
+
+
+def prune_host_errors(cur: Any) -> None:
+    """Keep the newest bounded host-error diagnostics."""
+    cur.execute(
+        "DELETE FROM host_errors WHERE"
+        " seq < COALESCE(("
+        " SELECT seq FROM host_errors ORDER BY seq DESC OFFSET %s LIMIT 1"
+        "), 0)",
+        (HOST_ERROR_LIMIT - 1,),
+    )
 
 
 def page_host_errors_before(

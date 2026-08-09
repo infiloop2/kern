@@ -70,26 +70,46 @@ function filesystemMountTile(label, mount) {
   return usageTile(label, mount.used_bytes, mount.total_bytes);
 }
 
+function historyStat(label, value, description) {
+  const count = Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  const formatted = new Intl.NumberFormat().format(count);
+  const accessible = `${label}: ${formatted}. ${description}`;
+  return `
+    <div class="history-stat" aria-label="${esc(accessible)}" title="${esc(description)}">
+      <span class="history-stat-value">${esc(formatted)}</span>
+      <span class="history-stat-label">${esc(label)}</span>
+    </div>`;
+}
+
 export async function refreshHealth() {
   const health = await api("GET", "/v1/health");
-  renderUpgradeNotice(health.upgrade);
   $("agent-name").textContent = health.agent_name ? `Host: ${health.agent_name}` : "";
   $("agent-name").hidden = !health.agent_name;
   const runtimes = Array.isArray(health.agent_runtime.runtimes) ? health.agent_runtime.runtimes : [];
   latestRuntimes = runtimes;
   const host = health.host_runtime;
   const mounts = host.filesystem?.mounts || {};
+  const history = health.history || {};
   setHtml($("health"), `
+    ${renderHomeUpgrade(health.upgrade)}
     <div class="stat-grid stat-statuses">
       ${statTile("Overall", badge(health.status))}
       ${statTile("Network controls", badge(health.network_controls.status))}
-      ${statTile("Version", renderVersion(health.version), "stat-wide")}
+      ${statTile("Version", renderVersion(health.version), "stat-wide version-tile")}
     </div>
     <div class="stat-grid stat-meters">
       ${meterTile("CPU", `<span class="metric-main">${esc(host.cpu.usage_percent)}%</span>`, Number(host.cpu.usage_percent) || 0)}
       ${memorySwapTile(host.memory, host.swap)}
       ${filesystemMountTile("Admin volume", mounts.admin)}
       ${filesystemMountTile("Agent volume", mounts.agent)}
+    </div>
+    <div class="stat-history" aria-label="Agent stats">
+      <div class="stat-history-title">Stats</div>
+      <div class="stat-history-grid">
+        ${historyStat("Threads", history.threads, "All agent threads recorded on this host.")}
+        ${historyStat("User messages", history.messages, "Messages sent by the user on this host.")}
+        ${historyStat("Agent activity", history.activities, "Agent messages, tool calls, commands, reasoning, and other recorded agent work.")}
+      </div>
     </div>`);
   renderRuntimeOverview();
   renderIntegrationAccounts();
@@ -101,31 +121,18 @@ export async function refreshHealth() {
   }
 }
 
-function renderUpgradeNotice(upgrade) {
-  const notice = $("upgrade-notice");
-  const checked = typeof upgrade?.latest === "string";
-  notice.hidden = !checked;
-  if (!checked) return;
-  const available = upgrade.available === true;
-  const title = available
-    ? `Upgrade available: version ${upgrade.latest}`
-    : "Your Kern is at the latest version.";
-  const detail = available ? "Use your operator plane to upgrade." : "";
-  const label = detail ? `${title}. ${detail}` : title;
-  notice.classList.toggle("upgrade-available", available);
-  notice.classList.toggle("upgrade-current", !available);
-  $("upgrade-popover-title").textContent = title;
-  $("upgrade-popover-detail").textContent = detail;
-  $("upgrade-popover-detail").hidden = !detail;
-  notice.setAttribute("aria-label", label);
-}
-
 function renderVersion(version) {
   if (!version || typeof version !== "object") return `<span class="muted">not reported</span>`;
   const status = typeof version.status === "string" && version.status ? version.status : "unknown";
   const runtime = typeof version.runtime === "string" && version.runtime ? version.runtime : "unknown";
-  const state = typeof version.state === "string" && version.state ? version.state : "unknown";
-  return `${badge(status)} <span class="muted">runtime</span> ${esc(runtime)} <span class="muted">state</span> ${esc(state)}`;
+  const mismatch = status === "ok" ? "" : `${badge(status)} `;
+  return `<span class="version-runtime">${mismatch}${esc(runtime)}</span>`;
+}
+
+function renderHomeUpgrade(upgrade) {
+  const available = upgrade?.available === true && typeof upgrade.latest === "string";
+  if (!available) return "";
+  return `<p class="home-upgrade-notice"><strong>Upgrade available: version ${esc(upgrade.latest)}</strong><span>Use your operator plane to upgrade.</span></p>`;
 }
 
 export async function refreshProviderAccounts() {
@@ -249,7 +256,7 @@ function runtimeSummaryCard(runtime, usageHtml, usageSummaryText, extraClass) {
         </span>
         ${runningBadge}`;
   const cls = `runtime-summary${extraClass ? ` ${extraClass}` : ""}`;
-  // Every box links to the Internet Access and Tools tab for its provider, in
+  // Every box links to its focused Home integration page, in
   // any state — to connect or re-enable a deactivated runtime, or to manage
   // credentials and integration settings for an active one.
   const summaryLabel = `${meta.label}: ${statusText}${runningLabel}; ${usageSummaryText}. Open provider settings`;

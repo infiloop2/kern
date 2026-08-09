@@ -12,6 +12,7 @@ from typing import Any
 from host.config import ConfigError, InputConfig, build_input_config
 from host.constants import ADMIN_API_PORT
 from host.cli.lifecycle_aws import _aws, _aws_env, _existing_storage_roles, _find_existing_instances, _find_storage_volume
+from host.cli.lifecycle_checks import _require_preserved_storage_roles
 from host.cli.lifecycle_constants import SSH_USER
 
 
@@ -69,15 +70,7 @@ def _single_existing_instance(config: InputConfig, env: dict[str, str]) -> str:
 
 
 def _require_preserved_storage(config: InputConfig, env: dict[str, str]) -> None:
-    roles = _existing_storage_roles(config, env)
-    expected = {"admin", "agent"}
-    if roles != expected:
-        missing = ", ".join(sorted(expected - roles)) or "none"
-        found = ", ".join(sorted(roles)) or "none"
-        raise ConfigError(
-            f"power operation requires existing admin and agent data volumes for {config.agent_name}; "
-            f"found {found}, missing {missing}"
-        )
+    _require_preserved_storage_roles("power operation", config.agent_name, _existing_storage_roles(config, env))
 
 
 def _describe_instance(env: dict[str, str], instance_id: str) -> dict[str, Any]:

@@ -97,14 +97,14 @@ def _split_sections(path: Path) -> tuple[str, str]:
 def applied_versions(cur: Any) -> dict[int, str]:
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
+        CREATE TABLE IF NOT EXISTS public.schema_migrations (
             version BIGINT PRIMARY KEY,
             name TEXT NOT NULL,
             applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )
         """
     )
-    cur.execute("SELECT version, name FROM schema_migrations ORDER BY version")
+    cur.execute("SELECT version, name FROM public.schema_migrations ORDER BY version")
     return {int(version): str(name) for version, name in cur.fetchall()}
 
 
@@ -123,7 +123,7 @@ def up(target: int | None = None, *, directory: Path | None = None, quiet: bool 
                 break
             cur.execute(migration.up_sql)
             cur.execute(
-                "INSERT INTO schema_migrations (version, name) VALUES (%s, %s)",
+                "INSERT INTO public.schema_migrations (version, name) VALUES (%s, %s)",
                 (migration.version, migration.name),
             )
             applied.append(migration.version)
@@ -152,7 +152,7 @@ def down(target: int | None = None, *, directory: Path | None = None, quiet: boo
                     f"cannot roll back version {version:04d}: its down section is empty"
                 )
             cur.execute(migration.down_sql)
-            cur.execute("DELETE FROM schema_migrations WHERE version = %s", (version,))
+            cur.execute("DELETE FROM public.schema_migrations WHERE version = %s", (version,))
             reverted.append(version)
             if not quiet:
                 print(f"reverted {migration.version:04d}_{migration.name}")

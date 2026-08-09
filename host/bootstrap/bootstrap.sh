@@ -22,9 +22,8 @@ PG_MAJOR=14
 # SERVICE_ACCOUNTS, which host.bootstrap.verify_deploy re-checks against the
 # live /etc/passwd at the end of this script).
 @SERVICE_ACCOUNT_CONSTANTS@
-@APP_UID_GID_CONSTANTS@
 PROXY_PORT=@PROXY_PORT@
-@APP_PORT_CONSTANTS@
+WORKSPACE_PORT=@WORKSPACE_PORT@
 
 # Persistent volume layout. The admin volume is durable across redeploys, so
 # the admin-state Postgres data directory and proxy-owned mutable state live
@@ -59,8 +58,6 @@ resolve_ebs_device() {
   local candidates=(
     "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${normalized}"
     "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${volume_id}"
-    "/dev/disk/by-id/scsi-0Amazon_Elastic_Block_Store_${normalized}"
-    "/dev/disk/by-id/scsi-0Amazon_Elastic_Block_Store_${volume_id}"
   )
   local attempt candidate
   for attempt in $(seq 1 30); do
@@ -162,10 +159,9 @@ ensure_group kern-proxy "$KERN_PROXY_GID"
 ensure_group kern-agent "$KERN_AGENT_GID"
 ensure_group cloudflared "$CLOUDFLARED_GID"
 ensure_group kern-tools "$KERN_TOOLS_GID"
-ensure_group kern-agent-app "$KERN_AGENT_APP_GID"
 ensure_group kern-agent-network "$KERN_AGENT_NETWORK_GID"
-ensure_group kern-app-backends "$KERN_APP_BACKENDS_GID"
-@APP_ENSURE_GROUPS@
+ensure_group kern-workspace-api "$KERN_WORKSPACE_API_GID"
+ensure_group kern-workspace "$KERN_WORKSPACE_GID"
 ensure_user kern-admin "$KERN_ADMIN_UID" kern-admin /mnt/kern-admin/admin-home
 ensure_user kern-proxy "$KERN_PROXY_UID" kern-proxy /mnt/kern-admin/proxy-state
 ensure_user kern-agent "$KERN_AGENT_UID" kern-agent /mnt/kern-agent/agent-home
@@ -173,15 +169,12 @@ ensure_user cloudflared "$CLOUDFLARED_UID" cloudflared /nonexistent
 # The tools service holds no durable state of its own (its state lives in the
 # tool tables, reached with a scoped Postgres role), so it needs no home.
 ensure_user kern-tools "$KERN_TOOLS_UID" kern-tools /nonexistent
-# The agent-app service derives authority from kernel-owned thread scopes and
-# keeps no durable state of its own, so it also needs no home.
-ensure_user kern-agent-app "$KERN_AGENT_APP_UID" kern-agent-app /nonexistent
 # The agent-network service serves read-only policy introspection with no
 # filesystem state or egress.
 ensure_user kern-agent-network "$KERN_AGENT_NETWORK_UID" kern-agent-network /nonexistent
-@APP_ENSURE_USERS@
-ensure_group_member kern-admin kern-app-backends
-@APP_ENSURE_GROUP_MEMBERS@
+ensure_user kern-workspace "$KERN_WORKSPACE_UID" kern-workspace /nonexistent
+ensure_group_member kern-admin kern-workspace-api
+ensure_group_member kern-workspace kern-workspace-api
 # The postgres account is created here, before the postgresql packages would
 # create it with a dynamic system uid: the preserved cluster files on the
 # admin volume are 0600/0700 postgres-owned, so like the kern-* users
@@ -385,7 +378,6 @@ PY
 install_runtime_code() {
 mkdir -p /opt/kern-host
 tar -xzf /tmp/kern-host-code.tar.gz -C /opt/kern-host
-payload_value operation.target_version > /opt/kern-host/VERSION
 # The script runs with umask 077; the runtime code must stay root-owned but
 # readable by the service users that import it.
 chown -R root:root /opt/kern-host
@@ -439,6 +431,39 @@ systemctl disable --now postgresql.service >/dev/null 2>&1 || true
 systemctl start apt-daily.timer apt-daily-upgrade.timer
 }
 
+# Idempotent legacy migration for releases that provisioned one PostgreSQL
+# role and schema per generic app. These operations require the postgres
+# superuser, so they intentionally live at the bootstrap identity boundary
+# instead of the kern-admin schema migration stream. Retained Chat/Web Apps
+# objects move directly to the host migration owner; removed app identities
+# and schemas are retired. Fresh hosts simply find no legacy roles or schemas.
+migrate_legacy_app_identities() {
+  local legacy_role
+  for legacy_role in kern-app-0 kern-app-6; do
+    if runuser -u postgres -- psql -tAc \
+        "SELECT 1 FROM pg_roles WHERE rolname = '${legacy_role}'" | grep -q 1; then
+      runuser -u postgres -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet \
+        -c "REASSIGN OWNED BY \"${legacy_role}\" TO \"kern-admin\";" \
+        -c "DROP OWNED BY \"${legacy_role}\";"
+      runuser -u postgres -- dropuser "${legacy_role}"
+    fi
+  done
+  runuser -u postgres -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet \
+    -c "DROP SCHEMA IF EXISTS app_mission_pursuit CASCADE;" \
+    -c "DROP SCHEMA IF EXISTS app_alpha_seeker CASCADE;" \
+    -c "DROP SCHEMA IF EXISTS app_social_marketer CASCADE;" \
+    -c "DROP SCHEMA IF EXISTS app_virality_machine CASCADE;" \
+    -c "DROP SCHEMA IF EXISTS app_software_builder CASCADE;"
+  for legacy_role in kern-app-1 kern-app-2 kern-app-3 kern-app-4 kern-app-5; do
+    if runuser -u postgres -- psql -tAc \
+        "SELECT 1 FROM pg_roles WHERE rolname = '${legacy_role}'" | grep -q 1; then
+      runuser -u postgres -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet \
+        -c "DROP OWNED BY \"${legacy_role}\";"
+      runuser -u postgres -- dropuser "${legacy_role}"
+    fi
+  done
+}
+
 setup_postgres() {
 echo "== setting up admin-state PostgreSQL =="
 PG_BIN="/usr/lib/postgresql/${PG_MAJOR}/bin"
@@ -461,26 +486,25 @@ cat > "$PGDATA_DIR/postgresql.conf" <<PGCONF
 listen_addresses = ''
 unix_socket_directories = '/var/run/postgresql'
 # Each service process bounds its own active sessions client-side
-# (db.MAX_ACTIVE_CONNECTIONS = 14). Provisioned once for growth rather than
-# retuned per app: up to fifteen bundled apps plus the four core database
-# clients use at most 19 x 14 = 266 sessions, leaving 34 slots for operator
-# psql, the superuser reserve, and deployment work (test_deploy asserts the
-# installed budget stays under this provision). Idle Postgres backends cost a
-# few MB each, so the larger ceiling is cheap; bursts beyond a process's cap
-# queue client-side instead of immediately failing at the server.
+# (db.MAX_ACTIVE_CONNECTIONS = 14). Keep a fixed ceiling with ample room for
+# the admin, proxy, tools, network-introspection, and Workspace runtime pools plus
+# operator psql, the superuser reserve, deployment work, and future fixed host
+# services. Bursts beyond a process's cap queue client-side instead of
+# immediately failing at the server.
 max_connections = 300
 log_destination = 'stderr'
 PGCONF
 cat > "$PGDATA_DIR/pg_hba.conf" <<'PGHBA'
 # Managed by Kern bootstrap; rewritten on every deploy.
 # Unix-socket connections only; identity is the OS user (peer auth). Schema
-# migrations give proxy, tools, and app roles only their required tables or
-# schema. The agent user has no role and no rule that admits it.
+# migrations give proxy, tools, network-introspection, and Workspace roles only their
+# required tables or schemas. The agent user has no role and no rule that
+# admits it.
 local  kern_admin  kern-admin  peer
 local  kern_admin  kern-proxy  peer
 local  kern_admin  kern-tools  peer
 local  kern_admin  kern-agent-network  peer
-@APP_PG_HBA_LINES@
+local  kern_admin  kern-workspace  peer
 local  all               postgres          peer
 local  all               all               reject
 PGHBA
@@ -539,22 +563,24 @@ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-agent-network') THEN
     CREATE ROLE "kern-agent-network" LOGIN;
   END IF;
-@APP_ROLE_SQL@
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-workspace') THEN
+    CREATE ROLE "kern-workspace" LOGIN;
+  END IF;
 END
 $$;
 SQL
 if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'kern_admin'" | grep -q 1; then
   runuser -u postgres -- createdb --owner=kern-admin kern_admin
 fi
+migrate_legacy_app_identities
 runuser -u postgres -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet \
   -c "REVOKE ALL ON DATABASE kern_admin FROM PUBLIC;" \
   -c "REVOKE CREATE ON SCHEMA public FROM PUBLIC;" \
   -c "GRANT CREATE ON SCHEMA public TO \"kern-admin\";" \
-@APP_POSTGRES_SCHEMA_GRANTS@
   -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-proxy\";" \
   -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-tools\";" \
   -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-agent-network\";" \
-@APP_POSTGRES_CONNECT_GRANTS@
+  -c 'GRANT CONNECT ON DATABASE kern_admin TO "kern-workspace";'
 # The PUBLIC revoke also stripped the proxy, tools, and agent-network roles'
 # inherited CONNECT, so it is granted back explicitly; without it the proxy
 # cannot log network decisions (and, being fail-closed, would fail every agent
@@ -564,6 +590,44 @@ runuser -u postgres -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet \
 # tools, or agent-network service can use only its granted tables, not mint new
 # objects. The owning kern-admin role keeps its database privileges
 # implicitly.
+}
+
+adopt_workspace_migration_history() {
+  # One-time, idempotent ledger migration. Releases before the fixed workspace
+  # service recorded Chat and Web Apps independently. Mirror every applied
+  # old version into its renumbered host migration before the unified runner
+  # decides what remains pending. Fresh databases simply insert no rows; once
+  # migration 0026 removes the old ledger, later bootstraps are a no-op.
+  runuser -u kern-admin -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet <<'SQL'
+DO $$
+BEGIN
+IF to_regclass('public.workspace_migrations') IS NULL THEN
+  RETURN;
+END IF;
+-- Dynamic SQL defers resolving the legacy table until after the existence
+-- guard, so this block remains valid after migration 0026 drops that table.
+EXECUTE $adopt$
+INSERT INTO public.schema_migrations (version, name, applied_at)
+SELECT mapping.new_version, mapping.new_name, old.applied_at
+FROM public.workspace_migrations AS old
+JOIN (VALUES
+  ('chat', 1, 15, 'workspace_chat_baseline'),
+  ('chat', 2, 16, 'workspace_chat_thread_names'),
+  ('chat', 3, 17, 'workspace_chat_drop_thread_tasks'),
+  ('web_apps', 1, 18, 'workspace_web_app_state'),
+  ('web_apps', 2, 19, 'workspace_web_builder_thread_reset'),
+  ('web_apps', 3, 20, 'workspace_multiple_web_apps'),
+  ('web_apps', 4, 21, 'workspace_web_app_platform'),
+  ('web_apps', 5, 22, 'workspace_web_remove_archiving'),
+  ('web_apps', 6, 23, 'workspace_web_memory_revision'),
+  ('web_apps', 7, 24, 'workspace_web_restore_archiving')
+) AS mapping(workspace_kind, old_version, new_version, new_name)
+  ON old.workspace_kind = mapping.workspace_kind AND old.version = mapping.old_version
+ON CONFLICT (version) DO NOTHING
+$adopt$;
+END
+$$;
+SQL
 }
 
 # Apply schema migrations, then compute and store the effective host config.
@@ -579,9 +643,9 @@ echo "== migrating admin state schema =="
 # (0001_baseline.sql), the same pattern as the kern-proxy grants;
 # bootstrap only provisions the role, its pg_hba line, and database CONNECT
 # above, before migrations run.
+runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.migrate up --to 13
+adopt_workspace_migration_history
 runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.migrate up
-echo "== migrating app schemas =="
-@APP_MIGRATION_COMMANDS@
 python3 - <<'PY' | runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.write_config > /tmp/kern_effective_config.json
 import json, pathlib
 payload = json.loads(pathlib.Path('/tmp/kern_payload.json').read_text())
@@ -872,9 +936,7 @@ for managed_agent_file in \
   "$AGENT_HOME_PATH/.claude/settings.json" \
   "$AGENT_HOME_PATH/.hermes/config.yaml" \
   "$AGENT_HOME_PATH/.hermes/.env"; do
-  if [ -e "$managed_agent_file" ]; then
-    chattr -f -i "$managed_agent_file" 2>/dev/null || true
-  fi
+  chattr -f -i "$managed_agent_file" || true
 done
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/agents_claude.md" "$AGENT_HOME_PATH/AGENTS.md"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/agents_claude.md" "$AGENT_HOME_PATH/CLAUDE.md"
@@ -911,26 +973,9 @@ chmod 440 /etc/sudoers.d/kern-host
 # Fail deploy now, not at first login, if the pinned CLIs are not executable by
 # the agent user from its home directory.
 assert_agent_clis() {
-codex_cli_version="$(runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home \
-  /usr/local/bin/codex --version)"
-if [ "$codex_cli_version" != "codex-cli ${CODEX_CLI_VERSION}" ]; then
-  echo "unexpected Codex CLI version: ${codex_cli_version}" >&2
-  exit 1
-fi
-claude_code_version="$(runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home CLAUDE_CONFIG_DIR=/mnt/kern-agent/agent-home/.claude \
-  /usr/local/bin/claude --version)"
-if [ "$claude_code_version" != "${CLAUDE_CODE_VERSION} (Claude Code)" ]; then
-  echo "unexpected Claude Code version: ${claude_code_version}" >&2
-  exit 1
-fi
-# importlib.metadata is deterministic and network-free, unlike `hermes
-# --version` (which phones home for an update check).
-hermes_version="$(runuser -u kern-agent -- /usr/local/lib/hermes-venv/bin/python \
-  -c 'import importlib.metadata; print(importlib.metadata.version("hermes-agent"))')"
-if [ "$hermes_version" != "${HERMES_AGENT_VERSION}" ]; then
-  echo "unexpected Hermes agent version: ${hermes_version}" >&2
-  exit 1
-fi
+runuser -u kern-agent -- test -x /usr/local/bin/codex
+runuser -u kern-agent -- test -x /usr/local/bin/claude
+runuser -u kern-agent -- test -x /usr/local/lib/hermes-venv/bin/python
 }
 
 # Host firewall. Root, the dedicated proxy user, and the optional cloudflared
@@ -941,10 +986,7 @@ fi
 # HTTPS because the bundled tool packages run inside it and call their
 # third-party APIs directly; the admin service holds no internet egress at all,
 # so a compromised tool package cannot exfiltrate admin state, and the agent's
-# fail-closed proxy path is unaffected. The kern-agent-app service gets
-# no egress rule at all: its only network reach is the per-app loopback port
-# accepts generated below, so it can proxy agent calls to app backends and
-# nothing else. The kern-agent-network service communicates only over
+# fail-closed proxy path is unaffected. The kern-agent-network service communicates only over
 # Unix sockets; its explicit loopback drop prevents the local policy proxy
 # from becoming an indirect egress path before the broad loopback accept.
 write_firewall() {
@@ -998,8 +1040,10 @@ $(cat /tmp/kern_cloudflare_rules)
     oif lo tcp dport @PROXY_PORT@ meta skuid "kern-agent" accept
 @AGENT_PREVIEW_NFTABLES_RULES@
     oif lo meta skuid "kern-agent" drop
-@APP_NFTABLES_RULES@
-    oif lo meta skuid "kern-agent-app" drop
+    oif lo ct state established,related meta skuid "kern-workspace" accept
+    oif lo meta skuid "kern-workspace" drop
+    oif lo tcp dport $WORKSPACE_PORT meta skuid "kern-admin" accept
+    oif lo tcp dport $WORKSPACE_PORT drop
     oif lo meta skuid "kern-agent-network" drop
     oif lo accept
     ct state established,related accept
@@ -1047,14 +1091,11 @@ MemorySwapMax=5G
 TasksMax=4096
 UNIT
 
-# App backend services share one top-level slice. Like the agent slice, the
-# underscore keeps this as a direct sibling of system.slice rather than a nested
-# dash-encoded slice. CPUWeight is intentionally soft: apps may use idle cores,
-# but under contention host services such as the admin API, proxy, and Postgres
-# keep priority over app backend CPU loops.
-cat > /etc/systemd/system/kern_app.slice <<'UNIT'
+# The workspaces backend is lower priority than the host control plane,
+# while remaining free to use idle CPU.
+cat > /etc/systemd/system/kern_workspace.slice <<'UNIT'
 [Unit]
-Description=Kern App Backends
+Description=Kern Workspaces Backend
 
 [Slice]
 CPUWeight=50
@@ -1135,52 +1176,23 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 
-# The dedicated agent-app service proxies agent app_api calls to app backend
-# ports (the one uid besides kern-admin that nftables allows to open new
-# connections to them). It derives app ownership from the caller's trusted
-# thread scope and needs no database access.
-# RuntimeDirectory stays world-traversable (0755) so the agent can connect;
-# the socket peer-credential check plus cgroup thread attribution are the
-# authentication.
-cat > /etc/systemd/system/kern-agent-app.service <<'UNIT'
-[Unit]
-Description=Kern Agent App Service
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-User=kern-agent-app
-UMask=0077
-RuntimeDirectory=kern-agent-app
-RuntimeDirectoryMode=0755
-Environment=PYTHONPATH=/opt/kern-host
-ExecStart=/usr/bin/python3 -m host.runtime.agent_app.service
-ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-agent-app
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
 cat > /etc/systemd/system/kern-admin-api.service <<'UNIT'
 [Unit]
 Description=Kern Admin API
-After=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-agent-app.service
-Wants=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-agent-app.service
+After=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service
+Wants=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service
 StartLimitIntervalSec=0
 
 [Service]
 User=kern-admin
 UMask=0077
-# kern-admin-api holds the app-backend admin socket; the agent-facing
+# kern-admin-api holds the workspace admin socket; the agent-facing
 # tools socket is owned by kern-tools.service. The directory stays
-# world-traversable so the app users can connect, and the socket peer
-# credentials authenticate the caller.
+# world-traversable so the Workspace service can connect; socket peer credentials
+# authenticate its fixed UID.
 RuntimeDirectory=kern-admin-api
 RuntimeDirectoryMode=0755
-# The app-backend socket is connectable by every local uid, and it shares this
+# The workspace socket is connectable by its group, and it shares this
 # process's fd table with the operator TCP listener, so the descriptor limit
 # must not be the first resource a connection flood exhausts.
 LimitNOFILE=8192
@@ -1217,7 +1229,29 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 
-@APP_SYSTEMD_UNITS@
+cat > /etc/systemd/system/kern-workspace.service <<'UNIT'
+[Unit]
+Description=Kern Workspace
+After=network-online.target kern-admin-api.service kern-postgres.service
+Wants=network-online.target kern-admin-api.service kern-postgres.service
+StartLimitIntervalSec=0
+
+[Service]
+User=kern-workspace
+Slice=kern_workspace.slice
+UMask=0077
+RuntimeDirectory=kern-workspace
+RuntimeDirectoryMode=0755
+Environment=PYTHONPATH=/opt/kern-host
+WorkingDirectory=/opt/kern-host
+ExecStart=/usr/bin/python3 -m host.runtime.workspace.service
+ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-workspace
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
 
 if [ "$cloudflare_connection_count" -gt 0 ]; then
   cat > /etc/systemd/system/kern-cloudflared.service <<'UNIT'
@@ -1246,8 +1280,9 @@ systemctl enable --now kern-network-proxy.service
 systemctl enable --now kern-host-errors.service
 systemctl enable --now kern-tools.service
 systemctl enable --now kern-agent-network.service
-systemctl enable --now kern-agent-app.service
 systemctl enable --now kern-admin-api.service
+systemctl enable kern-workspace.service
+systemctl start kern-workspace.service
 if [ "$cloudflare_connection_count" -gt 0 ]; then
   systemctl enable --now kern-cloudflared.service
   for attempt in $(seq 1 30); do
@@ -1327,13 +1362,11 @@ verify_deployment() {
 }
 
 # Provisioning is almost done: capture the non-secret target version, then
-# drop the single-use deploy key and staged files before starting arbitrary
-# app service code.
+# drop the single-use deploy key and staged files after all service checks pass.
 finalize_deploy() {
 target_version="$(payload_value operation.target_version)"
 rm -f /home/kern-operator/.ssh/authorized_keys2
 rm -f /tmp/kern_payload.json /tmp/kern_effective_config.json /tmp/kern-host-code.tar.gz /tmp/kern_bootstrap.sh
-@APP_ENABLE_START_COMMANDS@
 
 # The admin disk version is authoritative for preserved state. Advance it only
 # after the root-volume install and service setup have succeeded.

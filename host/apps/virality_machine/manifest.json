@@ -1,9 +1,0 @@
-{
-  "host_slot": 4,
-  "title": "Virality Machine",
-  "release_stage": "beta",
-  "deprecated": true,
-  "database": {
-    "migrations": "migrations"
-  }
-}

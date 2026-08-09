@@ -39,7 +39,7 @@ from host.tools import (
     ToolManifest,
 )
 from host.tools.host_api import AssetMetadata
-from host.tools.manifest import TOOL_ID_RE
+from host.tools.manifest import ActionSpec, TOOL_ID_RE
 
 _DEFAULT_ASSET_STORE = tool_assets.ToolAssetStore(tool_assets.DEFAULT_ASSET_ROOT)
 
@@ -84,7 +84,7 @@ def _discover_bundled_tools(
     module_prefix: str = "host.tools",
 ) -> tuple[Tool, ...]:
     """The bundled tools are discovered from the packages under host/tools —
-    like the app platform's manifest scan — so adding a tool is adding its
+    like a package manifest scan — so adding a tool is adding its
     package (with a module-level ``BUNDLED_TOOL`` instance), not editing a
     hand-kept registry here."""
     if root is None:
@@ -263,7 +263,7 @@ class _ToolConfigView(dict[str, str]):
 
     def __missing__(self, key: str) -> str:
         raise ToolConfigKeyUnsetError(
-            f"Tool config {key} is not set. The operator must set it in the admin UI's Tools tab."
+            f"Tool config {key} is not set. The operator must set it under Home > Integrations in the admin UI."
         )
 
 
@@ -438,10 +438,10 @@ def _result_json(result: Any) -> dict[str, Any]:
     }
 
 
-def _validate_output(tool_id: str, action: str, spec: Any, result_json: dict[str, Any]) -> dict[str, Any]:
+def _validate_output(tool_id: str, action: str, spec: ActionSpec, result_json: dict[str, Any]) -> dict[str, Any]:
     # Only direct actions carry a JSON "result" to validate; approved actions
     # return a user-visible "message" with no output schema.
-    if result_json.get("status") != "executed" or "result" not in result_json or spec is None:
+    if result_json.get("status") != "executed" or "result" not in result_json:
         return result_json
     error = validate_against_schema(result_json["result"], spec.output_schema, path="result")
     if not error:
@@ -636,12 +636,9 @@ def validate_against_schema(value: Any, schema: Any, path: str = "input") -> str
         return ""
     one_of = schema.get("oneOf")
     if isinstance(one_of, list):
-        errors = []
         for option in one_of:
-            error = validate_against_schema(value, option, path)
-            if not error:
+            if not validate_against_schema(value, option, path):
                 return ""
-            errors.append(error)
         return f"{path} matches none of the allowed shapes."
     enum = schema.get("enum")
     if isinstance(enum, list) and value not in enum:

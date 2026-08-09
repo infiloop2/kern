@@ -28,7 +28,7 @@ directory below. Those writable locations are not trusted code or policy inputs.
 | `/usr/local/bin`, `/usr/local/lib/node_modules` | root-owned, readable/executable, not service-writable | Node.js, Codex CLI, and Claude Code CLI. |
 | `/usr/local/lib/kern-host/*` | root-owned, `755`, not service-writable | Fixed sudo helpers for runtime launch, account reads, auth clearing, agent-home file reads, reboot, GitHub App token minting/audits, and `.github` push approval. |
 | `/etc/sudoers.d/kern-host` | root-owned, `440`, not service-writable | Exact helper allowlist for `kern-admin`. |
-| `/etc/systemd/system/kern*` | root-owned system config, not service-writable | Postgres, admin API, network proxy, tools, installed app, optional Cloudflare Tunnel service units, and the agent/app slice definitions. |
+| `/etc/systemd/system/kern*` | root-owned system config, not service-writable | Postgres, admin API, network proxy, tools, workspaces, optional Cloudflare Tunnel service units, and resource-slice definitions. |
 | `/etc/kern/cloudflared.token` | root-owned, `0640`, group `cloudflared` | Cloudflare Tunnel token for the optional `cloudflared` service. Directly readable only by root and `cloudflared`; the SSH operator can deliberately cross that boundary with unrestricted sudo. |
 | `/etc/kern/cloudflare_hostname` | root-owned, `644` | Configured Cloudflare Tunnel hostname used for bootstrap verification and operator diagnostics. |
 | `/etc/nftables.conf` | root-owned system config, not service-writable | Host firewall rules. |

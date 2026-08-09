@@ -177,7 +177,7 @@ class StageIntegrationChecks(AwsSmoke):
             failures.append(
                 "no GitHub credential is configured; set the STAGE_GITHUB_* stage secrets "
                 "to auto-configure, or store a write-capable PAT or App credential in the "
-                "admin UI (Internet Access and Tools)"
+                "admin UI (Home > Integrations)"
             )
         if write_repos:
             listed = ", ".join(f"{repo.get('owner')}/{repo.get('repo')}" for repo in write_repos)
@@ -186,7 +186,7 @@ class StageIntegrationChecks(AwsSmoke):
             failures.append(
                 "the network policy lists no GitHub write repository; set the STAGE_GITHUB_* "
                 "stage secrets to auto-configure, or add a dedicated sandbox write repo in "
-                "the admin UI (Internet Access and Tools)"
+                "the admin UI (Home > Integrations)"
             )
         return failures
 
@@ -451,6 +451,127 @@ class StageIntegrationChecks(AwsSmoke):
             )
         self._ok("Claude account guard passed; real turn completed and resumed through the proxy")
 
+    def check_package_client_headers_e2e(self) -> None:
+        """Drive the real pip and npm-registry clients through the proxy.
+
+        The proxy sees whatever a real client chooses to send — conditional
+        revalidation, ranged downloads, and provider-issued URLs — while a
+        unit test can only assert the traffic someone thought to invent. This
+        check exists so an integration tightened past real client traffic
+        fails here rather than in an operator's ``pip install``.
+
+        The assertion is deliberately the absence of a denial: any
+        ``request_param_*`` reason recorded against these hosts while the
+        clients ran means the guard rejected traffic a normal client emits.
+
+        Not covered here, and still unit-tested only: custom-domain
+        ``If-Match`` writes and the WebSocket handshake nonce, neither of
+        which a stage host emits from a real client.
+        """
+        self._step("package clients e2e (pip and npm registry through the proxy)")
+        policy = self.enforcement_policy()
+        policy["network_integrations"]["python_packages"] = {"enabled": True}
+        policy["network_integrations"]["npm_packages"] = {"enabled": True}
+        self._api("PUT", "/v1/network/policy", policy)
+        proxy = f"http://127.0.0.1:{PROXY_PORT}"
+        env = (
+            "sudo -u kern-agent env HOME=/mnt/kern-agent/agent-home "
+            f"HTTPS_PROXY={proxy} https_proxy={proxy} "
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt "
+            "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt "
+            "NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/kern-network-proxy.crt"
+        )
+
+        def agent_command(command: str) -> str:
+            return (
+                f"{env} sh -c "
+                + shlex.quote(f"cd /mnt/kern-agent/agent-home && {command}")
+            )
+
+        workdir = f"/tmp/kern-stage-packages-{time.time_ns()}"
+        baseline_seq = max((event["seq"] for event in self._network_events()), default=0)
+        try:
+            # Kern installs uv, not a system-wide pip module. Seed a venv with
+            # uv (also testing its proxy-CA path), then drive the venv's pip.
+            venv_result = self._ssh_code(
+                agent_command(f"uv venv --seed {workdir}/venv")
+                + " 2>&1 && echo __KERN_VENV_OK__"
+            ).strip()
+            if not venv_result.endswith("__KERN_VENV_OK__"):
+                raise AssertionError(
+                    "could not create the temporary pip venv: "
+                    f"{venv_result[-2000:]!r}"
+                )
+            # Twice: the first pass resolves and downloads, the second lets
+            # pip's cache layer revalidate, which is what puts a real
+            # provider-issued validator on the wire.
+            for attempt in (1, 2):
+                done = self._ssh_code(
+                    agent_command(
+                        f"{workdir}/venv/bin/python -m pip download --quiet --no-deps "
+                        f"--disable-pip-version-check --dest {workdir}/downloads-{attempt} "
+                        "certifi"
+                    )
+                    + " 2>&1 && echo __KERN_PIP_OK__"
+                ).strip()
+                if not done.endswith("__KERN_PIP_OK__"):
+                    raise AssertionError(
+                        f"pip download through the proxy failed on pass {attempt}; "
+                        f"output: {done[-2000:]!r}"
+                    )
+                print(f"    [pip download] pass={attempt} result=success", flush=True)
+            # npm metadata, then a ranged fetch: curl stands in for the npm
+            # binary, which a stage host is not guaranteed to carry, while
+            # still exercising the same forwarded Range and validator fields.
+            etag = self._ssh_code(
+                agent_command(
+                    "curl -sS -D- -o /dev/null https://registry.npmjs.org/lodash "
+                    "| tr -d '\\r' | awk 'tolower($1)==\"etag:\"{print $2}'"
+                )
+            ).strip()
+            if not etag:
+                raise AssertionError("npm registry metadata read through the proxy returned no ETag")
+            revalidated = self._ssh_code(
+                agent_command(
+                    "curl -sS -o /dev/null -w '%{http_code}' "
+                    f"-H 'If-None-Match: {etag}' https://registry.npmjs.org/lodash"
+                )
+            ).strip()
+            if revalidated not in {"200", "304"}:
+                raise AssertionError(
+                    f"npm registry revalidation returned {revalidated!r}; the guard may be "
+                    "denying a provider-issued validator"
+                )
+            ranged = self._ssh_code(
+                agent_command(
+                    "curl -sS -o /dev/null -w '%{http_code}' -r 0-1023 "
+                    "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+                )
+            ).strip()
+            if ranged not in {"200", "206"}:
+                raise AssertionError(
+                    f"npm tarball ranged download returned {ranged!r}; the bounded Range "
+                    "exemption may be narrower than a real client's request"
+                )
+            print(f"    [npm registry] revalidate={revalidated} ranged={ranged}", flush=True)
+        finally:
+            self._ssh_code(f"sudo -u kern-agent rm -rf {workdir}")
+        denied = [
+            event
+            for event in self._network_events(baseline_seq)
+            if str(event.get("reason_code") or "").startswith("request_param_")
+        ]
+        if denied:
+            detail = ", ".join(
+                f"{event.get('method')} {event.get('host')}{event.get('path')} -> {event.get('reason_code')}"
+                for event in denied[:5]
+            )
+            raise AssertionError(
+                "the parameter guard denied ordinary package-client traffic, so a guard rule "
+                f"is tighter than real clients: {detail}"
+            )
+        self._ok("pip and npm registry clients completed through the proxy")
+
     def check_github_write_e2e(self) -> None:
         """End-to-end exercise of the authenticated GitHub paths with a real,
         operator-installed write credential: clone, a real branch push
@@ -466,15 +587,15 @@ class StageIntegrationChecks(AwsSmoke):
         if not write_repos:
             raise AssertionError(
                 "the stage host's network policy lists no GitHub write repository; "
-                "add a dedicated sandbox write repo in the admin UI (Internet Access "
-                "and Tools), then rerun; like the provider logins, this is one-time "
+                "add a dedicated sandbox write repo in the admin UI (Home > Integrations), "
+                "then rerun; like the provider logins, this is one-time "
                 "stage-host configuration"
             )
         metadata = self._api("GET", "/v1/network-tools/github-credential")
         if metadata.get("configured") is not True:
             raise AssertionError(
                 "no GitHub credential is configured on the stage host; store a write-capable "
-                "PAT or App credential in the admin UI (Internet Access and Tools), then rerun; "
+                "PAT or App credential in the admin UI (Home > Integrations), then rerun; "
                 "like the provider logins, this is one-time stage-host configuration"
             )
         write_repo = f"{write_repos[0]['owner']}/{write_repos[0]['repo']}"

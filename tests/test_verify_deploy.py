@@ -15,7 +15,6 @@ import unittest
 
 from host.bootstrap import verify_deploy
 from host.constants import ADMIN_API_PORT, PROXY_PORT, SERVICE_ACCOUNTS
-from host.runtime.core import app_platform
 
 UIDS = {"root": 0, **SERVICE_ACCOUNTS}
 
@@ -33,14 +32,11 @@ def completed(returncode: int, stdout: str = "", stderr: str = "") -> "subproces
 
 
 class ExpectedAccountsTests(unittest.TestCase):
-    def test_includes_pinned_core_accounts_and_migration_app_packages(self) -> None:
+    def test_includes_pinned_core_accounts(self) -> None:
         accounts = verify_deploy.expected_accounts()
         for name, uid in SERVICE_ACCOUNTS.items():
             self.assertEqual(accounts[name], uid)
-        apps = app_platform.migration_apps()
-        self.assertGreaterEqual(len(apps), 1)
-        for app in apps:
-            self.assertEqual(accounts[app.linux_user], app.allocation.uid)
+        self.assertFalse(any(name.startswith("kern-app-") for name in accounts))
 
     def test_existing_account_with_matching_ids_passes(self) -> None:
         self.assertEqual(verify_deploy.check_service_accounts({"root": 0}), [])
@@ -53,7 +49,6 @@ class ExpectedAccountsTests(unittest.TestCase):
         self.assertTrue(
             any("kern-no-such-user does not exist" in failure for failure in failures)
         )
-
 
 class PathFactTests(unittest.TestCase):
     def test_matching_facts_pass(self) -> None:
@@ -121,7 +116,7 @@ class SocketTests(unittest.TestCase):
             set(verify_deploy.SOCKET_OWNERS.values()),
             {
                 "kern-tools",
-                "kern-agent-app",
+                "kern-workspace",
                 "kern-agent-network",
                 "kern-admin",
                 "postgres",
@@ -134,7 +129,8 @@ class ListenerTests(unittest.TestCase):
         "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
         "   0: 0100007F:1D13 00000000:0000 0A 00000000:00000000 00:00000000 00000000 47741        0 1000 1\n"
         "   1: 0100007F:1D15 00000000:0000 0A 00000000:00000000 00:00000000 00000000 47742        0 1001 1\n"
-        "   2: 0100007F:0016 00000000:0000 01 00000000:00000000 00:00000000 00000000     0        0 1002 1\n"
+        "   2: 0100007F:1D1A 00000000:0000 0A 00000000:00000000 00:00000000 00000000 47750        0 1002 1\n"
+        "   3: 0100007F:0016 00000000:0000 01 00000000:00000000 00:00000000 00000000     0        0 1003 1\n"
     )
 
     def test_parse_extracts_loopback_listeners_with_uids(self) -> None:
@@ -142,7 +138,7 @@ class ListenerTests(unittest.TestCase):
         self.assertIn(("127.0.0.1", ADMIN_API_PORT, 47741), listeners)
         self.assertIn(("127.0.0.1", PROXY_PORT, 47742), listeners)
         # Non-LISTEN rows are ignored.
-        self.assertEqual(len(listeners), 2)
+        self.assertEqual(len(listeners), 3)
 
     def test_expected_listeners_pass_and_wrong_owner_fails(self) -> None:
         self.assertEqual(
@@ -234,11 +230,6 @@ class RunnerBackedCheckTests(unittest.TestCase):
         for _, host, _, expectation, reason in enforced:
             if expectation == "reachable":
                 self.assertEqual(host, "127.0.0.1", reason)
-        # Positive external egress is advisory only.
-        advisory = {reason for _, _, _, _, reason in verify_deploy.advisory_probes()}
-        self.assertEqual(advisory, {"tools service egress", "proxy egress"})
-        for _, _, _, expectation, _ in verify_deploy.advisory_probes():
-            self.assertEqual(expectation, "reachable")
 
     def test_database_access(self) -> None:
         def run(argv: list[str]) -> "subprocess.CompletedProcess[str]":

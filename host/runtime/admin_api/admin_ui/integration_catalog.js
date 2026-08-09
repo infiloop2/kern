@@ -1,6 +1,6 @@
 // Operator-facing catalog for network integrations that are built into the
-// host rather than supplied by tool manifests. The compact info popover and
-// the full Integration Guides entry render this same content.
+// host rather than supplied by tool manifests. The compact integration card
+// and the full Home detail page render this same content.
 
 export const MANAGED_INTEGRATIONS = {
   openai: {
@@ -11,7 +11,7 @@ export const MANAGED_INTEGRATIONS = {
       "Live browsing and remote tool servers are blocked. Codex can use only OpenAI's cached web search.",
     ],
     setupSteps: [
-      { title: "Enable OpenAI", description: "In Internet Access and Tools, choose Enable on the OpenAI row, then expand it." },
+      { title: "Enable OpenAI", description: "On Home, open OpenAI under Integrations and choose Enable." },
       { title: "Start the Codex login", description: "In Account, choose Start Codex login. In the OpenAI browser sign-in, use the subscription you want this host to use and enter the displayed device code to complete sign-in." },
       { title: "Verify the linked account", description: "Return to Kern and wait for the row to show connected with the expected email or account id. That identity is now the operator-approved account anchor." },
     ],
@@ -77,7 +77,7 @@ export const MANAGED_INTEGRATIONS = {
       "Web search is off by default. When you enable it, the query and surrounding context reach Anthropic's server-side search, which may use search partners and retrieve source pages outside Kern's boundary. Server-side web fetch, code execution, and remote tool servers stay blocked at the proxy regardless; the agent's own web fetch runs on this host and can reach only Kern's allowed domains.",
     ],
     setupSteps: [
-      { title: "Enable Claude", description: "In Internet Access and Tools, choose Enable on the Claude row, then expand it." },
+      { title: "Enable Claude", description: "On Home, open Claude under Integrations and choose Enable." },
       { title: "Start the Claude Code login", description: "In Account, choose Start Claude Code login. Follow the displayed Anthropic OAuth flow and paste the authorization result when prompted." },
       { title: "Verify the linked account", description: "Wait for the row to show connected with the expected Anthropic identity. Kern validates the token live before reporting the runtime active." },
     ],
@@ -172,7 +172,7 @@ export const MANAGED_INTEGRATIONS = {
         linkUrl: "https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html",
         linkLabel: "View AWS's model access guide",
       },
-      { title: "Connect AWS", description: "In Internet Access and Tools, expand Hermes (AWS Bedrock), paste the access key id and secret access key, choose the region matching your model access, and connect them together." },
+      { title: "Connect AWS", description: "On Home, open Hermes (AWS Bedrock), paste the access key id and secret access key, choose the region matching your model access, and connect them together." },
       { title: "Enable Bedrock", description: "Choose Enable. Hermes becomes available." },
     ],
     dataSummary: {
@@ -233,8 +233,8 @@ export const MANAGED_INTEGRATIONS = {
       "Reads can reach any public repository and private repositories visible to the credential; writes work only for the repositories you configure.",
       "Repository administration, GraphQL, Git LFS uploads, and other write paths that could reach beyond the configured repositories stay denied.",
       "Keep approval for `.github` pushes enabled. Workflow changes can make GitHub Actions run arbitrary code with network access and repository credentials.",
-      "Search and read query values pass the host parameter guard: values shaped like a secret, credential, or sensitive identifier are denied before the request is sent.",
-      "GitHub Actions Azure downloads are limited to GitHub's documented productionresultssa0 through productionresultssa19 storage accounts.",
+      "Search/read query values pass the host parameter guard: values shaped like a secret, credential, or sensitive identifier are denied before the request is sent. Request headers are not inspected; the agent's Authorization is replaced with the host-held token and User-Agent with a fixed host value.",
+      "GitHub Actions Azure downloads are limited to GitHub's documented productionresultssa0 through productionresultssa19 storage accounts; path and query values take the parameter guard.",
     ],
     setupSteps: [
       { title: "Choose a credential mode", description: "Use a fine-grained personal access token for the simplest personal setup. Use a GitHub App when you want repository installation scope and short-lived minted tokens." },
@@ -252,7 +252,7 @@ export const MANAGED_INTEGRATIONS = {
       items: [
         {
           title: "What leaves this host",
-          description: "Any data on this host can be written to a repository on the write list, so assume GitHub can receive anything the agent can read here. Reads send only repository paths and query parameters, but GitHub receives and logs that request text with standard metadata whether or not the requested repository exists, so anything the agent puts in a path or query is itself disclosed to GitHub. Read query values first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent.",
+          description: "Any data on this host can be written to a repository on the write list, so assume GitHub can receive anything the agent can read here. Reads send repository paths, query parameters, and request headers; GitHub may log that metadata whether or not the requested repository exists. Read query values first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent. Headers are forwarded as the client sent them, except the agent's Authorization, which is replaced with the host-held token, and User-Agent, which is replaced with a fixed host value.",
           links: [],
         },
         {
@@ -282,8 +282,8 @@ export const MANAGED_INTEGRATIONS = {
       ],
     },
     controls: [
-      "Parameter guard: agent-authored read query values (search q= and filters) are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Repository paths and revision identifiers are exempt.",
-      "Azure account allowlist: only GitHub's documented productionresultssa0 through productionresultssa19 Blob storage accounts are eligible.",
+      "Parameter guard: agent-authored read query values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Repository paths and revision identifiers are exempt. Request headers are not inspected: the agent's Authorization is replaced with the host-held token and User-Agent with a fixed host value, and the rest are forwarded as the client sent them.",
+      "Azure Blob downloads: only GitHub's documented productionresultssa0 through productionresultssa19 storage accounts are eligible. The SAS signature is shape-validated and neutralized, then the path and other query values take the parameter guard.",
       "Disabling GitHub clears the write-repository list; the independently stored credential can remain staged or be cleared separately.",
     ],
     networkScope: [
@@ -305,10 +305,10 @@ export const MANAGED_INTEGRATIONS = {
     protections: [
       "Access is read-only and limited to the public PyPI index, package metadata, and distribution download paths.",
       "Package publishing and arbitrary requests to PyPI or the download host remain denied.",
-      "Index and metadata reads on pypi.org pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent. The bulk download host files.pythonhosted.org is exempt — its distribution download paths are NOT scanned by the parameter guard.",
+      "Index and metadata reads on pypi.org pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent. Credential headers are removed and User-Agent is replaced with a fixed host value; other headers are forwarded as sent, because PyPI reflects none of them back. The bulk download host files.pythonhosted.org is exempt — its distribution download URL paths are NOT scanned by the parameter guard.",
     ],
     setupSteps: [
-      { title: "Enable Python packages", description: "Choose Enable in Internet Access and Tools. pip and compatible package clients can then resolve and download public distributions." },
+      { title: "Enable Python packages", description: "On Home, open Python Packages under Integrations and choose Enable. pip and compatible package clients can then resolve and download public distributions." },
     ],
     capabilities: [
       { name: "Package discovery", description: "Reads the PyPI simple index and package JSON metadata." },
@@ -318,7 +318,7 @@ export const MANAGED_INTEGRATIONS = {
       items: [
         {
           title: "What leaves this host",
-          description: "Only package names and versions, the files requested, and standard web request metadata (source IP, request time, client User-Agent). Nothing else on this host is sent. Requested package names and URL values first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent.",
+          description: "Package names and versions, the files requested, and the request headers your package client sends — these are forwarded as sent, so treat any header the client adds as visible to the registry. Two are changed: credential headers (Authorization, Cookie) are removed, and User-Agent is replaced with a fixed value identifying this host rather than your client. Standard web request metadata (source IP, request time) is visible as it is for any HTTPS request. Nothing else on this host is sent. PyPI reflects no header back, so the control that matters here is on the requested package name.",
           links: [],
         },
         {
@@ -349,7 +349,7 @@ export const MANAGED_INTEGRATIONS = {
       ],
     },
     controls: [
-      "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Distribution downloads from files.pythonhosted.org are exempt and are not scanned.",
+      "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Headers are not scanned; credential headers are removed and User-Agent is replaced with a fixed host value. Distribution download URL paths on files.pythonhosted.org are exempt and are not scanned.",
     ],
     networkScope: [
       ["pypi.org", "GET and HEAD only under /simple and /pypi/<package>/json"],
@@ -362,10 +362,10 @@ export const MANAGED_INTEGRATIONS = {
     protections: [
       "Registry and Node.js distribution access is read-only; npm publishing and arbitrary Node.js website paths remain denied.",
       "Only public registry data and release files are available through this integration.",
-      "Requested package names and URL values pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent. The bulk paths are exempt — registry.npmjs.org carries no path guards, and every npm tarball path (any path containing `/-/`) is NOT scanned by the parameter guard.",
+      "Requested package names and URL values pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent. Credential headers are removed and User-Agent is replaced with a fixed host value; other headers are forwarded as sent, because the registry reflects none of them back. The bulk URL paths are exempt — registry.npmjs.org carries no path guards, and every npm tarball path (any path containing `/-/`) is NOT scanned by the parameter guard.",
     ],
     setupSteps: [
-      { title: "Enable NPM Packages", description: "Choose Enable in Internet Access and Tools. npm and compatible clients can then resolve and download public packages and Node.js distributions." },
+      { title: "Enable NPM Packages", description: "On Home, open NPM Packages under Integrations and choose Enable. npm and compatible package clients can then resolve and download public packages and Node.js distributions." },
     ],
     capabilities: [
       { name: "npm registry reads", description: "Reads public package metadata and tarballs through registry.npmjs.org." },
@@ -375,7 +375,7 @@ export const MANAGED_INTEGRATIONS = {
       items: [
         {
           title: "What leaves this host",
-          description: "Only package names and versions, the files requested, and standard web request metadata (source IP, request time, client User-Agent). Nothing else on this host is sent. Requested package names and URL values first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent.",
+          description: "Package names and versions, the files requested, and the request headers your package client sends — these are forwarded as sent, so treat any header the client adds as visible to the registry. Two are changed: credential headers (Authorization, Cookie) are removed, and User-Agent is replaced with a fixed value identifying this host rather than your client. Standard web request metadata (source IP, request time) is visible as it is for any HTTPS request. Nothing else on this host is sent. The registry reflects no header back, so the control that matters here is on the requested package name.",
           links: [],
         },
         {
@@ -407,7 +407,7 @@ export const MANAGED_INTEGRATIONS = {
       ],
     },
     controls: [
-      "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. registry.npmjs.org and npm tarball paths (any path containing /-/) are exempt and are not scanned.",
+      "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Headers are not scanned; credential headers are removed and User-Agent is replaced with a fixed host value. npm tarball URL paths (any path containing /-/) are exempt and are not scanned.",
     ],
     networkScope: [
       ["registry.npmjs.org", "GET and HEAD only"],
@@ -422,7 +422,7 @@ export const CUSTOM_DOMAIN_GUIDE = {
   summary: "Creates an explicit network rule for a domain that is not covered by a managed integration or bundled tool.",
   protections: [
     "Every request must match the configured domain, method, and any path guards. Anything outside the rule is denied and recorded in the network audit log.",
-    "Request URL values pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent.",
+    "Nothing inside the request is inspected: no header checks, no URL parameter guard, no body scanning. The domain, method and path rule is the whole boundary, so adding a domain here means trusting that destination with anything the agent can send it.",
     "Managed-integration domains are reserved, so a custom rule cannot bypass their account, repository, or request-body protections.",
   ],
   setupSteps: [
@@ -437,7 +437,7 @@ export const CUSTOM_DOMAIN_GUIDE = {
     items: [
       {
         title: "What leaves this host",
-        description: "The configured service receives the complete HTTPS request: hostname, path, query parameters, method, headers, cookies or authorization values, body, and source network metadata. Any host data the agent places in a request can go to that service. The request URL's path and query values first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent; the request body is not scanned.",
+        description: "The configured service receives the complete HTTPS request: hostname, path, query parameters, method, headers, cookies or authorization values, body, and source network metadata. Any host data the agent places in a request can go to that service, and none of it is inspected — the host checks only that the domain, method and path match your rule. Add a domain here only if you trust that destination with your data.",
         links: [],
       },
       {
@@ -458,7 +458,7 @@ export const CUSTOM_DOMAIN_GUIDE = {
     ],
   },
   controls: [
-    "Parameter guard: request URL path and query values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent; the request body is not scanned.",
+    "No content inspection: the domain, method and path rule is enforced and nothing else. URL values, headers, cookies, credentials and the request body are all forwarded as the agent sent them. Managed integrations are guarded because their clients and destinations are known; a custom domain is not, so trusting the destination is the decision you are making here.",
     "Rules validate structurally and publish atomically; an invalid replacement leaves the active policy unchanged.",
   ],
   networkScope: [],

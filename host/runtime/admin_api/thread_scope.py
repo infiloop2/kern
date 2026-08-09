@@ -22,24 +22,16 @@ class ThreadScopeError(RuntimeError):
     pass
 
 
-def _is_production_turn(
-    thread_id: str | None,
-    command: list[str],
-    launcher_command: list[str],
-) -> bool:
-    return (
-        thread_id is not None
-        and command[: len(launcher_command)] == launcher_command
-    )
+def _is_production_turn(command: list[str], launcher_command: list[str]) -> bool:
+    return command[: len(launcher_command)] == launcher_command
 
 
 def interrupt_thread_scope(
     thread_id: str | None, command: list[str], launcher_command: list[str]
 ) -> None:
     """Request SIGKILL for a production turn scope without waiting to reap it."""
-    if not _is_production_turn(thread_id, command, launcher_command):
+    if thread_id is None or not _is_production_turn(command, launcher_command):
         return
-    assert thread_id is not None
     try:
         subprocess.run(
             [*STOP_COMMAND, "--signal-only", thread_id],
@@ -63,9 +55,8 @@ def stop_thread_scope(
     test command runs in-process with no scope to stop. Codex folds
     ``--thread-scope`` into its command, so the launcher is matched by prefix.
     """
-    if not _is_production_turn(thread_id, command, launcher_command):
+    if thread_id is None or not _is_production_turn(command, launcher_command):
         return
-    assert thread_id is not None
     try:
         result = subprocess.run(
             [*STOP_COMMAND, thread_id],
@@ -77,8 +68,5 @@ def stop_thread_scope(
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ThreadScopeError("timed out reaping the agent process scope") from exc
-    # Test doubles that only assert the helper invocation may not provide a
-    # concrete return code; real CompletedProcess results always do.
-    returncode = getattr(result, "returncode", 0)
-    if isinstance(returncode, int) and returncode != 0:
+    if result.returncode != 0:
         raise ThreadScopeError("the agent process scope did not close")

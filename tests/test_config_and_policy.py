@@ -18,7 +18,7 @@ from host.config import (
     NetworkControls,
     parse_network_controls,
 )
-from host.cli.lifecycle import _subnet_has_public_ipv4_route
+from host.cli.lifecycle_aws import _subnet_has_public_ipv4_route
 from host.network_integrations.claude import guard as claude_guard
 from host.network_integrations.github import guard as github_guard
 from host.network_integrations.openai import guard as openai_guard

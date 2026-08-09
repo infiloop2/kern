@@ -14,7 +14,7 @@ import tempfile
 import threading
 import unittest
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pg_harness
 
@@ -72,6 +72,57 @@ class StateStorageTests(unittest.TestCase):
         self.assertIsNone(state.thread_session_config("t2"))
         self.assertIsNotNone(state.thread_session_config("t1"))
         self.assertEqual(read_agent_events(), [])
+
+    def test_agent_history_counts_are_monotonic_and_share_write_transactions(self) -> None:
+        self.assertEqual(
+            state.agent_history_counts(),
+            {"threads": 0, "messages": 0, "activities": 0},
+        )
+        with state.mutation() as cur:
+            seed_thread(cur, "t1")
+            state.append_agent_event(
+                cur, "thread.message", "t1", {"message": "hello", "source": "user"}
+            )
+            state.append_agent_event(
+                cur,
+                "thread.activity",
+                "t1",
+                {"activity": {"kind": "command", "title": "Checked status"}},
+            )
+            state.append_agent_event(
+                cur, "thread.error", "t1", {"error_message": "not counted"}
+            )
+
+        self.assertEqual(
+            state.agent_history_counts(),
+            {"threads": 1, "messages": 1, "activities": 1},
+        )
+
+        with state.mutation() as cur:
+            # Updating the provider mapping does not count the same thread twice.
+            seed_thread(cur, "t1", provider_session_id="session-1")
+            state.append_agent_event(
+                cur, "thread.message", "t1", {"message": "again", "source": "agent"}
+            )
+        self.assertEqual(
+            state.agent_history_counts(),
+            {"threads": 1, "messages": 1, "activities": 2},
+        )
+
+        with self.assertRaises(RuntimeError):
+            with state.mutation() as cur:
+                seed_thread(cur, "rolled-back")
+                state.append_agent_event(
+                    cur,
+                    "thread.activity",
+                    "rolled-back",
+                    {"activity": {"kind": "status", "title": "Never committed"}},
+                )
+                raise RuntimeError("rollback")
+        self.assertEqual(
+            state.agent_history_counts(),
+            {"threads": 1, "messages": 1, "activities": 2},
+        )
 
     def test_activity_event_escapes_nul_before_jsonb_persistence(self) -> None:
         with state.mutation() as cur:
@@ -154,18 +205,18 @@ class StateStorageTests(unittest.TestCase):
         self.assertEqual(summaries["t2"]["last_used_at"], "")
         self.assertEqual(summaries["t2"]["agent_runtime"], "claude_code")
 
-    def test_thread_summary_pages_use_stable_sort_key_and_prefix_scope(self) -> None:
+    def test_thread_summary_pages_use_stable_sort_key_and_prefix_filter(self) -> None:
         with state.mutation() as cur:
-            seed_thread(cur, "agent_chat__one", last_used_at="2026-06-08T00:00:02Z")
-            seed_thread(cur, "agent_chat__two", last_used_at="2026-06-08T00:00:02Z")
-            seed_thread(cur, "other_app__newer", last_used_at="2026-06-08T00:00:03Z")
+            seed_thread(cur, "thread-1", last_used_at="2026-06-08T00:00:02Z")
+            seed_thread(cur, "thread-2", last_used_at="2026-06-08T00:00:02Z")
+            seed_thread(cur, "app-1", last_used_at="2026-06-08T00:00:03Z")
 
         first = state.page_thread_summaries(
             None,
             1,
-            thread_prefix="agent_chat__",
+            thread_prefix="thread-",
         )
-        self.assertEqual([row["thread_id"] for row in first], ["agent_chat__two"])
+        self.assertEqual([row["thread_id"] for row in first], ["thread-2"])
         cursor = (
             first[-1]["last_used_at"],
             first[-1]["thread_id"],
@@ -173,9 +224,9 @@ class StateStorageTests(unittest.TestCase):
         second = state.page_thread_summaries(
             cursor,
             1,
-            thread_prefix="agent_chat__",
+            thread_prefix="thread-",
         )
-        self.assertEqual([row["thread_id"] for row in second], ["agent_chat__one"])
+        self.assertEqual([row["thread_id"] for row in second], ["thread-1"])
 
     def test_every_session_option_satisfies_the_thread_constraint(self) -> None:
         # The thread_sessions_options_check constraint must track the
@@ -261,7 +312,74 @@ class StateStorageTests(unittest.TestCase):
             )
         self.assertEqual(state.thread_session_config("chat")["agent_runtime"], "claude_code")
 
-    def test_recent_thread_handoff_events_include_expanded_activity_in_a_bounded_suffix(
+    def test_clearing_working_memory_drops_the_session_and_fences_the_handoff(
+        self,
+    ) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "chat", provider_session_id="codex-session")
+            state.append_agent_event(
+                cur, "thread.message", "chat", {"message": "before", "source": "user"}
+            )
+            cleared_seq = state.append_agent_event(
+                cur, "thread.activity", "chat", {"activity": {"title": "cleared"}}
+            )
+            state.clear_thread_context(cur, "chat", cleared_seq, "2026-06-08T00:00:09Z")
+
+        config = state.thread_session_config("chat")
+        assert config is not None
+        self.assertIsNone(config["provider_session_id"])
+        self.assertEqual(config["context_cleared_seq"], cleared_seq)
+        # Runtime configuration is untouched; only the provider session goes.
+        self.assertEqual(config["agent_runtime"], "codex")
+
+        with state.mutation() as cur:
+            # The marker itself is at the floor, so the next run is handed
+            # nothing at all rather than a summary of what was cleared.
+            self.assertEqual(
+                state.recent_thread_handoff_events(
+                    cur,
+                    "chat",
+                    message_character_limit=1000,
+                    activity_character_limit=1000,
+                    activity_event_character_limit=1000,
+                    after_seq=config["context_cleared_seq"],
+                ),
+                [],
+            )
+            state.append_agent_event(
+                cur, "thread.message", "chat", {"message": "after", "source": "user"}
+            )
+            resumed = state.recent_thread_handoff_events(
+                cur,
+                "chat",
+                message_character_limit=1000,
+                activity_character_limit=1000,
+                activity_event_character_limit=1000,
+                after_seq=config["context_cleared_seq"],
+            )
+        self.assertEqual([event["payload"]["message"] for event in resumed], ["after"])
+
+    def test_clearing_working_memory_requires_idle_and_never_lowers_the_floor(
+        self,
+    ) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "chat", provider_session_id="codex-session")
+            state.clear_thread_context(cur, "chat", 50, "2026-06-08T00:00:09Z")
+            # A late or out-of-order caller cannot restore cleared context.
+            state.clear_thread_context(cur, "chat", 20, "2026-06-08T00:00:10Z")
+        self.assertEqual(
+            state.thread_session_config("chat")["context_cleared_seq"], 50
+        )
+
+        with state.mutation() as cur:
+            state.start_thread_run(cur, "chat")
+        with self.assertRaisesRegex(ValueError, "running or does not exist"), state.mutation() as cur:
+            state.clear_thread_context(cur, "chat", 90, "2026-06-08T00:00:11Z")
+        self.assertEqual(
+            state.thread_session_config("chat")["context_cleared_seq"], 50
+        )
+
+    def test_recent_thread_handoff_events_use_independent_activity_and_message_windows(
         self,
     ) -> None:
         with state.mutation() as cur:
@@ -269,6 +387,10 @@ class StateStorageTests(unittest.TestCase):
             state.append_agent_event(
                 cur, "thread.message", "chat", {"message": "oldest", "source": "user"}
             )
+            state.append_agent_event(
+                cur, "thread.error", "chat", {"error_message": "not conversation"}
+            )
+            state.append_agent_event(cur, "thread.stopped", "chat", {})
             state.append_agent_event(
                 cur,
                 "thread.activity",
@@ -291,16 +413,59 @@ class StateStorageTests(unittest.TestCase):
             events = state.recent_thread_handoff_events(
                 cur,
                 "chat",
-                character_limit=200,
+                message_character_limit=200,
+                activity_character_limit=200,
+                activity_event_character_limit=200,
             )
 
         self.assertEqual(
             [event["event_type"] for event in events],
-            ["thread.activity", "thread.message"],
+            ["thread.message", "thread.activity", "thread.message"],
         )
-        activity = events[0]["payload"]["activity"]
+        activity = events[1]["payload"]["activity"]
         self.assertEqual(activity["detail"], "d" * 250)
         self.assertEqual(activity["output"], "full output")
+
+    def test_handoff_window_weights_activity_by_its_compacted_size(self) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "chat")
+            state.append_agent_event(
+                cur,
+                "thread.message",
+                "chat",
+                {"message": "important earlier decision", "source": "user"},
+            )
+            state.append_agent_event(
+                cur,
+                "thread.activity",
+                "chat",
+                {
+                    "activity": {
+                        "provider": "codex",
+                        "activity_id": "command-1",
+                        "kind": "command",
+                        "phase": "completed",
+                        "title": "Large output",
+                        "output": "o" * 10_000,
+                    }
+                },
+            )
+            state.append_agent_event(
+                cur, "thread.message", "chat", {"message": "newest", "source": "agent"}
+            )
+            events = state.recent_thread_handoff_events(
+                cur,
+                "chat",
+                message_character_limit=1_000,
+                activity_character_limit=200,
+                activity_event_character_limit=200,
+            )
+
+        self.assertEqual(
+            [event["event_type"] for event in events],
+            ["thread.message", "thread.activity", "thread.message"],
+        )
+        self.assertEqual(events[0]["payload"]["message"], "important earlier decision")
 
     def test_provider_session_callback_updates_only_its_matching_run(self) -> None:
         with state.mutation() as cur:
@@ -513,6 +678,155 @@ class StateStorageTests(unittest.TestCase):
             ["a", "b"],
         )
 
+    def test_conversation_search_supports_relevance_time_and_stable_cursors(self) -> None:
+        with state.mutation() as cur:
+            cur.execute(
+                "INSERT INTO chat_threads (thread_id, archived) VALUES"
+                " ('thread-1', FALSE), ('thread-2', FALSE), ('thread-3', FALSE)"
+            )
+            for thread_id, timestamp, message, source in (
+                ("thread-1", "2026-06-01T00:00:00Z", "Cloudflare tunnel is healthy", "user"),
+                ("thread-2", "2026-06-02T00:00:00Z", "A degraded tunnel still serves traffic", "agent"),
+                ("thread-3", "2026-06-03T00:00:00Z", "Unrelated package installation", "agent"),
+            ):
+                seq = state.append_agent_event(
+                    cur,
+                    "thread.message",
+                    thread_id,
+                    {"message": message, "source": source},
+                )
+                cur.execute(
+                    "UPDATE agent_events SET created_at = %s WHERE seq = %s",
+                    (timestamp, seq),
+                )
+            orphan = state.append_agent_event(
+                cur,
+                "thread.message",
+                "thread-99",
+                {"message": "degraded tunnel traffic", "source": "agent"},
+            )
+            cur.execute(
+                "UPDATE agent_events SET created_at = %s WHERE seq = %s",
+                ("2026-06-04T00:00:00Z", orphan),
+            )
+
+        relevant = state.search_thread_messages(
+            ("degraded tunnel", "tunnel traffic"),
+            from_timestamp=None,
+            to_timestamp=None,
+            thread_id=None,
+            sources=("user", "agent"),
+            limit=10,
+            before=None,
+        )
+        self.assertEqual(relevant[0]["thread_id"], "thread-99")
+        self.assertIn("thread-2", {row["thread_id"] for row in relevant})
+        self.assertIn("degraded", relevant[0]["excerpt"].lower())
+        self.assertGreater(relevant[0]["search_rank"], 0)
+
+        complete = state.search_thread_messages(
+            ("Cloudflare tunnel",),
+            from_timestamp=None,
+            to_timestamp=None,
+            thread_id="thread-1",
+            sources=("user",),
+            limit=10,
+            before=None,
+        )
+        self.assertEqual(complete[0]["excerpt"], "[[Cloudflare]] [[tunnel]] is healthy")
+        self.assertFalse(complete[0]["excerpt_truncated"])
+
+        timed = state.search_thread_messages(
+            (),
+            from_timestamp="2026-06-01T12:00:00Z",
+            to_timestamp="2026-06-04T00:00:00Z",
+            thread_id=None,
+            sources=("agent",),
+            limit=1,
+            before=None,
+        )
+        self.assertEqual([row["thread_id"] for row in timed], ["thread-3"])
+        older = state.search_thread_messages(
+            (),
+            from_timestamp="2026-06-01T12:00:00Z",
+            to_timestamp="2026-06-04T00:00:00Z",
+            thread_id=None,
+            sources=("agent",),
+            limit=10,
+            before=(timed[-1]["timestamp"], timed[-1]["seq"]),
+        )
+        self.assertEqual([row["thread_id"] for row in older], ["thread-2"])
+
+    def test_conversation_search_keeps_hostile_query_text_out_of_sql(self) -> None:
+        hostile = "tunnel'); DROP TABLE agent_events; SELECT pg_sleep(30); --"
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        transaction = MagicMock()
+        transaction.__enter__.return_value = cursor
+        transaction.__exit__.return_value = False
+
+        with patch.object(state.db, "transaction", return_value=transaction):
+            self.assertEqual(
+                state.search_thread_messages(
+                    (hostile,),
+                    from_timestamp=None,
+                    to_timestamp=None,
+                    thread_id=None,
+                    sources=("user", "agent"),
+                    limit=10,
+                    before=None,
+                ),
+                [],
+            )
+
+        search_sql, parameters = cursor.execute.call_args_list[-1].args
+        self.assertNotIn(hostile, search_sql)
+        self.assertEqual(parameters[0], hostile)
+
+    def test_thread_events_around_requires_an_anchor_in_the_thread(self) -> None:
+        with state.mutation() as cur:
+            seqs = [
+                state.append_agent_event(
+                    cur,
+                    "thread.message",
+                    "thread-1",
+                    {"message": str(index), "source": "user"},
+                )
+                for index in range(5)
+            ]
+            other = state.append_agent_event(
+                cur,
+                "thread.message",
+                "thread-2",
+                {"message": "other", "source": "user"},
+            )
+
+        around = state.page_thread_events_around(
+            "thread-1",
+            seqs[2],
+            3,
+            event_types=("thread.message",),
+        )
+        self.assertEqual(
+            [event["payload"]["message"] for event in around or []],
+            ["1", "2", "3"],
+        )
+        from_start = state.page_thread_events_around(
+            "thread-1",
+            seqs[0],
+            3,
+            event_types=("thread.message",),
+        )
+        self.assertEqual(
+            [event["payload"]["message"] for event in from_start or []],
+            ["0", "1", "2"],
+        )
+        self.assertIsNone(
+            state.page_thread_events_around(
+                "thread-1", other, 3, event_types=("thread.message",)
+            )
+        )
+
     def test_recover_interrupted_thread_runs_returns_them_to_idle(self) -> None:
         with state.mutation() as cur:
             seed_thread(cur, "done")
@@ -566,25 +880,15 @@ class StateStorageTests(unittest.TestCase):
                     last_used_at=f"2026-06-08T00:00:{number:02d}Z",
                 )
             seed_thread(cur, "c1", runtime="claude_code", model="claude-fable-5", effort="high")
-            # t1 is the least recently used, but its retained events keep the
-            # canonical row so its history stays listed.
             state.append_agent_event(cur, "thread.message", "t1", {"message": "keep", "source": "user"})
         with state.mutation() as cur:
             state.prune_thread_sessions(cur, "codex", 3)
-        remaining = {
-            row["thread_id"] for row in state.page_thread_summaries(None, 100)
-        }
-        # The event-referenced thread, the three newest unreferenced ones, and
-        # the other runtime's thread all survive.
+        remaining = {row["thread_id"] for row in state.page_thread_summaries(None, 100)}
         self.assertEqual(remaining, {"t1", "t5", "t6", "t7", "c1"})
-        # Once event retention drops a thread's last event, the ordinary LRU
-        # cap applies to it again.
         with state.mutation() as cur:
             cur.execute("DELETE FROM agent_events WHERE thread_id = 't1'")
             state.prune_thread_sessions(cur, "codex", 3)
-        remaining = {
-            row["thread_id"] for row in state.page_thread_summaries(None, 100)
-        }
+        remaining = {row["thread_id"] for row in state.page_thread_summaries(None, 100)}
         self.assertEqual(remaining, {"t5", "t6", "t7", "c1"})
 
     def test_event_logs_prune_to_the_newest_cap(self) -> None:
@@ -792,6 +1096,40 @@ class StateStorageTests(unittest.TestCase):
             state.resolve_pending_push("abc123", "rejected")
         self.assertEqual(state.get_pending_push("abc123")["status"], "approved")
 
+    def test_pending_push_retention_keeps_pending_and_newest_resolved(self) -> None:
+        for push_id in ("aa0001", "aa0002", "aa0003", "aa0004"):
+            state.enqueue_pending_push(
+                push_id,
+                "infiloop2",
+                "kern",
+                [{"old": "0" * 40, "new": "1" * 40, "ref": "refs/heads/main"}],
+                [".github/workflows/ci.yml"],
+            )
+        for push_id in ("aa0001", "aa0002", "aa0003"):
+            state.resolve_pending_push(push_id, "approved")
+
+        with state.mutation() as cur:
+            state.prune_pending_pushes(cur, keep=2)
+
+        retained = {push["id"] for push in state.read_pending_pushes()}
+        self.assertEqual(retained, {"aa0002", "aa0003", "aa0004"})
+
+    def test_bedrock_usage_retention_drops_only_days_before_cutoff(self) -> None:
+        with state.mutation() as cur:
+            for day in ("2025-01-01", "2026-01-01", "2026-01-02"):
+                cur.execute(
+                    "INSERT INTO bedrock_usage (model_id, day) VALUES (%s, %s)",
+                    ("deepseek.v3.2", day),
+                )
+            state.prune_bedrock_usage(cur, "2026-01-01")
+
+        with state.db.transaction() as cur:
+            cur.execute("SELECT day::text FROM bedrock_usage ORDER BY day")
+            self.assertEqual(
+                [row[0] for row in cur.fetchall()],
+                ["2026-01-01", "2026-01-02"],
+            )
+
     def test_encrypt_secret_refuses_non_string_values(self) -> None:
         # Secrets are either absent or non-empty strings; anything else is a
         # programming error that must never be stored (unencrypted or at all).
@@ -865,8 +1203,13 @@ class StateStorageTests(unittest.TestCase):
         # on GitHub domains (a smuggled token cannot substitute another
         # identity), nothing is injected, and other domains pass untouched.
         smuggled = [("Authorization", "token smuggled"), ("Accept", "application/json")]
-        self.assertEqual(github_credential_headers("api.github.com", smuggled), [("Accept", "application/json")])
-        self.assertEqual(github_credential_headers("example.com", smuggled), smuggled)
+        # The hook also replaces User-Agent with the host value, so it appears
+        # in every expectation below.
+        agent_header = ("User-Agent", "kern-proxy/1")
+        self.assertEqual(github_credential_headers("api.github.com", smuggled), [("Accept", "application/json"), agent_header])
+        self.assertEqual(
+            github_credential_headers("example.com", smuggled), [*smuggled, agent_header]
+        )
 
         state.save_proxy_github_token("ghs_working")
         self.assertEqual(state.read_proxy_github_token(), "ghs_working")
@@ -886,22 +1229,30 @@ class StateStorageTests(unittest.TestCase):
         # token as the Basic password with the x-access-token username.
         self.assertEqual(
             github_credential_headers("api.github.com", smuggled),
-            [("Accept", "application/json"), ("Authorization", "Bearer ghs_working")],
+            [
+                ("Accept", "application/json"),
+                agent_header,
+                ("Authorization", "Bearer ghs_working"),
+            ],
         )
         import base64 as _b64
 
         basic = _b64.b64encode(b"x-access-token:ghs_working").decode()
         self.assertEqual(
             github_credential_headers("github.com", [("Authorization", "token smuggled")]),
-            [("Authorization", f"Basic {basic}")],
+            [agent_header, ("Authorization", f"Basic {basic}")],
         )
         # Signed-URL domains are strip-only: an Authorization header breaks
         # the presigned download, and the signed URL is the access control.
         self.assertEqual(
-            github_credential_headers("objects.githubusercontent.com", [("Authorization", "token x")]), []
+            github_credential_headers(
+                "objects.githubusercontent.com", [("Authorization", "token x")]
+            ),
+            [agent_header],
         )
         self.assertEqual(
-            github_credential_headers("github-cloud.githubusercontent.com", [("Authorization", "token x")]), []
+            github_credential_headers("github-cloud.githubusercontent.com", [("Authorization", "token x")]),
+            [agent_header]
         )
         state.save_proxy_github_token(None)
         self.assertIsNone(state.read_proxy_github_token())
@@ -910,7 +1261,8 @@ class StateStorageTests(unittest.TestCase):
 
     def test_bedrock_proxy_reads_the_one_validated_row(self) -> None:
         self.assertIsNone(state.read_bedrock_proxy_credential())
-        state.save_bedrock_credential("AKIASHAREDOPERATOR01", "shared-secret-material", "us-east-1")
+        with state.mutation() as cur:
+            state.save_bedrock_credential("AKIASHAREDOPERATOR01", "shared-secret-material", "us-east-1", cur)
         self.assertEqual(
             state.read_bedrock_proxy_credential(),
             ("AKIASHAREDOPERATOR01", "shared-secret-material", "us-east-1"),
@@ -926,7 +1278,8 @@ class StateStorageTests(unittest.TestCase):
         # Replacing the validated row invalidates the decryption cache.
         # Disabling does not mutate the durable credential; the proxy's parsed
         # policy rejects the request earlier.
-        state.save_bedrock_credential("AKIASHAREDOPERATOR01", "shared-new-secret", "us-west-2")
+        with state.mutation() as cur:
+            state.save_bedrock_credential("AKIASHAREDOPERATOR01", "shared-new-secret", "us-west-2", cur)
         self.assertEqual(
             state.read_bedrock_proxy_credential(),
             ("AKIASHAREDOPERATOR01", "shared-new-secret", "us-west-2"),

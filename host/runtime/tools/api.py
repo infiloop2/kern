@@ -14,7 +14,8 @@ The agent-facing HTTP surface is four routes:
 - ``GET /tools`` — the callable tool actions for the enabled tools, named
   ``<tool_id>_<action>``, plus the built-ins: ``list_bundled_tools``,
   and ``check_tool_approval``. The MCP shim separately aggregates the network
-  introspection and app services into the stable agent-facing tool list.
+  introspection and the stable Workspace/history tools into the agent-facing
+  tool list.
 - ``POST /call`` — ``{"name": ..., "input": {...}}`` executes one action and
   returns either the JSON result shape from ``tools_host`` (``executed`` /
   ``pending_approval`` / ``failed``) or one exclusive binary asset response.
@@ -32,14 +33,9 @@ a pending approval and the operator decides in the admin UI (see ``admin_api``).
 from __future__ import annotations
 
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import json
 import os
 from pathlib import Path
-import pwd
 import re
-import socket
-import struct
 import threading
 import time
 from typing import Any, BinaryIO, cast
@@ -47,11 +43,15 @@ from urllib.parse import quote, unquote
 
 from host.constants import TOOLS_SOCKET_PATH
 from host.runtime.core import host_errors, state
+from host.runtime.core.unix_socket_service import (
+    UnixSocketRequestHandler,
+    UnixSocketServer,
+    peer_uids,
+)
 from host.runtime.tools import assets as tool_assets, tools_host
 from host.tools import OpenedStreamingAsset, StreamingAssetError
 
-DEFAULT_SOCKET_PATH = TOOLS_SOCKET_PATH
-SOCKET_PATH = os.environ.get("KERN_TOOLS_SOCKET", DEFAULT_SOCKET_PATH)
+SOCKET_PATH = os.environ.get("KERN_TOOLS_SOCKET", TOOLS_SOCKET_PATH)
 # Peers are scoped strictly by path: the agent gets exactly the MCP surface
 # (GET /tools, POST /call), and the admin service gets exactly the operator
 # delegation routes (POST /operator/...) that need this service's egress
@@ -68,19 +68,11 @@ MAX_IMAGE_BODY_BYTES = tool_assets.MAX_IMAGE_BYTES
 MAX_CONCURRENT_CALLS = 8
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
 _UPLOAD_SLOTS = threading.BoundedSemaphore(2)
-# The world-connectable socket parses the request line and headers before the
-# handler's peer-credential check runs, so a local peer that connects and stalls
-# mid-request would otherwise pin a handler thread indefinitely. A read timeout
-# closes such connections; a client sends its whole request up front, so this
-# never fires in normal use, and it does not bound in-flight tool execution
-# (that time is spent on third-party calls, not socket reads). A local peer
-# that deliberately dribbles bytes can hold one daemon thread per connection;
-# every peer on the box is a known service uid, so that costs nothing worth
-# defending against.
-REQUEST_READ_TIMEOUT_SECONDS = 30
 ASSET_CLEANUP_INTERVAL_SECONDS = 3600
 MAX_STREAMING_ASSET_BYTES = 200_000_000
 STREAMING_RESULT_HEADER = "streaming-asset"
+# The media type is emitted verbatim as the Content-Type header, so its shape
+# is enforced here at the socket boundary rather than trusted from the tool.
 STREAMING_MEDIA_TYPE_RE = re.compile(
     r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$"
 )
@@ -113,7 +105,7 @@ LIST_BUNDLED_TOOLS_TOOL = {
         "List every tool bundled with this Kern host and whether it is "
         "currently enabled. A tool listed here but not enabled exists on the "
         "host but its actions stay hidden until the operator enables it (and, "
-        "for OAuth tools, connects it) in the admin UI's Tools tab — ask the "
+        "for OAuth tools, connects it) under Home > Integrations in the admin UI — ask the "
         "operator instead of building a replacement. A capability with no "
         "entry here has no bundled tool at all."
     ),
@@ -334,59 +326,26 @@ def handle_operator(
     raise OperatorError(HTTPStatus.NOT_FOUND, "unknown path")
 
 
-def _peer_uids(user: str) -> frozenset[int]:
-    # Outside a bootstrapped host (tests, the UI mock) the service accounts do
-    # not exist; the socket then belongs to the developer running it.
-    try:
-        return frozenset({pwd.getpwnam(user).pw_uid})
-    except KeyError:
-        return frozenset({os.getuid()})
-
-
 def agent_peer_uids() -> frozenset[int]:
     """The uids allowed to call the agent MCP routes (GET /tools, POST /call):
     the agent only. Falls back to the current uid off a bootstrapped host."""
-    return _peer_uids(AGENT_PEER_USER)
+    return peer_uids(AGENT_PEER_USER)
 
 
 def admin_peer_uids() -> frozenset[int]:
     """The uids allowed to call the operator delegation routes: the admin
     service only. Falls back to the current uid off a bootstrapped host."""
-    return _peer_uids(ADMIN_PEER_USER)
+    return peer_uids(ADMIN_PEER_USER)
 
 
-class ToolsRequestHandler(BaseHTTPRequestHandler):
+class ToolsRequestHandler(UnixSocketRequestHandler):
     server: "ToolsServer"
-    # Bound how long a connection may stall while sending its request line and
-    # headers, before do_GET/do_POST (and the peer-credential check) run.
-    timeout = REQUEST_READ_TIMEOUT_SECONDS
-
-    def address_string(self) -> str:  # AF_UNIX has no client address tuple
-        return "local"
-
-    def log_message(self, format: str, *args: object) -> None:
-        pass
-
-    def _peer_uid(self) -> int:
-        creds = self.connection.getsockopt(
-            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
-        )
-        _, uid, _ = struct.unpack("3i", creds)
-        return uid
 
     def _peer_is_agent(self) -> bool:
-        return self._peer_uid() in self.server.agent_uids
+        return self._peer()[1] in self.server.agent_uids
 
     def _peer_is_admin(self) -> bool:
-        return self._peer_uid() in self.server.admin_uids
-
-    def _send_json(self, status: HTTPStatus, body: dict[str, Any]) -> None:
-        payload = json.dumps(body).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        return self._peer()[1] in self.server.admin_uids
 
     def do_GET(self) -> None:
         # The sole GET route belongs to the agent MCP surface.
@@ -416,9 +375,6 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
             or any(ord(character) < 32 or ord(character) == 127 for character in filename)
         ):
             raise ValueError("invalid filename")
-        media_type = opened.media_type
-        if not isinstance(media_type, str) or not STREAMING_MEDIA_TYPE_RE.fullmatch(media_type):
-            raise ValueError("invalid media type")
         size_bytes = opened.size_bytes
         if (
             isinstance(size_bytes, bool)
@@ -426,6 +382,9 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
             or not 1 <= size_bytes <= MAX_STREAMING_ASSET_BYTES
         ):
             raise ValueError("invalid size")
+        media_type = opened.media_type
+        if not isinstance(media_type, str) or not STREAMING_MEDIA_TYPE_RE.fullmatch(media_type):
+            raise ValueError("invalid media type")
         return filename, media_type, size_bytes
 
     def _send_streaming_action(self, streaming: tools_host.StreamingAction) -> None:
@@ -485,21 +444,6 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
                 {"status": "failed", "error": error, "reconnect_required": False},
             )
 
-    def _read_json_object_body(self, length: int) -> dict[str, Any] | None:
-        """Read and parse the request body as a JSON object, or send the error
-        response and return None. Operator disconnect/decide carry no body, so an
-        empty body is tolerated as an empty object."""
-        raw = self.rfile.read(length)
-        try:
-            body = json.loads(raw.decode("utf-8")) if raw else {}
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body must be JSON."})
-            return None
-        if not isinstance(body, dict):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body must be a JSON object."})
-            return None
-        return body
-
     def do_POST(self) -> None:
         # Peers are scoped strictly by path: operator delegation routes belong
         # to the admin service, everything else (the agent MCP surface) to the
@@ -538,7 +482,7 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
             # Operator routes are operator-initiated and low volume, so they do not
             # share the agent-call concurrency cap; a busy agent must not be able to
             # 429 the operator's approve/deny/connect/disconnect.
-            body = self._read_json_object_body(length)
+            body = self.read_json_object_body(length)
             if body is None:
                 return
             try:
@@ -556,7 +500,7 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
         action_result: dict[str, Any] | tools_host.StreamingAction
         try:
             try:
-                body = self._read_json_object_body(length)
+                body = self.read_json_object_body(length)
                 if body is None:
                     return
                 action_result = call_action(
@@ -655,10 +599,7 @@ class ToolsRequestHandler(BaseHTTPRequestHandler):
             _UPLOAD_SLOTS.release()
 
 
-class ToolsServer(ThreadingHTTPServer):
-    address_family = socket.AF_UNIX
-    daemon_threads = True
-
+class ToolsServer(UnixSocketServer):
     def __init__(
         self,
         socket_path: str,
@@ -676,17 +617,7 @@ class ToolsServer(ThreadingHTTPServer):
             asset_root or Path(socket_path).parent / "assets", clean_start=True
         )
         self._next_asset_cleanup = time.monotonic() + ASSET_CLEANUP_INTERVAL_SECONDS
-        # typeshed models HTTPServer addresses as (host, port) tuples only;
-        # with address_family = AF_UNIX the address is the socket path.
-        super().__init__(socket_path, ToolsRequestHandler)  # type: ignore[arg-type]
-
-    def server_bind(self) -> None:
-        path = Path(str(self.server_address))
-        path.unlink(missing_ok=True)
-        self.socket.bind(str(path))
-        # World-connectable like the Postgres socket; the peer-credential
-        # check above is the authentication.
-        path.chmod(0o666)
+        super().__init__(socket_path, ToolsRequestHandler)
 
     def service_actions(self) -> None:
         """Delete expired staged media hourly even when no tool call touches it."""

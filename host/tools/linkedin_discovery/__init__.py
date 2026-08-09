@@ -7,11 +7,13 @@ import urllib.parse
 from typing import cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
-from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
-from host.tools.results import ActionExecuted, ActionFailed, ActionResult, ApprovalResult
+from host.tools.results import ActionExecuted, ActionFailed, ActionResult
+from host.tools.shared.inputs import bounded_int as _bounded_int, clip as _text
 from host.tools.shared.web import WebRequestError, json_request
+from host.tools.tool import Tool
 
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
 MAX_QUERY_CHARS = 300
@@ -118,7 +120,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and enable LinkedIn Discovery",
             show_config=True,
-            description="Expand LinkedIn Discovery in Internet Access and Tools, save the key as SERPERAPI_API_KEY, then enable the tool. There is no LinkedIn app, login, OAuth consent, cookie, or session to configure; never paste LinkedIn credentials into this field.",
+            description="Open LinkedIn Discovery under Home > Integrations, save the key as SERPERAPI_API_KEY, then enable the tool. There is no LinkedIn app, login, OAuth consent, cookie, or session to configure; never paste LinkedIn credentials into this field.",
         ),
     ),
     data_summary=DataSummary(
@@ -164,27 +166,6 @@ MANIFEST = ToolManifest(
         ),
     ),
 )
-
-
-def _text(value: object, *, limit: int) -> str:
-    return value.strip()[:limit] if isinstance(value, str) else ""
-
-
-def _bounded_int(value: JSONValue | None, *, name: str, default: int, minimum: int, maximum: int) -> int:
-    if value is None or value == "":
-        return default
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}.")
-    if isinstance(value, str):
-        digits = value.strip()
-        if not digits.isascii() or not digits.isdecimal() or len(digits) > 3:
-            raise ValueError(f"{name} must be an integer from {minimum} to {maximum}.")
-        number = int(digits)
-    else:
-        number = value
-    if not minimum <= number <= maximum:
-        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}.")
-    return number
 
 
 def _query(tool_input: JSONObject) -> str:
@@ -279,7 +260,7 @@ def _search(api_key: str, query: str, page: int) -> JSONObject:
     )
 
 
-class LinkedInDiscoveryTool:
+class LinkedInDiscoveryTool(Tool):
     @property
     def manifest(self) -> ToolManifest:
         return MANIFEST
@@ -317,10 +298,6 @@ class LinkedInDiscoveryTool:
             return ActionFailed(str(exc) or "LinkedIn Discovery request failed.")
         except Exception:
             return ActionFailed("LinkedIn Discovery request failed.")
-
-    def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
-        del approval, api
-        return ActionFailed("LinkedIn Discovery has no approval-gated actions.")
 
 
 BUNDLED_TOOL = LinkedInDiscoveryTool()

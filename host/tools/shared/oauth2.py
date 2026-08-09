@@ -1,8 +1,8 @@
 """Provider-neutral OAuth 2.0 helpers for tool packages.
 
 The Google tools carry their own credential store (`shared/google.py`); this
-module holds the pieces the newer OAuth 2.0 tools (X, LinkedIn, Instagram)
-share: the HMAC-signed `state` value (which can carry flow data such as a PKCE
+module holds the pieces every OAuth 2.0 tool (Google, X, LinkedIn, Instagram)
+shares: the HMAC-signed `state` value (which can carry flow data such as a PKCE
 verifier through the provider round trip), token freshness checks, and the
 compare-before-write credential guards that keep a slow network call from
 clobbering an operator disconnect/reconnect that happened meanwhile.
@@ -28,7 +28,7 @@ ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60
 
 class IntegrationReconnectRequired(RuntimeError):
     """The saved connection is missing, expired, revoked, or superseded; the
-    operator must reconnect the tool. Mirrors shared/google.py's exception."""
+    operator must reconnect the tool. shared/google.py re-exports this class."""
 
 
 def now() -> int:
@@ -61,26 +61,33 @@ def signed_state(*, secret: str, tool_id: str, extra: JSONObject | None = None) 
     return f"{encoded_payload}.{base64url_encode(signature)}"
 
 
-def verify_state(state: str, *, secret: str, tool_id: str) -> JSONObject:
+def verify_state(
+    state: str,
+    *,
+    secret: str,
+    tool_id: str,
+    invalid_message: str = "Invalid OAuth state.",
+    expired_message: str = "OAuth state expired.",
+) -> JSONObject:
     """Verify a signed state and return its payload (including any extras)."""
     encoded_payload, separator, encoded_signature = state.partition(".")
     if not separator or not encoded_payload or not encoded_signature:
-        raise ValueError("Invalid OAuth state.")
+        raise ValueError(invalid_message)
     expected_signature = base64url_encode(
         hmac.new(secret.encode("utf-8"), encoded_payload.encode("ascii"), hashlib.sha256).digest()
     )
     if not hmac.compare_digest(expected_signature, encoded_signature):
-        raise ValueError("Invalid OAuth state.")
+        raise ValueError(invalid_message)
     decoded = json.loads(base64url_decode(encoded_payload).decode("utf-8"))
     if not isinstance(decoded, dict):
-        raise ValueError("Invalid OAuth state.")
+        raise ValueError(invalid_message)
     payload = cast(JSONObject, decoded)
     if payload.get("tool_id") != tool_id:
-        raise ValueError("Invalid OAuth state.")
+        raise ValueError(invalid_message)
     issued_at = payload.get("issued_at")
     age = now() - issued_at if isinstance(issued_at, int) and not isinstance(issued_at, bool) else None
     if age is None or age < -60 or age > OAUTH_STATE_MAX_AGE_SECONDS:
-        raise ValueError("OAuth state expired.")
+        raise ValueError(expired_message)
     return payload
 
 

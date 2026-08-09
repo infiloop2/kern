@@ -1,6 +1,6 @@
 # Admin State Storage and Migrations
 
-Admin, network, app, and tool state live in a local PostgreSQL database,
+Admin, network, Workspace, and tool state live in a local PostgreSQL database,
 `kern_admin`, served by `kern-postgres.service`. Kern
 services use the in-repo standard-library wire-protocol client
 (`host/runtime/core/pgclient.py`), which implements only Unix sockets, peer auth,
@@ -8,9 +8,10 @@ and text-format values. PostgreSQL has no TCP listener
 (`listen_addresses = ''`); the socket is
 `/var/run/postgresql/.s.PGSQL.5432`.
 
-The admin service owns the database. The proxy, tools service, and each app
-connect under separate peer-authenticated roles with grants limited to the
-tables or schema their process needs. There is no proxy fallback cache: a
+The admin role owns every table in the `public` schema. The proxy, tools,
+network-introspection, and Workspace services connect under separate
+peer-authenticated roles with grants limited to the exact tables and sequences
+their processes need; the Workspace role has DML but not DDL. There is no proxy fallback cache: a
 database outage denies agent network requests until the database returns.
 The remaining writable admin-volume paths are the proxy CA/certificates and
 Git quarantine mirror under `proxy-state`, the bounded temporary media spool
@@ -34,6 +35,11 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `admin_passkey_config`, `admin_passkeys` | The single administrator's stable WebAuthn user handle plus enrolled credential ids, RP domains, ES256 public keys, counters, transport/backup metadata, and timestamps. No private passkey material is stored. Upgrade/recover preserve these rows; only explicit root `reconfigure --reset-admin-passkeys` removes them. |
 | `agent_events` | Agent runtime and turn events with a direct `thread_id` column (`NULL` for runtime events, indexed with `seq` for per-thread paging) and typed payload columns (message/source, error, runtime, provider-neutral activity JSON); pruned to the newest 1,000,000. The event log is the single durable record of a thread's turn history — turns themselves are orchestrator memory, and the former `tasks`/`task_steers` tables were dropped by migration `0005_thread_only_turns.sql`, which also renamed `task.*` event types to `turn.*` and replaced the events' `task_id` with `thread_id`. A synchronous steer is appended only after provider acknowledgement; there is no steer mailbox or delivery-marker table. |
 | `thread_sessions` | One canonical row per user `thread_id`: current runtime, provider session/thread id, model, effort, recency, and durable idle/running state. An idle configuration change atomically replaces runtime/model/effort and clears the provider session before admitting the next run; the retained `agent_events` remain the thread's handoff source. Rows referenced by retained events stay; unreferenced rows beyond the 100,000 most recently used per runtime are pruned. |
+| `chat_threads` | Chat's immutable `thread-N` ids, editable display names, and archive state. Messages and provider state remain in the host thread tables above. |
+| `web_apps` | Web Apps' immutable `app-N` ids, editable names, archive state, generated UI bundle, durable JSON data, and one optimistic revision counter. |
+| `web_app_revisions` | Sparse, bounded full-state UI/data revisions for generated Web Apps. Every retained row is restorable as a new forward revision. |
+| `memory_pages`, `memory_page_revisions` | Host-global bounded memory pages plus their latest 100 immutable revisions. Pages soft-delete for 90 days and expose derived links/backlinks and local full-text search. |
+| `schedules`, `schedule_revisions`, `schedule_runs` | Host-global schedule definitions, their latest 100 revisions, and bounded run metadata. Each run snapshots its submitted message plus runtime/model/effort and references a fresh `schedule-ID-run-ID` host thread; agent responses and activity remain in `agent_events`. |
 | `oauth_logins` | In-flight OAuth logins, fully typed per flow (device code + login handle for Codex, browser code for Claude). Hermes has no row here: its Bedrock credential connect is a single API call with nothing in flight. |
 | `provider_accounts` | Admin-side provider account records: `account_id` typed, remaining provider-owned metadata as a cached document. An anchored row (`account_id` plus its provider's approval marker in metadata) is trigger-guarded: `provider_accounts_anchor_guard` refuses writes that change or delete the approved identity. The singleton `bedrock` provider row carries only cached AWS display metadata, not an anchor. |
 | `bedrock_credentials` | Hermes's singleton Bedrock connection: the synchronously validated IAM `access_key_id`, secret access key as `secretbox` ciphertext, and selected region. The admin service writes all three atomically; the trusted proxy reads this same row only for enabled Bedrock requests and re-signs requests carrying Hermes's fixed dummy access-key id. |
@@ -51,8 +57,7 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `tool_approvals` | Host-owned approval records. `number` is the identity behind the public `approval_<number>.<token>` id (the token is an unguessable poll capability); conditional transitions make each approval single-use, and terminal result text is returned to both operator and agent (decided history is pruned to the newest 10,000). |
 | `tool_events` | Tool call, approval, connection, enablement, and config audit events. Accepted calls store their exact bounded arguments; lifecycle events store no arguments. Pruned to the newest 1,000,000. |
 | `host_errors` | Unexpected host-service exceptions and abnormal systemd exits copied from structured journald records. Brief repeats coalesce by service and fingerprint; retained to the newest 10,000 rows. List reads omit traceback/context until detail expansion. |
-| `app_schema_migrations` | Host-owned record of applied per-app migration versions. App SQL runs under the app role, which cannot write this table. |
-| `counters` | Monotonic counters as plain rows. Currently empty — the last counter, `next_task_number`, left with the task tables (event seqs are a database serial) — the table remains for future counters. |
+| `counters` | Monotonic Home Stats totals for threads, user messages, and agent activity. Agent activity combines agent-authored messages with activity events. Migrations seed each total from retained state, then the thread/event write transaction increments it so later session or audit pruning never lowers the displayed totals. |
 | `secret_keys` | The at-rest encryption key for stored secrets (see below). The proxy and tools roles can read it, but their table grants expose only their own ciphertext-bearing rows. |
 | `schema_migrations` | Applied migration versions (owned by the migration runner). |
 
@@ -90,11 +95,11 @@ written inside a mutation share its transaction; serial event ids are unique
 and increasing with harmless gaps after aborts.
 
 `host/runtime/core/db.py` owns a small pool in each service process, capped at 14
-active sessions per process. PostgreSQL allows 100 connections: the three core
-database clients and two bundled apps can use at most 70, leaving 30 for operator,
-superuser, and deployment access. Each app has its own 14-session semaphore,
-so app pressure cannot consume that headroom through a backend pool; a new app
-operation fails when its own slots or the database are unavailable. Nested
+active sessions per process. PostgreSQL allows 300 connections: the six
+long-running database client processes can use at most 84, leaving 216 for
+operator, superuser, deployment, and future fixed-service access. Chat and Web
+Apps share the Workspace process's 14-session semaphore; a new operation fails when
+those slots or the database are unavailable. Nested
 transactions on one thread take separate connections so a read inside a
 mutation sees the last committed state.
 
@@ -115,7 +120,7 @@ non-owner roles with table or schema grants:
 
 - Connections are Unix-socket only with `peer` authentication: the client's
   OS user must match its database role, and no passwords exist anywhere.
-- `kern-admin` owns the database and the schema; the admin service (and
+- `kern-admin` owns the database, `public` schema, and every table; the admin service (and
   the bootstrap's migration/config steps) connect as it.
 - `kern-proxy` reads network policy, provider pins, GitHub settings and
   the encrypted working token plus the key needed to decrypt it; it
@@ -128,8 +133,11 @@ non-owner roles with table or schema grants:
 - `kern-agent-network` reads only network policy and `network_events` for
   the agent-facing introspection tools. It cannot mutate those tables, read
   credentials, or reach tool state.
-- Every app role owns only its derived `app_<app_id>` schema. The host-owned
-  `app_schema_migrations` table records what bootstrap applied.
+- The `kern-workspace` role has DML only on `chat_threads`, `web_apps`,
+  `web_app_revisions`, `memory_pages`, `memory_page_revisions`, `schedules`,
+  `schedule_revisions`, and `schedule_runs`, plus the four sequences those
+  tables use. It has no access to unrelated admin,
+  credential, network, or tool tables and no DDL rights.
 - The `postgres` superuser is reachable only by the `postgres` OS user, i.e.
   by operators through sudo: `sudo -u postgres psql kern_admin`.
 - Everyone else, most importantly `kern-agent`, has no role, and
@@ -172,6 +180,13 @@ code and schema change together in one bootstrap or not at all, so a stray
 service start can never move the schema under a live instance, and a
 schema/code mismatch (unsupported) fails loudly instead of being papered
 over.
+
+Chat and Web Apps use this same stream. During the one-time upgrade from the
+pre-1.6 generic-app layout, bootstrap first runs through the ledger-conversion
+migration, maps every already-applied per-product ledger row to its renumbered
+`schema_migrations` entry, and then resumes the normal runner. Thus partially
+applied old product histories are not replayed; after consolidation the old
+ledger is dropped and all future schema changes are ordinary host migrations.
 
 `migrate down` is a manual operator action only
 (`sudo -u kern-admin env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.migrate down`).

@@ -63,6 +63,31 @@ entry directly into that integration's typed config. The proxy selects one
 integration for a host and asks its guard to decide the request; it does not
 generate a parallel domain-rule or guard-field representation.
 
+Direct agent HTTP requests are controlled by the route rules, plus a content
+guard on request URL values for the managed integrations. Request headers are
+not inspected: GitHub, PyPI and npm reflect no header back, so a header sent
+there cannot reach an attacker, while a requested package name can — npm and
+PyPI publish per-package download statistics — which is what the URL guard
+answers.
+
+What the proxy removes is what a header can do. `Authorization` and `Cookie`
+are stripped on the package registries, where the agent holds no credential
+those destinations should receive; on GitHub the agent's `Authorization` is
+replaced with the host-held token. `User-Agent` is replaced with a fixed host value —
+PyPI publishes a public download dataset whose installer name and version come
+from it, so unlike the rest of a request there it does have a reader. The
+`Host` header is validated against the connected host but forwarded as sent.
+
+Custom domains are not inspected at all. The operator names the domain, its
+methods and its path guards, and that rule is the whole boundary: adding a
+custom domain means trusting that destination with anything the agent can
+reach. There is no knowable client or URL grammar there, and request bodies
+were never scanned, so on a write-capable domain a content rule was never a
+boundary in the first place.
+
+This is separate from bundled tool-call filtering and does not apply to
+integrations that use provider-specific request controls.
+
 ## Reserved Managed Domains
 
 Every domain owned by a provider integration is reserved: it is rejected in
@@ -447,9 +472,11 @@ integration directly enforces:
 ```
 
 Only `GET` and `HEAD` are allowed, so the integration is read-only by
-construction; package publishing is not part of it. Package names and versions
-do appear in request URLs — we trust these first-party registry domains not to
-be a data-exfiltration sink for those URL paths.
+construction; package publishing is not part of it. PyPI metadata URL values
+take the parameter guard. Distribution-file paths on
+`files.pythonhosted.org` remain exempt because they are returned by PyPI.
+Request headers are not inspected: credential headers are removed, `User-Agent`
+is replaced with a fixed host value, and the rest are forwarded as sent.
 
 ## NPM Packages Integration
 
@@ -469,8 +496,11 @@ integration directly enforces:
 ```
 
 As with Python packages, only `GET` and `HEAD` are allowed — read-only by
-construction, no publishing — and we trust these first-party registry domains
-not to leak data through requested URL paths.
+construction, no publishing. npm metadata and Node.js distribution URL values
+take the parameter guard. npm tarball paths under
+`/-/` remain exempt because they are provider-returned. Request headers are not
+inspected: credential headers are removed, `User-Agent` is replaced with a
+fixed host value, and the rest are forwarded as sent.
 
 ## Domain Rule
 
@@ -523,6 +553,13 @@ Path guards use Python `re` syntax and must match the full request target path.
 For example, `^/dist(?:/.*)?$` allows `/dist` and `/dist/index.js`. If query
 strings are allowed, include them in the regex, such as
 `^/simple(?:/.*)?(?:\\?.*)?$`.
+
+Custom-domain requests are enforced by the operator's rule alone — domain,
+methods, path guards — and nothing inside the request is inspected: no header
+checks, no URL parameter guard, no body scanning. Adding a domain here is an
+explicit statement that the destination is trusted with whatever the agent can
+send it. Use a managed integration where one exists; those destinations have
+known clients and are guarded accordingly.
 
 For Codex, the host also restricts the agent runtime to cached web search, so
 the OpenAI proxy guard is the second layer rather than the only one.

@@ -113,8 +113,7 @@ def connect_public(host: str, port: int, timeout: float) -> socket.socket:
 
 
 def request_denial_reason(
-    policy: NetworkControls | None,
-    protocol: str,
+    policy: NetworkControls,
     method: str,
     host: str,
     path: str,
@@ -127,9 +126,6 @@ def request_denial_reason(
     maps it to guidance. After the core domain/method/path decision, the
     request is decided by exactly the integration that owns the host (if any)
     — see ``host.network_integrations.runtime``."""
-    del protocol
-    if policy is None:
-        return "network_policy_unavailable"
     return integrations.request_denied(
         policy,
         method,
@@ -151,51 +147,41 @@ def attest_claude_token_account(token: str) -> str | None:
     response body, and returns no identity on any transport, HTTP, or parse
     failure. The bearer is used only for this call and is never persisted.
     """
-    upstream_raw: socket.socket | None = None
-    upstream_tls: ssl.SSLSocket | None = None
-    response: http.client.HTTPResponse | None = None
     try:
-        upstream_raw = connect_public(
+        # wrap_socket detaches the raw socket on success, so the outer with
+        # closes it only when the TLS handshake never took ownership.
+        with connect_public(
             "api.anthropic.com", 443, timeout=CLAUDE_ATTESTATION_TIMEOUT
-        )
-        upstream_tls = ssl.create_default_context().wrap_socket(
+        ) as upstream_raw, ssl.create_default_context().wrap_socket(
             upstream_raw, server_hostname="api.anthropic.com"
-        )
-        upstream_raw = None  # owned by the TLS socket now
-        upstream_tls.settimeout(CLAUDE_ATTESTATION_TIMEOUT)
-        send_http_request(
-            upstream_tls,
-            "GET",
-            "/api/oauth/profile",
-            [
-                ("Host", "api.anthropic.com"),
-                ("Authorization", f"Bearer {token}"),
-                ("Content-Type", "application/json"),
-                ("Cache-Control", "no-cache"),
-            ],
-            b"",
-            websocket=False,
-        )
-        response = http.client.HTTPResponse(upstream_tls)
-        response.begin()
-        if response.status != 200:
-            return None
-        body = response.read(CLAUDE_ATTESTATION_BODY_LIMIT + 1)
-        if len(body) > CLAUDE_ATTESTATION_BODY_LIMIT:
-            return None
-        value = json.loads(body)
-        account = value.get("account") if isinstance(value, dict) else None
-        account_uuid = account.get("uuid") if isinstance(account, dict) else None
-        return account_uuid.strip() if isinstance(account_uuid, str) and account_uuid.strip() else None
+        ) as upstream_tls:
+            upstream_tls.settimeout(CLAUDE_ATTESTATION_TIMEOUT)
+            send_http_request(
+                upstream_tls,
+                "GET",
+                "/api/oauth/profile",
+                [
+                    ("Host", "api.anthropic.com"),
+                    ("Authorization", f"Bearer {token}"),
+                    ("Content-Type", "application/json"),
+                    ("Cache-Control", "no-cache"),
+                ],
+                b"",
+                websocket=False,
+            )
+            with http.client.HTTPResponse(upstream_tls) as response:
+                response.begin()
+                if response.status != 200:
+                    return None
+                body = response.read(CLAUDE_ATTESTATION_BODY_LIMIT + 1)
+                if len(body) > CLAUDE_ATTESTATION_BODY_LIMIT:
+                    return None
+                value = json.loads(body)
+                account = value.get("account") if isinstance(value, dict) else None
+                account_uuid = account.get("uuid") if isinstance(account, dict) else None
+                return account_uuid.strip() if isinstance(account_uuid, str) and account_uuid.strip() else None
     except (OSError, http.client.HTTPException, json.JSONDecodeError, UnicodeDecodeError):
         return None
-    finally:
-        if response is not None:
-            response.close()
-        if upstream_tls is not None:
-            upstream_tls.close()
-        elif upstream_raw is not None:
-            upstream_raw.close()
 
 
 # Headers that carry one value and that the body guards and the upstream both
@@ -332,25 +318,33 @@ class ProxyHandler(BaseHTTPRequestHandler):
             protocol = "wss" if is_websocket else "https"
             body, body_deny = read_body(reader, headers)
             policy, policy_error = _policy_load_denial()
-            denial = (
+            guard_denial = (
                 body_deny
                 or target_denial
                 or duplicate_header_denial(headers)
                 or host_header_denial(headers, host, port)
                 or policy_error
-                or request_denial_reason(policy, protocol, method, host, path, query, headers, body)
             )
-            if denial is None and is_websocket:
-                assert policy is not None
-                if not integrations.websocket_allowed(policy, host):
-                    denial = "websocket_not_allowed"
+            if guard_denial is not None:
+                append_network_event(protocol, method, host, port, path, query, False, guard_denial)
+                message = guard_denial.encode()
+                client_tls.sendall(
+                    b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: "
+                    + str(len(message)).encode()
+                    + b"\r\n\r\n"
+                    + message
+                )
+                return
+            assert policy is not None
+            denial = request_denial_reason(policy, method, host, path, query, headers, body)
+            if denial is None and is_websocket and not integrations.websocket_allowed(policy, host):
+                denial = "websocket_not_allowed"
             # The owning integration's gate runs after the deny decision
             # passes: a gated push that changes .github/ is answered with a
             # git report-status ("queued for approval") instead of being
             # forwarded.
             gate_response = None
             if denial is None:
-                assert policy is not None
                 gate_response, gate_denial = integrations.gate_response(policy, method, host, path, body)
                 if gate_denial is not None:
                     denial = gate_denial
@@ -378,7 +372,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # the relayed bytes are never modified. Selected from the
             # as-received headers, before the rewrite below replaces the
             # routing identity that attributes the request to its runtime.
-            assert policy is not None
             meter = integrations.response_meter(policy, method, host, path, query, headers, body)
             # After the allow decision, the owning integration may rewrite
             # headers: on GitHub domains the proxy authenticates the request
@@ -389,7 +382,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
             upstream_raw = connect_public(host, port, timeout=15)
             upstream_tls = ssl.create_default_context().wrap_socket(upstream_raw, server_hostname=host)
             upstream_tls.settimeout(IDLE_TIMEOUT)
-            send_http_request(upstream_tls, method, target, headers, body, websocket=is_websocket)
+            send_http_request(
+                upstream_tls,
+                method,
+                target,
+                headers,
+                body,
+                websocket=is_websocket,
+            )
             if not is_websocket:
                 forward_until_close(upstream_tls, client_tls, meter)
                 return
@@ -623,7 +623,8 @@ def send_http_request(
     inspection, so it is re-sent with an explicit Content-Length. WebSocket
     handshakes keep their Connection/Upgrade headers; everything else is
     pinned to Connection: close so the upstream socket carries exactly one
-    policy-checked request."""
+    policy-checked request.
+"""
     upstream.sendall(f"{method} {target} HTTP/1.1\r\n".encode("ascii"))
     had_body_header = False
     for key, value in headers:
@@ -639,6 +640,10 @@ def send_http_request(
             # sets RSV bits, which the message guard cannot inspect and would
             # deny mid-stream. With the offer dropped, neither side negotiates
             # an extension and the frames stay plain.
+            continue
+        if lower == "sec-websocket-key" and not websocket:
+            # The random nonce is structural only on a real handshake. Do not
+            # let an ordinary HTTP request reuse the exempt field as data.
             continue
         if lower == "connection" and not websocket:
             continue
@@ -680,16 +685,12 @@ def read_response_head(reader: Any) -> tuple[int, list[tuple[str, str]], bytes]:
     return int(code), headers, bytes(raw)
 
 
-def forward_until_close(
-    source: socket.socket, target: socket.socket, meter: Any = None, initial: bytes = b""
-) -> None:
-    """Relay upstream bytes to the client until close. ``initial`` is upstream
-    data the caller already read and must still be relayed and metered, in
-    order, ahead of the rest. ``meter`` (feed/finish) observes the raw bytes
-    without touching the relay; finish() runs even on an aborted relay so the
-    request is still counted."""
+def forward_until_close(source: socket.socket, target: socket.socket, meter: Any = None) -> None:
+    """Relay upstream bytes to the client until close. ``meter`` (feed/finish)
+    observes the raw bytes without touching the relay; finish() runs even on
+    an aborted relay so the request is still counted."""
     try:
-        data = initial or source.recv(BUFFER_SIZE)
+        data = source.recv(BUFFER_SIZE)
         while data:
             if meter is not None:
                 meter.feed(data)

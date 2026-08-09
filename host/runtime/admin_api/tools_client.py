@@ -5,8 +5,8 @@ enable/disable, the OAuth connect flow, and approval decisions) but tool code an
 third-party egress live in the dedicated ``kern-tools`` service. So the
 routes here that need that service's egress or run tool code over third-party data
 -- the whole OAuth connect flow and approval decisions -- are reverse-proxied to
-the tools socket (peer-gated to the admin uid), the same way ``app_api_proxy``
-reverse-proxies app-backend requests. The rest (list, config, enable/disable,
+the tools socket (peer-gated to the admin uid), the same way ``workspace_proxy``
+reverse-proxies workspace requests. The rest (list, config, enable/disable,
 reading approvals) touch only stored state and run here.
 
 ``admin_api.route`` dispatches ``/v1/tools`` paths here; ``ApiError`` comes
@@ -231,7 +231,7 @@ def tool_action_route(tool_id: str, operation: str, body: Any) -> Any:
     # The connect flows are tool-owned OAuth, invoked from the admin UI (the only
     # exposed API: the browser callback lands on /oauth/callback here). The admin
     # service reverse-proxies the whole flow to the tools service verbatim, the
-    # same way it reverse-proxies app-backend requests, so no OAuth tool code
+    # same way it reverse-proxies workspace requests, so no OAuth tool code
     # runs here and the code exchange and token revoke use the tools service's
     # egress. The tools service is the single validator: it checks the params,
     # the connection kind, and the enabled gate (disconnect deliberately skips

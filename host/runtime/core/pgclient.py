@@ -344,7 +344,7 @@ class Cursor:
     def __enter__(self) -> "Cursor":
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *_: Any) -> None:
         return None
 
     def execute(self, sql: str, params: Sequence[Any] | None = None) -> None:
@@ -355,13 +355,3 @@ class Cursor:
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         return list(self._result.rows)
-
-
-def connect(
-    *,
-    socket_dir: str = DEFAULT_SOCKET_DIR,
-    port: int = DEFAULT_PORT,
-    dbname: str,
-    user: str | None = None,
-) -> Connection:
-    return Connection(socket_dir=socket_dir, port=port, dbname=dbname, user=user)

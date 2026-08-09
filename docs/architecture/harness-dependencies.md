@@ -66,7 +66,7 @@ Expected methods:
 | `account/read` | Accepts a `refreshToken` boolean and returns a JSON object with an `account` field. Normal status reads pass `false`; if the live usage probe fails for a pinned account, Kern retries with `true` so Codex validates or refreshes its credential before the UI reports connected. A ChatGPT account contains `email` and `planType`; any provider-specific account type is intentionally ignored. A falsey account means login is still required. |
 | `account/rateLimits/read` | Returns Codex usage-limit snapshots. Kern exposes only the default `rateLimits` snapshot in admin API responses; per-limit `rateLimitsByLimitId` entries and duplicated snapshot identity fields are intentionally not returned. Rate-limit windows contain `usedPercent`, `windowDurationMins`, and `resetsAt`; the default snapshot may contain `credits`. |
 | `account/login/start` | Accepts `{"type": "chatgptDeviceCode"}` and returns `type`, `loginId`, `verificationUrl`, and `userCode`. |
-| `thread/start` | Accepts `cwd`, `approvalPolicy`, `sandbox`, developer instructions, and the selected `model`. Kern appends the validated app manifest instructions for app-scoped threads. Returns `thread.id`. |
+| `thread/start` | Accepts `cwd`, `approvalPolicy`, `sandbox`, developer instructions, and the selected `model`. Kern supplies the same short host developer instruction to every thread; the release-owned Workspace contract lives in the immutable agent-home instructions. Returns `thread.id`. |
 | `thread/resume` | Accepts `threadId`, `cwd`, the selected `model`, and refreshed developer instructions. Returns a resumed `thread.id`, or fails when the thread cannot be resumed. |
 | `turn/start` | Accepts `threadId`, text input, and the selected `model` and `effort`. Returns `turn.id`. It may emit notifications before the response. |
 | `turn/steer` | Accepts `threadId`, `expectedTurnId`, and text input. The submitting API request waits for its JSON-RPC response; `no active turn` is returned to the caller as a retryable `409`, not retained by a host mailbox. |
@@ -218,8 +218,7 @@ Kern starts one Claude Code process per turn through:
 claude -p --input-format stream-json --output-format stream-json --verbose \
   --model <model> --effort <effort> \
   --setting-sources user --strict-mcp-config \
-  --mcp-config <inline JSON for the bundled tools MCP shim> \
-  [--append-system-prompt <validated app instructions>]
+  --mcp-config <inline JSON for the bundled tools MCP shim>
 ```
 
 Kern passes the session selection on every new and resumed process.
@@ -302,8 +301,10 @@ contents to `/mnt/kern-agent/agent-home/AGENTS.md` and
 `/mnt/kern-agent/agent-home/CLAUDE.md`. That source file must tell agents
 they are running on a Kern host with full local shell/file permissions,
 must not prompt for local approvals, and must use Kern network-policy
-failures as operator allowlist requests. The installed host files are also
-root-owned, readable, and immutable.
+failures as operator allowlist requests. It also contains the one host-global
+Web App API contract used by every runtime and thread; no per-surface prompt is
+appended at process launch. The installed host files are root-owned, readable,
+and immutable.
 
 When resuming a thread, Kern appends:
 

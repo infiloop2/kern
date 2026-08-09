@@ -66,19 +66,19 @@ Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
   no secrets. A **`tools/call`** failure — including the tools service being
   unavailable — is forwarded to the agent as a normal MCP result with
   `isError: true` and a sanitized message, so the agent sees the error and can
-  react. Only **`tools/list`** falls back to the stable `app_api` declaration
+  react. Only **`tools/list`** falls back to the stable Workspace and conversation-history declarations
   when the tools socket is unavailable, rather than erroring: an error at list
   time can make a harness disable the MCP server for the whole session, so the
   fallback keeps the session healthy and a later list picks the bundled tools
   back up once the service is up.
-- The same shim always serves the **`app_api`** tool,
-  forwarded to the separate agent-app socket
-  (`/run/kern-agent-app/agent-app.sock`) rather than the tools socket.
-  Listing it grants no authority. On every call the service attributes the
-  session to an app thread with an agent API; there is nothing to
-  configure and no secret involved because attribution comes from the
-  caller's cgroup. See
-  [`../apps/agent-app-api.md`](../apps/agent-app-api.md).
+- The same shim always serves **`workspace_api`**, **`search_conversation_history`**,
+  and **`read_thread_history`**, forwarded to the
+  main Workspace service's agent socket (`/run/kern-workspace/agent.sock`) rather
+  than the tools socket. Listing it grants no additional identity. Calls use
+  explicit immutable resource ids; peer credentials establish only that the
+  caller is `kern-agent`. The history tools are read-only and return bounded
+  retained messages and activity from any host thread. See
+  [`../workspaces/workspace-agent-api.md`](../workspaces/workspace-agent-api.md).
 - The socket service authenticates by kernel peer credentials (`SO_PEERCRED`),
   the same OS-identity pattern as Postgres peer auth, and scopes each peer
   strictly by path: only the `kern-agent` uid reaches the MCP routes
@@ -97,7 +97,7 @@ The listed actions are the enabled tools' manifest actions, named
   name, description, connection type, `enabled`, and action ids — from manifests
   plus the enablement set only (no credentials, no third-party calls). It lets
   the agent distinguish *bundled but not enabled* (ask the operator to enable it
-  in the Tools tab) from *not bundled at all* (no host integration exists; the
+  under Home > Integrations) from *not bundled at all* (no host integration exists; the
   agent tells the operator the tool is not implemented and to file a feature
   request), instead of inferring from an empty list.
 - **`list_network_integrations`** and **`recent_network_denials`** are the
@@ -263,17 +263,15 @@ pull request check before it can reach a host.
 
 ## Operator flow
 
-Tools live on the admin UI's **Internet Access and Tools** tab, in their own
-section beneath the network controls and formatted the same way: one card per
-tool, matching the managed-integration rows. Each card carries enable/disable, an
-info popover with its summary and protections, write-only config inputs with set
-indicators, the OAuth connect/disconnect buttons, and, when expanded, the tool
-approvals table. The separate **Integration Guides** tab renders the manifest's
-ordered setup steps (with this host's callback URI and the tool's config keys
-shown inside the step that needs them), exact action list with approval
-controls, local audited screenshots, and the data summary — what leaves the
-host and where it can go, what the third party can do with it, and how long it
-retains it, with authoritative policy links. Backed by the
+Tools appear as cards under **Home > Integrations**. Opening a card shows one
+focused page containing enable/disable controls, write-only config inputs with
+set indicators, OAuth connect/disconnect controls, pending approvals, and the
+manifest-backed guide. The guide renders the ordered setup steps (with this
+host's callback URI and the tool's config keys shown inside the step that needs
+them), exact action list with approval controls, local audited screenshots, and
+the data summary — what leaves the host and where it can go, what the third
+party can do with it, and how long it retains it, with authoritative policy
+links. Backed by the
 `/v1/tools` API (see
 [`../../api/AdminAPI.md`](../../api/AdminAPI.md)):
 
@@ -283,7 +281,7 @@ retains it, with authoritative policy links. Backed by the
    can be enabled with partial or no config (the config status stays visible per
    key in the tool listing), and an action that needs a key that is not set fails
    when the tool reads it, with the operator-actionable message "Tool config
-   `<KEY>` is not set. The operator must set it in the admin UI's Tools tab.";
+   `<KEY>` is not set. The operator must set it under Home > Integrations in the admin UI.";
    while actions that do not need it still work.
 3. **Connect** (OAuth tools): the tool builds the provider authorization URL, the
    browser returns to `/oauth/callback` on the admin origin, and the UI completes
@@ -306,7 +304,7 @@ trust properties.
 operator authorizes at the provider, the provider redirects the operator's
 *browser* to `/oauth/callback?code=...&state=...` on the admin origin. A browser
 redirect cannot carry the SameSite=Strict session cookie, so this path is served like every
-other admin-UI asset — it returns the same static SPA shell (`admin_ui.html`)
+other admin-UI asset — it returns the same static SPA shell (`admin_ui/index.html`)
 that `/` returns, with no secrets in the response and no side effect. It does
 not perform the token exchange; it only lets the already-loaded SPA read the
 `code` and `state` query parameters. Nothing security-sensitive happens here.
@@ -330,13 +328,11 @@ identical whether the operator reached the UI over SSH-forwarded loopback
 or over a Cloudflare Tunnel hostname.
 
 **No API path is served without the admin password.** The unauthenticated GETs
-are the static UI assets — the SPA shell (served at both `/` and
-`/oauth/callback`), `admin_ui.css`, the `admin_ui/*.js` modules, and the
-favicons — plus each installed app's own static UI assets under
-`/v1/apps/<app_id>/ui/...`, which are served before authentication for the
-sandboxed iframe. Every other `/v1/...` route, including `oauth_connect/complete`
-and every `/v1/apps/<app_id>/api/...` call, passes through admin authentication
-before it runs. The unauthenticated set carries no
+are static UI assets — the SPA shell (served at both `/` and
+`/oauth/callback`), `/admin_ui.css`, the `/admin_ui/*.js` modules, favicons, and
+the fixed Workspace assets under `/workspace/...`. Every `/v1/...` route,
+including `oauth_connect/complete`, `/v1/workspace/chat/...`, and `/v1/workspace/web-apps/...`,
+passes through admin authentication before it runs. The unauthenticated set carries no
 secrets and performs no state change.
 
 **Abuse and DDoS.** The admin login is the authentication boundary, reachable

@@ -145,10 +145,10 @@ On the GitHub delivery, port 22 opens at launch only when the operator
 endpoints include an `ssh` endpoint, and bootstrap installs that endpoint's
 key; there is never a provisioning-only SSH window.
 
-Operator endpoints expose the admin API/UI only. App backend services bind
-host-assigned loopback ports and are not forwarded directly over SSH, the
-Cloudflare Tunnel, or the EC2 security group; operator app requests go through
-the authenticated admin API app proxy.
+Operator endpoints expose the admin API/UI only. The Workspace service binds
+its fixed loopback port and is not forwarded directly over SSH, the Cloudflare
+Tunnel, or the EC2 security group; operator Workspace requests go through the
+authenticated admin API proxy.
 
 For a Cloudflare Tunnel endpoint, bootstrap installs a pinned `cloudflared`
 binary and a `kern-cloudflared.service` systemd unit with `Restart=always`

@@ -23,9 +23,47 @@ already holds that data (`from:alice@example.com` must not be denied), while
 secret/credential shapes and encoded payloads are still denied. Apart from
 that flag the caller passes the value and nothing else — no limits, thresholds, guard
 selections, or policy objects — so a call site cannot weaken the check;
-tightening or loosening is a host-side reviewed change. The proxy's
-network-integration guards run the same rules over decoded request-URL
-values (`request_param_denial` in `host/network_integrations/base.py`).
+tightening or loosening is a host-side reviewed change. The proxy also runs
+these rules over decoded request-URL values on the managed integrations
+(`request_param_denial` in `host/network_integrations/base.py`).
+
+**Why the URL and not the headers.** A channel needs a reader. GitHub, PyPI and
+npm are first-party destinations that reflect no request header back, so a
+header sent there reaches the provider's private logs and stops — there is
+nobody to retrieve it. The requested *package name* is different: npm and PyPI
+publish per-package download statistics, so "fetch package `<encoded-secret>`"
+is a real, if slow and low-bandwidth, signal an attacker can read. That is the
+threat the URL guard answers, and it is why it stays.
+
+Headers are therefore not inspected. What the proxy does instead is remove what
+a header can *do*:
+
+- **Credentials** (`Authorization`, `Cookie`) are stripped on the package
+  registries, where the agent holds no credential the destination should
+  receive. On GitHub the agent's `Authorization` is stripped and replaced with
+  the host-held token, which is credential injection rather than filtering and
+  exists so the agent never holds the working credential.
+- **`User-Agent`** is replaced with a fixed host value. This is the one field
+  where the no-reader argument does not hold: PyPI publishes a public download
+  dataset whose installer name and version are derived from `User-Agent`, so an
+  agent-chosen product token there really is attacker-readable. A fixed value
+  removes the field as a channel; these destinations require the header to be
+  present but do not care what it says.
+
+An earlier revision of this guard scanned header *content*, and then allowlisted
+header names and values. Both needed a special case per client to survive real
+traffic, and both kept yielding "this grammar is one character too generous"
+findings — because a bounded channel is still a channel, and the underlying
+channel had no reader to begin with. Concentrating on the dimension that does
+have a reader is what keeps this explainable.
+
+This reasoning depends on the managed destinations being first-party and not
+reflecting requests back. A future integration that echoes requests — a webhook
+receiver, a paste service — would need that judgment made again before its
+headers were forwarded unread.
+
+Custom domains are not inspected at all; the operator's domain, method and path
+rule is the whole boundary. See `docs/api/NetworkControls.md`.
 
 Any finding denies the action. The guard never redacts, truncates, or
 rewrites: a silently modified query or side effect is an action the caller
@@ -152,13 +190,14 @@ third-party destinations:
 - GitHub read-path query values (search `q=` and filters), with both
   token-shape guards (G3, G4) disabled there because revision ids, blob
   shas, and cursors are legitimately long and machine-shaped;
-- custom-domain request URLs (operator-configured destinations): the
-  operator allows the domain, methods, and paths, and the guard adds content
-  protection over the agent-authored URL;
 - connected-account mailbox queries (Gmail `search_messages`, `list_drafts`)
   via `allow_identifiers=True`: secret/credential shapes and encoded payloads
   denied; personal identifiers (including one-time codes) allowed as search
   syntax.
+
+Custom-domain requests are deliberately absent from that list: nothing inside
+them is inspected, and the operator's domain/method/path rule is the whole
+boundary.
 
 On the proxy path the whole reconstructed URL (`https://host<path>?<query>`)
 is decoded and scanned as one value rather than parsing segments and query

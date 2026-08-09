@@ -3,12 +3,12 @@
 | Level | Command | Needs network? | Needs AWS? | Needs provider login? |
 | --- | --- | --- | --- | --- |
 | Static type checks | `python3 -m mypy --config-file mypy.ini` and `python3 -m pyright --project pyrightconfig.json` | No | No | No |
-| Unit tests | `python3 -m unittest discover -s tests` | No | No | No |
+| Unit tests | `./tests/scripts/test` | No | No | No |
 | Admin UI mock smoke | `python3 tests/smoke-ui/admin_ui_smoke.py --port 3100` | No | No | No |
 
 Run the static type checks and unit tests on every change; the admin UI mock
 smoke runs in CI and is also useful locally while editing the files under
-`host/runtime/admin_ui.*`. Live AWS checks are covered separately in
+`host/runtime/admin_api/admin_ui/`. Live AWS checks are covered separately in
 [Fresh AWS smoke](fresh-aws-smoke.md) and
 [Persistent AWS stage](persistent-aws-stage.md).
 
@@ -26,9 +26,12 @@ syntax compilation and their live workflows.
 
 ## Unit tests (run on every change, and in CI)
 
+```bash
+./tests/scripts/test
 ```
-python3 -m unittest discover -s tests
-```
+
+For a focused run, pass ordinary unittest module or test names, for example
+`./tests/scripts/test test_personal_web_app_builder`.
 
 They need `openssl` (proxy certificate tests), `bash` (rendered-script
 checks), and PostgreSQL server binaries (admin-state tests), but **no network
@@ -75,7 +78,7 @@ Codex, Claude Code, and Hermes active with representative usage values so the
 runtime toolbar is useful for visual inspection. The port is an argument so
 multiple developers or agents can choose non-conflicting localhost ports.
 
-The mock backend serves `host/runtime/admin_ui.html` and implements the `/v1/*`
+The mock backend serves `host/runtime/admin_api/admin_ui/index.html` and implements the `/v1/*`
 routes the UI uses with in-memory data. It is for UI wiring and interaction
 checks only; it does not validate the real admin API, host state, sudo helpers,
 agent runtimes, or network proxy.
@@ -100,7 +103,7 @@ python3 tests/smoke-ui/admin_ui_smoke.py --port 3100
 
 The smoke starts the mock server, opens Chromium, and exercises the core
 operator flows across thread/session views, network and GitHub controls, files,
-processes, bundled tools and approvals, audit logs, and installed app surfaces
+processes, bundled tools and approvals, audit logs, and workspaces
 at desktop and mobile dimensions. CI installs Playwright and
 Chromium during the Docker image build, then runs this smoke through
 `.github/ci/run-in-sandbox.sh` with `--network none`. On development boxes with

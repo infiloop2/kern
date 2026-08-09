@@ -143,7 +143,13 @@ def ensure_database() -> None:
 
     # The scoped service roles must exist before migrations run (the schema
     # GRANTs them their tables). Tests connect as postgres either way.
-    for role in ("kern-proxy", "kern-tools", "kern-agent-network"):
+    for role in (
+        "kern-admin",
+        "kern-proxy",
+        "kern-tools",
+        "kern-agent-network",
+        "kern-workspace",
+    ):
         subprocess.run(
             [str(pg_bin / "createuser"), "-h", str(socket_dir), "-U", "postgres", role],
             stdout=subprocess.DEVNULL,
@@ -190,6 +196,15 @@ def reset_database() -> None:
             "INSERT INTO secret_keys (singleton, key_hex)"
             " VALUES (TRUE, translate(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''))"
         )
+        # Migration 0030 establishes these rows as a schema invariant. Tests
+        # truncate counters along with the rest of state, so restore the empty
+        # database values before each test just like the secretbox key above.
+        cur.execute(
+            "INSERT INTO counters (name, value) VALUES"
+            " ('agent_history_threads', 0),"
+            " ('agent_history_messages', 0),"
+            " ('agent_history_activities', 0)"
+        )
 
 
 def create_database(name: str) -> None:
@@ -213,6 +228,24 @@ def create_database(name: str) -> None:
     )
     subprocess.run(
         [str(pg_bin / "createdb"), "-h", socket_dir, "-U", "postgres", name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    subprocess.run(
+        [
+            str(pg_bin / "psql"),
+            "-h",
+            socket_dir,
+            "-U",
+            "postgres",
+            "-d",
+            name,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            "REVOKE CREATE ON SCHEMA public FROM PUBLIC;",
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         check=True,

@@ -199,24 +199,25 @@ class ToolAssetStore:
             self._records[asset_id] = _AssetRecord(tool_id, metadata, destination, True)
         return metadata
 
-    def describe(self, tool_id: str, asset_id: str) -> AssetMetadata:
+    def _locked_record(self, tool_id: str, asset_id: str) -> _AssetRecord:
+        """Validate an asset id and return its live, tool-owned record. The
+        caller must hold the lock."""
         if not isinstance(asset_id, str) or not ASSET_ID_RE.fullmatch(asset_id):
             raise AssetError("Asset id is invalid or expired. Upload the file again.")
+        self._cleanup_locked(int(time.time()))
+        record = self._records.get(asset_id)
+        if record is None or record.tool_id != tool_id or not record.ready:
+            raise AssetError("Asset id is invalid or expired. Upload the file again.")
+        return record
+
+    def describe(self, tool_id: str, asset_id: str) -> AssetMetadata:
         with self._lock:
-            self._cleanup_locked(int(time.time()))
-            record = self._records.get(asset_id)
-            if record is None or record.tool_id != tool_id or not record.ready:
-                raise AssetError("Asset id is invalid or expired. Upload the file again.")
-            return record.metadata
+            return self._locked_record(tool_id, asset_id).metadata
 
     @contextmanager
     def open(self, tool_id: str, asset_id: str) -> Iterator[BinaryIO]:
-        self.describe(tool_id, asset_id)
         with self._lock:
-            record = self._records.get(asset_id)
-            if record is None or record.tool_id != tool_id or not record.ready:
-                raise AssetError("Asset id is invalid or expired. Upload the file again.")
-            path = record.path
+            path = self._locked_record(tool_id, asset_id).path
         try:
             with path.open("rb") as source:
                 yield source

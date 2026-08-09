@@ -53,7 +53,11 @@ import sys
 import tempfile
 import urllib.request
 
-from host.bootstrap.render import _bootstrap_payload, _render_github_user_data, _render_ssh_user_data
+from host.bootstrap.render import (
+    _bootstrap_payload,
+    _render_github_user_data,
+    _render_ssh_user_data,
+)
 from host.config import (
     ConfigError,
     InputConfig,
@@ -65,30 +69,21 @@ from host.config import (
 from host.constants import ADMIN_API_PORT, OPERATOR_TUNNEL_TOKEN_ENV_NAME, PUBLIC_GITHUB_REPOSITORY
 from host.cli.lifecycle_aws import (
     _attach_storage_volumes,
-    _aws,
     _aws_env,
+    _close_security_group_ssh_ingress,
     _default_network,
-    _ensure_security_group,
     _ensure_storage_volumes,
     _existing_storage_roles,
     _existing_storage_volume_availability_zone,
-    _find_available_storage_volume,
     _find_existing_instances,
-    _find_storage_volume,
     _launch_instance,
-    _preserve_attached_volume_on_instance_termination,
     _preserve_existing_storage_volumes_on_instance_termination,
     _security_group_access_state,
-    _set_security_group_ssh_ingress,
-    _subnet_has_public_ipv4_route,
-    _tag_spec,
     _terminate_instances,
-    _ubuntu_ami,
-    _volume_tag_spec,
     _wait_for_instance,
 )
 from host.cli.lifecycle_bootstrap import _generate_deploy_key, _provision_over_ssh
-from host.cli.lifecycle_checks import _check_existing_version_hints, _validate_command_preflight, _version_hint_error
+from host.cli.lifecycle_checks import _check_existing_version_hints, _validate_command_preflight
 from host.cli.lifecycle_constants import SSH_USER
 from host.cli.lifecycle_logging import _log
 from host.cli.lifecycle_types import LifecycleCommand
@@ -308,7 +303,7 @@ def main_for_mode(mode: str, argv: list[str] | None = None) -> int:
                     # open during provisioning; close it when the operator
                     # endpoints do not keep it.
                     if not ssh_ingress:
-                        _set_security_group_ssh_ingress(aws_env, security_group_id, enabled=False)
+                        _close_security_group_ssh_ingress(aws_env, security_group_id)
                     _log("provisioning complete")
                 else:
                     _log(
@@ -462,4 +457,3 @@ def _aws_region_from_env() -> str:
     if not region:
         raise ConfigError("set AWS_REGION to the agent's AWS region")
     return region
-

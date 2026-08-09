@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Agentic Web App</title>
+</head>
+<body>
+<div class="builder-shell" id="builder-shell">
+  <section id="app-view" class="app-view">
+    <header id="app-view-toolbar" class="app-view-toolbar" hidden>
+      <div class="app-view-mode">
+        <span class="app-title-row">
+          <strong id="app-title"></strong>
+          <span id="revision-label" class="revision-label"></span>
+        </span>
+      </div>
+      <div class="app-view-actions">
+        <button id="rename-app" class="app-toolbar-button" type="button" title="Rename app" aria-label="Rename app">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4.5 14.5-.5 2 2-.5 9-9-1.5-1.5-9 9ZM12.5 6.5 14 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Rename</span>
+        </button>
+        <button id="settings-open" class="app-toolbar-button" type="button" aria-label="Agent" aria-expanded="false" aria-controls="settings-popover">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 7.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6Z M16 11V9l-1.8-.5-.6-1.4.9-1.6-1.4-1.4-1.6.9-1.4-.6L9.6 2h-2l-.5 2.4-1.4.6-1.6-.9-1.4 1.4.9 1.6L3 8.5 1.2 9v2l1.8.5.6 1.4-.9 1.6 1.4 1.4 1.6-.9 1.4.6.5 2.4h2l.5-2.4 1.4-.6 1.6.9 1.4-1.4-.9-1.6.6-1.4L16 11Z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/></svg>
+          <span>Agent</span>
+        </button>
+        <button id="recovery-open" class="app-toolbar-button" type="button" aria-label="Recovery" aria-expanded="false" aria-controls="recovery-drawer">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 10a5.5 5.5 0 1 1 1.6 3.9M4.5 10V6.6M4.5 10H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Recovery</span>
+        </button>
+        <button id="archive-app" class="app-toolbar-button archive" type="button" title="Archive app" aria-label="Archive app">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6.5h12v9H4zM3.5 3.5h13v3h-13zM8 10h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Archive</span>
+        </button>
+      </div>
+    </header>
+
+    <section id="agent-command-surface" class="agent-command-surface" aria-label="App agent" hidden>
+      <footer class="chat-composer" id="chat-composer">
+        <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
+        <div class="composer-row">
+          <button id="attach-file" class="attach-button" aria-label="Attach files" title="Attach up to 10 files (25 MiB each)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.2 10.8 4.7-4.7a2.4 2.4 0 0 1 3.4 3.4l-6.2 6.2a4 4 0 0 1-5.7-5.7l6.4-6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          </button>
+          <textarea id="message" rows="1" placeholder="Tell the agent what to change"></textarea>
+          <button id="send-message" class="send-button" aria-label="Send message" title="Send">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.2 3.6 13.9 6.3-13.9 6.5 1.9-5.2 6.6-1.2-6.6-1.2-1.9-5.2Z" fill="currentColor"/></svg>
+            <span>Send</span>
+          </button>
+        </div>
+      </footer>
+      <div id="latest-agent-card" class="latest-agent-card" hidden>
+        <span id="latest-agent-kind" class="latest-agent-kind" aria-hidden="true"></span>
+        <div id="latest-agent-message" class="latest-agent-message" role="status"></div>
+        <button id="stop-turn" class="latest-agent-stop" type="button" aria-label="Stop agent" title="Stop agent" hidden>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="6" y="6" width="8" height="8" rx="1" fill="currentColor"/></svg>
+          <span>Stop agent</span>
+        </button>
+        <button id="latest-agent-dismiss" class="latest-agent-dismiss" type="button" aria-label="Dismiss agent message">×</button>
+      </div>
+      <div id="settings-popover" class="settings-popover" hidden>
+        <div id="agent-settings" class="agent-settings" aria-label="App agent settings" aria-describedby="agent-settings-idle-note">
+          <label><span>Agent</span><select id="runtime" aria-label="App agent"></select></label>
+          <label><span>Model</span><select id="model" aria-label="App model"></select></label>
+          <label><span>Level</span><select id="effort" aria-label="App effort level"></select></label>
+          <span id="agent-settings-idle-note" class="agent-settings-note" role="tooltip">Agent settings can only be changed while the agent is idle. Stop this app's agent first if you want to change them.</span>
+          <span id="agent-session-change-warning" class="agent-settings-note change" role="status" hidden>Changing Agent, Model, or Level starts a new agent session. Some older context may be omitted, and provider cache reads will be invalidated.</span>
+        </div>
+      </div>
+    </section>
+
+    <div class="app-canvas">
+      <iframe id="capability-worker-sandbox" class="capability-worker-sandbox" src="/workspace/capability-worker-sandbox.html" sandbox="allow-scripts" title="Generated app behavior sandbox" aria-hidden="true"></iframe>
+      <div id="generated-host" class="generated-host" hidden></div>
+      <div id="canvas-empty" class="canvas-empty">
+        <div class="canvas-empty-inner">
+          <div class="canvas-empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2.8c.8 5.3 3.9 8.4 9.2 9.2-5.3.8-8.4 3.9-9.2 9.2-.8-5.3-3.9-8.4-9.2-9.2 5.3-.8 8.4-3.9 9.2-9.2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></div>
+          <h1 id="empty-title">Build this app</h1>
+          <p id="empty-description">Describe what you want in the command box above.</p>
+        </div>
+      </div>
+      <div id="app-update-veil" class="app-update-veil" hidden>
+        <div class="app-update-card">
+          <strong>A newer version of this app is available</strong>
+          <span>Your current view is paused so it cannot write against stale data.</span>
+          <button id="app-refresh" class="primary" type="button">Update app</button>
+        </div>
+      </div>
+      <div id="archived-app-veil" class="archived-app-veil" hidden>
+        <div class="archived-app-card">
+          <strong>Archived app</strong>
+          <span>This app is read-only. Restore it from the Apps sidebar to make changes.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <button id="recovery-backdrop" class="recovery-backdrop" aria-label="Dismiss Recovery" hidden></button>
+  <aside id="recovery-drawer" class="recovery-drawer" aria-label="App recovery" hidden>
+    <header class="recovery-head">
+      <div><span class="app-view-eyebrow">App history</span><h2>Recovery</h2></div>
+      <button id="recovery-close" class="ghost icon-button" aria-label="Close Recovery">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+    <p class="panel-intro">Restore the interface and data together. A restore is saved as a new revision.</p>
+    <div id="app-history-list" class="app-history-list"></div>
+  </aside>
+  <span id="runtime-status" class="runtime-status" role="status" hidden></span>
+</div>
+</body>
+</html>

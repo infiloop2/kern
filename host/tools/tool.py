@@ -15,7 +15,7 @@ from typing import Protocol, TypedDict
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI
 from host.tools.json_types import JSONObject
 from host.tools.manifest import ToolManifest
-from host.tools.results import ActionResult, ApprovalResult
+from host.tools.results import ActionFailed, ActionResult, ApprovalResult
 
 
 class OAuthStartConnectParams(TypedDict):
@@ -146,5 +146,10 @@ class Tool(Protocol):
         objects it references), executes the stored payload exactly as
         proposed, and returns ``ApprovalExecuted`` (a user-visible message) or
         ``ActionFailed`` — never ``ActionPendingApproval``.
+
+        The default implementation below serves read-only packages: a tool
+        with no approval-gated actions inherits it by subclassing ``Tool``
+        explicitly instead of carrying its own stub.
         """
-        ...
+        del approval, api
+        return ActionFailed(f"{self.manifest.display_name} has no approval-gated actions.")

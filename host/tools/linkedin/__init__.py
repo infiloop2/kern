@@ -25,7 +25,7 @@ from host.tools.tool import (
     OAuthStartConnectResult,
 )
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI
-from host.tools.shared.google import clip_text
+from host.tools.shared.inputs import ToolInputValidationError, clip_text
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
     access_token_is_fresh,
@@ -55,12 +55,6 @@ MAX_POST_CHARS = 3_000
 LITTLE_TEXT_RESERVED = "\\|{}@[]()<>#*_~"
 # Host approval summaries are capped at 500 UTF-8 bytes (tools_host SUMMARY_MAX_BYTES).
 SUMMARY_MAX_BYTES = 500
-
-
-class ToolInputValidationError(ValueError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
 
 
 LINKEDIN_OUTPUT_SCHEMA: JSONObject = {
@@ -150,7 +144,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and connect Kern",
             show_config=True,
-            description="Expand LinkedIn in Internet Access and Tools. Save the Client ID as LINKEDIN_OAUTH_CLIENT_ID and Primary Client Secret as LINKEDIN_OAUTH_CLIENT_SECRET, enable the tool, choose Connect, and approve the four displayed scopes while signed in to the personal profile you want the agent to use. Kern replaces no account silently; confirm the row shows that profile's expected name and email before giving the agent access.",
+            description="Open LinkedIn under Home > Integrations. Save the Client ID as LINKEDIN_OAUTH_CLIENT_ID and Primary Client Secret as LINKEDIN_OAUTH_CLIENT_SECRET, enable the tool, choose Connect, and approve the four displayed scopes while signed in to the personal profile you want the agent to use. Kern replaces no account silently; confirm the page shows that profile's expected name and email before giving the agent access.",
         ),
     ),
     data_summary=DataSummary(
@@ -333,20 +327,6 @@ class LinkedInCredentialStore:
 LINKEDIN_CREDENTIALS = LinkedInCredentialStore()
 
 
-class LinkedInCredentialFlow(CredentialFlow):
-    def start_connect(self, params: OAuthStartConnectParams, api: HostAPI) -> OAuthStartConnectResult:
-        return LINKEDIN_CREDENTIALS.start_connect(params, api)
-
-    def complete_connect(self, params: OAuthCompleteConnectParams, api: HostAPI) -> OAuthCompleteConnectResult:
-        return LINKEDIN_CREDENTIALS.complete_connect(params, api)
-
-    def disconnect(self, api: HostAPI) -> None:
-        LINKEDIN_CREDENTIALS.disconnect(api)
-
-    def connection_status(self, api: HostAPI) -> ConnectionStatus:
-        return LINKEDIN_CREDENTIALS.connection_status(api)
-
-
 def _rest_headers(access_token: str) -> dict[str, str]:
     return {
         "authorization": f"Bearer {access_token}",
@@ -438,7 +418,8 @@ class LinkedInTool:
 
     @property
     def credentials(self) -> CredentialFlow:
-        return LinkedInCredentialFlow()
+        # LinkedInCredentialStore implements the CredentialFlow protocol directly.
+        return LINKEDIN_CREDENTIALS
 
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
         try:

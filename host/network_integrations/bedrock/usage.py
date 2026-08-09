@@ -110,13 +110,7 @@ def _parse_usage(raw: bytes) -> dict[str, int] | None:
 
 
 def _skip_interim_responses(raw: bytes) -> bytes:
-    """Drop any leading 1xx interim responses so the final response is parsed.
-
-    When a client sends ``Expect: 100-continue`` (the proxy does not strip
-    that header) a conforming upstream may prepend ``HTTP/1.1 100 Continue``
-    before the ``200 OK``. Each interim response is a status line and headers
-    terminated by a blank line, with no body; skip them so a metered call is
-    not misread as unmetered."""
+    """Drop leading 1xx responses so metering parses the final response."""
     while True:
         status = _STATUS_RE.match(raw)
         if status is None or not status.group(1).startswith(b"1"):
@@ -204,15 +198,10 @@ def _metadata_event_payload(body: bytes) -> dict[str, Any] | None:
     return None
 
 
-# Value lengths for the fixed-size eventstream header types: bool true/false,
-# byte, short, int, long, timestamp, uuid. Types 6 (bytearray) and 7 (string)
-# carry a 2-byte length prefix instead.
-_FIXED_HEADER_VALUE_LENGTHS = {0: 0, 1: 0, 2: 1, 3: 2, 4: 4, 5: 8, 8: 8, 9: 16}
-
-
 def _event_headers(raw: bytes) -> dict[str, str] | None:
-    """The string-valued headers of one eventstream message, or None when the
-    header block is malformed."""
+    """The string-valued (type 7, the only type Bedrock stream events carry)
+    headers of one eventstream message, or None when the header block is
+    malformed or uses another header type."""
     headers: dict[str, str] = {}
     offset = 0
     while offset < len(raw):
@@ -224,23 +213,17 @@ def _event_headers(raw: bytes) -> dict[str, str] | None:
             return None
         value_type = raw[offset]
         offset += 1
-        if value_type in (6, 7):
-            if offset + 2 > len(raw):
-                return None
-            value_length = int.from_bytes(raw[offset : offset + 2], "big")
-            offset += 2
-            value = raw[offset : offset + value_length]
-            offset += value_length
-            if value_type == 7:
-                try:
-                    headers[name.decode("utf-8")] = value.decode("utf-8")
-                except UnicodeDecodeError:
-                    return None
-        elif value_type in _FIXED_HEADER_VALUE_LENGTHS:
-            offset += _FIXED_HEADER_VALUE_LENGTHS[value_type]
-        else:
+        if value_type != 7 or offset + 2 > len(raw):
             return None
+        value_length = int.from_bytes(raw[offset : offset + 2], "big")
+        offset += 2
+        value = raw[offset : offset + value_length]
+        offset += value_length
         if offset > len(raw):
+            return None
+        try:
+            headers[name.decode("utf-8")] = value.decode("utf-8")
+        except UnicodeDecodeError:
             return None
     return headers
 

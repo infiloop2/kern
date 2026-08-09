@@ -1,11 +1,11 @@
-// Internet Access and Tools tab: the active network policy (managed
+// Focused Home integration detail: the active network policy (managed
 // integrations and manual domain rules), the GitHub write-repository list
 // with per-repository audits, and the GitHub credential controls.
 
 import { api } from "./api.js";
-import { $, badge, bedrockUsage, claudeUsage, codexUsage, esc, formatTokenCount, formatUnixTime, informationIcon, inlineCode, inlineMessage, objectValue, providerRuntime, replaceIntegrationRows, runtimeLabel, RUNTIME_PROVIDERS, setHtml } from "./helpers.js";
+import { $, badge, bedrockUsage, claudeUsage, codexUsage, esc, formatTokenCount, formatUnixTime, inlineMessage, objectValue, providerRuntime, replaceIntegrationRows, runtimeLabel, RUNTIME_PROVIDERS, setHtml } from "./helpers.js";
 import { providerAccounts, refreshHealth, refreshProviderAccounts, runtimeRecords } from "./health.js";
-import { CUSTOM_DOMAIN_GUIDE, MANAGED_INTEGRATIONS, integrationInfo } from "./integration_catalog.js";
+import { MANAGED_INTEGRATIONS } from "./integration_catalog.js";
 
 const GITHUB_REPO_INPUT_RE = /^([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)\/([a-z0-9._-]{1,100})$/;
 // The AI Inference group in render order.
@@ -15,99 +15,71 @@ const BEDROCK_INTEGRATION = "bedrock";
 const BEDROCK_REGIONS = ["us-east-1", "us-east-2", "us-west-2"];
 
 let activeNetworkPolicy = {"network_integrations": {}};
-let expandedIntegrations = new Set();
 let expandedGithubRepoAudits = new Set();
-let customDomainExpanded = false;
 let latestGithubAudits = [];
-let infoPopoverAnchor = null;
 let bedrockCredentialMetadata = { connected: false };
+
+function selectedIntegrationId() {
+  return $("panel-network").dataset.guide || "";
+}
+
+export function selectIntegrationDetail(guideId) {
+  $("panel-network").dataset.guide = guideId || "";
+  applyIntegrationDetailSelection();
+}
+
+export function applyIntegrationDetailSelection() {
+  const selected = selectedIntegrationId();
+  for (const row of document.querySelectorAll("#panel-network .integration-row[data-integration]")) {
+    const visible = row.dataset.integration === selected;
+    row.hidden = !visible;
+    if (visible) {
+      row.classList.add("expanded");
+      const details = row.querySelector(".integration-details");
+      if (details) details.hidden = false;
+    }
+  }
+  for (const row of document.querySelectorAll("#panel-network .integration-row[data-tool-row]")) {
+    const visible = `tool:${row.dataset.toolRow}` === selected;
+    row.hidden = !visible;
+    if (visible) {
+      row.classList.add("expanded");
+      const details = row.querySelector(".integration-details");
+      if (details) details.hidden = false;
+    }
+  }
+  for (const group of document.querySelectorAll("#panel-network .network-group")) {
+    group.hidden = !group.querySelector(".integration-row:not([hidden])");
+  }
+}
+
+function renderHomeManagedStatuses() {
+  const integrations = objectValue(activeNetworkPolicy.network_integrations);
+  for (const [name] of Object.entries(MANAGED_INTEGRATIONS)) {
+    const status = document.querySelector(`[data-home-integration-status="${name}"]`);
+    if (!status) continue;
+    const enabled = objectValue(integrations[name]).enabled === true;
+    status.className = `status ${enabled ? "active" : "disabled"}`;
+    status.textContent = enabled ? "enabled" : "disabled";
+  }
+  const custom = document.querySelector('[data-home-integration-status="custom_domain"]');
+  if (custom) {
+    const count = Object.keys(customDomains(activeNetworkPolicy)).length;
+    custom.className = `status ${count ? "active" : "disabled"}`;
+    custom.textContent = count ? `${count} enabled` : "none enabled";
+  }
+  document.dispatchEvent(new CustomEvent("kern-home-integration-statuses-updated"));
+}
+
+document.addEventListener("kern-home-integration-cards-rendered", renderHomeManagedStatuses);
 
 export function setBedrockCredentialMetadata(value) {
   bedrockCredentialMetadata = value && typeof value === "object" ? value : { connected: false };
 }
 
-export function activePolicy() {
-  return activeNetworkPolicy;
-}
-
 function policyMessage(integration, message, isError) {
   const node = document.querySelector(`[data-integration-message="${integration}"]`);
   inlineMessage(node, message, isError);
-}
-
-export function closeIntegrationInfo() {
-  const panel = $("preset-info-popover");
-  panel.hidden = true;
-  panel.dataset.integration = "";
-  panel.innerHTML = "";
-  panel.style.left = "";
-  panel.style.top = "";
-  infoPopoverAnchor = null;
-  for (const button of document.querySelectorAll(".info-button")) {
-    button.setAttribute("aria-expanded", "false");
-  }
-}
-
-// One floating popover serves every info button on the tab: managed
-// integrations pass their catalog summary, tool rows pass
-// html built from the tool manifest (tools.js). The key identifies the open
-// popover so a second click on the same button closes it.
-export function toggleInfoPopover(key, anchor, html) {
-  const panel = $("preset-info-popover");
-  if (!panel.hidden && panel.dataset.integration === key) {
-    closeIntegrationInfo();
-    return;
-  }
-  panel.dataset.integration = key;
-  panel.innerHTML = html;
-  panel.hidden = false;
-  infoPopoverAnchor = anchor;
-  positionIntegrationInfo();
-  for (const button of document.querySelectorAll(".info-button")) {
-    button.setAttribute("aria-expanded", String(button.dataset.info === key));
-  }
-}
-
-export function toggleIntegrationInfo(name, anchor) {
-  const info = name === CUSTOM_DOMAIN_GUIDE.id ? CUSTOM_DOMAIN_GUIDE : integrationInfo(name);
-  if (!info) return;
-  toggleInfoPopover(name, anchor, renderIntegrationInfo(name, info));
-}
-
-export function positionIntegrationInfo() {
-  const panel = $("preset-info-popover");
-  if (panel.hidden || !infoPopoverAnchor) return;
-  const anchorRect = infoPopoverAnchor.getBoundingClientRect();
-  const margin = 12;
-  const panelWidth = Math.min(448, window.innerWidth - margin * 2);
-  panel.style.width = `${panelWidth}px`;
-  panel.style.left = "0px";
-  panel.style.top = "0px";
-  const panelRect = panel.getBoundingClientRect();
-  const rightLeft = anchorRect.right + margin;
-  const leftLeft = anchorRect.left - panelRect.width - margin;
-  const preferredLeft = rightLeft + panelRect.width <= window.innerWidth - margin
-    ? rightLeft
-    : leftLeft;
-  const left = Math.min(
-    Math.max(margin, preferredLeft),
-    Math.max(margin, window.innerWidth - panelRect.width - margin),
-  );
-  const preferredTop = anchorRect.top - 6;
-  const top = Math.min(
-    Math.max(margin, preferredTop),
-    Math.max(margin, window.innerHeight - panelRect.height - margin),
-  );
-  panel.style.left = `${left}px`;
-  panel.style.top = `${top}px`;
-}
-
-function renderIntegrationInfo(name, info) {
-  return `
-    <h3>${esc(info.label)}</h3>
-    <h4>Protections</h4>
-    <ul>${info.protections.map(protection => `<li>${inlineCode(protection)}</li>`).join("")}</ul>
-    <button class="popover-guide-link" data-action="open-connection-guide" data-guide="${esc(name)}">View integration guide</button>`;
 }
 
 export async function loadPolicy() {
@@ -134,6 +106,8 @@ function renderNetworkControls() {
   renderManagedIntegrations();
   renderGithubRepos();
   renderDomainRules();
+  renderHomeManagedStatuses();
+  applyIntegrationDetailSelection();
 }
 
 // Every edit control mutates a clone of the live policy and publishes it
@@ -157,7 +131,6 @@ async function publishPolicy(integration, mutate, message) {
 }
 
 function renderManagedIntegrations() {
-  closeIntegrationInfo();
   const managed = objectValue(activeNetworkPolicy.network_integrations);
   // Park the expansion node outside the list before the innerHTML swap below
   // would destroy it (it was moved under the GitHub details on the previous
@@ -169,18 +142,12 @@ function renderManagedIntegrations() {
     .sort(([, left], [, right]) => left.label.localeCompare(right.label, undefined, { sensitivity: "base" }));
   const renderRows = entries => entries.map(([name, meta]) => {
     const enabled = objectValue(managed[name]).enabled === true;
-    const expanded = expandedIntegrations.has(name);
+    const expanded = selectedIntegrationId() === name;
     return `
       <section class="integration-row" data-integration="${esc(name)}">
         <div class="integration-summary">
-          <button class="ghost sm icon-button integration-chevron" data-action="toggle-integration-expansion" data-integration="${esc(name)}" aria-label="Toggle ${esc(meta.label)} details" aria-expanded="${expanded}">
-            <svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 4.5 5 5.5-5 5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
           <div class="integration-title">
-            <div class="preset-with-info">
-              <h2>${esc(meta.label)}</h2>
-              <button class="info-button" data-action="toggle-integration-info" data-info="${esc(name)}" aria-label="${esc(meta.label)} overview and protections" aria-haspopup="dialog" aria-expanded="false">${informationIcon()}</button>
-            </div>
+            <h2>${esc(meta.label)}</h2>
             <div class="integration-subtitle">${esc(meta.summary)}</div>
           </div>
           <span class="status-chips">
@@ -206,12 +173,13 @@ function renderManagedIntegrations() {
   setHtml($("ai-inference-integrations"), renderRows(inference));
   replaceIntegrationRows(toolContainer, "[data-integration]", renderRows(managedTools));
   renderIntegrationAccounts();
-  // The write-repository list and audits render in the GitHub details
-  // dropdown: the static #github-expansion node (its input keeps state across
+  // The write-repository list and audits render in the GitHub details area:
+  // the static #github-expansion node (its input keeps state across
   // re-renders) moves under the freshly rendered card.
   const githubDetails = document.querySelector('.integration-details[data-integration-details="github"]');
   if (githubDetails) githubDetails.append(expansion);
-  expansion.hidden = !expandedIntegrations.has("github") || objectValue(managed.github).enabled !== true;
+  expansion.hidden = selectedIntegrationId() !== "github" || objectValue(managed.github).enabled !== true;
+  applyIntegrationDetailSelection();
 }
 
 function integrationDetailsHtml(name, enabled) {
@@ -270,7 +238,7 @@ function integrationDetailsHtml(name, enabled) {
 }
 
 // Filled in place on every accounts poll so the enclosing integration row
-// (its buttons and open info popover) is never re-rendered by the poll. Only
+// and its controls are never re-rendered by the poll. Only
 // nodes carrying data-provider belong to the OpenAI/Claude rows; the tool
 // rows reuse the .integration-account layout for their own connection line
 // and must not be overwritten here.
@@ -471,27 +439,6 @@ export async function resetLinkedAccount(provider) {
   } catch (error) { policyMessage(provider, error.message, true); }
 }
 
-export function toggleIntegrationExpansion(name) {
-  if (!MANAGED_INTEGRATIONS[name]) return;
-  if (expandedIntegrations.has(name)) {
-    expandedIntegrations.delete(name);
-  } else {
-    expandedIntegrations.add(name);
-  }
-  renderManagedIntegrations();
-}
-
-export function openProvider(name) {
-  if (!MANAGED_INTEGRATIONS[name]) return;
-  expandedIntegrations.add(name);
-  renderManagedIntegrations();
-}
-
-export function toggleCustomDomainAccess() {
-  customDomainExpanded = !customDomainExpanded;
-  renderDomainRules();
-}
-
 export async function setIntegrationEnabled(name, enabled) {
   const label = MANAGED_INTEGRATIONS[name].label;
   const runtime = providerRuntime(name);
@@ -506,7 +453,6 @@ export async function setIntegrationEnabled(name, enabled) {
     ? `Disable the ${label} integration and remove its write repositories? ${disclosure}`
     : `Disable the ${label} integration for the agent right now? ${disclosure}`;
   if (!enabled && !confirm(prompt)) return;
-  if (name === "github" && enabled) expandedIntegrations.add("github");
   await publishPolicy(name, policy => {
     const managed = policy.network_integrations;
     // A disabled integration carries no other state: disabling GitHub also
@@ -845,8 +791,7 @@ function renderDomainRules() {
   const count = domains.length;
   $("domain-rule-count").textContent = `${count} domain${count === 1 ? "" : "s"} enabled`;
   $("domain-rule-count").className = `status ${count > 0 ? "enabled" : "disabled"}`;
-  $("custom-domain-details").hidden = !customDomainExpanded;
-  $("custom-domain-toggle").setAttribute("aria-expanded", String(customDomainExpanded));
+  $("custom-domain-details").hidden = selectedIntegrationId() !== "custom_domain";
   if (!domains.length) {
     setHtml($("domain-rules"), `<p class="muted">No custom domains configured.</p>`);
     return;

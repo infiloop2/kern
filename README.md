@@ -3,7 +3,8 @@
 Kern is a controlled AI agent host with strong network activity gating.
 It runs Codex and Claude Code on infrastructure you own while keeping the agent
 behind an explicit, auditable network policy. Learn more at
-[kernai.cloud](https://kernai.cloud).
+[kernai.cloud](https://kernai.cloud), and read the thinking behind the design
+on [the Kern blog](https://kernai.cloud/blog).
 
 ## Deploy Your First Host
 
@@ -221,19 +222,12 @@ enabling network access, and adding optional tools.
   operator approval required for outward-facing actions such as sending email
   or publishing a post
   ([tools architecture](docs/architecture/tools/README.md)).
-- **Installed apps:** purpose-built product surfaces with richer UX than a
-  terminal chat loop, running behind the same host boundaries. These are
-  **Agent Chat** (threaded conversations over host tasks), **Mission
-  Pursuit** (a persistent workspace one agent furnishes with a goal, artifacts,
-  memory, and scheduled runs), and four domain workspaces built on the same
-  engine: **Alpha Seeker** (financial research over read-only IBKR and Polymarket),
-  **Social Marketer** (campaign planning and approval-gated publishing to X and
-  LinkedIn), **Virality Machine** (Runway video generation and approval-gated
-  Instagram publishing), and **Software Builder** (creating, reviewing, and
-  merging pull requests on your connected repo). The platform contract for adding more apps is in
-  [docs/architecture/apps/apps.md](./docs/architecture/apps/apps.md); each app has its
-  own doc under
-  [docs/architecture/apps/](./docs/architecture/apps/).
+- **Built-in workspaces:** **Chat** provides threaded agent conversations and
+  **Apps** provides isolated, agent-generated Web App workspaces with durable
+  UI, data, and checkpoints. Host-global **Memory** and **Schedules** are
+  available to every agent. These are fixed host capabilities—not installable
+  packages—and share one restricted service behind the authenticated admin UI. See
+  [docs/architecture/workspaces/workspaces.md](./docs/architecture/workspaces/workspaces.md).
 
 These choices follow from a broader set of beliefs about running AI agents.
 See [PHILOSOPHY.md](./PHILOSOPHY.md).
@@ -493,11 +487,11 @@ message.
 ## Internals
 
 The host runs on an AWS EC2 instance. The admin API, network proxy, tools
-service, installed app backends, optional Cloudflare Tunnel connector,
-database, and agent runtime run as separate Linux users. Filesystem ownership,
-peer-authenticated local sockets, scoped database roles, and uid-based firewall
-rules keep the agent from getting direct network access or broad access to host
-state.
+service, Workspace service, optional Cloudflare Tunnel connector, database,
+and agent runtime run as separate Linux users. Filesystem ownership,
+peer-authenticated local sockets, scoped database roles, and uid-based
+firewall rules keep the agent from getting direct network access or broad
+access to host state.
 
 For deeper architecture and contribution notes, read:
 
@@ -511,8 +505,10 @@ For deeper architecture and contribution notes, read:
 ## License
 
 Kern is source-available under the Business Source License 1.1.
-Production or commercial use is not granted by the public license. Commercial
-licenses are available on request from the copyright holder.
+You may self-deploy and run Kern for non-commercial purposes at no charge.
+Commercial production use requires a commercial license, available on request
+from the copyright holder. Evaluation, development, and testing are free for
+everyone under the license's standard non-production grant.
 
 The Change Date is 2030-07-09, after which the Change License is the GNU
 Affero General Public License v3.0 or any later version. See [LICENSE](LICENSE)

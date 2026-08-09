@@ -28,7 +28,13 @@ from host.tools.results import (
 )
 from host.tools.tool import CredentialFlow
 from host.tools.host_api import ApprovalRecord, HostAPI
-from host.tools.shared.google import GoogleCredentialStore, IntegrationReconnectRequired, clip_text, google_json_request
+from host.tools.shared.google import (
+    GoogleCredentialStore,
+    IntegrationReconnectRequired,
+    google_json_request,
+    google_oauth_setup_steps,
+)
+from host.tools.shared.inputs import ToolInputValidationError, clip_text, schema as _schema, string_value as _string_value
 
 CALENDAR_API_BASE_URL = "https://www.googleapis.com/calendar/v3"
 # Host approval summaries are capped at 500 UTF-8 bytes (tools_host SUMMARY_MAX_BYTES).
@@ -59,19 +65,6 @@ CALENDAR_CHANGE_TOOL_FIELDS = frozenset(
 # exact grammar keeps free agent text out of the event-lookup URL that runs
 # before any approval.
 CALENDAR_EVENT_ID_RE = re.compile(r"^[a-v0-9]{5,1024}(_[0-9]{8}T[0-9]{6}Z)?$")
-
-
-class ToolInputValidationError(ValueError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
-def _schema(properties: JSONObject, required: list[str] | None = None) -> JSONObject:
-    schema: JSONObject = {"type": "object", "properties": properties, "additionalProperties": False}
-    if required:
-        schema["required"] = cast(list[JSONValue], required)
-    return schema
 
 
 CALENDAR_OUTPUT_SCHEMA: JSONObject = {
@@ -164,28 +157,15 @@ MANIFEST = ToolManifest(
         "OAuth tokens stay in the host credential store and are never exposed to the agent. All operations are limited to the connected account's primary calendar.",
         "Reads run directly. Creating, updating, or deleting an event waits for explicit operator approval.",
     ),
-    setup_steps=(
-        SetupStep(
-            title="Create or select a Google Cloud project",
-            description="Open Google Cloud Console, choose the project picker, and create a dedicated project if you do not already have one for Kern. You can reuse the project and OAuth client configured for Gmail.",
-            link_url="https://console.cloud.google.com/projectcreate",
-            link_label="Open Google Cloud project creation",
-        ),
-        SetupStep(
+    setup_steps=google_oauth_setup_steps(
+        project_step_description="Open Google Cloud Console, choose the project picker, and create a dedicated project if you do not already have one for Kern. You can reuse the project and OAuth client configured for Gmail.",
+        enable_api_step=SetupStep(
             title="Enable the Google Calendar API",
             description="Open APIs and Services > Library, search for Google Calendar API, open it, and choose Enable.",
             link_url="https://console.cloud.google.com/apis/library/calendar-json.googleapis.com",
             link_label="Open the Calendar API library page",
         ),
-        SetupStep(
-            title="Configure the OAuth consent screen",
-            description="Open Google Auth Platform > Branding and choose Get Started. Enter an app name such as Kern, a support email, External audience unless you use a Workspace-internal app, and your contact email. Then publish the app to Production; an app left in Testing needs your Google account under Audience > Test users and must be reconnected every week.",
-            link_url="https://developers.google.com/workspace/guides/configure-oauth-consent",
-            link_label="View Google's consent-screen guide",
-            image_path="/guide-assets/google-auth-app-information.png",
-            image_alt="Google Auth Platform app information form with App name and User support email fields.",
-        ),
-        SetupStep(
+        scopes_step=SetupStep(
             title="Declare Calendar permissions",
             description="Under Google Auth Platform > Data Access, add openid, email, calendar.events.readonly, and calendar.events. The connection screen will show these permissions before you approve them. The screenshot locates the control; use this exact scope list rather than the example selection pictured.",
             link_url="https://developers.google.com/workspace/calendar/api/auth",
@@ -193,20 +173,7 @@ MANIFEST = ToolManifest(
             image_path="/guide-assets/google-auth-data-access.png",
             image_alt="Google Auth Platform Data Access screen for adding OAuth scopes manually.",
         ),
-        SetupStep(
-            title="Create a Web application OAuth client",
-            description="Open Google Auth Platform > Clients, choose Create Client, and select Web application. Give the client a recognizable name. Leave Authorized JavaScript origins empty. Under Authorized redirect URIs, choose Add URI and enter this host's callback URI shown below. Then create the client and copy the client ID and client secret for the final step. The screenshot shows where the two URI sections appear.",
-            link_url="https://developers.google.com/workspace/guides/create-credentials#web-application",
-            link_label="View Google's web-client instructions",
-            image_path="/guide-assets/google-auth-web-client.png",
-            image_alt="Google Auth Platform Web application client form with Authorized JavaScript origins and Authorized redirect URIs sections.",
-            show_callback=True,
-        ),
-        SetupStep(
-            title="Configure Kern and connect",
-            description="Expand Google Calendar in Internet Access and Tools and save the client ID and client secret you copied from the Web application client in the previous step under the two configuration keys below. Enable Calendar, then choose Connect and approve the requested Google permissions. Confirm that the row shows the expected connected email. A read can run immediately; an event change should appear under Approvals before Google receives it.",
-            show_config=True,
-        ),
+        connect_step_description="Open Google Calendar under Home > Integrations and save the client ID and client secret you copied from the Web application client in the previous step under the two configuration keys below. Enable Calendar, then choose Connect and approve the requested Google permissions. Confirm that the page shows the expected connected email. A read can run immediately; an event change should appear under Approvals before Google receives it.",
     ),
 )
 
@@ -217,14 +184,6 @@ CALENDAR_CREDENTIALS = GoogleCredentialStore(
     required_scopes=REQUIRED_CALENDAR_SCOPES,
     reconnect_message=CALENDAR_RECONNECT_MESSAGE,
 )
-
-
-def _string_value(record: JSONObject, keys: tuple[str, ...]) -> str:
-    for key in keys:
-        value = record.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
 
 
 def _calendar_response_time(value: object) -> str:

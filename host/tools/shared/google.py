@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import json
-import time
 import urllib.parse
-import uuid
 from collections.abc import Mapping
 from typing import cast
 
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.host_api import ConnectionAccount, HostAPI, StoredCredential
+from host.tools.manifest import SetupStep
+from host.tools.shared.oauth2 import (
+    IntegrationReconnectRequired,
+    access_token_is_fresh,
+    clear_if_still_loaded,
+    now,
+    save_if_still_connected,
+    signed_state,
+    verify_state,
+)
 from host.tools.shared.web import WebRequestError, json_request, request_bytes
 from host.tools.tool import (
     ConnectionStatus,
@@ -25,9 +30,7 @@ GOOGLE_OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_OAUTH_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
-GOOGLE_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60
 GOOGLE_DEFAULT_EXPIRES_IN_SECONDS = 3600
-GOOGLE_OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60
 GOOGLE_UNAUTHORIZED_RECONNECT_MESSAGE = (
     "Google rejected the stored credentials. Please reconnect this tool from the admin UI."
 )
@@ -35,23 +38,6 @@ GOOGLE_UNAUTHORIZED_RECONNECT_MESSAGE = (
 
 class GoogleOAuthInvalidGrantError(RuntimeError):
     pass
-
-
-class IntegrationReconnectRequired(RuntimeError):
-    pass
-
-
-def now() -> int:
-    return int(time.time())
-
-
-def _base64url_encode(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _base64url_decode(encoded: str) -> bytes:
-    padding = "=" * (-len(encoded) % 4)
-    return base64.urlsafe_b64decode(f"{encoded}{padding}".encode("ascii"))
 
 
 def build_google_oauth_authorization_url(
@@ -134,22 +120,6 @@ def google_token_for_revoke_from_payload(token_payload: object) -> str:
 def google_access_token_from_payload(token_payload: Mapping[str, object]) -> str:
     access_token = token_payload.get("access_token")
     return access_token if isinstance(access_token, str) and access_token else ""
-
-
-def google_access_token_is_fresh(
-    token_payload: Mapping[str, object],
-    current_time: int,
-    *,
-    skew_seconds: int = GOOGLE_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
-) -> bool:
-    access_token = token_payload.get("access_token")
-    expires_at = token_payload.get("expires_at")
-    return (
-        isinstance(access_token, str)
-        and bool(access_token)
-        and isinstance(expires_at, int)
-        and expires_at > current_time + skew_seconds
-    )
 
 
 def google_token_payload_from_response(
@@ -307,46 +277,49 @@ def revoke_google_token(token: str) -> JSONObject:
     return {"success": True}
 
 
-def clip_text(value: str, max_bytes: int) -> str:
-    """Clip one field to a UTF-8 byte budget for approval summaries. Clipping
-    per field keeps every disclosure present when the whole summary must fit
-    the host API's 500-byte limit."""
-    encoded = value.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return value
-    return encoded[: max_bytes - 3].decode("utf-8", errors="ignore") + "…"
-
-
-def _save_if_still_connected(
-    api: HostAPI, loaded: StoredCredential, credential: StoredCredential, *, reconnect_message: str
-) -> None:
-    """The compare-before-write guard shared/oauth2.py gives the newer OAuth
-    tools: persist a refreshed secret only if the stored connection is still
-    exactly the one this call loaded (same account id and same secret). An
-    operator disconnect or reconnect during the network round trip must win:
-    fail closed and let a retry run against the current credential."""
-    current = api.credentials.load()
-    if (
-        current is None
-        or current["account"]["id"] != loaded["account"]["id"]
-        or current["secret"] != loaded["secret"]
-    ):
-        raise IntegrationReconnectRequired(reconnect_message)
-    api.credentials.save(credential)
-
-
-def _clear_if_still_loaded(api: HostAPI, loaded: StoredCredential) -> None:
-    """Clear only the credential this call actually inspected, so a stale
-    failure (an invalid-grant, missing-scope, or identity result for a token
-    the operator already rotated by reconnecting) cannot delete a fresh
-    connection."""
-    current = api.credentials.load()
-    if (
-        current is not None
-        and current["account"]["id"] == loaded["account"]["id"]
-        and current["secret"] == loaded["secret"]
-    ):
-        api.credentials.clear()
+def google_oauth_setup_steps(
+    *,
+    project_step_description: str,
+    enable_api_step: SetupStep,
+    scopes_step: SetupStep,
+    connect_step_description: str,
+) -> tuple[SetupStep, ...]:
+    """The shared Google Cloud OAuth setup guide: the Gmail and Google Calendar
+    tools walk the operator through the same console flow, differing only in
+    which API is enabled, which scopes are declared, and the two descriptions
+    that name the tool."""
+    return (
+        SetupStep(
+            title="Create or select a Google Cloud project",
+            description=project_step_description,
+            link_url="https://console.cloud.google.com/projectcreate",
+            link_label="Open Google Cloud project creation",
+        ),
+        enable_api_step,
+        SetupStep(
+            title="Configure the OAuth consent screen",
+            description="Open Google Auth Platform > Branding and choose Get Started. Enter an app name such as Kern, a support email, External audience unless you use a Workspace-internal app, and your contact email. Then publish the app to Production; an app left in Testing needs your Google account under Audience > Test users and must be reconnected every week.",
+            link_url="https://developers.google.com/workspace/guides/configure-oauth-consent",
+            link_label="View Google's consent-screen guide",
+            image_path="/guide-assets/google-auth-app-information.png",
+            image_alt="Google Auth Platform app information form with App name and User support email fields.",
+        ),
+        scopes_step,
+        SetupStep(
+            title="Create a Web application OAuth client",
+            description="Open Google Auth Platform > Clients, choose Create Client, and select Web application. Give the client a recognizable name. Leave Authorized JavaScript origins empty. Under Authorized redirect URIs, choose Add URI and enter this host's callback URI shown below. Then create the client and copy the client ID and client secret for the final step. The screenshot shows where the two URI sections appear.",
+            link_url="https://developers.google.com/workspace/guides/create-credentials#web-application",
+            link_label="View Google's web-client instructions",
+            image_path="/guide-assets/google-auth-web-client.png",
+            image_alt="Google Auth Platform Web application client form with Authorized JavaScript origins and Authorized redirect URIs sections.",
+            show_callback=True,
+        ),
+        SetupStep(
+            title="Configure Kern and connect",
+            description=connect_step_description,
+            show_config=True,
+        ),
+    )
 
 
 class GoogleCredentialStore:
@@ -441,8 +414,8 @@ class GoogleCredentialStore:
                 revoke_google_token(token)
         api.credentials.clear()
 
-    # Saves and clears after a network round trip go through the
-    # compare-before-write guards above, so an operator disconnect/reconnect
+    # Saves and clears after a network round trip go through shared/oauth2.py's
+    # compare-before-write guards, so an operator disconnect/reconnect
     # landing in that multi-second window always wins: a stale refresh cannot
     # clobber the fresh credential and a stale failure cannot drop it.
 
@@ -459,14 +432,14 @@ class GoogleCredentialStore:
         token_payload = existing["secret"]
         missing_scopes = self.required_scopes - set(existing["account"]["scopes"])
         if missing_scopes:
-            _clear_if_still_loaded(api, existing)
+            clear_if_still_loaded(api, existing)
             raise IntegrationReconnectRequired(self.reconnect_message)
         payload = cast(Mapping[str, object], token_payload)
-        if google_access_token_is_fresh(payload, now()):
+        if access_token_is_fresh(payload, now()):
             return google_access_token_from_payload(payload)
         refresh_token = google_refresh_token_from_payload(payload)
         if not refresh_token:
-            _clear_if_still_loaded(api, existing)
+            clear_if_still_loaded(api, existing)
             raise IntegrationReconnectRequired(self.reconnect_message)
         try:
             token_response = refresh_google_oauth_token(
@@ -477,10 +450,10 @@ class GoogleCredentialStore:
                 invalid_response_message="Google OAuth token refresh returned an invalid response.",
             )
         except GoogleOAuthInvalidGrantError as exc:
-            _clear_if_still_loaded(api, existing)
+            clear_if_still_loaded(api, existing)
             raise IntegrationReconnectRequired(self.reconnect_message) from exc
         updated_payload = google_refreshed_token_payload(payload, token_response, current_time=now())
-        _save_if_still_connected(
+        save_if_still_connected(
             api,
             existing,
             {
@@ -504,14 +477,14 @@ class GoogleCredentialStore:
             )
         )
         if existing["account"]["id"] != identity["sub"]:
-            _clear_if_still_loaded(api, existing)
+            clear_if_still_loaded(api, existing)
             raise IntegrationReconnectRequired(self.reconnect_message)
         account: ConnectionAccount = {
             "id": str(identity["sub"]),
             "label": str(identity["email"]),
             "scopes": existing["account"]["scopes"],
         }
-        _save_if_still_connected(
+        save_if_still_connected(
             api,
             existing,
             {
@@ -529,41 +502,16 @@ class GoogleCredentialStore:
         return account
 
     def _signed_state(self, api: HostAPI) -> str:
-        payload: JSONObject = {
-            "issued_at": now(),
-            "nonce": uuid.uuid4().hex,
-            "tool_id": self.tool_id,
-        }
-        encoded_payload = _base64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-        signature = hmac.new(
-            api.config["GOOGLE_OAUTH_CLIENT_SECRET"].encode("utf-8"),
-            encoded_payload.encode("ascii"),
-            hashlib.sha256,
-        ).digest()
-        return f"{encoded_payload}.{_base64url_encode(signature)}"
+        return signed_state(secret=api.config["GOOGLE_OAUTH_CLIENT_SECRET"], tool_id=self.tool_id)
 
     def _verify_state(self, state: str, api: HostAPI) -> None:
-        encoded_payload, separator, encoded_signature = state.partition(".")
-        if not separator or not encoded_payload or not encoded_signature:
-            raise ValueError("Invalid Google OAuth state.")
-        expected_signature = _base64url_encode(
-            hmac.new(
-                api.config["GOOGLE_OAUTH_CLIENT_SECRET"].encode("utf-8"),
-                encoded_payload.encode("ascii"),
-                hashlib.sha256,
-            ).digest()
+        verify_state(
+            state,
+            secret=api.config["GOOGLE_OAUTH_CLIENT_SECRET"],
+            tool_id=self.tool_id,
+            invalid_message="Invalid Google OAuth state.",
+            expired_message="Google OAuth state expired.",
         )
-        if not hmac.compare_digest(expected_signature, encoded_signature):
-            raise ValueError("Invalid Google OAuth state.")
-        decoded = json.loads(_base64url_decode(encoded_payload).decode("utf-8"))
-        if not isinstance(decoded, dict):
-            raise ValueError("Invalid Google OAuth state.")
-        payload = cast(dict[str, object], decoded)
-        if payload.get("tool_id") != self.tool_id:
-            raise ValueError("Invalid Google OAuth state.")
-        issued_at = payload.get("issued_at")
-        if not isinstance(issued_at, int) or now() - issued_at > GOOGLE_OAUTH_STATE_MAX_AGE_SECONDS:
-            raise ValueError("Google OAuth state expired.")
 
 
 def google_json_request(

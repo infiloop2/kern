@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+repository_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repository_dir"
+
+# The unit suite intentionally needs no Python packages. Keeping this wrapper
+# on the system interpreter avoids every agent creating and populating its own
+# throwaway environment. Arguments are ordinary unittest module/test names.
+if [ "$#" -eq 0 ]; then
+    set -- discover -s tests
+fi
+exec env PYTHONPATH="$repository_dir/tests" python3 -m unittest "$@"

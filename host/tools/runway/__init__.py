@@ -22,6 +22,7 @@ from host.tools.results import (
     StreamingAssetError,
 )
 from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.shared.inputs import ToolInputValidationError
 from host.tools.shared.web import WebRequestError, json_request, open_response_stream, stream_request_bytes
 
 # Runway's Developer API is a single Bearer-authenticated JSON surface. Every
@@ -132,12 +133,6 @@ RUNWAY_SAVE_VIDEO_POLICY = (
     "Runway's authoritative temporary output URL, and streams it through the agent-side "
     "bridge into a host-generated path under /tool_assets in the agent workspace."
 )
-
-
-class ToolInputValidationError(ValueError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
 
 
 RUNWAY_OUTPUT_SCHEMA: JSONObject = {
@@ -302,7 +297,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and enable Runway",
             show_config=True,
-            description="Expand Runway Media Generation in Internet Access and Tools, save the developer secret as RUNWAY_API_SECRET, then enable the tool. There is no OAuth or separate OpenAI/ElevenLabs key. Never place the Runway key in a prompt, source URL, or media filename.",
+            description="Open Runway Media Generation under Home > Integrations, save the developer secret as RUNWAY_API_SECRET, then enable the tool. There is no OAuth or separate OpenAI/ElevenLabs key. Never place the Runway key in a prompt, source URL, or media filename.",
         ),
     ),
     data_summary=DataSummary(

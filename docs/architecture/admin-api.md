@@ -105,24 +105,23 @@ and validated as exactly `{"password": <string ≤256 bytes>}`. The server also
 caps concurrent worker threads and sets a per-connection read timeout so a
 connection flood or slow client cannot exhaust host threads.
 
-The same process also serves the app-backend Unix socket on a daemon thread, so
+The same process also serves the workspace Unix socket on a daemon thread, so
 both listeners draw on one fd table. That server is bounded too, but it rejects
 at capacity instead of queueing: its peers are unauthenticated until a request
 line arrives, and a queued connection still costs a descriptor the operator API
-would need. The socket is `0660`, owned by the dedicated `kern-app-backends`
-group. Its `kern-admin` owner and every provisioned app service account are
-added to that group before services start; agent and unrelated service uids
-therefore cannot connect.
-Peer credentials still bind each request to the claimed app id, and an idle
-timeout bounds accidental stalls by trusted app code. The unit's `LimitNOFILE`
+would need. The socket is `0660`, owned by the dedicated `kern-workspace-api`
+group. Only its `kern-admin` owner and the fixed Workspace service account belong
+to that group; agent and unrelated service uids therefore cannot connect.
+Peer credentials bind each request to that service, the fixed allowlist admits
+only host thread operations, and an idle timeout bounds accidental stalls. The unit's `LimitNOFILE`
 is raised for the same reason.
 
-App backends are reached only through the admin API reverse proxy. Each app
-service binds a host-assigned `127.0.0.1` port, and nftables accepts new
-connections to that port only from the `kern-admin` uid before dropping
-the same port for every other local uid. The app receives a host proxy marker,
-not the operator's session credential. Agent runtimes, app service users, and
-ordinary local users cannot call app backend TCP listeners directly.
+The Workspace service's browser endpoint is reached only through the admin
+API reverse proxy. It binds fixed `127.0.0.1:7450`, and nftables accepts new
+connections only from `kern-admin` before dropping that port for every other
+local uid. Path prefixes select Chat or Web Apps; no operator credential or
+identity header is forwarded. Agent calls use the separately
+peer-authenticated `/run/kern-workspace/agent.sock`, not this TCP listener.
 
 The agent, network, and tool event logs each keep the newest 1,000,000 entries.
 

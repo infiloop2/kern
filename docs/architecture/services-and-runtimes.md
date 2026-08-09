@@ -7,33 +7,31 @@
 | `kern-admin-api.service` | `kern-admin` | Admin API on `127.0.0.1:7443`. Owns admin state; holds no internet egress. |
 | `kern-tools.service` | `kern-tools` | Runs the bundled tool packages and owns the agent-facing tools socket `/run/kern-tools/tools.sock` (peer-credential authenticated). The only Kern application service besides the proxy with DNS+HTTPS egress; its Postgres role is scoped to the five tool tables plus read access to the encryption key needed for tool secrets. |
 | `kern-agent-network.service` | `kern-agent-network` | Serves read-only network integration and denial introspection on `/run/kern-agent-network/agent-network.sock`. No egress; its Postgres role has SELECT-only policy and network-event grants. |
-| `kern-agent-app.service` | `kern-agent-app` | Serves the agent-facing app API socket `/run/kern-agent-app/agent-app.sock` (peer-credential authenticated, agent uid only) and proxies thread-scope-attributed `app_api` calls to app backend ports. No database access or egress. See [agent-app-api.md](apps/agent-app-api.md). |
 | `kern-host-errors.service` | `kern-admin` | Follows new structured unexpected-error records from journald and copies them best-effort into the bounded Postgres host-error log. |
-| `kern-app-<app_id>.service` | per-app account | Installed app backend on its host-assigned loopback app port, reachable only from the admin API and agent-app service uids. |
+| `kern-workspace.service` | `kern-workspace` | One Chat, Web Apps, global Memory, and Schedules backend on `127.0.0.1:7450` (reachable only from the admin API), plus the peer-authenticated agent socket `/run/kern-workspace/agent.sock`. Its Postgres role has explicit DML-only access to the Workspace tables in `public` and no egress. |
 | `kern-cloudflared.service` | `cloudflared` | Optional Cloudflare Tunnel connector for Cloudflare Tunnel operator endpoints. Installed only when `operator_connections` contains `cloudflare_tunnel`. |
 | `kern_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; `MemoryHigh=70%`/`MemoryMax=80%`/`MemorySwapMax=5G` contain a runaway agent's RAM and swap to its own cgroup; `TasksMax=4096` stops a fork bomb from exhausting kernel PIDs. |
-| `kern_app.slice` | — | Top-level cgroup slice holding installed app services. `CPUWeight=50` gives host services priority under contention while allowing apps to use idle CPU; the current app slice does not impose memory, swap, or task-count caps. |
+| `kern_workspace.slice` | — | Cgroup slice for the fixed Workspace service. `CPUWeight=50` keeps host control services responsive under contention. |
 
 ## Process Inventory
 
 | Process | User | Started By | Purpose |
 | --- | --- | --- | --- |
-| `systemd` | root | OS boot | Starts nftables, Postgres, proxy, tools, admin API, installed app, and optional Cloudflare Tunnel services. |
+| `systemd` | root | OS boot | Starts nftables, Postgres, proxy, tools, admin API, workspaces, and optional Cloudflare Tunnel services. |
 | `nftables` | kernel/root configured | bootstrap/systemd | Enforces inbound and per-user outbound network policy. |
 | `kern-network-proxy.service` | `kern-proxy` | systemd | Handles all agent HTTP(S)/WS(S) egress and writes network events. |
 | `kern-postgres.service` | `postgres` | systemd | Stores admin state; local Unix-socket connections only. |
 | `kern-admin-api.service` | `kern-admin` | systemd | Serves localhost API/UI, owns thread state, and supervises runtime work. |
 | `kern-tools.service` | `kern-tools` | systemd | Executes bundled tool calls and operator-delegated OAuth/approval work; owns the peer-authenticated tools socket. |
 | `kern-agent-network.service` | `kern-agent-network` | systemd | Serves the peer-authenticated network-introspection socket from SELECT-only policy and event state, without egress. |
-| `kern-agent-app.service` | `kern-agent-app` | systemd | Attributes agent `app_api` calls to their app-prefixed thread by cgroup and proxies them to the owning app backend; owns the peer-authenticated agent-app socket. |
 | `kern-host-errors.service` | `kern-admin` | systemd | Validates tagged records from trusted Kern systemd units and stores/coalesces them for the read-only Host errors panel. |
-| `kern-app-<app_id>.service` | per-app account | systemd | Serves an installed app API on a loopback app port selected by the host. The admin API and agent-app service are the only uids allowed to open new TCP connections to that listener. |
+| `kern-workspace.service` | `kern-workspace` | systemd | Serves all browser Workspace resources on the admin-only loopback port, the agent Workspace API on a peer-authenticated Unix socket, generated Web Apps, and global scheduled runs. |
 | `kern-cloudflared.service` | `cloudflared` | systemd | Optional Cloudflare Tunnel connector. Reads `/etc/kern/cloudflared.token` and exposes the admin API through the configured Cloudflare Tunnel hostname. |
 | `run-codex-app-server` helper | starts as root, then `kern-agent` | admin API via sudo | Starts one Codex stdio app-server process. |
 | `codex app-server` | `kern-agent` | launch helper | Executes one Codex turn, resuming its provider thread by id, then exits. |
 | `run-claude-code` helper | starts as root, then `kern-agent` | admin API via sudo | Starts one Claude Code CLI process. |
 | `claude` | `kern-agent` | launch helper | Executes one Claude Code turn, then exits. |
-| `tools MCP shim` | `kern-agent` | Codex / Claude Code | Aggregates the tools, network-introspection, and app sockets into one MCP server; one per agent session that uses host tools. |
+| `tools MCP shim` | `kern-agent` | Codex / Claude Code | Aggregates the tools, network-introspection, and Workspace agent sockets into one MCP server; one per agent session that uses host tools. |
 | `read-codex-account-id` / `read-claude-account` | starts as root, then `kern-agent` | admin API via sudo | Reads provider auth files narrowly and prints only account guard metadata. |
 | `clear-agent-auth` | starts as root, then `kern-agent` | admin API via sudo | Removes local Codex/Claude auth files during linked-account reset. |
 | `read-agent-file` helper | starts as root, then `kern-agent` | admin API via sudo | Lists agent-home directories, returns a bounded text preview, or streams one bounded regular file to the authenticated Files viewer without giving admin general agent-home access. |
@@ -50,6 +48,7 @@
 | HTTP handler threads | admin API | One per concurrent API request. Mutations use state transactions and run slow helper calls outside the state lock. |
 | Tools socket handler threads | tools service | One per agent tool call (and per delegated operator operation), bounded by a concurrency cap; tool packages run their third-party requests on these threads. |
 | Network-introspection socket handler threads | agent-network service | One per local request, bounded by a concurrency cap; calls perform read-only policy or denial queries. |
+| Workspace agent socket handler threads | Workspace service | Peer-authenticated before allocation, with separate connection and active-call caps; calls use bounded explicit Workspace routes. |
 | Maintenance thread | admin API | Periodically prunes bounded state and event history. |
 | Journal follower | host-errors collector | Follows new trusted-unit `KERN_HOST_ERROR=1` records without a replay cursor. |
 | Runtime status poller | admin API/orchestrator | Rechecks provider health, including Hermes's Bedrock connection. |
@@ -89,11 +88,12 @@ re-derive active status from the agent user's home directory.
 
 ## Reboot and restart
 
-The admin API, proxy, tools, network-introspection, host-error collector, Postgres, app backends,
+The admin API, proxy, tools, network-introspection, host-error collector,
+Postgres, Workspace service,
 nftables, and optional Cloudflare Tunnel service are `systemctl enable`d, so
 they resume on every boot. Postgres starts before the proxy, tools, and
-network-introspection services; those services start before the admin API; app
-backends and `cloudflared` start after the admin API when installed. nftables
+network-introspection services; those services start before the admin API; the
+Workspace service and `cloudflared` start after the admin API. nftables
 reloads `/etc/nftables.conf`.
 Because admin state and agent home data live on the two data EBS volumes, a
 reboot, including via `POST /v1/host-runtime/reboot`, preserves them: the proxy comes

@@ -4,7 +4,7 @@
 This is for browser/UI development only. It does not import the real admin API
 handler because the real handler reads host state and invokes privileged helper
 paths. The mock keeps just enough in-memory state to exercise the single-page
-admin UI at ``host/runtime/admin_api/admin_ui.html``, and ships with seeded history plus
+admin UI at ``host/runtime/admin_api/admin_ui/index.html``, and ships with seeded history plus
 time-based turn progression so the UI looks and behaves like a live host.
 """
 
@@ -29,28 +29,44 @@ from urllib.parse import parse_qs, unquote, urlparse
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-import app_mocks
+import workspace_mocks
 import secrets
 from host.config import ConfigError, parse_network_controls
 from host.constants import LOOPBACK
 from host.runtime.admin_api import admin_auth
 from host.session_options import session_config_error
-from host.runtime.core import app_platform
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
 
 RUNTIME_DIR = REPO_ROOT / "host/runtime/admin_api"
+ADMIN_UI_DIR = RUNTIME_DIR / "admin_ui"
+WORKSPACE_DIR = REPO_ROOT / "host/runtime/workspace"
 TOOLS_DIR = REPO_ROOT / "host/tools"
 VERSION = (REPO_ROOT / "VERSION").read_text().strip()
 UI_ASSETS = {
-    "/": (RUNTIME_DIR / "admin_ui.html", "text/html; charset=utf-8"),
-    "/oauth/callback": (RUNTIME_DIR / "admin_ui.html", "text/html; charset=utf-8"),
-    "/admin_ui.css": (RUNTIME_DIR / "admin_ui.css", "text/css; charset=utf-8"),
-    "/favicon.ico": (RUNTIME_DIR / "admin_favicon.svg", "image/svg+xml"),
-    "/favicon.svg": (RUNTIME_DIR / "admin_favicon.svg", "image/svg+xml"),
+    "/": (ADMIN_UI_DIR / "index.html", "text/html; charset=utf-8"),
+    "/oauth/callback": (ADMIN_UI_DIR / "index.html", "text/html; charset=utf-8"),
+    "/admin_ui.css": (ADMIN_UI_DIR / "admin_ui.css", "text/css; charset=utf-8"),
+    "/favicon.ico": (ADMIN_UI_DIR / "favicon.svg", "image/svg+xml"),
+    "/favicon.svg": (ADMIN_UI_DIR / "favicon.svg", "image/svg+xml"),
 }
 UI_ASSETS.update({
     f"/admin_ui/{module.name}": (module, "application/javascript; charset=utf-8")
-    for module in sorted((RUNTIME_DIR / "admin_ui").glob("*.js"))
+    for module in sorted(ADMIN_UI_DIR.glob("*.js"))
+})
+UI_ASSETS.update({
+    "/workspace/chat.html": (WORKSPACE_DIR / "chat/ui/index.html", "text/html; charset=utf-8"),
+    "/workspace/chat.js": (WORKSPACE_DIR / "chat/ui/agent_chat.js", "application/javascript; charset=utf-8"),
+    "/workspace/chat.css": (WORKSPACE_DIR / "chat/ui/agent_chat.css", "text/css; charset=utf-8"),
+    "/workspace/rich_text.js": (WORKSPACE_DIR / "chat/ui/rich_text.js", "application/javascript; charset=utf-8"),
+    "/workspace/rich_text.css": (WORKSPACE_DIR / "chat/ui/rich_text.css", "text/css; charset=utf-8"),
+    "/workspace/web-apps.html": (WORKSPACE_DIR / "web_apps/ui/index.html", "text/html; charset=utf-8"),
+    "/workspace/web-apps.js": (WORKSPACE_DIR / "web_apps/ui/personal_web_app_builder.js", "application/javascript; charset=utf-8"),
+    "/workspace/web-apps.css": (WORKSPACE_DIR / "web_apps/ui/personal_web_app_builder.css", "text/css; charset=utf-8"),
+    "/workspace/global.html": (WORKSPACE_DIR / "ui/index.html", "text/html; charset=utf-8"),
+    "/workspace/global.js": (WORKSPACE_DIR / "ui/workspace.js", "application/javascript; charset=utf-8"),
+    "/workspace/global.css": (WORKSPACE_DIR / "ui/workspace.css", "text/css; charset=utf-8"),
+    "/workspace/capability-worker-sandbox.html": (WORKSPACE_DIR / "web_apps/ui/capability_worker_sandbox.html", "text/html; charset=utf-8"),
+    "/workspace/capability-worker-sandbox.js": (WORKSPACE_DIR / "web_apps/ui/capability_worker_sandbox.js", "application/javascript; charset=utf-8"),
 })
 for asset in sorted(TOOLS_DIR.glob("**/guide_assets/**/*.png")):
     route = f"/guide-assets/{asset.name}"
@@ -79,7 +95,7 @@ PASSWORD = "dev"
 # Session tokens minted by the mock /v1/login, mirroring the real cookie flow.
 MOCK_SESSIONS: set[str] = set()
 FAILED_UPLOADS_ONCE: set[str] = set()
-THREAD_RE = re.compile(r"^/v1/threads/([^/]+)(?:/(messages|stop|events))?$")
+THREAD_RE = re.compile(r"^/v1/threads/([^/]+)(?:/(messages|stop|clear-memory|events))?$")
 TOOL_ACTION_RE = re.compile(r"^/v1/tools/([a-z0-9_]+)/(enable|disable|oauth_connect/start|oauth_connect/complete|oauth_connect/disconnect)$")
 GITHUB_PENDING_PUSH_RE = re.compile(r"^/v1/network-tools/github-pending-pushes/([a-z0-9]+)/(approve|reject)$")
 TOOL_APPROVALS_LIST_RE = re.compile(r"^/v1/tools/([a-z0-9_]+)/approvals$")
@@ -142,7 +158,6 @@ class MockState:
     bedrock_access_key_id: str | None = None
     bedrock_region: str | None = None
     reboot_requested: bool = False
-    upgrade_available: bool = True
     usage_refreshes: int = 0
     github_pending_pushes: list[dict[str, Any]] = field(default_factory=list)
     tool_enabled: set[str] = field(default_factory=set)
@@ -640,7 +655,7 @@ def seed_state() -> None:
             "error_message": (
                 "network access to appstoreconnect.apple.com denied by policy (no custom domain rule).\n"
                 "The build and signing steps completed locally; only the upload was blocked. Add a domain rule "
-                "for appstoreconnect.apple.com (POST) under Internet Access and Tools > Manual, or run the "
+                "for appstoreconnect.apple.com (POST) under Home > Integrations > Manual, or run the "
                 "upload from a machine with App Store Connect access."
             ),
             "created_min": 150,
@@ -789,13 +804,13 @@ def seed_state() -> None:
             "error_id": "host_error_2",
             "first_seen_at": ago(12),
             "last_seen_at": ago(12),
-            "service": "kern-app-personal_web_app_builder",
+            "service": "kern-workspace",
             "component": "agentic_web_app.request",
             "kind": "unexpected_exception",
             "exception_type": "KeyError",
             "summary": "selected workspace was missing from the loaded row",
             "traceback": (
-                'File "host/apps/personal_web_app_builder/backend.py", line 518, in workspace_state\n'
+                'File "host/runtime/workspace/web_apps/backend.py", line 518, in workspace_state\n'
                 "  workspace = rows[workspace_id]"
             ),
             "context": {"method": "GET", "route": "/workspaces/mock/state"},
@@ -914,26 +929,11 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and parsed.path in UI_ASSETS:
                 asset, content_type = UI_ASSETS[parsed.path]
                 data = asset.read_bytes()
-                if parsed.path == "/admin_ui/health.js":
-                    data += b"""
-
-// Mock-only affordance: click the passive production indicator to preview
-// both version states without adding a test hook to production code.
-const mockUpgradeNotice = $("upgrade-notice");
-mockUpgradeNotice.style.cursor = "pointer";
-mockUpgradeNotice.addEventListener("click", async () => {
-  await api("POST", "/v1/mock/upgrade-toggle", {});
-  await refreshHealth();
-});
-"""
+                if parsed.path == "/workspace/capability-worker-sandbox.html":
+                    self._send_capability_sandbox(data, content_type)
+                    return
                 self._send(HTTPStatus.OK, data, content_type)
                 return
-            if method == "GET":
-                app_asset = app_platform.ui_asset(parsed.path)
-                if app_asset is not None:
-                    app, asset, content_type = app_asset
-                    self._send_app_asset(app, HTTPStatus.OK, asset.read_bytes(), content_type)
-                    return
             if method == "POST" and parsed.path == "/v1/login":
                 self._handle_login()
                 return
@@ -1146,6 +1146,25 @@ mockUpgradeNotice.addEventListener("click", async () => {
     def _send_json(self, status: HTTPStatus, data: dict[str, Any], set_cookie: str | None = None) -> None:
         self._send(status, json.dumps(data).encode(), "application/json", set_cookie=set_cookie)
 
+    def _send_capability_sandbox(self, data: bytes, content_type: str) -> None:
+        self.send_response(HTTPStatus.OK.value)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; base-uri 'none'; connect-src 'none'; "
+            "form-action 'none'; frame-ancestors 'self'; object-src 'none'; "
+            "script-src 'self'; worker-src blob:; sandbox allow-scripts",
+        )
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _send(self, status: HTTPStatus, data: bytes, content_type: str, set_cookie: str | None = None) -> None:
         self.send_response(status.value)
         self.send_header("Content-Type", content_type)
@@ -1161,61 +1180,16 @@ mockUpgradeNotice.addEventListener("click", async () => {
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_app_asset(
-        self,
-        app: app_platform.AppManifest,
-        status: HTTPStatus,
-        data: bytes,
-        content_type: str,
-    ) -> None:
-        asset_origin = self._asset_origin()
-        worker_policy = "; worker-src blob:; webrtc 'block'" if app.capability_worker else ""
-        self.send_response(status.value)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store, max-age=0")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'none'; base-uri 'none'; connect-src 'none'; "
-            f"font-src 'self' {asset_origin} data:; form-action 'none'; frame-ancestors 'self'; "
-            f"img-src 'self' {asset_origin} data:; navigate-to 'self'; object-src 'none'; "
-            f"sandbox allow-scripts allow-forms allow-modals; script-src 'self' {asset_origin}; "
-            f"style-src 'self' 'unsafe-inline' {asset_origin}"
-            f"{worker_policy}",
-        )
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "SAMEORIGIN")
-        self.end_headers()
-        self.wfile.write(data)
-
-    def _asset_origin(self) -> str:
-        host = self.headers.get("Host", "")
-        if not re.fullmatch(r"[A-Za-z0-9.:-]+", host):
-            host = f"{LOOPBACK}:{self.server.server_port}"
-        forwarded_proto = self.headers.get("X-Forwarded-Proto", "")
-        scheme = forwarded_proto if forwarded_proto in {"http", "https"} else "http"
-        return f"{scheme}://{host}"
-
-
 def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dict[str, Any]:
     if method == "GET" and path == "/v1/health":
         return health()
-    if method == "POST" and path == "/v1/mock/upgrade-toggle":
-        with STATE.lock:
-            STATE.upgrade_available = not STATE.upgrade_available
-            return {"available": STATE.upgrade_available}
     if method == "GET" and path == "/v1/agent-runtime/status":
         return agent_runtime_status()
     if method == "GET" and path == "/v1/agent-runtime/account":
         return agent_accounts()
     if method == "POST" and path == "/v1/agent-runtime/refresh":
         return refresh_agent_accounts(body)
-    if method == "GET" and path == "/v1/apps":
-        return {"apps": [app.public() for app in app_platform.installed_apps()]}
-    app_response = app_mocks.route_app_api(method, path, query, body, ApiError, route)
+    app_response = workspace_mocks.route_workspace_api(method, path, query, body, ApiError, route)
     if app_response is not None:
         return app_response
     if path == "/v1/agent-runtime/codex-oauth-login":
@@ -1462,7 +1436,6 @@ def health() -> dict[str, Any]:
         progress_running_turns_locked()
         runtime = agent_runtime_status_locked()
         running = sum(1 for thread in STATE.threads.values() if thread.get("_running"))
-        upgrade_available = STATE.upgrade_available
     # Gentle drift so the dashboard feels alive; busier while turns run.
     wave = math.sin(time.time() / 47.0)
     cpu = round(6.5 + 3.5 * wave + 24.0 * min(running, 2), 1)
@@ -1473,11 +1446,16 @@ def health() -> dict[str, Any]:
         "agent_name": "kern-mock",
         "version": {"status": "ok", "runtime": VERSION, "state": VERSION},
         "upgrade": {
-            "available": upgrade_available,
-            "latest": "99.0.0" if upgrade_available else VERSION,
+            "available": True,
+            "latest": "99.0.0",
         },
         "agent_runtime": runtime,
         "network_controls": {"status": "active"},
+        "history": {
+            "threads": 24,
+            "messages": 1286,
+            "activities": 9431,
+        },
         "host_runtime": {
             "cpu": {"usage_percent": cpu},
             "memory": {"used_bytes": memory_used, "total_bytes": 2 * gib},
@@ -1641,16 +1619,17 @@ def oauth(runtime: str, method: str) -> dict[str, str]:
                 raise ApiError(HTTPStatus.NOT_FOUND, "Codex OAuth login has not been started")
             if not STATE.codex_oauth:
                 # The real Codex device flow completes out of band after the
-                # operator enters the code in their browser. The mock stays
-                # awaiting_login for a couple of seconds and then completes on
-                # the next status read, so the device-code card is a stable
-                # surface (not a transient the UI poll can wipe mid-assertion).
+                # operator enters the code in their browser. Keep the mock
+                # awaiting_login through at least one 5-second dashboard poll,
+                # then complete on the following status read. This makes the
+                # device-code card a stable surface instead of a transient the
+                # same poll can render and immediately wipe mid-assertion.
                 STATE.codex_oauth = {
                     "status": "awaiting_login",
                     "device_code": "MOCK-CODEX",
                     "login_url": "https://auth.openai.com/activate",
                     "expires_at": expires,
-                    "_completes_at": time.time() + 2,
+                    "_completes_at": time.time() + 6,
                 }
             return {key: value for key, value in STATE.codex_oauth.items() if not key.startswith("_")}
     if method not in {"GET", "POST"}:
@@ -1764,6 +1743,8 @@ def thread_route(
         return send_thread_message(thread_id, body)
     if action == "stop" and method == "POST":
         return stop_thread(thread_id)
+    if action == "clear-memory" and method == "POST":
+        return clear_thread_memory(thread_id)
     if action == "events" and method == "GET":
         return list_thread_events(thread_id, query)
     raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
@@ -1836,7 +1817,7 @@ def send_thread_message(thread_id: str, body: Any) -> dict[str, Any]:
         if status == "deactivated":
             raise ApiError(
                 HTTPStatus.CONFLICT,
-                f"{label} runtime is deactivated; enable its provider under Internet Access and Tools",
+                f"{label} runtime is deactivated; enable its provider under Home > Integrations",
             )
         if status != "active":
             raise ApiError(
@@ -1913,6 +1894,35 @@ def stop_thread(thread_id: str) -> dict[str, str]:
         finish_turn_locked(thread)
         STATE.add_agent_event("thread.stopped", thread_id, {})
         return {"status": "accepted"}
+
+
+def clear_thread_memory(thread_id: str) -> dict[str, str]:
+    """Mirror the real route: idle-only, and the marker is the only new event.
+
+    The mock keeps no provider session, so the observable contract is the
+    appended activity plus the retained history staying in place.
+    """
+    with STATE.lock:
+        progress_running_turns_locked()
+        thread = STATE.threads.get(thread_id)
+        if thread is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
+        if thread.get("_running"):
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "working memory can be cleared only while the thread is idle",
+            )
+        STATE.add_agent_event(
+            "thread.memory_cleared",
+            thread_id,
+            {
+                "message": (
+                    "Working memory cleared. The agent starts fresh from here. "
+                    "Earlier messages stay visible but are no longer sent to it."
+                )
+            },
+        )
+        return {"status": "cleared"}
 
 
 def list_threads(query: dict[str, list[str]]) -> dict[str, Any]:
@@ -2617,7 +2627,7 @@ def main(argv: list[str] | None = None) -> int:
     # App smoke modules are loaded lazily on their first API request. Demo
     # mode renders representative product data without surfacing the
     # intentionally hostile probes used by the automated security smoke.
-    app_mocks.set_demo_mode(args.demo)
+    workspace_mocks.set_demo_mode(args.demo)
     seed_state()
     if args.demo:
         seed_demo_state()

@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
-from host.config import ConfigError, InputConfig
 from host.cli import lifecycle_aws
 from host.cli.lifecycle_constants import VERSION_TAG_KEY
 from host.cli.lifecycle_logging import _log
+from host.config import ConfigError, InputConfig
 from host.cli.lifecycle_types import LifecycleCommand
 from host.version import compare_versions
+
+
+def _require_preserved_storage_roles(operation: str, agent_name: str, storage_roles: set[str]) -> None:
+    expected_roles = {"admin", "agent"}
+    if storage_roles != expected_roles:
+        missing = ", ".join(sorted(expected_roles - storage_roles)) or "none"
+        found = ", ".join(sorted(storage_roles)) or "none"
+        raise ConfigError(
+            f"{operation} requires existing admin and agent data volumes for {agent_name}; "
+            f"found {found}, missing {missing}"
+        )
 
 
 def _validate_command_preflight(
@@ -16,7 +27,6 @@ def _validate_command_preflight(
     existing_instances: list[str],
     storage_roles: set[str],
 ) -> None:
-    expected_roles = {"admin", "agent"}
     if command.mode == "deploy":
         if existing_instances:
             raise ConfigError(
@@ -32,13 +42,7 @@ def _validate_command_preflight(
             )
         return
 
-    if storage_roles != expected_roles:
-        missing = ", ".join(sorted(expected_roles - storage_roles)) or "none"
-        found = ", ".join(sorted(storage_roles)) or "none"
-        raise ConfigError(
-            f"{command.mode} requires existing admin and agent data volumes for {config.agent_name}; "
-            f"found {found}, missing {missing}"
-        )
+    _require_preserved_storage_roles(command.mode, config.agent_name, storage_roles)
     if command.mode in {"upgrade", "reconfigure"} and not existing_instances:
         raise ConfigError(
             f"{command.mode} requires an existing Kern instance for {config.agent_name}; "
@@ -92,6 +96,7 @@ def _version_hint_error(
     target_version: str,
     comparison: int,
 ) -> str | None:
+    del version
     if command.mode == "upgrade":
         if comparison >= 0:
             return (
@@ -112,10 +117,9 @@ def _version_hint_error(
                 f"recover requires preserved state to match target VERSION {target_version}; "
                 "use recover --allow-upgrade to advance older state, or target a newer Kern version for newer preserved state"
             )
-    if command.mode == "reconfigure":
-        if comparison != 0:
-            return (
-                f"{command.mode} requires preserved state to match target VERSION {target_version}; "
-                "run upgrade first, or target the version matching the preserved state"
-            )
+    if command.mode == "reconfigure" and comparison != 0:
+        return (
+            f"{command.mode} requires preserved state to match target VERSION {target_version}; "
+            "run upgrade first, or target the version matching the preserved state"
+        )
     return None

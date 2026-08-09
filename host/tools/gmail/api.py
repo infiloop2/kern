@@ -8,6 +8,7 @@ from typing import Any, NamedTuple, cast
 
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.shared.google import google_json_request
+from host.tools.shared.inputs import ToolInputValidationError, string_value
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 GMAIL_READ_MAX_RESULTS = 5
@@ -48,12 +49,6 @@ GMAIL_DRAFT_ATTACHMENT_UNSUPPORTED_MESSAGE = (
 )
 
 
-class ToolInputValidationError(ValueError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
 class GmailApiOperation(NamedTuple):
     method: str
     path_template: str
@@ -82,14 +77,6 @@ GMAIL_OPERATIONS: dict[str, GmailApiOperation] = {
     "users.messages.untrash": GmailApiOperation("POST", "/messages/{id}/untrash", "Untrash Gmail message", "Remove one Gmail message from trash."),
     "users.threads.get": GmailApiOperation("GET", "/threads/{id}", "Get Gmail thread", "Read one Gmail thread."),
 }
-
-
-def string_value(record: JSONObject, keys: tuple[str, ...]) -> str:
-    for key in keys:
-        value = record.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
 
 
 def json_object(value: JSONValue | None) -> JSONObject:

@@ -10,7 +10,7 @@ import sys
 import time
 from typing import Any
 
-from host.runtime.core import app_platform, state
+from host.runtime.core import state
 from host.runtime.core.host_errors import (
     JOURNAL_FIELD,
     JOURNAL_FIELD_VALUE,
@@ -33,12 +33,11 @@ def allowed_units() -> frozenset[str]:
         "kern-network-proxy.service",
         "kern-tools.service",
         "kern-agent-network.service",
-        "kern-agent-app.service",
         "kern-admin-api.service",
+        "kern-workspace.service",
         "kern-host-errors.service",
         "kern-cloudflared.service",
     }
-    units.update(app.service_name for app in app_platform.installed_apps())
     return frozenset(units)
 
 

@@ -65,7 +65,7 @@ import time
 from typing import Any, Callable
 
 from host.config import AGENT_RUNTIMES
-from host.runtime.core import app_platform, host_errors, network_policy, state
+from host.runtime.core import host_errors, network_policy, state
 from host.runtime.admin_api import (
     agent_activity,
     bedrock_credentials,
@@ -194,23 +194,13 @@ def all_runtime_status_records() -> dict[str, dict[str, str]]:
     return {runtime_type: runtime_status_record(runtime_type) for runtime_type in AGENT_RUNTIMES}
 
 
-def _set_runtime_status(runtime_type: str, status: str, error_message: str | None = None) -> str:
-    """Replace the provider status record and return its previous status."""
+def _set_runtime_status(runtime_type: str, status: str, error_message: str | None = None) -> None:
+    """Replace the provider status record."""
     record = {"status": status}
     if error_message is not None:
         record["error_message"] = error_message
     with _RUNTIME_STATUS_LOCK:
-        previous = _RUNTIME_STATUSES.get(runtime_type, {"status": "loading"})["status"]
         _RUNTIME_STATUSES[runtime_type] = record
-    return previous
-
-
-def _publish_runtime_status(
-    runtime_type: str,
-    status: str,
-    error_message: str | None = None,
-) -> None:
-    _set_runtime_status(runtime_type, status, error_message)
 
 
 def agent_runtime_status() -> dict[str, Any]:
@@ -245,7 +235,7 @@ def refresh_runtime_status(runtime_type: str, *, force_provider_probe: bool = Fa
 
 
 def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_probe: bool = False) -> str:
-    if not _runtime_network_enabled(runtime_type):
+    if not runtime_network_enabled(runtime_type):
         return _mark_runtime_deactivated(runtime_type)
     provider = _provider_module(runtime_type)
     try:
@@ -277,7 +267,7 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
     codex_login_to_close: str | None = None
     after_commit: list[Callable[[], None]] = []
     with state.mutation(after_commit=after_commit) as cur:
-        if not _runtime_network_enabled(runtime_type):
+        if not runtime_network_enabled(runtime_type):
             # The one policy re-check, inside the mutation: a policy disable
             # that landed while the slow probe ran must not be overwritten by
             # the probe's stale result. The deactivated status, the OAuth
@@ -300,7 +290,7 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
             previous = runtime_status(runtime_type)
             cached_error = error_message if status == "error" and error_message else None
             after_commit.append(
-                partial(_publish_runtime_status, runtime_type, status, cached_error)
+                partial(_set_runtime_status, runtime_type, status, cached_error)
             )
             became_nonactive = previous == "active" and status != "active"
             if status == "active":
@@ -334,7 +324,7 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
                     {"agent_runtime": runtime_type},
                 )
     if deactivated:
-        deactivate_runtime(runtime_type, DEACTIVATED_REASON)
+        _stop_runtime_processes(runtime_type, DEACTIVATED_REASON)
         return "deactivated"
     if became_nonactive:
         label = RUNTIME_LABELS.get(runtime_type, runtime_type)
@@ -687,7 +677,7 @@ def _trusted_openai_account(cur: Any, account: dict[str, Any]) -> dict[str, Any]
     trusted_account_id = _trusted_openai_account_id(read_openai_account(cur))
     if trusted_account_id:
         if account_id != trusted_account_id:
-            raise ProviderAccountTrustError("OpenAI account changed; reset the linked account under Internet Access and Tools in the admin UI")
+            raise ProviderAccountTrustError("OpenAI account changed; reset the linked account under Home > Integrations in the admin UI")
         return _with_openai_operator_approval(account)
     raise ProviderAccountNotApproved("OpenAI account is not operator-approved; start OAuth login from the admin UI")
 
@@ -734,7 +724,7 @@ def _trusted_claude_account(
     if not attested_uuid:
         raise ProviderAccountTrustError("Claude account attestation has no account uuid")
     if trusted_account_id and attested_uuid != trusted_account_id:
-        raise ProviderAccountTrustError("Claude account changed; reset the linked account under Internet Access and Tools in the admin UI")
+        raise ProviderAccountTrustError("Claude account changed; reset the linked account under Home > Integrations in the admin UI")
     return _with_identity(account, attested_uuid, attested)
 
 
@@ -836,7 +826,7 @@ def _mark_runtime_deactivated(runtime_type: str) -> str:
     after_commit: list[Callable[[], None]] = []
     with state.mutation(after_commit=after_commit) as cur:
         _mark_runtime_deactivated_in(cur, after_commit, runtime_type)
-    deactivate_runtime(runtime_type, DEACTIVATED_REASON)
+    _stop_runtime_processes(runtime_type, DEACTIVATED_REASON)
     return "deactivated"
 
 
@@ -846,7 +836,7 @@ def _mark_runtime_deactivated_in(
     runtime_type: str,
 ) -> None:
     previous = runtime_status(runtime_type)
-    after_commit.append(partial(_publish_runtime_status, runtime_type, "deactivated"))
+    after_commit.append(partial(_set_runtime_status, runtime_type, "deactivated"))
     _clear_oauth_login_in(cur, runtime_type)
     if runtime_type in OAUTH_RUNTIMES:
         _sync_runtime_proxy_pin_in(cur, runtime_type, None)
@@ -867,10 +857,6 @@ def _clear_oauth_login_in(cur: Any, runtime_type: str) -> None:
     state.set_oauth_login(cur, "claude" if runtime_type == "claude_code" else "codex", None)
 
 
-def runtime_network_enabled(runtime_type: str) -> bool:
-    return _runtime_network_enabled(runtime_type)
-
-
 def reconcile_runtime_status_after_policy_change() -> None:
     """Synchronize cached runtime state after a policy update.
 
@@ -885,7 +871,7 @@ def reconcile_runtime_status_after_policy_change() -> None:
     """
     enabled: list[str] = []
     for runtime_type in ("codex", "claude_code", "hermes"):
-        if not _runtime_network_enabled(runtime_type):
+        if not runtime_network_enabled(runtime_type):
             _mark_runtime_deactivated(runtime_type)
         else:
             enabled.append(runtime_type)
@@ -904,13 +890,6 @@ def _refresh_runtimes(runtime_types: tuple[str, ...]) -> None:
                 context={"agent_runtime": runtime_type},
             )
             continue
-
-
-def deactivate_runtime(runtime_type: str, reason: str) -> None:
-    """Stop every live process for a non-active runtime and fail its in-flight
-    turns. New messages need no handling here: admission rejects them with the
-    runtime's non-active status."""
-    _stop_runtime_processes(runtime_type, reason)
 
 
 def reset_linked_account(runtime_type: str) -> None:
@@ -941,8 +920,8 @@ def reset_linked_account(runtime_type: str) -> None:
 def _reset_linked_account_in_state(runtime_type: str) -> None:
     after_commit: list[Callable[[], None]] = []
     with state.mutation(after_commit=after_commit) as cur:
-        next_status = "awaiting_login" if _runtime_network_enabled(runtime_type) else "deactivated"
-        after_commit.append(partial(_publish_runtime_status, runtime_type, next_status))
+        next_status = "awaiting_login" if runtime_network_enabled(runtime_type) else "deactivated"
+        after_commit.append(partial(_set_runtime_status, runtime_type, next_status))
         _clear_oauth_login_in(cur, runtime_type)
         if runtime_type == "claude_code":
             save_claude_account(None, cur)
@@ -962,7 +941,7 @@ def disconnect_bedrock_connection() -> None:
             cur.execute("SELECT 1 FROM managed_integrations WHERE integration = 'bedrock'")
             enabled = cur.fetchone() is not None
             next_status = "awaiting_login" if enabled else "deactivated"
-            after_commit.append(partial(_publish_runtime_status, "hermes", next_status))
+            after_commit.append(partial(_set_runtime_status, "hermes", next_status))
             state.append_agent_event(
                 cur,
                 "agent_runtime.linked_account_reset",
@@ -1112,10 +1091,10 @@ def admit_turn(
         existing = next((t for t in _LIVE.values() if t.thread_id == thread_id), None)
         if existing is not None:
             raise _retryable_phase_error(existing.phase)
-        if not _runtime_network_enabled(runtime_type):
+        if not runtime_network_enabled(runtime_type):
             raise ApiError(
                 HTTPStatus.CONFLICT,
-                f"{label} runtime is deactivated; enable its provider under Internet Access and Tools",
+                f"{label} runtime is deactivated; enable its provider under Home > Integrations",
             )
         status = runtime_status(runtime_type)
         if status != "active":
@@ -1413,10 +1392,6 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
             partial(_provider_ready, turn),
             partial(_provider_session_accepted, turn),
         )
-        # App instructions come from the host-validated manifest associated
-        # with this app-scoped thread, never from message content. Runtime
-        # adapters deliver them at their developer/system instruction boundary.
-        server.app_instructions = _app_instructions(thread_id)
         # Publish before start so Stop can call the adapter's non-blocking,
         # start-safe interrupt. Each adapter prevents a process spawn after
         # interrupt has won its own lifecycle lock.
@@ -1602,31 +1577,15 @@ def _provider_module(runtime_type: str | None = None) -> Any:
     return codex_app_server
 
 
-def _app_for_thread(thread_id: str) -> tuple[app_platform.AppManifest, str] | None:
-    """Installed app and app-visible id for an app-scoped host thread."""
-    app_id, separator, visible_thread_id = thread_id.partition(app_platform.APP_SCOPED_ID_SEPARATOR)
-    if not separator or not app_id or not visible_thread_id:
-        return None
-    app = app_platform.app_by_id(app_id)
-    return (app, visible_thread_id) if app is not None else None
-
-
-def _app_instructions(thread_id: str) -> str | None:
-    app_thread = _app_for_thread(thread_id)
-    return app_thread[0].agent_instructions if app_thread is not None else None
-
-
 def _new_agent_server(
     runtime_type: str,
     thread_id: str,
     on_ready: Callable[[], bool],
     on_session_id: Callable[[str], None],
 ) -> Any:
-    # Every turn runs inside a scope named after its host thread. App
-    # threads carry the host-reserved `<app_id>__` prefix, so the agent-app
-    # service derives ownership directly from kernel-owned cgroup state.
-    # Turns on one thread are serialized, and --collect removes the scope
-    # before the same unit name can be used by its next turn.
+    # Every turn runs inside a scope named after its host thread. Turns on one
+    # thread are serialized, and --collect removes the scope before the same
+    # unit name can be used by its next turn.
     if runtime_type == "claude_code":
         return claude_code.ClaudeCodeSession(
             thread_id=thread_id,
@@ -1650,7 +1609,7 @@ def _live_key(runtime_type: str, thread_id: Any) -> str:
     return f"{runtime_type}:{thread_id}"
 
 
-def _runtime_network_enabled(runtime_type: str) -> bool:
+def runtime_network_enabled(runtime_type: str) -> bool:
     provider = _MANAGED_PROVIDER_BY_RUNTIME.get(runtime_type)
     integrations = network_policy.load_policy().get("network_integrations", {})
     if not provider or not isinstance(integrations, dict):

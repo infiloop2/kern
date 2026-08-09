@@ -1,9 +1,0 @@
-{
-  "host_slot": 5,
-  "title": "Software Builder",
-  "release_stage": "beta",
-  "deprecated": true,
-  "database": {
-    "migrations": "migrations"
-  }
-}

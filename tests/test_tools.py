@@ -71,7 +71,7 @@ class _ConfigView(dict[str, str]):
 
     def __missing__(self, key: str) -> str:
         raise RuntimeError(
-            f"Tool config {key} is not set. The operator must set it in the admin UI's Tools tab."
+            f"Tool config {key} is not set. The operator must set it under Home > Integrations in the admin UI."
         )
 
 
@@ -1018,6 +1018,8 @@ class ToolTests(unittest.TestCase):
         self.assertIn("routing from", everything)
         self.assertIn("reply-to", everything)
         self.assertIn("thread", everything)
+        self.assertIn("9 attachments", everything)
+        self.assertIn("; NNN", everything)
 
     def test_gmail_draft_update_summary_worst_case_stays_under_limit(self) -> None:
         proposal = gmail._draft_action_proposal(

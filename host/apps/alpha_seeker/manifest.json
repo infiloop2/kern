@@ -1,9 +1,0 @@
-{
-  "host_slot": 2,
-  "title": "Alpha Seeker",
-  "release_stage": "beta",
-  "deprecated": true,
-  "database": {
-    "migrations": "migrations"
-  }
-}

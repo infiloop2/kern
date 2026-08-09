@@ -11,17 +11,17 @@ Defense in depth, fail closed at each layer:
    `systemd-timesyncd`, with narrow
    loopback exceptions: the agent may reach the proxy port and the agent
    preview port range (`8000-8015`, its own HTTP servers — see
-   [agent-preview-ports.md](agent-preview-ports.md)), the admin API
-   and the agent-app service may reach app backend ports (the browser bridge
-   and the agent `app_api` proxy respectively — the agent-app service has no
-   other network reach; see [agent-app-api.md](apps/agent-app-api.md)), and app
-   service users may answer established
-   admin-proxy connections. The agent has no direct network path off the host:
+   [agent-preview-ports.md](agent-preview-ports.md)), `kern-admin` may reach the
+   fixed Workspace browser port, and `kern-workspace` may answer established
+   connections. Agent `workspace_api` calls use a Unix socket rather than
+   TCP; see
+   [workspace-agent-api.md](workspaces/workspace-agent-api.md). The agent has no
+   direct network path off the host:
    its only loopback egress is the proxy port and its own preview range, where
    it serves and tests its own HTTP servers. That range is default-deny — only
    the agent (originate + serve) and the operator's SSH forward (view) are
    allowed, and both a destination- and a source-port drop deny every other
-   principal in both directions — so no service account or app can dial a
+   principal in both directions — so no service account can dial a
    preview server or answer a connection the agent opened.
    Non-root DNS is blocked even toward the local `systemd-resolved` stub (DNS
    lookups are an exfiltration channel); only `systemd-resolved`, the proxy,
@@ -145,15 +145,14 @@ only to the network proxy port and to its own preview range (`8000-8015`),
 where it runs and tests its own HTTP servers. That range is default-deny: only
 the agent and the operator's SSH forward are allowed, and destination- and
 source-port drops deny every other principal both directions, so no service
-account or app reaches a preview server or answers a connection the agent
-opened, and the agent still cannot originate from a preview source port. See
-[agent-preview-ports.md](agent-preview-ports.md). App
-backend ports
-are opened only to the `kern-admin` uid, and a port-specific drop blocks all
-other local users before the general loopback accept. App service users may
-send established loopback responses for admin-proxied requests, but may not
-initiate loopback connections to the proxy, the browser-facing admin API, other
-app backends, or other local listeners. The agent — a non-root user with no sudo — only inherits
+account reaches a preview server or answers a connection the agent opened, and
+the agent still cannot originate from a preview source port. See
+[agent-preview-ports.md](agent-preview-ports.md). The fixed Workspace port is
+opened only to `kern-admin`; a port-specific drop
+blocks all other local users before the general loopback accept. The
+`kern-workspace` user may send established loopback responses for proxied
+requests but may not initiate connections to the proxy, browser-facing admin
+API, or other local listeners. The agent — a non-root user with no sudo — only inherits
 root's blanket path by first escalating to root.
 
 Decisions are logged to the `network_events` database table, which the proxy
@@ -251,7 +250,7 @@ guidance is the human explanation wherever one is needed.
 
 The agent reads this through two always-listed tools on the dedicated
 `/run/kern-agent-network/agent-network.sock` socket. The MCP shim combines
-them with bundled tools and `app_api` into one stable server (see
+them with bundled tools and `workspace_api` into one stable server (see
 [tools host integration](tools/host-integration.md)):
 
 - `list_network_integrations` — each registered integration with its

@@ -229,6 +229,10 @@ def begin_registration(
 ) -> dict[str, Any]:
     _validated_rp_id(rp_id)
     _validated_origin(origin, rp_id)
+    if len(state.admin_passkeys()) >= state.ADMIN_PASSKEY_LIMIT:
+        raise PasskeyError(
+            "Kern already has an admin passkey; reset it before registering another"
+        )
     config = state.admin_passkey_config()
     user_handle = (
         str(config["user_handle"])
@@ -307,16 +311,25 @@ def finish_registration(session_hash: str, response: Any) -> dict[str, Any]:
         raise PasskeyError("passkey credential id does not match its attestation")
     if state.admin_passkeys() and state.admin_passkey_config() is None:
         raise PasskeyError("stored passkey configuration is inconsistent")
-    state.save_admin_passkey(
-        user_handle=ceremony.user_handle,
-        credential_id=credential_id,
-        rp_id=ceremony.rp_id,
-        public_key_spki=_b64encode(public_key),
-        sign_count=sign_count,
-        transports=transports,
-        backed_up=bool(flags & 0x10),
-        created_at=state.utc_now(),
-    )
+    if len(state.admin_passkeys()) >= state.ADMIN_PASSKEY_LIMIT:
+        raise PasskeyError(
+            "Kern already has an admin passkey; reset it before registering another"
+        )
+    try:
+        state.save_admin_passkey(
+            user_handle=ceremony.user_handle,
+            credential_id=credential_id,
+            rp_id=ceremony.rp_id,
+            public_key_spki=_b64encode(public_key),
+            sign_count=sign_count,
+            transports=transports,
+            backed_up=bool(flags & 0x10),
+            created_at=state.utc_now(),
+        )
+    except state.AdminPasskeyLimitError as exc:
+        raise PasskeyError(
+            "Kern already has an admin passkey; reset it before registering another"
+        ) from exc
     return {
         "configured": True,
         "credential_count": len(state.admin_passkeys()),

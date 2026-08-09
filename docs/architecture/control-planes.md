@@ -31,7 +31,7 @@ send, steer, stop, and inspect agent threads; inspect agent files and
 processes; read agent, network, and tool audit events; manage runtime network
 policy and the GitHub credential/approval queue; start provider login flows
 and read provider account summaries; configure, connect, enable, and approve
-bundled tools; use installed app surfaces; inspect health; and request a host
+bundled tools; use the Chat and Web Apps workspaces; inspect health; and request a host
 reboot.
 
 Admin-plane host controls cross privilege boundaries only through fixed

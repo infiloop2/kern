@@ -1,8 +1,6 @@
-// Bundled tools UI: one integration row per tool in the network tab, styled
-// exactly like the managed integrations (GitHub, OpenAI, ...): a collapsed
-// summary with status and enable/disable, and a chevron dropdown holding the
-// OAuth connection, a Configuration section, and an Approvals section, so
-// pending write actions are shown per tool rather than in one unified list.
+// Bundled tools UI for the focused Home integration page. The selected tool
+// shows its status and enable/disable controls, OAuth connection,
+// configuration, and pending approvals alongside its manifest-backed guide.
 // Direct actions return immediately; approval-gated actions queue an operator
 // decision in that tool's Approvals section. Tool state is fetched from
 // /v1/tools and rendered on tab entry and after actions only, never on the
@@ -10,14 +8,19 @@
 // row is expanded and refresh on the poll while it stays open.
 
 import { api } from "./api.js";
-import { $, badge, esc, formatUnixTime, informationIcon, inlineCode, inlineMessage, notice, replaceIntegrationRows, setHtml } from "./helpers.js";
-import { closeIntegrationInfo, toggleInfoPopover } from "./network.js";
+import { $, badge, esc, formatUnixTime, inlineMessage, notice, replaceIntegrationRows, setHtml } from "./helpers.js";
+import { applyIntegrationDetailSelection } from "./network.js";
 
 let tools = [];
 // tool_id -> approvals array, for tools whose row is expanded.
 const toolApprovalsByTool = new Map();
-// Tool rows are collapsed by default, like the managed integration rows.
+// Selection expands exactly one tool row; the remaining rows stay hidden.
 const expandedTools = new Set();
+
+export function selectToolDetail(guideId) {
+  expandedTools.clear();
+  if (guideId && guideId.startsWith("tool:")) expandedTools.add(guideId.slice(5));
+}
 
 function toolsMessage(toolId, message, isError) {
   const node = document.querySelector(`[data-tool-message="${toolId}"]`);
@@ -31,8 +34,6 @@ export async function refreshTools() {
 }
 
 function renderTools() {
-  // Re-rendering replaces the info buttons, so drop any open popover.
-  closeIntegrationInfo();
   $("tools-cross-access-notice").hidden = tools.filter(tool => tool.enabled).length < 2;
   $("tools-empty").hidden = tools.length > 0;
   if (!tools.length) {
@@ -46,6 +47,14 @@ function renderTools() {
   // repaint them from the cached approvals; the poll and actions refresh the
   // data.
   for (const toolId of expandedTools) renderToolApprovalsTable(toolId);
+  for (const tool of tools) {
+    const status = document.querySelector(`[data-home-integration-status="tool:${tool.tool_id}"]`);
+    if (!status) continue;
+    status.className = `status ${tool.enabled ? "active" : "disabled"}`;
+    status.textContent = tool.enabled ? "enabled" : "disabled";
+  }
+  document.dispatchEvent(new CustomEvent("kern-home-integration-statuses-updated"));
+  applyIntegrationDetailSelection();
 }
 
 function renderToolRow(tool) {
@@ -61,14 +70,8 @@ function renderToolRow(tool) {
   return `
     <section class="integration-row${expanded ? " expanded" : ""}" data-tool-row="${esc(tool.tool_id)}">
       <div class="integration-summary">
-        <button class="ghost sm icon-button integration-chevron" data-action="toggle-tool-expansion" data-tool="${esc(tool.tool_id)}" aria-label="Toggle ${esc(tool.display_name)} details" aria-expanded="${expanded}">
-          <svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 4.5 5 5.5-5 5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
         <div class="integration-title">
-          <div class="preset-with-info">
-            <h2>${esc(tool.display_name)}</h2>
-            <button class="info-button" data-action="toggle-tool-info" data-tool="${esc(tool.tool_id)}" data-info="tool:${esc(tool.tool_id)}" aria-label="${esc(tool.display_name)} overview and protections" aria-haspopup="dialog" aria-expanded="false">${informationIcon()}</button>
-          </div>
+          <h2>${esc(tool.display_name)}</h2>
           <div class="integration-subtitle">${esc(tool.description)}</div>
         </div>
         <span class="status-chips">${chips.join(" ")}</span>
@@ -123,23 +126,6 @@ function renderToolConnection(tool, connected) {
     </div>`;
 }
 
-// Expand/collapse without re-rendering, so half-typed config values in other
-// rows survive the toggle (only refreshTools rebuilds the rows). Expanding
-// loads that tool's approvals; they refresh on the poll while the row is open.
-export function toggleToolExpansion(toolId) {
-  if (expandedTools.has(toolId)) expandedTools.delete(toolId);
-  else expandedTools.add(toolId);
-  const expanded = expandedTools.has(toolId);
-  const row = document.querySelector(`.integration-row[data-tool-row="${cssEscape(toolId)}"]`);
-  if (row) row.classList.toggle("expanded", expanded);
-  const details = document.querySelector(`.integration-details[data-tool-details="${cssEscape(toolId)}"]`);
-  if (details) details.hidden = !expanded;
-  const chevron = document.querySelector(`.integration-chevron[data-action="toggle-tool-expansion"][data-tool="${cssEscape(toolId)}"]`);
-  if (chevron) chevron.setAttribute("aria-expanded", String(expanded));
-  if (expanded) loadToolApprovals(toolId).catch(error => toolsMessage(toolId, error.message, true));
-}
-
-
 function renderToolConfigRow(tool, entry) {
   const inputId = `tool-config-${tool.tool_id}-${entry.key}`;
   return `
@@ -154,22 +140,6 @@ function renderToolConfigRow(tool, entry) {
         <button class="sm" data-action="save-tool-config" data-tool="${esc(tool.tool_id)}" data-key="${esc(entry.key)}">Save</button>
       </div>
     </div>`;
-}
-
-// Tool details open in the same floating popover as the managed integration
-// info buttons, anchored to the clicked button.
-export function toggleToolInfo(toolId, anchor) {
-  const tool = tools.find(item => item.tool_id === toolId);
-  if (!tool) return;
-  toggleInfoPopover(`tool:${toolId}`, anchor, renderToolInfo(tool));
-}
-
-function renderToolInfo(tool) {
-  return `
-    <h3>${esc(tool.display_name)}</h3>
-    <h4>Protections</h4>
-    <ul>${(tool.protections || []).map(protection => `<li>${inlineCode(protection)}</li>`).join("")}</ul>
-    <button class="popover-guide-link" data-action="open-connection-guide" data-guide="tool:${esc(tool.tool_id)}">View integration guide</button>`;
 }
 
 export async function setToolEnabled(toolId, enabled) {
@@ -220,12 +190,12 @@ export async function disconnectTool(toolId) {
 
 // Finish a tool OAuth connect after the provider redirected back to
 // /oauth/callback?code=...&state=... — the tool id was stashed before leaving.
-// The caller (app.js start) has already switched to the network tab.
-export async function completeToolConnect() {
-  const params = new URLSearchParams(location.search);
+// app.js preserves the callback query before replacing the callback URL and
+// waits for the focused tool row to render before completing the exchange.
+export async function completeToolConnect(callbackSearch = location.search) {
+  const params = new URLSearchParams(callbackSearch);
   const toolId = sessionStorage.getItem("kern_tool_connect");
   sessionStorage.removeItem("kern_tool_connect");
-  history.replaceState(null, "", "/");
   if (!toolId) { notice("Tool connect callback had no pending tool."); return; }
   if (!params.get("code")) {
     try { await refreshTools(); } catch (_error) { /* render the callback error if the row already exists */ }

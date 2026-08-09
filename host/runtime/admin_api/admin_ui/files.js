@@ -8,6 +8,7 @@ const FILE_LIST_ENTRY_LIMIT = 1000;
 let currentFilePath = "/";
 let fileEntries = [];
 let activeFileUrl = null;
+let fileNavigationSequence = 0;
 
 function fileMessage(message, isError) {
   const node = $("file-message");
@@ -22,15 +23,25 @@ function parentPath(path) {
   return index <= 0 ? "/" : normalized.slice(0, index);
 }
 
-export async function loadAgentFiles(path = currentFilePath) {
+export async function loadAgentFiles(path = currentFilePath, navigate = false) {
+  if (navigate) fileNavigationSequence += 1;
+  const navigationSequence = fileNavigationSequence;
   try {
     fileMessage("");
     const response = await api("GET", `/v1/agent-files?path=${encodeURIComponent(path || "/")}`);
+    if (
+      navigationSequence !== fileNavigationSequence
+      || (!navigate && path !== currentFilePath)
+    ) return;
     currentFilePath = response.path || "/";
     fileEntries = Array.isArray(response.entries) ? response.entries : [];
     $("file-path").value = currentFilePath;
     renderFileList(response);
   } catch (error) {
+    if (
+      navigationSequence !== fileNavigationSequence
+      || (!navigate && path !== currentFilePath)
+    ) return;
     fileMessage(error.message, true);
   }
 }
@@ -44,7 +55,7 @@ export async function ensureFilesLoaded() {
 }
 
 export function loadParentDirectory() {
-  return loadAgentFiles(parentPath(currentFilePath));
+  return loadAgentFiles(parentPath(currentFilePath), true);
 }
 
 async function readAgentFile(path) {
@@ -76,7 +87,7 @@ async function readAgentFile(path) {
 
 export async function openAgentPath(path, type) {
   if (type === "directory") {
-    await loadAgentFiles(path);
+    await loadAgentFiles(path, true);
     return;
   }
   await readAgentFile(path);
@@ -178,5 +189,5 @@ function resetFileMedia() {
 }
 
 export function goToFilePath() {
-  loadAgentFiles($("file-path").value.trim() || "/");
+  loadAgentFiles($("file-path").value.trim() || "/", true);
 }

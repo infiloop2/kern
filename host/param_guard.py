@@ -50,7 +50,7 @@ PARAM_GUARD_PROTECTION = (
     "is sent."
 )
 
-# The expanded guide description (Integration Guides technical details).
+# The expanded guide description (Home integration page technical details).
 # Defined next to the short line so the two cannot drift apart.
 PARAM_GUARD_TECHNICAL_DETAIL = (
     "Parameter guard: free-text request parameters sent without operator "

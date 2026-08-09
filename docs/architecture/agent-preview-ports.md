@@ -10,8 +10,8 @@ machine over SSH and opens it in their own browser.
 This is deliberately the *whole* feature. An earlier design also reverse-proxied
 these ports into a sandboxed iframe in the admin console; it was dropped because
 rendering agent-authored (therefore untrusted, potentially prompt-injected)
-HTML/JS on the admin origin inverts the installed-app sandbox model — apps are
-reviewed repo code with no direct network, while preview content would have been
+HTML/JS on the admin origin inverts the trusted-UI sandbox model — Workspace
+chrome is reviewed release code, while preview content would have been
 adversarial code one iframe attribute away from an authenticated console. The
 SSH forward gives the operator the same view from their own machine at no new
 attack surface in the console — provided the preview is browsed on a **loopback
@@ -61,7 +61,7 @@ everything else in the range is dropped both ways:
   service that bound a preview port from completing a handshake the agent
   originated — which would let a prompt-injected agent POST workspace data
   straight to that service, bypassing the policy proxy — and it subsumes the
-  per-app source-port drop.
+  workspace source-port drop.
 
 The result is that only agent↔agent traffic and the operator's forward touch
 the range; adding a new service account or user grants no access, because the
@@ -70,7 +70,7 @@ default is deny.
 ## Security boundary: what the carve-out does and does not unlock
 
 The agent's egress drop exists to stop it reaching services that trust
-loopback callers (Postgres, the admin API, app backends, the network proxy's
+loopback callers (Postgres, the admin API, the Workspace service, the network proxy's
 unauthenticated listener). This carve-out must not weaken that, so here is the
 exhaustive accounting of what the agent gains. It gains exactly two abilities:
 originate TCP to `127.0.0.1:8000-8015`, and answer established connections on
@@ -85,23 +85,23 @@ on the other end of the socket:
   capability.
 - **A platform service.** None exists in the range, by construction and by CI:
   every platform listener has a pinned port in the 7xxx block (admin 7443,
-  proxy 7445, apps 7450-7549; Postgres is Unix-socket / 5432), and
+  proxy 7445, workspaces 7450; Postgres is Unix-socket / 5432), and
   `test_deploy` asserts the preview range is disjoint from the admin API, the
-  network proxy, and every possible installed-app port. The operational
+  network proxy, and the fixed Workspace port. The operational
   invariant is that no platform or root service may ever bind `8000-8015`;
   adding one is a firewall change and must be reviewed as such.
-- **Any other local principal — app uid, service account, future user.** The
+- **Any other local principal — service account or future user.** The
   default-deny closes both directions for all of them at once, so this is one
   case, not many. None can *dial* the range (the dport default drop catches
-  every uid except `kern-agent` and `kern-operator`), so no app or service can
+  every uid except `kern-agent` and `kern-operator`), so no service can
   reach a preview server — no unmediated read path, and the admin API cannot be
   an SSRF confused-deputy into it. None can *answer* on the range either (the
   sport default drop catches every non-agent source port), so a compromised
   service that bound a preview port cannot complete a handshake the agent
   originated — which is what would otherwise let a prompt-injected agent POST
   workspace data straight to an egress-capable service (`kern-tools` holds
-  outbound HTTPS) and exfiltrate it around the policy proxy. Agent↔app
-  communication remains only the journaled `app_api` path. Because the policy
+  outbound HTTPS) and exfiltrate it around the policy proxy. Agent↔Web App
+  communication remains only the journaled `workspace_api` path. Because the policy
   is default-deny rather than an enumeration, adding a service account or user
   later cannot silently open a hole.
 

@@ -10,7 +10,7 @@ import unittest
 class AgentChatRichTextTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_markdown_renderer_escapes_html_and_rejects_javascript_links(self) -> None:
-        renderer = Path("host/apps/agent_chat/ui/rich_text.js").resolve()
+        renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
         script = (
             f"const rich = require({json.dumps(str(renderer))});"
             "process.stdout.write(rich.renderMarkdown("
@@ -39,7 +39,7 @@ class AgentChatRichTextTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_activity_deltas_compact_to_one_bounded_snapshot(self) -> None:
-        renderer = Path("host/apps/agent_chat/ui/rich_text.js").resolve()
+        renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
         script = (
             f"const rich = require({json.dumps(str(renderer))});"
             "const event = (seq, phase, output, append_output=false) => ({"
@@ -74,7 +74,7 @@ class AgentChatRichTextTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_activity_compaction_preserves_first_sequence_across_merges(self) -> None:
-        renderer = Path("host/apps/agent_chat/ui/rich_text.js").resolve()
+        renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
         script = (
             f"const rich = require({json.dumps(str(renderer))});"
             "const activity = (seq, phase) => ({"
@@ -107,7 +107,7 @@ class AgentChatRichTextTests(unittest.TestCase):
     def test_activity_compaction_never_merges_host_scoped_provider_ids(self) -> None:
         # The host prefixes provider ids with the private execution number, so
         # a later process reusing command-1 cannot overwrite old activity.
-        renderer = Path("host/apps/agent_chat/ui/rich_text.js").resolve()
+        renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
         script = (
             f"const rich = require({json.dumps(str(renderer))});"
             "const activity = (seq, scope, phase, title) => ({"
@@ -135,7 +135,7 @@ class AgentChatRichTextTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_deeply_nested_blockquotes_do_not_overflow_the_stack(self) -> None:
-        renderer = Path("host/apps/agent_chat/ui/rich_text.js").resolve()
+        renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
         script = (
             f"const rich = require({json.dumps(str(renderer))});"
             "process.stdout.write(rich.renderMarkdown(process.argv[1]));"

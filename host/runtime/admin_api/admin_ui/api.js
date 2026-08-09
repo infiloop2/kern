@@ -16,7 +16,7 @@ let lastOperatorActivityAt = Date.now();
 
 export function markSessionActivity(event) {
   // Programmatically dispatched DOM events are not operator activity. Calls
-  // without an event come only from the host's audited app-bridge path below.
+  // without an event come only from the host's trusted Workspace UI path.
   if (event && !event.isTrusted) return;
   lastOperatorActivityAt = Date.now();
 }

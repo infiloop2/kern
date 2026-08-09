@@ -15,7 +15,7 @@ id, and timestamp. Every managed service also has an `ExecStopPost` hook that
 emits an error when systemd reports an abnormal service result.
 
 `kern-host-errors.service` asks journald for tagged records originating from
-only the fixed set of Kern units and installed app units, then checks the
+only the fixed set of Kern service units, then checks the
 trusted `_SYSTEMD_UNIT` field again before any database work. It validates and
 bounds every field before writing to `host_errors` in PostgreSQL. The record
 contains a component, kind, exception type, short summary, traceback frames, a

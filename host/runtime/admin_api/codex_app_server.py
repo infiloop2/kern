@@ -130,10 +130,6 @@ class CodexAppServer:
         self._thread_id = thread_id
         self._on_ready = on_ready
         self._on_session_id = on_session_id
-        # The orchestrator sets this only for an app-created turn. It is kept
-        # separate from the turn's user input and applied when a provider
-        # thread is created as subordinate developer instructions.
-        self.app_instructions: str | None = None
         # run_turn sets this as soon as the Codex threadId for this turn is
         # known — well before turn/start, let alone turn/completed — so a
         # kill (which surfaces run_turn's call()/read_message() as an
@@ -142,9 +138,8 @@ class CodexAppServer:
         self.last_known_session_id: str | None = None
         # Turns run inside a systemd scope named after the host thread:
         # the helper consumes this pair and turns it into systemd-run --unit,
-        # which lets the agent-app service derive an app from the trusted
-        # thread prefix (see agent_app_api). Non-turn servers (status probes,
-        # logins) pass no thread id and keep systemd's generated scope name.
+        # Non-turn servers (status probes and logins) pass no thread id and
+        # keep systemd's generated scope name.
         if thread_id is not None:
             self._command = [*self._command, "--thread-scope", thread_id]
         self._next_id = 1
@@ -170,7 +165,7 @@ class CodexAppServer:
         self.start()
         return self
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+    def __exit__(self, *_: object) -> None:
         self.close()
 
     def start(self, init_timeout: float = 60.0) -> None:
@@ -679,66 +674,40 @@ def _string_field(value: dict[str, Any], key: str) -> str | None:
     return item.strip() or None
 
 
-def _rate_limit_scalar(value: Any) -> Any:
-    if isinstance(value, bool) or isinstance(value, int) or isinstance(value, float):
-        return value
-    if isinstance(value, str):
-        return value.strip() or None
-    return None
+# Only these scalar fields, per snapshot section, survive into metadata.
+_RATE_LIMIT_WINDOW_FIELDS = (
+    ("usedPercent", "used_percent"),
+    ("windowDurationMins", "window_duration_mins"),
+    ("resetsAt", "resets_at"),
+)
+_RATE_LIMIT_SECTIONS = (
+    ("primary", _RATE_LIMIT_WINDOW_FIELDS),
+    ("secondary", _RATE_LIMIT_WINDOW_FIELDS),
+    ("credits", (("hasCredits", "has_credits"), ("unlimited", "unlimited"), ("balance", "balance"))),
+)
 
 
 def _safe_rate_limits_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    result: dict[str, Any] = {}
-    rate_limits = _safe_rate_limit_snapshot(value.get("rateLimits"))
-    if rate_limits:
-        result["rate_limits"] = rate_limits
-    return result
-
-
-def _safe_rate_limit_snapshot(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    result: dict[str, Any] = {}
-    for key in ("primary", "secondary"):
-        window = _safe_rate_limit_window(value.get(key))
-        if window:
-            result[key] = window
-    credits = _safe_credits_snapshot(value.get("credits"))
-    if credits:
-        result["credits"] = credits
-    return result
-
-
-def _safe_rate_limit_window(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    result: dict[str, Any] = {}
-    for source_key, target_key in (
-        ("usedPercent", "used_percent"),
-        ("windowDurationMins", "window_duration_mins"),
-        ("resetsAt", "resets_at"),
-    ):
-        item = _rate_limit_scalar(value.get(source_key))
-        if item is not None:
-            result[target_key] = item
-    return result
-
-
-def _safe_credits_snapshot(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    result: dict[str, Any] = {}
-    for source_key, target_key in (
-        ("hasCredits", "has_credits"),
-        ("unlimited", "unlimited"),
-        ("balance", "balance"),
-    ):
-        item = _rate_limit_scalar(value.get(source_key))
-        if item is not None:
-            result[target_key] = item
-    return result
+    snapshot = value.get("rateLimits")
+    rate_limits: dict[str, Any] = {}
+    for key, fields in _RATE_LIMIT_SECTIONS:
+        section = snapshot.get(key) if isinstance(snapshot, dict) else None
+        if not isinstance(section, dict):
+            continue
+        safe: dict[str, Any] = {}
+        for source_key, target_key in fields:
+            item = section.get(source_key)
+            if isinstance(item, str):
+                item = item.strip() or None
+            elif not isinstance(item, (bool, int, float)):
+                item = None
+            if item is not None:
+                safe[target_key] = item
+        if safe:
+            rate_limits[key] = safe
+    return {"rate_limits": rate_limits} if rate_limits else {}
 
 
 def read_codex_account_id(command: list[str] | None = None) -> str | None:
@@ -861,7 +830,7 @@ def run_turn(
                     "threadId": thread_id,
                     "cwd": AGENT_CWD,
                     "model": model,
-                    "developerInstructions": _developer_instructions(server),
+                    "developerInstructions": _developer_instructions(),
                 },
                 timeout=30,
             )["thread"]
@@ -1133,18 +1102,15 @@ def _start_thread(server: CodexAppServer, model: str) -> dict[str, Any]:
             # Effort is a turn/start field in the pinned app-server protocol,
             # not a thread/start field.
             "model": model,
-            "developerInstructions": _developer_instructions(server),
+            "developerInstructions": _developer_instructions(),
         },
         timeout=30,
     )["thread"]
 
 
-def _developer_instructions(server: CodexAppServer) -> str:
-    """Current host and app contract, refreshed on start and every resume."""
-    developer_instructions = (
+def _developer_instructions() -> str:
+    """Current host contract, refreshed on start and every resume."""
+    return (
         "You are running inside Kern. Complete the operator task and "
         "return a concise final result."
     )
-    if server.app_instructions:
-        developer_instructions += f"\n\nApp instructions:\n{server.app_instructions}"
-    return developer_instructions

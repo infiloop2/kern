@@ -86,6 +86,13 @@ runtimes in one invocation (without the tool, GitHub, or cross-runtime
 matrix); `github` runs only the GitHub write end-to-end; and
 a bundled tool id runs only that tool's live provider check.
 
+When any runtime passes, the stable-app check creates a uniquely searchable
+real Chat conversation, reads it through the deployed
+`search_conversation_history` and `read_thread_history` MCP tools, verifies the
+untrusted provenance metadata and retained user/assistant messages, clears the
+thread's working memory, and proves both the visible boundary and earlier
+history survive. The same check then generates and persists a minimal Web App.
+
 The live concurrency scenario uses three Codex and three Claude turns. The
 provider-neutral orchestrator tests separately prove the same three-turn cap
 for Hermes, avoiding three additional paid Bedrock turns merely to repeat the
@@ -342,7 +349,7 @@ exercises the GitHub write paths end to end. This depends on GitHub being
 configured from the `KERN_STAGE_GITHUB_*` secrets (auto-installed before
 the preflight) or, absent those, from a manually configured credential and
 write repo. The preflight reports exactly what is absent. Manual setup requires
-both of these through the admin UI (Internet Access and Tools): a
+both of these through the admin UI (Home > Integrations): a
 **write-capable GitHub credential** stored, and **at least one sandbox write
 repository** in the policy that the credential can push to (real branches are
 pushed and deleted there, so use a dedicated sandbox repo, never a real one).

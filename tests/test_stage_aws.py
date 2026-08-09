@@ -72,6 +72,83 @@ class StageOrchestrationTests(unittest.TestCase):
             )
         self.assertEqual(events[0]["event_type"], "thread.message")
 
+    def test_stage_history_check_uses_typed_tools_and_preserves_messages_after_clear(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        metadata = {
+            "provenance": "retained_conversation_history",
+            "trust": "untrusted",
+            "instruction_authority": "none",
+        }
+        search = {
+            **metadata,
+            "matches": [
+                {
+                    "thread_id": "thread-7",
+                    "event_id": "event_10",
+                    "role": "user",
+                    "excerpt": "remember stagehistory123",
+                }
+            ],
+            "next_cursor": None,
+        }
+        history = {
+            **metadata,
+            "thread": {"thread_id": "thread-7"},
+            "events": [
+                {
+                    "event_id": "event_10",
+                    "type": "message",
+                    "role": "user",
+                    "content": "remember stagehistory123",
+                },
+                {
+                    "event_id": "event_11",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "STAGE_AGENT_CHAT_OK",
+                },
+            ],
+        }
+
+        def fake_api(method: str, path: str, body: dict | None = None) -> dict:
+            if (method, path) == (
+                "POST",
+                "/v1/workspace/chat/threads/thread-7/clear-memory",
+            ):
+                self.assertIsNone(body)
+                return {"status": "cleared"}
+            if (method, path) == (
+                "GET",
+                "/v1/workspace/chat/threads/thread-7/events",
+            ):
+                return {"events": [{"event_type": "thread.memory_cleared"}]}
+            raise AssertionError((method, path, body))
+
+        with (
+            patch.object(
+                stage,
+                "_shim_tool_result",
+                side_effect=[search, history, history],
+            ) as tool,
+            patch.object(stage, "_api", side_effect=fake_api),
+        ):
+            stage._check_agent_history_and_clear_memory(
+                "/v1/workspace/chat", "thread-7", "stagehistory123"
+            )
+
+        self.assertEqual(
+            [call.args[0] for call in tool.call_args_list],
+            [
+                "search_conversation_history",
+                "read_thread_history",
+                "read_thread_history",
+            ],
+        )
+        self.assertEqual(
+            tool.call_args_list[0].args[1],
+            {"query": "stagehistory123", "roles": ["user"], "limit": 1},
+        )
+
     def test_stage_harness_import_does_not_require_playwright(self) -> None:
         script = """
 import builtins
@@ -528,6 +605,129 @@ import tests.stage.stage_aws
         )
         # The stop check asserts the thread's scope unit is gone from systemd.
         self.assertIn("kern-agent-thread-smoke-kill-hermes.scope", ssh_code.call_args.args[0])
+        self.assertEqual((stage.passed, stage.total), (1, 1))
+
+    def test_claude_stage_exercises_two_rapid_steers(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        stage.total = 0
+        stage.passed = 0
+        stage.agent_runtime = "claude_code"
+        with (
+            patch.object(stage, "_latest_thread_event_seq", return_value=0),
+            patch.object(stage, "send_message", return_value={"status": "accepted"}),
+            patch.object(stage, "_wait_for_turn_activity"),
+            # Nine seconds elapse between the rejected STARTING attempt and
+            # the accepted attempt, but the accepted POST itself takes 0.1s.
+            # Startup waiting must not be reported as steering latency.
+            patch(
+                "tests.smoke.smoke_aws.time.monotonic",
+                side_effect=[0.0, 9.0, 9.1, 10.0, 10.1, 11.0, 11.1],
+            ),
+            patch.object(
+                stage,
+                "send_follow_up",
+                side_effect=[
+                    AssertionError(
+                        "the agent is starting; retry shortly"
+                    ),
+                    {"status": "accepted"},
+                    {"status": "accepted"},
+                    {"status": "accepted"},
+                ],
+            ) as follow_up,
+            patch.object(
+                stage,
+                "_wait_for_turn",
+                side_effect=[
+                    {
+                        "status": "completed",
+                        "output_message": "STARTUP_STEERED",
+                    },
+                    {
+                        "status": "completed",
+                        "output_message": "DOUBLE_STEERED",
+                    },
+                ],
+            ),
+        ):
+            stage.check_agent_steering()
+
+        self.assertEqual(follow_up.call_count, 4)
+        self.assertIn("STARTUP_STEERED", follow_up.call_args_list[1].args[1])
+        self.assertIn("DOUBLE_STEERED", follow_up.call_args_list[3].args[1])
+        self.assertEqual((stage.passed, stage.total), (1, 1))
+
+    def test_smoke_package_check_uses_the_venv_pip(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        stage.total = 0
+        stage.passed = 0
+        with (
+            patch.object(stage, "_network_events", side_effect=[[], []]),
+            patch.object(
+                stage,
+                "_ssh_code",
+                side_effect=[
+                    "__KERN_VENV_OK__",
+                    "__KERN_PIP_OK__",
+                    "",
+                    "absent",
+                    "200",
+                    "206",
+                    "403",
+                ],
+            ) as ssh_code,
+        ):
+            stage.check_package_client_headers()
+
+        commands = [call.args[0] for call in ssh_code.call_args_list]
+        self.assertIn("uv venv --seed", commands[0])
+        self.assertIn("HOME=/mnt/kern-agent/agent-home", commands[0])
+        self.assertIn("cd /mnt/kern-agent/agent-home", commands[0])
+        self.assertIn("SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt", commands[0])
+        self.assertIn("REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt", commands[0])
+        self.assertIn("NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/kern-network-proxy.crt", commands[0])
+        self.assertIn("/venv/bin/python -m pip download", commands[1])
+        self.assertNotIn("python3 -m pip download", commands[1])
+        self.assertIn("sudo -u kern-agent rm -rf", commands[2])
+        self.assertEqual((stage.passed, stage.total), (1, 1))
+
+    def test_stage_package_check_uses_the_venv_pip_twice(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        stage.total = 0
+        stage.passed = 0
+        policy = {"network_integrations": {}}
+        with (
+            patch.object(stage, "enforcement_policy", return_value=policy),
+            patch.object(stage, "_api"),
+            patch.object(stage, "_network_events", side_effect=[[], []]),
+            patch.object(
+                stage,
+                "_ssh_code",
+                side_effect=[
+                    "__KERN_VENV_OK__",
+                    "__KERN_PIP_OK__",
+                    "__KERN_PIP_OK__",
+                    '"registry-etag"',
+                    "304",
+                    "206",
+                    "",
+                ],
+            ) as ssh_code,
+        ):
+            stage.check_package_client_headers_e2e()
+
+        commands = [call.args[0] for call in ssh_code.call_args_list]
+        self.assertIn("uv venv --seed", commands[0])
+        self.assertIn("HOME=/mnt/kern-agent/agent-home", commands[0])
+        self.assertIn("cd /mnt/kern-agent/agent-home", commands[0])
+        self.assertIn("SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt", commands[0])
+        self.assertIn("REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt", commands[0])
+        self.assertIn("NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/kern-network-proxy.crt", commands[0])
+        self.assertIn("/venv/bin/python -m pip download", commands[1])
+        self.assertIn("/venv/bin/python -m pip download", commands[2])
+        self.assertIn("downloads-1", commands[1])
+        self.assertIn("downloads-2", commands[2])
+        self.assertIn("sudo -u kern-agent rm -rf", commands[-1])
         self.assertEqual((stage.passed, stage.total), (1, 1))
 
     def test_every_recorded_check_name_has_an_explicit_label(self) -> None:

@@ -87,10 +87,12 @@ GUARDS: dict[str, IntegrationGuard] = {
     "python_packages": IntegrationGuard(
         host_allowed=python_guard.host_allowed,
         request_denied=python_guard.request_denied,
+        rewrite_request_headers=python_guard.rewrite_request_headers,
     ),
     "npm_packages": IntegrationGuard(
         host_allowed=npm_guard.host_allowed,
         request_denied=npm_guard.request_denied,
+        rewrite_request_headers=npm_guard.rewrite_request_headers,
     ),
     "custom": IntegrationGuard(
         host_allowed=custom_guard.host_allowed,

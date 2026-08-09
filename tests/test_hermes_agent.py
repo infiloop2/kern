@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from host.runtime.admin_api import hermes_agent, thread_scope
 
@@ -30,7 +30,6 @@ class HermesSessionTests(unittest.TestCase):
         script: str,
         *,
         session_id: str | None = None,
-        app_instructions: str | None = None,
         input_message: str = "initial",
     ) -> tuple[str, str, list[str], list[str]]:
         delivered: list[str] = []
@@ -42,7 +41,6 @@ class HermesSessionTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 hermes_agent.AGENT_CWD = tmp
                 server = hermes_agent.HermesSession([sys.executable, "-u", "-c", script])
-                server.app_instructions = app_instructions
                 server.start()
                 with patch.object(state, "read_bedrock_region", return_value="us-east-1"):
                     result_session_id, output = hermes_agent.run_turn(
@@ -103,17 +101,6 @@ class HermesSessionTests(unittest.TestCase):
         self.assertEqual(session_id, "hermes-session-7")
         payload = json.loads(output)
         self.assertEqual(payload["args"][payload["args"].index("--resume") + 1], "hermes-session-7")
-
-    def test_app_instructions_prefix_only_the_new_session_prompt(self) -> None:
-        _sid, output, _delivered, _streamed = self.run_turn(CHAT_SCRIPT, app_instructions="Be the app.")
-        payload = json.loads(output)
-        self.assertIn("[Host app instructions]", payload["prompt"])
-        self.assertIn("Be the app.", payload["prompt"])
-        self.assertIn("[User message]\ninitial", payload["prompt"])
-        _sid, output, _delivered, _streamed = self.run_turn(
-            CHAT_SCRIPT, session_id="hermes-session-1", app_instructions="Be the app."
-        )
-        self.assertEqual(json.loads(output)["prompt"], "initial")
 
     def test_a_leading_dash_prompt_is_delivered_verbatim_over_stdin(self) -> None:
         _sid, output, _delivered, _streamed = self.run_turn(
@@ -312,7 +299,7 @@ print("session_id: hermes-session-1", file=sys.stderr)
         session = hermes_agent.HermesSession(
             command=hermes_agent.DEFAULT_COMMAND, thread_id="stage-1-smoke-kill-hermes"
         )
-        with patch.object(thread_scope.subprocess, "run") as run:
+        with patch.object(thread_scope.subprocess, "run", return_value=MagicMock(returncode=0)) as run:
             session.close()
         run.assert_called_once()
         self.assertEqual(
@@ -325,7 +312,7 @@ print("session_id: hermes-session-1", file=sys.stderr)
             hermes_agent.HermesSession(command=["/bin/echo"], thread_id="sample_app__ws-3"),
             hermes_agent.HermesSession(command=hermes_agent.DEFAULT_COMMAND, thread_id=None),
         ):
-            with patch.object(thread_scope.subprocess, "run") as run:
+            with patch.object(thread_scope.subprocess, "run", return_value=MagicMock(returncode=0)) as run:
                 session.close()
             run.assert_not_called()
 

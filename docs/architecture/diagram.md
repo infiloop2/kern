@@ -31,8 +31,7 @@ flowchart LR
             proxy["kern-proxy<br/>Network proxy<br/>127.0.0.1:7445<br/>DNS + TCP 80/443 only"]
             tools["kern-tools<br/>Tool packages + tools.sock<br/>DNS + TCP 443 only"]
             agentnetwork["kern-agent-network<br/>Network introspection socket<br/>no egress"]
-            agentapp["kern-agent-app<br/>app_api proxy + agent-app.sock<br/>loopback to app ports only"]
-            apps["kern-app-*<br/>App backends<br/>host-slot uid, port, schema<br/>no egress"]
+            workspace["kern-workspace<br/>Chat + Web Apps + Memory + Schedules + agent.sock<br/>fixed uid, port, explicit table grants<br/>no egress"]
             agent["kern-agent<br/>Codex + Claude Code + Hermes<br/>no sudo, DB role, or direct egress"]
             db["postgres<br/>kern_admin<br/>Unix socket only, peer auth"]
             tunnel["cloudflared<br/>Tunnel connector<br/>DNS, TCP 443/7844, UDP 7844"]
@@ -68,11 +67,10 @@ flowchart LR
     admin -->|"operator tool routes, peer uid route"| tools
     tools -->|"third-party tool APIs"| outside_services
 
-    admin -->|"reverse proxy to assigned loopback ports"| apps
-    apps -->|"app-backend.sock thread-route allowlist, peer uid"| admin
+    admin -->|"reverse proxy to fixed loopback port"| workspace
+    workspace -->|"workspace.sock thread-only allowlist, peer uid"| admin
 
-    agent -->|"app_api via agent-app.sock, cgroup thread attribution"| agentapp
-    agentapp -->|"reverse proxy to owning app's /agent/ routes"| apps
+    agent -->|"Workspace + bounded history tools via agent.sock"| workspace
 
     admin -->|"owner role, all host tables"| db
     admin -->|"admin-home + disk version"| adminvol
@@ -81,7 +79,7 @@ flowchart LR
     tools -->|"tool tables + secret key only"| db
     agentnetwork -->|"SELECT-only policy + events"| db
     tools -->|"bounded temporary media"| adminvol
-    apps -->|"own app schema only"| db
+    workspace -->|"explicit workspace-table DML grants"| db
     db -->|"PGDATA"| adminvol
     agent -->|"agent-home, sessions, caches, workspaces"| agentvol
 

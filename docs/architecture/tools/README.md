@@ -16,8 +16,8 @@ host implementation of the same contract.
   the agent-facing MCP surface, the local sockets involved, the operator UI, and
   the state model.
 
-Tool-specific documentation lives in the admin UI's Integration Guides and is
-rendered from the guide content owned by each package under `host/tools/`. Those
+Tool-specific documentation lives on each admin UI **Home > Integrations** page
+and is rendered from the guide content owned by each package under `host/tools/`. Those
 guides are the source of truth for what an integration does, setup, protections,
 data flow, and technical notes. Per-tool Markdown references do not live here,
 so adding or changing a package updates one operator-facing source.

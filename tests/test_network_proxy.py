@@ -25,7 +25,7 @@ from host.network_integrations.claude import guard as claude_guard
 from host.network_integrations.claude.manifest import ClaudeIntegration
 from host.config import parse_network_controls
 from host.network_integrations.openai import guard as openai_guard
-from host.runtime.core import network_policy, state
+from host.runtime.core import db, network_policy, state
 from host.runtime.core.network_policy import load_policy
 from host.runtime.core.state import save_network_policy as save_policy
 from host.runtime.core.state import save_proxy_claude_account_id, save_proxy_openai_account_id
@@ -181,10 +181,13 @@ class NetworkProxyTests(unittest.TestCase):
 
     def test_claude_token_attestation_reads_provider_signed_account_uuid(self) -> None:
         raw = MagicMock()
+        raw.__enter__.return_value = raw
         tls = MagicMock()
+        tls.__enter__.return_value = tls
         context = MagicMock()
         context.wrap_socket.return_value = tls
         response = MagicMock()
+        response.__enter__.return_value = response
         response.status = 200
         response.read.return_value = b'{"account":{"uuid":"acct-approved"}}'
 
@@ -206,15 +209,18 @@ class NetworkProxyTests(unittest.TestCase):
         self.assertIn(b"Authorization: Bearer rotated-token", sent)
         self.assertIn(b"Content-Type: application/json", sent)
         self.assertIn(b"Cache-Control: no-cache", sent)
-        response.close.assert_called_once_with()
-        tls.close.assert_called_once_with()
+        response.__exit__.assert_called_once()
+        tls.__exit__.assert_called_once()
 
     def test_claude_token_attestation_fails_closed_on_bad_profile(self) -> None:
         raw = MagicMock()
+        raw.__enter__.return_value = raw
         tls = MagicMock()
+        tls.__enter__.return_value = tls
         context = MagicMock()
         context.wrap_socket.return_value = tls
         response = MagicMock()
+        response.__enter__.return_value = response
         response.status = 200
         response.read.return_value = b'{"account":{}}'
 
@@ -521,7 +527,8 @@ class NetworkProxyTests(unittest.TestCase):
         save_policy(
             {"network_integrations": {"bedrock": {"enabled": True}}}, "2026-06-08T00:00:00Z"
         )
-        state.save_bedrock_credential("AKIAOPERATORKEY00001", "S" * 40, "us-east-1")
+        with state.mutation() as cur:
+            state.save_bedrock_credential("AKIAOPERATORKEY00001", "S" * 40, "us-east-1", cur)
 
         path = "/model/deepseek.v3.2/converse"
         body = b'{"messages":[]}'
@@ -794,6 +801,40 @@ def masked_frame(payload: bytes, opcode: int = 0x1, fin: bool = True, rsv: int =
 
 
 class WebSocketHandshakeTests(unittest.TestCase):
+    def test_if_none_match_is_preserved_on_mutation(self) -> None:
+        ours, theirs = socket.socketpair()
+        self.addCleanup(ours.close)
+        self.addCleanup(theirs.close)
+        network_proxy.send_http_request(
+            ours,
+            "PUT",
+            "/resource",
+            [("Host", "example.com"), ("If-None-Match", "*")],
+            b"value",
+            websocket=False,
+        )
+        sent = b""
+        while b"\r\n\r\n" not in sent:
+            sent += theirs.recv(65536)
+        self.assertIn(b"If-None-Match: *", sent)
+
+    def test_websocket_key_is_dropped_from_ordinary_http(self) -> None:
+        ours, theirs = socket.socketpair()
+        self.addCleanup(ours.close)
+        self.addCleanup(theirs.close)
+        network_proxy.send_http_request(
+            ours,
+            "GET",
+            "/",
+            [("Host", "example.com"), ("Sec-WebSocket-Key", "c2VjcmV0LWtleQ==")],
+            b"",
+            websocket=False,
+        )
+        sent = b""
+        while b"\r\n\r\n" not in sent:
+            sent += theirs.recv(65536)
+        self.assertNotIn(b"sec-websocket-key", sent.lower())
+
     def test_extension_offer_is_not_forwarded_upstream(self) -> None:
         # If the upstream accepted permessage-deflate, frames would carry RSV
         # bits the message guard must deny mid-stream. Dropping the client's
@@ -812,6 +853,7 @@ class WebSocketHandshakeTests(unittest.TestCase):
                 ("Sec-WebSocket-Key", "c2VjcmV0LWtleQ=="),
                 ("Sec-WebSocket-Version", "13"),
                 ("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits"),
+                ("If-None-Match", 'W/"x7Kp2mQv9zR4tYw8LbN3"'),
             ],
             b"",
             websocket=True,
@@ -820,6 +862,11 @@ class WebSocketHandshakeTests(unittest.TestCase):
         while b"\r\n\r\n" not in sent:
             sent += theirs.recv(65536)
         self.assertNotIn(b"sec-websocket-extensions", sent.lower())
+        # If-None-Match is forwarded now: the managed integrations validate the
+        # entity-tag grammar themselves, and custom domains forward what the
+        # agent sent, so a global strip had nothing left to protect and
+        # contradicted the custom-domain contract.
+        self.assertIn(b"if-none-match", sent.lower())
         self.assertIn(b"Upgrade: websocket", sent)
         self.assertIn(b"Sec-WebSocket-Key", sent)
 
