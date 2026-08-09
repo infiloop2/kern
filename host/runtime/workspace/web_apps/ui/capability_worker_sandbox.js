@@ -1,57 +1,47 @@
 "use strict";
 
-const workers = new Map();
+let generatedWorker = null;
 
-window.addEventListener("message", event => {
-  if (event.source !== parent || !event.data || typeof event.data !== "object") return;
+globalThis.addEventListener("message", event => {
   const message = event.data;
+  if (!message || typeof message !== "object") return;
   if (message.type === "create") {
-    if (typeof message.worker_id !== "string" || typeof message.source !== "string") return;
-    terminate(message.worker_id);
-    const url = URL.createObjectURL(new Blob([message.source], { type: "application/javascript" }));
+    if (typeof message.source !== "string") return;
+    terminateGeneratedWorker();
     let worker;
     try {
-      worker = new Worker(url);
+      worker = new Worker(
+        `data:application/javascript;charset=utf-8,${encodeURIComponent(message.source)}`,
+      );
     } catch (_error) {
-      parent.postMessage({
-        type: "capability-worker-error",
-        worker_id: message.worker_id,
-        reason: "worker-create",
-      }, "*");
+      globalThis.postMessage({ type: "capability-worker-error", reason: "worker-create" });
       return;
-    } finally {
-      URL.revokeObjectURL(url);
     }
-    workers.set(message.worker_id, worker);
+    generatedWorker = worker;
     worker.addEventListener("message", workerEvent => {
-      parent.postMessage({
+      if (generatedWorker !== worker) return;
+      globalThis.postMessage({
         type: "capability-worker-message",
-        worker_id: message.worker_id,
         data: workerEvent.data,
-      }, "*");
+      });
     });
-    worker.addEventListener("error", () => {
-      parent.postMessage({
-        type: "capability-worker-error",
-        worker_id: message.worker_id,
-        reason: "worker-runtime",
-      }, "*");
-      terminate(message.worker_id);
+    worker.addEventListener("error", errorEvent => {
+      errorEvent.preventDefault();
+      if (generatedWorker !== worker) return;
+      globalThis.postMessage({ type: "capability-worker-error", reason: "worker-runtime" });
+      terminateGeneratedWorker();
     });
     return;
   }
   if (message.type === "worker-post") {
-    workers.get(message.worker_id)?.postMessage(message.data);
+    generatedWorker?.postMessage(message.data);
     return;
   }
-  if (message.type === "terminate") terminate(message.worker_id);
+  if (message.type === "terminate") terminateGeneratedWorker();
 });
 
-function terminate(workerId) {
-  const worker = workers.get(workerId);
-  if (!worker) return;
-  workers.delete(workerId);
-  worker.terminate();
+function terminateGeneratedWorker() {
+  if (!generatedWorker) return;
+  generatedWorker.terminate();
+  generatedWorker = null;
 }
-
-parent.postMessage({ type: "capability-sandbox-ready" }, "*");

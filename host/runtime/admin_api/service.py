@@ -125,7 +125,6 @@ WORKSPACE_UI_ASSETS = {
     "/workspace/global.html": (RUNTIME_DIR.parent / "workspace/ui/index.html", "text/html; charset=utf-8"),
     "/workspace/global.js": (RUNTIME_DIR.parent / "workspace/ui/workspace.js", "application/javascript; charset=utf-8"),
     "/workspace/global.css": (RUNTIME_DIR.parent / "workspace/ui/workspace.css", "text/css; charset=utf-8"),
-    "/workspace/capability-worker-sandbox.html": (RUNTIME_DIR.parent / "workspace/web_apps/ui/capability_worker_sandbox.html", "text/html; charset=utf-8"),
     "/workspace/capability-worker-sandbox.js": (RUNTIME_DIR.parent / "workspace/web_apps/ui/capability_worker_sandbox.js", "application/javascript; charset=utf-8"),
 }
 UI_ASSETS.update(WORKSPACE_UI_ASSETS)
@@ -318,8 +317,8 @@ class Handler(BaseHTTPRequestHandler):
             ):
                 raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
             if method == "GET" and path.path in UI_ASSETS:
-                if path.path == "/workspace/capability-worker-sandbox.html":
-                    self._send_capability_sandbox()
+                if path.path == "/workspace/capability-worker-sandbox.js":
+                    self._send_capability_worker()
                 else:
                     self._send_ui_asset(path.path)
                 return
@@ -407,8 +406,8 @@ class Handler(BaseHTTPRequestHandler):
         for name, value in SECURITY_HEADERS.items():
             self.send_header(name, value)
 
-    def _send_capability_sandbox(self) -> None:
-        asset, content_type = UI_ASSETS["/workspace/capability-worker-sandbox.html"]
+    def _send_capability_worker(self) -> None:
+        asset, content_type = UI_ASSETS["/workspace/capability-worker-sandbox.js"]
         data = asset.read_bytes()
         self.send_response(HTTPStatus.OK.value)
         self.send_header("Content-Type", content_type)
@@ -417,12 +416,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; base-uri 'none'; connect-src 'none'; "
-            "form-action 'none'; frame-ancestors 'self'; object-src 'none'; "
-            "script-src 'self'; worker-src blob:; sandbox allow-scripts",
+            "object-src 'none'; script-src 'none'; worker-src data:",
         )
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(data)
 

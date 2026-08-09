@@ -38,7 +38,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         wait_for_server(port, server)
-        run_browser_smoke(f"http://127.0.0.1:{port}/", headed=args.headed, scope=args.scope)
+        run_browser_smoke(
+            f"http://127.0.0.1:{port}/",
+            headed=args.headed,
+            scope=args.scope,
+            webkit=args.webkit,
+        )
     finally:
         server.terminate()
         try:
@@ -53,6 +58,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=0, help="Local port to use; defaults to a free ephemeral port.")
     parser.add_argument("--headed", action="store_true", help="Run the browser visibly.")
+    parser.add_argument(
+        "--webkit",
+        action="store_true",
+        help="Also run the generated Web App worker-startup regression in Playwright WebKit.",
+    )
     parser.add_argument(
         "--scope",
         choices=("all", "core", "workspaces"),
@@ -89,7 +99,7 @@ def wait_for_server(port: int, proc: subprocess.Popen[str]) -> None:
     raise TimeoutError(f"mock server did not become ready at {url}")
 
 
-def run_browser_smoke(url: str, *, headed: bool, scope: str) -> None:
+def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = False) -> None:
     try:
         from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import sync_playwright
@@ -97,7 +107,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str) -> None:
         raise SystemExit(
             "Playwright is not installed. Run:\n"
             "  python3 -m pip install -r tests/requirements.txt\n"
-            "  python3 -m playwright install chromium"
+            "  python3 -m playwright install chromium webkit"
         ) from exc
 
     with sync_playwright() as playwright:
@@ -157,6 +167,27 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str) -> None:
                 mobile_workspaces.close()
         finally:
             browser.close()
+        if webkit and scope in {"all", "workspaces"}:
+            run_webkit_workspace_smoke(playwright, url, headed=headed)
+
+
+def run_webkit_workspace_smoke(playwright, url: str, *, headed: bool) -> None:
+    try:
+        browser = playwright.webkit.launch(headless=not headed)
+    except Exception as exc:
+        raise SystemExit(
+            "Playwright WebKit is not installed. Run:\n"
+            "  python3 -m playwright install webkit"
+        ) from exc
+    try:
+        workspace = browser.new_context()
+        workspace_page = workspace.new_page()
+        report_page_errors(workspace_page, "WebKit generated Web App")
+        log_in(workspace_page, url)
+        workspace_smokes.web_app_worker_startup_smoke(workspace_page)
+        workspace.close()
+    finally:
+        browser.close()
 
 
 def report_page_errors(page, label: str) -> None:
