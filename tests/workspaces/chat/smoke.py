@@ -168,20 +168,22 @@ def desktop_smoke(page: Any) -> None:
         "Earlier messages stay visible but are no longer sent to it"
     )
 
-    # The desktop instruction line begins on the same vertical guide as the
-    # prompt text instead of floating centered beneath the composer.
-    prompt_box = frame.locator("#new-task").bounding_box()
+    # The desktop instruction line is centered beneath the composer instead
+    # of following the prompt's asymmetric inner padding.
+    composer_box = frame.locator("#composer").bounding_box()
     hint = frame.locator("#composer-hint")
     hint_box = hint.bounding_box()
-    hint_padding = hint.evaluate(
-        "element => Number.parseFloat(getComputedStyle(element).paddingLeft)"
+    hint_alignment = hint.evaluate(
+        "element => getComputedStyle(element).textAlign"
     )
-    if not prompt_box or not hint_box:
-        raise AssertionError("composer prompt or instruction line is not visible")
-    if abs(prompt_box["x"] - (hint_box["x"] + hint_padding)) > 1:
+    if not composer_box or not hint_box:
+        raise AssertionError("composer or instruction line is not visible")
+    composer_center = composer_box["x"] + composer_box["width"] / 2
+    hint_center = hint_box["x"] + hint_box["width"] / 2
+    if hint_alignment != "center" or abs(composer_center - hint_center) > 1:
         raise AssertionError(
-            "composer instruction line is not aligned with the prompt text: "
-            f"prompt={prompt_box}, hint={hint_box}, padding={hint_padding}"
+            "composer instruction line is not centered beneath the composer: "
+            f"composer={composer_box}, hint={hint_box}, text_align={hint_alignment}"
         )
     frame.get_by_role("switch", name="Activity", exact=True).click()
     expect(frame.locator("#thread-detail")).to_contain_text("Working memory cleared")

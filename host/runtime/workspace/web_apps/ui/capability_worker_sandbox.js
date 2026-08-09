@@ -9,8 +9,19 @@ window.addEventListener("message", event => {
     if (typeof message.worker_id !== "string" || typeof message.source !== "string") return;
     terminate(message.worker_id);
     const url = URL.createObjectURL(new Blob([message.source], { type: "application/javascript" }));
-    const worker = new Worker(url);
-    URL.revokeObjectURL(url);
+    let worker;
+    try {
+      worker = new Worker(url);
+    } catch (_error) {
+      parent.postMessage({
+        type: "capability-worker-error",
+        worker_id: message.worker_id,
+        reason: "worker-create",
+      }, "*");
+      return;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
     workers.set(message.worker_id, worker);
     worker.addEventListener("message", workerEvent => {
       parent.postMessage({
@@ -23,6 +34,7 @@ window.addEventListener("message", event => {
       parent.postMessage({
         type: "capability-worker-error",
         worker_id: message.worker_id,
+        reason: "worker-runtime",
       }, "*");
       terminate(message.worker_id);
     });

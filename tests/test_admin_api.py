@@ -721,6 +721,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('id="processes"', html)
         self.assertIn('id="file-image" class="file-image" alt="" hidden', html)
         self.assertIn("img-src 'self' data: blob:", admin_api.SECURITY_HEADERS["Content-Security-Policy"])
+        self.assertIn("style-src 'self' blob:", admin_api.SECURITY_HEADERS["Content-Security-Policy"])
         self.assertIn('id="chat-nav-items"', html)
         self.assertIn('id="web-apps-nav-items"', html)
         self.assertIn("window.KernHost", app_js)
@@ -3179,7 +3180,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIsNone(state.thread_session_config("t1"))
         self.assertIsNone(state.thread_session_config("t2"))
 
-    def test_fourth_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
+    def test_eleventh_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
         save_policy(
             {"network_integrations": {"openai": {"enabled": True}, "claude": {"enabled": True}}},
             "2026-06-08T00:00:00Z",
@@ -3188,7 +3189,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with patch.object(
             orchestrator, "launch_turn", side_effect=attach_recording_steer_server
         ):
-            for thread_id in ("t1", "t2", "t3"):
+            for index in range(1, orchestrator.TURN_LIMIT_PER_RUNTIME + 1):
+                thread_id = f"t{index}"
                 _, body = self.request(
                     "POST",
                     f"/v1/threads/{thread_id}/messages",
@@ -3198,16 +3200,16 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
             with self.assertRaises(urllib.error.HTTPError) as error:
                 self.request(
-                    "POST", "/v1/threads/t4/messages", {"message": "go", "agent_runtime": "codex"}
+                    "POST", "/v1/threads/t11/messages", {"message": "go", "agent_runtime": "codex"}
                 )
             self.assertEqual(error.exception.code, 429)
             self.assertIn(
-                "already running 3 concurrent threads; retry when one finishes",
+                "already running 10 concurrent threads; retry when one finishes",
                 error.exception.read().decode(),
             )
             # The rejection rolled everything back: no thread, no events.
-            self.assertIsNone(state.thread_session_config("t4"))
-            _, events = self.request("GET", "/v1/threads/t4/events")
+            self.assertIsNone(state.thread_session_config("t11"))
+            _, events = self.request("GET", "/v1/threads/t11/events")
             self.assertEqual(events["events"], [])
 
             # Capacity is per runtime: Claude Code still has its own pool.

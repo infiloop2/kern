@@ -500,7 +500,7 @@ client-chosen id (`thread_id`) and a session configuration (`agent_runtime`,
 separate create call. The public model has no
 turn resource or turn lifecycle: a thread is simply `idle` or `running`, and
 its history is one chronological stream. Work on the same thread is
-serialized; work on different threads runs in parallel, up to 3 per runtime.
+serialized; work on different threads runs in parallel, up to 10 per runtime.
 Codex resumes the thread's provider conversation by id on a fresh app-server;
 Claude Code and Hermes resume by their recorded provider session ids. An idle
 thread may replace all three configuration fields atomically on its next
@@ -657,7 +657,7 @@ caller retries):
 | `409` | Hermes has no mid-run input channel. | `Hermes cannot accept another message while running; wait for it to finish` |
 | `409` | A message tries to change configuration while work is running. | `thread runtime, model, and effort can change only while the thread is idle` |
 | `409` | The thread's current session configuration left the option matrix and the message does not replace it. | `this thread runs a session configuration that is no longer offered; select a currently offered model to continue` |
-| `429` | The runtime is at its concurrency cap. Each runtime owns an independent pool of 3 concurrent threads, so one busy runtime cannot take capacity from its peers. | `<Runtime> runtime is already running 3 concurrent threads; retry when one finishes` |
+| `429` | The runtime is at its concurrency cap. Each runtime owns an independent pool of 10 concurrent threads, so one busy runtime cannot take capacity from its peers. | `<Runtime> runtime is already running 10 concurrent threads; retry when one finishes` |
 | `502` | A provider that already declared itself running rejects a synchronous message. The host records `thread.error`, finalizes the run, and begins cleanup rather than treating this as startup. | `<Runtime> rejected the message: <provider detail>` |
 
 Thread list response:

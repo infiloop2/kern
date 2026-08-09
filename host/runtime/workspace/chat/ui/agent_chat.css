@@ -790,8 +790,8 @@ button.attachment-clear {
   color: var(--text-dim);
   font-size: 0.68rem;
   margin: 0.45rem auto 0;
-  padding: 0 0.6rem 0 calc(0.95rem + 1px);
-  text-align: left;
+  padding: 0 0.6rem;
+  text-align: center;
 }
 
 /* ---------- Mobile: sidebar becomes a slide-in drawer ---------- */

@@ -549,6 +549,16 @@ def desktop_smoke(page: Any) -> None:
         raise AssertionError(f"memory content should grow instead of scrolling: {dimensions}")
     if dimensions["scrollWidth"] > dimensions["clientWidth"] + 1:
         raise AssertionError(f"memory content should wrap instead of scrolling: {dimensions}")
+    original_viewport = page.viewport_size
+    if original_viewport:
+        page.set_viewport_size({"width": 720, "height": original_viewport["height"]})
+        page.wait_for_timeout(50)
+        narrowed = memory_content.evaluate(
+            "element => ({scrollHeight: element.scrollHeight, clientHeight: element.clientHeight})"
+        )
+        if narrowed["scrollHeight"] > narrowed["clientHeight"] + 1:
+            raise AssertionError(f"memory content clipped after its width changed: {narrowed}")
+        page.set_viewport_size(original_viewport)
     surface.get_by_role("button", name="Save page", exact=True).click()
     expect(surface.locator("#global-list")).to_contain_text("release-preferences")
     expect(surface.locator("#memory-links")).to_contain_text("rollback-plan")

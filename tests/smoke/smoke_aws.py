@@ -3152,8 +3152,8 @@ class AwsSmoke:
 
     def check_agent_parallelism(self) -> None:
         """Mixed-runtime parallelism on the live host: three Codex turns and
-        three Claude Code turns run at the same time through independent
-        per-runtime admission caps, then all are steered to completion."""
+        three Claude Code turns run at the same time within their independent
+        per-runtime admission pools, then all are steered to completion."""
         self._step("mixed OAuth harness parallelism: 3 Codex + 3 Claude turns")
         specs = [
             ("codex", "smoke-codex-par-a", "CODEX_ALPHA"),

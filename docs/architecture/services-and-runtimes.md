@@ -52,7 +52,7 @@
 | Maintenance thread | admin API | Periodically prunes bounded state and event history. |
 | Journal follower | host-errors collector | Follows new trusted-unit `KERN_HOST_ERROR=1` records without a replay cursor. |
 | Runtime status poller | admin API/orchestrator | Rechecks provider health, including Hermes's Bedrock connection. |
-| Turn threads | admin API/orchestrator | One daemon thread per admitted turn; at most three turns run per runtime, and a message past that cap is rejected rather than queued. Each turn spawns and closes its own runtime process. |
+| Turn threads | admin API/orchestrator | One daemon thread per admitted turn; at most ten turns run per runtime, and a message past that cap is rejected rather than queued. Each turn spawns and closes its own runtime process. |
 | Proxy handler threads | network proxy | One per proxied connection, capped so buffered request bodies cannot exhaust memory. |
 | Proxy certificate lock users | network proxy | Serialize per-host certificate generation so concurrent TLS CONNECTs do not race on cert files. |
 

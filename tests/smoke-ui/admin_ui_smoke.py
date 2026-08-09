@@ -133,6 +133,13 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str) -> None:
                 mobile.close()
 
             if scope in {"all", "workspaces"}:
+                fallback_workspaces = browser.new_context()
+                fallback_page = fallback_workspaces.new_page()
+                report_page_errors(fallback_page, "workspaces stylesheet fallback")
+                log_in(fallback_page, url)
+                workspace_smokes.web_app_stylesheet_fallback_smoke(fallback_page)
+                fallback_workspaces.close()
+
                 desktop_workspaces = browser.new_context()
                 workspace_page = desktop_workspaces.new_page()
                 report_page_errors(workspace_page, "workspaces desktop")

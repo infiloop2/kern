@@ -20,11 +20,19 @@ Selection, composer drafts, event cursors, and asynchronous responses are keyed
 by app id so late results from one app cannot update another.
 
 Generated markup is not trusted product code. HTML and CSS pass strict
-sanitizers and render inside a nested ShadowRoot. Generated JavaScript runs in
-a Worker inside an opaque sandbox iframe whose CSP denies network access and
+sanitizers with byte, node, nesting, and CSS-rule complexity limits and render
+inside a nested ShadowRoot. Sanitized CSS uses a constructed stylesheet when
+the browser supports ShadowRoot adoption and a CSP-authorized blob stylesheet
+otherwise; generated markup cannot create either form. Safe HTML is committed
+before style installation so a browser-specific stylesheet failure cannot
+leave the canvas on an obsolete Loading placeholder. Generated JavaScript runs
+in a Worker inside an opaque sandbox iframe whose CSP denies network access and
 dynamic evaluation. The broker exposes only bounded rendering, JSON mutation,
 notification, and ask-agent capabilities. Worker calls remain pinned to the
-app and revisions that created the Worker.
+app and revisions that created the Worker. Worker startup has a separate
+bounded deadline; the three-second generated-execution limit begins only after
+the Worker is ready, and startup, execution, and trusted-render failures are
+reported distinctly.
 
 Browser and agent writes share per-app locks and one optimistic `revision`.
 Every data operation, atomic data batch, or UI publish compares and increments
