@@ -180,14 +180,14 @@ THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT = 8_000
 THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT = 8_000
 MAINTENANCE_INTERVAL_SECONDS = 3600  # scheduled state cleanup cadence (not per-request)
 THREAD_EVENT_MESSAGE_BYTES_LIMIT = 200_000
-# The in-thread boundary text. It states what survives, because "cleared"
-# otherwise reads as deleted history and operators clear again looking for an
-# effect that already happened. Carried as a plain message rather than an
-# activity payload: the Chat renderer merges events that share an activity id,
-# so a fixed id would collapse a second clear onto the first one's position.
+# The in-thread boundary text. Retained events remain available to audit and
+# history APIs, while Chat treats this marker as the new visible beginning.
+# Carried as a plain message rather than an activity payload: the Chat renderer
+# merges events that share an activity id, so a fixed id would collapse a
+# second clear onto the first one's position.
 WORKING_MEMORY_CLEARED_NOTICE = (
     "Working memory cleared. The agent starts fresh from here. Earlier "
-    "messages stay visible but are no longer sent to it."
+    "messages are hidden and are no longer sent to it."
 )
 THREAD_DISPLAY_EVENT_TYPES = frozenset({
     "thread.message",

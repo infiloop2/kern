@@ -624,11 +624,16 @@ button.workspace-nav-new:hover { background: var(--surface-2); color: var(--text
 .workspace-nav-items { display: grid; gap: 2px; }
 .workspace-nav-row { align-items: center; display: grid; grid-template-columns: minmax(0, 1fr) auto; }
 button.workspace-nav-item {
-  align-items: center; background: transparent; border: 0; border-radius: 8px;
-  color: var(--text-dim); display: flex; gap: 0.45rem; min-width: 0;
+  align-items: stretch; background: transparent; border: 0; border-radius: 8px;
+  color: var(--text-dim); display: flex; flex-direction: column; gap: 0.15rem; min-width: 0;
   font-size: 0.78rem; padding: 0.4rem 0.5rem; text-align: left;
 }
-button.workspace-nav-item > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-nav-primary { align-items: center; display: flex; gap: 0.45rem; min-width: 0; }
+.workspace-nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-nav-meta {
+  color: var(--text-dim); font-size: 0.63rem; line-height: 1.25; opacity: 0.72;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 button.workspace-nav-item:hover { background: var(--surface-2); color: var(--text); }
 .workspace-nav-running { animation: pulse 1.4s ease infinite; background: var(--warn); border-radius: 50%; flex: 0 0 auto; height: 7px; width: 7px; }
 button.workspace-nav-row-action {

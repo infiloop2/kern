@@ -6,7 +6,7 @@
 import {
   api, apiUpload, login as apiLogin, logout as apiLogout, setUnauthorizedHandler,
 } from "./api.js";
-import { $, notice } from "./helpers.js";
+import { $, notice, runtimeLabel } from "./helpers.js";
 import {
   collapseRuntimeOverview, completeClaudeLogin, refreshHealth, refreshProviderAccounts,
   refreshProviderUsage, rebootHost, startLogin, toggleRuntimeOverview,
@@ -535,17 +535,32 @@ function renderWorkspaceRows(containerId, items, action, archived) {
     button.className = "workspace-nav-item";
     button.dataset.action = action;
     button.dataset.itemId = itemId;
-    button.title = item.name || itemId;
     button.disabled = pending;
+    const primary = document.createElement("span");
+    primary.className = "workspace-nav-primary";
     if (item.status === "running") {
       const dot = document.createElement("span");
       dot.className = "workspace-nav-running";
       dot.setAttribute("aria-label", "Agent running");
-      button.append(dot);
+      primary.append(dot);
     }
     const label = document.createElement("span");
+    label.className = "workspace-nav-label";
     label.textContent = item.name || itemId;
-    button.append(label);
+    primary.append(label);
+    button.append(primary);
+    if (kind === "chat") {
+      const settings = [runtimeLabel(item.agent_runtime), item.model, item.effort]
+        .filter(Boolean)
+        .join(" · ");
+      const meta = document.createElement("span");
+      meta.className = "workspace-nav-meta";
+      meta.textContent = settings;
+      button.append(meta);
+      button.title = settings ? `${item.name || itemId}\n${settings}` : item.name || itemId;
+    } else {
+      button.title = item.name || itemId;
+    }
     row.append(button);
     if (archived) {
       const restore = document.createElement("button");
