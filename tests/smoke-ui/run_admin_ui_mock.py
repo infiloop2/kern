@@ -1916,7 +1916,7 @@ def clear_thread_memory(thread_id: str) -> dict[str, str]:
             {
                 "message": (
                     "Working memory cleared. The agent starts fresh from here. "
-                    "Earlier messages stay visible but are no longer sent to it."
+                    "Earlier messages are hidden and are no longer sent to it."
                 )
             },
         )

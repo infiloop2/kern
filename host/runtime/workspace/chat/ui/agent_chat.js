@@ -17,9 +17,9 @@ let threadEvents = [];
 let threadEventPages = freshThreadEventPages();
 let loadingOlderThreadEvents = false;
 let lastChatScrollTop = 0;
-let restoredChatScrollTop = null;
-// Keep each opened thread's loaded window and reading position for the
-// lifetime of this mounted surface. A browser reload intentionally starts fresh.
+let openThreadAtTail = false;
+// Keep each opened thread's loaded window for the lifetime of this mounted
+// surface. A browser reload intentionally starts fresh.
 const threadViewStates = new Map();
 const EVENTS_PAGE = 6;
 const INITIAL_EVENT_PAGES = 3;
@@ -575,6 +575,7 @@ async function showThread(threadId, name, runtime, model, effort, status, archiv
   restoreComposerDraft();
   loadSelectedSessionControls();
   restoreThreadView(threadId);
+  openThreadAtTail = true;
   updateComposer();
   renderThreads();
   renderThreadHistory();
@@ -598,7 +599,6 @@ async function refreshSelectedThread() {
 
 function saveSelectedThreadView() {
   if (!selectedThreadId) return;
-  const scroller = $("chat-scroll");
   // Refresh insertion order so the oldest unvisited thread is evicted first.
   threadViewStates.delete(selectedThreadId);
   threadViewStates.set(selectedThreadId, {
@@ -607,7 +607,6 @@ function saveSelectedThreadView() {
       all: { ...threadEventPages.all },
       conversation: { ...threadEventPages.conversation },
     },
-    scrollTop: scroller ? scroller.scrollTop : lastChatScrollTop,
   });
   if (threadViewStates.size > VIEW_STATE_LIMIT) {
     threadViewStates.delete(threadViewStates.keys().next().value);
@@ -626,8 +625,7 @@ function restoreThreadView(threadId) {
     conversation: { ...state.eventPages.conversation },
   };
   loadingOlderThreadEvents = false;
-  lastChatScrollTop = state.scrollTop;
-  restoredChatScrollTop = state.scrollTop;
+  lastChatScrollTop = 0;
   renderHistoryLoader();
 }
 
@@ -636,7 +634,6 @@ function resetThreadEvents() {
   threadEventPages = freshThreadEventPages();
   loadingOlderThreadEvents = false;
   lastChatScrollTop = 0;
-  restoredChatScrollTop = null;
   renderHistoryLoader();
 }
 
@@ -675,6 +672,19 @@ function mergeThreadEvents(events) {
   threadEvents = KernRichText.compactActivityEvents(ordered);
 }
 
+function hasWorkingMemoryBoundary() {
+  return threadEvents.some(event => event.event_type === "thread.memory_cleared");
+}
+
+function visibleThreadEvents() {
+  for (let index = threadEvents.length - 1; index >= 0; index -= 1) {
+    if (threadEvents[index].event_type === "thread.memory_cleared") {
+      return threadEvents.slice(index);
+    }
+  }
+  return threadEvents;
+}
+
 async function refreshThreadEvents(threadId, refreshSequence) {
   const pageState = activeThreadEventPage();
   if (!pageState.initialized) {
@@ -698,7 +708,8 @@ async function refreshThreadEvents(threadId, refreshSequence) {
       let page = 1;
       page < INITIAL_EVENT_PAGES
       && oldestPage.length === EVENTS_PAGE
-      && pageState.oldestSeq !== null;
+      && pageState.oldestSeq !== null
+      && !hasWorkingMemoryBoundary();
       page += 1
     ) {
       const before = pageState.oldestSeq;
@@ -748,6 +759,7 @@ async function loadOlderThreadEvents() {
     !selectedThreadId
     || !pageState.initialized
     || !pageState.hasOlder
+    || hasWorkingMemoryBoundary()
     || loadingOlderThreadEvents
     || pageState.oldestSeq === null
   ) return;
@@ -789,7 +801,7 @@ function renderHistoryLoader() {
   const loader = $("history-loader");
   if (!loader) return;
   const pageState = activeThreadEventPage();
-  loader.hidden = !selectedThreadId || !pageState.hasOlder;
+  loader.hidden = !selectedThreadId || !pageState.hasOlder || hasWorkingMemoryBoundary();
   loader.dataset.oldestSeq = pageState.oldestSeq === null
     ? ""
     : String(pageState.oldestSeq);
@@ -806,7 +818,14 @@ function renderThreadHistory() {
     threadEventPages,
     threadEvents.length,
   ]);
-  if (key === renderedHistoryKey) return;
+  if (key === renderedHistoryKey) {
+    if (openThreadAtTail) {
+      const scroller = $("chat-scroll");
+      scroller.scrollTop = scroller.scrollHeight;
+      openThreadAtTail = false;
+    }
+    return;
+  }
   renderedHistoryKey = key;
   const switched = renderedHistoryThread !== selectedThreadId;
   renderedHistoryThread = selectedThreadId;
@@ -830,7 +849,7 @@ function renderThreadHistory() {
   const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
   // Patch entries in place instead of rebuilding the whole history, so an
   // in-flight touch scroll (and its momentum) survives polling.
-  const ordered = threadEvents.filter(event => (
+  const ordered = visibleThreadEvents().filter(event => (
     ["thread.message", "thread.activity", "thread.error", "thread.stopped",
       "thread.memory_cleared"].includes(event.event_type)
   ));
@@ -863,14 +882,13 @@ function renderThreadHistory() {
       detail.lastElementChild.remove();
     }
   }
-  // Instant jump when landing in a thread; smooth glide when the operator
-  // just sent a message; stick to the bottom while reading there.
-  if (switched && restoredChatScrollTop !== null) {
-    scroller.scrollTop = restoredChatScrollTop;
-  } else if (switched) scroller.scrollTop = scroller.scrollHeight;
+  // Every explicit open lands on the latest message. Keep each thread's
+  // loaded event window across switches, but do not restore an old reading
+  // position that makes the operator hunt for new replies.
+  if (openThreadAtTail || switched) scroller.scrollTop = scroller.scrollHeight;
   else if (forceScrollBottom) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
   else if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
-  restoredChatScrollTop = null;
+  openThreadAtTail = false;
   forceScrollBottom = false;
 }
 
@@ -1086,8 +1104,8 @@ async function clearWorkingMemory() {
   }
   if (!confirm(
     "Clear working memory?\n\n"
-    + "The agent starts fresh from here. Earlier messages stay visible "
-    + "but are no longer sent to it."
+    + "The agent starts fresh from here. Earlier messages will be hidden "
+    + "and will no longer be sent to it."
   )) return;
   await api("POST", `/threads/${encodeURIComponent(selectedThreadId)}/clear-memory`);
   // The marker is the only confirmation, and a clear made while scrolled up

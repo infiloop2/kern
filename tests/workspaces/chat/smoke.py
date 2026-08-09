@@ -135,6 +135,18 @@ def desktop_smoke(page: Any) -> None:
     # The host sidebar owns the lived-in list across runtimes and turn states.
     expect(page.locator("#chat-nav-items")).to_contain_text("website-redesign")
     expect(page.locator("#chat-nav-items")).to_contain_text("thread-1")
+    website_nav = page.locator(
+        "#chat-nav-items [data-action='open-chat'][data-item-id='website-redesign']"
+    )
+    expect(website_nav.locator(".workspace-nav-meta")).to_have_text(
+        "Claude Code · claude-opus-5 · high"
+    )
+    thread_nav = page.locator(
+        "#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']"
+    )
+    expect(thread_nav.locator(".workspace-nav-meta")).to_have_text(
+        "Codex · gpt-5.6-terra · high"
+    )
 
     _open_host_thread(page, "website-redesign")
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
@@ -155,18 +167,19 @@ def desktop_smoke(page: Any) -> None:
     page.once("dialog", lambda dialog: dialog.accept("website-redesign"))
     frame.get_by_role("button", name="Rename thread", exact=True).click()
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
-    # Clearing working memory records a visible boundary and keeps the
-    # transcript: the operator must be able to tell it took effect without
-    # believing their history was deleted. Cleared with activity hidden,
-    # because that view drops thread.activity and would otherwise show no
-    # confirmation at all.
+    # Clearing working memory makes the boundary the visible start of Chat.
+    # Retained events still exist for audit/history APIs, but the prior
+    # transcript and its older-history control must disappear from this UI.
+    expect(frame.locator("#thread-detail")).to_contain_text("Audit the marketing site")
     frame.get_by_role("switch", name="Activity", exact=True).click()
     page.once("dialog", lambda dialog: dialog.accept())
     frame.get_by_role("button", name="Clear working memory", exact=True).click()
     expect(frame.locator("#thread-detail")).to_contain_text("Working memory cleared")
     expect(frame.locator("#thread-detail")).to_contain_text(
-        "Earlier messages stay visible but are no longer sent to it"
+        "Earlier messages are hidden and are no longer sent to it"
     )
+    expect(frame.locator("#thread-detail")).not_to_contain_text("Audit the marketing site")
+    expect(frame.get_by_role("button", name="Load earlier messages")).to_be_hidden()
 
     # The desktop instruction line is centered beneath the composer instead
     # of following the prompt's asymmetric inner padding.
@@ -187,14 +200,7 @@ def desktop_smoke(page: Any) -> None:
         )
     frame.get_by_role("switch", name="Activity", exact=True).click()
     expect(frame.locator("#thread-detail")).to_contain_text("Working memory cleared")
-
-    _load_older_history(frame, expected_turns=2)
-    expect(frame.locator("#thread-detail")).to_contain_text("Push the responsive fixes")
-    expect(frame.locator("#thread-detail")).to_contain_text(
-        "network access to deploy.acme.dev denied by policy"
-    )
-    expect(frame.locator("#thread-detail .status")).to_have_count(0)
-    expect(frame.locator("#thread-detail .thread-entry").nth(0)).to_contain_text("Audit the marketing site")
+    expect(frame.locator("#thread-detail")).not_to_contain_text("Push the responsive fixes")
 
     # Unsent text belongs to its thread and returns when the operator switches
     # back, rather than leaking into whichever thread is selected next.
@@ -361,7 +367,7 @@ def mobile_smoke(page: Any) -> None:
     _load_older_history(frame, expected_turns=5)
     _assert_full_message_stream(frame)
     _assert_mobile_chat_scrolling(page, frame)
-    _assert_thread_view_memory(page, frame)
+    _assert_thread_switch_opens_latest(page, frame)
     _assert_rich_activity_stream(page, frame)
     _assert_mobile_composer_ergonomics(frame)
     _assert_mobile_keyboard_viewport_recovery(page, frame)
@@ -655,30 +661,41 @@ def _assert_mobile_chat_scrolling(page: Any, frame: Any) -> None:
         raise AssertionError("a background poll rebuilt the chat history DOM while reading")
 
 
-def _assert_thread_view_memory(page: Any, frame: Any) -> None:
-    """A thread switch retains the loaded window and the reader's position."""
+def _assert_thread_switch_opens_latest(page: Any, frame: Any) -> None:
+    """A thread switch retains its loaded window but opens at the latest message."""
     from playwright.sync_api import expect
 
     scroller = frame.locator("#chat-scroll")
-    previous_scroll_top = scroller.evaluate("element => element.scrollTop")
     _open_host_thread(page, "thread-2")
     expect(frame.locator(".thread-title")).to_have_text("thread-2")
     expect(frame.locator("#thread-detail")).to_contain_text("Draft a launch blog post")
 
     _open_host_thread(page, "thread-1")
     expect(frame.locator(".thread-title")).to_have_text("thread-1")
-    # Selecting a thread swaps the title before its restored history renders,
-    # so gate the raw count() and the scroll read below on the restored window
-    # actually being back rather than on the title alone.
+    # Selecting a thread swaps the title before its cached history renders, so
+    # gate the raw count() and the scroll read below on the loaded window being
+    # back rather than on the title alone.
     expect(frame.locator("#thread-detail .thread-entry").nth(4)).to_be_attached()
     if frame.locator("#thread-detail .thread-entry").count() < 5:
         raise AssertionError("restored thread lost its loaded history entries")
     expect(frame.get_by_role("button", name="Load earlier messages")).to_be_hidden()
-    restored_scroll_top = scroller.evaluate("element => element.scrollTop")
-    if abs(restored_scroll_top - previous_scroll_top) > 1:
+    distance_from_bottom = scroller.evaluate(
+        "element => element.scrollHeight - element.scrollTop - element.clientHeight"
+    )
+    if distance_from_bottom > 1:
         raise AssertionError(
-            "returning to a thread did not restore its reading position: "
-            f"{previous_scroll_top} -> {restored_scroll_top}"
+            "returning to a thread did not open on its latest message: "
+            f"{distance_from_bottom}px from bottom"
+        )
+    scroller.evaluate("element => { element.scrollTop = 0; }")
+    _open_host_thread(page, "thread-1")
+    reopened_distance = scroller.evaluate(
+        "element => element.scrollHeight - element.scrollTop - element.clientHeight"
+    )
+    if reopened_distance > 1:
+        raise AssertionError(
+            "reopening the selected thread did not jump to its latest message: "
+            f"{reopened_distance}px from bottom"
         )
 
 

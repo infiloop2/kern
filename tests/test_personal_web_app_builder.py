@@ -100,6 +100,15 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("COMPOSER_DRAFTS_STORAGE_KEY", source)
         self.assertIn("DISMISSED_AGENT_MESSAGES_STORAGE_KEY", source)
         self.assertIn("setDismissedAgentMessage", source)
+        self.assertIn("const sessionAgentMessageApps = new Set()", source)
+        send_message = source.split("async function sendMessage", 1)[1].split(
+            "\nasync function stopRunningTurn", 1
+        )[0]
+        self.assertLess(
+            send_message.index("sessionAgentMessageApps.add(appId)"),
+            send_message.index("setDismissedAgentMessage"),
+        )
+        self.assertIn("sessionAgentMessageApps.delete(app.app_id)", source)
         self.assertIn("localStorage.setItem", source)
         self.assertIn("/revisions/${revision}/restore", source)
         self.assertIn("applyAppVersion(response.app);", source)

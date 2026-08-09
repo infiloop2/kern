@@ -64,6 +64,7 @@ let appsRefreshSequence = 0;
 let appSelectionSequence = 0;
 let createAppPromise = null;
 const messageBusyApps = new Set();
+const sessionAgentMessageApps = new Set();
 let selectedRefreshSequence = 0;
 let establishedSession = null;
 let establishedSessionKey = "";
@@ -1538,6 +1539,7 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
     if (fromGeneratedApp) showRuntimeStatus("Agent is already starting");
     return;
   }
+  sessionAgentMessageApps.add(appId);
   if (!fromGeneratedApp) saveComposerDraft();
   setDismissedAgentMessage(appId, conversationEntries()
     .filter(entry => ["agent", "error", "stopped"].includes(entry.kind))
@@ -1641,9 +1643,12 @@ async function stopRunningTurn() {
 
 function renderChat() {
   const running = snapshot.status === "running";
-  let latest = transientAgentStatus || conversationEntries()
-    .filter(entry => ["agent", "error", "stopped"].includes(entry.kind))
-    .at(-1);
+  let latest = transientAgentStatus;
+  if (!latest && selectedAppId && sessionAgentMessageApps.has(selectedAppId)) {
+    latest = conversationEntries()
+      .filter(entry => ["agent", "error", "stopped"].includes(entry.kind))
+      .at(-1);
+  }
   if (running && (!latest || latest.key === dismissedAgentMessageKey)) {
     latest = { key: "running", kind: "agent", message: "Agent is working" };
   }
@@ -2043,6 +2048,7 @@ function clearSelectedApp() {
   appSelectionSequence += 1;
   selectedRefreshSequence += 1;
   panelRefreshSequence += 1;
+  if (selectedAppId) sessionAgentMessageApps.delete(selectedAppId);
   selectedAppId = null;
   selectedAppName = null;
   selectedAgentUpdatesLocked = false;
@@ -2075,6 +2081,7 @@ async function showApp(app, outsideActiveIndex = false) {
   revokeBundleUrl();
   selectedRefreshSequence += 1;
   panelRefreshSequence += 1;
+  sessionAgentMessageApps.delete(app.app_id);
   selectedAppId = app.app_id;
   selectedAppName = app.name;
   selectedAgentUpdatesLocked = Boolean(app.agent_updates_locked);
@@ -2330,6 +2337,7 @@ $("latest-agent-dismiss").addEventListener("click", () => {
     renderChat();
     return;
   }
+  sessionAgentMessageApps.delete(selectedAppId);
   setDismissedAgentMessage(selectedAppId, conversationEntries()
     .filter(entry => ["agent", "error", "stopped"].includes(entry.kind))
     .at(-1)?.key || null);

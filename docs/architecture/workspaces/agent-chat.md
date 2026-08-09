@@ -14,9 +14,17 @@ again.
 
 The trusted UI runs in the authenticated admin document. It calls the admin
 API directly; there is no iframe or `postMessage` bridge. Each visited thread
-keeps independent composer text, bounded event pages, cursors, and scroll
-position. History loads newest-first and scrolling upward fetches older pages.
-Activity visibility changes rendering only, never stored history.
+keeps independent composer text, bounded event pages, and cursors. Opening a
+thread always lands on its newest message; background polling preserves the
+reader's current position. History loads newest-first and scrolling upward
+fetches older pages. Activity visibility changes rendering only, never stored
+history.
+
+After working memory is cleared, Chat treats the latest
+`thread.memory_cleared` event as the visible start of the thread and does not
+offer pagination into earlier events. Those retained events are not deleted:
+the admin and conversation-history APIs remain authoritative for audit and
+history access.
 
 The backend filters host thread-list queries with `prefix=thread-` and joins
 the results to its own index. The filter is an optimization; the product row

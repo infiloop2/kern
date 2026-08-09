@@ -977,6 +977,14 @@ def desktop_smoke(page: Any) -> None:
     _start_host_app(page)
     _open_host_app(page, "app-1")
     expect(frame.locator("#latest-agent-card")).to_be_hidden()
+    # A fresh Web Apps mount suppresses retained agent output even when
+    # browser storage did not keep the dismissal key.
+    page.evaluate(
+        "localStorage.removeItem('kern.agentic-web-app.dismissed-agent-messages.v1')"
+    )
+    page.reload(wait_until="domcontentloaded")
+    _open_host_app(page, "app-1")
+    expect(frame.locator("#latest-agent-card")).to_be_hidden()
 
     lock_updates = frame.locator("#lock-agent-updates")
     lock_updates.click()
