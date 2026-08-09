@@ -204,7 +204,7 @@ and show up in the same agent slice.
   immediately; a message for a thread with a live turn is synchronously
   delivered into that turn as a steer and recorded after provider
   acknowledgement. Turns on one thread are serialized by the live-turn fence;
-  turns on different threads run in parallel, up to three per runtime (each
+  turns on different threads run in parallel, up to ten per runtime (each
   runtime owns an independent pool, and a message that would exceed the cap
   is rejected with `429` rather than queued).
 - Each turn gets its own runtime process, spawned through the sudo

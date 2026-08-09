@@ -661,8 +661,23 @@
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => void loadItems(false, $("memory-search").value), 250);
   });
-  for (const id of ["memory-content", "schedule-message"]) {
-    $(id).addEventListener("input", () => resizeTextarea(id));
+  const growingEditorIds = ["memory-content", "schedule-message"];
+  for (const id of growingEditorIds) $(id).addEventListener("input", () => resizeTextarea(id));
+  if (typeof ResizeObserver === "function") {
+    const observedWidths = new WeakMap();
+    const editorResizeObserver = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const width = entry.contentRect.width;
+        if (observedWidths.get(entry.target) === width) continue;
+        observedWidths.set(entry.target, width);
+        resizeTextarea(entry.target.id);
+      }
+    });
+    for (const id of growingEditorIds) editorResizeObserver.observe($(id));
+  } else {
+    window.addEventListener("resize", () => {
+      for (const id of growingEditorIds) resizeTextarea(id);
+    });
   }
   $("memory-form").addEventListener("submit", saveMemory);
   $("memory-delete").addEventListener("click", () => void deleteMemory());

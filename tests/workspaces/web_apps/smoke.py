@@ -794,6 +794,35 @@ def _start_host_app(page: Any) -> None:
     expect(page.locator("#panel-workspace-web-apps")).to_be_visible()
 
 
+def stylesheet_fallback_smoke(page: Any) -> None:
+    """The App still renders when constructable sheets cannot be adopted.
+
+    This models browsers that expose CSSStyleSheet (needed by the sanitizer)
+    but reject ShadowRoot.adoptedStyleSheets, the compatibility boundary that
+    previously left dynamic Apps stuck on their stored Loading placeholder.
+    """
+    from playwright.sync_api import expect
+
+    page.evaluate("""
+      Object.defineProperty(ShadowRoot.prototype, "adoptedStyleSheets", {
+        configurable: true,
+        get() { return []; },
+        set() { throw new DOMException("unsupported", "NotSupportedError"); },
+      });
+    """)
+    _start_host_app(page)
+    frame = page.locator("#panel-workspace-web-apps")
+    frame.locator("#message").fill("Build a small weekly focus dashboard.")
+    frame.get_by_role("button", name="Send message", exact=True).click()
+    expect(frame.locator(".dashboard")).to_be_visible(timeout=20_000)
+    expect(frame.locator(".dashboard")).to_have_css("display", "grid")
+    stylesheet = frame.locator("#generated-host").evaluate(
+        "element => element.shadowRoot.querySelector('link[rel=stylesheet]')?.href || ''"
+    )
+    if not stylesheet.startswith("blob:"):
+        raise AssertionError(f"generated app did not use its blob stylesheet fallback: {stylesheet!r}")
+
+
 def desktop_smoke(page: Any) -> None:
     from playwright.sync_api import expect
 

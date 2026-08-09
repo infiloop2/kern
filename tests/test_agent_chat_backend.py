@@ -85,6 +85,12 @@ class AgentChatBackendTests(unittest.TestCase):
             10,
         )
 
+    def test_composer_hint_is_centered_under_the_composer(self) -> None:
+        css = (CHAT_DIR / "ui" / "agent_chat.css").read_text()
+        hint = css.split(".composer-hint {", 1)[1].split("}", 1)[0]
+        self.assertIn("text-align: center;", hint)
+        self.assertIn("padding: 0 0.6rem;", hint)
+
     def test_failed_upload_keeps_the_local_file_available_for_retry(self) -> None:
         source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
         upload = source.split("async function requestFileUpload", 1)[1].split(

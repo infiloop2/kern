@@ -93,10 +93,10 @@ untrusted provenance metadata and retained user/assistant messages, clears the
 thread's working memory, and proves both the visible boundary and earlier
 history survive. The same check then generates and persists a minimal Web App.
 
-The live concurrency scenario uses three Codex and three Claude turns. The
-provider-neutral orchestrator tests separately prove the same three-turn cap
-for Hermes, avoiding three additional paid Bedrock turns merely to repeat the
-scheduler invariant.
+The live concurrency scenario uses three Codex and three Claude turns as a
+bounded integration check. Provider-neutral orchestrator tests prove the full
+ten-turn cap for Codex, Claude Code, and Hermes without adding paid provider
+turns merely to repeat the admission invariant.
 
 All agent turns use the least expensive exposed options: Codex uses
 `gpt-5.6-luna` with `high` effort, and Claude Code uses `sonnet` with `high`

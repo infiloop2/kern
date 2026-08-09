@@ -448,8 +448,8 @@ class OrchestratorTests(unittest.TestCase):
         self.assertTrue(orchestrator.stop_thread_turn("chat"))
         orchestrator._close_turn(turn, server)
 
-    def test_fourth_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
-        self.assertEqual(orchestrator.TURN_LIMIT_PER_RUNTIME, 3)
+    def test_eleventh_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
+        self.assertEqual(orchestrator.TURN_LIMIT_PER_RUNTIME, 10)
         release = threading.Event()
         started: list[str] = []
 
@@ -461,23 +461,30 @@ class OrchestratorTests(unittest.TestCase):
 
         try:
             with patch.object(orchestrator.codex_app_server, "run_turn", fake_run_turn):
-                for thread_id in ("t1", "t2", "t3"):
+                thread_ids = [
+                    f"t{index}"
+                    for index in range(1, orchestrator.TURN_LIMIT_PER_RUNTIME + 1)
+                ]
+                for thread_id in thread_ids:
                     self.assertEqual(self.send_message(thread_id, thread_id)["status"], "accepted")
-                self.wait_for(lambda: len(started) == 3, "all three turns to start")
+                self.wait_for(
+                    lambda: len(started) == orchestrator.TURN_LIMIT_PER_RUNTIME,
+                    "all ten turns to start",
+                )
 
                 with self.assertRaises(ApiError) as caught:
-                    self.send_message("t4", "one too many")
+                    self.send_message("t11", "one too many")
                 self.assertEqual(caught.exception.status.value, 429)
-                self.assertIn("already running 3 concurrent threads", caught.exception.message)
+                self.assertIn("already running 10 concurrent threads", caught.exception.message)
                 # A message for a live thread is a steer, never capacity-bound.
                 self.assertEqual(self.send_message("t1", "still steerable")["status"], "accepted")
 
                 release.set()
-                for thread_id in ("t1", "t2", "t3"):
+                for thread_id in thread_ids:
                     self.wait_until_idle(thread_id)
                 # Capacity freed: the rejected thread now starts.
-                self.assertEqual(self.send_message("t4", "retry")["status"], "accepted")
-                self.wait_until_idle("t4")
+                self.assertEqual(self.send_message("t11", "retry")["status"], "accepted")
+                self.wait_until_idle("t11")
         finally:
             release.set()
 
@@ -502,7 +509,7 @@ class OrchestratorTests(unittest.TestCase):
             with self.assertRaises(ApiError) as caught:
                 self.admit(f"{runtime}-overflow", runtime=runtime)
             self.assertEqual(caught.exception.status.value, 429)
-        self.assertEqual(len(orchestrator._LIVE), 9)
+        self.assertEqual(len(orchestrator._LIVE), 3 * orchestrator.TURN_LIMIT_PER_RUNTIME)
 
     def test_finished_turn_still_fences_its_thread_and_counts_against_capacity(self) -> None:
         # A turn can be terminal (finished) while its process is still closing.

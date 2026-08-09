@@ -85,10 +85,10 @@ from host.runtime.core.state import (
     utc_now,
 )
 
-# Every runtime owns an independent three-turn pool, so one busy runtime
+# Every runtime owns an independent ten-turn pool, so one busy runtime
 # cannot take capacity from its peers. A message that would exceed the cap is
 # rejected at admission; callers retry.
-TURN_LIMIT_PER_RUNTIME = 3
+TURN_LIMIT_PER_RUNTIME = 10
 EXECUTION_START_TIMEOUT_SECONDS = 10.0
 RUNTIME_RECHECK_SECONDS = 300  # re-verify an active agent login this often (it can expire)
 RUNTIME_PENDING_RECHECK_SECONDS = 5  # poll more often while loading / awaiting login

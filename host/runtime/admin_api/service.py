@@ -145,7 +145,7 @@ SECURITY_HEADERS = {
         "media-src blob:; "
         "object-src 'none'; "
         "script-src 'self'; "
-        "style-src 'self'"
+        "style-src 'self' blob:"
     ),
     "Referrer-Policy": "no-referrer",
     "Strict-Transport-Security": "max-age=63072000",

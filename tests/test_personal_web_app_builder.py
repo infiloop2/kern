@@ -112,6 +112,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
         handler = source.split('addEventListener("message"', 1)[1]
         self.assertIn("event.source !== parent", handler)
         self.assertIn("new Worker(url)", handler)
+        self.assertIn('reason: "worker-create"', handler)
+        self.assertIn('reason: "worker-runtime"', handler)
         self.assertIn('parent.postMessage({ type: "capability-sandbox-ready" }', source)
     def test_frame_does_not_render_a_conversation_transcript(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
@@ -135,6 +137,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
             source,
         )
         self.assertIn("MAX_WORKER_MUTATIONS_PER_TURN = 16", source)
+        self.assertIn("capabilitySandboxQueue.splice(index, 1)", source)
         self.assertIn('"fetch", "XMLHttpRequest", "WebSocket"', source)
         self.assertNotIn("window.open", source)
         self.assertNotIn("location.href", source)
@@ -161,13 +164,21 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("armed.run = run;", source)
         self.assertIn("armed.timer = setTimeout(discard, WORKER_START_TIMEOUT_MS)", source)
         self.assertGreaterEqual(
-            source.count('run.timer = setTimeout(() => run.finish("timeout"), WORKER_TURN_TIMEOUT_MS)'),
+            source.count(
+                'run.timer = setTimeout(() => run.finish("timeout", "execution"), '
+                "WORKER_TURN_TIMEOUT_MS)"
+            ),
             2,
         )
         self.assertIn("let pendingApp = null", source)
         self.assertIn("function applyPendingAppVersion()", source)
         self.assertIn("pendingApp = next.app", source)
         self.assertIn("pendingApp = null", source)
+        preview_failure = source.split("function applyAppVersion(app)", 1)[1].split(
+            "function applyPendingAppVersion", 1
+        )[0]
+        self.assertIn("catch (_error) {", preview_failure)
+        self.assertIn("clearGenerated();", preview_failure)
         # The bundle source survives across turns for one App revision.
         self.assertIn("bundleUrl.revision === revision", source)
         sandbox = (APP_DIR / "ui" / "capability_worker_sandbox.js").read_text()
@@ -177,6 +188,14 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("sanitizeCssCached", source)
         self.assertIn("generatedRoot.adoptedStyleSheets = [generatedStyleSheet]", source)
         self.assertIn("generatedStyleSheet.replaceSync(styleText)", source)
+        self.assertIn('generatedStyleLink.rel = "stylesheet"', source)
+        self.assertIn('new Blob([styleText], { type: "text/css" })', source)
+        self.assertGreaterEqual(source.count("current === generatedStyleLink"), 2)
+        self.assertIn("parent.insertBefore(want, generatedStyleLink)", source)
+        self.assertIn("MAX_RENDER_NODES = 5000", source)
+        self.assertIn("MAX_RENDER_DEPTH = 128", source)
+        self.assertIn("MAX_CSS_RULES = 4096", source)
+        self.assertIn("MAX_CSS_RULE_DEPTH = 16", source)
         self.assertNotIn('document.createElement("style")', source)
         # Drag state stays in the trusted frame and only bounded plain values
         # enter the worker event payload.
@@ -196,6 +215,15 @@ class AgenticWebAppContractTests(unittest.TestCase):
             '(!fromGeneratedApp && $("send-message").disabled)) return;',
             source,
         )
+
+    def test_growing_workspace_editors_reflow_when_their_width_changes(self) -> None:
+        source = (
+            REPO_ROOT / "host" / "runtime" / "workspace" / "ui" / "workspace.js"
+        ).read_text()
+        self.assertIn('const growingEditorIds = ["memory-content", "schedule-message"]', source)
+        self.assertIn("new ResizeObserver(entries =>", source)
+        self.assertIn("observedWidths.get(entry.target) === width", source)
+        self.assertIn("resizeTextarea(entry.target.id)", source)
 
     def test_agent_instructions_are_terse_and_current(self) -> None:
         instructions = (

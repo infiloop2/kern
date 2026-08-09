@@ -85,7 +85,7 @@ SECURITY_HEADERS = {
         "media-src blob:; "
         "object-src 'none'; "
         "script-src 'self'; "
-        "style-src 'self'"
+        "style-src 'self' blob:"
     ),
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
@@ -107,7 +107,7 @@ MOCK_OAUTH_CODE = "mock-auth-code"
 RUNTIMES = ("codex", "claude_code", "hermes")
 PROVIDER_BY_RUNTIME = {"codex": "openai", "claude_code": "claude", "hermes": "bedrock"}
 RUNTIME_LABELS = {"codex": "Codex", "claude_code": "Claude Code", "hermes": "Hermes"}
-TURN_LIMIT_PER_RUNTIME = 3
+TURN_LIMIT_PER_RUNTIME = 10
 
 # Timed progression script for running turns: (fraction of duration, message).
 PROGRESS_SCRIPT = [

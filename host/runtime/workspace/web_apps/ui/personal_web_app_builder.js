@@ -8,6 +8,10 @@ const WORKER_START_TIMEOUT_MS = 15 * 1000;
 const WORKER_TURN_TIMEOUT_MS = 3000;
 const MAX_RENDER_HTML_BYTES = 128 * 1024;
 const MAX_RENDER_CSS_BYTES = 64 * 1024;
+const MAX_RENDER_NODES = 5000;
+const MAX_RENDER_DEPTH = 128;
+const MAX_CSS_RULES = 4096;
+const MAX_CSS_RULE_DEPTH = 16;
 const MAX_CSS_CONDITION_BYTES = 512;
 const MAX_AGENT_MESSAGE_BYTES = 4000;
 const MAX_EVENT_FIELDS = 64;
@@ -43,6 +47,8 @@ let renderedRevision = -1;
 let pendingApp = null;
 let generatedRoot = null;
 let generatedStyleSheet = null;
+let generatedStyleLink = null;
+let generatedStyleUrl = null;
 let workerRun = null;
 let armedWorker = null;
 let bundleUrl = null;
@@ -245,7 +251,7 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
       resolvePromise()
         .then(() => message.load && loadHandler ? loadHandler() : undefined)
         .then(() => send({ type: "initialized" }))
-        .catch(() => send({ type: "initialization-error" }));
+        .catch(() => send({ type: "initialization-error", reason: "load-handler" }));
       return;
     }
     if (message.type === "data-result") {
@@ -264,7 +270,9 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
       const handler = handlers.get(message.action);
       resolvePromise(handler ? handler(clone(message.event)) : undefined)
         .then(() => send({ type: "turn-complete", turn_id: message.turn_id }))
-        .catch(() => send({ type: "turn-error", turn_id: message.turn_id }));
+        .catch(() => send({
+          type: "turn-error", turn_id: message.turn_id, reason: "action-handler",
+        }));
     }
   });
   send({ type: "ready" });
@@ -360,11 +368,15 @@ function sanitizeHtml(html) {
   const template = document.createElement("template");
   template.innerHTML = html;
   const output = document.createDocumentFragment();
-  for (const node of template.content.childNodes) cloneSafeNode(node, output);
+  const budget = { nodes: 0 };
+  for (const node of template.content.childNodes) cloneSafeNode(node, output, budget, 0);
   return output;
 }
 
-function cloneSafeNode(node, parent) {
+function cloneSafeNode(node, parent, budget, depth) {
+  if (++budget.nodes > MAX_RENDER_NODES || depth > MAX_RENDER_DEPTH) {
+    throw new Error("Generated HTML is too complex");
+  }
   if (node.nodeType === Node.TEXT_NODE) {
     parent.append(document.createTextNode(node.data));
     return;
@@ -372,7 +384,7 @@ function cloneSafeNode(node, parent) {
   if (node.nodeType !== Node.ELEMENT_NODE) return;
   if (droppedElements.has(node.tagName)) return;
   if (!allowedElements.has(node.tagName)) {
-    for (const child of node.childNodes) cloneSafeNode(child, parent);
+    for (const child of node.childNodes) cloneSafeNode(child, parent, budget, depth + 1);
     return;
   }
   const clean = document.createElement(node.tagName.toLowerCase());
@@ -383,7 +395,7 @@ function cloneSafeNode(node, parent) {
     const type = node.getAttribute("type") || "text";
     clean.type = allowedInputTypes.has(type.toLowerCase()) ? type.toLowerCase() : "text";
   }
-  for (const child of node.childNodes) cloneSafeNode(child, clean);
+  for (const child of node.childNodes) cloneSafeNode(child, clean, budget, depth + 1);
   parent.append(clean);
 }
 
@@ -437,7 +449,8 @@ function sanitizeCss(css) {
   }
   const sheet = new CSSStyleSheet();
   sheet.replaceSync(css);
-  return Array.from(sheet.cssRules, sanitizeRule).filter(Boolean).join("\n");
+  const budget = { rules: 0 };
+  return Array.from(sheet.cssRules, rule => sanitizeRule(rule, budget, 0)).filter(Boolean).join("\n");
 }
 
 function sanitizeCssCached(css) {
@@ -450,7 +463,10 @@ function sanitizeCssCached(css) {
   return value;
 }
 
-function sanitizeRule(rule) {
+function sanitizeRule(rule, budget, depth) {
+  if (++budget.rules > MAX_CSS_RULES || depth > MAX_CSS_RULE_DEPTH) {
+    throw new Error("Generated CSS is too complex");
+  }
   const kind = rule.constructor.name;
   if (kind === "CSSStyleRule") {
     // Shadow CSS can otherwise restyle its host and escape the generated
@@ -460,7 +476,9 @@ function sanitizeRule(rule) {
   }
   if (kind === "CSSMediaRule") {
     if (textEncoder.encode(rule.conditionText).length > MAX_CSS_CONDITION_BYTES) return "";
-    return `@media ${rule.conditionText}{${Array.from(rule.cssRules, sanitizeRule).filter(Boolean).join("")}}`;
+    return `@media ${rule.conditionText}{${Array.from(
+      rule.cssRules, child => sanitizeRule(child, budget, depth + 1)
+    ).filter(Boolean).join("")}}`;
   }
   if (kind === "CSSKeyframesRule") {
     const name = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(rule.name) ? rule.name : "generated";
@@ -491,38 +509,69 @@ function sanitizeDeclarations(style) {
 function renderGenerated(html, css) {
   const host = $("generated-host");
   if (!generatedRoot) generatedRoot = host.attachShadow({ mode: "open" });
-  if (!generatedStyleSheet) {
-    generatedStyleSheet = new CSSStyleSheet();
-    generatedRoot.adoptedStyleSheets = [generatedStyleSheet];
-  }
   const renderKey = `${html}\u0000${css}`;
   if (renderKey !== lastRenderKey || !generatedRoot.firstChild) {
     clearGeneratedDrag();
     const fragment = sanitizeHtml(html);
     const safeCss = sanitizeCssCached(css);
     const styleText = `:host{display:block;min-height:100%;color:var(--text);background:var(--bg);font-family:system-ui,sans-serif}${safeCss}`;
-    // The admin document intentionally rejects inline styles. A constructed
-    // sheet keeps that CSP strict while applying only the declarations that
-    // passed the generated-CSS sanitizer above.
-    generatedStyleSheet.replaceSync(styleText);
     patchChildren(generatedRoot, fragment);
+    // Commit safe content before installing styles. A browser-specific style
+    // failure must never strand the operator on the stored Loading placeholder.
+    host.hidden = false;
+    $("canvas-empty").hidden = true;
+    installGeneratedStyles(styleText);
     lastRenderKey = renderKey;
   }
   host.hidden = false;
   $("canvas-empty").hidden = true;
 }
 
+function installGeneratedStyles(styleText) {
+  if (generatedStyleSheet !== false) {
+    try {
+      if (!generatedStyleSheet) {
+        generatedStyleSheet = new CSSStyleSheet();
+        generatedRoot.adoptedStyleSheets = [generatedStyleSheet];
+      }
+      generatedStyleSheet.replaceSync(styleText);
+      return;
+    } catch (_error) {
+      // Some otherwise supported browsers expose CSSStyleSheet construction
+      // but reject adoptedStyleSheets on ShadowRoot. Fall back to a sanitized
+      // blob stylesheet instead of failing before the App's HTML can render.
+      generatedStyleSheet = false;
+      try { generatedRoot.adoptedStyleSheets = []; }
+      catch (_ignored) { /* The fallback does not depend on this assignment. */ }
+    }
+  }
+  if (!generatedStyleLink) {
+    generatedStyleLink = document.createElement("link");
+    generatedStyleLink.rel = "stylesheet";
+    generatedRoot.append(generatedStyleLink);
+  }
+  const previousUrl = generatedStyleUrl;
+  const nextUrl = URL.createObjectURL(new Blob([styleText], { type: "text/css" }));
+  generatedStyleUrl = nextUrl;
+  generatedStyleLink.addEventListener("load", () => {
+    if (previousUrl) URL.revokeObjectURL(previousUrl);
+  }, { once: true });
+  generatedStyleLink.href = nextUrl;
+}
+
 function patchChildren(parent, fragment) {
   const desired = Array.from(fragment.childNodes);
   let current = parent.firstChild;
+  if (current === generatedStyleLink) current = null;
   for (const want of desired) {
+    if (current === generatedStyleLink) current = null;
     if (!current) {
-      parent.append(want);
+      parent.insertBefore(want, generatedStyleLink);
       continue;
     }
     current = patchNode(current, want).nextSibling;
   }
-  while (current) {
+  while (current && current !== generatedStyleLink) {
     const next = current.nextSibling;
     current.remove();
     current = next;
@@ -596,6 +645,9 @@ function syncControlState(current, want) {
 function clearGenerated() {
   clearGeneratedDrag();
   if (generatedRoot) generatedRoot.replaceChildren();
+  if (generatedStyleUrl) URL.revokeObjectURL(generatedStyleUrl);
+  generatedStyleLink = null;
+  generatedStyleUrl = null;
   lastRenderKey = "";
   $("generated-host").hidden = true;
   $("canvas-empty").hidden = false;
@@ -815,6 +867,14 @@ class SandboxedCapabilityWorker {
 
   terminate() {
     if (!sandboxWorkers.delete(this.workerId)) return;
+    if (!capabilitySandboxReady) {
+      for (let index = capabilitySandboxQueue.length - 1; index >= 0; index -= 1) {
+        if (capabilitySandboxQueue[index].worker_id === this.workerId) {
+          capabilitySandboxQueue.splice(index, 1);
+        }
+      }
+      return;
+    }
     sendCapabilitySandbox({
       type: "terminate", worker_id: this.workerId,
     });
@@ -823,7 +883,7 @@ class SandboxedCapabilityWorker {
   dispatch(type, data) {
     const event = type === "message"
       ? { data }
-      : { preventDefault() {} };
+      : { preventDefault() {}, reason: data?.reason || "worker-runtime" };
     for (const listener of this.listeners[type] || []) listener(event);
   }
 }
@@ -857,7 +917,7 @@ window.addEventListener("message", event => {
   const worker = sandboxWorkers.get(message.worker_id);
   if (!worker) return;
   if (message.type === "capability-worker-message") worker.dispatch("message", message.data);
-  if (message.type === "capability-worker-error") worker.dispatch("error");
+  if (message.type === "capability-worker-error") worker.dispatch("error", message);
 });
 
 function workerSourceFor(appId, revision) {
@@ -991,15 +1051,21 @@ async function runCapabilityWorker(pendingEvent = null) {
     finished: false,
     windowStarted: performance.now(),
     timer: null,
-    finish(reason) {
+    finish(reason, stage = this.state) {
       if (this.finished) return;
       this.finished = true;
       clearTimeout(this.timer);
       worker.terminate();
       const current = workerRun === this;
       if (current) workerRun = null;
-      if (current && reason === "timeout") {
+      if (current && reason === "timeout" && stage === "starting") {
+        showRuntimeStatus("This app could not start its isolated renderer. Refresh and try again.", "error");
+      } else if (current && reason === "timeout") {
         showRuntimeStatus("This app action took too long and was stopped. Ask the agent to fix it.", "error");
+      } else if (current && reason === "error" && stage === "render") {
+        showRuntimeStatus("This app could not render safely. Ask the agent to fix its interface.", "error");
+      } else if (current && reason === "error" && stage === "worker-create") {
+        showRuntimeStatus("This browser could not start the app sandbox. Refresh or update the browser.", "error");
       } else if (current && reason === "error") {
         showRuntimeStatus("This app action failed. Ask the agent to fix it.", "error");
       }
@@ -1007,11 +1073,11 @@ async function runCapabilityWorker(pendingEvent = null) {
     },
   };
   workerRun = run;
-  run.timer = setTimeout(() => run.finish("timeout"), WORKER_START_TIMEOUT_MS);
+  run.timer = setTimeout(() => run.finish("timeout", "starting"), WORKER_START_TIMEOUT_MS);
   if (armed) {
     clearTimeout(armed.timer);
     clearTimeout(run.timer);
-    run.timer = setTimeout(() => run.finish("timeout"), WORKER_TURN_TIMEOUT_MS);
+    run.timer = setTimeout(() => run.finish("timeout", "execution"), WORKER_TURN_TIMEOUT_MS);
     armed.run = run;
     worker.postMessage({
       type: "event", action: pendingEvent.action, event: pendingEvent.event, turn_id: "turn",
@@ -1020,7 +1086,7 @@ async function runCapabilityWorker(pendingEvent = null) {
   }
   worker.addEventListener("error", event => {
     event.preventDefault();
-    run.finish("error");
+    run.finish("error", event.reason);
   });
   worker.addEventListener("message", event => handleWorkerMessage(run, event.data));
 }
@@ -1041,13 +1107,13 @@ async function handleWorkerMessage(run, message) {
   }
   if (message.type === "ready" && run.state === "starting") {
     clearTimeout(run.timer);
-    run.timer = setTimeout(() => run.finish("timeout"), WORKER_TURN_TIMEOUT_MS);
+    run.timer = setTimeout(() => run.finish("timeout", "execution"), WORKER_TURN_TIMEOUT_MS);
     run.state = "initializing";
     run.worker.postMessage({ type: "init", data: run.data, load: !run.event });
     return;
   }
   if (message.type === "initialization-error" && run.state === "initializing") {
-    run.finish("error");
+    run.finish("error", message.reason || "initializing");
     return;
   }
   if (message.type === "initialized" && run.state === "initializing") {
@@ -1067,7 +1133,7 @@ async function handleWorkerMessage(run, message) {
   }
   if (message.type === "render" && typeof message.html === "string" && typeof message.css === "string") {
     try { renderGenerated(message.html, message.css); }
-    catch (_error) { run.finish("error"); }
+    catch (_error) { run.finish("error", "render"); }
     return;
   }
   if (message.type === "notify") {
@@ -1869,7 +1935,16 @@ function applyAppVersion(app) {
   renderedRevision = app.revision;
   if (hasBundle) {
     $("revision-label").textContent = `Revision ${app.revision}`;
-    if (changed) renderGenerated(app.html, app.css);
+    if (changed) {
+      try { renderGenerated(app.html, app.css); }
+      catch (_error) {
+        // The dynamic onLoad render may still recover from a bad stored
+        // placeholder. Clear the old revision so it cannot remain interactive
+        // against the newly accepted revision while worker startup proceeds.
+        clearGenerated();
+        showRuntimeStatus("The saved app preview could not render; starting its live interface…", "error");
+      }
+    }
     if (changed) runCapabilityWorker();
   } else {
     $("revision-label").textContent = "Empty app";
