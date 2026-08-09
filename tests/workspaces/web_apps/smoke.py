@@ -108,6 +108,7 @@ def _empty_app() -> dict[str, Any]:
         "javascript": "",
         "data": {},
         "updated_at": "1970-01-01T00:00:00Z",
+        "agent_updates_locked": False,
     }
 
 
@@ -234,7 +235,9 @@ def _route_workspace_api(
             raise builder_backend.WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
         resource = app_match.group(2)
         if method == "GET" and resource == "state":
-            return {"app": copy.deepcopy(workspace["app"])}
+            app = copy.deepcopy(workspace["app"])
+            app["agent_updates_locked"] = bool(workspace["agent_updates_locked"])
+            return {"app": app}
         if method == "GET" and resource == "conversation":
             return {
                 "session": copy.deepcopy(workspace["session"]),
@@ -246,6 +249,8 @@ def _route_workspace_api(
             return _list_revisions(workspace)
         if method == "PUT" and resource == "name":
             return {"app": _rename_app(workspace, body)}
+        if method == "PUT" and resource == "agent-updates":
+            return {"app": _set_agent_updates_locked(workspace, body)}
         if method == "POST" and resource in {"archive", "unarchive"}:
             return {"app": _set_archived(workspace, resource == "archive")}
         if method == "POST" and resource == "stop":
@@ -303,6 +308,7 @@ def _app_summary(workspace: dict[str, Any]) -> dict[str, Any]:
         "session": copy.deepcopy(workspace["session"]),
         "status": _workspace_status(workspace),
         "archived": bool(workspace["archived"]),
+        "agent_updates_locked": bool(workspace["agent_updates_locked"]),
     }
 
 
@@ -327,6 +333,7 @@ def _create_app() -> dict[str, Any]:
         "events": [],
         "session": None,
         "archived": False,
+        "agent_updates_locked": False,
         "history": [],
         "history_seq": 0,
     }
@@ -342,6 +349,20 @@ def _set_archived(workspace: dict[str, Any], archived: bool) -> dict[str, Any]:
         )
     workspace["archived"] = archived
     workspace["last_used_at"] = _now()
+    return _app_summary(workspace)
+
+
+def _set_agent_updates_locked(
+    workspace: dict[str, Any], body: Any
+) -> dict[str, Any]:
+    request = builder_backend._required_object(body, "agent update lock request")
+    builder_backend._require_keys(request, {"locked"}, required={"locked"})
+    locked = request.get("locked")
+    if not isinstance(locked, bool):
+        raise builder_backend.WorkspaceError(
+            HTTPStatus.BAD_REQUEST, "locked must be a boolean"
+        )
+    workspace["agent_updates_locked"] = locked
     return _app_summary(workspace)
 
 
@@ -925,6 +946,19 @@ def desktop_smoke(page: Any) -> None:
         raise AssertionError(
             f"Send and Stop agent are not aligned: send={send_box}, stop={stop_box}"
         )
+    composer_box = frame.locator(".composer-row").bounding_box()
+    if not composer_box:
+        raise AssertionError("Composer row is not visible")
+    send_top_gap = send_box["y"] - composer_box["y"]
+    send_bottom_gap = (
+        composer_box["y"] + composer_box["height"]
+        - send_box["y"] - send_box["height"]
+    )
+    if send_top_gap < 3 or send_bottom_gap < 3:
+        raise AssertionError(
+            "Send should have equivalent vertical breathing room: "
+            f"send={send_box}, composer={composer_box}"
+        )
     expect(frame.locator(".dashboard")).to_be_visible(timeout=20_000)
     expect(frame.locator(".dashboard")).to_have_css("display", "grid")
     expect(frame.locator(".dashboard")).to_have_css("max-width", "768px")
@@ -937,6 +971,27 @@ def desktop_smoke(page: Any) -> None:
             f"generated app should have one sanitized stylesheet, got {generated_sheet_count}"
         )
     expect(frame.locator("#runtime")).to_be_enabled()
+    expect(frame.locator("#latest-agent-card")).to_be_visible()
+    frame.get_by_role("button", name="Dismiss agent message", exact=True).click()
+    expect(frame.locator("#latest-agent-card")).to_be_hidden()
+    _start_host_app(page)
+    _open_host_app(page, "app-1")
+    expect(frame.locator("#latest-agent-card")).to_be_hidden()
+
+    lock_updates = frame.locator("#lock-agent-updates")
+    lock_updates.click()
+    expect(lock_updates).to_have_attribute("aria-pressed", "true")
+    expect(lock_updates).to_have_attribute("aria-label", "Unlock agent updates")
+    expect(frame.locator("#runtime-status")).to_have_text(
+        "Agent updates locked. Agents will be asked to retry later."
+    )
+    _open_host_app(page, "app-2")
+    _open_host_app(page, "app-1")
+    unlock_updates = frame.locator("#lock-agent-updates")
+    expect(unlock_updates).to_have_attribute("aria-pressed", "true")
+    unlock_updates.click()
+    expect(unlock_updates).to_have_attribute("aria-pressed", "false")
+    expect(unlock_updates).to_have_attribute("aria-label", "Lock agent updates")
 
     generated = frame.locator("#generated-host")
     expect(
@@ -1035,7 +1090,7 @@ def mobile_smoke(page: Any) -> None:
     frame.get_by_role("button", name="Recovery", exact=True).click()
     expect(frame.locator("#recovery-drawer")).to_be_visible()
     controls = frame.locator(
-        "#settings-open, #recovery-open, #archive-app, #recovery-close, #send-message"
+        "#settings-open, #lock-agent-updates, #recovery-open, #archive-app, #recovery-close, #send-message"
     )
     touch_heights = controls.evaluate_all(
         "elements => elements.map(element => element.getBoundingClientRect().height)"

@@ -696,7 +696,9 @@ class MigrateRunnerTests(unittest.TestCase):
                         " VALUES ('app-9', 'Preserved app',"
                         " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
                     )
-                self.assertEqual(migrate.up(quiet=True), [26, 27, 28, 29, 30, 31, 32])
+                self.assertEqual(
+                    migrate.up(quiet=True), [26, 27, 28, 29, 30, 31, 32, 33]
+                )
                 with db.transaction() as cur:
                     # Migration 0026 removed the old ledger; every later
                     # bootstrap must treat adoption as an immediate no-op.
@@ -708,7 +710,7 @@ class MigrateRunnerTests(unittest.TestCase):
                         [(int(version), str(name)) for version, name in cur.fetchall()],
                         [
                             (version, migrations[version].name)
-                            for version in range(1, 33)
+                            for version in range(1, 34)
                         ],
                     )
                     cur.execute(

@@ -39,6 +39,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         for element_id in (
             'id="app-view"', 'id="app-update-veil"', 'id="archived-app-veil"',
             'id="app-refresh"', 'id="settings-open"', 'id="recovery-open"',
+            'id="lock-agent-updates"',
             'id="latest-agent-card"', 'id="latest-agent-message"',
             'id="agent-command-surface"', 'id="rename-app"',
             'id="app-history-list"', 'id="recovery-drawer"',
@@ -97,6 +98,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("if (focused && typeof focused.blur", source)
         self.assertIn("stopCapabilityWorker();", source)
         self.assertIn("COMPOSER_DRAFTS_STORAGE_KEY", source)
+        self.assertIn("DISMISSED_AGENT_MESSAGES_STORAGE_KEY", source)
+        self.assertIn("setDismissedAgentMessage", source)
         self.assertIn("localStorage.setItem", source)
         self.assertIn("/revisions/${revision}/restore", source)
         self.assertIn("applyAppVersion(response.app);", source)
@@ -480,6 +483,27 @@ class BrowserRoutingTests(unittest.TestCase):
         self.assertEqual(result, {"status": "accepted"})
         require.assert_called_once_with("app-8")
         host.assert_called_once_with("POST", "/v1/threads/app-8/stop", {})
+
+    def test_agent_action_route_reports_the_user_lock_without_dispatching(self) -> None:
+        locked = backend.WorkspaceError(
+            HTTPStatus.LOCKED, backend.AGENT_UPDATES_LOCKED_MESSAGE
+        )
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(
+                backend, "_require_agent_writable_web_app", side_effect=locked
+            ),
+            patch.object(backend, "apply_agent_action") as apply,
+            self.assertRaises(backend.WorkspaceError) as error,
+        ):
+            backend.route_agent(
+                "POST",
+                "/agent/apps/app-9/actions",
+                {"action": "set", "expected_revision": 0, "path": ["x"], "value": 1},
+            )
+        self.assertEqual(error.exception.status, HTTPStatus.LOCKED)
+        self.assertIn("retry again in a while", error.exception.message)
+        apply.assert_not_called()
 
     def test_agent_state_meta_is_resolved_to_the_exact_workspace(self) -> None:
         with (
@@ -1163,6 +1187,39 @@ class AgenticWebAppDbTests(unittest.TestCase):
         state = backend.load_app_state("app-1")
         self.assertEqual(state["revision"], 1)
         self.assertEqual(state["data"], {"count": 1, "label": "kept"})
+
+    def test_agent_update_lock_persists_and_only_blocks_agent_writes(self) -> None:
+        backend.create_web_app()
+        locked = backend.set_agent_updates_locked("app-1", {"locked": True})
+        self.assertTrue(locked["agent_updates_locked"])
+        self.assertTrue(backend.load_app_state("app-1")["agent_updates_locked"])
+        self.assertTrue(backend.load_app_state_meta("app-1")["agent_updates_locked"])
+
+        with self.assertRaises(backend.WorkspaceError) as error:
+            backend.route_agent(
+                "POST",
+                "/agent/apps/app-1/actions",
+                {"action": "set", "expected_revision": 0, "path": ["agent"], "value": 1},
+            )
+        self.assertEqual(error.exception.status, HTTPStatus.LOCKED)
+        self.assertIn("retry again in a while", error.exception.message)
+
+        app_write = backend.apply_runtime_action(
+            {"action": "set", "expected_revision": 0, "path": ["user"], "value": 1},
+            "app-1",
+        )
+        self.assertEqual(app_write["app"]["revision"], 1)
+
+        unlocked = backend.set_agent_updates_locked("app-1", {"locked": False})
+        self.assertFalse(unlocked["agent_updates_locked"])
+        self.assertEqual(
+            backend.route_agent(
+                "POST",
+                "/agent/apps/app-1/actions",
+                {"action": "set", "expected_revision": 1, "path": ["agent"], "value": 1},
+            ),
+            {"ok": True, "revision": 2},
+        )
 
     def test_web_app_creation_stops_at_durable_quota(self) -> None:
         with (

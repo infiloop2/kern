@@ -73,8 +73,16 @@ TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # A fixed stripe set keeps that coordination bounded while unrelated
 # workspaces normally proceed independently.
 WORKSPACE_LOCKS = tuple(threading.RLock() for _ in range(64))
-STATE_COLUMNS = "revision, html, css, javascript, data_json, updated_at"
-SUMMARY_COLUMNS = "app_id, name, revision, created_at, updated_at, archived"
+STATE_COLUMNS = (
+    "revision, html, css, javascript, data_json, updated_at, agent_updates_locked"
+)
+SUMMARY_COLUMNS = (
+    "app_id, name, revision, created_at, updated_at, archived, agent_updates_locked"
+)
+AGENT_UPDATES_LOCKED_MESSAGE = (
+    "The user has locked agent updates for this app. Do not change the app now; "
+    "retry again in a while after the user unlocks updates."
+)
 
 
 def route_browser(
@@ -131,6 +139,12 @@ def _route_browser(
         app_id = _path_segment(match.group(1))
         _require_writable_web_app(app_id)
         return {"app": rename_web_app(app_id, body)}
+
+    match = re.fullmatch(r"/apps/([^/]+)/agent-updates", path)
+    if method == "PUT" and match:
+        app_id = _path_segment(match.group(1))
+        _require_writable_web_app(app_id)
+        return {"app": set_agent_updates_locked(app_id, body)}
 
     match = re.fullmatch(r"/apps/([^/]+)/(archive|unarchive)", path)
     if method == "POST" and match:
@@ -210,7 +224,7 @@ def route_agent(
         return {"app": read_app_data_path(app_id, body)}
     if method == "POST" and resource == "/actions":
         with _workspace_lock(app_id):
-            _require_writable_web_app(app_id)
+            _require_agent_writable_web_app(app_id)
             return apply_agent_action(body, app_id)
     raise WorkspaceError(HTTPStatus.NOT_FOUND, "agent route not found")
 
@@ -321,6 +335,7 @@ def _web_app_summary(
         "session": session,
         "status": status,
         "archived": bool(row[5]),
+        "agent_updates_locked": bool(row[6]),
     }
 
 
@@ -397,6 +412,24 @@ def rename_web_app(app_id: str, body: Any) -> dict[str, Any]:
     return _web_app_summary(row, None)
 
 
+def set_agent_updates_locked(app_id: str, body: Any) -> dict[str, Any]:
+    request = _required_object(body, "agent update lock request")
+    _require_keys(request, {"locked"}, required={"locked"})
+    locked = request.get("locked")
+    if not isinstance(locked, bool):
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "locked must be a boolean")
+    with db.transaction() as cur:
+        cur.execute(
+            "UPDATE web_apps SET agent_updates_locked = %s WHERE app_id = %s"
+            f" RETURNING {SUMMARY_COLUMNS}",
+            (locked, app_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
+    return _web_app_summary(row, None)
+
+
 def set_web_app_archived(app_id: str, archived: bool) -> dict[str, Any]:
     _require_web_app(app_id)
     if archived:
@@ -448,6 +481,21 @@ def _require_writable_web_app(app_id: str) -> None:
         raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
     if row[0]:
         raise WorkspaceError(HTTPStatus.CONFLICT, "archived apps are read-only")
+
+
+def _require_agent_writable_web_app(app_id: str) -> None:
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT archived, agent_updates_locked FROM web_apps WHERE app_id = %s",
+            (app_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
+    if row[0]:
+        raise WorkspaceError(HTTPStatus.CONFLICT, "archived apps are read-only")
+    if row[1]:
+        raise WorkspaceError(HTTPStatus.LOCKED, AGENT_UPDATES_LOCKED_MESSAGE)
 
 
 def _workspace_lock(app_id: str) -> threading.RLock:
@@ -588,7 +636,7 @@ def load_app_state_meta(app_id: str) -> dict[str, Any]:
     _require_web_app(app_id)
     with db.transaction() as cur:
         cur.execute(
-            "SELECT revision, updated_at,"
+            "SELECT revision, updated_at, agent_updates_locked,"
             " octet_length(html), octet_length(css), octet_length(javascript),"
             " octet_length(data_json) FROM web_apps WHERE app_id = %s",
             (app_id,),
@@ -599,11 +647,12 @@ def load_app_state_meta(app_id: str) -> dict[str, Any]:
     return {
         "revision": row[0],
         "updated_at": row[1],
+        "agent_updates_locked": bool(row[2]),
         "bytes": {
-            "html": row[2],
-            "css": row[3],
-            "javascript": row[4],
-            "data": row[5],
+            "html": row[3],
+            "css": row[4],
+            "javascript": row[5],
+            "data": row[6],
         },
     }
 
@@ -1110,6 +1159,7 @@ def _state_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "javascript": row[3],
         "data": _decoded_data(row[4]),
         "updated_at": row[5],
+        "agent_updates_locked": bool(row[6]),
     }
 
 
