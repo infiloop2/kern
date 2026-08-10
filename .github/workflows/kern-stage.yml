@@ -20,6 +20,7 @@ on:
           - linkedin_discovery
           - polymarket
           - runway
+          - seedance
           - twitter
           - claude
           - codex
@@ -205,6 +206,7 @@ jobs:
           KERN_STAGE_SCRAPECREATORS_API_KEY: ${{ secrets.KERN_STAGE_SCRAPECREATORS_API_KEY }}
           KERN_STAGE_SERPERAPI_API_KEY: ${{ secrets.KERN_STAGE_SERPERAPI_API_KEY }}
           KERN_STAGE_RUNWAY_API_SECRET: ${{ secrets.KERN_STAGE_RUNWAY_API_SECRET }}
+          KERN_STAGE_SEEDANCE_ARK_API_KEY: ${{ secrets.KERN_STAGE_SEEDANCE_ARK_API_KEY }}
         run: |
           set -euo pipefail
           python3 tests/stage/stage_aws.py \

@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import ipaddress
 import re
 import secrets
 import urllib.parse
-from contextlib import contextmanager
 from typing import BinaryIO, Iterator, cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
@@ -17,13 +15,20 @@ from host.tools.results import (
     ActionFailed,
     ActionResult,
     ApprovalResult,
-    OpenedStreamingAsset,
     StreamingAsset,
-    StreamingAssetError,
 )
 from host.tools.host_api import ApprovalRecord, HostAPI
-from host.tools.shared.inputs import ToolInputValidationError
-from host.tools.shared.web import WebRequestError, json_request, open_response_stream, stream_request_bytes
+from host.tools.shared.inputs import ToolInputValidationError, provider_fetched_https_url
+from host.tools.shared.media import open_downloaded_video
+from host.tools.shared.web import (
+    UnmappedProviderError,
+    WebRequestError,
+    is_public_https_url,
+    json_request,
+    known_provider_transport_error,
+    stream_request_bytes,
+    unmapped_provider_error,
+)
 
 # Runway's Developer API is a single Bearer-authenticated JSON surface. Every
 # generation is an async task: POST a generation endpoint to get a task id, then
@@ -415,30 +420,7 @@ def _prompt_text(tool_input: JSONObject, api: HostAPI) -> str:
 
 
 def _https_url(tool_input: JSONObject, key: str, api: HostAPI) -> str:
-    value = tool_input.get(key)
-    if not isinstance(value, str):
-        raise ToolInputValidationError(f"Runway tool_input.{key} must be an https URL.")
-    value = value.strip()
-    if len(value) > 4_096:
-        raise ToolInputValidationError(f"Runway tool_input.{key} must be an https URL.")
-    try:
-        parsed = urllib.parse.urlsplit(value)
-        port = parsed.port
-    except ValueError as exc:
-        raise ToolInputValidationError(f"Runway tool_input.{key} must be an https URL.") from exc
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or port not in {None, 443}
-    ):
-        raise ToolInputValidationError(f"Runway tool_input.{key} must be an https URL.")
-    # Runway fetches this URL, so scan the whole value for secrets or personal
-    # data an agent might encode into the path or query and exfiltrate. (Raw-IP
-    # hosts are allowed - Runway does the fetch from its own network, so any
-    # SSRF exposure is Runway's, not this host's.)
-    return api.outbound.guard_request_parameter_string(value)
+    return provider_fetched_https_url(tool_input, key, api, provider="Runway")
 
 
 def _generation_request(
@@ -676,50 +658,29 @@ def _task_result(response: JSONObject, output_kind: str = "video") -> JSONObject
     return result
 
 
-def _is_public_https_url(value: str) -> bool:
-    """Structural checks only — this does NOT pin the hostname. Runway's
-    upload and output URLs come from Runway's own authenticated HTTPS API
-    responses, and Runway does not document which asset/CDN hosts those URLs
-    use (presigned object-store or CDN hosts are likely), so pinning a domain
-    here would risk rejecting legitimate provider traffic. What is enforced:
-    plain HTTPS on the default port to a named public host — no userinfo, no
-    IP literals, no oversized URLs."""
-    if len(value) > 2_048:
-        return False
-    try:
-        parsed = urllib.parse.urlsplit(value)
-        port = parsed.port
-    except ValueError:
-        return False
-    hostname = parsed.hostname or ""
-    try:
-        ipaddress.ip_address(hostname)
-        return False
-    except ValueError:
-        pass
-    return (
-        parsed.scheme == "https"
-        and "." in hostname
-        and parsed.username is None
-        and parsed.password is None
-        and port in {None, 443}
-    )
+# Structural-only URL check shared with the other media tools; see
+# host.tools.shared.web.is_public_https_url for why the host is not pinned.
+_is_public_https_url = is_public_https_url
 
 
 def _failure_from_status(exc: WebRequestError) -> str:
     if exc.status == 401:
-        return "Runway rejected the configured API key."
-    if exc.status == 403:
-        return "Runway denied the request (insufficient permissions for this model or action)."
-    if exc.status == 404:
-        return "Runway task was not found."
-    if exc.status == 429:
-        return "Runway rate limit or daily generation quota was reached."
-    if exc.status in {400, 422}:
-        return "Runway rejected the request. Check that the model, prompt, aspect ratio, and duration are compatible."
-    if exc.status:
-        return f"Runway API returned HTTP {exc.status}."
-    return "Runway API request failed."
+        message = "Runway rejected the configured API key."
+    elif exc.status == 403:
+        message = "Runway denied the request (insufficient permissions for this model or action)."
+    elif exc.status == 404:
+        message = "Runway task was not found."
+    elif exc.status == 429:
+        message = "Runway rate limit or daily generation quota was reached."
+    elif exc.status in {400, 422}:
+        message = "Runway rejected the request. Check that the model, prompt, aspect ratio, and duration are compatible."
+    elif exc.status:
+        message = f"Runway API returned HTTP {exc.status}."
+    else:
+        message = known_provider_transport_error(exc)
+        if not message:
+            raise unmapped_provider_error("Runway", "API", exc) from None
+    return message
 
 
 def _save_video(task_id: str, headers: dict[str, str]) -> ActionResult:
@@ -738,46 +699,13 @@ def _save_video(task_id: str, headers: dict[str, str]) -> ActionResult:
     output_url = output[0] if isinstance(output, list) and output and isinstance(output[0], str) else ""
     if not output_url or not _is_public_https_url(output_url):
         return ActionFailed("Runway reported success but returned no valid video URL.")
-    @contextmanager
-    def open_video() -> Iterator[OpenedStreamingAsset]:
-        try:
-            with open_response_stream(
-                "GET", output_url, failure_message="Runway video download failed.", timeout=120
-            ) as (source, response_headers):
-                raw_length = response_headers.get("content-length", "")
-                if not raw_length.isascii() or not raw_length.isdecimal():
-                    raise StreamingAssetError(
-                        "Runway video download did not include a valid size."
-                    )
-                size_bytes = int(raw_length)
-                if not 512 <= size_bytes <= 200_000_000:
-                    raise StreamingAssetError(
-                        "Runway video download size is outside the supported range."
-                    )
-                media_type = (
-                    response_headers.get("content-type", "")
-                    .split(";", 1)[0]
-                    .strip()
-                    .lower()
-                )
-                suffixes = {"video/mp4": ".mp4", "video/quicktime": ".mov"}
-                suffix = suffixes.get(media_type)
-                if suffix is None:
-                    raise StreamingAssetError(
-                        "Runway video download returned an unsupported media type."
-                    )
-                yield OpenedStreamingAsset(
-                    filename=f"runway-{task_id}{suffix}",
-                    media_type=media_type,
-                    size_bytes=size_bytes,
-                    source=source,
-                )
-        except StreamingAssetError:
-            raise
-        except WebRequestError as exc:
-            raise StreamingAssetError(_failure_from_status(exc)) from exc
-        except ValueError as exc:
-            raise StreamingAssetError(str(exc) or "Runway video download failed.") from exc
+    def open_video():
+        return open_downloaded_video(
+            output_url,
+            provider="Runway",
+            filename_stem=f"runway-{task_id}",
+            map_failure=_failure_from_status,
+        )
 
     return StreamingAsset(open_video)
 
@@ -891,6 +819,8 @@ class RunwayTool:
             return ActionFailed(exc.message)
         except WebRequestError as exc:
             return ActionFailed(_failure_from_status(exc))
+        except UnmappedProviderError:
+            raise
         except (ValueError, RuntimeError) as exc:
             # The tool's own errors (validation, config-unset) carry curated,
             # secret-free messages; an unexpected exception must not leak its

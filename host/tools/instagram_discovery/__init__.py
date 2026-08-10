@@ -15,7 +15,7 @@ from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.tools.shared.inputs import bounded_int, clip as _text
-from host.tools.shared.web import WebRequestError, json_request
+from host.tools.shared.web import UnmappedProviderError, WebRequestError, json_request, known_provider_transport_error, unmapped_provider_error
 from host.tools.tool import Tool
 
 API_ORIGIN = "https://api.scrapecreators.com"
@@ -654,12 +654,20 @@ class InstagramDiscoveryTool(Tool):
             return ActionFailed("Unsupported Instagram Discovery action.")
         except WebRequestError as exc:
             if exc.status in {401, 403}:
-                return ActionFailed("ScrapeCreators rejected the configured API key or account access.")
-            if exc.status == 429:
-                return ActionFailed("ScrapeCreators request capacity or account credits were exhausted.")
-            if exc.status == 404:
-                return ActionFailed("ScrapeCreators could not find public Instagram content for that request.")
-            return ActionFailed(str(exc))
+                message = "ScrapeCreators rejected the configured API key or account access."
+            elif exc.status == 429:
+                message = "ScrapeCreators request capacity or account credits were exhausted."
+            elif exc.status == 404:
+                message = "ScrapeCreators could not find public Instagram content for that request."
+            elif exc.status:
+                message = f"ScrapeCreators returned HTTP {exc.status}."
+            else:
+                message = known_provider_transport_error(exc)
+                if not message:
+                    raise unmapped_provider_error("ScrapeCreators", "Instagram discovery", exc) from None
+            return ActionFailed(message)
+        except UnmappedProviderError:
+            raise
         except (ValueError, RuntimeError) as exc:
             # Input validation and config-unset carry curated messages; an
             # unexpected exception must not leak its raw text to the agent.

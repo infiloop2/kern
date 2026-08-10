@@ -22,8 +22,14 @@ uses only the stdlib. Its public staging actions open local media as the agent
 and stream bytes to the tools service. In the reverse direction, every binary
 tool result is atomically materialized at a host-generated path under the
 agent's ``/tool_assets`` directory. No pathname crosses into the tools service.
-If a socket is unavailable it omits the unavailable bundled tools, rather than
-failing the whole agent session.
+
+``tools/list`` is answered entirely from the static declarations in
+``host/agent_tool_surface.py`` without touching a socket, so the listing is
+identical for every session regardless of which integrations are enabled or
+which services happen to be up. An unreachable socket therefore fails the
+individual call with its own error rather than silently withdrawing tools
+mid-session — a withdrawal the model reads as "that capability does not exist",
+and which re-encodes the entire cached prompt prefix when the tools reappear.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ import sys
 from typing import Any
 import urllib.parse
 
-from host import constants
+from host import agent_tool_surface, constants
 
 SOCKET_PATH = os.environ.get("KERN_TOOLS_SOCKET", constants.TOOLS_SOCKET_PATH)
 WORKSPACE_AGENT_SOCKET_PATH = os.environ.get(
@@ -51,7 +57,7 @@ AGENT_NETWORK_SOCKET_PATH = os.environ.get(
 WORKSPACE_API_TOOL_NAME = "workspace_api"
 SEARCH_CONVERSATION_HISTORY_TOOL_NAME = "search_conversation_history"
 READ_THREAD_HISTORY_TOOL_NAME = "read_thread_history"
-NETWORK_TOOL_NAMES = frozenset({"list_network_integrations", "recent_network_denials"})
+NETWORK_TOOL_NAMES = agent_tool_surface.NETWORK_TOOL_NAMES
 REQUEST_TIMEOUT_SECONDS = 120
 PENDING_APPROVAL_HINT = (
     "This action needs operator approval. Tell the user to approve or deny it "
@@ -63,6 +69,9 @@ MIN_VIDEO_BYTES = 512
 MAX_IMAGE_BYTES = 200_000_000
 MIN_IMAGE_BYTES = 512
 STREAMING_RESULT_HEADER = "streaming-asset"
+# Tool results land verbatim in the model's context, where JSON indentation is
+# ~10% of their bytes and buys the reader nothing.
+_COMPACT_JSON = (",", ":")
 STREAMING_MEDIA_TYPE_RE = re.compile(
     r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$"
 )
@@ -353,33 +362,28 @@ def _tools_action_request(
         connection.close()
 
 
-def _listed_socket_tools(socket_path: str) -> list[dict[str, Any]]:
-    try:
-        tools = _tools_request("GET", "/tools", socket_path=socket_path).get("tools")
-    except Exception:
-        tools = []
-    if not isinstance(tools, list):
-        tools = []
-    listed = [
-        {
-            "name": tool["name"],
-            "description": tool["description"],
-            "inputSchema": tool["input_schema"],
-        }
-        for tool in tools
-        if isinstance(tool, dict)
-    ]
-    return listed
+def _mcp_declaration(tool: dict[str, Any]) -> dict[str, Any]:
+    """One service-side declaration in MCP's ``inputSchema`` spelling."""
+    return {
+        "name": tool["name"],
+        "description": tool["description"],
+        "inputSchema": tool["input_schema"],
+    }
 
 
 def _list_tools() -> list[dict[str, Any]]:
-    listed = _listed_socket_tools(SOCKET_PATH)
-    listed.extend(_listed_socket_tools(AGENT_NETWORK_SOCKET_PATH))
-    names = [str(tool.get("name", "")) for tool in listed]
-    if any(name.startswith("runway_") for name in names):
-        listed.append(STAGE_IMAGE_TOOL)
-    if any(name.startswith(("runway_", "instagram_")) for name in names):
-        listed.append(STAGE_VIDEO_TOOL)
+    """The complete agent tool surface, constant for every session.
+
+    No socket is consulted and nothing here is conditional. The staging tools
+    are declared whether or not Runway or Instagram is enabled, for the same
+    reason the bundled catalog is no longer enumerated: a listing that tracks
+    live state rewrites the model's whole cached prefix whenever that state
+    moves. Calls against an unavailable capability fail individually, with a
+    message the operator can act on.
+    """
+    listed = [_mcp_declaration(tool) for tool in agent_tool_surface.TOOLS_SOCKET_TOOLS]
+    listed.extend(_mcp_declaration(tool) for tool in agent_tool_surface.AGENT_NETWORK_TOOLS)
+    listed.extend((STAGE_IMAGE_TOOL, STAGE_VIDEO_TOOL))
     listed.extend((SEARCH_CONVERSATION_HISTORY_TOOL, READ_THREAD_HISTORY_TOOL))
     listed.append(_workspace_api_tool())
     return listed
@@ -520,7 +524,7 @@ def _call_workspace_api(arguments: dict[str, Any]) -> dict[str, Any]:
         return _tool_text(f"Workspace API call failed: {exc}", is_error=True)
     except Exception as exc:
         return _tool_text(f"Workspace API unavailable: {exc}", is_error=True)
-    return _tool_text(json.dumps(result, indent=2))
+    return _tool_text(json.dumps(result, separators=_COMPACT_JSON))
 
 
 def _call_conversation_history_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -544,7 +548,7 @@ def _call_conversation_history_tool(name: str, arguments: dict[str, Any]) -> dic
         body = result.get("body")
         message = body.get("error", {}).get("message") if isinstance(body, dict) else None
         return _tool_text(str(message or "Conversation history call failed."), is_error=True)
-    return _tool_text(json.dumps(result.get("body", {}), indent=2))
+    return _tool_text(json.dumps(result.get("body", {}), separators=_COMPACT_JSON))
 
 
 def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
@@ -566,7 +570,7 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(arguments, dict):
                 raise RuntimeError(f"{name} arguments must be an object.")
             stage = _stage_image if name == "stage_image" else _stage_video
-            return _tool_text(json.dumps(stage(arguments), indent=2))
+            return _tool_text(json.dumps(stage(arguments), separators=_COMPACT_JSON))
         forwarded = dict(arguments) if isinstance(arguments, dict) else {}
         socket_path = AGENT_NETWORK_SOCKET_PATH if name in NETWORK_TOOL_NAMES else SOCKET_PATH
         result = _tools_action_request(
@@ -578,14 +582,14 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
     status = result.get("status")
     if status == "executed":
         executed = result.get("result")
-        return _tool_text(json.dumps(executed, indent=2))
+        return _tool_text(json.dumps(executed, separators=_COMPACT_JSON))
     if status == "pending_approval":
         pending = {
             "approval_id": result.get("approval_id"),
             "summary": result.get("summary"),
             "next_step": PENDING_APPROVAL_HINT,
         }
-        return _tool_text(json.dumps(pending, indent=2))
+        return _tool_text(json.dumps(pending, separators=_COMPACT_JSON))
     error = str(result.get("error") or "Tool call failed.")
     if result.get("reconnect_required"):
         error += " (The operator needs to reconnect this tool in the admin UI.)"

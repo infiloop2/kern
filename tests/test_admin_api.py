@@ -765,11 +765,11 @@ class AdminUiStaticTests(unittest.TestCase):
     def test_workspace_route_allowlist_contains_thread_and_history_operations(self) -> None:
         allowed = [
             ("GET", "/v1/threads"),
-            ("GET", "/v1/threads/thread_1"),
-            ("POST", "/v1/threads/thread_1/messages"),
-            ("POST", "/v1/threads/thread_1/stop"),
-            ("POST", "/v1/threads/thread_1/clear-memory"),
-            ("GET", "/v1/threads/thread_1/events"),
+            ("GET", "/v1/threads/thread-1"),
+            ("POST", "/v1/threads/thread-1/messages"),
+            ("POST", "/v1/threads/thread-1/stop"),
+            ("POST", "/v1/threads/thread-1/clear-memory"),
+            ("GET", "/v1/threads/thread-1/events"),
             ("POST", "/v1/conversation-history/search"),
             ("POST", "/v1/conversation-history/read"),
         ]
@@ -787,7 +787,7 @@ class AdminUiStaticTests(unittest.TestCase):
             ("POST", "/v1/tasks/task_1/cancel"),
             ("POST", "/v1/tasks/task_1/kill"),
             ("POST", "/v1/tasks/task_1/steer"),
-            ("GET", "/v1/threads/thread_1/tasks"),
+            ("GET", "/v1/threads/thread-1/tasks"),
             ("GET", "/v1/health"),
             ("GET", "/v1/network/policy"),
             ("PUT", "/v1/network/policy"),
@@ -879,7 +879,7 @@ class AdminUiStaticTests(unittest.TestCase):
         events = [
             {
                 "seq": seq,
-                "thread_id": "thread_1",
+                "thread_id": "thread-1",
                 "event_type": "thread.message",
                 "payload": {
                     "message": "\x01" * (message_bytes + 1),
@@ -895,7 +895,7 @@ class AdminUiStaticTests(unittest.TestCase):
         ) as page:
             response = admin_api.thread_route(
                 "GET",
-                "/v1/threads/thread_1/events",
+                "/v1/threads/thread-1/events",
                 {
                     "since": ["2"],
                     "limit": ["5"],
@@ -904,7 +904,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 None,
             )
 
-        page.assert_called_once_with("thread_1", 2, 5, before=None)
+        page.assert_called_once_with("thread-1", 2, 5, before=None)
         payload = response["events"][0]["payload"]
         self.assertLessEqual(len(payload["message"].encode()), message_bytes)
         self.assertTrue(payload["message"].endswith("… (truncated)"))
@@ -922,18 +922,18 @@ class AdminUiStaticTests(unittest.TestCase):
             self.assertEqual(
                 admin_api.thread_route(
                     "GET",
-                    "/v1/threads/thread_1/events",
+                    "/v1/threads/thread-1/events",
                     {"before": ["42"], "limit": ["5"]},
                     None,
                 ),
                 {"events": []},
             )
 
-        page.assert_called_once_with("thread_1", None, 5, before=42)
+        page.assert_called_once_with("thread-1", None, 5, before=42)
         with self.assertRaises(admin_api.ApiError) as error:
             admin_api.thread_route(
                 "GET",
-                "/v1/threads/thread_1/events",
+                "/v1/threads/thread-1/events",
                 {"since": ["2"], "before": ["42"]},
                 None,
             )
@@ -947,7 +947,7 @@ class AdminUiStaticTests(unittest.TestCase):
             self.assertEqual(
                 admin_api.thread_route(
                     "GET",
-                    "/v1/threads/thread_1/events",
+                    "/v1/threads/thread-1/events",
                     {
                         "limit": ["6"],
                         "event_type": [
@@ -962,7 +962,7 @@ class AdminUiStaticTests(unittest.TestCase):
             )
 
         page.assert_called_once_with(
-            "thread_1",
+            "thread-1",
             None,
             6,
             before=None,
@@ -975,7 +975,7 @@ class AdminUiStaticTests(unittest.TestCase):
         with self.assertRaises(admin_api.ApiError) as error:
             admin_api.thread_route(
                 "GET",
-                "/v1/threads/thread_1/events",
+                "/v1/threads/thread-1/events",
                 {"event_type": ["turn.started"]},
                 None,
             )
@@ -985,7 +985,7 @@ class AdminUiStaticTests(unittest.TestCase):
         message_bytes = 120 * 1024
         events = [{
             "seq": 1,
-            "thread_id": "thread_1",
+            "thread_id": "thread-1",
             "event_type": "thread.activity",
             "payload": {
                 "activity": {
@@ -1004,7 +1004,7 @@ class AdminUiStaticTests(unittest.TestCase):
         ):
             response = admin_api.thread_route(
                 "GET",
-                "/v1/threads/thread_1/events",
+                "/v1/threads/thread-1/events",
                 {"limit": ["1"], "message_bytes": [str(message_bytes)]},
                 None,
             )
@@ -1020,7 +1020,7 @@ class AdminUiStaticTests(unittest.TestCase):
         events = [
             {
                 "seq": seq,
-                "thread_id": "thread_1",
+                "thread_id": "thread-1",
                 "event_type": "thread.activity",
                 "payload": {
                     "activity": {
@@ -1043,7 +1043,7 @@ class AdminUiStaticTests(unittest.TestCase):
         ):
             response = admin_api.thread_route(
                 "GET",
-                "/v1/threads/thread_1/events",
+                "/v1/threads/thread-1/events",
                 {"limit": ["6"], "message_bytes": [str(message_bytes)]},
                 None,
             )
@@ -1059,7 +1059,7 @@ class AdminUiStaticTests(unittest.TestCase):
         events = [
             {
                 "seq": seq,
-                "thread_id": "thread_1",
+                "thread_id": "thread-1",
                 "event_type": "thread.message",
                 "payload": {"message": "\x01" * message_bytes, "source": "agent"},
             }
@@ -1071,7 +1071,7 @@ class AdminUiStaticTests(unittest.TestCase):
         ):
             response = admin_api.thread_route(
                 "GET",
-                "/v1/threads/thread_1/events",
+                "/v1/threads/thread-1/events",
                 {"limit": ["8"], "message_bytes": [str(message_bytes)]},
                 None,
             )
@@ -1088,7 +1088,7 @@ class AdminUiStaticTests(unittest.TestCase):
         events = [
             {
                 "seq": seq,
-                "thread_id": "thread_1",
+                "thread_id": "thread-1",
                 "event_type": "thread.message",
                 "payload": {"message": "😀" * message_bytes, "source": "agent"},
             }
@@ -1100,7 +1100,7 @@ class AdminUiStaticTests(unittest.TestCase):
         ):
             response = admin_api.thread_route(
                 "GET",
-                "/v1/threads/thread_1/events",
+                "/v1/threads/thread-1/events",
                 {"limit": ["8"], "message_bytes": [str(message_bytes)]},
                 None,
             )
@@ -1276,6 +1276,7 @@ class AdminUiStaticTests(unittest.TestCase):
             {"query": "ok", "query_variants": ["ok"] * 9},
             {"query": "ok", "query_variants": [{"nested": "value"}]},
             {"query": "ok", "thread_id": "../thread-1"},
+            {"query": "ok", "thread_id": "legacy-thread"},
             {"query": "ok", "roles": ["user", {"role": "assistant"}]},
             {"query": "ok", "limit": float("nan")},
             {"query": "ok", "limit": 10**5_000},
@@ -1284,6 +1285,7 @@ class AdminUiStaticTests(unittest.TestCase):
         read_requests = (
             {"thread_id": {"$ne": None}},
             {"thread_id": "../thread-1"},
+            {"thread_id": "legacy-thread"},
             {"thread_id": "thread-1", "before": "event_0"},
             {"thread_id": "thread-1", "include_activity": 1},
             {"thread_id": "thread-1", "limit": float("inf")},
@@ -1537,8 +1539,9 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_thread_prefix_is_a_query_filter_not_an_authority_claim(self) -> None:
         self.assertEqual(admin_api._thread_list_prefix({"prefix": ["app-"]}), "app-")
-        with self.assertRaises(admin_api.ApiError):
-            admin_api._thread_list_prefix({"prefix": ["bad prefix"]})
+        for invalid in ("legacy", "bad prefix"):
+            with self.subTest(invalid=invalid), self.assertRaises(admin_api.ApiError):
+                admin_api._thread_list_prefix({"prefix": [invalid]})
 
 
     def test_shared_route_requires_a_valid_explicit_principal(self) -> None:
@@ -1558,49 +1561,50 @@ class AdminUiStaticTests(unittest.TestCase):
                     )
                 self.assertEqual(denied.exception.status, HTTPStatus.FORBIDDEN)
 
-    def test_workspace_thread_creation_is_reserved_for_workspace_service(self) -> None:
+    def test_product_thread_prefixes_are_available_to_both_principals(self) -> None:
         body = {
             "message": "scheduled work",
             "agent_runtime": "codex",
             "model": "gpt-5.2-codex",
             "effort": "medium",
         }
-        for path in (
+        paths = (
             "/v1/threads/thread-17/messages",
+            "/v1/threads/thread-custom/messages",
             "/v1/threads/app-17/messages",
+            "/v1/threads/app-custom/messages",
             "/v1/threads/schedule-17-run-23/messages",
             "/v1/threads/schedule-custom/messages",
-        ):
-            with self.subTest(path=path):
-                with self.assertRaises(admin_api.ApiError) as denied:
-                    admin_api.route(
-                        "POST",
-                        path,
-                        {},
-                        body,
-                        principal=admin_api.OperatorPrincipal("test-session"),
+        )
+        principals = (
+            admin_api.OperatorPrincipal("test-session"),
+            admin_api.WorkspacePrincipal(),
+        )
+        for principal in principals:
+            for path in paths:
+                with self.subTest(principal=principal, path=path), patch(
+                    "host.runtime.admin_api.service.thread_route",
+                    return_value={"status": "accepted"},
+                ) as thread_route:
+                    response = admin_api.route(
+                        "POST", path, {}, body, principal=principal
                     )
-                self.assertEqual(denied.exception.status, HTTPStatus.FORBIDDEN)
+                    self.assertEqual(response, {"status": "accepted"})
+                    thread_route.assert_called_once_with("POST", path, {}, body)
 
-        for path in (
-            "/v1/threads/thread-17/messages",
-            "/v1/threads/app-17/messages",
-            "/v1/threads/schedule-17-run-23/messages",
-            "/v1/threads/schedule-custom/messages",
+    def test_every_thread_route_rejects_an_unprefixed_id(self) -> None:
+        for method, path in (
+            ("GET", "/v1/threads/legacy"),
+            ("POST", "/v1/threads/legacy/messages"),
+            ("POST", "/v1/threads/legacy/stop"),
+            ("POST", "/v1/threads/legacy/clear-memory"),
+            ("GET", "/v1/threads/legacy/events"),
         ):
-            with self.subTest(path=path), patch(
-                "host.runtime.admin_api.service.thread_route",
-                return_value={"status": "accepted"},
-            ) as thread_route:
-                response = admin_api.route(
-                    "POST",
-                    path,
-                    {},
-                    body,
-                    principal=admin_api.WorkspacePrincipal(),
-                )
-                self.assertEqual(response, {"status": "accepted"})
-                thread_route.assert_called_once_with("POST", path, {}, body)
+            with self.subTest(method=method, path=path), self.assertRaises(
+                admin_api.ApiError
+            ) as rejected:
+                admin_api.thread_route(method, path, {}, None)
+            self.assertEqual(rejected.exception.status, HTTPStatus.NOT_FOUND)
 
     def test_http_service_cannot_mint_auth_cookies_or_sessions(self) -> None:
         source = Path(admin_api.__file__).read_text()
@@ -2564,13 +2568,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with patch.object(
             orchestrator, "launch_turn", side_effect=attach_recording_steer_server
         ):
-            first = self.workspace_request("POST", "/v1/threads/repeated-send/messages", request)
-            repeated = self.workspace_request("POST", "/v1/threads/repeated-send/messages", request)
+            first = self.workspace_request("POST", "/v1/threads/thread-repeated-send/messages", request)
+            repeated = self.workspace_request("POST", "/v1/threads/thread-repeated-send/messages", request)
 
         self.assertEqual(first["status"], "accepted")
         self.assertEqual(repeated["status"], "accepted")
-        self.assertEqual(repeated["thread"]["thread_id"], "repeated-send")
-        turn = orchestrator._LIVE["codex:repeated-send"]
+        self.assertEqual(repeated["thread"]["thread_id"], "thread-repeated-send")
+        turn = orchestrator._LIVE["codex:thread-repeated-send"]
         self.assertEqual(turn.server.messages, ["from app"])
 
     def test_workspace_repeated_steer_appends_again(self) -> None:
@@ -2579,7 +2583,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         ):
             self.workspace_request(
                 "POST",
-                "/v1/threads/durable-steer/messages",
+                "/v1/threads/thread-durable-steer/messages",
                 {
                     "message": "from app",
                     "agent_runtime": "codex",
@@ -2588,10 +2592,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 },
             )
             first = self.workspace_request(
-                "POST", "/v1/threads/durable-steer/messages", {"message": "nudge"}
+                "POST", "/v1/threads/thread-durable-steer/messages", {"message": "nudge"}
             )
             repeated = self.workspace_request(
-                "POST", "/v1/threads/durable-steer/messages", {"message": "nudge"}
+                "POST", "/v1/threads/thread-durable-steer/messages", {"message": "nudge"}
             )
 
         self.assertEqual(first["status"], "accepted")
@@ -2604,9 +2608,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 response["thread"]["last_used_at"],
                 r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
             )
-        turn = orchestrator._LIVE["codex:durable-steer"]
+        turn = orchestrator._LIVE["codex:thread-durable-steer"]
         self.assertEqual(turn.server.messages, ["nudge", "nudge"])
-        events = self.workspace_request("GET", "/v1/threads/durable-steer/events")
+        events = self.workspace_request("GET", "/v1/threads/thread-durable-steer/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
             ["thread.message", "thread.message", "thread.message"],
@@ -2619,7 +2623,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             ("POST", "/v1/tasks/task_1/steer"),
             ("POST", "/v1/tasks/task_1/cancel"),
             ("POST", "/v1/tasks/task_1/kill"),
-            ("GET", "/v1/threads/chat/tasks"),
+            ("GET", "/v1/threads/thread-chat/tasks"),
         ):
             with self.subTest(method=method, path=path):
                 with self.assertRaises(admin_api.ApiError) as error:
@@ -2751,13 +2755,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def test_malformed_or_huge_content_length_returns_4xx(self) -> None:
         invalid = self.raw_request(
-            b"POST /v1/threads/t1/messages HTTP/1.1\r\n"
+            b"POST /v1/threads/thread-t1/messages HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
             + f"Cookie: tc_admin_session={self.session_token}\r\nX-Kern-Csrf: 1\r\n".encode()
             + b"Content-Length: nope\r\n\r\n"
         )
         huge = self.raw_request(
-            b"POST /v1/threads/t1/messages HTTP/1.1\r\n"
+            b"POST /v1/threads/thread-t1/messages HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
             + f"Cookie: tc_admin_session={self.session_token}\r\nX-Kern-Csrf: 1\r\n".encode()
             + b"Content-Length: 1048577\r\n\r\n"
@@ -3089,72 +3093,76 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("root helper could not be terminated", error.exception.read().decode())
 
     def test_message_starts_turn_and_records_thread_events(self) -> None:
+        seed_thread_session("thread-t1")
         with patch.object(orchestrator, "launch_turn") as launch:
             status, body = self.request(
                 "POST",
-                "/v1/threads/t1/messages",
-                {"message": "first turn", "agent_runtime": "codex"},
+                "/v1/threads/thread-t1/messages",
+                {"message": "first turn"},
             )
 
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "accepted")
-        self.assertEqual(body["thread"]["thread_id"], "t1")
+        self.assertEqual(body["thread"]["thread_id"], "thread-t1")
         self.assertEqual(body["thread"]["agent_runtime"], "codex")
         self.assertEqual(body["thread"]["status"], "running")
         launch.assert_called_once()
         turn = launch.call_args.args[0]
-        self.assertEqual((turn.runtime_type, turn.thread_id), ("codex", "t1"))
+        self.assertEqual((turn.runtime_type, turn.thread_id), ("codex", "thread-t1"))
         self.assertEqual(launch.call_args.args[1], "first turn")
 
-        _, events = self.request("GET", "/v1/threads/t1/events")
+        _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [(event["event_type"], event["thread_id"]) for event in events["events"]],
-            [("thread.message", "t1")],
+            [("thread.message", "thread-t1")],
         )
         self.assertEqual(events["events"][0]["payload"], {"message": "first turn", "source": "user"})
 
         _, listed = self.request("GET", "/v1/threads")
-        self.assertEqual(listed["threads"][0]["thread_id"], "t1")
+        self.assertEqual(listed["threads"][0]["thread_id"], "thread-t1")
         self.assertEqual(listed["threads"][0]["status"], "running")
 
     def test_message_steers_running_turn_without_a_host_mailbox(self) -> None:
+        seed_thread_session("thread-t1")
         with patch.object(
             orchestrator, "launch_turn", side_effect=attach_recording_steer_server
         ):
             self.request(
-                "POST", "/v1/threads/t1/messages", {"message": "start", "agent_runtime": "codex"}
+                "POST", "/v1/threads/thread-t1/messages", {"message": "start"}
             )
-            _, first = self.request("POST", "/v1/threads/t1/messages", {"message": "s1"})
-            _, second = self.request("POST", "/v1/threads/t1/messages", {"message": "s2"})
-            _, third = self.request("POST", "/v1/threads/t1/messages", {"message": "s3"})
+            _, first = self.request("POST", "/v1/threads/thread-t1/messages", {"message": "s1"})
+            _, second = self.request("POST", "/v1/threads/thread-t1/messages", {"message": "s2"})
+            _, third = self.request("POST", "/v1/threads/thread-t1/messages", {"message": "s3"})
         self.assertEqual(first["status"], "accepted")
         self.assertEqual(second["status"], "accepted")
         self.assertEqual(third["status"], "accepted")
-        turn = orchestrator._LIVE["codex:t1"]
+        turn = orchestrator._LIVE["codex:thread-t1"]
         self.assertEqual(turn.server.messages, ["s1", "s2", "s3"])
-        _, events = self.request("GET", "/v1/threads/t1/events")
+        _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
             ["thread.message", "thread.message", "thread.message", "thread.message"],
         )
 
     def test_message_rejected_while_thread_finishes_previous_turn(self) -> None:
-        seed_thread_session("t1")
-        turn = register_live_turn("t1")
+        seed_thread_session("thread-t1")
+        turn = register_live_turn("thread-t1")
         turn.phase = orchestrator.ExecutionPhase.FINISHING
 
         with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request("POST", "/v1/threads/t1/messages", {"message": "retry"})
+            self.request("POST", "/v1/threads/thread-t1/messages", {"message": "retry"})
 
         self.assertEqual(error.exception.code, 409)
         self.assertIn("agent is finishing; retry shortly", error.exception.read().decode())
 
     def test_message_rejected_while_runtime_is_not_active(self) -> None:
         set_runtime_statuses(codex="awaiting_login", claude_code="deactivated")
+        seed_thread_session("thread-t1")
+        seed_thread_session("thread-t2", "claude_code")
 
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.request(
-                "POST", "/v1/threads/t1/messages", {"message": "hello", "agent_runtime": "codex"}
+                "POST", "/v1/threads/thread-t1/messages", {"message": "hello"}
             )
         self.assertEqual(error.exception.code, 409)
         self.assertIn(
@@ -3166,7 +3174,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # pointer instead of a bare status.
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.request(
-                "POST", "/v1/threads/t2/messages", {"message": "hello", "agent_runtime": "claude_code"}
+                "POST", "/v1/threads/thread-t2/messages", {"message": "hello"}
             )
         self.assertEqual(error.exception.code, 409)
         self.assertIn(
@@ -3174,9 +3182,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
             error.exception.read().decode(),
         )
 
-        # The rejected messages created no thread.
-        self.assertIsNone(state.thread_session_config("t1"))
-        self.assertIsNone(state.thread_session_config("t2"))
+        # The rejected messages recorded no events on the existing threads.
+        self.assertEqual(self.request("GET", "/v1/threads/thread-t1/events")[1]["events"], [])
+        self.assertEqual(self.request("GET", "/v1/threads/thread-t2/events")[1]["events"], [])
 
     def test_eleventh_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
         save_policy(
@@ -3187,8 +3195,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with patch.object(
             orchestrator, "launch_turn", side_effect=attach_recording_steer_server
         ):
+            for index in range(1, orchestrator.TURN_LIMIT_PER_RUNTIME + 2):
+                seed_thread_session(f"thread-t{index}")
+            seed_thread_session("thread-c1", "claude_code")
             for index in range(1, orchestrator.TURN_LIMIT_PER_RUNTIME + 1):
-                thread_id = f"t{index}"
+                thread_id = f"thread-t{index}"
                 _, body = self.request(
                     "POST",
                     f"/v1/threads/{thread_id}/messages",
@@ -3198,7 +3209,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
             with self.assertRaises(urllib.error.HTTPError) as error:
                 self.request(
-                    "POST", "/v1/threads/t11/messages", {"message": "go", "agent_runtime": "codex"}
+                    "POST", "/v1/threads/thread-t11/messages", {"message": "go"}
                 )
             self.assertEqual(error.exception.code, 429)
             self.assertIn(
@@ -3206,13 +3217,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 error.exception.read().decode(),
             )
             # The rejection rolled everything back: no thread, no events.
-            self.assertIsNone(state.thread_session_config("t11"))
-            _, events = self.request("GET", "/v1/threads/t11/events")
+            _, events = self.request("GET", "/v1/threads/thread-t11/events")
             self.assertEqual(events["events"], [])
 
             # Capacity is per runtime: Claude Code still has its own pool.
             _, claude = self.request(
-                "POST", "/v1/threads/c1/messages", {"message": "go", "agent_runtime": "claude_code"}
+                "POST", "/v1/threads/thread-c1/messages", {"message": "go"}
             )
             self.assertEqual(claude["status"], "accepted")
 
@@ -3222,12 +3232,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "2026-06-08T00:00:00Z",
         )
         set_runtime_statuses(codex="active", claude_code="active")
+        seed_thread_session("thread-codex-options", model="gpt-5.6-luna", effort="max")
+        seed_thread_session(
+            "thread-claude-options",
+            "claude_code",
+            model="claude-fable-5",
+            effort="ultracode",
+        )
         with patch.object(
             orchestrator, "launch_turn", side_effect=attach_recording_steer_server
         ):
             status, codex = self.request(
                 "POST",
-                "/v1/threads/codex-options/messages",
+                "/v1/threads/thread-codex-options/messages",
                 {
                     "message": "codex turn",
                     "agent_runtime": "codex",
@@ -3242,7 +3259,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
             status, claude = self.request(
                 "POST",
-                "/v1/threads/claude-options/messages",
+                "/v1/threads/thread-claude-options/messages",
                 {
                     "message": "claude turn",
                     "agent_runtime": "claude_code",
@@ -3264,10 +3281,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
             {"model": None, "effort": None},
         ]
         for index, fields in enumerate(invalid):
+            seed_thread_session(f"thread-invalid-options-{index}")
             with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
                 self.request(
                     "POST",
-                    f"/v1/threads/invalid-options-{index}/messages",
+                    f"/v1/threads/thread-invalid-options-{index}/messages",
                     {"message": "invalid", "agent_runtime": "codex", **fields},
                 )
             self.assertEqual(error.exception.code, 400)
@@ -3281,7 +3299,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "model": "gpt-5.6-terra",
             "effort": "high",
         }
-        path = "/v1/threads/fixed-options/messages"
+        path = "/v1/threads/thread-fixed-options/messages"
+        seed_thread_session("thread-fixed-options")
         with patch.object(
             orchestrator, "launch_turn", side_effect=attach_recording_steer_server
         ):
@@ -3333,7 +3352,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         set_runtime_statuses(codex="active", claude_code="active")
         seed_thread_session(
-            "switchable",
+            "thread-switchable",
             "codex",
             model="gpt-5.6-terra",
             effort="high",
@@ -3343,19 +3362,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
             state.append_agent_event(
                 cur,
                 "thread.message",
-                "switchable",
+                "thread-switchable",
                 {"message": "original question", "source": "user"},
             )
             state.append_agent_event(
                 cur,
                 "thread.message",
-                "switchable",
+                "thread-switchable",
                 {"message": "original answer", "source": "agent"},
             )
             state.append_agent_event(
                 cur,
                 "thread.activity",
-                "switchable",
+                "thread-switchable",
                 {
                     "activity": {
                         "provider": "codex",
@@ -3372,7 +3391,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with patch.object(orchestrator, "launch_turn") as launch:
             _, accepted = self.request(
                 "POST",
-                "/v1/threads/switchable/messages",
+                "/v1/threads/thread-switchable/messages",
                 {
                     "message": "continue here",
                     "agent_runtime": "claude_code",
@@ -3381,7 +3400,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 },
             )
 
-        config = state.thread_session_config("switchable")
+        config = state.thread_session_config("thread-switchable")
         assert config is not None
         self.assertEqual(
             (config["agent_runtime"], config["model"], config["effort"]),
@@ -3398,7 +3417,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('"detail": "command context"', launch_message)
         self.assertIn('"output": "complete command output"', launch_message)
         self.assertIn("CURRENT USER MESSAGE ---\ncontinue here", launch_message)
-        _, events = self.request("GET", "/v1/threads/switchable/events?since=0")
+        _, events = self.request("GET", "/v1/threads/thread-switchable/events?since=0")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
             [
@@ -3528,7 +3547,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self,
     ) -> None:
         seed_thread_session(
-            "missing-provider-session",
+            "thread-missing-provider-session",
             "codex",
             provider_session_id=None,
         )
@@ -3536,14 +3555,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
             state.append_agent_event(
                 cur,
                 "thread.message",
-                "missing-provider-session",
+                "thread-missing-provider-session",
                 {"message": "work already attempted", "source": "user"},
             )
 
         with patch.object(orchestrator, "launch_turn") as launch:
             self.request(
                 "POST",
-                "/v1/threads/missing-provider-session/messages",
+                "/v1/threads/thread-missing-provider-session/messages",
                 {"message": "retry with context"},
             )
 
@@ -3553,7 +3572,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("CURRENT USER MESSAGE ---\nretry with context", launch_message)
         _, events = self.request(
             "GET",
-            "/v1/threads/missing-provider-session/events?since=0",
+            "/v1/threads/thread-missing-provider-session/events?since=0",
         )
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
@@ -3562,7 +3581,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def test_thread_on_a_superseded_model_can_switch_to_an_offered_model(self) -> None:
         seed_thread_session(
-            "legacy-alias-thread",
+            "thread-legacy-alias-thread",
             "claude_code",
             model="opus",
             effort="high",
@@ -3576,7 +3595,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
                 self.request(
                     "POST",
-                    "/v1/threads/legacy-alias-thread/messages",
+                    "/v1/threads/thread-legacy-alias-thread/messages",
                     {"message": "follow up", **fields},
                 )
             self.assertEqual(error.exception.code, 409)
@@ -3585,7 +3604,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with patch.object(orchestrator, "launch_turn"):
             _, switched = self.request(
                 "POST",
-                "/v1/threads/legacy-alias-thread/messages",
+                "/v1/threads/thread-legacy-alias-thread/messages",
                 {
                     "message": "continue on a current model",
                     "agent_runtime": "codex",
@@ -3601,13 +3620,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # threads.
         _, threads = self.request("GET", "/v1/threads")
         listed = {thread["thread_id"]: thread for thread in threads["threads"]}
-        self.assertEqual(listed["legacy-alias-thread"]["model"], "gpt-5.6-terra")
-        self.assertEqual(listed["legacy-alias-thread"]["status"], "running")
+        self.assertEqual(listed["thread-legacy-alias-thread"]["model"], "gpt-5.6-terra")
+        self.assertEqual(listed["thread-legacy-alias-thread"]["status"], "running")
 
-        with self.assertRaises(urllib.error.HTTPError) as new_thread_error:
-            self.request(
+        with self.assertRaises(admin_api.ApiError) as new_thread_error:
+            self.workspace_request(
                 "POST",
-                "/v1/threads/new-alias-thread/messages",
+                "/v1/threads/thread-new-alias-thread/messages",
                 {
                     "message": "new thread",
                     "agent_runtime": "claude_code",
@@ -3615,35 +3634,37 @@ class AdminApiIntegrationTests(unittest.TestCase):
                     "effort": "high",
                 },
             )
-        self.assertEqual(new_thread_error.exception.code, 400)
-        self.assertIn("model must be one of", new_thread_error.exception.read().decode())
+        self.assertEqual(new_thread_error.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertIn("model must be one of", new_thread_error.exception.message)
 
     def test_message_without_session_options_requires_an_existing_thread(self) -> None:
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request("POST", "/v1/threads/unknown-options/messages", {"message": "first"})
+        with self.assertRaises(admin_api.ApiError) as error:
+            self.workspace_request(
+                "POST", "/v1/threads/thread-unknown-options/messages", {"message": "first"}
+            )
 
-        self.assertEqual(error.exception.code, 400)
-        self.assertIn("required when starting a new thread", error.exception.read().decode())
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertIn("required when starting a new thread", error.exception.message)
 
     def test_message_session_options_must_be_provided_together(self) -> None:
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request(
+        with self.assertRaises(admin_api.ApiError) as error:
+            self.workspace_request(
                 "POST",
-                "/v1/threads/partial-options/messages",
+                "/v1/threads/thread-partial-options/messages",
                 {"message": "first", "agent_runtime": "codex", "model": "gpt-5.6-terra"},
             )
 
-        self.assertEqual(error.exception.code, 400)
-        self.assertIn("must be provided together", error.exception.read().decode())
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertIn("must be provided together", error.exception.message)
 
     def test_hermes_thread_rejects_steering_without_recording_it(self) -> None:
-        seed_thread_session("hermes-thread", "hermes")
-        register_live_turn("hermes-thread", "hermes")
-        _, before = self.request("GET", "/v1/threads/hermes-thread/events")
+        seed_thread_session("thread-hermes-thread", "hermes")
+        register_live_turn("thread-hermes-thread", "hermes")
+        _, before = self.request("GET", "/v1/threads/thread-hermes-thread/events")
 
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.request(
-                "POST", "/v1/threads/hermes-thread/messages", {"message": "change direction"}
+                "POST", "/v1/threads/thread-hermes-thread/messages", {"message": "change direction"}
             )
 
         self.assertEqual(error.exception.code, HTTPStatus.CONFLICT)
@@ -3651,24 +3672,24 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "Hermes cannot accept another message while running; wait for it to finish",
             error.exception.read().decode(),
         )
-        _, after = self.request("GET", "/v1/threads/hermes-thread/events")
+        _, after = self.request("GET", "/v1/threads/thread-hermes-thread/events")
         self.assertEqual(after["events"], before["events"])
 
     def test_thread_list_reports_configuration_recency_and_live_status(self) -> None:
         seed_thread_session(
-            "t1", "codex", provider_session_id="codex-t1", last_used_at="2026-06-08T00:00:03Z"
+            "thread-t1", "codex", provider_session_id="codex-t1", last_used_at="2026-06-08T00:00:03Z"
         )
-        seed_thread_session("t2", "codex", last_used_at="2026-06-08T00:00:04Z")
+        seed_thread_session("thread-t2", "codex", last_used_at="2026-06-08T00:00:04Z")
         seed_thread_session(
-            "t3", "claude_code", provider_session_id="claude-t3", last_used_at="2026-06-08T00:00:05Z"
+            "thread-t3", "claude_code", provider_session_id="claude-t3", last_used_at="2026-06-08T00:00:05Z"
         )
-        register_live_turn("t2")
+        register_live_turn("thread-t2")
 
         _, body = self.request("GET", "/v1/threads")
 
         self.assertEqual(
             [(thread["thread_id"], thread["agent_runtime"], thread["status"]) for thread in body["threads"]],
-            [("t3", "claude_code", "idle"), ("t2", "codex", "running"), ("t1", "codex", "idle")],
+            [("thread-t3", "claude_code", "idle"), ("thread-t2", "codex", "running"), ("thread-t1", "codex", "idle")],
         )
         self.assertEqual(body["threads"][2]["last_used_at"], "2026-06-08T00:00:03Z")
         self.assertEqual(
@@ -3677,14 +3698,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
 
     def test_thread_list_is_bounded_and_pages_with_an_opaque_cursor(self) -> None:
-        seed_thread_session("t1", "codex", last_used_at="2026-06-08T00:00:01Z")
-        seed_thread_session("t2", "codex", last_used_at="2026-06-08T00:00:02Z")
-        seed_thread_session("t3", "codex", last_used_at="2026-06-08T00:00:03Z")
+        seed_thread_session("thread-t1", "codex", last_used_at="2026-06-08T00:00:01Z")
+        seed_thread_session("thread-t2", "codex", last_used_at="2026-06-08T00:00:02Z")
+        seed_thread_session("thread-t3", "codex", last_used_at="2026-06-08T00:00:03Z")
 
         _, first = self.request("GET", "/v1/threads?limit=2")
         self.assertEqual(
             [thread["thread_id"] for thread in first["threads"]],
-            ["t3", "t2"],
+            ["thread-t3", "thread-t2"],
         )
         self.assertIsInstance(first.get("next_before"), str)
 
@@ -3692,7 +3713,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, second = self.request("GET", f"/v1/threads?limit=2&before={cursor}")
         self.assertEqual(
             [thread["thread_id"] for thread in second["threads"]],
-            ["t1"],
+            ["thread-t1"],
         )
         self.assertNotIn("next_before", second)
 
@@ -3707,19 +3728,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def test_thread_list_cursor_uses_thread_id_as_the_equal_timestamp_tiebreaker(self) -> None:
         timestamp = "2026-06-08T00:00:03Z"
-        seed_thread_session("same-a", "codex", last_used_at=timestamp)
-        seed_thread_session("same-b", "claude_code", last_used_at=timestamp)
+        seed_thread_session("thread-same-a", "codex", last_used_at=timestamp)
+        seed_thread_session("thread-same-b", "claude_code", last_used_at=timestamp)
 
         _, first = self.request("GET", "/v1/threads?limit=1")
         self.assertEqual(
             [thread["thread_id"] for thread in first["threads"]],
-            ["same-b"],
+            ["thread-same-b"],
         )
         cursor = first["next_before"]
         decoded = json.loads(
             base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
         )
-        self.assertEqual(decoded, [timestamp, "same-b"])
+        self.assertEqual(decoded, [timestamp, "thread-same-b"])
 
         _, second = self.request(
             "GET",
@@ -3727,17 +3748,17 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             [thread["thread_id"] for thread in second["threads"]],
-            ["same-a"],
+            ["thread-same-a"],
         )
 
     def test_thread_detail_returns_thread_or_404_and_rejects_query_params(self) -> None:
-        seed_thread_session("t1", "codex", last_used_at="2026-06-08T00:00:03Z")
+        seed_thread_session("thread-t1", "codex", last_used_at="2026-06-08T00:00:03Z")
 
-        _, body = self.request("GET", "/v1/threads/t1")
+        _, body = self.request("GET", "/v1/threads/thread-t1")
         self.assertEqual(
             body["thread"],
             {
-                "thread_id": "t1",
+                "thread_id": "thread-t1",
                 "agent_runtime": "codex",
                 "model": "gpt-5.6-terra",
                 "effort": "high",
@@ -3747,29 +3768,30 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(urllib.error.HTTPError) as missing:
-            self.request("GET", "/v1/threads/missing")
+            self.request("GET", "/v1/threads/thread-missing")
         self.assertEqual(missing.exception.code, 404)
         self.assertIn("thread not found", missing.exception.read().decode())
 
         with self.assertRaises(urllib.error.HTTPError) as query_error:
-            self.request("GET", "/v1/threads/t1?limit=5")
+            self.request("GET", "/v1/threads/thread-t1?limit=5")
         self.assertEqual(query_error.exception.code, 400)
         self.assertIn("does not accept query parameters", query_error.exception.read().decode())
 
     def test_stop_ends_running_turn_and_late_finish_does_not_resurrect_it(self) -> None:
+        seed_thread_session("thread-t1")
         with patch.object(orchestrator, "launch_turn"):
             self.request(
-                "POST", "/v1/threads/t1/messages", {"message": "long turn", "agent_runtime": "codex"}
+                "POST", "/v1/threads/thread-t1/messages", {"message": "long turn"}
             )
-        turn = orchestrator._LIVE["codex:t1"]
+        turn = orchestrator._LIVE["codex:thread-t1"]
         turn.server = MagicMock()
 
-        _, body = self.request("POST", "/v1/threads/t1/stop")
+        _, body = self.request("POST", "/v1/threads/thread-t1/stop")
 
         self.assertEqual(body["status"], "accepted")
         turn.server.interrupt.assert_called_once_with()
         self.assertEqual(turn.phase, orchestrator.ExecutionPhase.FINISHING)
-        _, events = self.request("GET", "/v1/threads/t1/events")
+        _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
             ["thread.message", "thread.stopped"],
@@ -3777,9 +3799,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         # The thread stays fenced until the owning turn thread releases it, so
         # a new message is rejected with a retry hint rather than queued.
-        self.assertIn("t1", orchestrator.live_thread_ids())
+        self.assertIn("thread-t1", orchestrator.live_thread_ids())
         with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request("POST", "/v1/threads/t1/messages", {"message": "again"})
+            self.request("POST", "/v1/threads/thread-t1/messages", {"message": "again"})
         self.assertEqual(error.exception.code, 409)
         self.assertIn("agent is finishing", error.exception.read().decode())
 
@@ -3787,12 +3809,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # the stopped turn, but the session id it learned mid-turn is persisted
         # so the thread's next turn can resume it.
         orchestrator._finish_turn(turn, provider_session_id="sess-9")
-        _, events = self.request("GET", "/v1/threads/t1/events")
+        _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
             ["thread.message", "thread.stopped"],
         )
-        config = state.thread_session_config("t1")
+        config = state.thread_session_config("thread-t1")
         self.assertIsNotNone(config)
         assert config is not None
         self.assertEqual(config["provider_session_id"], "sess-9")
@@ -3802,17 +3824,17 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with state.mutation() as cur:
             for n in range(map_limit + 5):
                 state.save_thread_session(
-                    cur, "codex", f"codex-chat-{n}", f"thread_{n}",
+                    cur, "codex", f"thread-codex-chat-{n}", f"thread_{n}",
                     f"2026-06-08T{n // 60:02d}:{n % 60:02d}:00Z", "gpt-5.6-terra", "high",
                 )
                 state.save_thread_session(
-                    cur, "claude_code", f"claude-chat-{n}", f"session_{n}",
+                    cur, "claude_code", f"thread-claude-chat-{n}", f"session_{n}",
                     f"2026-06-09T{n // 60:02d}:{n % 60:02d}:00Z", "claude-opus-5", "high",
                 )
             state.append_agent_event(
                 cur,
                 "thread.message",
-                "codex-chat-0",
+                "thread-codex-chat-0",
                 {"message": "retained", "source": "user"},
             )
 
@@ -3820,37 +3842,37 @@ class AdminApiIntegrationTests(unittest.TestCase):
             admin_api.prune_state()
 
         remaining = {thread["thread_id"] for thread in state.page_thread_summaries(None, 100)}
-        codex_history = {thread for thread in remaining if thread.startswith("codex-chat-")}
-        claude_history = {thread for thread in remaining if thread.startswith("claude-chat-")}
+        codex_history = {thread for thread in remaining if thread.startswith("thread-codex-chat-")}
+        claude_history = {thread for thread in remaining if thread.startswith("thread-claude-chat-")}
         self.assertEqual(
             codex_history,
-            {"codex-chat-0", *(f"codex-chat-{n}" for n in range(5, map_limit + 5))},
+            {"thread-codex-chat-0", *(f"thread-codex-chat-{n}" for n in range(5, map_limit + 5))},
         )
         self.assertEqual(
             claude_history,
-            {f"claude-chat-{n}" for n in range(5, map_limit + 5)},
+            {f"thread-claude-chat-{n}" for n in range(5, map_limit + 5)},
         )
 
     def test_clearing_working_memory_starts_the_next_run_without_a_handoff(self) -> None:
-        seed_thread_session("cleared", "codex", provider_session_id="codex-session")
+        seed_thread_session("thread-cleared", "codex", provider_session_id="codex-session")
         with state.mutation() as cur:
             state.append_agent_event(
-                cur, "thread.message", "cleared", {"message": "secret plan", "source": "user"}
+                cur, "thread.message", "thread-cleared", {"message": "secret plan", "source": "user"}
             )
             state.append_agent_event(
-                cur, "thread.message", "cleared", {"message": "acknowledged", "source": "agent"}
+                cur, "thread.message", "thread-cleared", {"message": "acknowledged", "source": "agent"}
             )
 
-        _, cleared = self.request("POST", "/v1/threads/cleared/clear-memory")
+        _, cleared = self.request("POST", "/v1/threads/thread-cleared/clear-memory")
         self.assertEqual(cleared["status"], "cleared")
 
-        config = state.thread_session_config("cleared")
+        config = state.thread_session_config("thread-cleared")
         assert config is not None
         self.assertIsNone(config["provider_session_id"])
         # Runtime configuration survives; only the provider conversation goes.
         self.assertEqual(config["agent_runtime"], "codex")
 
-        _, events = self.request("GET", "/v1/threads/cleared/events?since=0")
+        _, events = self.request("GET", "/v1/threads/thread-cleared/events?since=0")
         marker = events["events"][-1]
         self.assertEqual(marker["event_type"], "thread.memory_cleared")
         self.assertEqual(
@@ -3864,7 +3886,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         with patch.object(orchestrator, "launch_turn") as launch:
             self.request(
-                "POST", "/v1/threads/cleared/messages", {"message": "fresh start", "agent_runtime": "codex"}
+                "POST", "/v1/threads/thread-cleared/messages", {"message": "fresh start", "agent_runtime": "codex"}
             )
         _, launch_message, provider_session_id = launch.call_args.args
         self.assertIsNone(provider_session_id)
@@ -3882,7 +3904,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         continuing a thread — the opposite of what a clear just established.
         """
         seed_thread_session(
-            "switched",
+            "thread-switched",
             "codex",
             model="gpt-5.6-terra",
             effort="high",
@@ -3890,14 +3912,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         with state.mutation() as cur:
             state.append_agent_event(
-                cur, "thread.message", "switched", {"message": "old plan", "source": "user"}
+                cur, "thread.message", "thread-switched", {"message": "old plan", "source": "user"}
             )
-        self.request("POST", "/v1/threads/switched/clear-memory")
+        self.request("POST", "/v1/threads/thread-switched/clear-memory")
 
         with patch.object(orchestrator, "launch_turn") as launch:
             self.request(
                 "POST",
-                "/v1/threads/switched/messages",
+                "/v1/threads/thread-switched/messages",
                 {
                     "message": "fresh start",
                     "agent_runtime": "codex",
@@ -3918,19 +3940,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
         onto the first one's position, so the transcript would stop showing
         where the latest clear actually happened.
         """
-        seed_thread_session("twice", "codex", provider_session_id="codex-session")
+        seed_thread_session("thread-twice", "codex", provider_session_id="codex-session")
         with state.mutation() as cur:
             state.append_agent_event(
-                cur, "thread.message", "twice", {"message": "first", "source": "user"}
+                cur, "thread.message", "thread-twice", {"message": "first", "source": "user"}
             )
-        self.request("POST", "/v1/threads/twice/clear-memory")
+        self.request("POST", "/v1/threads/thread-twice/clear-memory")
         with state.mutation() as cur:
             state.append_agent_event(
-                cur, "thread.message", "twice", {"message": "second", "source": "user"}
+                cur, "thread.message", "thread-twice", {"message": "second", "source": "user"}
             )
-        self.request("POST", "/v1/threads/twice/clear-memory")
+        self.request("POST", "/v1/threads/thread-twice/clear-memory")
 
-        _, events = self.request("GET", "/v1/threads/twice/events?since=0")
+        _, events = self.request("GET", "/v1/threads/thread-twice/events?since=0")
         markers = [
             event for event in events["events"]
             if event["event_type"] == "thread.memory_cleared"
@@ -3943,27 +3965,27 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # The newest floor is the later marker, so the earlier one is not
         # resurrected as handoff context.
         self.assertEqual(
-            state.thread_session_config("twice")["context_cleared_seq"],
+            state.thread_session_config("thread-twice")["context_cleared_seq"],
             markers[1]["seq"],
         )
 
     def test_clearing_working_memory_rejects_unknown_and_running_threads(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as missing:
-            self.request("POST", "/v1/threads/unknown-thread/clear-memory")
+            self.request("POST", "/v1/threads/thread-unknown-thread/clear-memory")
         self.assertEqual(missing.exception.code, 404)
 
-        seed_thread_session("busy", "codex", provider_session_id="codex-session")
+        seed_thread_session("thread-busy", "codex", provider_session_id="codex-session")
         with patch.object(orchestrator, "launch_turn"):
             self.request(
-                "POST", "/v1/threads/busy/messages", {"message": "long turn", "agent_runtime": "codex"}
+                "POST", "/v1/threads/thread-busy/messages", {"message": "long turn", "agent_runtime": "codex"}
             )
         with self.assertRaises(urllib.error.HTTPError) as running:
-            self.request("POST", "/v1/threads/busy/clear-memory")
+            self.request("POST", "/v1/threads/thread-busy/clear-memory")
         self.assertEqual(running.exception.code, 409)
         self.assertIn("only while the thread is idle", running.exception.read().decode())
         # A refused clear leaves the live session mapping intact.
         self.assertEqual(
-            state.thread_session_config("busy")["provider_session_id"], "codex-session"
+            state.thread_session_config("thread-busy")["provider_session_id"], "codex-session"
         )
 
     def test_clearing_working_memory_waits_for_a_finishing_turn_to_close(self) -> None:
@@ -3973,64 +3995,64 @@ class AdminApiIntegrationTests(unittest.TestCase):
         number, which would restore the mapping the clear just dropped, so the
         clear has to wait for the turn to leave the live set.
         """
-        seed_thread_session("finishing", "codex", provider_session_id="codex-session")
-        turn = register_live_turn("finishing")
+        seed_thread_session("thread-finishing", "codex", provider_session_id="codex-session")
+        turn = register_live_turn("thread-finishing")
         turn.phase = orchestrator.ExecutionPhase.FINISHING
         # Stopping returns the thread to durable idle; the turn stays live
         # until its process closes, which is exactly the window at issue.
         with state.mutation() as cur:
-            state.finish_thread_run(cur, "finishing", turn.run_number)
-        self.assertEqual(state.thread_session_config("finishing")["status"], "idle")
+            state.finish_thread_run(cur, "thread-finishing", turn.run_number)
+        self.assertEqual(state.thread_session_config("thread-finishing")["status"], "idle")
 
         with self.assertRaises(urllib.error.HTTPError) as finishing:
-            self.request("POST", "/v1/threads/finishing/clear-memory")
+            self.request("POST", "/v1/threads/thread-finishing/clear-memory")
         self.assertEqual(finishing.exception.code, 409)
         self.assertIn("still finishing", finishing.exception.read().decode())
         self.assertEqual(
-            state.thread_session_config("finishing")["provider_session_id"],
+            state.thread_session_config("thread-finishing")["provider_session_id"],
             "codex-session",
         )
         # No marker is written for a refused clear.
-        _, events = self.request("GET", "/v1/threads/finishing/events?since=0")
+        _, events = self.request("GET", "/v1/threads/thread-finishing/events?since=0")
         self.assertEqual(events["events"], [])
 
         orchestrator._LIVE.clear()
-        _, cleared = self.request("POST", "/v1/threads/finishing/clear-memory")
+        _, cleared = self.request("POST", "/v1/threads/thread-finishing/clear-memory")
         self.assertEqual(cleared["status"], "cleared")
         self.assertIsNone(
-            state.thread_session_config("finishing")["provider_session_id"]
+            state.thread_session_config("thread-finishing")["provider_session_id"]
         )
 
     def test_stop_rejects_threads_without_a_stoppable_turn(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as missing:
-            self.request("POST", "/v1/threads/unknown-thread/stop")
+            self.request("POST", "/v1/threads/thread-unknown-thread/stop")
         self.assertEqual(missing.exception.code, 404)
         self.assertIn("thread not found", missing.exception.read().decode())
 
-        seed_thread_session("idle-thread")
+        seed_thread_session("thread-idle-thread")
         with self.assertRaises(urllib.error.HTTPError) as idle:
-            self.request("POST", "/v1/threads/idle-thread/stop")
+            self.request("POST", "/v1/threads/thread-idle-thread/stop")
         self.assertEqual(idle.exception.code, 409)
         self.assertIn("the thread has no running work", idle.exception.read().decode())
 
         # A turn already finishing (its process still closing) is not
         # stoppable again.
-        turn = register_live_turn("idle-thread")
+        turn = register_live_turn("thread-idle-thread")
         turn.phase = orchestrator.ExecutionPhase.FINISHING
         with self.assertRaises(urllib.error.HTTPError) as finishing:
-            self.request("POST", "/v1/threads/idle-thread/stop")
+            self.request("POST", "/v1/threads/thread-idle-thread/stop")
         self.assertEqual(finishing.exception.code, 409)
 
     def test_thread_event_history_can_be_paged_for_selected_thread(self) -> None:
-        seed_thread_session("t1", "codex", last_used_at="2026-06-08T00:00:01Z")
+        seed_thread_session("thread-t1", "codex", last_used_at="2026-06-08T00:00:01Z")
         with state.mutation() as cur:
-            state.append_agent_event(cur, "thread.message", "t1", {"message": "done", "source": "user"})
-            state.append_agent_event(cur, "thread.message", "t1", {"message": "working", "source": "agent"})
-            state.append_agent_event(cur, "thread.message", "t1", {"message": "ok", "source": "agent"})
-            state.append_agent_event(cur, "thread.error", "t1", {"error_message": "retryable"})
-            state.append_agent_event(cur, "thread.stopped", "t1", {})
+            state.append_agent_event(cur, "thread.message", "thread-t1", {"message": "done", "source": "user"})
+            state.append_agent_event(cur, "thread.message", "thread-t1", {"message": "working", "source": "agent"})
+            state.append_agent_event(cur, "thread.message", "thread-t1", {"message": "ok", "source": "agent"})
+            state.append_agent_event(cur, "thread.error", "thread-t1", {"error_message": "retryable"})
+            state.append_agent_event(cur, "thread.stopped", "thread-t1", {})
 
-        _, first = self.request("GET", "/v1/threads/t1/events")
+        _, first = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(len(first["events"]), 5)
         self.assertEqual([event["event_type"] for event in first["events"]], [
             "thread.message",
@@ -4039,23 +4061,23 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "thread.error",
             "thread.stopped",
         ])
-        self.assertTrue(all(event["thread_id"] == "t1" for event in first["events"]))
-        _, second = self.request("GET", f"/v1/threads/t1/events?since={first['events'][-1]['seq']}")
+        self.assertTrue(all(event["thread_id"] == "thread-t1" for event in first["events"]))
+        _, second = self.request("GET", f"/v1/threads/thread-t1/events?since={first['events'][-1]['seq']}")
         self.assertEqual(second["events"], [])
 
     def test_runtime_status_and_health_report_active_thread_ids(self) -> None:
-        register_live_turn("t2")
-        register_live_turn("t1")
-        register_live_turn("c1", "claude_code")
+        register_live_turn("thread-t2")
+        register_live_turn("thread-t1")
+        register_live_turn("thread-c1", "claude_code")
 
         _, body = self.request("GET", "/v1/agent-runtime/status")
         by_type = {runtime["type"]: runtime for runtime in body["runtimes"]}
-        self.assertEqual(by_type["codex"]["active_thread_ids"], ["t1", "t2"])
-        self.assertEqual(by_type["claude_code"]["active_thread_ids"], ["c1"])
+        self.assertEqual(by_type["codex"]["active_thread_ids"], ["thread-t1", "thread-t2"])
+        self.assertEqual(by_type["claude_code"]["active_thread_ids"], ["thread-c1"])
         self.assertEqual(by_type["hermes"]["active_thread_ids"], [])
 
         _, health = self.health()
-        self.assertEqual(self.runtime(health)["active_thread_ids"], ["t1", "t2"])
+        self.assertEqual(self.runtime(health)["active_thread_ids"], ["thread-t1", "thread-t2"])
 
     def test_task_routes_are_removed(self) -> None:
         for method, path in (
@@ -4068,7 +4090,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             ("POST", "/v1/tasks/task_1/steer"),
             ("POST", "/v1/tasks/task_1/cancel"),
             ("POST", "/v1/tasks/task_1/kill"),
-            ("GET", "/v1/threads/t1/tasks"),
+            ("GET", "/v1/threads/thread-t1/tasks"),
         ):
             with self.subTest(method=method, path=path):
                 with self.assertRaises(urllib.error.HTTPError) as error:
@@ -4078,13 +4100,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, 404)
 
     def test_message_rejects_partial_configuration_for_existing_threads(self) -> None:
-        seed_thread_session("used-by-codex", "codex", last_used_at="2026-06-08T00:00:01Z")
-        seed_thread_session("used-by-claude", "claude_code", last_used_at="2026-06-08T00:00:02Z")
+        seed_thread_session("thread-used-by-codex", "codex", last_used_at="2026-06-08T00:00:01Z")
+        seed_thread_session("thread-used-by-claude", "claude_code", last_used_at="2026-06-08T00:00:02Z")
 
         with self.assertRaises(urllib.error.HTTPError) as codex_error:
             self.request(
                 "POST",
-                "/v1/threads/used-by-codex/messages",
+                "/v1/threads/thread-used-by-codex/messages",
                 {"message": "bad", "model": "gpt-5.6-sol"},
             )
         self.assertEqual(codex_error.exception.code, 400)
@@ -4092,16 +4114,16 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as claude_error:
             self.request(
                 "POST",
-                "/v1/threads/used-by-claude/messages",
+                "/v1/threads/thread-used-by-claude/messages",
                 {"message": "bad", "effort": "max"},
             )
         self.assertEqual(claude_error.exception.code, 400)
 
         with patch.object(orchestrator, "launch_turn"):
             _, accepted = self.request(
-                "POST", "/v1/threads/used-by-codex/messages", {"message": "ok"}
+                "POST", "/v1/threads/thread-used-by-codex/messages", {"message": "ok"}
             )
-        self.assertEqual(accepted["thread"]["thread_id"], "used-by-codex")
+        self.assertEqual(accepted["thread"]["thread_id"], "thread-used-by-codex")
 
     def test_admin_ui_has_activity_and_diagnostic_views(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
@@ -4329,7 +4351,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             {"message": "hello", "agent_runtime": "bad", "model": "x", "effort": "high"},
         ):
             with self.subTest(body=body), self.assertRaises(urllib.error.HTTPError) as error:
-                self.request("POST", "/v1/threads/t1/messages", body)
+                self.request("POST", "/v1/threads/thread-t1/messages", body)
             self.assertEqual(error.exception.code, 400)
 
         # Thread ids are path components; a malformed one never reaches the
@@ -4343,13 +4365,52 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 )
             self.assertEqual(error.exception.code, 404)
 
-        with patch.object(orchestrator, "launch_turn"):
-            _, body = self.request(
+        for invalid_prefix in ("Chat_01-a", "custom-thread"):
+            with self.subTest(thread_id=invalid_prefix), self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(
+                    "POST",
+                    f"/v1/threads/{invalid_prefix}/messages",
+                    {"message": "hello", "agent_runtime": "codex"},
+                )
+            self.assertEqual(error.exception.code, 404)
+
+        with self.assertRaises(admin_api.ApiError) as invalid_slug:
+            self.workspace_request(
                 "POST",
-                "/v1/threads/Chat_01-a/messages",
-                {"message": "hello", "agent_runtime": "codex"},
+                "/v1/threads/thread-Chat_01-a/messages",
+                {
+                    "message": "hello",
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-terra",
+                    "effort": "high",
+                },
             )
-        self.assertEqual(body["thread"]["thread_id"], "Chat_01-a")
+        self.assertEqual(invalid_slug.exception.status, HTTPStatus.NOT_FOUND)
+
+        with self.assertRaises(admin_api.ApiError) as direct_call:
+            admin_api.send_thread_message(
+                "legacy-thread",
+                {
+                    "message": "hello",
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-terra",
+                    "effort": "high",
+                },
+            )
+        self.assertEqual(direct_call.exception.status, HTTPStatus.BAD_REQUEST)
+
+        with patch.object(orchestrator, "launch_turn"):
+            body = self.workspace_request(
+                "POST",
+                "/v1/threads/thread-chat-01-a/messages",
+                {
+                    "message": "hello",
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-terra",
+                    "effort": "high",
+                },
+            )
+        self.assertEqual(body["thread"]["thread_id"], "thread-chat-01-a")
 
     def test_network_policy_replace_and_events(self) -> None:
         body = {
@@ -5989,8 +6050,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "login_url": "https://auth.openai.com/device",
             "expires_at": "2099-06-08T00:10:00Z",
         })
-        seed_thread_session("chat")
-        turn = register_live_turn("chat", server=MagicMock())
+        seed_thread_session("thread-chat")
+        turn = register_live_turn("thread-chat", server=MagicMock())
         save_approved_openai_account("acct_old")
         state.save_proxy_openai_account_id("acct_old")
 
@@ -6011,7 +6072,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # owning turn thread keeps the fence until it observes the close.
         self.assertEqual(turn.phase, orchestrator.ExecutionPhase.FINISHING)
         turn.server.interrupt.assert_called_once_with()
-        _, events = self.request("GET", "/v1/threads/chat/events")
+        _, events = self.request("GET", "/v1/threads/thread-chat/events")
         self.assertEqual([event["event_type"] for event in events["events"]], ["thread.error"])
         self.assertIn(
             "linked provider account was reset by the operator",
@@ -6140,14 +6201,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # since-based endpoint under /v1/threads/{id}/events).
         with state.mutation() as cur:
             for index in range(120):
-                state.append_agent_event(cur, "thread.message", "t1", {"message": f"m{index}"})
+                state.append_agent_event(cur, "thread.message", "thread-t1", {"message": f"m{index}"})
 
         _, body = self.request("GET", "/v1/events")
         seqs = [event["seq"] for event in body["events"]]
         self.assertEqual(len(seqs), 100)
         self.assertEqual(seqs, sorted(seqs, reverse=True))
         # Global events carry the thread key, not a task id.
-        self.assertEqual(body["events"][0]["thread_id"], "t1")
+        self.assertEqual(body["events"][0]["thread_id"], "thread-t1")
         self.assertNotIn("task_id", body["events"][0])
 
         _, older = self.request("GET", f"/v1/events?before={seqs[-1]}")
@@ -6207,21 +6268,21 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(body["updated_at"], "2026-06-08T00:00:03Z")
 
     def test_initialize_state_fails_turns_orphaned_by_a_restart(self) -> None:
-        seed_thread_session("t1")
-        seed_thread_session("t2")
+        seed_thread_session("thread-t1")
+        seed_thread_session("thread-t2")
         with state.mutation() as cur:
-            run_number = state.start_thread_run(cur, "t1")
+            run_number = state.start_thread_run(cur, "thread-t1")
             state.append_agent_event(
                 cur,
                 "thread.message",
-                "t1",
+                "thread-t1",
                 {"message": "interrupted turn", "source": "user"},
                 run_number=run_number,
             )
 
         admin_api.initialize_state()
 
-        _, open_events = self.request("GET", "/v1/threads/t1/events")
+        _, open_events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in open_events["events"]],
             ["thread.message", "thread.error"],
@@ -6231,12 +6292,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
             open_events["events"][-1]["payload"]["error_message"],
         )
         # A thread whose newest turn already ended is left alone.
-        _, closed_events = self.request("GET", "/v1/threads/t2/events")
+        _, closed_events = self.request("GET", "/v1/threads/thread-t2/events")
         self.assertEqual(
             [event["event_type"] for event in closed_events["events"]],
             [],
         )
-        self.assertEqual(state.thread_session_config("t1")["status"], "idle")
+        self.assertEqual(state.thread_session_config("thread-t1")["status"], "idle")
 
     def test_event_seq_commits_atomically_with_the_event(self) -> None:
         # Event seqs come from a database serial: unique and increasing, and
@@ -6244,22 +6305,22 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # seq can never appear twice in the log — duplicate seqs would break
         # cursor-based event pagination.
         with state.mutation() as cur:
-            first = state.append_agent_event(cur, "thread.message", "t1", {"message": "hello"})
+            first = state.append_agent_event(cur, "thread.message", "thread-t1", {"message": "hello"})
         with self.assertRaises(RuntimeError):
             with state.mutation() as cur:
-                state.append_agent_event(cur, "thread.message", "t1", {"message": "aborted"})
+                state.append_agent_event(cur, "thread.message", "thread-t1", {"message": "aborted"})
                 raise RuntimeError("abort after allocating a seq")
         with state.mutation() as cur:
-            second = state.append_agent_event(cur, "thread.message", "t1", {"message": "again"})
+            second = state.append_agent_event(cur, "thread.message", "thread-t1", {"message": "again"})
 
         self.assertGreater(second, first)
         _, body = self.request("GET", "/v1/events")
         self.assertEqual([event["seq"] for event in body["events"]], [second, first])
 
     def test_second_instance_fails_on_bind_before_touching_live_state(self) -> None:
-        seed_thread_session("t1")
+        seed_thread_session("thread-t1")
         with state.mutation() as cur:
-            state.start_thread_run(cur, "t1")
+            state.start_thread_run(cur, "thread-t1")
 
         # The port bind is the single-instance gate: a second instance must die
         # there before restart recovery could fail the live instance's open
@@ -6272,7 +6333,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 admin_api.main()
 
-        _, events = self.request("GET", "/v1/threads/t1/events")
+        _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(events["events"], [])
 
 
@@ -6589,7 +6650,7 @@ class ToolRoutesTests(unittest.TestCase):
             "exception_type": "RuntimeError",
             "summary": "thread session missing",
             "traceback": 'File "host/runtime/admin_api/orchestrator.py", line 1, in execute',
-            "context": {"thread_id": "thread_1"},
+            "context": {"thread_id": "thread-1"},
             "fingerprint": "a" * 64,
             "host_version": "1.3.3",
             "boot_id": "boot-1",
@@ -6611,7 +6672,7 @@ class ToolRoutesTests(unittest.TestCase):
         self.assertEqual([row["seq"] for row in filtered["events"]], [first])
         _, detail = self.request("GET", f"/v1/host-errors/{first}")
         self.assertEqual(detail["error"]["traceback"], event["traceback"])
-        self.assertEqual(detail["error"]["context"], {"thread_id": "thread_1"})
+        self.assertEqual(detail["error"]["context"], {"thread_id": "thread-1"})
         self.assertEqual(detail["error"]["id"], first)
 
         # Coalescing moves the row back to the top of seq-based paging without

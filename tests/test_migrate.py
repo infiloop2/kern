@@ -264,6 +264,37 @@ class MigrateRunnerTests(unittest.TestCase):
                 [("agent_history_activities", 1), ("agent_history_messages", 3)],
             )
 
+    def test_product_thread_id_migration_drops_old_sessions_and_events(self) -> None:
+        self.assertEqual(migrate.up(target=33, quiet=True), list(range(1, 34)))
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO thread_sessions"
+                " (agent_runtime, thread_id, model, effort) VALUES"
+                " ('codex', 'thread-retained', 'gpt-5.6-terra', 'high'),"
+                " ('codex', 'admin-owned', 'gpt-5.6-terra', 'high'),"
+                " ('codex', %s, 'gpt-5.6-terra', 'high')",
+                ("thread-" + "x" * 58,),
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, message, source) VALUES"
+                " ('2026-08-10T00:00:00Z', 'thread.message',"
+                "  'thread-retained', 'keep', 'user'),"
+                " ('2026-08-10T00:00:01Z', 'thread.message',"
+                "  'admin-owned', 'drop session history', 'agent'),"
+                " ('2026-08-10T00:00:02Z', 'thread.message',"
+                "  'orphaned-old-id', 'drop orphaned history', 'agent'),"
+                " ('2026-08-10T00:00:03Z', 'agent_runtime.started',"
+                "  NULL, NULL, NULL)"
+            )
+
+        self.assertEqual(migrate.up(target=34, quiet=True), [34])
+        with db.transaction() as cur:
+            cur.execute("SELECT thread_id FROM thread_sessions ORDER BY thread_id")
+            self.assertEqual(cur.fetchall(), [("thread-retained",)])
+            cur.execute("SELECT thread_id FROM agent_events ORDER BY seq")
+            self.assertEqual(cur.fetchall(), [("thread-retained",), (None,)])
+
     def test_global_resource_migration_is_bounded_deterministic_and_drops_unconfigured_schedules(self) -> None:
         self.assertEqual(migrate.up(target=26, quiet=True), list(range(1, 27)))
         with db.transaction() as cur:
@@ -697,7 +728,7 @@ class MigrateRunnerTests(unittest.TestCase):
                         " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
                     )
                 self.assertEqual(
-                    migrate.up(quiet=True), [26, 27, 28, 29, 30, 31, 32, 33]
+                    migrate.up(quiet=True), [26, 27, 28, 29, 30, 31, 32, 33, 34]
                 )
                 with db.transaction() as cur:
                     # Migration 0026 removed the old ledger; every later
@@ -710,7 +741,7 @@ class MigrateRunnerTests(unittest.TestCase):
                         [(int(version), str(name)) for version, name in cur.fetchall()],
                         [
                             (version, migrations[version].name)
-                            for version in range(1, 34)
+                            for version in range(1, 35)
                         ],
                     )
                     cur.execute(

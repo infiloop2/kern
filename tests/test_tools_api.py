@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+from typing import Any
 import unittest
 from unittest.mock import patch
 
@@ -30,6 +31,24 @@ from host.runtime.agent_shim.mcp_shim import UnixHTTPConnection
 from host.tools import OpenedStreamingAsset, StreamingAsset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# The agent's whole tool surface, in listing order. It is spelled out here
+# rather than derived from the shim so that any change to what the model sees
+# has to be made deliberately: these declarations head the prompt, and moving
+# them re-encodes every cached context behind them.
+EXPECTED_SHIM_TOOLS = [
+    "list_bundled_tools",
+    "describe_tool",
+    "call_tool",
+    "check_tool_approval",
+    "list_network_integrations",
+    "recent_network_denials",
+    "stage_image",
+    "stage_video",
+    "search_conversation_history",
+    "read_thread_history",
+    "workspace_api",
+]
 
 
 class _MemoryResponse:
@@ -106,39 +125,91 @@ class ToolsApiTestCase(unittest.TestCase):
 
 
 class ActionListingTests(ToolsApiTestCase):
-    def test_lists_only_enabled_tools_plus_the_synthetic_tools(self) -> None:
+    def test_listing_is_the_static_discovery_surface(self) -> None:
         listing = tools_api.action_listing()
-        names = [entry["name"] for entry in listing]
-        self.assertEqual(names, [
-            "fake_notes_read_note",
-            "fake_notes_crash_note",
-            "fake_notes_write_note",
-            "list_bundled_tools",
-            "check_tool_approval",
-        ])
-        read_note = listing[0]
-        self.assertIn("Fake Notes", read_note["description"])
-        self.assertEqual(read_note["input_schema"]["type"], "object")
+        self.assertEqual(
+            [entry["name"] for entry in listing],
+            ["list_bundled_tools", "describe_tool", "call_tool", "check_tool_approval"],
+        )
+        self.assertTrue(all(entry["input_schema"]["type"] == "object" for entry in listing))
 
-    def test_exposes_every_bundled_action_contract_as_agent_context(self) -> None:
+    def test_listing_does_not_move_with_operator_state(self) -> None:
+        # The declarations head the model prompt, so anything that varies with
+        # enablement re-encodes the whole cached context when an operator
+        # toggles an integration.
+        baseline = tools_api.action_listing()
         with patch.object(state, "enabled_tool_ids", return_value=set(tools_host.BUNDLED_TOOLS)):
-            by_name = {entry["name"]: entry for entry in tools_api.action_listing()}
+            self.assertEqual(tools_api.action_listing(), baseline)
+        with patch.object(state, "enabled_tool_ids", return_value=set()):
+            self.assertEqual(tools_api.action_listing(), baseline)
 
+    def test_listing_entries_cannot_be_mutated_by_a_caller(self) -> None:
+        tools_api.action_listing()[0]["name"] = "clobbered"
+        self.assertEqual(tools_api.action_listing()[0]["name"], "list_bundled_tools")
+
+    def test_describe_tool_exposes_every_bundled_action_contract(self) -> None:
         for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
+            described = tools_api.call_action("describe_tool", {"tool_id": tool_id})
+            self.assertEqual(described["status"], "executed")
+            by_id = {entry["id"]: entry for entry in described["result"]["actions"]}
             for action in tool.manifest.actions:
                 with self.subTest(tool_id=tool_id, action=action.id):
-                    listed = by_name[f"{tool_id}_{action.id}"]
-                    self.assertEqual(
-                        listed["description"],
-                        f"{tool.manifest.display_name}: {action.description}",
-                    )
-                    self.assertEqual(listed["input_schema"], action.input_schema)
+                    self.assertEqual(by_id[action.id]["description"], action.description)
+                    self.assertEqual(by_id[action.id]["input_schema"], action.input_schema)
+                    self.assertEqual(by_id[action.id]["approval"], action.approval)
 
-        self.assertIn("individual tradable questions", by_name["polymarket_list_markets"]["description"])
-        self.assertIn("umbrella topics", by_name["polymarket_list_events"]["description"])
-        self.assertIn("not public-post", by_name["instagram_get_recent_media"]["description"])
-        self.assertIn("not an objective global ranking", by_name["instagram_discovery_get_trending_reels"]["description"])
-        self.assertIn("not a LinkedIn feed", by_name["linkedin_discovery_search_posts"]["description"])
+        def described_action(tool_id: str, action_id: str) -> dict[str, Any]:
+            result = tools_api.call_action("describe_tool", {"tool_id": tool_id})["result"]
+            return {entry["id"]: entry for entry in result["actions"]}[action_id]
+
+        self.assertIn("individual tradable questions", described_action("polymarket", "list_markets")["description"])
+        self.assertIn("umbrella topics", described_action("polymarket", "list_events")["description"])
+        self.assertIn("not public-post", described_action("instagram", "get_recent_media")["description"])
+        self.assertIn("not an objective global ranking", described_action("instagram_discovery", "get_trending_reels")["description"])
+        self.assertIn("not a LinkedIn feed", described_action("linkedin_discovery", "search_posts")["description"])
+
+    def test_describe_tool_reports_enablement_and_rejects_unknown_ids(self) -> None:
+        described = tools_api.call_action("describe_tool", {"tool_id": "fake_notes"})
+        self.assertTrue(described["result"]["enabled"])
+        self.assertEqual(described["result"]["display_name"], "Fake Notes")
+        self.assertFalse(tools_api.call_action("describe_tool", {"tool_id": "gmail"})["result"]["enabled"])
+        with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown tool_id"):
+            tools_api.call_action("describe_tool", {"tool_id": "nope"})
+        with self.assertRaisesRegex(tools_host.ToolCallError, "must be a non-empty string"):
+            tools_api.call_action("describe_tool", {})
+        with self.assertRaisesRegex(tools_host.ToolCallError, "only tool_id"):
+            tools_api.call_action("describe_tool", {"tool_id": "fake_notes", "extra": 1})
+
+    def test_call_tool_runs_an_action_and_rejects_bad_addresses(self) -> None:
+        result = tools_api.call_action(
+            "call_tool", {"tool_id": "fake_notes", "action_id": "read_note", "input": {}}
+        )
+        self.assertEqual(result["status"], "executed")
+        # A missing input is an empty object, not a crash.
+        self.assertEqual(
+            tools_api.call_action("call_tool", {"tool_id": "fake_notes", "action_id": "read_note"})["status"],
+            "executed",
+        )
+        with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown tool_id"):
+            tools_api.call_action("call_tool", {"tool_id": "nope", "action_id": "read_note"})
+        with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown action_id"):
+            tools_api.call_action("call_tool", {"tool_id": "fake_notes", "action_id": "nope"})
+        with self.assertRaisesRegex(tools_host.ToolCallError, "must be a non-empty string"):
+            tools_api.call_action("call_tool", {"tool_id": "fake_notes"})
+        with self.assertRaisesRegex(tools_host.ToolCallError, "only tool_id, action_id, and input"):
+            tools_api.call_action(
+                "call_tool", {"tool_id": "fake_notes", "action_id": "read_note", "extra": 1}
+            )
+        # A disabled tool is addressable but refuses, so the agent can tell the
+        # operator which integration to enable.
+        with self.assertRaisesRegex(tools_host.ToolCallError, "not enabled"):
+            tools_api.call_action("call_tool", {"tool_id": "gmail", "action_id": "search_messages"})
+
+    def test_flat_action_names_stay_callable_though_unlisted(self) -> None:
+        # Approval records and audit rows address actions this way.
+        listed = [entry["name"] for entry in tools_api.action_listing()]
+        self.assertNotIn("fake_notes_read_note", listed)
+        self.assertEqual(tools_api.call_action("fake_notes_read_note", {})["status"], "executed")
 
     def test_list_bundled_tools_reports_the_catalog_with_enablement(self) -> None:
         # Enabled and disabled bundled tools both appear, distinguished by the
@@ -148,12 +219,28 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertEqual(result["status"], "executed")
         by_id = {entry["tool_id"]: entry for entry in result["result"]["tools"]}
         self.assertTrue(by_id["fake_notes"]["enabled"])
-        self.assertEqual(by_id["fake_notes"]["action_ids"], ["read_note", "crash_note", "write_note"])
+        self.assertEqual(
+            [action["id"] for action in by_id["fake_notes"]["actions"]],
+            ["read_note", "crash_note", "write_note"],
+        )
         gmail = by_id["gmail"]
         self.assertFalse(gmail["enabled"])
         self.assertEqual(gmail["connection"], "oauth")
         self.assertEqual(gmail["display_name"], "Gmail")
-        self.assertIn("search_messages", gmail["action_ids"])
+        self.assertIn("search_messages", [action["id"] for action in gmail["actions"]])
+
+    def test_catalog_carries_descriptions_but_not_schemas(self) -> None:
+        # Descriptions are what the agent plans from; schemas are what it needs
+        # only once it commits to a call, so they stay behind describe_tool.
+        catalog = tools_api.call_action("list_bundled_tools", {})["result"]["tools"]
+        by_id = {entry["tool_id"]: entry for entry in catalog}
+        for action in by_id["fake_notes"]["actions"]:
+            self.assertTrue(action["description"])
+            self.assertNotIn("input_schema", action)
+        by_action = {action["id"]: action for action in by_id["fake_notes"]["actions"]}
+        # Only the exceptional case is spelled out; direct actions stay silent.
+        self.assertEqual(by_action["write_note"]["approval"], "operator")
+        self.assertNotIn("approval", by_action["read_note"])
 
     def test_call_action_resolves_names_and_rejects_unknowns(self) -> None:
         result = tools_api.call_action("fake_notes_read_note", {})
@@ -287,9 +374,17 @@ class ToolsSocketTests(ToolsApiTestCase):
         socket_path = self.start_server()
         status, body = self.http(socket_path, "GET", "/tools")
         self.assertEqual(status, 200)
-        self.assertEqual(body["tools"][0]["name"], "fake_notes_read_note")
+        self.assertEqual(
+            [tool["name"] for tool in body["tools"]],
+            ["list_bundled_tools", "describe_tool", "call_tool", "check_tool_approval"],
+        )
 
-        status, body = self.http(socket_path, "POST", "/call", {"name": "fake_notes_read_note", "input": {}})
+        status, body = self.http(
+            socket_path,
+            "POST",
+            "/call",
+            {"name": "call_tool", "input": {"tool_id": "fake_notes", "action_id": "read_note"}},
+        )
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "executed")
 
@@ -548,8 +643,9 @@ class McpShimTests(ToolsApiTestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        # Enable Runway and Instagram so their actions and the matching public
-        # staging actions appear in the MCP surface.
+        # Enable Runway and Instagram so their actions are executable. Neither
+        # they nor the staging tools appear in the listing — that is constant —
+        # but the staged-asset schemas below are reached through describe_tool.
         with state.mutation() as cur:
             state.set_tool_enabled(cur, "runway", True)
             state.set_tool_enabled(cur, "instagram", True)
@@ -563,27 +659,30 @@ class McpShimTests(ToolsApiTestCase):
         shim.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
         listed = self.rpc(shim, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = [tool["name"] for tool in listed["result"]["tools"]]
-        self.assertIn("fake_notes_read_note", names)
-        self.assertIn("list_bundled_tools", names)
-        self.assertIn("check_tool_approval", names)
-        self.assertIn("stage_image", names)
-        self.assertIn("stage_video", names)
-        self.assertIn("workspace_api", names)
+        self.assertEqual(names, EXPECTED_SHIM_TOOLS)
         self.assertTrue(all("inputSchema" in tool for tool in listed["result"]["tools"]))
-        by_name = {tool["name"]: tool for tool in listed["result"]["tools"]}
-        save_schema = by_name["runway_save_video"]["inputSchema"]
-        self.assertEqual(save_schema["required"], ["task_id"])
-        self.assertNotIn("path", save_schema["properties"])
-        edit_schema = by_name["runway_edit_video"]["inputSchema"]
-        self.assertIn("video_asset_id", edit_schema["properties"])
-        self.assertNotIn("video_path", edit_schema["properties"])
-        generate_schema = by_name["runway_generate_video"]["inputSchema"]
-        self.assertIn("image_asset_id", generate_schema["properties"])
-        self.assertNotIn("image_path", generate_schema["properties"])
-        publish_schema = by_name["instagram_post_reel"]["inputSchema"]
-        self.assertEqual(publish_schema["required"], ["video_asset_id"])
-        self.assertIn("video_asset_id", publish_schema["properties"])
-        self.assertNotIn("path", publish_schema["properties"])
+
+        def describe(shim_tool_id: str) -> dict[str, Any]:
+            described = self.rpc(shim, {
+                "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                "params": {"name": "describe_tool", "arguments": {"tool_id": shim_tool_id}},
+            })
+            self.assertFalse(described["result"]["isError"])
+            # The shim unwraps the service envelope to the action result itself.
+            body = json.loads(described["result"]["content"][0]["text"])
+            return {entry["id"]: entry["input_schema"] for entry in body["actions"]}
+
+        runway = describe("runway")
+        self.assertEqual(runway["save_video"]["required"], ["task_id"])
+        self.assertNotIn("path", runway["save_video"]["properties"])
+        self.assertIn("video_asset_id", runway["edit_video"]["properties"])
+        self.assertNotIn("video_path", runway["edit_video"]["properties"])
+        self.assertIn("image_asset_id", runway["generate_video"]["properties"])
+        self.assertNotIn("image_path", runway["generate_video"]["properties"])
+        instagram = describe("instagram")
+        self.assertEqual(instagram["post_reel"]["required"], ["video_asset_id"])
+        self.assertIn("video_asset_id", instagram["post_reel"]["properties"])
+        self.assertNotIn("path", instagram["post_reel"]["properties"])
 
         video = Path(socket_dir.name) / "clip.mp4"
         video.write_bytes(b"x" * 512)
@@ -648,11 +747,13 @@ class McpShimTests(ToolsApiTestCase):
         self.assertIn('"fake_notes"', catalog_text)
         self.assertIn('"gmail"', catalog_text)  # disabled bundled tools appear too
 
-        called = self.rpc(shim, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "fake_notes_read_note", "arguments": {}}})
+        called = self.rpc(shim, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "call_tool", "arguments": {"tool_id": "fake_notes", "action_id": "read_note"}}})
         self.assertFalse(called["result"]["isError"])
         self.assertIn('"token-1"', called["result"]["content"][0]["text"])
+        # Results reach the model compactly; indentation is ~10% of their bytes.
+        self.assertNotIn("\n", called["result"]["content"][0]["text"])
 
-        pending = self.rpc(shim, {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "fake_notes_write_note", "arguments": {"text": "hi"}}})
+        pending = self.rpc(shim, {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "call_tool", "arguments": {"tool_id": "fake_notes", "action_id": "write_note", "input": {"text": "hi"}}}})
         self.assertFalse(pending["result"]["isError"])
         pending_text = pending["result"]["content"][0]["text"]
         self.assertIn("approval_id", pending_text)
@@ -665,18 +766,15 @@ class McpShimTests(ToolsApiTestCase):
         unknown = self.rpc(shim, {"jsonrpc": "2.0", "id": 6, "method": "bogus/method"})
         self.assertEqual(unknown["error"]["code"], -32601)
 
-    def test_shim_lists_only_stable_workspace_api_when_tools_socket_is_missing(self) -> None:
+    def test_shim_lists_the_same_tools_when_the_tools_socket_is_missing(self) -> None:
+        # An unreachable service must not withdraw declarations: the model reads
+        # a shrinking tool list as "that capability does not exist", and the
+        # list growing back re-encodes the whole cached prompt prefix.
         shim = self.start_shim("/nonexistent/tools.sock")
         listed = self.rpc(shim, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        self.assertEqual(
-            [tool["name"] for tool in listed["result"]["tools"]],
-            [
-                "search_conversation_history",
-                "read_thread_history",
-                "workspace_api",
-            ],
-        )
-        called = self.rpc(shim, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "x", "arguments": {}}})
+        self.assertEqual([tool["name"] for tool in listed["result"]["tools"]], EXPECTED_SHIM_TOOLS)
+        # The failure surfaces on the call instead, where it can be reported.
+        called = self.rpc(shim, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "call_tool", "arguments": {"tool_id": "gmail", "action_id": "search_messages"}}})
         self.assertTrue(called["result"]["isError"])
 
 

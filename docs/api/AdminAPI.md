@@ -535,10 +535,9 @@ Thread endpoints:
 | `POST` | `/v1/threads/{thread_id}/clear-memory` | none | `{"status": "cleared"}` | Clears the thread's working memory: the provider session mapping is dropped so the next run opens a new provider conversation, a `thread.memory_cleared` event is appended, and that event's seq becomes the thread's handoff floor so the next run is not handed the cleared context. Nothing is deleted — retained events stay readable here and in conversation history, while Chat hides events older than the latest clear boundary. `404` for an unknown thread; `409` (`working memory can be cleared only while the thread is idle`) while a turn is running. A thread stopped moments earlier reads as idle while its process is still closing, and clearing then returns the retryable `409` `the thread is still finishing; retry shortly` until that worker is gone — the fence that stops it restoring the session just cleared. Retry that one rather than treating it as a failure; the Workspace proxy does this for Chat. |
 | `GET` | `/v1/threads/{thread_id}/events?since=<seq>&limit=<n>&message_bytes=<b>` | query parameters optional | Event list response | One chronological page of the thread's event stream. See [Events](#events). |
 
-The operator transport rejects message sends to Workspace-owned `thread-*`,
-`app-*`, and `schedule-*` ids with `403`. Only the peer-authenticated Workspace
-service may create or continue those threads. Their detail, stop, and event
-routes remain available to the operator for host inspection and recovery.
+Operator and peer-authenticated Workspace-service callers use the same thread
+id contract. The three prefixes identify the product thread kind; they do not
+convey authority or prevent operator inspection and recovery.
 
 Stop has no mailbox or deferred delivery. The HTTP request synchronizes
 directly with steering and provider event writes, commits `thread.stopped`,
@@ -569,10 +568,9 @@ Send message request fields:
 | `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-5.6-terra`, `gpt-5.6-sol`, or `gpt-5.6-luna`; Claude Code accepts `claude-opus-5`, `claude-fable-5`, or `claude-sonnet-5`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, or `moonshotai.kimi-k2.5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
 | `effort` | New thread or configuration change | enum | Effort for this session. Codex accepts `high`, `max`, or `ultra`, except Luna accepts only `high` or `max`. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
 
-The path's `thread_id` must be 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `-`,
-or `_`; other values are `404` (no such route). The admin API does not reserve,
-prepend, strip, or authorize product prefixes. Chat and Web Apps choose their
-own direct ids (`thread-N` and `app-N`) in the Workspace backend.
+The path's `thread_id` must be a lowercase slug of at most 64 characters
+beginning with `app-`, `thread-`, or `schedule-`; any other value is `404` (no
+such route). The same rule applies to operator and Workspace-service callers.
 The first message requires all three configuration fields. Later messages may
 omit all three or repeat the complete matching triple. A different complete
 triple rotates an idle thread to a new provider session in the same admission

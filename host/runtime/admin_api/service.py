@@ -158,7 +158,12 @@ UNTRUSTED_FILE_SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
 }
-THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+PRODUCT_THREAD_ID_RE = re.compile(
+    r"(?=^[a-z0-9-]{1,64}$)^(?:app|thread|schedule)-[a-z0-9-]+$"
+)
+PRODUCT_THREAD_PREFIX_RE = re.compile(
+    r"(?=^[a-z0-9-]{1,64}$)^(?:app|thread|schedule)-[a-z0-9-]*$"
+)
 UTC_TIMESTAMP_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 RFC3339_TIMESTAMP_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
@@ -900,18 +905,6 @@ def route(
     if path == "/v1/conversation-history/read" and method == "POST":
         return read_conversation_history(body)
     if path.startswith("/v1/threads/"):
-        if (
-            is_operator
-            and method == "POST"
-            and re.fullmatch(
-                r"/v1/threads/(?:thread-[1-9][0-9]*|app-[1-9][0-9]*|schedule-[^/]+)/messages",
-                path,
-            )
-        ):
-            raise ApiError(
-                HTTPStatus.FORBIDDEN,
-                "Workspace-owned threads are reserved for the Workspace service",
-            )
         return thread_route(method, path, query, body)
     if path == "/v1/events" and method == "GET":
         _reject_query_keys(query, {"before", "limit"}, "event")
@@ -1283,7 +1276,7 @@ def thread_route(
     body: Any,
 ) -> Any:
     parts = path.strip("/").split("/")
-    if len(parts) < 3 or not THREAD_ID_RE.fullmatch(parts[2]):
+    if len(parts) < 3 or not PRODUCT_THREAD_ID_RE.fullmatch(parts[2]):
         raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
     thread_id = parts[2]
     if len(parts) == 3 and method == "GET":
@@ -1855,6 +1848,11 @@ def send_thread_message(
     (creating the thread on its first message) or steer the thread's running
     turn. There is no queue — a message that cannot run now is rejected with
     a retry hint and the caller decides."""
+    if PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "thread_id must start with app-, thread-, or schedule-",
+        )
     message = _message(body)
     with _thread_send_lock(thread_id):
         session_config = state.thread_session_config(thread_id)
@@ -2258,7 +2256,8 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
         raise ApiError(HTTPStatus.BAD_REQUEST, "from must be earlier than to")
     thread_id = body.get("thread_id")
     if thread_id is not None and (
-        not isinstance(thread_id, str) or THREAD_ID_RE.fullmatch(thread_id) is None
+        not isinstance(thread_id, str)
+        or PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None
     ):
         raise ApiError(HTTPStatus.BAD_REQUEST, "thread_id is invalid")
     if query is None and from_timestamp is None and to_timestamp is None and thread_id is None:
@@ -2355,7 +2354,10 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
             f"unsupported conversation read field: {unexpected[0]}",
         )
     thread_id = body.get("thread_id")
-    if not isinstance(thread_id, str) or THREAD_ID_RE.fullmatch(thread_id) is None:
+    if (
+        not isinstance(thread_id, str)
+        or PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None
+    ):
         raise ApiError(HTTPStatus.BAD_REQUEST, "thread_id is invalid")
     cursors: dict[str, int] = {}
     for public_name, internal_name in (
@@ -3019,10 +3021,10 @@ def _thread_list_prefix(query: dict[str, list[str]]) -> str | None:
     prefix = _one(query, "prefix")
     if prefix is None:
         return None
-    if THREAD_ID_RE.fullmatch(prefix) is None:
+    if PRODUCT_THREAD_PREFIX_RE.fullmatch(prefix) is None:
         raise ApiError(
             HTTPStatus.BAD_REQUEST,
-            "prefix must contain 1 to 64 thread-id characters",
+            "prefix must start with app-, thread-, or schedule-",
         )
     return prefix
 
@@ -3058,7 +3060,7 @@ def _thread_list_cursor(
             not isinstance(fields, list)
             or len(fields) != 2
             or not all(isinstance(field, str) for field in fields)
-            or THREAD_ID_RE.fullmatch(fields[1]) is None
+            or PRODUCT_THREAD_ID_RE.fullmatch(fields[1]) is None
         ):
             raise ValueError
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:

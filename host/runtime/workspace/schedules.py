@@ -116,7 +116,7 @@ def route_agent(
         return {"session_options": public_session_options()}
     if path == "/agent/schedules":
         if method == "GET":
-            return list_schedules(query, agent=True)
+            return list_active_schedules(query)
         if method == "POST":
             return {"schedule": create_schedule(body, actor="agent")}
     match = re.fullmatch(rf"/agent/schedules/{ID_CAPTURE}", path)
@@ -131,12 +131,24 @@ def route_agent(
     raise WorkspaceError(HTTPStatus.NOT_FOUND, "agent schedule route not found")
 
 
-def list_schedules(
-    query: dict[str, list[str]], *, agent: bool = False
+def list_schedules(query: dict[str, list[str]]) -> dict[str, Any]:
+    _reject_query_keys(query, {"before", "limit", "deleted"}, "schedule list")
+    return _list_schedules(
+        query,
+        deleted=_boolean_query(query, "deleted", default=False),
+    )
+
+
+def list_active_schedules(query: dict[str, list[str]]) -> dict[str, Any]:
+    _reject_query_keys(query, {"before", "limit"}, "schedule list")
+    return _list_schedules(query, deleted=False)
+
+
+def _list_schedules(
+    query: dict[str, list[str]],
+    *,
+    deleted: bool,
 ) -> dict[str, Any]:
-    allowed = {"before", "limit"} if agent else {"before", "limit", "deleted"}
-    _reject_query_keys(query, allowed, "schedule list")
-    deleted = False if agent else _boolean_query(query, "deleted", default=False)
     before = _optional_positive_int(query, "before")
     limit = _limit(query)
     clause = "deleted_at IS NOT NULL" if deleted else "deleted_at IS NULL"

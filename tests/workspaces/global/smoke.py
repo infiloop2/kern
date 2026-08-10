@@ -147,19 +147,22 @@ def _translate(api_error: Any, operation: Any, *args: Any, **kwargs: Any) -> Any
 
 
 def _memory_summary(page: dict[str, Any]) -> dict[str, Any]:
-    return {
+    summary = {
         key: deepcopy(page[key])
         for key in ("page_id", "description", "revision", "deleted", "links", "updated_by", "created_at", "updated_at")
     }
+    summary["links"] = memory_backend._page_links(page["page_id"], page["content"])
+    return summary
 
 
 def _list_memory(query: dict[str, list[str]], api_error: Any) -> dict[str, Any]:
-    _translate(api_error, memory_backend._reject_query_keys, query, {"cursor", "limit", "deleted"}, "memory index")
+    _translate(api_error, memory_backend._reject_query_keys, query, {"cursor", "limit", "deleted", "scope"}, "memory index")
     deleted = _translate(api_error, memory_backend._boolean_query, query, "deleted", default=False)
+    scope = _translate(api_error, memory_backend._memory_scope, query)
     limit = _translate(api_error, memory_backend._limit, query)
     after = _translate(api_error, memory_backend._decode_cursor, memory_backend._one(query, "cursor"))
     pages = sorted(
-        (_memory_summary(page) for page in MEMORY.values() if page["deleted"] == deleted and (after is None or page["page_id"] > after)),
+        (_memory_summary(page) for page in MEMORY.values() if page["deleted"] == deleted and memory_backend.is_individual_page_id(page["page_id"]) == (scope == "individual") and (after is None or page["page_id"] > after)),
         key=lambda page: page["page_id"],
     )
     response: dict[str, Any] = {"pages": pages[:limit]}
@@ -169,7 +172,8 @@ def _list_memory(query: dict[str, list[str]], api_error: Any) -> dict[str, Any]:
 
 
 def _search_memory(query: dict[str, list[str]], api_error: Any) -> dict[str, Any]:
-    _translate(api_error, memory_backend._reject_query_keys, query, {"q", "cursor", "limit"}, "memory search")
+    _translate(api_error, memory_backend._reject_query_keys, query, {"q", "cursor", "limit", "scope"}, "memory search")
+    scope = _translate(api_error, memory_backend._memory_scope, query)
     needle = _translate(api_error, memory_backend._one, query, "q")
     if not needle or len(needle.encode()) > memory_backend.MAX_SEARCH_BYTES:
         raise api_error(HTTPStatus.BAD_REQUEST, f"q must be between 1 and {memory_backend.MAX_SEARCH_BYTES} bytes")
@@ -179,7 +183,7 @@ def _search_memory(query: dict[str, list[str]], api_error: Any) -> dict[str, Any
     matches = []
     for page in MEMORY.values():
         haystack = f"{page['page_id']} {page['description']} {page['content']}".lower()
-        if not page["deleted"] and terms and all(term in haystack for term in terms):
+        if not page["deleted"] and memory_backend.is_individual_page_id(page["page_id"]) == (scope == "individual") and terms and all(term in haystack for term in terms):
             matches.append(_memory_summary(page))
     matches.sort(key=lambda page: page["page_id"])
     response: dict[str, Any] = {"pages": matches[offset:offset + limit]}
@@ -192,11 +196,14 @@ def _memory_detail(page_id: str, api_error: Any) -> dict[str, Any]:
     page = MEMORY.get(page_id)
     if page is None:
         raise api_error(HTTPStatus.NOT_FOUND, "memory page not found")
-    backlinks = sorted(
+    links = memory_backend._page_links(page_id, page["content"])
+    backlinks = [] if memory_backend.is_individual_page_id(page_id) else sorted(
         item["page_id"] for item in MEMORY.values()
-        if not item["deleted"] and page_id in item["links"]
+        if not item["deleted"]
+        and not memory_backend.is_individual_page_id(item["page_id"])
+        and page_id in memory_backend._page_links(item["page_id"], item["content"])
     )
-    return {**deepcopy(page), "backlinks": backlinks}
+    return {**deepcopy(page), "links": links, "backlinks": backlinks}
 
 
 def _save_memory(page_id: str, body: Any, api_error: Any) -> dict[str, Any]:
@@ -231,7 +238,7 @@ def _save_memory(page_id: str, body: Any, api_error: Any) -> dict[str, Any]:
         "content": content,
         "revision": 1 if current is None else current["revision"] + 1,
         "deleted": False,
-        "links": list(dict.fromkeys(memory_backend.LINK_RE.findall(content)))[:100],
+        "links": memory_backend._page_links(page_id, content),
         "updated_by": "user",
         "created_at": now if current is None else current["created_at"],
         "updated_at": now,
@@ -474,6 +481,12 @@ def _seed_demo() -> None:
             "revision": 2, "deleted": True, "links": [], "updated_by": "user",
             "created_at": older, "updated_at": recent,
         },
+        "thread-7": {
+            "page_id": "thread-7", "description": "Private context for chat thread 7",
+            "content": "Prefer a bounded release checklist.",
+            "revision": 1, "deleted": False, "links": [], "updated_by": "agent",
+            "created_at": older, "updated_at": recent,
+        },
     })
     for page in MEMORY.values():
         first = {"id": 1, "revision": 1, "description": page["description"], "content": page["content"], "deleted": False, "actor": page["updated_by"], "created_at": page["created_at"]}
@@ -565,6 +578,19 @@ def desktop_smoke(page: Any) -> None:
     surface.locator("#memory-content").fill("Keep release notes concise.")
     surface.get_by_role("button", name="Save page", exact=True).click()
     expect(surface.locator("#memory-history")).to_contain_text("Revision 1")
+    surface.get_by_role("button", name="Individual", exact=True).click()
+    expect(surface.locator("#global-intro")).to_contain_text("Private memory")
+    expect(surface.locator("#global-list")).not_to_contain_text("release-preferences")
+    surface.get_by_role("button", name="New page", exact=True).click()
+    expect(surface.locator("#memory-link-graph")).to_be_hidden()
+    surface.locator("#memory-page-id").fill("thread-7")
+    surface.locator("#memory-description").fill("Private context for chat thread 7")
+    surface.locator("#memory-content").fill("Prefer a bounded release checklist.")
+    surface.get_by_role("button", name="Save page", exact=True).click()
+    expect(surface.locator("#global-list")).to_contain_text("thread-7")
+    surface.get_by_role("button", name="Swarm", exact=True).click()
+    expect(surface.locator("#global-list")).to_contain_text("release-preferences")
+    expect(surface.locator("#global-list")).not_to_contain_text("thread-7")
 
     page.get_by_role("button", name="Schedules", exact=True).click()
     expect(surface.locator("#global-title")).to_have_text("Schedules")

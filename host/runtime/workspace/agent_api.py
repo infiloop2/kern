@@ -72,6 +72,7 @@ def dispatch_call(
 
     parsed = urlparse(path)
     query = parse_qs(parsed.query, keep_blank_values=True)
+    response: dict[str, Any]
     if parsed.path == "/agent/identity":
         if method != "GET" or body is not None or query:
             raise WorkspaceError(
@@ -93,14 +94,19 @@ def dispatch_call(
         if peer_thread_id.startswith("schedule-"):
             raise WorkspaceError(
                 HTTPStatus.CONFLICT,
-                "schedule threads have no persistent self-memory",
+                "self-memory is not enabled for schedule threads",
             )
-        response = memory.route_agent(
-            method,
-            f"/agent/memory/pages/{peer_thread_id}",
-            body,
-            query,
-        )
+        self_page_id = memory.individual_page_id(peer_thread_id)
+        if method == "GET":
+            response = {"page": memory.load_page(self_page_id)}
+        else:
+            response = {
+                "page": memory.save_page(
+                    self_page_id,
+                    body,
+                    actor="agent",
+                )
+            }
     elif parsed.path.startswith("/agent/conversation-history/"):
         response = conversation_history.route_agent(method, parsed.path, body, query)
     elif parsed.path == "/agent/memory" or parsed.path.startswith("/agent/memory/"):

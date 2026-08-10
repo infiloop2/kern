@@ -6,6 +6,7 @@
   const api = (method, path, body) => window.KernHost.api(method, `/v1/workspace${path}`, body);
   const state = {
     resource: "memory",
+    memoryScope: "swarm",
     deleted: false,
     items: [],
     next: null,
@@ -36,15 +37,18 @@
   async function open(resource) {
     if (!new Set(["memory", "schedules"]).has(resource)) return;
     state.resource = resource;
+    if (resource === "memory") state.memoryScope = "swarm";
     state.deleted = false;
     state.selected = null;
     state.creating = false;
     $("global-title").textContent = resource === "memory" ? "Memory" : "Schedules";
     $("global-intro").textContent = resource === "memory"
-      ? "Durable pages available to every agent thread."
+      ? "Swarm memory shared across agent threads."
       : "Recurring work, each run in a fresh independent agent thread.";
     $("global-new").textContent = resource === "memory" ? "New page" : "New schedule";
     $("memory-search-wrap").hidden = resource !== "memory";
+    $("memory-scope-toggle").hidden = resource !== "memory";
+    renderMemoryScope();
     hideForms();
     await loadItems(false);
   }
@@ -57,6 +61,7 @@
     status("Loading…");
     const base = state.resource === "memory" ? "/memory" : "/schedules";
     const params = new URLSearchParams({ limit: "50" });
+    if (state.resource === "memory") params.set("scope", state.memoryScope);
     if (state.deleted) params.set("deleted", "true");
     if (append && state.next) {
       params.set(state.resource === "memory" ? "cursor" : "before", state.next);
@@ -64,6 +69,7 @@
     let path = `${base}?${params}`;
     if (state.resource === "memory" && search.trim() && !state.deleted) {
       const searchParams = new URLSearchParams({ q: search.trim(), limit: "50" });
+      searchParams.set("scope", state.memoryScope);
       if (append && state.next) searchParams.set("cursor", state.next);
       path = `/memory/search?${searchParams}`;
     }
@@ -78,6 +84,33 @@
     } catch (error) {
       if (sequence === state.sequence) status(error.message || "Could not load Workspace data", "error");
     }
+  }
+
+  function renderMemoryScope() {
+    for (const button of root.querySelectorAll("button[data-memory-scope]")) {
+      const active = button.dataset.memoryScope === state.memoryScope;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    if (state.resource !== "memory") return;
+    const individual = state.memoryScope === "individual";
+    $("global-intro").textContent = individual
+      ? "Private memory owned by one app, chat, or schedule thread."
+      : "Swarm memory shared across agent threads.";
+    $("memory-page-id-help").textContent = individual
+      ? "Use an app-, thread-, or schedule- page ID."
+      : "Shared page IDs cannot start with app-, thread-, or schedule-.";
+  }
+
+  function setMemoryScope(scope) {
+    if (!new Set(["swarm", "individual"]).has(scope) || scope === state.memoryScope) return;
+    state.memoryScope = scope;
+    state.deleted = false;
+    state.selected = null;
+    state.creating = false;
+    hideForms();
+    renderMemoryScope();
+    void loadItems(false, $("memory-search").value);
   }
 
   function renderList() {
@@ -159,7 +192,10 @@
       $("memory-description").value = "";
       $("memory-content").value = "";
       resizeTextarea("memory-content");
-      $("memory-meta").textContent = "New global memory page";
+      $("memory-meta").textContent = state.memoryScope === "individual"
+        ? "New individual memory page"
+        : "New swarm memory page";
+      $("memory-link-graph").hidden = state.memoryScope === "individual";
       $("memory-links").replaceChildren();
       $("memory-backlinks").replaceChildren();
       $("memory-history").replaceChildren();
@@ -191,6 +227,7 @@
     $("memory-content").value = page.content;
     resizeTextarea("memory-content");
     $("memory-meta").textContent = `Revision ${page.revision} · edited by ${page.updated_by} · ${relativeTime(page.updated_at)}`;
+    $("memory-link-graph").hidden = state.memoryScope === "individual";
     renderChips($("memory-links"), page.links || []);
     renderChips($("memory-backlinks"), page.backlinks || []);
     $("memory-delete").hidden = page.deleted;
@@ -242,6 +279,16 @@
     event.preventDefault();
     const operationSequence = state.sequence;
     const pageId = $("memory-page-id").value.trim();
+    const individual = /^(?:app|thread|schedule)-/.test(pageId);
+    if (individual !== (state.memoryScope === "individual")) {
+      status(
+        state.memoryScope === "individual"
+          ? "Individual page IDs must start with app-, thread-, or schedule-."
+          : "Swarm page IDs cannot start with app-, thread-, or schedule-.",
+        "error",
+      );
+      return;
+    }
     const body = {
       description: $("memory-description").value.trim(),
       content: $("memory-content").value,
@@ -649,6 +696,10 @@
     if (runs) void loadEarlierRuns(runs);
   });
   $("global-new").addEventListener("click", newItem);
+  root.addEventListener("click", event => {
+    const target = event.target instanceof Element ? event.target.closest("button[data-memory-scope]") : null;
+    if (target) setMemoryScope(target.dataset.memoryScope);
+  });
   $("global-archive-toggle").addEventListener("click", () => {
     state.deleted = !state.deleted;
     state.selected = null;

@@ -9,9 +9,13 @@ parameters, so consolidating here changes no user-visible text.
 
 from __future__ import annotations
 
-from typing import cast
+import urllib.parse
+from typing import TYPE_CHECKING, cast
 
 from host.tools.json_types import JSONObject, JSONValue
+
+if TYPE_CHECKING:  # avoids a runtime import cycle through host_api
+    from host.tools.host_api import HostAPI
 
 
 class ToolInputValidationError(ValueError):
@@ -85,3 +89,44 @@ def clip_text(value: str, max_bytes: int) -> str:
     if len(encoded) <= max_bytes:
         return value
     return encoded[: max_bytes - 3].decode("utf-8", errors="ignore") + "…"
+
+
+def provider_fetched_https_url(
+    tool_input: JSONObject, key: str, api: "HostAPI", *, provider: str
+) -> str:
+    """Validate one external media URL a provider will fetch, then guard it.
+
+    Generation tools hand the provider a URL rather than bytes, which makes the
+    URL itself the thing that leaves this host: whatever an agent encodes into
+    its path or query travels with it. So the whole value is scanned, not just
+    the parts a reader would think of as data.
+
+    Raw-IP hosts stay allowed. The fetch is made from the provider's network
+    rather than this one, so the SSRF exposure is the provider's — an invariant
+    worth stating because anything that makes *this* host fetch the URL breaks
+    it and needs its own address checks.
+
+    Shared rather than copied per package: this decides what gets scanned before
+    reaching a third party, and two copies of that are two chances to drift.
+    """
+    message = f"{provider} tool_input.{key} must be an https URL."
+    value = tool_input.get(key)
+    if not isinstance(value, str):
+        raise ToolInputValidationError(message)
+    value = value.strip()
+    if len(value) > 4_096:
+        raise ToolInputValidationError(message)
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ToolInputValidationError(message) from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+    ):
+        raise ToolInputValidationError(message)
+    return api.outbound.guard_request_parameter_string(value)

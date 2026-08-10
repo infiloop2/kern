@@ -120,7 +120,11 @@ The tools socket (`/run/kern-tools/tools.sock`) is the deliberate crossing
 from the agent to the tools service: the harnesses spawn the MCP shim as
 `kern-agent`, and the `kern-tools`-owned socket service accepts only
 the `kern-agent` and `kern-admin` uids by kernel peer credentials
-(`SO_PEERCRED`). The agent gets exactly the enabled tools' actions; the admin
+(`SO_PEERCRED`). The agent can enumerate the whole bundled catalog and read any
+action's input schema, enabled or not — manifest data carries no credentials,
+config keys, or OAuth scopes — but it can *execute* only the enabled tools'
+actions, which the tools service enforces per call rather than by hiding
+declarations. The admin
 service uses the same socket (admin uid, `/operator/...` routes) to delegate the
 operator operations that need the tools service's egress. Tool secrets and
 approval decisions stay in Postgres, reachable by the scoped `kern-tools`
@@ -138,8 +142,9 @@ deliberate agent-side crossing. The main `kern-workspace` service authenticates
 the `kern-agent` peer uid before allocating a bounded handler, validates one
 bounded `/agent/` call, and requires an explicit immutable Web App id. There is
 no cgroup-derived app authority: any agent may access any existing app, while
-archived apps reject writes. It also offers global memory/schedule CRUD and
-derives an informational current thread id from the peer cgroup. The service
+archived apps reject writes. It also offers swarm memory and schedule CRUD,
+identity-derived self-memory for App and Chat threads, and an informational
+current thread id from the peer cgroup. The service
 holds no secrets and no egress; see
 [`workspace-agent-api.md`](workspaces/workspace-agent-api.md).
 

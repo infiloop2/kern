@@ -14,7 +14,7 @@ are partitioned by `tool_id`.
 
 Tool packages make outbound HTTPS calls to third parties (Google, Brave, X,
 LinkedIn, Serper, Meta/Instagram, ScrapeCreators, Polymarket, Interactive
-Brokers, and Runway) and
+Brokers, Runway, and BytePlus ModelArk) and
 parse their responses, so unlike other host code they need direct egress and are
 the host code most exposed to attacker-influenced data. They run in a **dedicated
 `kern-tools` service** — its own Linux user, running
@@ -61,16 +61,20 @@ Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
   `--strict-mcp-config` making it the only server), Codex through `mcp_servers`
   in the root-owned managed config `/etc/codex/managed_config.toml`, and Hermes
   through its root-owned managed config and headless adapter.
-- The shim is a dumb stdio-to-socket pipe: `tools/list` and `tools/call` forward
-  to the tools socket `/run/kern-tools/tools.sock`. It holds no state and
-  no secrets. A **`tools/call`** failure — including the tools service being
-  unavailable — is forwarded to the agent as a normal MCP result with
-  `isError: true` and a sanitized message, so the agent sees the error and can
-  react. Only **`tools/list`** falls back to the stable Workspace and conversation-history declarations
-  when the tools socket is unavailable, rather than erroring: an error at list
-  time can make a harness disable the MCP server for the whole session, so the
-  fallback keeps the session healthy and a later list picks the bundled tools
-  back up once the service is up.
+- The shim is a dumb stdio-to-socket pipe: `tools/call` forwards to the tools
+  socket `/run/kern-tools/tools.sock`. It holds no state and no secrets. A
+  **`tools/call`** failure — including the tools service being unavailable — is
+  forwarded to the agent as a normal MCP result with `isError: true` and a
+  sanitized message, so the agent sees the error and can react.
+- **`tools/list`** touches no socket at all. It is answered from the static
+  declarations in `host/agent_tool_surface.py`, so every session sees the same
+  surface no matter which integrations are enabled or which services are up.
+  Tool declarations head the model prompt, so a listing that tracked live state
+  would re-encode the entire cached context behind it whenever that state moved
+  — measured at more, for a single change in a large context, than declaring the
+  whole catalog outright. A degraded service therefore fails its own call with
+  an actionable message instead of withdrawing declarations, which a model reads
+  as "that capability does not exist".
 - The same shim always serves **`workspace_api`**, **`search_conversation_history`**,
   and **`read_thread_history`**, forwarded to the
   main Workspace service's agent socket (`/run/kern-workspace/agent.sock`) rather
@@ -90,16 +94,26 @@ Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
   invisible to the nftables loopback rules, so the agent's drop rules are
   untouched. See [`../local-sockets.md`](../local-sockets.md) for the full local-socket inventory.
 
-The listed actions are the enabled tools' manifest actions, named
-`<tool_id>_<action>` (e.g. `gmail_search_messages`), plus host actions:
+The bundled catalog is not enumerated in the listing. The agent reaches it by
+explicit discovery through three listed actions, whose results append to the
+context instead of rewriting its prefix:
 
 - **`list_bundled_tools`** returns the full bundled catalog — `tool_id`, display
-  name, description, connection type, `enabled`, and action ids — from manifests
-  plus the enablement set only (no credentials, no third-party calls). It lets
-  the agent distinguish *bundled but not enabled* (ask the operator to enable it
-  under Home > Integrations) from *not bundled at all* (no host integration exists; the
+  name, description, connection type, `enabled`, and each action's id and
+  one-line description — from manifests plus the enablement set only (no
+  credentials, no third-party calls). Action input schemas are deliberately
+  excluded: descriptions are what the agent plans from. It lets the agent
+  distinguish *bundled but not enabled* (ask the operator to enable it under
+  Home > Integrations) from *not bundled at all* (no host integration exists; the
   agent tells the operator the tool is not implemented and to file a feature
   request), instead of inferring from an empty list.
+- **`describe_tool`** takes a `tool_id` and returns that tool's actions with
+  their full input schemas — fetched once the agent has committed to using the
+  tool, rather than carried in every prompt.
+- **`call_tool`** takes `tool_id`, `action_id`, and `input` and runs the action.
+  The flat `<tool_id>_<action>` names (e.g. `gmail_search_messages`) remain
+  callable because approval records and audit rows address actions that way, but
+  they are no longer listed.
 - **`list_network_integrations`** and **`recent_network_denials`** are the
   agent's read-only view of the host's network controls. A separate non-egress
   `kern-agent-network` service serves them from
@@ -173,9 +187,11 @@ The listed actions are the enabled tools' manifest actions, named
 
   Runway is the first producer. `runway_save_video {task_id}` re-reads the task
   from Runway, accepts only its authoritative successful HTTPS output, and
-  returns that response as a `StreamingAsset`. The egress-capable tools process
-  cannot write agent files, while the filesystem-capable shim has no Runway
-  credential or external network access. To publish the returned workspace file
+  returns that response as a `StreamingAsset`. `seedance_save_video` is the same
+  shape against BytePlus ModelArk; both rely on the generic streaming-result
+  path rather than any per-tool wiring in the shim. The egress-capable tools
+  process cannot write agent files, while the filesystem-capable shim has no
+  provider credential or external network access. To publish the returned workspace file
   later, the agent explicitly stages it for Instagram and passes the resulting
   `video_asset_id` into `instagram_post_reel`; the Instagram package and shim
   interface stay unchanged.

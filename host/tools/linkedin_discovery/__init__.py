@@ -12,7 +12,7 @@ from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.tools.shared.inputs import bounded_int as _bounded_int, clip as _text
-from host.tools.shared.web import WebRequestError, json_request
+from host.tools.shared.web import UnmappedProviderError, WebRequestError, json_request, known_provider_transport_error, unmapped_provider_error
 from host.tools.tool import Tool
 
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
@@ -289,10 +289,18 @@ class LinkedInDiscoveryTool(Tool):
             )
         except WebRequestError as exc:
             if exc.status in {401, 403}:
-                return ActionFailed("Serper rejected the configured API key.")
-            if exc.status == 429:
-                return ActionFailed("Serper search capacity or account credits were exhausted.")
-            return ActionFailed(str(exc))
+                message = "Serper rejected the configured API key."
+            elif exc.status == 429:
+                message = "Serper search capacity or account credits were exhausted."
+            elif exc.status:
+                message = f"Serper returned HTTP {exc.status}."
+            else:
+                message = known_provider_transport_error(exc)
+                if not message:
+                    raise unmapped_provider_error("Serper", "LinkedIn discovery", exc) from None
+            return ActionFailed(message)
+        except UnmappedProviderError:
+            raise
         except (ValueError, RuntimeError) as exc:
             # Input validation and config-unset carry curated messages.
             return ActionFailed(str(exc) or "LinkedIn Discovery request failed.")

@@ -36,6 +36,7 @@ from host.tools import (
     StoredCredential,
     ToolManifest,
 )
+from host.tools.shared.web import UnmappedProviderError
 
 FAKE_OUTPUT_SCHEMA: JSONObject = {
     "type": "object",
@@ -214,6 +215,7 @@ class ToolRegistryTests(unittest.TestCase):
                 "linkedin_discovery",
                 "polymarket",
                 "runway",
+                "seedance",
                 "twitter",
             }.issubset(tools_host.BUNDLED_TOOLS)
         )
@@ -479,6 +481,26 @@ class ExecuteActionTests(ToolsHostTestCase):
         self.assertEqual(events[0]["outcome"], "failed")
         self.assertEqual(events[0]["detail"], "Tool call failed.")
         self.assertEqual(state.tool_event(events[0]["seq"])["arguments"], {})
+
+    def test_unmapped_provider_failure_is_logged_without_provider_body(self) -> None:
+        self.prepare_fake_tool()
+        provider_error = UnmappedProviderError("Example", "lookup", status=0)
+        with (
+            patch.object(FakeTool, "execute", side_effect=provider_error),
+            patch.object(tools_host.host_errors, "report_unexpected") as report,
+        ):
+            result = tools_host.execute_action("fake_notes", "read_note", {})
+        self.assertEqual(
+            result,
+            {
+                "status": "failed",
+                "error": "Provider request failed. Check Host errors for details.",
+                "reconnect_required": False,
+            },
+        )
+        report.assert_called_once()
+        self.assertEqual(report.call_args.kwargs["context"]["provider"], "Example")
+        self.assertEqual(report.call_args.kwargs["context"]["operation"], "lookup")
 
     def test_executed_output_must_match_manifest_output_schema(self) -> None:
         with patch.dict(tools_host.BUNDLED_TOOLS, {"bad_output_tool": BadOutputTool()}):

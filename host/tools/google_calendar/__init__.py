@@ -35,6 +35,7 @@ from host.tools.shared.google import (
     google_oauth_setup_steps,
 )
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, schema as _schema, string_value as _string_value
+from host.tools.shared.web import UnmappedProviderError
 
 CALENDAR_API_BASE_URL = "https://www.googleapis.com/calendar/v3"
 # Host approval summaries are capped at 500 UTF-8 bytes (tools_host SUMMARY_MAX_BYTES).
@@ -550,6 +551,8 @@ class GoogleCalendarTool:
             return ActionFailed(exc.message)
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
             return ActionFailed(str(exc) or "Calendar tool request failed.")
 
@@ -581,6 +584,8 @@ class GoogleCalendarTool:
             return ApprovalExecuted(messages.get(operation, f"Updated Google Calendar event {event_id}."))
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
             return ActionFailed(str(exc) or "Calendar write failed after approval.")
 

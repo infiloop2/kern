@@ -152,11 +152,20 @@ class NetworkIntrospectionTests(unittest.TestCase):
         shim.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n")
         shim.stdin.flush()
         listed = json.loads(shim.stdout.readline())
+        # The listing is static, so an unreachable tools socket changes nothing
+        # about it; the network tools are declared here either way and the call
+        # below is what proves this shim reaches the dedicated socket.
         self.assertEqual(
             [tool["name"] for tool in listed["result"]["tools"]],
             [
+                "list_bundled_tools",
+                "describe_tool",
+                "call_tool",
+                "check_tool_approval",
                 "list_network_integrations",
                 "recent_network_denials",
+                "stage_image",
+                "stage_video",
                 "search_conversation_history",
                 "read_thread_history",
                 "workspace_api",

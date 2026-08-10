@@ -40,6 +40,7 @@ from host.tools import (
 )
 from host.tools.host_api import AssetMetadata
 from host.tools.manifest import ActionSpec, TOOL_ID_RE
+from host.tools.shared.web import UnmappedProviderError
 
 _DEFAULT_ASSET_STORE = tool_assets.ToolAssetStore(tool_assets.DEFAULT_ASSET_ROOT)
 
@@ -348,6 +349,19 @@ def execute_action(
         result = tool.execute(action, audit_arguments, host_api_for(tool, asset_store))
     except (ApprovalBackpressureError, ToolConfigKeyUnsetError) as exc:
         result = ActionFailed(str(exc))
+    except UnmappedProviderError as exc:
+        host_errors.report_unexpected(
+            "tools.provider_request",
+            exc,
+            context={
+                "tool_id": tool_id,
+                "action_id": action,
+                "provider": exc.provider,
+                "operation": exc.operation,
+                "http_status": exc.status,
+            },
+        )
+        result = ActionFailed("Provider request failed. Check Host errors for details.")
     except Exception as exc:
         host_errors.report_unexpected(
             "tools.execute",
@@ -397,6 +411,19 @@ def _execute_approved(
         )
     except (ToolCallError, ToolConfigKeyUnsetError) as exc:
         result = ActionFailed(str(exc))
+    except UnmappedProviderError as exc:
+        host_errors.report_unexpected(
+            "tools.provider_request_approved",
+            exc,
+            context={
+                "tool_id": tool_id,
+                "action_id": action,
+                "provider": exc.provider,
+                "operation": exc.operation,
+                "http_status": exc.status,
+            },
+        )
+        result = ActionFailed("Provider request failed. Check Host errors for details.")
     except Exception as exc:
         host_errors.report_unexpected(
             "tools.execute_approved",

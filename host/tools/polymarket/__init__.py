@@ -11,7 +11,7 @@ from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL, ParamGuardDenied
 from host.tools.host_api import HostAPI
 from host.tools.shared.inputs import ToolInputValidationError, clip as _clip, int_field, schema as _schema
-from host.tools.shared.web import WebRequestError, encode_query, json_request
+from host.tools.shared.web import WebRequestError, encode_query, json_request, known_provider_transport_error, unmapped_provider_error
 from host.tools.tool import Tool
 
 GAMMA_API_BASE_URL = "https://gamma-api.polymarket.com"
@@ -482,10 +482,14 @@ class PolymarketTool(Tool):
             return ActionFailed(str(exc))
         except WebRequestError as exc:
             if exc.status == 429:
-                return ActionFailed("Polymarket API rate limit was reached.")
-            if exc.status:
-                return ActionFailed(f"Polymarket API returned HTTP {exc.status}.")
-            return ActionFailed(str(exc) or "Polymarket API request failed.")
+                message = "Polymarket API rate limit was reached."
+            elif exc.status:
+                message = f"Polymarket API returned HTTP {exc.status}."
+            else:
+                message = known_provider_transport_error(exc)
+                if not message:
+                    raise unmapped_provider_error("Polymarket", action, exc) from None
+            return ActionFailed(message)
         except Exception:
             # Curated errors are handled above; an unexpected exception must not
             # leak its raw text to the agent.

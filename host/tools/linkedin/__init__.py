@@ -34,7 +34,14 @@ from host.tools.shared.oauth2 import (
     signed_state,
     verify_state,
 )
-from host.tools.shared.web import WebRequestError, json_request, json_request_with_headers
+from host.tools.shared.web import (
+    UnmappedProviderError,
+    WebRequestError,
+    json_request,
+    json_request_with_headers,
+    known_provider_transport_error,
+    unmapped_provider_error,
+)
 
 LINKEDIN_AUTHORIZE_URL = "https://www.linkedin.com/oauth/v2/authorization"
 LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
@@ -248,19 +255,31 @@ class LinkedInCredentialStore:
 
     def complete_connect(self, params: OAuthCompleteConnectParams, api: HostAPI) -> OAuthCompleteConnectResult:
         verify_state(params["state"], secret=api.config["LINKEDIN_OAUTH_CLIENT_SECRET"], tool_id=MANIFEST.tool_id)
-        token_response = json_request(
-            "POST",
-            LINKEDIN_TOKEN_URL,
-            form={
-                "grant_type": "authorization_code",
-                "code": params["code"],
-                "client_id": api.config["LINKEDIN_OAUTH_CLIENT_ID"],
-                "client_secret": api.config["LINKEDIN_OAUTH_CLIENT_SECRET"],
-                "redirect_uri": params["redirect_uri"],
-            },
-            failure_message="LinkedIn OAuth token exchange failed.",
-            invalid_response_message="LinkedIn OAuth token exchange returned an invalid response.",
-        )
+        try:
+            token_response = json_request(
+                "POST",
+                LINKEDIN_TOKEN_URL,
+                form={
+                    "grant_type": "authorization_code",
+                    "code": params["code"],
+                    "client_id": api.config["LINKEDIN_OAUTH_CLIENT_ID"],
+                    "client_secret": api.config["LINKEDIN_OAUTH_CLIENT_SECRET"],
+                    "redirect_uri": params["redirect_uri"],
+                },
+                failure_message="LinkedIn OAuth token exchange failed.",
+                invalid_response_message="LinkedIn OAuth token exchange returned an invalid response.",
+            )
+        except WebRequestError as exc:
+            if exc.status in {400, 401, 403}:
+                raise RuntimeError(
+                    "LinkedIn OAuth token exchange was rejected. Check the client credentials, callback URI, authorization code, and enabled products."
+                ) from exc
+            if exc.status:
+                raise RuntimeError(f"LinkedIn returned HTTP {exc.status} during OAuth token exchange.") from exc
+            known = known_provider_transport_error(exc)
+            if known:
+                raise RuntimeError(known) from exc
+            raise unmapped_provider_error("LinkedIn", "OAuth token exchange", exc) from None
         access_token = token_response.get("access_token")
         if not isinstance(access_token, str) or not access_token:
             raise RuntimeError("LinkedIn OAuth token exchange returned no access token.")
@@ -272,7 +291,10 @@ class LinkedInCredentialStore:
         if REQUIRED_LINKEDIN_SCOPES - set(granted_scopes):
             raise RuntimeError("LinkedIn connection is missing required permissions.")
         expires_in = token_response.get("expires_in")
-        userinfo = _fetch_userinfo(access_token)
+        try:
+            userinfo = _fetch_userinfo(access_token)
+        except WebRequestError as exc:
+            raise _mapped_web_error(exc, "profile lookup") from exc
         account = _account_from_userinfo(userinfo, granted_scopes)
         existing = api.credentials.load()
         created_at = existing["metadata"].get("created_at") if existing is not None else None
@@ -339,16 +361,22 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     if exc.status == 401:
         return IntegrationReconnectRequired(LINKEDIN_RECONNECT_MESSAGE)
     if exc.status == 403:
-        return RuntimeError(
-            f"LinkedIn declined the {what} request (forbidden). The app may be missing the required product."
+        message = (
+            f"LinkedIn declined the {what} request (HTTP 403 forbidden). "
+            "The app may be missing the required product."
         )
-    if exc.status == 429:
-        return RuntimeError("LinkedIn API rate limit was reached.")
-    if exc.status == 422:
-        return RuntimeError(f"LinkedIn rejected the {what} content (for example a duplicate post).")
-    if exc.status:
-        return RuntimeError(f"LinkedIn API returned HTTP {exc.status}.")
-    return RuntimeError(f"LinkedIn {what} request failed.")
+    elif exc.status == 429:
+        message = "LinkedIn API rate limit was reached."
+    elif exc.status == 422:
+        message = f"LinkedIn rejected the {what} content (for example a duplicate post)."
+    elif exc.status:
+        message = f"LinkedIn API returned HTTP {exc.status} for the {what} request."
+    else:
+        known = known_provider_transport_error(exc)
+        if known:
+            return RuntimeError(known)
+        return unmapped_provider_error("LinkedIn", what, exc)
+    return RuntimeError(message)
 
 
 def _post_proposal(tool_input: JSONObject) -> JSONObject:
@@ -460,7 +488,11 @@ class LinkedInTool:
             mapped = _mapped_web_error(exc, "profile")
             if isinstance(mapped, IntegrationReconnectRequired):
                 return ActionFailed(str(mapped), reconnect_required=True)
+            if isinstance(mapped, UnmappedProviderError):
+                raise mapped
             return ActionFailed(str(mapped))
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
             return ActionFailed(str(exc) or "LinkedIn tool request failed.")
 
@@ -490,7 +522,11 @@ class LinkedInTool:
             mapped = _mapped_web_error(exc, "profile")
             if isinstance(mapped, IntegrationReconnectRequired):
                 return ActionFailed(str(mapped), reconnect_required=True)
+            if isinstance(mapped, UnmappedProviderError):
+                raise mapped
             return ActionFailed(str(mapped))
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
             return ActionFailed(str(exc) or "LinkedIn write failed after approval.")
 

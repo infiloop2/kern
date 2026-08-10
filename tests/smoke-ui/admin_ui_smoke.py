@@ -491,9 +491,9 @@ def desktop_smoke(page, url: str) -> None:
         ["AI inference", "Tools", "Manual"]
     )
     integration_cards = page.locator("#home-integration-groups .home-integration-card")
-    expect(integration_cards).to_have_count(18)
-    expect(integration_cards.locator(".integration-logo")).to_have_count(18)
-    expect(integration_cards.locator(".integration-logo[data-logo-source='brand']")).to_have_count(18)
+    expect(integration_cards).to_have_count(19)
+    expect(integration_cards.locator(".integration-logo")).to_have_count(19)
+    expect(integration_cards.locator(".integration-logo[data-logo-source='brand']")).to_have_count(19)
     if integration_cards.locator(".integration-logo:not([aria-hidden='true'])").count():
         raise AssertionError("integration logos must remain decorative inside their labelled card buttons")
     grouped_ordering = page.locator("#home-integration-groups .home-integration-group").evaluate_all("""groups =>
@@ -751,7 +751,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(hermes_box).to_contain_text("active")
     expect(hermes_box.locator(".runtime-running-badge")).to_have_count(0)
     counter_turn_response = page.request.post(
-        f"{url.rstrip('/')}/v1/threads/toolbar-hermes-counter/messages",
+        f"{url.rstrip('/')}/v1/threads/thread-toolbar-hermes-counter/messages",
         headers={"X-Kern-Csrf": "1"},
         data={
             "agent_runtime": "hermes",
@@ -772,7 +772,7 @@ def desktop_smoke(page, url: str) -> None:
     # full cycle plus render, not most of one.
     expect(hermes_box).to_contain_text("1 running", timeout=12000)
     stopped = page.request.post(
-        f"{url.rstrip('/')}/v1/threads/toolbar-hermes-counter/stop",
+        f"{url.rstrip('/')}/v1/threads/thread-toolbar-hermes-counter/stop",
         headers={"X-Kern-Csrf": "1"},
     )
     if not stopped.ok:
@@ -1186,7 +1186,7 @@ def mobile_smoke(page, url: str) -> None:
     # Chat and Apps remain in the navigation drawer; Home has no duplicate
     # hero action on mobile.
     expect(page.locator("#home-hero")).to_have_count(0)
-    expect(page.locator("#home-integration-groups .home-integration-card .integration-logo")).to_have_count(18)
+    expect(page.locator("#home-integration-groups .home-integration-card .integration-logo")).to_have_count(19)
     assert_no_horizontal_overflow(page, "home")
 
     # The drawer closes on backdrop click, Escape, and destination selection.

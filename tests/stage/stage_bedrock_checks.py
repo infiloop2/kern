@@ -134,7 +134,7 @@ class StageBedrockChecks(AwsSmoke):
 
         token = f"{runtime.upper()}_STAGE_OK"
         model = CHEAP_MODELS[runtime]
-        thread_id = f"{runtime}-bedrock"
+        thread_id = f"{self.thread_id_component(runtime)}-bedrock"
         baseline_seq = max((event["seq"] for event in self._network_events()), default=0)
         turn_baseline = self._latest_thread_event_seq(thread_id)
         started = self.send_message(

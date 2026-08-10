@@ -289,7 +289,8 @@ it.
 
 `--strict-mcp-config` plus the inline `--mcp-config` make the bundled tools
 shim (`host.runtime.agent_shim.mcp_shim`, spawned as `kern-agent`) the only
-MCP server; with no tools enabled it lists nothing. The invocation
+MCP server; it lists the same static discovery surface whether or not any tool
+is enabled (`host/agent_tool_surface.py`). The invocation
 deliberately does not pass `--safe-mode`: the pinned CLI drops every non-SDK
 MCP server in safe mode, which would disable the bundled tools entirely. The
 agent's isolation comes from the OS boundaries (dedicated user, nftables,

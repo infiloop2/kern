@@ -81,18 +81,28 @@ Global routes are:
 kernel-attributed peer thread. They delegate to the ordinary memory page load
 and save behavior, including 404, optimistic revision checks, and size limits;
 the request has no identity or page-id field. `schedule-*` peers receive 409
-because schedule runs do not have persistent self-memory. The alias neither
-injects memory into prompts nor changes existing thread-id pages or global
-memory routes.
+because self-memory is not enabled for schedule runs.
+
+Memory page ids beginning with `app-`, `thread-`, or `schedule-` form the
+individual-memory namespace. Agent index, search, and direct page routes expose
+only swarm memory and return 404 for direct access to an individual page. App
+and Chat threads reach only their identity-derived page through self-memory;
+`schedule-*` pages remain individual despite the schedule self-memory guard.
+The browser API accepts `scope=swarm|individual` on memory index and search,
+defaulting to `swarm`, so the operator UI can display the namespaces
+separately. Existing pages keep their ids and are classified in place by this
+prefix rule; the distinction makes the prior individual-memory convention an
+enforced API boundary.
 
 Memory and schedule writes use an `expected_revision` compare-and-swap so
 parallel agents cannot silently overwrite each other. Agents have ordinary
 CRUD only; the browser-only API exposes deleted resources, revision history,
 restoration, schedule run history, and retained host-thread events. Memory
-list/search responses are paginated and omit page bodies. Page content may
-link to another bounded id as `[[page-id]]`; Kern derives links and backlinks
-without a separate graph store. Search uses PostgreSQL full-text ranking and
-does not send memory to an embedding service.
+list/search responses are paginated and omit page bodies. Swarm page content
+may link to another swarm page as `[[page-id]]`; Kern derives links and
+backlinks without a separate graph store. Individual pages are excluded from
+all links and backlinks. Search uses PostgreSQL full-text ranking and does not
+send memory to an embedding service.
 
 Schedule `PUT` replaces the complete definition. Runtime/model/effort values
 are stored as bounded strings and checked by the host only when a run starts;
