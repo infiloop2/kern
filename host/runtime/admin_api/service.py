@@ -935,26 +935,30 @@ def route(
         if event is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "tool event not found")
         return {"event": event}
-    if path == "/v1/host-errors" and method == "GET":
-        _reject_query_keys(query, {"before", "limit", "service"}, "host error")
+    if path == "/v1/host-diagnostics" and method == "GET":
+        _reject_query_keys(query, {"before", "limit", "service", "severity"}, "host diagnostic")
         service_filter = _one(query, "service")
         if service_filter is not None and SERVICE_NAME_RE.fullmatch(service_filter) is None:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "host error service is invalid")
+            raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic service is invalid")
+        severity_filter = _one(query, "severity")
+        if severity_filter is not None and severity_filter not in {"error", "warning"}:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic severity is invalid")
         return {
-            "events": state.page_host_errors_before(
+            "events": state.page_host_diagnostics_before(
                 _optional_non_negative_int(query, "before"),
                 service=service_filter,
+                severity=severity_filter,
                 limit=_event_page_limit(query),
             )
         }
-    host_error_match = re.fullmatch(r"/v1/host-errors/([1-9][0-9]*)", path)
-    if host_error_match and method == "GET":
+    host_diagnostic_match = re.fullmatch(r"/v1/host-diagnostics/([1-9][0-9]*)", path)
+    if host_diagnostic_match and method == "GET":
         if query:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "host error detail does not accept query parameters")
-        error = state.host_error(int(host_error_match.group(1)))
-        if error is None:
-            raise ApiError(HTTPStatus.NOT_FOUND, "host error not found")
-        return {"error": error}
+            raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic detail does not accept query parameters")
+        diagnostic = state.host_diagnostic(int(host_diagnostic_match.group(1)))
+        if diagnostic is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "host diagnostic not found")
+        return {"diagnostic": diagnostic}
     if path == "/v1/tools" or path.startswith("/v1/tools/"):
         return tools_admin_api.tools_route(method, path, body)
     if path == "/v1/network/events" and method == "GET":
@@ -1383,7 +1387,7 @@ def prune_state() -> None:
     now = datetime.now(timezone.utc)
     with state.mutation() as cur:
         state.prune_event_logs(cur)
-        state.prune_host_errors(cur)
+        state.prune_host_diagnostics(cur)
         state.prune_pending_pushes(cur)
         state.prune_bedrock_usage(
             cur,

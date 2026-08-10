@@ -137,7 +137,7 @@ class NetworkIntrospectionRequestHandler(UnixSocketRequestHandler):
             except NetworkToolCallError as exc:
                 result = {"status": "failed", "error": str(exc)}
             except Exception as exc:
-                host_errors.report_unexpected("agent_network.call", exc)
+                host_errors.report_warning("agent_network.call", exc)
                 result = {"status": "failed", "error": "Network introspection failed."}
             self._send_json(HTTPStatus.OK, result)
         finally:

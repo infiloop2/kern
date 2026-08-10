@@ -146,7 +146,7 @@ class MockState:
     # orchestrator memory).
     threads: dict[str, dict[str, Any]] = field(default_factory=dict)
     network_events: list[dict[str, Any]] = field(default_factory=list)
-    host_errors: list[dict[str, Any]] = field(default_factory=list)
+    host_diagnostics: list[dict[str, Any]] = field(default_factory=list)
     policy: dict[str, Any] = field(
         default_factory=lambda: {"network_integrations": {}}
     )
@@ -773,15 +773,16 @@ def seed_state() -> None:
     for runtime in RUNTIMES:
         STATE.add_agent_event("agent_runtime.deactivated", None, {"agent_runtime": runtime}, ago(70))
 
-    STATE.host_errors.extend([
+    STATE.host_diagnostics.extend([
         {
             "id": 1,
             "seq": 1,
-            "error_id": "host_error_1",
+            "diagnostic_id": "host_diagnostic_1",
             "first_seen_at": ago(52),
             "last_seen_at": ago(49),
             "service": "kern-admin-api",
             "component": "orchestrator.execution",
+            "severity": "error",
             "kind": "unexpected_exception",
             "exception_type": "RuntimeError",
             "summary": "execution observed a thread without its provider session",
@@ -800,11 +801,12 @@ def seed_state() -> None:
         {
             "id": 2,
             "seq": 2,
-            "error_id": "host_error_2",
+            "diagnostic_id": "host_diagnostic_2",
             "first_seen_at": ago(12),
             "last_seen_at": ago(12),
             "service": "kern-workspace",
             "component": "agentic_web_app.request",
+            "severity": "warning",
             "kind": "unexpected_exception",
             "exception_type": "KeyError",
             "summary": "selected workspace was missing from the loaded row",
@@ -1227,19 +1229,25 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
             raise ApiError(HTTPStatus.NOT_FOUND, "tool event not found")
         event["has_arguments"] = isinstance(event.get("arguments"), dict)
         return {"event": event}
-    if method == "GET" and path == "/v1/host-errors":
-        before, limit = event_page_query(query, {"before", "limit", "service"}, "host error")
-        return {"events": host_errors_before(before, limit, one(query, "service"))}
-    host_error_match = re.fullmatch(r"^/v1/host-errors/([1-9][0-9]*)$", path)
-    if method == "GET" and host_error_match:
+    if method == "GET" and path == "/v1/host-diagnostics":
+        before, limit = event_page_query(
+            query, {"before", "limit", "service", "severity"}, "host diagnostic"
+        )
+        return {
+            "events": host_diagnostics_before(
+                before, limit, one(query, "service"), one(query, "severity")
+            )
+        }
+    host_diagnostic_match = re.fullmatch(r"^/v1/host-diagnostics/([1-9][0-9]*)$", path)
+    if method == "GET" and host_diagnostic_match:
         if query:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "host error detail does not accept query parameters")
-        error_id = int(host_error_match.group(1))
+            raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic detail does not accept query parameters")
+        diagnostic_id = int(host_diagnostic_match.group(1))
         with STATE.lock:
-            error = next((dict(item) for item in STATE.host_errors if item["id"] == error_id), None)
+            error = next((dict(item) for item in STATE.host_diagnostics if item["id"] == diagnostic_id), None)
         if error is None:
-            raise ApiError(HTTPStatus.NOT_FOUND, "host error not found")
-        return {"error": error}
+            raise ApiError(HTTPStatus.NOT_FOUND, "host diagnostic not found")
+        return {"diagnostic": error}
     if path == "/v1/network/policy":
         if method == "GET":
             return {"network_controls": STATE.policy}
@@ -2033,15 +2041,20 @@ def tool_events_before(before: int | None, limit: int) -> list[dict[str, Any]]:
         ]
 
 
-def host_errors_before(
-    before: int | None, limit: int, service: str | None
+def host_diagnostics_before(
+    before: int | None,
+    limit: int,
+    service: str | None,
+    severity: str | None,
 ) -> list[dict[str, Any]]:
     with STATE.lock:
-        errors = list(reversed(STATE.host_errors))
+        errors = list(reversed(STATE.host_diagnostics))
         if before is not None:
             errors = [error for error in errors if error["seq"] < before]
         if service is not None:
             errors = [error for error in errors if error["service"] == service]
+        if severity is not None:
+            errors = [error for error in errors if error["severity"] == severity]
         return [
             {
                 key: value

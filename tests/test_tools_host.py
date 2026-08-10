@@ -36,7 +36,7 @@ from host.tools import (
     StoredCredential,
     ToolManifest,
 )
-from host.tools.shared.web import UnmappedProviderError
+from host.tools.shared.web import ProviderWarning, UnmappedProviderError
 
 FAKE_OUTPUT_SCHEMA: JSONObject = {
     "type": "object",
@@ -472,8 +472,10 @@ class ExecuteActionTests(ToolsHostTestCase):
 
     def test_tool_crash_is_audited_as_failed_call(self) -> None:
         self.prepare_fake_tool()
-        result = tools_host.execute_action("fake_notes", "crash_note", {})
+        with patch.object(tools_host.host_errors, "report_warning") as report:
+            result = tools_host.execute_action("fake_notes", "crash_note", {})
         self.assertEqual(result, {"status": "failed", "error": "Tool call failed.", "reconnect_required": False})
+        report.assert_called_once()
         events = state.page_tool_events_before(None)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["tool_id"], "fake_notes")
@@ -482,25 +484,47 @@ class ExecuteActionTests(ToolsHostTestCase):
         self.assertEqual(events[0]["detail"], "Tool call failed.")
         self.assertEqual(state.tool_event(events[0]["seq"])["arguments"], {})
 
-    def test_unmapped_provider_failure_is_logged_without_provider_body(self) -> None:
+    def test_unmapped_provider_failure_is_logged_with_operator_context(self) -> None:
         self.prepare_fake_tool()
-        provider_error = UnmappedProviderError("Example", "lookup", status=0)
+        provider_error = UnmappedProviderError("Example", "lookup", status=503)
         with (
             patch.object(FakeTool, "execute", side_effect=provider_error),
-            patch.object(tools_host.host_errors, "report_unexpected") as report,
+            patch.object(tools_host.host_errors, "report_warning") as report,
         ):
             result = tools_host.execute_action("fake_notes", "read_note", {})
         self.assertEqual(
             result,
             {
                 "status": "failed",
-                "error": "Provider request failed. Check Host errors for details.",
+                "error": "Provider request failed. Check Host diagnostics for details.",
                 "reconnect_required": False,
             },
         )
         report.assert_called_once()
         self.assertEqual(report.call_args.kwargs["context"]["provider"], "Example")
         self.assertEqual(report.call_args.kwargs["context"]["operation"], "lookup")
+        self.assertEqual(report.call_args.kwargs["context"]["http_status"], 503)
+        self.assertNotIn("provider_response", report.call_args.kwargs["context"])
+        self.assertEqual(report.call_args.kwargs["kind"], "provider_failure")
+
+    def test_mapped_provider_warning_keeps_body_in_operator_context_only(self) -> None:
+        self.prepare_fake_tool()
+        warning = ProviderWarning(
+            "X",
+            "post",
+            "X declined the post request (HTTP 403 forbidden).",
+            status=403,
+            body=b'{"type":"client-forbidden","detail":"reply blocked"}',
+        )
+        with (
+            patch.object(FakeTool, "execute", side_effect=warning),
+            patch.object(tools_host.host_errors, "report_warning") as report,
+        ):
+            result = tools_host.execute_action("fake_notes", "read_note", {})
+
+        self.assertEqual(result["error"], "X declined the post request (HTTP 403 forbidden).")
+        self.assertNotIn("reply blocked", result["error"])
+        self.assertIn("reply blocked", report.call_args.kwargs["context"]["provider_response"])
 
     def test_executed_output_must_match_manifest_output_schema(self) -> None:
         with patch.dict(tools_host.BUNDLED_TOOLS, {"bad_output_tool": BadOutputTool()}):

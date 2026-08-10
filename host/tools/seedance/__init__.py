@@ -627,7 +627,7 @@ def _failure_from_status(exc: WebRequestError, *, creating: bool = False) -> str
         )
     if exc.status:
         return f"ModelArk API returned HTTP {exc.status}."
-    # A transport failure with no curated mapping is a Host error rather than a
+    # A transport failure with no curated mapping is a Host warning rather than a
     # vague message to the agent: raising here records it with routing metadata
     # only, leaving the provider body confined to the WebRequestError.
     message = known_provider_transport_error(exc)

@@ -1,4 +1,4 @@
-"""Ingest structured Kern host-error journal records into PostgreSQL."""
+"""Ingest structured Kern host-diagnostic journal records into PostgreSQL."""
 
 from __future__ import annotations
 
@@ -24,7 +24,14 @@ from host.runtime.core.host_errors import (
 
 RETRY_SECONDS = 3
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
-KINDS = frozenset({"unexpected_exception", "service_exit", "invariant_failure"})
+SEVERITIES = frozenset({"error", "warning"})
+KINDS = frozenset({
+    "unexpected_exception",
+    "service_exit",
+    "invariant_failure",
+    "provider_failure",
+    "unexpected_behavior",
+})
 
 
 def allowed_units() -> frozenset[str]:
@@ -113,19 +120,23 @@ def parse_journal_record(
         return realtime, None
     payload = json.loads(message)
     if not isinstance(payload, dict):
-        raise ValueError("host error payload must be an object")
+        raise ValueError("host diagnostic payload must be an object")
     kind = _bounded_string(payload.get("kind"), 64, required=True)
     if kind not in KINDS:
-        raise ValueError("unsupported host error kind")
+        raise ValueError("unsupported host diagnostic kind")
+    severity = _bounded_string(payload.get("severity"), 16, required=True)
+    if severity not in SEVERITIES:
+        raise ValueError("unsupported host diagnostic severity")
     fingerprint = _bounded_string(payload.get("fingerprint"), 64, required=True)
     if not FINGERPRINT_RE.fullmatch(fingerprint):
-        raise ValueError("invalid host error fingerprint")
+        raise ValueError("invalid host diagnostic fingerprint")
     pid_value = journal.get("_PID")
     pid = int(pid_value) if isinstance(pid_value, (str, int)) and str(pid_value).isdigit() else None
     boot_id = _bounded_string(journal.get("_BOOT_ID"), 64)
     return realtime, {
         "service": unit.removesuffix(".service"),
         "component": _bounded_string(payload.get("component"), MAX_COMPONENT_BYTES, required=True),
+        "severity": severity,
         "kind": kind,
         "exception_type": _bounded_string(payload.get("exception_type"), MAX_EXCEPTION_TYPE_BYTES),
         "summary": _bounded_string(payload.get("summary"), MAX_SUMMARY_BYTES, required=True),
@@ -153,13 +164,13 @@ def _consume(process: subprocess.Popen[str], units: frozenset[str]) -> bool:
         try:
             realtime, event = parse_journal_record(line, units=units)
         except Exception as exc:
-            print(f"host error collector skipped invalid payload: {exc}", file=sys.stderr, flush=True)
+            print(f"host diagnostic collector skipped invalid payload: {exc}", file=sys.stderr, flush=True)
             continue
         try:
             if event is not None:
-                state.ingest_host_error(realtime, event)
+                state.ingest_host_diagnostic(realtime, event)
         except Exception as exc:
-            print(f"host error collector paused: {exc}", file=sys.stderr, flush=True)
+            print(f"host diagnostic collector paused: {exc}", file=sys.stderr, flush=True)
             _stop(process)
             return False
     return process.wait() == 0
@@ -178,9 +189,9 @@ def run_forever() -> None:
             )
             clean = _consume(process, units)
             if clean:
-                print("host error journal stream ended; restarting", file=sys.stderr, flush=True)
+                print("host diagnostic journal stream ended; restarting", file=sys.stderr, flush=True)
         except Exception as exc:
-            print(f"host error collector unavailable: {exc}", file=sys.stderr, flush=True)
+            print(f"host diagnostic collector unavailable: {exc}", file=sys.stderr, flush=True)
         time.sleep(RETRY_SECONDS)
 
 

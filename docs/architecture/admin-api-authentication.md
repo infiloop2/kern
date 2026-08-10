@@ -208,7 +208,7 @@ the [Admin API reference](../api/AdminAPI.md).
 | `GET /v1/agent-files`, file read/content/upload routes, and `GET /v1/agent-processes` | Session + CSRF | Content and upload use bounded streaming handlers after authentication |
 | `GET\|PUT /v1/network/policy`, `GET /v1/network/events`, and GitHub credential/audit/pending-push routes under `/v1/network-tools/` | Session + CSRF | Method-specific mutation validation and root-helper boundaries still apply |
 | Tool catalog/config/enablement/OAuth/approval routes and tool events under `/v1/tools` | Session + CSRF | Tool-specific authorization and approval state run after operator authentication |
-| `GET /v1/host-errors[/<seq>]` and `POST /v1/host-runtime/reboot` | Session + CSRF | Diagnostic read or fixed privileged helper after authentication |
+| `GET /v1/host-diagnostics[/<seq>]` and `POST /v1/host-runtime/reboot` | Session + CSRF | Diagnostic read or fixed privileged helper after authentication |
 | Any unlisted method/path | Not dispatched | `404`; route prefixes do not confer access by themselves |
 
 This grouping is unchanged for external operator access. Transport-specific

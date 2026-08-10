@@ -504,7 +504,7 @@ def desktop_smoke(page, url: str) -> None:
     for ordering in grouped_ordering:
         assert ordering == sorted(ordering, key=lambda item: (not item["enabled"], item["label"].casefold()))
     expect(page.locator("#panel-home").get_by_role("button", name=re.compile(r"Agent processes"))).to_be_visible()
-    expect(page.locator("#panel-home").get_by_role("button", name=re.compile(r"Host errors"))).to_be_visible()
+    expect(page.locator("#panel-home").get_by_role("button", name=re.compile(r"Host diagnostics"))).to_be_visible()
 
     open_home_integration(page, "github")
     expect(page.locator("#panel-network")).to_be_visible()
@@ -1277,10 +1277,10 @@ def mobile_smoke(page, url: str) -> None:
     assert_no_horizontal_overflow(page, "tool audit log")
 
     page.locator("#panel-tool-log .home-back").click()
-    page.locator("#panel-home").get_by_role("button", name=re.compile(r"Host errors")).click()
-    expect(page.locator("#host-errors")).to_contain_text("agentic_web_app.request")
-    expect(page.locator("#host-errors")).to_contain_text("orchestrator.execution")
-    assert_no_horizontal_overflow(page, "host errors")
+    page.locator("#panel-home").get_by_role("button", name=re.compile(r"Host diagnostics")).click()
+    expect(page.locator("#host-diagnostics")).to_contain_text("agentic_web_app.request")
+    expect(page.locator("#host-diagnostics")).to_contain_text("orchestrator.execution")
+    assert_no_horizontal_overflow(page, "host diagnostics")
 
 
 def open_mobile_navigation(page) -> None:

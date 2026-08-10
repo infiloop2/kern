@@ -1485,24 +1485,24 @@ the Tool Audit Log. The UI loads arguments only after the operator expands an
 event. Tool config values and OAuth callback parameters are never stored as
 event arguments.
 
-## Host Errors
+## Host diagnostics
 
 ```text
-GET /v1/host-errors
-GET /v1/host-errors/{id}
+GET /v1/host-diagnostics
+GET /v1/host-diagnostics/{id}
 ```
 
 | Method | Path | Request | Response | Behavior |
 | --- | --- | --- | --- | --- |
-| `GET` | `/v1/host-errors` | `?before=&limit=&service=` | `{"events": [...]}` | Lists unexpected host-service failures newest first. `before` is the row's ordering `seq`, `limit` is 1–100, and optional `service` selects one exact systemd service name. List rows omit traceback, context, and fingerprint. |
-| `GET` | `/v1/host-errors/{id}` | none | `{"error": {...}}` | Loads the full bounded diagnostic record by its stable numeric `id`, including traceback, context, and fingerprint. Returns `404` when the row does not exist. |
+| `GET` | `/v1/host-diagnostics` | `?before=&limit=&service=&severity=` | `{"events": [...]}` | Lists host errors and warnings newest first. `before` is the row's ordering `seq`, `limit` is 1–100, optional `service` selects one exact systemd service name, and optional `severity` accepts `error` or `warning`. List rows omit traceback, context, and fingerprint. |
+| `GET` | `/v1/host-diagnostics/{id}` | none | `{"diagnostic": {...}}` | Loads the full bounded diagnostic record by its stable numeric `id`, including traceback, context, and fingerprint. Returns `404` when the row does not exist. |
 
 The API is display-only: there are no resolve, dismiss, delete, or report
-routes. Expected thread, provider, tool, validation, and network-policy outcomes
-do not belong in this log. See [Host error diagnostics](../architecture/host-errors.md)
+routes. Ordinary validation, user-decision, and network-policy outcomes do not
+belong in this log. See [Host diagnostics](../architecture/host-diagnostics.md)
 for best-effort capture, safety, and retention.
 
-Host error list rows contain stable `id` and `error_id` fields, the rotating
+Host diagnostic list rows contain stable `id` and `diagnostic_id` fields, the rotating
 newest-first paging cursor `seq`, `first_seen_at`,
 `last_seen_at`, `service`, `component`, `kind`, `exception_type`, `summary`,
 `occurrence_count`, `host_version`, `boot_id`, `pid`, and `has_details`. Detail

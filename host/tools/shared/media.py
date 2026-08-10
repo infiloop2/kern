@@ -43,7 +43,7 @@ def open_downloaded_video(
 
     ``map_failure`` turns a transport failure into that provider's curated,
     secret-free message; it may also raise, which lets a package report an
-    unmapped failure as a Host error instead of a vague string.
+    unmapped failure as a Host warning instead of a vague string.
     """
     failure_message = f"{provider} video download failed."
     try:

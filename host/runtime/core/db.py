@@ -1,6 +1,6 @@
 """Connection layer for the local host-state Postgres database.
 
-The admin, proxy, tools, network-introspection, host-error, and Workspace processes
+The admin, proxy, tools, network-introspection, host-diagnostics, and Workspace processes
 use this module under peer-authenticated database roles. They connect over the
 local Unix socket through the in-repo
 protocol client (``host.runtime.core.pgclient``; standard library only, with no

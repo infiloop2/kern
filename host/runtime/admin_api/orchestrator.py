@@ -244,7 +244,7 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
         else:
             status, error_message, account = provider.account_status()
     except Exception as exc:
-        host_errors.report_unexpected(
+        host_errors.report_warning(
             "orchestrator.runtime_status",
             exc,
             context={"agent_runtime": runtime_type},
@@ -884,7 +884,7 @@ def _refresh_runtimes(runtime_types: tuple[str, ...]) -> None:
         try:
             refresh_runtime_status(runtime_type)
         except Exception as exc:
-            host_errors.report_unexpected(
+            host_errors.report_warning(
                 "orchestrator.initial_runtime_refresh",
                 exc,
                 context={"agent_runtime": runtime_type},
@@ -1003,7 +1003,7 @@ def runtime_status_loop() -> None:
         except Exception as exc:
             # Keep the loop alive; retry soon because the failed refresh did
             # not update that runtime's cached state.
-            host_errors.report_unexpected("orchestrator.runtime_status_loop", exc)
+            host_errors.report_warning("orchestrator.runtime_status_loop", exc)
             time.sleep(RUNTIME_PENDING_RECHECK_SECONDS)
             continue
         sleep_for = min(max(0.0, due - time.monotonic()) for due in next_check_at.values())

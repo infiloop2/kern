@@ -159,7 +159,7 @@
             <button class="home-card" data-action="open-home-view" data-view="agent-log"><span class="home-card-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="6" cy="5.5" r="2.5"/><path d="M2.5 14.8c.4-3 1.6-4.5 3.5-4.5s3 1.2 3.5 3.7M12 5h5M12 9h5M12 13h5"/></svg></span><span class="home-card-copy"><strong>Agent audit</strong><small>Every agent turn and runtime event.</small></span><span class="home-card-arrow">→</span></button>
             <button class="home-card" data-action="open-home-view" data-view="net-log"><span class="home-card-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M2.5 10h15M10 2.5c2.2 2.1 3.2 4.6 3.2 7.5s-1 5.4-3.2 7.5M10 2.5C7.8 4.6 6.8 7.1 6.8 10s1 5.4 3.2 7.5"/></svg></span><span class="home-card-copy"><strong>Network audit</strong><small>Allowed and denied proxied connections.</small></span><span class="home-card-arrow">→</span></button>
             <button class="home-card" data-action="open-home-view" data-view="tool-log"><span class="home-card-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11.8 4.7a4 4 0 0 0-5.1 5.1l-4 4a1.8 1.8 0 0 0 2.5 2.5l4-4a4 4 0 0 0 5.1-5.1l-2.2 2.2-1.7-1.7 2.2-2.2Z"/></svg></span><span class="home-card-copy"><strong>Tool audit</strong><small>Tool calls, approvals, and connection changes.</small></span><span class="home-card-arrow">→</span></button>
-            <button class="home-card" data-action="open-home-view" data-view="host-errors"><span class="home-card-icon home-card-icon-warn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.3 3.2 2.2 14a1.8 1.8 0 0 0 1.6 2.7h12.4a1.8 1.8 0 0 0 1.6-2.7L11.7 3.2a2 2 0 0 0-3.4 0Z"/><path d="M10 7v4.2M10 14h.01"/></svg></span><span class="home-card-copy"><strong>Host errors</strong><small>Unexpected failures that need developer attention.</small></span><span class="home-card-arrow">→</span></button>
+            <button class="home-card" data-action="open-home-view" data-view="host-diagnostics"><span class="home-card-icon home-card-icon-warn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.3 3.2 2.2 14a1.8 1.8 0 0 0 1.6 2.7h12.4a1.8 1.8 0 0 0 1.6-2.7L11.7 3.2a2 2 0 0 0-3.4 0Z"/><path d="M10 7v4.2M10 14h.01"/></svg></span><span class="home-card-copy"><strong>Host diagnostics</strong><small>Errors and warnings for operator debugging.</small></span><span class="home-card-arrow">→</span></button>
           </div>
         </section>
       </div>
@@ -384,16 +384,17 @@
         </section>
       </div>
 
-      <div id="panel-host-errors" class="tab-panel" hidden>
+      <div id="panel-host-diagnostics" class="tab-panel" hidden>
         <div class="home-detail-nav"><button class="home-back" data-action="home-back">← Back to Home</button><span>Activity and diagnostics</span></div>
         <section>
-          <h2>Host errors</h2>
-          <p class="muted">These errors indicate that something unexpected happened on the host and should be investigated by a Kern developer, newest first.</p>
+          <h2>Host diagnostics</h2>
+          <p class="muted">Service errors and contained warnings that may help diagnose strange host or provider behavior, newest first.</p>
           <div class="audit-toolbar">
-            <span class="muted" id="host-error-page-summary"></span>
+            <span class="muted" id="host-diagnostic-page-summary"></span>
+            <button class="ghost sm" id="host-diagnostic-filter" data-action="toggle-host-diagnostic-filter">Show errors only</button>
           </div>
-          <div class="table-scroll"><table id="host-errors"></table></div>
-          <div class="pager" id="host-error-pager"></div>
+          <div class="table-scroll"><table id="host-diagnostics"></table></div>
+          <div class="pager" id="host-diagnostic-pager"></div>
         </section>
       </div>
     </main>

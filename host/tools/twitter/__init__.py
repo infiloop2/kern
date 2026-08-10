@@ -40,11 +40,12 @@ from host.tools.shared.oauth2 import (
     verify_state,
 )
 from host.tools.shared.web import (
-    UnmappedProviderError,
+    ProviderWarning,
     WebRequestError,
     encode_query,
     json_request,
     known_provider_transport_error,
+    provider_warning,
     unmapped_provider_error,
 )
 
@@ -369,11 +370,19 @@ class XCredentialStore:
             )
         except WebRequestError as exc:
             if exc.status in {400, 401, 403}:
-                raise RuntimeError(
-                    "X OAuth token exchange was rejected. Check the client credentials, callback URI, authorization code, PKCE settings, and requested scopes."
+                raise provider_warning(
+                    "X",
+                    "OAuth token exchange",
+                    exc,
+                    "X OAuth token exchange was rejected. Check the client credentials, callback URI, authorization code, PKCE settings, and requested scopes.",
                 ) from exc
             if exc.status:
-                raise RuntimeError(f"X returned HTTP {exc.status} during OAuth token exchange.") from exc
+                raise provider_warning(
+                    "X",
+                    "OAuth token exchange",
+                    exc,
+                    f"X returned HTTP {exc.status} during OAuth token exchange.",
+                ) from exc
             known = known_provider_transport_error(exc)
             if known:
                 raise RuntimeError(known) from exc
@@ -460,11 +469,19 @@ class XCredentialStore:
                 clear_if_still_loaded(api, existing)
                 raise IntegrationReconnectRequired(X_RECONNECT_MESSAGE) from exc
             if exc.status in {400, 401, 403}:
-                raise RuntimeError(
-                    "X OAuth token refresh was rejected. Check the app credentials and reconnect the account if the token was revoked."
+                raise provider_warning(
+                    "X",
+                    "OAuth token refresh",
+                    exc,
+                    "X OAuth token refresh was rejected. Check the app credentials and reconnect the account if the token was revoked.",
                 ) from exc
             if exc.status:
-                raise RuntimeError(f"X returned HTTP {exc.status} during OAuth token refresh.") from exc
+                raise provider_warning(
+                    "X",
+                    "OAuth token refresh",
+                    exc,
+                    f"X returned HTTP {exc.status} during OAuth token refresh.",
+                ) from exc
             known = known_provider_transport_error(exc)
             if known:
                 raise RuntimeError(known) from exc
@@ -530,7 +547,7 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
         if known:
             return RuntimeError(known)
         return unmapped_provider_error("X", what, exc)
-    return RuntimeError(message)
+    return provider_warning("X", what, exc, message)
 
 
 def _usernames_by_id(response: JSONObject) -> dict[str, str]:
@@ -683,7 +700,7 @@ def _get_trends(api: HostAPI, tool_input: JSONObject) -> JSONObject:
                 "X rejected the configured Bearer token. Update X_BEARER_TOKEN "
                 "under Home > Integrations in the admin UI."
             )
-            raise RuntimeError(message) from exc
+            raise provider_warning("X", "trends", exc, message) from exc
         raise _mapped_web_error(exc, "trends") from exc
     data = response.get("data")
     trends: list[JSONValue] = []
@@ -971,7 +988,7 @@ class XTool:
             return ActionFailed(exc.message)
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
-        except UnmappedProviderError:
+        except ProviderWarning:
             raise
         except Exception as exc:
             return ActionFailed(str(exc) or "X tool request failed.")
@@ -1072,7 +1089,7 @@ class XTool:
             return ActionFailed(exc.message)
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
-        except UnmappedProviderError:
+        except ProviderWarning:
             raise
         except Exception as exc:
             return ActionFailed(str(exc) or "X write failed after approval.")

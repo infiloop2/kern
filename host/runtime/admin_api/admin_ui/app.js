@@ -16,7 +16,7 @@ import {
   refreshFiles,
 } from "./files.js";
 import { refreshAgentProcesses } from "./processes.js";
-import { agentLog, hostErrorLog, netLog, toolLog, toggleNetDeniedFilter } from "./logs.js";
+import { agentLog, hostDiagnosticLog, netLog, toolLog, toggleHostDiagnosticFilter, toggleNetDeniedFilter } from "./logs.js";
 import {
   addDomainRule, addGithubRepo, approveGithubPush, deleteGithubCredential,
   loadPolicy, recheckGithubAudit, rejectGithubPush, removeDomainRule,
@@ -39,7 +39,7 @@ import {
 
 let activeTab = "home";
 let activeTabRefresh = Promise.resolve();
-const staticTabs = ["home", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-errors"];
+const staticTabs = ["home", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics"];
 const homeDetailTabs = new Set(staticTabs.filter(name => name !== "home"));
 const MOBILE_NAV_QUERY = "(max-width: 860px)";
 let mobileNavOpen = false;
@@ -290,9 +290,9 @@ const tabRefreshers = {
     enter: [() => toolLog.showFirstPage()],
     tick: [() => toolLog.page === 1 && toolLog.showFirstPage()],
   },
-  "host-errors": {
-    enter: [() => hostErrorLog.showFirstPage()],
-    tick: [() => hostErrorLog.page === 1 && hostErrorLog.showFirstPage()],
+  "host-diagnostics": {
+    enter: [() => hostDiagnosticLog.showFirstPage()],
+    tick: [() => hostDiagnosticLog.page === 1 && hostDiagnosticLog.showFirstPage()],
   },
   "processes": { enter: [refreshAgentProcesses], tick: [refreshAgentProcesses] },
   "files": { enter: [ensureFilesLoaded], tick: [refreshFiles] },
@@ -719,7 +719,8 @@ document.addEventListener("click", event => {
     "net-page": () => netLog.showPage(button.dataset.page).catch(() => {}),
     "agent-page": () => agentLog.showPage(button.dataset.page).catch(() => {}),
     "tool-page": () => toolLog.showPage(button.dataset.page).catch(() => {}),
-    "host-error-page": () => hostErrorLog.showPage(button.dataset.page).catch(() => {}),
+    "host-diagnostic-page": () => hostDiagnosticLog.showPage(button.dataset.page).catch(() => {}),
+    "toggle-host-diagnostic-filter": () => toggleHostDiagnosticFilter(),
     "approve-github-push": () => approveGithubPush(button.dataset.id),
     "reject-github-push": () => rejectGithubPush(button.dataset.id),
     "enable-tool": () => setToolEnabled(button.dataset.tool, true),

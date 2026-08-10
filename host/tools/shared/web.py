@@ -56,21 +56,53 @@ class WebRequestError(RuntimeError):
         self.body = body
 
 
-class UnmappedProviderError(RuntimeError):
-    """A provider failure with no curated user-facing mapping.
+class ProviderWarning(RuntimeError):
+    """A provider failure that should be visible in Host diagnostics.
 
-    This exception deliberately retains only non-secret routing metadata. Tool
-    packages let it reach the host boundary, which records a Host error and
-    returns a generic failure to the agent. The provider response body remains
-    confined to the handled ``WebRequestError`` and is never copied here.
+    The exception message is curated for the agent/operator result. A bounded
+    provider response is retained separately for the authenticated operator
+    diagnostic and is never included in ``str(exc)``.
     """
 
-    def __init__(self, provider: str, operation: str, *, status: int = 0) -> None:
-        transport = f"HTTP {status}" if status else "transport error"
-        super().__init__(f"Unmapped {provider} {operation} provider failure ({transport}).")
+    def __init__(
+        self,
+        provider: str,
+        operation: str,
+        message: str,
+        *,
+        status: int = 0,
+        body: bytes = b"",
+    ) -> None:
+        super().__init__(message)
         self.provider = provider
         self.operation = operation
         self.status = status
+        self.response_body = body.decode("utf-8", "replace").strip()
+
+
+class UnmappedProviderError(ProviderWarning):
+    """A provider failure with no curated user-facing mapping.
+
+    Tool packages let it reach the host boundary, which records a warning in
+    Host diagnostics and returns a generic failure to the agent. Generic
+    provider bodies remain discarded; tool-specific mapped warnings may retain
+    a bounded response when that provider integration deliberately opts in.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        operation: str,
+        *,
+        status: int = 0,
+    ) -> None:
+        transport = f"HTTP {status}" if status else "transport error"
+        super().__init__(
+            provider,
+            operation,
+            f"Unmapped {provider} {operation} provider failure ({transport}).",
+            status=status,
+        )
 
 
 def known_provider_transport_error(exc: WebRequestError) -> str:
@@ -80,9 +112,26 @@ def known_provider_transport_error(exc: WebRequestError) -> str:
 
 
 def unmapped_provider_error(provider: str, operation: str, exc: WebRequestError) -> UnmappedProviderError:
-    """Create a body-free failure for host-side diagnostics."""
+    """Create an operator-diagnostic failure with a generic agent result."""
 
     return UnmappedProviderError(provider, operation, status=exc.status)
+
+
+def provider_warning(
+    provider: str,
+    operation: str,
+    exc: WebRequestError,
+    message: str,
+) -> ProviderWarning:
+    """Create a provider warning with a curated agent-facing message."""
+
+    return ProviderWarning(
+        provider,
+        operation,
+        message,
+        status=exc.status,
+        body=exc.body,
+    )
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
