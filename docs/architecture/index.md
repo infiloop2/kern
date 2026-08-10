@@ -11,7 +11,7 @@ so operators and contributors can jump to the trust boundary they need.
 | [Architecture diagram](diagram.md) | One-page host capability map covering operator access, service users, storage, and egress boundaries. |
 | [Deployment and upgrades](deployment.md) | EC2 provisioning, upgrade/recovery behavior, drive lifecycle, and secret handling. |
 | [Admin state storage and migrations](admin-state-storage.md) | The local Postgres database: schema, access control, and schema migrations. |
-| [Host error diagnostics](host-errors.md) | Best-effort structured unexpected-service failures, PostgreSQL retention, and the read-only operator panel. |
+| [Host diagnostics](host-diagnostics.md) | Best-effort structured service errors and contained warnings, PostgreSQL retention, and the read-only operator panel. |
 | [Control planes](control-planes.md) | Operator-plane and admin-plane responsibilities and authority. |
 | [Privilege boundaries](privilege-boundaries.md) | Linux users, fixed sudo helpers, and root-owned helper pattern. |
 | [Filesystem layout](filesystem.md) | Trusted root paths, durable volumes, and per-service ownership. |

@@ -1,8 +1,9 @@
-"""Structured unexpected-error emission for journald ingestion.
+"""Structured host-diagnostic emission for journald ingestion.
 
-Services call :func:`report_unexpected` only after their typed, expected error
-paths have been excluded. The reporter does not inspect locals, request
-bodies, headers, the environment, or arbitrary object representations.
+Services call :func:`report_unexpected` only for service-level exceptions and
+:func:`report_warning` for contained but suspicious behavior. The reporter
+does not inspect locals, request headers, the environment, or arbitrary object
+representations; callers explicitly select any operator-facing context.
 ``logger --journald`` gives the collector a dedicated field to follow while
 systemd attaches the trusted originating unit, PID, timestamp, and boot id.
 """
@@ -19,9 +20,9 @@ import traceback as traceback_module
 from typing import Any
 
 
-JOURNAL_FIELD = "KERN_HOST_ERROR"
+JOURNAL_FIELD = "KERN_HOST_DIAGNOSTIC"
 JOURNAL_FIELD_VALUE = "1"
-JOURNAL_TAG = "kern-host-error"
+JOURNAL_TAG = "kern-host-diagnostic"
 MAX_COMPONENT_BYTES = 256
 MAX_EXCEPTION_TYPE_BYTES = 256
 MAX_SUMMARY_BYTES = 2048
@@ -65,6 +66,9 @@ def _exception_record(
     component: str,
     exc: BaseException,
     context: dict[str, Any] | None,
+    *,
+    severity: str = "error",
+    kind: str = "unexpected_exception",
 ) -> dict[str, Any]:
     frames = traceback_module.extract_tb(exc.__traceback__)
     frame_lines: list[str] = []
@@ -75,21 +79,27 @@ def _exception_record(
         source = f"\n  {frame.line.strip()}" if frame.line else ""
         frame_lines.append(f'File "{filename}", line {frame.lineno}, in {frame.name}{source}')
     exception_type = type(exc).__name__
-    summary = str(exc).strip() or exception_type
-    fingerprint_input = "\n".join(
-        ("unexpected_exception", component, exception_type, *fingerprint_frames)
-    )
+    summary = _clip(str(exc).strip() or exception_type, MAX_SUMMARY_BYTES)
+    safe_context = _safe_context(context)
+    fingerprint_parts = [severity, kind, component, exception_type, *fingerprint_frames]
+    if severity == "warning":
+        fingerprint_parts.extend((
+            summary,
+            json.dumps(safe_context, sort_keys=True, separators=(",", ":")),
+        ))
+    fingerprint_input = "\n".join(fingerprint_parts)
     try:
         host_version = _VERSION_FILE.read_text().strip()
     except OSError:
         host_version = ""
     return {
         "component": _clip(component, MAX_COMPONENT_BYTES),
-        "kind": "unexpected_exception",
+        "severity": severity,
+        "kind": kind,
         "exception_type": _clip(exception_type, MAX_EXCEPTION_TYPE_BYTES),
-        "summary": _clip(summary, MAX_SUMMARY_BYTES),
+        "summary": summary,
         "traceback": _clip("\n".join(frame_lines), MAX_TRACEBACK_BYTES),
-        "context": _safe_context(context),
+        "context": safe_context,
         "fingerprint": hashlib.sha256(fingerprint_input.encode()).hexdigest(),
         "host_version": _clip(host_version, 64),
     }
@@ -101,9 +111,10 @@ def emit_record(record: dict[str, Any]) -> None:
     Reporting must never replace or mask the failure being reported.
     """
     message = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    priority = "4" if record.get("severity") == "warning" else "3"
     fields = (
         f"MESSAGE={message}\n"
-        "PRIORITY=3\n"
+        f"PRIORITY={priority}\n"
         f"SYSLOG_IDENTIFIER={JOURNAL_TAG}\n"
         f"{JOURNAL_FIELD}={JOURNAL_FIELD_VALUE}\n\n"
     )
@@ -131,6 +142,56 @@ def report_unexpected(
         print(f"{JOURNAL_TAG}: unexpected error reporter failure", file=sys.stderr, flush=True)
 
 
+def report_warning(
+    component: str,
+    issue: BaseException | str,
+    *,
+    context: dict[str, Any] | None = None,
+    kind: str = "unexpected_behavior",
+) -> None:
+    """Record a contained anomaly for operator debugging.
+
+    String warnings deliberately have no traceback. Exception warnings retain
+    their bounded traceback, but remain warnings because the service handled
+    the failure and continued operating.
+    """
+    try:
+        if isinstance(issue, BaseException):
+            record = _exception_record(
+                component,
+                issue,
+                context,
+                severity="warning",
+                kind=kind,
+            )
+        else:
+            summary = str(issue).strip() or "Unexpected behavior"
+            safe_context = _safe_context(context)
+            fingerprint_input = json.dumps(
+                [kind, component, summary, safe_context],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            try:
+                host_version = _VERSION_FILE.read_text().strip()
+            except OSError:
+                host_version = ""
+            record = {
+                "component": _clip(component, MAX_COMPONENT_BYTES),
+                "severity": "warning",
+                "kind": kind,
+                "exception_type": "",
+                "summary": _clip(summary, MAX_SUMMARY_BYTES),
+                "traceback": "",
+                "context": safe_context,
+                "fingerprint": hashlib.sha256(fingerprint_input.encode()).hexdigest(),
+                "host_version": _clip(host_version, 64),
+            }
+        emit_record(record)
+    except Exception:
+        print(f"{JOURNAL_TAG}: warning reporter failure", file=sys.stderr, flush=True)
+
+
 def report_service_exit(service: str, result: str, exit_code: str, exit_status: str) -> None:
     """Emit an abnormal systemd service exit from an ``ExecStopPost`` hook."""
     if not result or result == "success":
@@ -143,6 +204,7 @@ def report_service_exit(service: str, result: str, exit_code: str, exit_status: 
         host_version = ""
     emit_record({
         "component": "systemd",
+        "severity": "error",
         "kind": "service_exit",
         "exception_type": "",
         "summary": _clip(summary, MAX_SUMMARY_BYTES),

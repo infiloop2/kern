@@ -63,11 +63,12 @@ MAX_EVENT_MESSAGE_CHARS = 128 * 1024
 # The audit logs page newest-first in pages of EVENT_PAGE_LIMIT rows; the
 # limit query parameter can only shrink a page.
 EVENT_PAGE_LIMIT = 100
-# Unexpected host failures are rare and materially larger than ordinary audit
-# rows because details may carry a stack trace. Keep a smaller bounded log.
-HOST_ERROR_LIMIT = 10_000
-HOST_ERROR_PRUNE_EVERY = 100
-HOST_ERROR_COALESCE_SECONDS = 60
+# Host diagnostics are materially larger than ordinary audit rows because
+# details may carry a stack trace or provider response. Keep one smaller
+# bounded log across errors and warnings.
+HOST_DIAGNOSTIC_LIMIT = 10_000
+HOST_DIAGNOSTIC_PRUNE_EVERY = 100
+HOST_DIAGNOSTIC_COALESCE_SECONDS = 60
 ADMIN_PASSKEY_LIMIT = 1
 # Resolved GitHub push approvals are useful operator history, but their JSON
 # payloads can be much larger than ordinary audit rows. Pending pushes have
@@ -2111,25 +2112,26 @@ def tool_event(seq: int) -> dict[str, Any] | None:
     return _tool_event_dict(row, include_arguments=True) if row is not None else None
 
 
-# -- host error log ------------------------------------------------------------
+# -- host diagnostics log ------------------------------------------------------
 # A journald collector is the sole writer.
 
-_HOST_ERROR_FIELDS = (
+_HOST_DIAGNOSTIC_FIELDS = (
     "id, seq, first_seen_at, last_seen_at, service, component, kind,"
-    " exception_type, summary, traceback, context, fingerprint,"
+    " severity, exception_type, summary, traceback, context, fingerprint,"
     " occurrence_count, host_version, boot_id, pid"
 )
 
 
-def _host_error_dict(row: Any, *, include_details: bool = False) -> dict[str, Any]:
+def _host_diagnostic_dict(row: Any, *, include_details: bool = False) -> dict[str, Any]:
     (
-        error_id,
+        diagnostic_id,
         seq,
         first_seen_at,
         last_seen_at,
         service,
         component,
         kind,
+        severity,
         exception_type,
         summary,
         trace,
@@ -2140,15 +2142,16 @@ def _host_error_dict(row: Any, *, include_details: bool = False) -> dict[str, An
         boot_id,
         pid,
     ) = row
-    error: dict[str, Any] = {
-        "id": int(error_id),
+    diagnostic: dict[str, Any] = {
+        "id": int(diagnostic_id),
         "seq": int(seq),
-        "error_id": f"host_error_{error_id}",
+        "diagnostic_id": f"host_diagnostic_{diagnostic_id}",
         "first_seen_at": first_seen_at,
         "last_seen_at": last_seen_at,
         "service": service,
         "component": component,
         "kind": kind,
+        "severity": severity,
         "exception_type": exception_type,
         "summary": summary,
         "occurrence_count": int(occurrence_count),
@@ -2158,17 +2161,17 @@ def _host_error_dict(row: Any, *, include_details: bool = False) -> dict[str, An
         "has_details": bool(trace or context),
     }
     if include_details:
-        error["traceback"] = trace
-        error["context"] = dict(context) if isinstance(context, dict) else {}
-        error["fingerprint"] = fingerprint
-    return error
+        diagnostic["traceback"] = trace
+        diagnostic["context"] = dict(context) if isinstance(context, dict) else {}
+        diagnostic["fingerprint"] = fingerprint
+    return diagnostic
 
 
-def ingest_host_error(
+def ingest_host_diagnostic(
     realtime_usec: int,
     event: dict[str, Any],
 ) -> int:
-    """Store or briefly coalesce one validated journal error."""
+    """Store or briefly coalesce one validated journal diagnostic."""
     from datetime import datetime, timedelta, timezone
 
     seen_at = (
@@ -2179,11 +2182,11 @@ def ingest_host_error(
     )
     cutoff = (
         datetime.fromtimestamp(realtime_usec / 1_000_000, timezone.utc)
-        - timedelta(seconds=HOST_ERROR_COALESCE_SECONDS)
+        - timedelta(seconds=HOST_DIAGNOSTIC_COALESCE_SECONDS)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     with db.transaction() as cur:
         cur.execute(
-            "SELECT id FROM host_errors"
+            "SELECT id FROM host_diagnostics"
             " WHERE fingerprint = %s AND service = %s AND last_seen_at >= %s"
             " ORDER BY seq DESC LIMIT 1 FOR UPDATE",
             (event["fingerprint"], event["service"], cutoff),
@@ -2192,7 +2195,7 @@ def ingest_host_error(
         if existing is not None:
             existing_id = int(existing[0])
             cur.execute(
-                "UPDATE host_errors SET seq = nextval('host_errors_seq_seq'),"
+                "UPDATE host_diagnostics SET seq = nextval('host_diagnostics_seq_seq'),"
                 " last_seen_at = %s,"
                 " occurrence_count = occurrence_count + 1, summary = %s,"
                 " traceback = %s, context = %s, host_version = %s,"
@@ -2210,14 +2213,14 @@ def ingest_host_error(
             )
             updated = cur.fetchone()
             assert updated is not None
-            error_id, seq = int(updated[0]), int(updated[1])
+            diagnostic_id, seq = int(updated[0]), int(updated[1])
         else:
             cur.execute(
-                "INSERT INTO host_errors"
+                "INSERT INTO host_diagnostics"
                 " (first_seen_at, last_seen_at, service, component, kind,"
-                " exception_type, summary, traceback, context, fingerprint,"
+                " severity, exception_type, summary, traceback, context, fingerprint,"
                 " occurrence_count, host_version, boot_id, pid)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s)"
                 " RETURNING id, seq",
                 (
                     seen_at,
@@ -2225,6 +2228,7 @@ def ingest_host_error(
                     event["service"],
                     event["component"],
                     event["kind"],
+                    event["severity"],
                     event["exception_type"],
                     event["summary"],
                     event["traceback"],
@@ -2237,47 +2241,57 @@ def ingest_host_error(
             )
             inserted = cur.fetchone()
             assert inserted is not None
-            error_id, seq = int(inserted[0]), int(inserted[1])
-        if seq % HOST_ERROR_PRUNE_EVERY == 0:
-            prune_host_errors(cur)
-    return error_id
+            diagnostic_id, seq = int(inserted[0]), int(inserted[1])
+        if seq % HOST_DIAGNOSTIC_PRUNE_EVERY == 0:
+            prune_host_diagnostics(cur)
+    return diagnostic_id
 
 
-def prune_host_errors(cur: Any) -> None:
-    """Keep the newest bounded host-error diagnostics."""
+def prune_host_diagnostics(cur: Any) -> None:
+    """Keep the newest bounded host diagnostics across both severities."""
     cur.execute(
-        "DELETE FROM host_errors WHERE"
+        "DELETE FROM host_diagnostics WHERE"
         " seq < COALESCE(("
-        " SELECT seq FROM host_errors ORDER BY seq DESC OFFSET %s LIMIT 1"
+        " SELECT seq FROM host_diagnostics ORDER BY seq DESC OFFSET %s LIMIT 1"
         "), 0)",
-        (HOST_ERROR_LIMIT - 1,),
+        (HOST_DIAGNOSTIC_LIMIT - 1,),
     )
 
 
-def page_host_errors_before(
-    before: int | None, *, service: str | None = None, limit: int = EVENT_PAGE_LIMIT
+def page_host_diagnostics_before(
+    before: int | None,
+    *,
+    service: str | None = None,
+    severity: str | None = None,
+    limit: int = EVENT_PAGE_LIMIT,
 ) -> list[dict[str, Any]]:
-    clause = "service = %s" if service is not None else None
-    params: tuple[Any, ...] = (service,) if service is not None else ()
+    clauses: list[str] = []
+    params: list[Any] = []
+    if service is not None:
+        clauses.append("service = %s")
+        params.append(service)
+    if severity is not None:
+        clauses.append("severity = %s")
+        params.append(severity)
     return _page_before(
-        "host_errors",
-        _HOST_ERROR_FIELDS,
-        _host_error_dict,
+        "host_diagnostics",
+        _HOST_DIAGNOSTIC_FIELDS,
+        _host_diagnostic_dict,
         before,
         limit,
-        extra_clause=clause,
-        extra_params=params,
+        extra_clause=" AND ".join(clauses) if clauses else None,
+        extra_params=tuple(params),
     )
 
 
-def host_error(error_id: int) -> dict[str, Any] | None:
+def host_diagnostic(diagnostic_id: int) -> dict[str, Any] | None:
     with db.transaction() as cur:
         cur.execute(
-            f"SELECT {_HOST_ERROR_FIELDS} FROM host_errors WHERE id = %s",
-            (error_id,),
+            f"SELECT {_HOST_DIAGNOSTIC_FIELDS} FROM host_diagnostics WHERE id = %s",
+            (diagnostic_id,),
         )
         row = cur.fetchone()
-    return _host_error_dict(row, include_details=True) if row is not None else None
+    return _host_diagnostic_dict(row, include_details=True) if row is not None else None
 
 
 def _approval_id(number: int, check_token: str) -> str:

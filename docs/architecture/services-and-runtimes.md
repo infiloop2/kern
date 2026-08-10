@@ -7,7 +7,7 @@
 | `kern-admin-api.service` | `kern-admin` | Admin API on `127.0.0.1:7443`. Owns admin state; holds no internet egress. |
 | `kern-tools.service` | `kern-tools` | Runs the bundled tool packages and owns the agent-facing tools socket `/run/kern-tools/tools.sock` (peer-credential authenticated). The only Kern application service besides the proxy with DNS+HTTPS egress; its Postgres role is scoped to the five tool tables plus read access to the encryption key needed for tool secrets. |
 | `kern-agent-network.service` | `kern-agent-network` | Serves read-only network integration and denial introspection on `/run/kern-agent-network/agent-network.sock`. No egress; its Postgres role has SELECT-only policy and network-event grants. |
-| `kern-host-errors.service` | `kern-admin` | Follows new structured unexpected-error records from journald and copies them best-effort into the bounded Postgres host-error log. |
+| `kern-host-errors.service` | `kern-admin` | Follows structured error and warning records from journald and copies them best-effort into the bounded Postgres host-diagnostics log. |
 | `kern-workspace.service` | `kern-workspace` | One Chat, Web Apps, global Memory, and Schedules backend on `127.0.0.1:7450` (reachable only from the admin API), plus the peer-authenticated agent socket `/run/kern-workspace/agent.sock`. Its Postgres role has explicit DML-only access to the Workspace tables in `public` and no egress. |
 | `kern-cloudflared.service` | `cloudflared` | Optional Cloudflare Tunnel connector for Cloudflare Tunnel operator endpoints. Installed only when `operator_connections` contains `cloudflare_tunnel`. |
 | `kern_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; `MemoryHigh=70%`/`MemoryMax=80%`/`MemorySwapMax=5G` contain a runaway agent's RAM and swap to its own cgroup; `TasksMax=4096` stops a fork bomb from exhausting kernel PIDs. |
@@ -24,7 +24,7 @@
 | `kern-admin-api.service` | `kern-admin` | systemd | Serves localhost API/UI, owns thread state, and supervises runtime work. |
 | `kern-tools.service` | `kern-tools` | systemd | Executes bundled tool calls and operator-delegated OAuth/approval work; owns the peer-authenticated tools socket. |
 | `kern-agent-network.service` | `kern-agent-network` | systemd | Serves the peer-authenticated network-introspection socket from SELECT-only policy and event state, without egress. |
-| `kern-host-errors.service` | `kern-admin` | systemd | Validates tagged records from trusted Kern systemd units and stores/coalesces them for the read-only Host errors panel. |
+| `kern-host-errors.service` | `kern-admin` | systemd | Validates tagged records from trusted Kern systemd units and stores/coalesces them for the read-only Host diagnostics panel. |
 | `kern-workspace.service` | `kern-workspace` | systemd | Serves all browser Workspace resources on the admin-only loopback port, the agent Workspace API on a peer-authenticated Unix socket, generated Web Apps, and global scheduled runs. |
 | `kern-cloudflared.service` | `cloudflared` | systemd | Optional Cloudflare Tunnel connector. Reads `/etc/kern/cloudflared.token` and exposes the admin API through the configured Cloudflare Tunnel hostname. |
 | `run-codex-app-server` helper | starts as root, then `kern-agent` | admin API via sudo | Starts one Codex stdio app-server process. |
@@ -50,7 +50,7 @@
 | Network-introspection socket handler threads | agent-network service | One per local request, bounded by a concurrency cap; calls perform read-only policy or denial queries. |
 | Workspace agent socket handler threads | Workspace service | Peer-authenticated before allocation, with separate connection and active-call caps; calls use bounded explicit Workspace routes. |
 | Maintenance thread | admin API | Periodically prunes bounded state and event history. |
-| Journal follower | host-errors collector | Follows new trusted-unit `KERN_HOST_ERROR=1` records without a replay cursor. |
+| Journal follower | host-diagnostics collector | Follows new trusted-unit `KERN_HOST_DIAGNOSTIC=1` records without a replay cursor. |
 | Runtime status poller | admin API/orchestrator | Rechecks provider health, including Hermes's Bedrock connection. |
 | Turn threads | admin API/orchestrator | One daemon thread per admitted turn; at most ten turns run per runtime, and a message past that cap is rejected rather than queued. Each turn spawns and closes its own runtime process. |
 | Proxy handler threads | network proxy | One per proxied connection, capped so buffered request bodies cannot exhaust memory. |
@@ -88,7 +88,7 @@ re-derive active status from the agent user's home directory.
 
 ## Reboot and restart
 
-The admin API, proxy, tools, network-introspection, host-error collector,
+The admin API, proxy, tools, network-introspection, host-diagnostics collector,
 Postgres, Workspace service,
 nftables, and optional Cloudflare Tunnel service are `systemctl enable`d, so
 they resume on every boot. Postgres starts before the proxy, tools, and

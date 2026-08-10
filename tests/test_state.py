@@ -1453,6 +1453,7 @@ class HostErrorStorageTests(unittest.TestCase):
         return {
             "service": service,
             "component": "admin_api.request",
+            "severity": "error",
             "kind": "unexpected_exception",
             "exception_type": "RuntimeError",
             "summary": "request handler escaped",
@@ -1466,73 +1467,87 @@ class HostErrorStorageTests(unittest.TestCase):
 
     def test_ingest_coalesces_brief_repeats_and_rotates_ordering(self) -> None:
         first_usec = 1_800_000_000_000_000
-        first = state.ingest_host_error(first_usec, self.event())
-        other = state.ingest_host_error(
+        first = state.ingest_host_diagnostic(first_usec, self.event())
+        other = state.ingest_host_diagnostic(
             first_usec + 5_000_000,
             self.event(service="kern-tools"),
         )
-        repeated = state.ingest_host_error(
+        repeated = state.ingest_host_diagnostic(
             first_usec + 10_000_000, self.event()
         )
 
         self.assertEqual(repeated, first)
         self.assertGreater(other, first)
-        detail = state.host_error(first)
+        detail = state.host_diagnostic(first)
         assert detail is not None
         self.assertEqual(detail["occurrence_count"], 2)
         self.assertEqual(detail["context"]["route"], "/v1/status")
         self.assertEqual(detail["fingerprint"], "a" * 64)
-        page = state.page_host_errors_before(None)
+        page = state.page_host_diagnostics_before(None)
         self.assertEqual([row["id"] for row in page], [first, other])
         self.assertGreater(page[0]["seq"], page[1]["seq"])
 
-        later = state.ingest_host_error(
+        later = state.ingest_host_diagnostic(
             first_usec + 80_000_000, self.event()
         )
         self.assertNotEqual(later, first)
-        page = state.page_host_errors_before(None)
+        page = state.page_host_diagnostics_before(None)
         self.assertEqual([row["id"] for row in page], [later, first, other])
         self.assertNotIn("traceback", page[0])
         self.assertNotIn("context", page[0])
 
     def test_service_filter(self) -> None:
         seen_usec = 1_800_000_000_000_000
-        state.ingest_host_error(seen_usec, self.event())
-        state.ingest_host_error(
+        state.ingest_host_diagnostic(seen_usec, self.event())
+        state.ingest_host_diagnostic(
             seen_usec + 1_000_000, self.event(service="kern-tools")
         )
-        filtered = state.page_host_errors_before(None, service="kern-tools")
+        filtered = state.page_host_diagnostics_before(None, service="kern-tools")
         self.assertEqual([row["service"] for row in filtered], ["kern-tools"])
-        self.assertEqual(len(state.page_host_errors_before(None)), 2)
+        self.assertEqual(len(state.page_host_diagnostics_before(None)), 2)
+
+    def test_severity_filter(self) -> None:
+        seen_usec = 1_800_000_000_000_000
+        state.ingest_host_diagnostic(seen_usec, self.event())
+        warning = dict(
+            self.event(service="kern-tools"),
+            severity="warning",
+            kind="provider_failure",
+            fingerprint="b" * 64,
+        )
+        state.ingest_host_diagnostic(seen_usec + 1_000_000, warning)
+
+        filtered = state.page_host_diagnostics_before(None, severity="warning")
+        self.assertEqual([row["service"] for row in filtered], ["kern-tools"])
 
     def test_coalesced_sequence_rotation_does_not_consume_retention_slots(self) -> None:
         seen_usec = 1_800_000_000_000_000
         with (
-            patch.object(state, "HOST_ERROR_LIMIT", 2),
-            patch.object(state, "HOST_ERROR_PRUNE_EVERY", 1),
+            patch.object(state, "HOST_DIAGNOSTIC_LIMIT", 2),
+            patch.object(state, "HOST_DIAGNOSTIC_PRUNE_EVERY", 1),
         ):
-            state.ingest_host_error(seen_usec, self.event())
-            state.ingest_host_error(
+            state.ingest_host_diagnostic(seen_usec, self.event())
+            state.ingest_host_diagnostic(
                 seen_usec + 1_000_000,
                 self.event(service="kern-tools"),
             )
             for repeat in range(2, 7):
-                state.ingest_host_error(
+                state.ingest_host_diagnostic(
                     seen_usec + repeat * 1_000_000,
                     self.event(),
                 )
 
-            rows = state.page_host_errors_before(None)
+            rows = state.page_host_diagnostics_before(None)
             self.assertEqual({row["service"] for row in rows}, {"kern-admin-api", "kern-tools"})
             repeated = next(row for row in rows if row["service"] == "kern-admin-api")
             self.assertEqual(repeated["occurrence_count"], 6)
 
-            state.ingest_host_error(
+            state.ingest_host_diagnostic(
                 seen_usec + 7_000_000,
                 self.event(service="kern-agent-network"),
             )
             self.assertEqual(
-                [row["service"] for row in state.page_host_errors_before(None)],
+                [row["service"] for row in state.page_host_diagnostics_before(None)],
                 ["kern-agent-network", "kern-admin-api"],
             )
 

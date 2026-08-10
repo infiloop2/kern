@@ -1210,7 +1210,7 @@ UNIT
 
 cat > /etc/systemd/system/kern-host-errors.service <<'UNIT'
 [Unit]
-Description=Kern Host Error Journal Collector
+Description=Kern Host Diagnostics Journal Collector
 After=systemd-journald.service
 Wants=kern-postgres.service
 StartLimitIntervalSec=0

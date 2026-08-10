@@ -53,7 +53,7 @@ from host.runtime.core.unix_socket_service import (
 )
 from host.runtime.tools import assets as tool_assets, tools_host
 from host.tools import OpenedStreamingAsset, StreamingAssetError
-from host.tools.shared.web import UnmappedProviderError
+from host.tools.shared.web import ProviderWarning, UnmappedProviderError
 
 SOCKET_PATH = os.environ.get("KERN_TOOLS_SOCKET", TOOLS_SOCKET_PATH)
 # Peers are scoped strictly by path: the agent gets exactly the MCP surface
@@ -302,8 +302,8 @@ def _operator_start_connect(
         return flow.start_connect({"redirect_uri": body["redirect_uri"]}, api)
     except (ValueError, KeyError, tools_host.ToolConfigKeyUnsetError) as exc:
         raise OperatorError(HTTPStatus.BAD_REQUEST, str(exc) or "invalid connect request") from exc
-    except UnmappedProviderError as exc:
-        _report_operator_provider_error(tool_id, "oauth_connect_start", exc)
+    except ProviderWarning as exc:
+        _report_operator_provider_warning(tool_id, "oauth_connect_start", exc)
     except Exception as exc:  # noqa: BLE001 - tool packages redact their messages
         raise OperatorError(HTTPStatus.BAD_GATEWAY, str(exc) or "tool connect flow failed") from exc
 
@@ -322,8 +322,8 @@ def _operator_complete_connect(
         result = flow.complete_connect(params, api)
     except (ValueError, KeyError, tools_host.ToolConfigKeyUnsetError) as exc:
         raise OperatorError(HTTPStatus.BAD_REQUEST, str(exc) or "invalid connect request") from exc
-    except UnmappedProviderError as exc:
-        _report_operator_provider_error(tool_id, "oauth_connect_complete", exc)
+    except ProviderWarning as exc:
+        _report_operator_provider_warning(tool_id, "oauth_connect_complete", exc)
     except Exception as exc:  # noqa: BLE001 - tool packages redact their messages
         raise OperatorError(HTTPStatus.BAD_GATEWAY, str(exc) or "tool connect flow failed") from exc
     account = result.get("account") if isinstance(result, dict) else None
@@ -340,29 +340,38 @@ def _operator_disconnect(
     api = tools_host.host_api_for(tools_host.bundled_tool(tool_id), asset_store)
     try:
         flow.disconnect(api)
-    except UnmappedProviderError as exc:
-        _report_operator_provider_error(tool_id, "oauth_disconnect", exc)
+    except ProviderWarning as exc:
+        _report_operator_provider_warning(tool_id, "oauth_disconnect", exc)
     except Exception as exc:  # noqa: BLE001 - tool packages redact their messages
         raise OperatorError(HTTPStatus.BAD_GATEWAY, str(exc) or "tool disconnect failed") from exc
     state.record_tool_event(tool_id, "oauth_connect", "disconnected", "")
     return {"tool_id": tool_id, "connected": False}
 
 
-def _report_operator_provider_error(tool_id: str, action_id: str, exc: UnmappedProviderError) -> NoReturn:
-    host_errors.report_unexpected(
+def _report_operator_provider_warning(tool_id: str, action_id: str, exc: ProviderWarning) -> NoReturn:
+    context: dict[str, Any] = {
+        "tool_id": tool_id,
+        "action_id": action_id,
+        "provider": exc.provider,
+        "operation": exc.operation,
+        "http_status": exc.status,
+    }
+    if exc.response_body:
+        context["provider_response"] = exc.response_body
+    host_errors.report_warning(
         "tools.operator_provider_request",
         exc,
-        context={
-            "tool_id": tool_id,
-            "action_id": action_id,
-            "provider": exc.provider,
-            "operation": exc.operation,
-            "http_status": exc.status,
-        },
+        context=context,
+        kind="provider_failure",
+    )
+    message = (
+        "Provider request failed. Check Host diagnostics for details."
+        if isinstance(exc, UnmappedProviderError)
+        else str(exc)
     )
     raise OperatorError(
         HTTPStatus.BAD_GATEWAY,
-        "Provider request failed. Check Host errors for details.",
+        message,
     ) from None
 
 
@@ -507,23 +516,31 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
                 self.wfile.flush()
         except StreamingAssetError as exc:
             error = str(exc) or "Tool asset stream failed."
-        except UnmappedProviderError as exc:
-            host_errors.report_unexpected(
+        except ProviderWarning as exc:
+            context: dict[str, Any] = {
+                "tool_id": streaming.tool_id,
+                "action_id": streaming.action,
+                "provider": exc.provider,
+                "operation": exc.operation,
+                "http_status": exc.status,
+            }
+            if exc.response_body:
+                context["provider_response"] = exc.response_body
+            host_errors.report_warning(
                 "tools.streaming_provider_request",
                 exc,
-                context={
-                    "tool_id": streaming.tool_id,
-                    "action_id": streaming.action,
-                    "provider": exc.provider,
-                    "operation": exc.operation,
-                    "http_status": exc.status,
-                },
+                context=context,
+                kind="provider_failure",
             )
-            error = "Provider request failed. Check Host errors for details."
+            error = (
+                "Provider request failed. Check Host diagnostics for details."
+                if isinstance(exc, UnmappedProviderError)
+                else str(exc)
+            )
         except ValueError:
             error = "Tool returned invalid streaming asset metadata."
         except Exception as exc:
-            host_errors.report_unexpected(
+            host_errors.report_warning(
                 "tools.streaming_asset",
                 exc,
                 context={"tool_id": streaming.tool_id, "action_id": streaming.action},
@@ -604,7 +621,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
             except Exception as exc:
                 # Tool packages map their own errors; anything else must not leak
                 # internals to the agent.
-                host_errors.report_unexpected("tools.agent_call", exc)
+                host_errors.report_warning("tools.agent_call", exc)
                 action_result = {"status": "failed", "error": "Tool call failed.", "reconnect_required": False}
             if isinstance(action_result, tools_host.StreamingAction):
                 self._send_streaming_action(action_result)
@@ -666,7 +683,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             except Exception as exc:
-                host_errors.report_unexpected(
+                host_errors.report_warning(
                     "tools.asset_staging",
                     exc,
                     context={"tool_id": tool_id, "asset_kind": kind},

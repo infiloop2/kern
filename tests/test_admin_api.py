@@ -2730,6 +2730,71 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(body, {"status": "ok"})
         self.assertEqual(captured["request"][1], "/memory?limit=50")
 
+    def test_workspace_proxy_warns_on_invalid_backend_response(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def read(self, _limit: int) -> bytes:
+                return b"not-json"
+
+        class FakeConnection:
+            def __init__(self, _host: str, _port: int, timeout: int) -> None:
+                del timeout
+
+            def request(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def getresponse(self) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch(
+                "host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection",
+                FakeConnection,
+            ),
+            patch.object(workspace_api_proxy.host_errors, "report_warning") as report,
+            self.assertRaises(admin_api.ApiError) as error,
+        ):
+            workspace_api_proxy.route_request(
+                "GET", "/v1/workspace/chat/health", {}, None
+            )
+
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
+        report.assert_called_once()
+
+    def test_tools_proxy_warns_on_invalid_backend_response(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def read(self) -> bytes:
+                return b"not-json"
+
+        class FakeConnection:
+            def __init__(self, _socket_path: str) -> None:
+                pass
+
+            def request(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def getresponse(self) -> FakeResponse:
+                return FakeResponse()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch.object(tools_admin_api, "_ToolsSocketConnection", FakeConnection),
+            patch.object(tools_admin_api.host_errors, "report_warning") as report,
+            self.assertRaises(admin_api.ApiError) as error,
+        ):
+            tools_admin_api._tools_operator_request("/oauth_connect/start", {})
+
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
+        report.assert_called_once()
+
     def test_filesystem_metrics_reports_root_and_data_mounts(self) -> None:
         class Usage:
             def __init__(self, used: int, total: int) -> None:
@@ -4148,14 +4213,17 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('ADMIN_UI_DIR / "favicon.svg"', api)
         self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 3)
         self.assertNotIn('id="tab-processes"', html)
-        self.assertNotIn('id="tab-host-errors"', html)
+        self.assertNotIn('id="tab-host-diagnostics"', html)
         self.assertIn('data-action="open-home-view" data-view="processes"', html)
-        self.assertIn('data-action="open-home-view" data-view="host-errors"', html)
-        self.assertLess(html.index('data-view="tool-log"'), html.index('data-view="host-errors"'))
-        self.assertIn("should be investigated by a Kern developer, newest first", html)
-        self.assertIn('id="host-error-pager"', html)
-        self.assertIn('endpoint: "/v1/host-errors"', ui)
-        self.assertIn('"host-error-page": () => hostErrorLog.showPage(button.dataset.page)', ui)
+        self.assertIn('data-action="open-home-view" data-view="host-diagnostics"', html)
+        self.assertLess(html.index('data-view="tool-log"'), html.index('data-view="host-diagnostics"'))
+        self.assertIn("Service errors and contained warnings", html)
+        self.assertIn('id="host-diagnostic-pager"', html)
+        self.assertIn('endpoint: "/v1/host-diagnostics"', ui)
+        self.assertIn(
+            '"host-diagnostic-page": () => hostDiagnosticLog.showPage(button.dataset.page)',
+            ui,
+        )
         self.assertNotIn('data-action="resolve-host-error"', ui)
         self.assertNotIn('data-action="dismiss-host-error"', ui)
         self.assertNotIn('data-action="report-host-error"', ui)
@@ -6642,10 +6710,11 @@ class ToolRoutesTests(unittest.TestCase):
                 self.request("GET", "/v1/tools/events/999999")
             self.assertEqual(error.exception.code, 404)
 
-    def test_host_errors_endpoint_is_read_only_and_lazy_loads_details(self) -> None:
+    def test_host_diagnostics_endpoint_is_read_only_filterable_and_lazy(self) -> None:
         event = {
             "service": "kern-admin-api",
             "component": "orchestrator.execution",
+            "severity": "error",
             "kind": "unexpected_exception",
             "exception_type": "RuntimeError",
             "summary": "thread session missing",
@@ -6656,45 +6725,56 @@ class ToolRoutesTests(unittest.TestCase):
             "boot_id": "boot-1",
             "pid": 1234,
         }
-        first = state.ingest_host_error(1_800_000_000_000_000, event)
-        tools_event = dict(event, service="kern-tools", fingerprint="b" * 64)
-        second = state.ingest_host_error(
+        first = state.ingest_host_diagnostic(1_800_000_000_000_000, event)
+        tools_event = dict(
+            event,
+            service="kern-tools",
+            severity="warning",
+            kind="provider_failure",
+            fingerprint="b" * 64,
+        )
+        second = state.ingest_host_diagnostic(
             1_800_000_001_000_000, tools_event
         )
 
-        status, body = self.request("GET", "/v1/host-errors?limit=1")
+        status, body = self.request("GET", "/v1/host-diagnostics?limit=1")
         self.assertEqual(status, 200)
         self.assertEqual([row["seq"] for row in body["events"]], [second])
         self.assertNotIn("traceback", body["events"][0])
         self.assertNotIn("context", body["events"][0])
 
-        _, filtered = self.request("GET", "/v1/host-errors?service=kern-admin-api")
+        _, filtered = self.request("GET", "/v1/host-diagnostics?service=kern-admin-api")
         self.assertEqual([row["seq"] for row in filtered["events"]], [first])
-        _, detail = self.request("GET", f"/v1/host-errors/{first}")
-        self.assertEqual(detail["error"]["traceback"], event["traceback"])
-        self.assertEqual(detail["error"]["context"], {"thread_id": "thread-1"})
-        self.assertEqual(detail["error"]["id"], first)
+        _, warnings = self.request("GET", "/v1/host-diagnostics?severity=warning")
+        self.assertEqual([row["seq"] for row in warnings["events"]], [second])
+        _, detail = self.request("GET", f"/v1/host-diagnostics/{first}")
+        self.assertEqual(detail["diagnostic"]["traceback"], event["traceback"])
+        self.assertEqual(detail["diagnostic"]["context"], {"thread_id": "thread-1"})
+        self.assertEqual(detail["diagnostic"]["id"], first)
 
         # Coalescing moves the row back to the top of seq-based paging without
         # invalidating a detail link rendered before the repeat arrived.
-        repeated = state.ingest_host_error(
+        repeated = state.ingest_host_diagnostic(
             1_800_000_010_000_000, event
         )
         self.assertEqual(repeated, first)
-        _, repeated_detail = self.request("GET", f"/v1/host-errors/{first}")
-        self.assertEqual(repeated_detail["error"]["occurrence_count"], 2)
+        _, repeated_detail = self.request("GET", f"/v1/host-diagnostics/{first}")
+        self.assertEqual(repeated_detail["diagnostic"]["occurrence_count"], 2)
 
         with self.assertRaises(urllib.error.HTTPError) as invalid:
-            self.request("GET", "/v1/host-errors?bogus=1")
+            self.request("GET", "/v1/host-diagnostics?bogus=1")
         self.assertEqual(invalid.exception.code, HTTPStatus.BAD_REQUEST)
         with self.assertRaises(urllib.error.HTTPError) as invalid_service:
-            self.request("GET", "/v1/host-errors?service=not%20a%20unit")
+            self.request("GET", "/v1/host-diagnostics?service=not%20a%20unit")
         self.assertEqual(invalid_service.exception.code, HTTPStatus.BAD_REQUEST)
+        with self.assertRaises(urllib.error.HTTPError) as invalid_severity:
+            self.request("GET", "/v1/host-diagnostics?severity=debug")
+        self.assertEqual(invalid_severity.exception.code, HTTPStatus.BAD_REQUEST)
         with self.assertRaises(urllib.error.HTTPError) as missing:
-            self.request("GET", "/v1/host-errors/999999")
+            self.request("GET", "/v1/host-diagnostics/999999")
         self.assertEqual(missing.exception.code, HTTPStatus.NOT_FOUND)
         with self.assertRaises(urllib.error.HTTPError) as write:
-            self.request("POST", f"/v1/host-errors/{first}")
+            self.request("POST", f"/v1/host-diagnostics/{first}")
         self.assertEqual(write.exception.code, HTTPStatus.NOT_FOUND)
 
     def test_oauth_callback_serves_the_ui_shell(self) -> None:

@@ -56,7 +56,7 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `tool_credentials` | One OAuth credential per tool, split into typed connected-account columns, encrypted provider token material, and tool-owned non-secret metadata. |
 | `tool_approvals` | Host-owned approval records. `number` is the identity behind the public `approval_<number>.<token>` id (the token is an unguessable poll capability); conditional transitions make each approval single-use, and terminal result text is returned to both operator and agent (decided history is pruned to the newest 10,000). |
 | `tool_events` | Tool call, approval, connection, enablement, and config audit events. Accepted calls store their exact bounded arguments; lifecycle events store no arguments. Pruned to the newest 1,000,000. |
-| `host_errors` | Unexpected host-service exceptions and abnormal systemd exits copied from structured journald records. Brief repeats coalesce by service and fingerprint; retained to the newest 10,000 rows. List reads omit traceback/context until detail expansion. |
+| `host_diagnostics` | Service-level errors and contained warnings copied from structured journald records. Brief repeats coalesce by service and fingerprint; one shared cap retains the newest 10,000 rows. List reads omit traceback/context until detail expansion. |
 | `counters` | Monotonic Home Stats totals for threads, user messages, and agent activity. Agent activity combines agent-authored messages with activity events. Migrations seed each total from retained state, then the thread/event write transaction increments it so later session or audit pruning never lowers the displayed totals. |
 | `secret_keys` | The at-rest encryption key for stored secrets (see below). The proxy and tools roles can read it, but their table grants expose only their own ciphertext-bearing rows. |
 | `schema_migrations` | Applied migration versions (owned by the migration runner). |
@@ -104,9 +104,9 @@ transactions on one thread take separate connections so a read inside a
 mutation sees the last committed state.
 
 Growth stays bounded by deliberately high caps (1M rows per ordinary audit
-log — agent, network, and tool events each — 10k host-error rows, 100k session
+log — agent, network, and tool events each — 10k host-diagnostic rows, 100k session
 mappings per runtime, and 10k decided tool approvals). Ordinary audit logs use
-O(1)-planning primary-key range deletes below `MAX(seq) - N`; host errors find
+O(1)-planning primary-key range deletes below `MAX(seq) - N`; host diagnostics find
 the oldest boundary among the newest N rows because a coalesced row rotates
 its sequence without adding a row. Logs prune on their own append cadence, the
 rest on the hourly maintenance pass. The admin volume is sized for those caps;

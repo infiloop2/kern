@@ -40,7 +40,7 @@ from host.tools import (
 )
 from host.tools.host_api import AssetMetadata
 from host.tools.manifest import ActionSpec, TOOL_ID_RE
-from host.tools.shared.web import UnmappedProviderError
+from host.tools.shared.web import ProviderWarning, UnmappedProviderError
 
 _DEFAULT_ASSET_STORE = tool_assets.ToolAssetStore(tool_assets.DEFAULT_ASSET_ROOT)
 
@@ -317,6 +317,29 @@ class StreamingAction:
     arguments: JSONObject
 
 
+def _provider_warning_context(
+    tool_id: str,
+    action_id: str,
+    exc: ProviderWarning,
+) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "tool_id": tool_id,
+        "action_id": action_id,
+        "provider": exc.provider,
+        "operation": exc.operation,
+        "http_status": exc.status,
+    }
+    if exc.response_body:
+        context["provider_response"] = exc.response_body
+    return context
+
+
+def _provider_failure_result(exc: ProviderWarning) -> ActionFailed:
+    if isinstance(exc, UnmappedProviderError):
+        return ActionFailed("Provider request failed. Check Host diagnostics for details.")
+    return ActionFailed(str(exc) or "Provider request failed. Check Host diagnostics for details.")
+
+
 def execute_action(
     tool_id: str,
     action: str,
@@ -349,21 +372,16 @@ def execute_action(
         result = tool.execute(action, audit_arguments, host_api_for(tool, asset_store))
     except (ApprovalBackpressureError, ToolConfigKeyUnsetError) as exc:
         result = ActionFailed(str(exc))
-    except UnmappedProviderError as exc:
-        host_errors.report_unexpected(
+    except ProviderWarning as exc:
+        host_errors.report_warning(
             "tools.provider_request",
             exc,
-            context={
-                "tool_id": tool_id,
-                "action_id": action,
-                "provider": exc.provider,
-                "operation": exc.operation,
-                "http_status": exc.status,
-            },
+            context=_provider_warning_context(tool_id, action, exc),
+            kind="provider_failure",
         )
-        result = ActionFailed("Provider request failed. Check Host errors for details.")
+        result = _provider_failure_result(exc)
     except Exception as exc:
-        host_errors.report_unexpected(
+        host_errors.report_warning(
             "tools.execute",
             exc,
             context={"tool_id": tool_id, "action_id": action},
@@ -411,21 +429,16 @@ def _execute_approved(
         )
     except (ToolCallError, ToolConfigKeyUnsetError) as exc:
         result = ActionFailed(str(exc))
-    except UnmappedProviderError as exc:
-        host_errors.report_unexpected(
+    except ProviderWarning as exc:
+        host_errors.report_warning(
             "tools.provider_request_approved",
             exc,
-            context={
-                "tool_id": tool_id,
-                "action_id": action,
-                "provider": exc.provider,
-                "operation": exc.operation,
-                "http_status": exc.status,
-            },
+            context=_provider_warning_context(tool_id, action, exc),
+            kind="provider_failure",
         )
-        result = ActionFailed("Provider request failed. Check Host errors for details.")
+        result = _provider_failure_result(exc)
     except Exception as exc:
-        host_errors.report_unexpected(
+        host_errors.report_warning(
             "tools.execute_approved",
             exc,
             context={"tool_id": tool_id, "action_id": action},

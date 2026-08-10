@@ -15,6 +15,7 @@ from host.constants import (
     WORKSPACE_PORT,
 )
 from host.runtime.admin_api.errors import ApiError
+from host.runtime.core import host_errors
 
 
 PROXY_TIMEOUT_SECONDS = WORKSPACE_ADMIN_API_TIMEOUT_SECONDS + 10
@@ -71,10 +72,20 @@ def _proxy(
         if conn is not None:
             conn.close()
     if len(raw) > MAX_REQUEST_BODY_BYTES:
+        host_errors.report_warning(
+            "admin_api.workspace_proxy",
+            "Workspace service returned an oversized response.",
+            context={"method": method, "route": path, "http_status": response.status},
+        )
         raise ApiError(HTTPStatus.BAD_GATEWAY, "Workspace service response too large")
     try:
         data = json.loads(raw.decode() or "{}")
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        host_errors.report_warning(
+            "admin_api.workspace_proxy",
+            exc,
+            context={"method": method, "route": path, "http_status": response.status},
+        )
         raise ApiError(
             HTTPStatus.BAD_GATEWAY, "Workspace service returned invalid JSON"
         ) from exc

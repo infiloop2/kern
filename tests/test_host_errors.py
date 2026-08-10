@@ -48,6 +48,7 @@ class HostErrorReporterTests(unittest.TestCase):
             )
 
         self.assertEqual(record["kind"], "unexpected_exception")
+        self.assertEqual(record["severity"], "error")
         self.assertEqual(record["exception_type"], "RuntimeError")
         self.assertEqual(record["summary"], "broken request")
         self.assertEqual(record["context"]["method"], "GET")
@@ -66,9 +67,59 @@ class HostErrorReporterTests(unittest.TestCase):
         run.assert_called_once()
         call = run.call_args
         self.assertEqual(call.args[0], ["/usr/bin/logger", "--journald"])
-        self.assertIn("KERN_HOST_ERROR=1\n", call.kwargs["input"])
-        self.assertIn("SYSLOG_IDENTIFIER=kern-host-error\n", call.kwargs["input"])
+        self.assertIn("KERN_HOST_DIAGNOSTIC=1\n", call.kwargs["input"])
+        self.assertIn("SYSLOG_IDENTIFIER=kern-host-diagnostic\n", call.kwargs["input"])
+        self.assertIn("PRIORITY=3\n", call.kwargs["input"])
         self.assertTrue(call.kwargs["check"])
+
+    @patch("host.runtime.core.host_errors.subprocess.run")
+    def test_emit_record_uses_warning_journal_priority(self, run: Mock) -> None:
+        host_errors.emit_record(
+            {"severity": "warning", "kind": "unexpected_behavior", "summary": "odd"}
+        )
+
+        self.assertIn("PRIORITY=4\n", run.call_args.kwargs["input"])
+
+    @patch("host.runtime.core.host_errors.emit_record")
+    def test_warning_record_is_distinct_from_service_errors(self, emit: Mock) -> None:
+        error = RuntimeError("provider rejected request")
+        host_errors.report_warning(
+            "tools.provider_request",
+            error,
+            context={"provider": "X", "http_status": 403},
+            kind="provider_failure",
+        )
+
+        record = emit.call_args.args[0]
+        self.assertEqual(record["severity"], "warning")
+        self.assertEqual(record["kind"], "provider_failure")
+        self.assertEqual(record["context"], {"provider": "X", "http_status": 403})
+
+    def test_warning_fingerprint_distinguishes_summary_and_context(self) -> None:
+        first = host_errors._exception_record(
+            "tools.provider_request",
+            RuntimeError("forbidden"),
+            {"action_id": "post", "http_status": 403},
+            severity="warning",
+            kind="provider_failure",
+        )
+        different_summary = host_errors._exception_record(
+            "tools.provider_request",
+            RuntimeError("rate limited"),
+            {"action_id": "post", "http_status": 403},
+            severity="warning",
+            kind="provider_failure",
+        )
+        different_context = host_errors._exception_record(
+            "tools.provider_request",
+            RuntimeError("forbidden"),
+            {"action_id": "delete", "http_status": 403},
+            severity="warning",
+            kind="provider_failure",
+        )
+
+        self.assertNotEqual(first["fingerprint"], different_summary["fingerprint"])
+        self.assertNotEqual(first["fingerprint"], different_context["fingerprint"])
 
     @patch("host.runtime.core.host_errors.emit_record")
     def test_service_exit_reports_only_abnormal_results(self, emit: Mock) -> None:
@@ -77,6 +128,7 @@ class HostErrorReporterTests(unittest.TestCase):
 
         host_errors.report_service_exit("kern-tools", "exit-code", "exited", "1")
         record = emit.call_args.args[0]
+        self.assertEqual(record["severity"], "error")
         self.assertEqual(record["kind"], "service_exit")
         self.assertEqual(record["context"]["service"], "kern-tools")
         self.assertEqual(
@@ -91,6 +143,7 @@ class HostErrorCollectorTests(unittest.TestCase):
     UNITS = frozenset({"kern-admin-api.service"})
     PAYLOAD = {
         "component": "admin_api.request",
+        "severity": "error",
         "kind": "unexpected_exception",
         "exception_type": "RuntimeError",
         "summary": "broken request",
@@ -119,14 +172,14 @@ class HostErrorCollectorTests(unittest.TestCase):
 
     def test_journal_command_follows_only_new_trusted_unit_records(self) -> None:
         command = collector.journal_command(self.UNITS)
-        self.assertIn("KERN_HOST_ERROR=1", command)
+        self.assertIn("KERN_HOST_DIAGNOSTIC=1", command)
         self.assertIn("_SYSTEMD_UNIT=kern-admin-api.service", command)
         self.assertIn("--follow", command)
         self.assertIn("--lines=0", command)
         self.assertFalse(any(argument.startswith("--since=") for argument in command))
         self.assertFalse(any(argument.startswith("--after-cursor=") for argument in command))
 
-    @patch("host.runtime.host_errors.collector.state.ingest_host_error")
+    @patch("host.runtime.host_errors.collector.state.ingest_host_diagnostic")
     def test_invalid_payload_is_skipped_without_database_work(self, ingest: Mock) -> None:
         process = Mock()
         process.stdout = iter([journal_row({"kind": "invalid"})])
@@ -138,7 +191,7 @@ class HostErrorCollectorTests(unittest.TestCase):
         ingest.assert_not_called()
         process.terminate.assert_not_called()
 
-    @patch("host.runtime.host_errors.collector.state.ingest_host_error")
+    @patch("host.runtime.host_errors.collector.state.ingest_host_diagnostic")
     def test_untrusted_unit_is_skipped_without_database_work(self, ingest: Mock) -> None:
         process = Mock()
         process.stdout = iter([
@@ -150,7 +203,7 @@ class HostErrorCollectorTests(unittest.TestCase):
         ingest.assert_not_called()
 
     @patch(
-        "host.runtime.host_errors.collector.state.ingest_host_error",
+        "host.runtime.host_errors.collector.state.ingest_host_diagnostic",
         side_effect=RuntimeError("database unavailable"),
     )
     def test_database_failure_stops_the_stream(self, ingest: Mock) -> None:
@@ -175,6 +228,15 @@ class HostErrorCollectorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "storage bound"):
             collector.parse_journal_record(
                 journal_row(oversized),
+                units=frozenset({"kern-admin-api.service"}),
+            )
+        oversized_traceback = dict(
+            self.PAYLOAD,
+            traceback="x" * (host_errors.MAX_TRACEBACK_BYTES + 1),
+        )
+        with self.assertRaisesRegex(ValueError, "storage bound"):
+            collector.parse_journal_record(
+                journal_row(oversized_traceback),
                 units=frozenset({"kern-admin-api.service"}),
             )
 

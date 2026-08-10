@@ -1,1 +1,1 @@
-"""Structured host-error journal collector."""
+"""Structured host-diagnostics journal collector."""

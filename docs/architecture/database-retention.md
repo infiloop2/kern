@@ -50,7 +50,7 @@ The categories are:
 | `tool_events` | retention | Newest 1,000,000 rows, with at most 499 rows of amortization slack. |
 | `bedrock_credentials` | fixed | Singleton. |
 | `bedrock_usage` | retention | Daily counters for the latest 400 days; model ids are normalized to a finite catalog plus `other`. |
-| `host_errors` | retention | Newest 10,000 coalesced error rows, with at most 99 rows of amortization slack. |
+| `host_diagnostics` | retention | Newest 10,000 coalesced error and warning rows, with at most 99 rows of amortization slack. |
 | `admin_passkey_config` | fixed | Singleton. |
 | `admin_passkeys` | fixed | Exactly zero or one administrator passkey; reset precedes replacement. |
 | `chat_threads` | quota | At most 10,000 durable Chat thread records; no age-based deletion. |

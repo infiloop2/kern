@@ -480,9 +480,9 @@ class SeedanceToolTests(unittest.TestCase):
             assert isinstance(result, ActionFailed)
             self.assertIn(fragment, result.error)
 
-    def test_unmapped_transport_failure_becomes_a_host_error(self) -> None:
+    def test_unmapped_transport_failure_becomes_a_host_warning(self) -> None:
         # A statusless failure has no curated message, so it must reach the host
-        # as a Host error carrying routing metadata only, rather than becoming a
+        # as a Host warning carrying routing metadata only, rather than becoming a
         # vague ActionFailed the agent cannot act on.
         with patch.object(
             seedance, "json_request", side_effect=WebRequestError("failed", body=b"provider detail")

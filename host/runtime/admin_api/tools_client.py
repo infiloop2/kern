@@ -25,7 +25,7 @@ import socket
 from typing import Any
 
 from host.constants import TOOLS_SOCKET_PATH as DEFAULT_TOOLS_SOCKET_PATH
-from host.runtime.core import state
+from host.runtime.core import host_errors, state
 from host.runtime.tools import tools_host
 from host.runtime.admin_api.errors import ApiError
 
@@ -63,8 +63,18 @@ def _tools_operator_request(path: str, body: Any = None) -> Any:
         payload = json.dumps(body).encode("utf-8") if body is not None else b"{}"
         connection.request("POST", path, body=payload, headers={"Content-Type": "application/json"})
         response = connection.getresponse()
-        raw = response.read().decode("utf-8")
-        data = json.loads(raw) if raw else {}
+        raw = response.read()
+        try:
+            data = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            host_errors.report_warning(
+                "admin_api.tools_proxy",
+                exc,
+                context={"route": path, "http_status": response.status},
+            )
+            raise ApiError(
+                HTTPStatus.BAD_GATEWAY, "tools service returned invalid JSON"
+            ) from exc
         if response.status != 200:
             message = data.get("error") if isinstance(data, dict) else None
             raise ApiError(HTTPStatus(response.status), message or f"tools service error {response.status}")

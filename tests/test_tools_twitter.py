@@ -11,7 +11,7 @@ from host.tools.json_types import JSONObject
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
 from host.tools import twitter
 from host.tools.twitter import XTool
-from host.tools.shared.web import WebRequestError
+from host.tools.shared.web import ProviderWarning, WebRequestError
 
 from test_tools import FakeHostAPI, FRESH_EXPIRES_AT
 
@@ -216,11 +216,12 @@ class XToolReadTests(unittest.TestCase):
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             raise WebRequestError("failed", status=401)
 
-        with patch.object(twitter, "json_request", fake_json_request):
-            result = XTool().execute("get_trends", {}, connected_api())
-        assert isinstance(result, ActionFailed)
-        self.assertFalse(result.reconnect_required)
-        self.assertIn("X_BEARER_TOKEN", result.error)
+        with (
+            patch.object(twitter, "json_request", fake_json_request),
+            self.assertRaises(ProviderWarning) as caught,
+        ):
+            XTool().execute("get_trends", {}, connected_api())
+        self.assertIn("X_BEARER_TOKEN", str(caught.exception))
 
     def test_personalized_trends_uses_user_token_and_maps_fields(self) -> None:
         seen: dict[str, Any] = {}
@@ -444,12 +445,15 @@ class XToolPostTests(unittest.TestCase):
                 ),
             )
 
-        with patch.object(twitter, "json_request", fake_execute):
-            result = XTool().execute_approved(approved_record, api)
-        assert isinstance(result, ActionFailed)
-        self.assertIn("HTTP 403", result.error)
-        self.assertNotIn("User is not permitted to create replies.", result.error)
-        self.assertNotIn("client-forbidden", result.error)
+        with (
+            patch.object(twitter, "json_request", fake_execute),
+            self.assertRaises(ProviderWarning) as caught,
+        ):
+            XTool().execute_approved(approved_record, api)
+        self.assertIn("HTTP 403", str(caught.exception))
+        self.assertNotIn("User is not permitted to create replies.", str(caught.exception))
+        self.assertNotIn("client-forbidden", str(caught.exception))
+        self.assertIn("client-forbidden", caught.exception.response_body)
 
     def test_execute_approved_rejects_non_post_action(self) -> None:
         api = connected_api()

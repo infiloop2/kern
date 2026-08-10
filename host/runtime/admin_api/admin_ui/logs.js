@@ -1,4 +1,4 @@
-// The three audit logs plus the read-only host error log, one tab each. All
+// The three audit logs plus the read-only host diagnostics log, one tab each. All
 // share one model:
 // page 1 is a live tail refreshed while it is visible, deeper pages are
 // stable before-cursor snapshots fetched on demand (new inserts never shift
@@ -14,6 +14,7 @@ const EVENT_PAGE_SIZE = 100;
 const EVENT_PAGER_WINDOW = 10;
 
 let netEventFilter = "all";
+let hostDiagnosticFilter = "all";
 
 function createPagedLog(config) {
   const log = {
@@ -152,27 +153,29 @@ export const toolLog = createPagedLog({
     </tr>`,
 });
 
-export const hostErrorLog = createPagedLog({
-  endpoint: "/v1/host-errors",
-  summaryId: "host-error-page-summary",
-  tableId: "host-errors",
-  pagerId: "host-error-pager",
-  pageAction: "host-error-page",
-  pauseWhileOpen: "#host-errors .host-error-details[open]",
+export const hostDiagnosticLog = createPagedLog({
+  endpoint: "/v1/host-diagnostics",
+  query: () => (hostDiagnosticFilter === "error" ? { severity: "error" } : {}),
+  summaryId: "host-diagnostic-page-summary",
+  tableId: "host-diagnostics",
+  pagerId: "host-diagnostic-pager",
+  pageAction: "host-diagnostic-page",
+  pauseWhileOpen: "#host-diagnostics .host-diagnostic-details[open]",
   columns: 5,
-  header: `<tr><th>last seen</th><th>service</th><th>component</th><th>error</th><th>details</th></tr>`,
-  emptySummary: () => "No errors",
-  emptyState: () => "No unexpected host errors have been recorded.",
-  row: error => {
-    const repeats = Number(error.occurrence_count) > 1
-      ? ` <span class="badge warning">×${esc(error.occurrence_count)}</span>` : "";
+  header: `<tr><th>last seen</th><th>service</th><th>component</th><th>diagnostic</th><th>details</th></tr>`,
+  summarySuffix: () => (hostDiagnosticFilter === "error" ? " · errors only" : ""),
+  emptySummary: () => "No diagnostics",
+  emptyState: () => `No ${hostDiagnosticFilter === "error" ? "host errors" : "host diagnostics"} have been recorded.`,
+  row: diagnostic => {
+    const repeats = Number(diagnostic.occurrence_count) > 1
+      ? ` <span class="badge warning">×${esc(diagnostic.occurrence_count)}</span>` : "";
     return `
       <tr>
-        <td class="muted time">${esc(formatDateTime(error.last_seen_at))}</td>
-        <td class="mono">${esc(error.service)}</td>
-        <td class="mono">${esc(error.component)}</td>
-        <td>${badge(error.kind)}${repeats}<pre>${esc(error.summary)}</pre></td>
-        <td>${error.has_details ? `<details class="host-error-details" data-host-error-id="${esc(error.id)}"><summary class="muted">view</summary><pre class="metadata"></pre></details>` : ""}</td>
+        <td class="muted time">${esc(formatDateTime(diagnostic.last_seen_at))}</td>
+        <td class="mono">${esc(diagnostic.service)}</td>
+        <td class="mono">${esc(diagnostic.component)}</td>
+        <td>${badge(diagnostic.severity)} ${badge(diagnostic.kind)}${repeats}<pre>${esc(diagnostic.summary)}</pre></td>
+        <td>${diagnostic.has_details ? `<details class="host-diagnostic-details" data-host-diagnostic-id="${esc(diagnostic.id)}"><summary class="muted">view</summary><pre class="metadata"></pre></details>` : ""}</td>
       </tr>`;
   },
 });
@@ -198,14 +201,14 @@ document.addEventListener("toggle", async event => {
 
 document.addEventListener("toggle", async event => {
   const details = event.target;
-  if (!(details instanceof HTMLDetailsElement) || !details.open || !details.matches(".host-error-details")) return;
-  const id = details.dataset.hostErrorId;
+  if (!(details instanceof HTMLDetailsElement) || !details.open || !details.matches(".host-diagnostic-details")) return;
+  const id = details.dataset.hostDiagnosticId;
   const pre = details.querySelector("pre.metadata");
   if (!id || !pre || pre.dataset.filled === "1") return;
   pre.dataset.filled = "1";
   try {
-    const response = await api("GET", `/v1/host-errors/${encodeURIComponent(id)}`);
-    const error = response.error || {};
+    const response = await api("GET", `/v1/host-diagnostics/${encodeURIComponent(id)}`);
+    const error = response.diagnostic || {};
     const lines = [
       `${error.exception_type || error.kind || "error"}: ${error.summary || ""}`,
       error.traceback || "",
@@ -229,4 +232,10 @@ export function toggleNetDeniedFilter() {
   netEventFilter = netEventFilter === "denied" ? "all" : "denied";
   $("net-filter-denied").textContent = netEventFilter === "denied" ? "Show all" : "Show denied";
   netLog.showFirstPage().catch(() => {});
+}
+
+export function toggleHostDiagnosticFilter() {
+  hostDiagnosticFilter = hostDiagnosticFilter === "error" ? "all" : "error";
+  $("host-diagnostic-filter").textContent = hostDiagnosticFilter === "error" ? "Show all" : "Show errors only";
+  hostDiagnosticLog.showFirstPage().catch(() => {});
 }
