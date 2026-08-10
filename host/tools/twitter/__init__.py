@@ -39,21 +39,32 @@ from host.tools.shared.oauth2 import (
     signed_state,
     verify_state,
 )
-from host.tools.shared.web import WebRequestError, encode_query, json_request
+from host.tools.shared.web import (
+    UnmappedProviderError,
+    WebRequestError,
+    encode_query,
+    json_request,
+    known_provider_transport_error,
+    unmapped_provider_error,
+)
 
 X_AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
 X_TOKEN_URL = "https://api.x.com/2/oauth2/token"
 X_REVOKE_URL = "https://api.x.com/2/oauth2/revoke"
 X_API_BASE_URL = "https://api.x.com/2"
-X_OAUTH_SCOPES = ("tweet.read", "users.read", "tweet.write", "offline.access")
+X_OAUTH_SCOPES = ("tweet.read", "users.read", "tweet.write", "dm.read", "dm.write", "offline.access")
 # offline.access is required at connect time: without it X issues no refresh
 # token, and the 2-hour access token would strand the connection.
-REQUIRED_X_SCOPES = frozenset({"tweet.read", "users.read", "tweet.write", "offline.access"})
+REQUIRED_X_SCOPES = frozenset(X_OAUTH_SCOPES)
+REQUIRED_X_DM_SCOPES = frozenset({"tweet.read", "users.read", "dm.read", "dm.write"})
 X_RECONNECT_MESSAGE = "X (Twitter) is no longer connected. Please reconnect the tool."
+X_DM_RECONNECT_MESSAGE = "X direct-message permissions are missing. Reconnect X and approve DM access."
 DEFAULT_TOKEN_LIFETIME_SECONDS = 7200
 MAX_QUERY_CHARS = 512
 MAX_TWEET_CHARS = 4_000
+MAX_DM_CHARS = 10_000
 TWEET_ID_RE = re.compile(r"^[0-9]{1,25}$")
+USER_ID_RE = re.compile(r"^[0-9]{1,19}$")
 USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{1,15}$")
 WOEID_RE = re.compile(r"^[0-9]{1,10}$")
 WORLDWIDE_WOEID = "1"
@@ -85,7 +96,7 @@ X_OUTPUT_SCHEMA: JSONObject = {
 MANIFEST = ToolManifest(
     tool_id="twitter",
     display_name="X (Twitter)",
-    description="Connect your X account and let your agent search and read X posts, and publish posts, replies, and quotes with your approval.",
+    description="Connect your X account and let your agent search and read X posts, publish posts, replies, and quotes, and send direct messages with your approval.",
     connection="oauth",
     actions=(
         ActionSpec(id="search_tweets",
@@ -159,6 +170,27 @@ MANIFEST = ToolManifest(
             output_schema=X_OUTPUT_SCHEMA,
             approval="operator",
         ),
+        ActionSpec(id="send_dm",
+            description="Queue approval to send exactly one text-only direct message from the connected X account. Provide exactly one recipient username or permanent numeric user id; the resolved recipient and full message are shown in the approval.",
+            data_policy=(
+                "Before approval, sends only the supplied recipient username or user id "
+                "to X to resolve the stable recipient shown in the approval; the message "
+                "text is not sent. After explicit approval, sends the resolved recipient "
+                "id and exactly the approved private-message text from the connected "
+                "account. Lookup and sending consume the deployment's X API credits. "
+                "The proposal and sanitized created-event id are available to the active model."
+            ),
+            input_schema=_schema(
+                {
+                    "text": {"type": "string", "description": "Direct-message text (up to 10,000 characters)."},
+                    "recipient_username": {"type": "string", "description": "Recipient X handle with or without @; mutually exclusive with recipient_user_id."},
+                    "recipient_user_id": {"type": "string", "description": "Recipient permanent numeric X user id; mutually exclusive with recipient_username."},
+                },
+                ["text"],
+            ),
+            output_schema=X_OUTPUT_SCHEMA,
+            approval="operator",
+        ),
     ),
     config=(
         ConfigRequirement(key="X_OAUTH_CLIENT_ID", description="X developer app OAuth 2.0 client id."),
@@ -166,8 +198,8 @@ MANIFEST = ToolManifest(
         ConfigRequirement(key="X_BEARER_TOKEN", description="X developer app Bearer Token (app-only auth; used by trends lookups, which do not accept user-context tokens)."),
     ),
     protections=(
-        "Reading does not require approval. Publishing a post, reply, or quote post happens only after your approval.",
-        "Public reads and writes consume X pay-per-use credits. Your X credentials stay encrypted in write-only tool config.",
+        "Reading does not require approval. Publishing a post, reply, or quote post and sending a direct message happen only after your approval.",
+        "Public reads, public writes, and direct messages consume X pay-per-use credits. Your X credentials stay encrypted in write-only tool config.",
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(PARAM_GUARD_TECHNICAL_DETAIL,),
@@ -181,7 +213,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure user authentication",
             show_callback=True,
-            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, set App permissions to Read and write, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. If X requires a Website URL, use your public Kern base URL: for a callback such as https://host.example/oauth/callback, use https://host.example. You do not need a separate website. Then save. Kern requests exactly tweet.read, users.read, tweet.write, and offline.access; offline.access is what lets X issue refresh tokens after the two-hour access token expires.",
+            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, set App permissions to Read and write and Direct message, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. If X requires a Website URL, use your public Kern base URL: for a callback such as https://host.example/oauth/callback, use https://host.example. You do not need a separate website. Then save. Kern requests exactly tweet.read, users.read, tweet.write, dm.read, dm.write, and offline.access. X requires dm.read together with dm.write; offline.access lets X issue refresh tokens after the two-hour access token expires.",
             link_url="https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code",
             link_label="View X OAuth 2.0 authorization-code documentation",
         ),
@@ -192,7 +224,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and connect Kern",
             show_config=True,
-            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, choose Connect, sign in as the account the agent may read and publish from, and approve the four displayed scopes. Confirm the page shows the expected @username.",
+            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, choose Connect, sign in as the account the agent may read, publish, and send direct messages from, and approve all six displayed scopes. Existing connections must disconnect and reconnect once to grant the new dm.read and dm.write scopes. Confirm the page shows the expected @username.",
         ),
     ),
     data_summary=DataSummary(
@@ -202,6 +234,7 @@ MANIFEST = ToolManifest(
                 points=(
                     DataSummaryPoint(label="Reads", text="Search queries, post ids, usernames, trend locations, and paging values go to X directly. Query text is received and logged like any other request, so it is itself data sent to X. The search query first passes the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent."),
                     DataSummaryPoint(label="Posts, replies, and quote posts", text="A post, reply, or quote post reaches X only after your approval. It sends exactly the approved text and, for a reply or quote post, the target post id."),
+                    DataSummaryPoint(label="Direct messages", text="Before approval, the supplied recipient username or user id goes to X for a recipient lookup so Kern can show the resolved account in the approval; message text does not. After approval, X receives the resolved permanent user id and exactly the approved message text."),
                 ),
             ),
             DataSummaryCard(
@@ -209,6 +242,7 @@ MANIFEST = ToolManifest(
                 points=(
                     DataSummaryPoint(label="X", text="Reads and the OAuth connection stay within X's services under the connected account."),
                     DataSummaryPoint(label="The public internet", text="An approved post is published on X under your account's audience settings; public posts are broadly visible and reusable under X's terms."),
+                    DataSummaryPoint(label="DM recipient", text="An approved direct message is available to the resolved recipient and is also processed and retained by X."),
                 ),
             ),
             DataSummaryCard(
@@ -225,7 +259,7 @@ MANIFEST = ToolManifest(
             DataSummaryCard(
                 title="How long X retains it",
                 description=(
-                    "A published post stays on X until you or X remove it. X keeps account, security, and API records under its "
+                    "A published post or direct message stays on X until you or X remove it. X keeps account, security, and API records under its "
                     "Privacy Policy with no single fixed period. Disconnect revokes the token where possible and always clears "
                     "the local credential, but does not delete X's own records."
                 ),
@@ -266,19 +300,22 @@ def _is_invalid_grant(body: bytes) -> bool:
 
 
 def _fetch_me(access_token: str) -> ConnectionAccount:
-    response = json_request(
-        "GET",
-        f"{X_API_BASE_URL}/users/me?{encode_query({'user.fields': 'id,name,username'})}",
-        headers={"authorization": f"Bearer {access_token}"},
-        failure_message="X profile lookup failed.",
-        invalid_response_message="X profile lookup returned an invalid response.",
-    )
+    try:
+        response = json_request(
+            "GET",
+            f"{X_API_BASE_URL}/users/me?{encode_query({'user.fields': 'id,name,username'})}",
+            headers={"authorization": f"Bearer {access_token}"},
+            failure_message="X profile lookup failed.",
+            invalid_response_message="X profile lookup returned an invalid response.",
+        )
+    except WebRequestError as exc:
+        raise _mapped_web_error(exc, "profile lookup") from exc
     data = response.get("data")
     if not isinstance(data, dict):
         raise RuntimeError("X profile lookup returned an invalid response.")
     user_id = data.get("id")
     username = data.get("username")
-    if not isinstance(user_id, str) or not TWEET_ID_RE.fullmatch(user_id):
+    if not isinstance(user_id, str) or not USER_ID_RE.fullmatch(user_id):
         raise RuntimeError("X did not return a stable account id.")
     label = f"@{username}" if isinstance(username, str) and username else user_id
     return {"id": user_id, "label": label, "scopes": []}
@@ -315,24 +352,39 @@ class XCredentialStore:
         verifier = state_payload.get("verifier")
         if not isinstance(verifier, str) or not verifier:
             raise ValueError("Invalid OAuth state.")
-        token_response = json_request(
-            "POST",
-            X_TOKEN_URL,
-            headers={"authorization": _basic_auth_header(api)},
-            form={
-                "grant_type": "authorization_code",
-                "code": params["code"],
-                "redirect_uri": params["redirect_uri"],
-                "code_verifier": verifier,
-                "client_id": api.config["X_OAUTH_CLIENT_ID"],
-            },
-            failure_message="X OAuth token exchange failed.",
-            invalid_response_message="X OAuth token exchange returned an invalid response.",
-        )
+        try:
+            token_response = json_request(
+                "POST",
+                X_TOKEN_URL,
+                headers={"authorization": _basic_auth_header(api)},
+                form={
+                    "grant_type": "authorization_code",
+                    "code": params["code"],
+                    "redirect_uri": params["redirect_uri"],
+                    "code_verifier": verifier,
+                    "client_id": api.config["X_OAUTH_CLIENT_ID"],
+                },
+                failure_message="X OAuth token exchange failed.",
+                invalid_response_message="X OAuth token exchange returned an invalid response.",
+            )
+        except WebRequestError as exc:
+            if exc.status in {400, 401, 403}:
+                raise RuntimeError(
+                    "X OAuth token exchange was rejected. Check the client credentials, callback URI, authorization code, PKCE settings, and requested scopes."
+                ) from exc
+            if exc.status:
+                raise RuntimeError(f"X returned HTTP {exc.status} during OAuth token exchange.") from exc
+            known = known_provider_transport_error(exc)
+            if known:
+                raise RuntimeError(known) from exc
+            raise unmapped_provider_error("X", "OAuth token exchange", exc) from None
         granted_scopes = str(token_response.get("scope") or "").split()
         missing = REQUIRED_X_SCOPES - set(granted_scopes)
         if missing:
-            raise RuntimeError("X connection is missing required permissions.")
+            raise RuntimeError(
+                "X connection is missing required permissions: "
+                f"{', '.join(sorted(missing))}. Update the X app permissions and reconnect."
+            )
         existing = api.credentials.load()
         token_payload = _token_payload_from_response(token_response, fallback_refresh_token="")
         if not token_payload["refresh_token"]:
@@ -407,11 +459,24 @@ class XCredentialStore:
             if exc.status == 400 and _is_invalid_grant(exc.body):
                 clear_if_still_loaded(api, existing)
                 raise IntegrationReconnectRequired(X_RECONNECT_MESSAGE) from exc
-            raise
+            if exc.status in {400, 401, 403}:
+                raise RuntimeError(
+                    "X OAuth token refresh was rejected. Check the app credentials and reconnect the account if the token was revoked."
+                ) from exc
+            if exc.status:
+                raise RuntimeError(f"X returned HTTP {exc.status} during OAuth token refresh.") from exc
+            known = known_provider_transport_error(exc)
+            if known:
+                raise RuntimeError(known) from exc
+            raise unmapped_provider_error("X", "OAuth token refresh", exc) from None
         # X rotates refresh tokens: the one just used is spent, so the new
         # payload (with the newly issued refresh token) must win or the
         # connection is lost. Keep the old one only if none was returned.
         updated_payload = _token_payload_from_response(token_response, fallback_refresh_token=refresh_token)
+        refreshed_scope = token_response.get("scope")
+        if isinstance(refreshed_scope, str) and REQUIRED_X_SCOPES - set(refreshed_scope.split()):
+            clear_if_still_loaded(api, existing)
+            raise IntegrationReconnectRequired(X_RECONNECT_MESSAGE)
         save_if_still_connected(
             api,
             existing,
@@ -455,12 +520,17 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     if exc.status == 401:
         return IntegrationReconnectRequired(X_RECONNECT_MESSAGE)
     if exc.status == 429:
-        return RuntimeError("X API rate limit was reached.")
-    if exc.status == 403:
-        return RuntimeError(f"X declined the {what} request (forbidden).")
-    if exc.status:
-        return RuntimeError(f"X API returned HTTP {exc.status}.")
-    return RuntimeError(f"X {what} request failed.")
+        message = "X API rate limit was reached."
+    elif exc.status == 403:
+        message = f"X declined the {what} request (HTTP 403 forbidden)."
+    elif exc.status:
+        message = f"X API returned HTTP {exc.status} for the {what} request."
+    else:
+        known = known_provider_transport_error(exc)
+        if known:
+            return RuntimeError(known)
+        return unmapped_provider_error("X", what, exc)
+    return RuntimeError(message)
 
 
 def _usernames_by_id(response: JSONObject) -> dict[str, str]:
@@ -551,7 +621,7 @@ def _user_tweets(access_token: str, tool_input: JSONObject) -> JSONObject:
     if (username is None) == (user_id is None):
         raise ToolInputValidationError("X user posts require exactly one of tool_input.username or tool_input.user_id.")
     if user_id is not None:
-        if not isinstance(user_id, str) or not TWEET_ID_RE.fullmatch(user_id.strip()):
+        if not isinstance(user_id, str) or not USER_ID_RE.fullmatch(user_id.strip()):
             raise ToolInputValidationError("X tool_input.user_id must be a numeric id string.")
         resolved_id = user_id.strip()
         resolved_username = ""
@@ -609,9 +679,11 @@ def _get_trends(api: HostAPI, tool_input: JSONObject) -> JSONObject:
         )
     except WebRequestError as exc:
         if exc.status == 401:
-            raise RuntimeError(
-                "X rejected the configured Bearer token. Update X_BEARER_TOKEN under Home > Integrations in the admin UI."
-            ) from exc
+            message = (
+                "X rejected the configured Bearer token. Update X_BEARER_TOKEN "
+                "under Home > Integrations in the admin UI."
+            )
+            raise RuntimeError(message) from exc
         raise _mapped_web_error(exc, "trends") from exc
     data = response.get("data")
     trends: list[JSONValue] = []
@@ -738,6 +810,97 @@ def _post_summary(proposal: JSONObject, account_label: str, target: JSONObject |
     return summary
 
 
+def _require_dm_scopes(api: HostAPI) -> None:
+    existing = api.credentials.load()
+    if existing is None:
+        raise IntegrationReconnectRequired(X_RECONNECT_MESSAGE)
+    scopes = existing["account"].get("scopes")
+    granted = {scope for scope in scopes if isinstance(scope, str)} if isinstance(scopes, list) else set()
+    if REQUIRED_X_DM_SCOPES - granted:
+        raise IntegrationReconnectRequired(X_DM_RECONNECT_MESSAGE)
+
+
+def _dm_proposal(tool_input: JSONObject) -> JSONObject:
+    extra = set(tool_input) - {"text", "recipient_username", "recipient_user_id"}
+    if extra:
+        raise ToolInputValidationError(
+            "X send_dm tool input only supports text, recipient_username, and recipient_user_id."
+        )
+    text = tool_input.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ToolInputValidationError("X send_dm tool_input.text is required.")
+    text = text.strip()
+    if len(text) > MAX_DM_CHARS:
+        raise ToolInputValidationError(f"X direct-message text must be at most {MAX_DM_CHARS} characters.")
+    username = tool_input.get("recipient_username")
+    user_id = tool_input.get("recipient_user_id")
+    if (username is None) == (user_id is None):
+        raise ToolInputValidationError(
+            "X send_dm requires exactly one of tool_input.recipient_username or tool_input.recipient_user_id."
+        )
+    proposal: JSONObject = {"text": text}
+    if username is not None:
+        if not isinstance(username, str) or not USERNAME_RE.fullmatch(username.strip()):
+            raise ToolInputValidationError("X tool_input.recipient_username must be a valid X handle.")
+        proposal["recipient_username"] = username.strip().lstrip("@")
+    else:
+        if not isinstance(user_id, str) or not USER_ID_RE.fullmatch(user_id.strip()):
+            raise ToolInputValidationError("X tool_input.recipient_user_id must be a numeric user id string.")
+        proposal["recipient_user_id"] = user_id.strip()
+    return proposal
+
+
+def _dm_recipient_preview(access_token: str, proposal: JSONObject) -> JSONObject:
+    username = proposal.get("recipient_username")
+    requested_id = proposal.get("recipient_user_id")
+    params = encode_query({"user.fields": "id,name,username"})
+    if isinstance(username, str):
+        response = _api_get(
+            access_token,
+            f"/users/by/username/{username}?{params}",
+            what="direct-message recipient lookup",
+        )
+    elif isinstance(requested_id, str):
+        response = _api_get(
+            access_token,
+            f"/users/{requested_id}?{params}",
+            what="direct-message recipient lookup",
+        )
+    else:
+        raise ToolInputValidationError("X direct-message recipient is invalid.")
+    data = response.get("data")
+    if not isinstance(data, dict):
+        raise ToolInputValidationError("The X direct-message recipient was not found.")
+    resolved_id = data.get("id")
+    resolved_username = data.get("username")
+    if (
+        not isinstance(resolved_id, str)
+        or not USER_ID_RE.fullmatch(resolved_id)
+        or (isinstance(requested_id, str) and resolved_id != requested_id)
+        or not isinstance(resolved_username, str)
+        or not USERNAME_RE.fullmatch(resolved_username)
+    ):
+        raise ToolInputValidationError("The X direct-message recipient was not found.")
+    return {
+        "id": resolved_id,
+        "username": resolved_username,
+        "name": clip_text(str(data.get("name") or ""), 120),
+    }
+
+
+def _dm_summary(proposal: JSONObject, account_label: str, recipient: JSONObject) -> str:
+    text = str(proposal.get("text") or "")
+    prefix = (
+        f"Direct message on X as {clip_text(account_label, 80)} to "
+        f"@{recipient.get('username')} (user id {recipient.get('id')}), {len(text)}-char message"
+    )
+    for text_clip in (280, 200, 120, 60):
+        summary = f'{prefix}: "{clip_text(text, text_clip)}"'
+        if len(summary.encode("utf-8")) <= SUMMARY_MAX_BYTES:
+            return summary
+    return summary
+
+
 class XTool:
     @property
     def manifest(self) -> ToolManifest:
@@ -768,18 +931,39 @@ class XTool:
                 target: JSONObject | None = None
                 if isinstance(target_id, str):
                     target = _target_tweet_preview(access_token, target_id)
-                payload: JSONObject = {
+                post_payload: JSONObject = {
                     "action": action,
                     "tool_id": MANIFEST.tool_id,
                     "x_account": {"id": account["id"], "label": account["label"]},
                     "proposal": proposal,
                 }
                 if target is not None:
-                    payload["target_tweet"] = target
+                    post_payload["target_tweet"] = target
                 approval = api.approvals.request(
                     action_id=action,
                     summary=_post_summary(proposal, account["label"], target),
-                    payload=payload,
+                    payload=post_payload,
+                )
+                return ActionPendingApproval(approval.approval_id, approval.summary)
+            if action == "send_dm":
+                proposal = _dm_proposal(tool_input)
+                _require_dm_scopes(api)
+                access_token = X_CREDENTIALS.access_token(api)
+                account = X_CREDENTIALS.refresh_identity(api, access_token)
+                recipient = _dm_recipient_preview(access_token, proposal)
+                if recipient["id"] == account["id"]:
+                    raise ToolInputValidationError("X cannot send a direct message to the connected account itself.")
+                dm_payload: JSONObject = {
+                    "action": action,
+                    "tool_id": MANIFEST.tool_id,
+                    "x_account": {"id": account["id"], "label": account["label"]},
+                    "recipient": recipient,
+                    "proposal": proposal,
+                }
+                approval = api.approvals.request(
+                    action_id=action,
+                    summary=_dm_summary(proposal, account["label"], recipient),
+                    payload=dm_payload,
                 )
                 return ActionPendingApproval(approval.approval_id, approval.summary)
             return ActionFailed("Unsupported X action.")
@@ -787,13 +971,15 @@ class XTool:
             return ActionFailed(exc.message)
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
             return ActionFailed(str(exc) or "X tool request failed.")
 
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
         try:
             # The host hands a loaded record: approved, and this tool's own.
-            if approval.action_id != "post_tweet":
+            if approval.action_id not in {"post_tweet", "send_dm"}:
                 return ActionFailed("X approval action is invalid.")
             payload = approval.payload
             proposal = payload.get("proposal")
@@ -807,6 +993,47 @@ class XTool:
                 return ActionFailed("X approval payload is invalid.")
             if approved_account.get("id") != current_account["id"]:
                 return ActionFailed("X account changed after approval. Please queue a new approval.")
+            if approval.action_id == "send_dm":
+                _require_dm_scopes(api)
+                approved_recipient = payload.get("recipient")
+                if not isinstance(approved_recipient, dict):
+                    return ActionFailed("X direct-message approval recipient is invalid.")
+                recipient_id = approved_recipient.get("id")
+                if not isinstance(recipient_id, str) or not USER_ID_RE.fullmatch(recipient_id):
+                    return ActionFailed("X direct-message approval recipient is invalid.")
+                current_recipient = _dm_recipient_preview(
+                    access_token,
+                    {"recipient_user_id": recipient_id},
+                )
+                if (
+                    current_recipient.get("id") != recipient_id
+                    or current_recipient.get("username") != approved_recipient.get("username")
+                ):
+                    return ActionFailed(
+                        "X direct-message recipient changed after approval. Please queue a new approval."
+                    )
+                text = proposal_object.get("text")
+                if not isinstance(text, str) or not text or len(text) > MAX_DM_CHARS:
+                    return ActionFailed("X direct-message approval text is invalid.")
+                try:
+                    response = json_request(
+                        "POST",
+                        f"{X_API_BASE_URL}/dm_conversations/with/{recipient_id}/messages",
+                        headers={"authorization": f"Bearer {access_token}"},
+                        body={"text": text},
+                        failure_message="X direct-message request failed.",
+                        invalid_response_message="X direct-message request returned an invalid response.",
+                    )
+                except WebRequestError as exc:
+                    raise _mapped_web_error(exc, "direct-message") from exc
+                data = response.get("data")
+                event_id = data.get("dm_event_id") if isinstance(data, dict) else None
+                if not isinstance(event_id, str) or not TWEET_ID_RE.fullmatch(event_id):
+                    return ActionFailed("X did not confirm the new direct message.")
+                return ApprovalExecuted(
+                    f"Sent a direct message on X as {current_account['label']} to "
+                    f"@{current_recipient['username']} (event id {event_id})."
+                )
             approved_target = payload.get("target_tweet")
             if isinstance(approved_target, dict):
                 proposal_target = proposal_object.get("in_reply_to_tweet_id") or proposal_object.get("quote_tweet_id")
@@ -845,8 +1072,10 @@ class XTool:
             return ActionFailed(exc.message)
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
-            return ActionFailed(str(exc) or "X post failed after approval.")
+            return ActionFailed(str(exc) or "X write failed after approval.")
 
 
 # The instance the host discovers (see host.runtime.tools.tools_host).

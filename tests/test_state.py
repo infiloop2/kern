@@ -173,10 +173,10 @@ class StateStorageTests(unittest.TestCase):
 
     def test_thread_summaries_report_the_canonical_session_rows(self) -> None:
         with state.mutation() as cur:
-            seed_thread(cur, "t1", last_used_at="2026-06-08T00:00:01Z")
+            seed_thread(cur, "thread-t1", last_used_at="2026-06-08T00:00:01Z")
             seed_thread(
                 cur,
-                "t2",
+                "thread-t2",
                 runtime="claude_code",
                 model="claude-fable-5",
                 effort="max",
@@ -187,13 +187,13 @@ class StateStorageTests(unittest.TestCase):
             row["thread_id"]: row
             for row in state.page_thread_summaries(None, 100)
         }
-        self.assertEqual(set(summaries), {"t1", "t2"})
+        self.assertEqual(set(summaries), {"thread-t1", "thread-t2"})
         # Exactly the session configuration: no provider session id, no status
         # (live status is in-process orchestrator state), no counts.
         self.assertEqual(
-            summaries["t1"],
+            summaries["thread-t1"],
             {
-                "thread_id": "t1",
+                "thread_id": "thread-t1",
                 "agent_runtime": "codex",
                 "model": "gpt-5.6-terra",
                 "effort": "high",
@@ -202,8 +202,8 @@ class StateStorageTests(unittest.TestCase):
             },
         )
         # A never-used thread reads as an empty last_used_at, not None.
-        self.assertEqual(summaries["t2"]["last_used_at"], "")
-        self.assertEqual(summaries["t2"]["agent_runtime"], "claude_code")
+        self.assertEqual(summaries["thread-t2"]["last_used_at"], "")
+        self.assertEqual(summaries["thread-t2"]["agent_runtime"], "claude_code")
 
     def test_thread_summary_pages_use_stable_sort_key_and_prefix_filter(self) -> None:
         with state.mutation() as cur:
@@ -875,21 +875,21 @@ class StateStorageTests(unittest.TestCase):
             for number in range(1, 8):
                 seed_thread(
                     cur,
-                    f"t{number}",
+                    f"thread-t{number}",
                     provider_session_id=f"ct_{number}",
                     last_used_at=f"2026-06-08T00:00:{number:02d}Z",
                 )
-            seed_thread(cur, "c1", runtime="claude_code", model="claude-fable-5", effort="high")
-            state.append_agent_event(cur, "thread.message", "t1", {"message": "keep", "source": "user"})
+            seed_thread(cur, "thread-c1", runtime="claude_code", model="claude-fable-5", effort="high")
+            state.append_agent_event(cur, "thread.message", "thread-t1", {"message": "keep", "source": "user"})
         with state.mutation() as cur:
             state.prune_thread_sessions(cur, "codex", 3)
         remaining = {row["thread_id"] for row in state.page_thread_summaries(None, 100)}
-        self.assertEqual(remaining, {"t1", "t5", "t6", "t7", "c1"})
+        self.assertEqual(remaining, {"thread-t1", "thread-t5", "thread-t6", "thread-t7", "thread-c1"})
         with state.mutation() as cur:
-            cur.execute("DELETE FROM agent_events WHERE thread_id = 't1'")
+            cur.execute("DELETE FROM agent_events WHERE thread_id = 'thread-t1'")
             state.prune_thread_sessions(cur, "codex", 3)
         remaining = {row["thread_id"] for row in state.page_thread_summaries(None, 100)}
-        self.assertEqual(remaining, {"t5", "t6", "t7", "c1"})
+        self.assertEqual(remaining, {"thread-t5", "thread-t6", "thread-t7", "thread-c1"})
 
     def test_event_logs_prune_to_the_newest_cap(self) -> None:
         # Retention is a primary-key range delete below MAX(seq) - cap: cheap

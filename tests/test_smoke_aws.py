@@ -339,9 +339,9 @@ class ThreadTurnHelperTests(unittest.TestCase):
 
     def test_post_message_retries_only_the_thread_close_fence(self) -> None:
         smoke = AwsSmoke()
-        smoke.thread_prefix = "stage-test-"
+        smoke.thread_prefix = "thread-stage-test-"
         fence = AssertionError(
-            "POST /v1/threads/stage-test-smoke-fence/messages returned HTTP 409: "
+            "POST /v1/threads/thread-stage-test-smoke-fence/messages returned HTTP 409: "
             "{'error': {'message': 'the agent is finishing; retry shortly'}}"
         )
         with (
@@ -351,11 +351,11 @@ class ThreadTurnHelperTests(unittest.TestCase):
             response = smoke.send_follow_up("smoke-fence", "again")
         self.assertEqual(response, {"status": "accepted"})
         self.assertEqual(api.call_count, 2)
-        self.assertEqual(api.call_args.args[1], "/v1/threads/stage-test-smoke-fence/messages")
+        self.assertEqual(api.call_args.args[1], "/v1/threads/thread-stage-test-smoke-fence/messages")
         self.assertEqual(api.call_args.args[2], {"message": "again"})
 
         hermes = AssertionError(
-            "POST /v1/threads/stage-test-smoke-fence/messages returned HTTP 409: "
+            "POST /v1/threads/thread-stage-test-smoke-fence/messages returned HTTP 409: "
             "{'error': {'message': 'Hermes cannot accept another message while running; wait for it to finish'}}"
         )
         with patch.object(smoke, "_api", side_effect=hermes) as api:
@@ -376,7 +376,12 @@ class ThreadTurnHelperTests(unittest.TestCase):
             },
         )
         self.assertEqual(smoke.follow_up_body("again"), {"message": "again"})
-        self.assertEqual(smoke.api_thread_id("smoke-x"), "smoke-x")
+        self.assertEqual(smoke.api_thread_id("smoke-x"), "thread-smoke-x")
+        self.assertEqual(smoke.thread_id_component("claude_code"), "claude-code")
+        self.assertEqual(
+            smoke.thread_id_component("moonshotai.kimi-k2.5"),
+            "moonshotai-kimi-k2-5",
+        )
 
 
 class StageAwsSmokeTests(unittest.TestCase):

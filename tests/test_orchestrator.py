@@ -303,20 +303,20 @@ class OrchestratorTests(unittest.TestCase):
             return "codex-chat", "done"
 
         with patch.object(orchestrator.codex_app_server, "run_turn", fake_run_turn):
-            response = self.send_message("chat", "hello")
+            response = self.send_message("thread-chat", "hello")
             self.assertEqual(response["status"], "accepted")
-            self.assertEqual(response["thread"]["thread_id"], "chat")
-            self.wait_until_idle("chat")
+            self.assertEqual(response["thread"]["thread_id"], "thread-chat")
+            self.wait_until_idle("thread-chat")
 
         self.assertEqual(observed_config, [("gpt-5.6-terra", "high")])
-        events = thread_events("chat")
+        events = thread_events("thread-chat")
         self.assertEqual(
             event_summary(events),
             [("thread.message", "hello")],
         )
         message_event = next(event for event in events if event["event_type"] == "thread.message")
         self.assertEqual(message_event["payload"]["source"], "user")
-        self.assertEqual(state.thread_session_config("chat")["provider_session_id"], "codex-chat")
+        self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "codex-chat")
         self.assertEqual(len(FakeServer.instances), 1)
         self.assertTrue(FakeServer.instances[0].closed)
         self.assertEqual(orchestrator._LIVE, {})
@@ -340,16 +340,16 @@ class OrchestratorTests(unittest.TestCase):
 
         try:
             with patch.object(orchestrator.codex_app_server, "run_turn", fake_run_turn):
-                self.send_message("t1", "go")
+                self.send_message("thread-t1", "go")
                 self.assertTrue(running.wait(timeout=10))
-                self.assertEqual(self.send_message("t1", "first")["status"], "accepted")
-                self.assertEqual(self.send_message("t1", "second")["status"], "accepted")
+                self.assertEqual(self.send_message("thread-t1", "first")["status"], "accepted")
+                self.assertEqual(self.send_message("thread-t1", "second")["status"], "accepted")
                 self.assertEqual(FakeServer.instances[0].steered, ["first", "second"])
                 release.set()
-                self.wait_until_idle("t1")
+                self.wait_until_idle("thread-t1")
         finally:
             release.set()
-        events = thread_events("t1")
+        events = thread_events("thread-t1")
         self.assertEqual(
             event_summary(events),
             [
@@ -362,38 +362,38 @@ class OrchestratorTests(unittest.TestCase):
         activity_event = next(event for event in events if event["event_type"] == "thread.activity")
         self.assertEqual(
             activity_event["payload"]["activity"]["activity_id"],
-            f"{state.thread_session_config('t1')['run_number']}:command-1",
+            f"{state.thread_session_config('thread-t1')['run_number']}:command-1",
         )
         for message in ("first", "second"):
             event = next(e for e in events if e.get("payload", {}).get("message") == message)
             self.assertEqual(event["payload"]["source"], "user")
 
     def test_starting_is_retryable_until_the_provider_accepts_the_initial_message(self) -> None:
-        turn = self.admit("chat", message="initial")
+        turn = self.admit("thread-chat", message="initial")
         assert turn is not None
         server = FakeServer()
         turn.server = server
 
         with self.assertRaises(ApiError) as starting:
-            orchestrator.steer_live_turn("chat", "codex", "too early")
+            orchestrator.steer_live_turn("thread-chat", "codex", "too early")
         self.assertEqual(starting.exception.status.value, 409)
         self.assertEqual(
             starting.exception.message,
             "the agent is starting; retry shortly",
         )
-        self.assertEqual(event_summary(thread_events("chat")), [("thread.message", "initial")])
+        self.assertEqual(event_summary(thread_events("thread-chat")), [("thread.message", "initial")])
 
         self.assertTrue(orchestrator._provider_ready(turn))
-        self.assertTrue(orchestrator.steer_live_turn("chat", "codex", "accepted"))
+        self.assertTrue(orchestrator.steer_live_turn("thread-chat", "codex", "accepted"))
         self.assertEqual(server.steered, ["accepted"])
         self.assertEqual(
-            event_summary(thread_events("chat")),
+            event_summary(thread_events("thread-chat")),
             [("thread.message", "initial"), ("thread.message", "accepted")],
         )
 
-        self.assertTrue(orchestrator.stop_thread_turn("chat"))
+        self.assertTrue(orchestrator.stop_thread_turn("thread-chat"))
         orchestrator._close_turn(turn, server)
-        self.assertNotIn("codex:chat", orchestrator._LIVE)
+        self.assertNotIn("codex:thread-chat", orchestrator._LIVE)
 
     def test_provider_rejection_after_running_fails_instead_of_retrying_startup(self) -> None:
         class RejectingServer(FakeServer):
@@ -404,17 +404,17 @@ class OrchestratorTests(unittest.TestCase):
                 )
 
         server = RejectingServer()
-        turn = self.register_live_turn("codex", "chat", server)
+        turn = self.register_live_turn("codex", "thread-chat", server)
 
         with self.assertRaises(ApiError) as rejected:
-            orchestrator.steer_live_turn("chat", "codex", "new direction")
+            orchestrator.steer_live_turn("thread-chat", "codex", "new direction")
 
         self.assertEqual(rejected.exception.status.value, 502)
         self.assertIn("rejected the message", rejected.exception.message)
         self.assertEqual(turn.phase, orchestrator.ExecutionPhase.FINISHING)
         self.assertTrue(server.interrupted)
-        self.assertEqual(state.thread_session_config("chat")["status"], "idle")
-        events = thread_events("chat")
+        self.assertEqual(state.thread_session_config("thread-chat")["status"], "idle")
+        events = thread_events("thread-chat")
         self.assertEqual(event_summary(events), [("thread.error", None)])
         self.assertNotIn(
             "new direction",
@@ -431,10 +431,10 @@ class OrchestratorTests(unittest.TestCase):
                 )
 
         server = FinishingServer()
-        turn = self.register_live_turn("codex", "chat", server)
+        turn = self.register_live_turn("codex", "thread-chat", server)
 
         with self.assertRaises(ApiError) as finishing:
-            orchestrator.steer_live_turn("chat", "codex", "too late")
+            orchestrator.steer_live_turn("thread-chat", "codex", "too late")
 
         self.assertEqual(finishing.exception.status.value, 409)
         self.assertEqual(
@@ -443,9 +443,9 @@ class OrchestratorTests(unittest.TestCase):
         )
         self.assertEqual(turn.phase, orchestrator.ExecutionPhase.RUNNING)
         self.assertFalse(server.interrupted)
-        self.assertEqual(thread_events("chat"), [])
+        self.assertEqual(thread_events("thread-chat"), [])
         self.assertNotIn("too late", server.steered)
-        self.assertTrue(orchestrator.stop_thread_turn("chat"))
+        self.assertTrue(orchestrator.stop_thread_turn("thread-chat"))
         orchestrator._close_turn(turn, server)
 
     def test_eleventh_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
@@ -462,7 +462,7 @@ class OrchestratorTests(unittest.TestCase):
         try:
             with patch.object(orchestrator.codex_app_server, "run_turn", fake_run_turn):
                 thread_ids = [
-                    f"t{index}"
+                    f"thread-t{index}"
                     for index in range(1, orchestrator.TURN_LIMIT_PER_RUNTIME + 1)
                 ]
                 for thread_id in thread_ids:
@@ -473,18 +473,18 @@ class OrchestratorTests(unittest.TestCase):
                 )
 
                 with self.assertRaises(ApiError) as caught:
-                    self.send_message("t11", "one too many")
+                    self.send_message("thread-t11", "one too many")
                 self.assertEqual(caught.exception.status.value, 429)
                 self.assertIn("already running 10 concurrent threads", caught.exception.message)
                 # A message for a live thread is a steer, never capacity-bound.
-                self.assertEqual(self.send_message("t1", "still steerable")["status"], "accepted")
+                self.assertEqual(self.send_message("thread-t1", "still steerable")["status"], "accepted")
 
                 release.set()
                 for thread_id in thread_ids:
                     self.wait_until_idle(thread_id)
                 # Capacity freed: the rejected thread now starts.
-                self.assertEqual(self.send_message("t11", "retry")["status"], "accepted")
-                self.wait_until_idle("t11")
+                self.assertEqual(self.send_message("thread-t11", "retry")["status"], "accepted")
+                self.wait_until_idle("thread-t11")
         finally:
             release.set()
 
@@ -546,21 +546,21 @@ class OrchestratorTests(unittest.TestCase):
                 patch.object(orchestrator.codex_app_server, "CodexAppServer", SlowCloseServer),
                 patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()),
             ):
-                self.send_message("chat", "first")
+                self.send_message("thread-chat", "first")
                 self.wait_for(
-                    lambda: state.thread_session_config("chat")["status"] == "idle",
+                    lambda: state.thread_session_config("thread-chat")["status"] == "idle",
                     "the run state to become idle",
                 )
                 with self.assertRaises(ApiError) as caught:
-                    self.send_message("chat", "too soon")
+                    self.send_message("thread-chat", "too soon")
                 self.assertEqual(caught.exception.status.value, 409)
                 self.assertIn("agent is finishing", caught.exception.message)
-                self.assertEqual(self.send_message("other", "fine")["status"], "accepted")
+                self.assertEqual(self.send_message("thread-other", "fine")["status"], "accepted")
                 release_close.set()
-                self.wait_until_idle("chat")
-                self.wait_until_idle("other")
-                self.assertEqual(self.send_message("chat", "retry")["status"], "accepted")
-                self.wait_until_idle("chat")
+                self.wait_until_idle("thread-chat")
+                self.wait_until_idle("thread-other")
+                self.assertEqual(self.send_message("thread-chat", "retry")["status"], "accepted")
+                self.wait_until_idle("thread-chat")
         finally:
             release_close.set()
 
@@ -579,16 +579,16 @@ class OrchestratorTests(unittest.TestCase):
             state.save_thread_session(
                 cur,
                 "codex",
-                "chat",
+                "thread-chat",
                 "codex-existing",
                 "2026-06-08T00:00:01Z",
                 model,
                 effort,
             )
-        turn = self.register_live_turn("codex", "chat", FakeServer())
+        turn = self.register_live_turn("codex", "thread-chat", FakeServer())
         for index in range(25):
             self.assertTrue(
-                orchestrator.steer_live_turn("chat", "codex", f"steer {index}")
+                orchestrator.steer_live_turn("thread-chat", "codex", f"steer {index}")
             )
         self.assertEqual(
             turn.server.steered,
@@ -601,23 +601,23 @@ class OrchestratorTests(unittest.TestCase):
             state.save_thread_session(
                 cur,
                 "codex",
-                "chat",
+                "thread-chat",
                 "codex-existing",
                 "2026-06-08T00:00:01Z",
                 model,
                 effort,
             )
-        self.register_live_turn("codex", "chat", FakeServer())
+        self.register_live_turn("codex", "thread-chat", FakeServer())
 
         with patch.object(orchestrator, "utc_now", return_value="2026-06-08T00:00:09Z"):
-            self.assertTrue(orchestrator.steer_live_turn("chat", "codex", "new direction"))
+            self.assertTrue(orchestrator.steer_live_turn("thread-chat", "codex", "new direction"))
 
-        config = state.thread_session_config("chat")
+        config = state.thread_session_config("thread-chat")
         self.assertIsNotNone(config)
         assert config is not None
         self.assertEqual(config["last_used_at"], "2026-06-08T00:00:09Z")
         self.assertEqual(config["provider_session_id"], "codex-existing")
-        self.assertEqual(event_summary(thread_events("chat")), [("thread.message", "new direction")])
+        self.assertEqual(event_summary(thread_events("thread-chat")), [("thread.message", "new direction")])
 
     def test_admission_rejects_a_non_active_runtime_without_refreshing(self) -> None:
         # A cached non-active status is the rejection verdict as-is: admission
@@ -629,20 +629,20 @@ class OrchestratorTests(unittest.TestCase):
             side_effect=AssertionError("a cached non-active admission must not refresh"),
         ):
             with self.assertRaises(ApiError) as caught:
-                self.admit("chat")
+                self.admit("thread-chat")
         self.assertEqual(caught.exception.status.value, 409)
         self.assertEqual(
             caught.exception.message,
             "Codex runtime is awaiting_login; messages run only while it is active",
         )
         self.assertEqual(orchestrator._LIVE, {})
-        self.assertEqual(thread_events("chat"), [])
+        self.assertEqual(thread_events("thread-chat"), [])
 
     def test_admission_rejects_a_policy_disabled_runtime_despite_cached_active_status(self) -> None:
         save_policy({"network_integrations": {}}, "2026-06-08T00:00:01Z")
         self.assertEqual(orchestrator.runtime_status("codex"), "active")  # stale cache
         with self.assertRaises(ApiError) as caught:
-            self.admit("chat")
+            self.admit("thread-chat")
         self.assertEqual(caught.exception.status.value, 409)
         self.assertIn("Codex runtime is deactivated", caught.exception.message)
         self.assertEqual(orchestrator._LIVE, {})
@@ -652,13 +652,13 @@ class OrchestratorTests(unittest.TestCase):
         # rolls the events back without any in-memory cleanup path.
         with patch.object(service.state, "save_thread_session", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
-                self.send_message("chat", "hello")
+                self.send_message("thread-chat", "hello")
         self.assertEqual(orchestrator._LIVE, {})
-        self.assertEqual(thread_events("chat"), [])
+        self.assertEqual(thread_events("thread-chat"), [])
         # The thread is usable immediately afterwards.
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
-            self.assertEqual(self.send_message("chat", "hello")["status"], "accepted")
-            self.wait_until_idle("chat")
+            self.assertEqual(self.send_message("thread-chat", "hello")["status"], "accepted")
+            self.wait_until_idle("thread-chat")
 
     def test_failed_post_ack_steer_write_is_ambiguous_without_a_history_event(self) -> None:
         model, effort = DEFAULT_SESSION["codex"]
@@ -666,36 +666,36 @@ class OrchestratorTests(unittest.TestCase):
             state.save_thread_session(
                 cur,
                 "codex",
-                "chat",
+                "thread-chat",
                 "codex-existing",
                 "2026-06-08T00:00:01Z",
                 model,
                 effort,
             )
-        turn = self.register_live_turn("codex", "chat", FakeServer())
+        turn = self.register_live_turn("codex", "thread-chat", FakeServer())
         with patch.object(state, "append_agent_event", side_effect=RuntimeError("write failed")):
             with self.assertRaises(RuntimeError):
-                orchestrator.steer_live_turn("chat", "codex", "possibly delivered")
+                orchestrator.steer_live_turn("thread-chat", "codex", "possibly delivered")
         self.assertEqual(turn.server.steered, ["possibly delivered"])
-        self.assertEqual(thread_events("chat"), [])
+        self.assertEqual(thread_events("thread-chat"), [])
         self.assertEqual(
-            state.thread_session_config("chat")["last_used_at"],
+            state.thread_session_config("thread-chat")["last_used_at"],
             "2026-06-08T00:00:01Z",
         )
 
     def test_agent_runtime_status_reports_active_thread_ids(self) -> None:
-        self.register_live_turn("codex", "t2", FakeServer())
-        self.register_live_turn("codex", "t1", FakeServer())
+        self.register_live_turn("codex", "thread-t2", FakeServer())
+        self.register_live_turn("codex", "thread-t1", FakeServer())
         self.register_live_turn("claude_code", "c1", FakeServer())
         runtimes = {record["type"]: record for record in orchestrator.agent_runtime_status()["runtimes"]}
-        self.assertEqual(runtimes["codex"]["active_thread_ids"], ["t1", "t2"])
+        self.assertEqual(runtimes["codex"]["active_thread_ids"], ["thread-t1", "thread-t2"])
         self.assertEqual(runtimes["claude_code"]["active_thread_ids"], ["c1"])
         self.assertEqual(runtimes["hermes"]["active_thread_ids"], [])
 
     # -- turn execution --------------------------------------------------------------
 
     def test_startup_timeout_finalizes_the_database_before_interrupting(self) -> None:
-        turn = self.admit("slow-start", message="hello")
+        turn = self.admit("thread-slow-start", message="hello")
         assert turn is not None
         server = FakeServer()
         turn.server = server
@@ -703,22 +703,22 @@ class OrchestratorTests(unittest.TestCase):
         orchestrator._starting_timed_out(turn)
 
         self.assertEqual(turn.phase, orchestrator.ExecutionPhase.FINISHING)
-        self.assertEqual(state.thread_session_config("slow-start")["status"], "idle")
+        self.assertEqual(state.thread_session_config("thread-slow-start")["status"], "idle")
         self.assertTrue(server.interrupted)
         self.assertEqual(
-            thread_events("slow-start")[-1]["payload"]["error_message"],
+            thread_events("thread-slow-start")[-1]["payload"]["error_message"],
             "agent startup timed out",
         )
         # Durable finalization does not lift the process fence.
-        self.assertEqual(service.get_thread("slow-start")["status"], "running")
+        self.assertEqual(service.get_thread("thread-slow-start")["status"], "running")
         with self.assertRaises(ApiError) as finishing:
-            self.send_message("slow-start", "retry")
+            self.send_message("thread-slow-start", "retry")
         self.assertEqual(
             finishing.exception.message,
             "the agent is finishing; retry shortly",
         )
         orchestrator._close_turn(turn, server)
-        self.assertEqual(service.get_thread("slow-start")["status"], "idle")
+        self.assertEqual(service.get_thread("thread-slow-start")["status"], "idle")
 
     def test_provider_session_callback_persists_while_the_process_is_live(self) -> None:
         session_published = threading.Event()
@@ -734,15 +734,15 @@ class OrchestratorTests(unittest.TestCase):
 
         try:
             with patch.object(orchestrator.codex_app_server, "run_turn", live_run):
-                self.send_message("chat", "hello")
+                self.send_message("thread-chat", "hello")
                 self.assertTrue(session_published.wait(timeout=10))
                 self.assertEqual(
-                    state.thread_session_config("chat")["provider_session_id"],
+                    state.thread_session_config("thread-chat")["provider_session_id"],
                     "codex-live-session",
                 )
-                self.assertIn("codex:chat", orchestrator._LIVE)
+                self.assertIn("codex:thread-chat", orchestrator._LIVE)
                 release.set()
-                self.wait_until_idle("chat")
+                self.wait_until_idle("thread-chat")
         finally:
             release.set()
 
@@ -752,20 +752,20 @@ class OrchestratorTests(unittest.TestCase):
             state.save_thread_session(
                 cur,
                 "codex",
-                "chat",
+                "thread-chat",
                 "codex-existing",
                 state.utc_now(),
                 model,
                 effort,
             )
-            run_number = state.start_thread_run(cur, "chat")
-        turn = orchestrator._Turn("codex", "chat", model, effort, run_number)
+            run_number = state.start_thread_run(cur, "thread-chat")
+        turn = orchestrator._Turn("codex", "thread-chat", model, effort, run_number)
 
         with self.assertRaisesRegex(ValueError, "empty session"):
             orchestrator._provider_session_accepted(turn, "  ")
 
         self.assertEqual(
-            state.thread_session_config("chat")["provider_session_id"],
+            state.thread_session_config("thread-chat")["provider_session_id"],
             "codex-existing",
         )
 
@@ -932,15 +932,15 @@ class OrchestratorTests(unittest.TestCase):
             return f"codex-{input_message}", "done"
 
         with patch.object(orchestrator.codex_app_server, "run_turn", recording_run_turn):
-            self.send_message("chat", "first")
-            self.wait_until_idle("chat")
-            self.send_message("chat", "second")
-            self.wait_until_idle("chat")
+            self.send_message("thread-chat", "first")
+            self.wait_until_idle("thread-chat")
+            self.send_message("thread-chat", "second")
+            self.wait_until_idle("thread-chat")
 
         self.assertEqual(seen, [None, "codex-first"])
         self.assertEqual(len(FakeServer.instances), 2)
         self.assertTrue(all(server.closed for server in FakeServer.instances))
-        self.assertEqual(state.thread_session_config("chat")["provider_session_id"], "codex-second")
+        self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "codex-second")
 
     def test_claude_runtime_records_and_resumes_session_id(self) -> None:
         save_attested_claude_account("acct", access_token_sha256="f" * 64)
@@ -970,7 +970,7 @@ class OrchestratorTests(unittest.TestCase):
             ),
         ):
             service.send_thread_message(
-                "chat",
+                "thread-chat",
                 {
                     "message": "hi",
                     "agent_runtime": "claude_code",
@@ -978,13 +978,13 @@ class OrchestratorTests(unittest.TestCase):
                     "effort": "ultracode",
                 },
             )
-            self.wait_until_idle("chat")
-            service.send_thread_message("chat", {"message": "again"})
-            self.wait_until_idle("chat")
+            self.wait_until_idle("thread-chat")
+            service.send_thread_message("thread-chat", {"message": "again"})
+            self.wait_until_idle("thread-chat")
 
         self.assertEqual(seen, [None, "claude-session-1"])
         self.assertEqual(seen_config, [("claude-fable-5", "ultracode")] * 2)
-        self.assertEqual(state.thread_session_config("chat")["provider_session_id"], "claude-session-1")
+        self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "claude-session-1")
 
     def test_claude_finish_turn_atomically_chooses_between_steer_and_finish(self) -> None:
         # Direct steer delivery and the finish decision share the turn's
@@ -1002,7 +1002,7 @@ class OrchestratorTests(unittest.TestCase):
             results["first_finish"] = finish_turn("claude-session-1", "done")
             results["second_finish"] = finish_turn("claude-session-1", "done")
             try:
-                service.send_thread_message("chat", {"message": "too late"})
+                service.send_thread_message("thread-chat", {"message": "too late"})
                 results["post_finish"] = "accepted"
             except ApiError as exc:
                 results["post_finish"] = (exc.status.value, exc.message)
@@ -1018,11 +1018,11 @@ class OrchestratorTests(unittest.TestCase):
         )
         with claude_patches[0], claude_patches[1]:
             with patch.object(orchestrator.claude_code, "run_turn", fake_run_turn):
-                self.send_message("chat", "start", runtime="claude_code")
+                self.send_message("thread-chat", "start", runtime="claude_code")
                 self.assertTrue(turn_running.wait(timeout=10))
-                self.assertEqual(self.send_message("chat", "queued steer")["status"], "accepted")
+                self.assertEqual(self.send_message("thread-chat", "queued steer")["status"], "accepted")
                 steer_sent.set()
-                self.wait_until_idle("chat")
+                self.wait_until_idle("thread-chat")
 
             self.assertEqual(results["first_finish"], 1)
             self.assertEqual(results["second_finish"], 0)
@@ -1031,13 +1031,13 @@ class OrchestratorTests(unittest.TestCase):
                 (409, "the agent is finishing; retry shortly"),
             )
             self.assertEqual(
-                event_summary(thread_events("chat")),
+                event_summary(thread_events("thread-chat")),
                 [
                     ("thread.message", "start"),
                     ("thread.message", "queued steer"),
                 ],
             )
-            self.assertEqual(state.thread_session_config("chat")["provider_session_id"], "claude-session-1")
+            self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "claude-session-1")
 
             # After the close the thread accepts a new turn, resuming the session.
             seen: list[str | None] = []
@@ -1049,8 +1049,8 @@ class OrchestratorTests(unittest.TestCase):
                 return "claude-session-2", "done"
 
             with patch.object(orchestrator.claude_code, "run_turn", recording_run_turn):
-                self.assertEqual(self.send_message("chat", "next turn")["status"], "accepted")
-                self.wait_until_idle("chat")
+                self.assertEqual(self.send_message("thread-chat", "next turn")["status"], "accepted")
+                self.wait_until_idle("thread-chat")
             self.assertEqual(seen, ["claude-session-1"])
 
     def test_claude_turn_updates_rotated_token_metadata_before_the_turn(self) -> None:
@@ -1093,10 +1093,10 @@ class OrchestratorTests(unittest.TestCase):
                 },
             ),
         ):
-            self.send_message("chat", "hi", runtime="claude_code")
-            self.wait_until_idle("chat")
+            self.send_message("thread-chat", "hi", runtime="claude_code")
+            self.wait_until_idle("thread-chat")
 
-        self.assertEqual(event_summary(thread_events("chat"))[-1], ("thread.message", "hi"))
+        self.assertEqual(event_summary(thread_events("thread-chat"))[-1], ("thread.message", "hi"))
         self.assertEqual(read_claude_account()["access_token_sha256"], hashlib.sha256(fresh_token.encode()).hexdigest())
         self.assertEqual(read_proxy_claude_account_id(), "acct")
         fresh_headers = [("Authorization", f"Bearer {fresh_token}")]
@@ -1124,9 +1124,9 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_non_app_thread_is_still_passed_to_its_runtime_scope(self) -> None:
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
-            self.send_message("chat", "hi")
-            self.wait_until_idle("chat")
-        self.assertEqual(FakeServer.instances[-1].thread_id, "chat")
+            self.send_message("thread-chat", "hi")
+            self.wait_until_idle("thread-chat")
+        self.assertEqual(FakeServer.instances[-1].thread_id, "thread-chat")
         self.assertFalse(hasattr(FakeServer.instances[-1], "workspace_instructions"))
 
     def test_chat_threads_use_their_direct_thread_id(self) -> None:
@@ -1140,12 +1140,12 @@ class OrchestratorTests(unittest.TestCase):
             raise orchestrator.codex_app_server.CodexAppServerError("turn failed")
 
         with patch.object(orchestrator.codex_app_server, "run_turn", failing_run_turn):
-            self.send_message("chat", "hi")
-            self.wait_until_idle("chat")
-        events = thread_events("chat")
+            self.send_message("thread-chat", "hi")
+            self.wait_until_idle("thread-chat")
+        events = thread_events("thread-chat")
         self.assertEqual(events[-1]["event_type"], "thread.error")
         self.assertEqual(events[-1]["payload"]["error_message"], "turn failed")
-        self.assertNotIn("codex:chat", orchestrator._LIVE)
+        self.assertNotIn("codex:thread-chat", orchestrator._LIVE)
         self.assertTrue(FakeServer.instances[0].closed)
 
     def test_server_acquire_failure_fails_the_turn_instead_of_orphaning_it(self) -> None:
@@ -1160,40 +1160,40 @@ class OrchestratorTests(unittest.TestCase):
             raise OSError("cannot spawn app-server")
 
         with patch.object(orchestrator.codex_app_server, "CodexAppServer", exploding_server):
-            self.send_message("chat", "hi")
-            self.wait_until_idle("chat")
-        events = thread_events("chat")
+            self.send_message("thread-chat", "hi")
+            self.wait_until_idle("thread-chat")
+        events = thread_events("thread-chat")
         self.assertEqual(events[-1]["event_type"], "thread.error")
         self.assertIn("cannot spawn app-server", events[-1]["payload"]["error_message"])
-        self.assertNotIn("codex:chat", orchestrator._LIVE)
+        self.assertNotIn("codex:thread-chat", orchestrator._LIVE)
 
     def test_worker_start_failure_fails_the_turn_and_releases_capacity(self) -> None:
         worker = MagicMock()
         worker.start.side_effect = RuntimeError("thread limit reached")
         with patch.object(orchestrator.threading, "Thread", return_value=worker):
-            response = self.send_message("chat", "hi")
+            response = self.send_message("thread-chat", "hi")
 
         self.assertEqual(response["status"], "accepted")
-        failed = thread_events("chat")[-1]
+        failed = thread_events("thread-chat")[-1]
         self.assertEqual(failed["event_type"], "thread.error")
         self.assertIn("thread limit reached", failed["payload"]["error_message"])
-        self.assertNotIn("codex:chat", orchestrator._LIVE)
+        self.assertNotIn("codex:thread-chat", orchestrator._LIVE)
 
     def test_failed_idle_transition_leaves_run_retryable(self) -> None:
-        turn = self.register_live_turn("codex", "chat", FakeServer())
+        turn = self.register_live_turn("codex", "thread-chat", FakeServer())
         with patch.object(state, "finish_thread_run", side_effect=RuntimeError("write failed")):
             with self.assertRaises(RuntimeError):
                 orchestrator._finish_turn(turn, provider_session_id="session-1")
 
         self.assertEqual(turn.phase, orchestrator.ExecutionPhase.RUNNING)
         self.assertIsNone(turn.provider_session_id)
-        self.assertEqual(state.thread_session_config("chat")["status"], "running")
+        self.assertEqual(state.thread_session_config("thread-chat")["status"], "running")
 
         orchestrator._finish_turn(turn, provider_session_id="session-1")
         self.assertEqual(turn.phase, orchestrator.ExecutionPhase.FINISHING)
         self.assertEqual(turn.provider_session_id, "session-1")
-        self.assertEqual(state.thread_session_config("chat")["status"], "idle")
-        self.assertEqual(thread_events("chat"), [])
+        self.assertEqual(state.thread_session_config("thread-chat")["status"], "idle")
+        self.assertEqual(thread_events("thread-chat"), [])
 
     # -- stop ------------------------------------------------------------------------
 
@@ -1212,38 +1212,38 @@ class OrchestratorTests(unittest.TestCase):
 
         try:
             with patch.object(orchestrator.codex_app_server, "run_turn", blocking_run_turn):
-                self.send_message("chat", "hi")
+                self.send_message("thread-chat", "hi")
                 self.assertTrue(running.wait(timeout=10))
                 self.assertEqual(
-                    state.thread_session_config("chat")["provider_session_id"],
+                    state.thread_session_config("thread-chat")["provider_session_id"],
                     "codex-mid-turn",
                 )
 
-                self.assertEqual(service.stop_thread("chat"), {"status": "accepted"})
+                self.assertEqual(service.stop_thread("thread-chat"), {"status": "accepted"})
                 # The turn is terminal but its thread stays fenced until the
                 # owning turn thread has persisted the session id and the
                 # close completed.
-                self.assertIn("codex:chat", orchestrator._LIVE)
+                self.assertIn("codex:thread-chat", orchestrator._LIVE)
                 with self.assertRaises(ApiError) as caught:
-                    self.send_message("chat", "too soon")
+                    self.send_message("thread-chat", "too soon")
                 self.assertEqual(caught.exception.status.value, 409)
                 self.assertIn("agent is finishing", caught.exception.message)
                 # A second stop finds no stoppable turn.
-                self.assertFalse(orchestrator.stop_thread_turn("chat"))
+                self.assertFalse(orchestrator.stop_thread_turn("thread-chat"))
                 release.set()
-                self.wait_until_idle("chat")
+                self.wait_until_idle("thread-chat")
         finally:
             release.set()
 
         self.assertTrue(FakeServer.instances[0].closed)
         self.assertEqual(
-            event_summary(thread_events("chat")),
+            event_summary(thread_events("thread-chat")),
             [("thread.message", "hi"), ("thread.stopped", None)],
         )
         # The adapter callback persisted the mid-turn session id immediately,
         # before Stop or process teardown.
-        self.assertEqual(state.thread_session_config("chat")["provider_session_id"], "codex-mid-turn")
-        self.assertFalse(orchestrator.stop_thread_turn("chat"))
+        self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "codex-mid-turn")
+        self.assertFalse(orchestrator.stop_thread_turn("thread-chat"))
 
     def test_provider_events_after_stop_are_discarded(self) -> None:
         running = threading.Event()
@@ -1265,16 +1265,16 @@ class OrchestratorTests(unittest.TestCase):
 
         try:
             with patch.object(orchestrator.codex_app_server, "run_turn", late_output):
-                self.send_message("chat", "hi")
+                self.send_message("thread-chat", "hi")
                 self.assertTrue(running.wait(timeout=10))
-                self.assertTrue(orchestrator.stop_thread_turn("chat"))
+                self.assertTrue(orchestrator.stop_thread_turn("thread-chat"))
                 release.set()
-                self.wait_until_idle("chat")
+                self.wait_until_idle("thread-chat")
         finally:
             release.set()
 
         self.assertEqual(
-            event_summary(thread_events("chat")),
+            event_summary(thread_events("thread-chat")),
             [("thread.message", "hi"), ("thread.stopped", None)],
         )
 
@@ -1284,7 +1284,7 @@ class OrchestratorTests(unittest.TestCase):
         # then releases the same-thread fence.
         for runtime in ("codex", "claude_code", "hermes"):
             with self.subTest(runtime=runtime):
-                thread_id = f"{runtime}-chat"
+                thread_id = f"thread-{runtime}-chat"
                 session_id = f"{runtime}-mid-turn"
                 running = threading.Event()
                 release = threading.Event()
@@ -1355,11 +1355,11 @@ class OrchestratorTests(unittest.TestCase):
                 patch.object(orchestrator.codex_app_server, "CodexAppServer", BlockingStartServer),
                 patch.object(orchestrator.codex_app_server, "run_turn", recording_run_turn),
             ):
-                self.send_message("boot", "hi")
+                self.send_message("thread-boot", "hi")
                 self.assertTrue(start_entered.wait(timeout=10))
-                self.assertTrue(orchestrator.stop_thread_turn("boot"))
+                self.assertTrue(orchestrator.stop_thread_turn("thread-boot"))
                 release_start.set()
-                self.wait_until_idle("boot")
+                self.wait_until_idle("thread-boot")
         finally:
             release_start.set()
 
@@ -1367,7 +1367,7 @@ class OrchestratorTests(unittest.TestCase):
         # event is the cancellation.
         self.assertEqual(run_turn_calls, [])
         self.assertEqual(
-            event_summary(thread_events("boot")),
+            event_summary(thread_events("thread-boot")),
             [("thread.message", "hi"), ("thread.stopped", None)],
         )
         self.assertTrue(FakeServer.instances[0].closed)
@@ -1487,7 +1487,7 @@ class OrchestratorTests(unittest.TestCase):
     def test_reset_fails_live_runtime_turns(self) -> None:
         server = FakeServer()
         server.started = 1
-        turn = self.register_live_turn("codex", "chat", server)
+        turn = self.register_live_turn("codex", "thread-chat", server)
         save_approved_openai_account("acct-local")
         save_proxy_openai_account_id("acct-local")
 
@@ -1495,8 +1495,8 @@ class OrchestratorTests(unittest.TestCase):
         orchestrator._close_turn(turn, server)
 
         self.assertTrue(server.closed)
-        self.assertNotIn("codex:chat", orchestrator._LIVE)
-        events = thread_events("chat")
+        self.assertNotIn("codex:thread-chat", orchestrator._LIVE)
+        events = thread_events("thread-chat")
         self.assertEqual(event_summary(events), [("thread.error", None)])
         self.assertEqual(
             events[0]["payload"]["error_message"],
@@ -1514,8 +1514,8 @@ class OrchestratorTests(unittest.TestCase):
         bad_server.started = 1
         good_server = FakeServer()
         good_server.started = 1
-        bad_turn = self.register_live_turn("codex", "chat", bad_server)
-        good_turn = self.register_live_turn("codex", "other", good_server)
+        bad_turn = self.register_live_turn("codex", "thread-chat", bad_server)
+        good_turn = self.register_live_turn("codex", "thread-other", good_server)
         save_approved_openai_account("acct-local")
         save_proxy_openai_account_id("acct-local")
 
@@ -1526,21 +1526,21 @@ class OrchestratorTests(unittest.TestCase):
         orchestrator._close_turn(bad_turn, bad_server)
 
         self.assertEqual(
-            event_summary(thread_events("chat")),
+            event_summary(thread_events("thread-chat")),
             [("thread.error", None), ("thread.error", None)],
         )
-        self.assertEqual(event_summary(thread_events("other")), [("thread.error", None)])
+        self.assertEqual(event_summary(thread_events("thread-other")), [("thread.error", None)])
         self.assertTrue(bad_server.interrupted)
         self.assertTrue(good_server.closed)
         # The failed close keeps its entry fenced so no new turn can start on
         # that thread while the old process may still live.
-        self.assertEqual(set(orchestrator._LIVE), {"codex:chat"})
+        self.assertEqual(set(orchestrator._LIVE), {"codex:thread-chat"})
         self.assertEqual(
-            orchestrator._LIVE["codex:chat"].phase,
+            orchestrator._LIVE["codex:thread-chat"].phase,
             orchestrator.ExecutionPhase.FINISHING,
         )
         with self.assertRaises(ApiError) as caught:
-            self.admit("chat")
+            self.admit("thread-chat")
         self.assertEqual(caught.exception.status.value, 409)
         self.assertEqual(read_openai_account(), {})
         self.assertIsNone(read_proxy_openai_account_id())
@@ -1962,18 +1962,18 @@ class OrchestratorTests(unittest.TestCase):
         model, effort = DEFAULT_SESSION["codex"]
         with state.mutation() as cur:
             state.save_thread_session(
-                cur, "codex", "chat", "codex-earlier", "2026-07-27T00:00:00Z", model, effort
+                cur, "codex", "thread-chat", "codex-earlier", "2026-07-27T00:00:00Z", model, effort
             )
 
         def boot_failure_run_turn(server, *_args, **_kwargs):
             raise RuntimeError("provider process stopped before announcing a session")
 
         with patch.object(orchestrator.codex_app_server, "run_turn", boot_failure_run_turn):
-            self.send_message("chat", "hello")
-            self.wait_until_idle("chat")
+            self.send_message("thread-chat", "hello")
+            self.wait_until_idle("thread-chat")
 
-        self.assertEqual(thread_events("chat")[-1]["event_type"], "thread.error")
-        self.assertEqual(state.thread_session_config("chat")["provider_session_id"], "codex-earlier")
+        self.assertEqual(thread_events("thread-chat")[-1]["event_type"], "thread.error")
+        self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "codex-earlier")
 
     def test_codex_refresh_probe_runs_without_a_pin_and_publishes_it_at_commit(self) -> None:
         # There is no pre-probe pin seed: the probe itself needs no pin (its

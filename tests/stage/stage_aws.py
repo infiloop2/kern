@@ -321,7 +321,7 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
         self.region = str(result["region"])
         self.workdir = Path(tempfile.mkdtemp(prefix="stage-aws-"))
         self.control_socket = self.workdir / "ssh-control"
-        self.thread_prefix = f"stage-{int(time.time())}-"
+        self.thread_prefix = f"thread-stage-{int(time.time())}-"
         self.github_app_config, self.github_secret_error = _github_app_config_from_env()
         self.stage_bedrock_credential, self.bedrock_secret_error = _bedrock_credential_from_env()
 

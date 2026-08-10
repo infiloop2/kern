@@ -34,6 +34,7 @@ from host.param_guard import ParamGuardDenied
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.shared.google import GoogleCredentialStore, IntegrationReconnectRequired, google_oauth_setup_steps
 from host.tools.shared.inputs import clip_text, schema as _schema
+from host.tools.shared.web import UnmappedProviderError
 
 from .api import (
     GMAIL_DRAFT_ATTACHMENT_UNSUPPORTED_MESSAGE,
@@ -1068,6 +1069,8 @@ class GmailTool:
             return ActionFailed(str(exc))
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
             return ActionFailed(str(exc) or "Gmail tool request failed.")
 
@@ -1087,6 +1090,8 @@ class GmailTool:
             return ApprovalExecuted(string_value(result, ("message",)) or "Gmail action completed after approval.")
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
             return ActionFailed(str(exc) or "Gmail action failed after approval.")
 

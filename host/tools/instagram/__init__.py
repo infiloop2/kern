@@ -39,10 +39,13 @@ from host.tools.shared.oauth2 import (
     verify_state,
 )
 from host.tools.shared.web import (
+    UnmappedProviderError,
     WebRequestError,
     encode_query,
     json_request,
+    known_provider_transport_error,
     stream_request_bytes,
+    unmapped_provider_error,
 )
 
 IG_AUTHORIZE_URL = "https://www.instagram.com/oauth/authorize"
@@ -231,12 +234,32 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     if exc.status == 401 or code == 190:
         return IntegrationReconnectRequired(IG_RECONNECT_MESSAGE)
     if exc.status == 429 or code in {4, 9, 17, 613}:
-        return RuntimeError("Instagram API rate limit was reached.")
-    if code == 9007 or code == 2207026:
-        return RuntimeError(f"Instagram could not process the video for the {what} request (format or fetch problem).")
+        message = "Instagram API rate limit was reached."
+    elif code == 9007 or code == 2207026:
+        message = f"Instagram could not process the video for the {what} request (format or fetch problem)."
+    elif exc.status:
+        message = f"Instagram API returned HTTP {exc.status} for the {what} request."
+    else:
+        known = known_provider_transport_error(exc)
+        if known:
+            return RuntimeError(known)
+        return unmapped_provider_error("Instagram", what, exc)
+    return RuntimeError(message)
+
+
+def _connect_web_error(exc: WebRequestError, what: str) -> Exception:
+    if exc.status in {400, 401, 403}:
+        return RuntimeError(
+            f"Instagram {what} was rejected. Check the app credentials, callback URI, authorization code, and permissions."
+        )
+    if exc.status == 429:
+        return RuntimeError(f"Instagram rate-limited the {what}.")
     if exc.status:
-        return RuntimeError(f"Instagram API returned HTTP {exc.status}.")
-    return RuntimeError(f"Instagram {what} request failed.")
+        return RuntimeError(f"Instagram returned HTTP {exc.status} during {what}.")
+    known = known_provider_transport_error(exc)
+    if known:
+        return RuntimeError(known)
+    return unmapped_provider_error("Instagram", what, exc)
 
 
 def _graph_get(access_token: str, path: str, params: dict[str, str], *, what: str) -> JSONObject:
@@ -288,35 +311,41 @@ class InstagramCredentialStore:
 
     def complete_connect(self, params: OAuthCompleteConnectParams, api: HostAPI) -> OAuthCompleteConnectResult:
         verify_state(params["state"], secret=api.config["INSTAGRAM_APP_SECRET"], tool_id=MANIFEST.tool_id)
-        token_response = json_request(
-            "POST",
-            IG_TOKEN_URL,
-            form={
-                "client_id": api.config["INSTAGRAM_APP_ID"],
-                "client_secret": api.config["INSTAGRAM_APP_SECRET"],
-                "grant_type": "authorization_code",
-                "redirect_uri": params["redirect_uri"],
-                # Instagram appends #_ to the redirect; the host strips
-                # fragments before the tool sees the code.
-                "code": params["code"],
-            },
-            failure_message="Instagram OAuth token exchange failed.",
-            invalid_response_message="Instagram OAuth token exchange returned an invalid response.",
-        )
-        short_lived = _short_lived_token(token_response)
-        long_lived = json_request(
-            "GET",
-            f"{IG_GRAPH_BASE_URL}/access_token?"
-            + encode_query(
-                {
-                    "grant_type": "ig_exchange_token",
+        try:
+            token_response = json_request(
+                "POST",
+                IG_TOKEN_URL,
+                form={
+                    "client_id": api.config["INSTAGRAM_APP_ID"],
                     "client_secret": api.config["INSTAGRAM_APP_SECRET"],
-                    "access_token": short_lived,
-                }
-            ),
-            failure_message="Instagram long-lived token exchange failed.",
-            invalid_response_message="Instagram long-lived token exchange returned an invalid response.",
-        )
+                    "grant_type": "authorization_code",
+                    "redirect_uri": params["redirect_uri"],
+                    # Instagram appends #_ to the redirect; the host strips
+                    # fragments before the tool sees the code.
+                    "code": params["code"],
+                },
+                failure_message="Instagram OAuth token exchange failed.",
+                invalid_response_message="Instagram OAuth token exchange returned an invalid response.",
+            )
+        except WebRequestError as exc:
+            raise _connect_web_error(exc, "OAuth token exchange") from exc
+        short_lived = _short_lived_token(token_response)
+        try:
+            long_lived = json_request(
+                "GET",
+                f"{IG_GRAPH_BASE_URL}/access_token?"
+                + encode_query(
+                    {
+                        "grant_type": "ig_exchange_token",
+                        "client_secret": api.config["INSTAGRAM_APP_SECRET"],
+                        "access_token": short_lived,
+                    }
+                ),
+                failure_message="Instagram long-lived token exchange failed.",
+                invalid_response_message="Instagram long-lived token exchange returned an invalid response.",
+            )
+        except WebRequestError as exc:
+            raise _connect_web_error(exc, "long-lived token exchange") from exc
         access_token = long_lived.get("access_token")
         if not isinstance(access_token, str) or not access_token:
             raise RuntimeError("Instagram long-lived token exchange returned no access token.")
@@ -723,6 +752,8 @@ class InstagramTool:
             return ActionFailed(exc.message)
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
             return ActionFailed(str(exc) or "Instagram tool request failed.")
 
@@ -755,6 +786,8 @@ class InstagramTool:
             return ApprovalExecuted(f"Published a Reel to Instagram as {current_account['label']}{suffix}.")
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
             return ActionFailed(str(exc) or "Instagram publish failed after approval.")
 

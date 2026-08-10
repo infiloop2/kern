@@ -193,7 +193,8 @@ The result is intentionally not turn state: turn processes exit shortly after
 their turn finishes, and child processes normally inherit the runtime cgroup
 and show up in the same agent slice.
 
-- Every message names a client-chosen `thread_id`. The first message also
+- Every message names a client-chosen `thread_id` beginning with `app-`,
+  `thread-`, or `schedule-`. The first message also
   names an `agent_runtime` (`codex`, `claude_code`, or `hermes`) and one
   allowed model/effort pair, which binds all four values and starts a runtime
   conversation. Later messages

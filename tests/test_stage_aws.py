@@ -521,7 +521,7 @@ import tests.stage.stage_aws
         )
         self.assertEqual(CHEAP_EFFORT, "high")
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
-        stage.thread_prefix = "stage-test-"
+        stage.thread_prefix = "thread-stage-test-"
         stage.agent_runtime = "codex"
         codex = stage.message_body("test")
         claude = stage.message_body("test", runtime="claude_code")
@@ -539,7 +539,7 @@ import tests.stage.stage_aws
         # the thread route through api_thread_id.
         self.assertEqual(codex["message"], "test")
         self.assertNotIn("thread_id", codex)
-        self.assertEqual(stage.api_thread_id("codex"), "stage-test-codex")
+        self.assertEqual(stage.api_thread_id("codex"), "thread-stage-test-codex")
 
     def test_stage_session_switch_prefers_an_available_provider_then_an_alternate_model(
         self,
@@ -598,13 +598,18 @@ import tests.stage.stage_aws
             stage.check_agent_kill_and_thread_survival(expect_steering_denied=True)
 
         self.assertEqual(
-            api_status.call_args_list[0].args[1], "/v1/threads/smoke-kill-hermes/messages"
+            api_status.call_args_list[0].args[1],
+            "/v1/threads/thread-smoke-kill-hermes/messages",
         )
         self.assertEqual(
-            api_status.call_args_list[1].args[1], "/v1/threads/smoke-kill-hermes/stop"
+            api_status.call_args_list[1].args[1],
+            "/v1/threads/thread-smoke-kill-hermes/stop",
         )
         # The stop check asserts the thread's scope unit is gone from systemd.
-        self.assertIn("kern-agent-thread-smoke-kill-hermes.scope", ssh_code.call_args.args[0])
+        self.assertIn(
+            "kern-agent-thread-thread-smoke-kill-hermes.scope",
+            ssh_code.call_args.args[0],
+        )
         self.assertEqual((stage.passed, stage.total), (1, 1))
 
     def test_claude_stage_exercises_two_rapid_steers(self) -> None:

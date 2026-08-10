@@ -18,7 +18,7 @@ from host.tools.manifest import (
 )
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.tools.host_api import HostAPI
-from host.tools.shared.web import WebRequestError, json_request
+from host.tools.shared.web import UnmappedProviderError, WebRequestError, json_request, known_provider_transport_error, unmapped_provider_error
 from host.tools.tool import Tool
 
 BRAVE_LLM_CONTEXT_ENDPOINT = "https://api.search.brave.com/res/v1/llm/context"
@@ -190,11 +190,16 @@ def _post_brave_context(api_key: str, payload: JSONObject) -> dict[str, Any]:
             invalid_response_message="Brave Search API returned an invalid response.",
         )
     except WebRequestError as exc:
-        message = f"Brave Search API returned HTTP {exc.status}." if exc.status else str(exc)
         if exc.status in {401, 403}:
             message = "Brave Search API rejected the configured API key."
         elif exc.status == 429:
             message = "Brave Search API rate limit was reached."
+        elif exc.status:
+            message = f"Brave Search API returned HTTP {exc.status}."
+        else:
+            message = known_provider_transport_error(exc)
+            if not message:
+                raise unmapped_provider_error("Brave Search", "search", exc) from None
         raise RuntimeError(message) from exc
 
 
@@ -251,6 +256,8 @@ class BraveSearchTool(Tool):
                 "results": cast(list[JSONValue], results),
             }
             return ActionExecuted(result)
+        except UnmappedProviderError:
+            raise
         except Exception as exc:
             return ActionFailed(str(exc) or "Brave Search tool request failed.")
 

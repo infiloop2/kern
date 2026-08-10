@@ -19,8 +19,9 @@ served by the admin UI service rather than an app server or iframe bridge.
 Home remains the default panel.
 
 Memory is host-global, not attached to an App. It is a paginated set of small,
-revisioned pages with descriptions, `[[page-id]]` links, lexical search,
-soft-delete, history, and operator restore. Schedules are also host-global.
+revisioned pages with descriptions, lexical search, soft-delete, history, and
+operator restore. Swarm pages also form a `[[page-id]]` link graph; individual
+pages do not participate in that graph. Schedules are also host-global.
 Each definition stores its own agent runtime, model, effort, cadence, and
 message. Every firing creates a fresh `schedule-ID-run-ID` host thread; runs never
 reuse a provider session or overlap another run of the same schedule. The run
@@ -83,9 +84,11 @@ activity. An agent selects an existing Web App explicitly through routes under
 `/agent/apps/{app_id}/...`. Any agent thread may read any existing app and
 write any active app. Archived apps remain readable but reject every agent
 mutation. Chat has no agent-callable product API.
-Agents can also list, search, fetch, create, edit, and delete global memory
-pages, and perform ordinary CRUD on global schedules. Revision history and
-restore stay operator-only.
+Agents can also list, search, fetch, create, edit, and delete swarm memory
+pages. Individual `app-*`, `thread-*`, and `schedule-*` pages are absent from
+those routes; App and Chat threads reach only their own page through
+self-memory, while schedule self-memory is disabled. Agents perform ordinary
+CRUD on global schedules. Revision history and restore stay operator-only.
 The host-wide conversation-history tools are read-only and are not a
 Chat product mutation API.
 

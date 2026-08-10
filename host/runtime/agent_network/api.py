@@ -13,6 +13,7 @@ import os
 import threading
 from typing import Any
 
+from host import agent_tool_surface
 from host.constants import AGENT_NETWORK_SOCKET_PATH
 from host.network_integrations import registry
 from host.runtime.core import host_errors, network_policy, state
@@ -28,36 +29,8 @@ MAX_REQUEST_BODY_BYTES = 16 * 1024
 MAX_CONCURRENT_CALLS = 8
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
 
-LIST_NETWORK_INTEGRATIONS_TOOL = {
-    "name": "list_network_integrations",
-    "description": (
-        "List every network integration on this host with whether it is enabled and its "
-        "policy options. All agent network traffic passes through exactly one integration, "
-        "including operator-configured custom domains. If a destination is not covered, ask "
-        "the operator to enable or configure its integration in the admin UI's Network tab."
-    ),
-    "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
-}
-RECENT_NETWORK_DENIALS_TOOL = {
-    "name": "recent_network_denials",
-    "description": (
-        "List this host's most recent denied network requests with each denial's code and "
-        "guidance on what would change the outcome. Use this after an HTTP request, git push, "
-        "or package install failed with a 403 or unclear client error."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 100,
-                "description": "How many recent denials to return (default 20).",
-            },
-        },
-        "additionalProperties": False,
-    },
-}
+LIST_NETWORK_INTEGRATIONS_TOOL = agent_tool_surface.LIST_NETWORK_INTEGRATIONS_TOOL
+RECENT_NETWORK_DENIALS_TOOL = agent_tool_surface.RECENT_NETWORK_DENIALS_TOOL
 
 
 class NetworkToolCallError(ValueError):

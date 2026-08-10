@@ -251,16 +251,32 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("observedWidths.get(entry.target) === width", source)
         self.assertIn("resizeTextarea(entry.target.id)", source)
 
+    def test_memory_ui_separates_swarm_and_individual_pages(self) -> None:
+        source = (
+            REPO_ROOT / "host" / "runtime" / "workspace" / "ui" / "workspace.js"
+        ).read_text()
+        markup = (
+            REPO_ROOT / "host" / "runtime" / "workspace" / "ui" / "index.html"
+        ).read_text()
+        self.assertIn('data-memory-scope="swarm"', markup)
+        self.assertIn('data-memory-scope="individual"', markup)
+        self.assertIn('params.set("scope", state.memoryScope)', source)
+        self.assertIn('state.memoryScope === "individual"', source)
+
     def test_agent_instructions_are_terse_and_current(self) -> None:
         instructions = (
             REPO_ROOT / "host" / "bootstrap" / "agent-home" / "agents_claude.md"
         ).read_text()
         self.assertIn("Web Apps Workspace API", instructions)
-        self.assertIn("Global memory", instructions)
+        self.assertIn("Swarm memory (global memory)", instructions)
         self.assertIn("Self-memory", instructions)
-        self.assertLess(instructions.index("Self-memory"), instructions.index("Global memory"))
+        self.assertLess(
+            instructions.index("Self-memory"),
+            instructions.index("Swarm memory (global memory)"),
+        )
         self.assertIn("GET /agent/self/memory", instructions)
         self.assertIn("before handling the thread's first request", instructions)
+        self.assertIn("also search\nswarm memory", instructions)
         self.assertIn("Global schedules", instructions)
         self.assertIn("GET /agent/identity", instructions)
         self.assertIn("search_conversation_history", instructions)

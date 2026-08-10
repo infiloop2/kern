@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import http.client
+import ipaddress
 import json
 import math
 import urllib.error
@@ -46,13 +47,42 @@ def _parse_json_float(value: str) -> float:
 
 class WebRequestError(RuntimeError):
     """An HTTP-level failure with the status code preserved so callers can map
-    provider-specific statuses (401 reconnect, 429 rate limit) to specific
-    user-visible messages without parsing the raw body."""
+    provider-specific statuses (401 reconnect, 429 rate limit) without
+    exposing the raw body across the tool boundary."""
 
     def __init__(self, message: str, *, status: int = 0, body: bytes = b"") -> None:
         super().__init__(message)
         self.status = status
         self.body = body
+
+
+class UnmappedProviderError(RuntimeError):
+    """A provider failure with no curated user-facing mapping.
+
+    This exception deliberately retains only non-secret routing metadata. Tool
+    packages let it reach the host boundary, which records a Host error and
+    returns a generic failure to the agent. The provider response body remains
+    confined to the handled ``WebRequestError`` and is never copied here.
+    """
+
+    def __init__(self, provider: str, operation: str, *, status: int = 0) -> None:
+        transport = f"HTTP {status}" if status else "transport error"
+        super().__init__(f"Unmapped {provider} {operation} provider failure ({transport}).")
+        self.provider = provider
+        self.operation = operation
+        self.status = status
+
+
+def known_provider_transport_error(exc: WebRequestError) -> str:
+    """Return a curated status-free transport failure, if one is known."""
+
+    return RESPONSE_TOO_LARGE_MESSAGE if str(exc) == RESPONSE_TOO_LARGE_MESSAGE else ""
+
+
+def unmapped_provider_error(provider: str, operation: str, exc: WebRequestError) -> UnmappedProviderError:
+    """Create a body-free failure for host-side diagnostics."""
+
+    return UnmappedProviderError(provider, operation, status=exc.status)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -116,6 +146,38 @@ def open_response_stream(
 
 def encode_query(params: Mapping[str, str]) -> str:
     return urllib.parse.urlencode(params)
+
+
+def is_public_https_url(value: str) -> bool:
+    """Structural checks only — this does NOT pin the hostname.
+
+    Media providers return upload and output URLs from their own authenticated
+    HTTPS API responses and generally do not document which asset/CDN hosts
+    those URLs use (presigned object-store or CDN hosts are likely), so pinning
+    a domain would risk rejecting legitimate provider traffic. What is enforced:
+    plain HTTPS on the default port to a named public host — no userinfo, no IP
+    literals, no oversized URLs.
+    """
+    if len(value) > 2_048:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    hostname = parsed.hostname or ""
+    try:
+        ipaddress.ip_address(hostname)
+        return False
+    except ValueError:
+        pass
+    return (
+        parsed.scheme == "https"
+        and "." in hostname
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+    )
 
 
 def request_bytes(

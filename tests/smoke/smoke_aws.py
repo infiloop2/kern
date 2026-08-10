@@ -87,6 +87,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets as py_secrets
 import shlex
 import shutil
@@ -106,6 +107,24 @@ from host.constants import ADMIN_API_PORT as ADMIN_PORT, AGENT_PREVIEW_PORT_BASE
 from host.network_integrations.bedrock.manifest import ROUTING_ACCESS_KEY_ID
 from host.runtime.core.state import PRUNE_EVERY
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
+
+# The agent's whole MCP surface. Spelled out rather than derived from the shim
+# so a deployed host is checked against what we intend the model to see: these
+# declarations head the prompt, and any movement in them re-encodes every
+# cached context behind them (host/agent_tool_surface.py).
+STATIC_SHIM_TOOLS = [
+    "list_bundled_tools",
+    "describe_tool",
+    "call_tool",
+    "check_tool_approval",
+    "list_network_integrations",
+    "recent_network_denials",
+    "stage_image",
+    "stage_video",
+    "search_conversation_history",
+    "read_thread_history",
+    "workspace_api",
+]
 
 # Region the smoke deploys into. Keep in sync with the region scoped in
 # tests/smoke/iam_policy_smoke.json — change both together.
@@ -239,6 +258,11 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("get_task", {"task_id": "kern-smoke-missing"}),
         ("save_video", {"task_id": "kern-smoke-missing"}),
     ),
+    "seedance": (
+        ("generate_video", {"prompt": "Kern smoke"}),
+        ("get_task", {"task_id": "kern-smoke-missing"}),
+        ("save_video", {"task_id": "kern-smoke-missing"}),
+    ),
     "twitter": (
         ("search_tweets", {"query": "Kern", "max_results": "10"}),
         ("read_tweet", {"tweet_id": "1"}),
@@ -246,6 +270,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("get_trends", {"max_trends": "1"}),
         ("get_personalized_trends", {}),
         ("post_tweet", {"text": "Kern smoke; never published."}),
+        ("send_dm", {"text": "Kern smoke; never sent.", "recipient_user_id": "1"}),
     ),
 }
 
@@ -310,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
 class AwsSmoke:
     # Host-side thread ids are the API thread ids verbatim; the stage harness
     # sets a per-run prefix that api_thread_id applies to every thread route.
-    thread_prefix = ""
+    thread_prefix = "thread-"
 
     def __init__(self) -> None:
         self.agent_runtime = "codex"
@@ -332,6 +357,11 @@ class AwsSmoke:
     def api_thread_id(self, thread_id: str) -> str:
         """The host-side thread id for a harness thread name."""
         return self.thread_prefix + thread_id
+
+    @staticmethod
+    def thread_id_component(value: str) -> str:
+        """A runtime or model name safe to embed in a product thread id."""
+        return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
     def message_body(
         self,
@@ -1195,14 +1225,14 @@ class AwsSmoke:
         auth = f"Cookie: tc_admin_session={self._admin_cookie()}\r\nX-Kern-Csrf: 1\r\n".encode()
         malformed = self._raw_local_http(
             ADMIN_PORT,
-            b"POST /v1/threads/smoke-auth/messages HTTP/1.1\r\n"
+            b"POST /v1/threads/thread-smoke-auth/messages HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
             + auth
             + b"Content-Length: nope\r\n\r\n",
         )
         huge = self._raw_local_http(
             ADMIN_PORT,
-            b"POST /v1/threads/smoke-auth/messages HTTP/1.1\r\n"
+            b"POST /v1/threads/thread-smoke-auth/messages HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
             + auth
             + b"Content-Length: 1048577\r\n\r\n",
@@ -1566,7 +1596,7 @@ class AwsSmoke:
         validation 400s and 404s hold on the thread-only surface."""
         self._step("thread message admission and 4xx contract (pre-login)")
         status, body = self._api_status(
-            "POST", "/v1/threads/smoke-lifecycle/messages",
+            "POST", "/v1/threads/thread-smoke-lifecycle/messages",
             self.message_body("lifecycle check (smoke)"),
         )
         if status != 409:
@@ -1584,7 +1614,10 @@ class AwsSmoke:
                 else (SMOKE_RUNTIME_MODELS[runtime],)
             )
             for model in models:
-                thread_id = f"smoke-lifecycle-{runtime}-{model.replace('.', '-').replace(':', '-')}"
+                thread_id = (
+                    f"thread-smoke-lifecycle-{self.thread_id_component(runtime)}-"
+                    f"{self.thread_id_component(model)}"
+                )
                 status, body = self._api_status(
                     "POST",
                     f"/v1/threads/{thread_id}/messages",
@@ -1597,10 +1630,10 @@ class AwsSmoke:
                         f"{runtime} {model} did not reject cleanly before login: {status} {body}"
                     )
 
-        status, _ = self._api_status("GET", "/v1/threads/thread_999999")
+        status, _ = self._api_status("GET", "/v1/threads/thread-999999")
         if status != 404:
             raise AssertionError(f"unknown thread returned {status}, expected 404")
-        status, _ = self._api_status("POST", "/v1/threads/thread_999999/stop")
+        status, _ = self._api_status("POST", "/v1/threads/thread-999999/stop")
         if status != 404:
             raise AssertionError(f"stopping an unknown thread returned {status}, expected 404")
 
@@ -1613,7 +1646,7 @@ class AwsSmoke:
             ("bad-runtime", self.message_body("bad runtime (smoke)") | {"agent_runtime": "bad"}),
             ("partial-config", {"message": "partial config (smoke)", "agent_runtime": self.agent_runtime}),
         ):
-            status, _ = self._api_status("POST", "/v1/threads/smoke-bad-config/messages", bad_body)
+            status, _ = self._api_status("POST", "/v1/threads/thread-smoke-bad-config/messages", bad_body)
             if status != 400:
                 raise AssertionError(f"message with {label} returned {status}, expected 400")
         # An invalid thread id shape never reaches a handler.
@@ -1622,10 +1655,10 @@ class AwsSmoke:
         )
         if status != 404:
             raise AssertionError(f"invalid thread id returned {status}, expected 404")
-        status, _ = self._api_status("GET", "/v1/threads/smoke-lifecycle?verbose=1")
+        status, _ = self._api_status("GET", "/v1/threads/thread-smoke-lifecycle?verbose=1")
         if status != 400:
             raise AssertionError(f"thread detail with query params returned {status}, expected 400")
-        status, _ = self._api_status("GET", "/v1/threads/smoke-lifecycle/events?since=0&before=9")
+        status, _ = self._api_status("GET", "/v1/threads/thread-smoke-lifecycle/events?since=0&before=9")
         if status != 400:
             raise AssertionError(f"combining since and before returned {status}, expected 400")
 
@@ -1635,10 +1668,10 @@ class AwsSmoke:
         leaked = {thread_id for thread_id in listed if "smoke-lifecycle" in thread_id}
         if leaked:
             raise AssertionError(f"rejected admissions left thread rows behind: {leaked}")
-        status, _ = self._api_status("GET", "/v1/threads/smoke-lifecycle")
+        status, _ = self._api_status("GET", "/v1/threads/thread-smoke-lifecycle")
         if status != 404:
             raise AssertionError(f"rejected thread should stay unknown, got {status}")
-        events = self._api("GET", "/v1/threads/smoke-lifecycle/events?since=0")["events"]
+        events = self._api("GET", "/v1/threads/thread-smoke-lifecycle/events?since=0")["events"]
         if events:
             raise AssertionError(f"rejected admission left turn events behind: {events}")
 
@@ -1648,7 +1681,7 @@ class AwsSmoke:
             ("POST", "/v1/tasks"),
             ("GET", "/v1/tasks/task_999999"),
             ("GET", "/v1/tasks/finished"),
-            ("GET", "/v1/threads/smoke-lifecycle/tasks"),
+            ("GET", "/v1/threads/thread-smoke-lifecycle/tasks"),
         ):
             status, _ = self._api_status(method, path)
             if status != 404:
@@ -1675,7 +1708,7 @@ class AwsSmoke:
             if index >= creates:
                 return self._api_status("GET", "/v1/health")
             return self._api_status(
-                "POST", f"/v1/threads/smoke-cc-{index}/messages",
+                "POST", f"/v1/threads/thread-smoke-cc-{index}/messages",
                 self.message_body(f"concurrent admission {index} (smoke)"),
             )
 
@@ -1708,24 +1741,24 @@ class AwsSmoke:
         sends = self._parallel(
             6,
             lambda i: self._api_status(
-                "POST", "/v1/threads/smoke-tx-send/messages",
+                "POST", "/v1/threads/thread-smoke-tx-send/messages",
                 self.message_body("admission race (smoke)"),
             ),
         )
         statuses = sorted(status for status, _ in sends)
         if any(status != 409 for status in statuses):
             raise AssertionError(f"racing admissions must all yield 409, got {statuses}")
-        status, _ = self._api_status("GET", "/v1/threads/smoke-tx-send")
+        status, _ = self._api_status("GET", "/v1/threads/thread-smoke-tx-send")
         if status != 404:
             raise AssertionError(f"racing admissions left a thread row behind ({status})")
-        events = self._api("GET", "/v1/threads/smoke-tx-send/events?since=0")["events"]
+        events = self._api("GET", "/v1/threads/thread-smoke-tx-send/events?since=0")["events"]
         if events:
             raise AssertionError(f"racing admissions left turn events behind: {events}")
 
         # 2. Concurrent stops on a thread that does not exist: every racer
         # sees the clean 404 (never a 5xx or a phantom accepted stop).
         stops = self._parallel(
-            5, lambda i: self._api_status("POST", "/v1/threads/smoke-tx-stop/stop")
+            5, lambda i: self._api_status("POST", "/v1/threads/thread-smoke-tx-stop/stop")
         )
         bad = [status for status, _ in stops if status != 404]
         if bad:
@@ -1738,10 +1771,10 @@ class AwsSmoke:
                 return self._api_status("GET", "/v1/health")
             if index % 3 == 1:
                 return self._api_status(
-                    "POST", "/v1/threads/smoke-tx-mixed/messages",
+                    "POST", "/v1/threads/thread-smoke-tx-mixed/messages",
                     self.message_body(f"mixed racer {index} (smoke)"),
                 )
-            return self._api_status("POST", "/v1/threads/smoke-tx-mixed/stop")
+            return self._api_status("POST", "/v1/threads/thread-smoke-tx-mixed/stop")
 
         mixed = self._parallel(9, message_stop_or_read)
         for index, (status, body) in enumerate(mixed):
@@ -2648,21 +2681,30 @@ class AwsSmoke:
                 except json.JSONDecodeError as exc:
                     raise AssertionError(f"{name} returned non-JSON success text: {text!r}") from exc
             return result, parsed
+
+        def shim_bundled_call(tool_id: str, action_id: str, arguments: dict) -> tuple[dict, object]:
+            """Invoke a bundled action the way the agent now does."""
+            return shim_tool_call(
+                "call_tool",
+                {"tool_id": tool_id, "action_id": action_id, "input": arguments},
+            )
+
         list_request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         shim_listing = self._ssh_code(f"printf '%s\\n' {shlex.quote(list_request)} | {shim_command}")
         print(f"  shim tools/list -> {shim_listing[:200]!r}", flush=True)
-        if "brave_search_search_web" not in shim_listing or "check_tool_approval" not in shim_listing:
-            raise AssertionError(f"MCP shim listing missing expected tools: {shim_listing!r}")
-        if "list_bundled_tools" not in shim_listing:
-            raise AssertionError(f"MCP shim listing missing list_bundled_tools: {shim_listing!r}")
+        for expected in ("list_bundled_tools", "describe_tool", "call_tool", "check_tool_approval"):
+            if expected not in shim_listing:
+                raise AssertionError(f"MCP shim listing missing {expected}: {shim_listing!r}")
         if "list_network_integrations" not in shim_listing or "recent_network_denials" not in shim_listing:
             raise AssertionError(f"MCP shim listing missing network introspection: {shim_listing!r}")
         if "search_conversation_history" not in shim_listing or "read_thread_history" not in shim_listing:
             raise AssertionError(
                 f"MCP shim listing missing typed conversation history tools: {shim_listing!r}"
             )
-        if "gmail_search_messages" in shim_listing:
-            raise AssertionError("MCP shim listed a disabled tool")
+        # The listing never enumerates the catalog, enabled or not: it heads the
+        # model prompt and must be identical for every session.
+        if "brave_search_search_web" in shim_listing or "gmail_search_messages" in shim_listing:
+            raise AssertionError(f"MCP shim enumerated bundled actions: {shim_listing!r}")
 
         # A fresh host has no retained messages, but both typed history tools
         # must still traverse the deployed shim -> Workspace socket -> admin
@@ -2686,8 +2728,9 @@ class AwsSmoke:
             raise AssertionError(
                 f"fresh conversation search returned an invalid contract: {empty_search}"
             )
+        missing_thread_id = "thread-fresh-smoke-missing-thread"
         read_result, empty_read = shim_tool_call(
-            "read_thread_history", {"thread_id": "fresh-smoke-missing-thread"}
+            "read_thread_history", {"thread_id": missing_thread_id}
         )
         if read_result.get("isError") or not isinstance(empty_read, dict):
             raise AssertionError(
@@ -2697,7 +2740,7 @@ class AwsSmoke:
             empty_read.get(key) != value
             for key, value in expected_history_metadata.items()
         ) or empty_read.get("events") != [] or empty_read.get("thread") != {
-            "thread_id": "fresh-smoke-missing-thread"
+            "thread_id": missing_thread_id
         }:
             raise AssertionError(
                 f"fresh conversation read returned an invalid contract: {empty_read}"
@@ -2897,16 +2940,44 @@ class AwsSmoke:
         all_tool_names = {
             entry["name"] for entry in json.loads(all_listed)["result"]["tools"]
         }
+        # Enabling every bundled tool must not change the listing: that
+        # invariant is the whole point of the static surface.
+        if all_tool_names != set(STATIC_SHIM_TOOLS):
+            raise AssertionError(
+                f"MCP shim listing moved with enablement: {sorted(all_tool_names)}"
+            )
+        # Every bundled action must instead be reachable through discovery.
+        describe_requests = [
+            shlex.quote(json.dumps({
+                "jsonrpc": "2.0",
+                "id": index,
+                "method": "tools/call",
+                "params": {"name": "describe_tool", "arguments": {"tool_id": tool_id}},
+            }))
+            for index, tool_id in enumerate(BUNDLED_TOOLS, start=1)
+        ]
+        described = self._ssh_code(
+            f"printf '%s\\n' {' '.join(describe_requests)} | {shim_command}"
+        )
+        described_actions: set[str] = set()
+        for line in described.splitlines():
+            if not line.strip():
+                continue
+            response = json.loads(line)
+            if response["result"]["isError"]:
+                raise AssertionError(f"describe_tool failed: {line!r}")
+            body = json.loads(response["result"]["content"][0]["text"])
+            described_actions.update(
+                f"{body['tool_id']}_{action['id']}" for action in body["actions"]
+            )
         expected_actions = {
             f"{tool_id}_{action.id}"
             for tool_id, tool in BUNDLED_TOOLS.items()
             for action in tool.manifest.actions
         }
-        missing_actions = expected_actions - all_tool_names
+        missing_actions = expected_actions - described_actions
         if missing_actions:
-            raise AssertionError(f"MCP shim omitted bundled actions: {sorted(missing_actions)}")
-        if not {"stage_image", "stage_video"}.issubset(all_tool_names):
-            raise AssertionError(f"MCP shim omitted media staging actions: {sorted(all_tool_names)}")
+            raise AssertionError(f"describe_tool omitted bundled actions: {sorted(missing_actions)}")
 
         # Exercise both local media uploads without provider config. The files
         # live in the agent workspace, are opened by the agent-side shim, and
@@ -2980,7 +3051,7 @@ class AwsSmoke:
                     for key, value in arguments_template.items()
                 }
                 name = f"{tool_id}_{action_id}"
-                response, parsed = shim_tool_call(name, arguments)
+                response, parsed = shim_bundled_call(tool_id, action_id, arguments)
                 if tool_id == "polymarket":
                     if response.get("isError") or not isinstance(parsed, dict) or parsed.get("status") != "success_executed":
                         raise AssertionError(f"credential-free {name} failed: {response} {parsed}")
@@ -3023,7 +3094,7 @@ class AwsSmoke:
         )
         for action_id, arguments in dependent_public_calls:
             name = f"polymarket_{action_id}"
-            response, parsed = shim_tool_call(name, arguments)
+            response, parsed = shim_bundled_call("polymarket", action_id, arguments)
             if response.get("isError") or not isinstance(parsed, dict) or parsed.get("status") != "success_executed":
                 raise AssertionError(f"credential-free {name} failed: {response} {parsed}")
             triggered_actions.add(name)
@@ -3062,7 +3133,7 @@ class AwsSmoke:
         for tool_id in BUNDLED_TOOLS:
             self._api("POST", f"/v1/tools/{tool_id}/disable", {})
         self._ok(
-            "every bundled action listed, triggered, and audited with no tool config; OAuth starts and "
+            "every bundled action discoverable, triggered, and audited with no tool config; OAuth starts and "
             "credentialed actions failed closed, all public Polymarket reads completed, local image/video "
             "uploads worked, non-agent peers were rejected, and no approval was queued"
         )
@@ -3266,7 +3337,7 @@ class AwsSmoke:
         while the turn is running must be synchronously flushed to the runtime
         as a steer."""
         self._step(f"{self.agent_runtime} steering: redirect a running turn mid-turn")
-        thread_id = f"smoke-steer-{self.agent_runtime}"
+        thread_id = f"smoke-steer-{self.thread_id_component(self.agent_runtime)}"
         if self.agent_runtime == "claude_code":
             # Do not wait for activity: this pins cancel_queued handling when
             # the initial message is still queued or pending dispatch.
@@ -3392,7 +3463,7 @@ class AwsSmoke:
         the persisted runtime thread/session. A runtime without mid-turn
         steering can prove that API boundary against the same running turn."""
         self._step(f"{self.agent_runtime} stop: cancel a running turn, then reuse its thread")
-        thread_id = f"smoke-kill-{self.agent_runtime}"
+        thread_id = f"smoke-kill-{self.thread_id_component(self.agent_runtime)}"
         baseline = self._latest_thread_event_seq(thread_id)
         slow = self.send_message(
             thread_id,
@@ -3428,7 +3499,7 @@ class AwsSmoke:
         # failed remnant, so systemd forgets the unit entirely. The turn is
         # marked cancelled before that close completes, so poll briefly. This
         # pins the mechanism the follow-up turn below depends on.
-        scope_unit = f"kern-agent-thread-{self.thread_prefix}smoke-kill-{self.agent_runtime}.scope"
+        scope_unit = f"kern-agent-thread-{self.api_thread_id(thread_id)}.scope"
         deadline = time.time() + 30
         while True:
             load_state = self._ssh_code(

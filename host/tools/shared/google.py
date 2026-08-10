@@ -17,7 +17,7 @@ from host.tools.shared.oauth2 import (
     signed_state,
     verify_state,
 )
-from host.tools.shared.web import WebRequestError, json_request, request_bytes
+from host.tools.shared.web import WebRequestError, json_request, known_provider_transport_error, request_bytes, unmapped_provider_error
 from host.tools.tool import (
     ConnectionStatus,
     OAuthCompleteConnectParams,
@@ -188,7 +188,16 @@ def _post_google_oauth_form(
     except WebRequestError as exc:
         if invalid_grant_is_special and is_google_invalid_grant_payload(exc.body):
             raise GoogleOAuthInvalidGrantError("Google OAuth refresh token is invalid.") from exc
-        raise RuntimeError(failure_message) from exc
+        if exc.status in {400, 401, 403}:
+            raise RuntimeError(
+                "Google OAuth rejected the request. Check the OAuth client credentials, callback URI, authorization code, and requested scopes."
+            ) from exc
+        if exc.status:
+            raise RuntimeError(f"{failure_message.rstrip('.')} (HTTP {exc.status}).") from exc
+        known = known_provider_transport_error(exc)
+        if known:
+            raise RuntimeError(known) from exc
+        raise unmapped_provider_error("Google", "OAuth", exc) from None
     return cast(dict[str, object], decoded)
 
 
@@ -256,7 +265,16 @@ def get_google_userinfo(
             # must surface the reconnect flow, and refresh_identity runs
             # before every write proposal and approved execution.
             raise IntegrationReconnectRequired(GOOGLE_UNAUTHORIZED_RECONNECT_MESSAGE) from exc
-        raise RuntimeError(failure_message) from exc
+        if exc.status == 403:
+            raise RuntimeError("Google denied the profile lookup. The connection may be missing a required scope.") from exc
+        if exc.status == 429:
+            raise RuntimeError("Google API rate limit was reached during the profile lookup.") from exc
+        if exc.status:
+            raise RuntimeError(f"{failure_message.rstrip('.')} (HTTP {exc.status}).") from exc
+        known = known_provider_transport_error(exc)
+        if known:
+            raise RuntimeError(known) from exc
+        raise unmapped_provider_error("Google", "profile lookup", exc) from None
     return cast(dict[str, object], decoded)
 
 
@@ -538,4 +556,13 @@ def google_json_request(
             # operator revoked the app) is a connection problem, not a
             # generic API failure: surface the reconnect-required flow.
             raise IntegrationReconnectRequired(GOOGLE_UNAUTHORIZED_RECONNECT_MESSAGE) from exc
-        raise RuntimeError(failure_message) from exc
+        if exc.status == 403:
+            raise RuntimeError("Google denied the API request. The connection may be missing a required scope.") from exc
+        if exc.status == 429:
+            raise RuntimeError("Google API rate limit was reached.") from exc
+        if exc.status:
+            raise RuntimeError(f"{failure_message.rstrip('.')} (HTTP {exc.status}).") from exc
+        known = known_provider_transport_error(exc)
+        if known:
+            raise RuntimeError(known) from exc
+        raise unmapped_provider_error("Google", "API", exc) from None

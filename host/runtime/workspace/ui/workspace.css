@@ -11,6 +11,9 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .global-head-actions, .form-actions { align-items: center; display: flex; gap: 0.55rem; }
 .global-layout { display: grid; grid-template-columns: minmax(14rem, 22rem) minmax(0, 1fr); min-height: 0; }
 .global-index { border-right: 1px solid var(--border); min-height: 0; overflow-y: auto; padding: 0.8rem; }
+.memory-scope-toggle { background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; display: grid; grid-template-columns: 1fr 1fr; margin-bottom: 0.65rem; padding: 0.18rem; }
+.memory-scope-toggle button { background: transparent; border: 0; border-radius: 7px; color: var(--text-dim); font-size: 0.7rem; font-weight: 700; min-height: 1.9rem; }
+.memory-scope-toggle button.active { background: var(--surface); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); color: var(--text); }
 .global-search { display: block; margin-bottom: 0.65rem; }
 .global-search input, .resource-form input, .resource-form select, .resource-form textarea { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text); min-width: 0; padding: 0.62rem 0.7rem; width: 100%; }
 .global-search input:focus, .resource-form input:focus, .resource-form select:focus, .resource-form textarea:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
@@ -32,6 +35,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .form-grid { display: grid; gap: 0.8rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .form-grid label { display: grid; gap: 0.35rem; }
 .form-grid label > span { color: var(--text-dim); font-size: 0.7rem; font-weight: 650; }
+.form-grid label > small { color: var(--text-dim); font-size: 0.66rem; }
 .form-grid .wide { grid-column: 1 / -1; }
 .resource-meta { color: var(--text-dim); font-family: var(--font-mono); font-size: 0.68rem; }
 .spacer { flex: 1; }

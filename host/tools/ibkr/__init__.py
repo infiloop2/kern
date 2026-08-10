@@ -37,7 +37,7 @@ from host.tools.shared.rsa_pkcs1 import (
     load_rsa_private_key,
     sign_sha256_pkcs1_v1_5,
 )
-from host.tools.shared.web import WebRequestError, encode_query, json_request
+from host.tools.shared.web import UnmappedProviderError, WebRequestError, encode_query, json_request, known_provider_transport_error, unmapped_provider_error
 
 IBKR_API_BASE_URL = "https://api.ibkr.com/v1/api"
 # IBKR rejects requests without a User-Agent.
@@ -305,12 +305,17 @@ def _signed_big_endian(value: int) -> bytes:
 
 def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     if exc.status == 401:
-        return RuntimeError(IBKR_UNAUTHORIZED_MESSAGE)
-    if exc.status == 429:
-        return RuntimeError("IBKR Web API rate limit was reached.")
-    if exc.status:
-        return RuntimeError(f"IBKR Web API returned HTTP {exc.status} on the {what} request.")
-    return RuntimeError(f"IBKR {what} request failed.")
+        message = IBKR_UNAUTHORIZED_MESSAGE
+    elif exc.status == 429:
+        message = "IBKR Web API rate limit was reached."
+    elif exc.status:
+        message = f"IBKR Web API returned HTTP {exc.status} on the {what} request."
+    else:
+        known = known_provider_transport_error(exc)
+        if known:
+            return RuntimeError(known)
+        return unmapped_provider_error("IBKR", what, exc)
+    return RuntimeError(message)
 
 
 def _live_session_token(material: _OAuthMaterial) -> str:
@@ -536,9 +541,7 @@ def _summary_result(material: _OAuthMaterial, live_session_token: str, account_i
     }
 
 
-def _trades_result(
-    material: _OAuthMaterial, live_session_token: str, account_id: str, tool_input: JSONObject
-) -> JSONObject:
+def _trade_days_input(tool_input: JSONObject) -> int:
     days_value = tool_input.get("days")
     days = MAX_TRADE_DAYS
     if days_value is not None:
@@ -552,6 +555,12 @@ def _trades_result(
         if not 1 <= days_value <= MAX_TRADE_DAYS:
             raise ToolInputValidationError("IBKR tool_input.days must be between 1 and 7.")
         days = days_value
+    return days
+
+
+def _trades_result(
+    material: _OAuthMaterial, live_session_token: str, account_id: str, days: int
+) -> JSONObject:
     # Executed trades live behind /iserver, which needs a brokerage session on
     # top of the OAuth session; open one for this call. compete=False so this
     # read never force-closes the operator's own live session (TWS, Client
@@ -648,18 +657,22 @@ class IBKRTool:
             supported = ", ".join(sorted(allowed)) if allowed else "no fields"
             return ActionFailed(f"IBKR {action} tool input only supports {supported}.")
         try:
+            account_id_input = _account_id_input(tool_input) if action != "get_accounts" else None
+            trade_days = _trade_days_input(tool_input) if action == "get_trades" else MAX_TRADE_DAYS
             material = _oauth_material(api)
             live_session_token = _live_session_token(material)
             if action == "get_accounts":
                 return ActionExecuted(_accounts_result(material, live_session_token))
-            account_id = _resolve_account(material, live_session_token, _account_id_input(tool_input))
+            account_id = _resolve_account(material, live_session_token, account_id_input)
             if action == "get_positions":
                 return ActionExecuted(_positions_result(material, live_session_token, account_id))
             if action == "get_account_summary":
                 return ActionExecuted(_summary_result(material, live_session_token, account_id))
-            return ActionExecuted(_trades_result(material, live_session_token, account_id, tool_input))
+            return ActionExecuted(_trades_result(material, live_session_token, account_id, trade_days))
         except ToolInputValidationError as exc:
             return ActionFailed(exc.message)
+        except UnmappedProviderError:
+            raise
         except (ValueError, RuntimeError) as exc:
             # The tool's own errors (validation, config-unset, WebRequestError)
             # carry curated, secret-free messages. Anything else is unexpected

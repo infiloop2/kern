@@ -19,6 +19,20 @@ from tests.stage.stage_support import (
 )
 
 
+# Every way a stage account can lack the Seedance entitlement rather than be
+# broken: ModelArk answers 401 for an invalid key, 403 when the key cannot reach
+# video generation, and 404 when the model is not activated for the account. All
+# three mean "no credential to test", which skips the suite instead of failing
+# it. These are substrings of messages the tool composes, so
+# test_tools_seedance pins them against the real mapper — a reworded message
+# must not quietly turn a skip into a hard stage failure.
+SEEDANCE_UNAVAILABLE_MARKERS = (
+    "rejected the configured api key",
+    "denied the request",
+    "activate seedance 2.5 for this account",
+)
+
+
 _SENSITIVE_ARGUMENT_KEYS = frozenset(
     {
         "access_token",
@@ -31,6 +45,26 @@ _SENSITIVE_ARGUMENT_KEYS = frozenset(
         "secret",
     }
 )
+
+
+def _tool_call_params(name: str, arguments: dict) -> dict:
+    """Address a bundled action through call_tool, anything else by name.
+
+    The listing no longer enumerates bundled actions, so these checks must
+    exercise the same discovery-and-invoke path the agent uses rather than the
+    flat names, which stay callable only for approval and audit records."""
+    for tool_id, tool in BUNDLED_TOOLS.items():
+        prefix = f"{tool_id}_"
+        if name.startswith(prefix) and tool.manifest.action(name[len(prefix):]) is not None:
+            return {
+                "name": "call_tool",
+                "arguments": {
+                    "tool_id": tool_id,
+                    "action_id": name[len(prefix):],
+                    "input": arguments,
+                },
+            }
+    return {"name": name, "arguments": arguments}
 
 
 def _safe_arguments(value: object, key: str = "") -> object:
@@ -159,7 +193,11 @@ class StageToolChecks:
             raise AssertionError(f"tools shim returned non-JSON: {output!r}") from exc
 
     def _shim_tool_response(self, name: str, arguments: dict) -> tuple[dict, str]:
-        """Call one MCP action and print bounded, secret-free diagnostics."""
+        """Call one MCP action and print bounded, secret-free diagnostics.
+
+        Bundled actions are still named ``<tool_id>_<action_id>`` at these call
+        sites, but they reach the host the way the agent now does: through
+        ``call_tool``. Only the shim-level tools are invoked by name."""
         safe = json.dumps(_safe_arguments(arguments), sort_keys=True, separators=(",", ":"))
         started = time.monotonic()
         print(f"    [mcp call] {name} arguments={safe}", flush=True)
@@ -169,7 +207,7 @@ class StageToolChecks:
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "tools/call",
-                    "params": {"name": name, "arguments": arguments},
+                    "params": _tool_call_params(name, arguments),
                 }
             )
             result = response.get("result") or {}
@@ -225,7 +263,7 @@ class StageToolChecks:
             "including disabled tools, exactly once in sorted order. Do not include display names, "
             "action names, Markdown, or commentary."
         )
-        thread_id = f"mcp-catalog-{runtime}-{time.time_ns()}"
+        thread_id = f"mcp-catalog-{self.thread_id_component(runtime)}-{int(time.time())}"
         turn_baseline = self._latest_thread_event_seq(thread_id)
         started = self.send_message(
             thread_id, prompt, runtime=runtime, model=CHEAP_MODELS[runtime], effort=CHEAP_EFFORT
@@ -289,6 +327,7 @@ class StageToolChecks:
             "polymarket": self._check_polymarket_live,
             "twitter": self._check_twitter_live,
             "runway": self._check_runway_live,
+            "seedance": self._check_seedance_live,
         }.get(tool_id)
         if specialized is not None:
             return specialized()
@@ -570,6 +609,24 @@ class StageToolChecks:
         if not result.get("isError") or "not found" not in text.lower():
             raise AssertionError(
                 f"Runway authenticated task probe was unexpected: "
+                f"isError={result.get('isError')}, message={text}"
+            )
+        return "authenticated missing-task probe completed without generation spend"
+
+    def _check_seedance_live(self) -> str:
+        # Same no-spend shape as Runway: a real generation would bill ModelArk
+        # tokens, so the probe only proves the key authenticates against a task
+        # id that cannot exist.
+        name = "seedance_get_task"
+        result, text = self._shim_tool_response(
+            name, {"task_id": "cgt-00000000000000-kernstage"}
+        )
+        lowered = text.lower()
+        if any(marker in lowered for marker in SEEDANCE_UNAVAILABLE_MARKERS):
+            raise CredentialUnavailable(f"{name}: {text}")
+        if not result.get("isError") or "not found" not in lowered:
+            raise AssertionError(
+                f"Seedance authenticated task probe was unexpected: "
                 f"isError={result.get('isError')}, message={text}"
             )
         return "authenticated missing-task probe completed without generation spend"

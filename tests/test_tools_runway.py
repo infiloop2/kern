@@ -12,6 +12,7 @@ from host.tools.json_types import JSONObject
 from host.tools.results import ActionExecuted, ActionFailed, StreamingAsset
 from host.tools import runway
 from host.tools.runway import RunwayTool
+from host.tools.shared import media as shared_media
 from host.tools.shared.web import WebRequestError
 
 from test_tools import FakeHostAPI
@@ -379,7 +380,7 @@ class RunwayToolTests(unittest.TestCase):
 
         with (
             patch.object(runway, "json_request", fake_json_request),
-            patch.object(runway, "open_response_stream", fake_stream),
+            patch.object(shared_media, "open_response_stream", fake_stream),
         ):
             result = RunwayTool().execute(
                 "save_video", {"task_id": "task-1"}, api

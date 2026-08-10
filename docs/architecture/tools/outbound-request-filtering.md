@@ -182,7 +182,7 @@ unclassified field. The categories:
 third-party destinations:
 
 - public search, discovery, and scraper queries;
-- generation and speech prompts, and external media URLs supplied to a generation tool that the provider then fetches (Runway image_url / video_url);
+- generation and speech prompts, and external media URLs supplied to a generation tool that the provider then fetches (Runway image_url / video_url, Seedance image_url);
 - slugs and hashtags (after their stricter grammar checks);
 - package-registry names and query values on the agent network path
   (`python_packages`, `npm_packages` integrations) — a "package lookup"

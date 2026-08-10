@@ -16,6 +16,7 @@ from host.runtime.workspace.host_api import WorkspaceError
 
 
 PAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+INDIVIDUAL_PAGE_ID_RE = re.compile(r"^(?:app|thread|schedule)-")
 LINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9-]{0,63})\]\]")
 MAX_DESCRIPTION_CHARS = 100
 MAX_CONTENT_CHARS = 1000
@@ -69,12 +70,13 @@ def route_agent(
     query: dict[str, list[str]],
 ) -> dict[str, Any]:
     if path == "/agent/memory" and method == "GET":
-        return list_pages(query, agent=True)
+        return list_swarm_pages(query)
     if path == "/agent/memory/search" and method == "GET":
-        return search_pages(query)
+        return search_swarm_pages(query)
     match = re.fullmatch(r"/agent/memory/pages/([^/]+)", path)
     if match:
         page_id = _page_id(match.group(1))
+        _require_swarm_page(page_id)
         if method == "GET":
             return {"page": load_page(page_id)}
         if method == "PUT":
@@ -84,15 +86,34 @@ def route_agent(
     raise WorkspaceError(HTTPStatus.NOT_FOUND, "agent memory route not found")
 
 
-def list_pages(
-    query: dict[str, list[str]], *, agent: bool = False
+def list_pages(query: dict[str, list[str]]) -> dict[str, Any]:
+    _reject_query_keys(
+        query,
+        {"cursor", "limit", "deleted", "scope"},
+        "memory index",
+    )
+    return _list_pages(
+        query,
+        deleted=_boolean_query(query, "deleted", default=False),
+        scope=_memory_scope(query),
+    )
+
+
+def list_swarm_pages(query: dict[str, list[str]]) -> dict[str, Any]:
+    _reject_query_keys(query, {"cursor", "limit"}, "memory index")
+    return _list_pages(query, deleted=False, scope="swarm")
+
+
+def _list_pages(
+    query: dict[str, list[str]],
+    *,
+    deleted: bool,
+    scope: str,
 ) -> dict[str, Any]:
-    allowed = {"cursor", "limit"} if agent else {"cursor", "limit", "deleted"}
-    _reject_query_keys(query, allowed, "memory index")
-    deleted = False if agent else _boolean_query(query, "deleted", default=False)
     limit = _limit(query)
     after = _decode_cursor(_one(query, "cursor"))
     clause = "deleted_at IS NOT NULL" if deleted else "deleted_at IS NULL"
+    clause += _scope_clause(scope)
     params: list[Any] = []
     if after is not None:
         clause += " AND page_id > %s"
@@ -114,7 +135,24 @@ def list_pages(
 
 
 def search_pages(query: dict[str, list[str]]) -> dict[str, Any]:
+    _reject_query_keys(
+        query,
+        {"q", "cursor", "limit", "scope"},
+        "memory search",
+    )
+    return _search_pages(query, scope=_memory_scope(query))
+
+
+def search_swarm_pages(query: dict[str, list[str]]) -> dict[str, Any]:
     _reject_query_keys(query, {"q", "cursor", "limit"}, "memory search")
+    return _search_pages(query, scope="swarm")
+
+
+def _search_pages(
+    query: dict[str, list[str]],
+    *,
+    scope: str,
+) -> dict[str, Any]:
     needle = _one(query, "q")
     if not needle or len(needle.encode()) > MAX_SEARCH_BYTES:
         raise WorkspaceError(
@@ -130,6 +168,7 @@ def search_pages(query: dict[str, list[str]]) -> dict[str, Any]:
             " ts_rank(to_tsvector('simple', page_id || ' ' || description || ' ' || content),"
             " websearch_to_tsquery('simple', %s)) AS rank"
             " FROM memory_pages WHERE deleted_at IS NULL"
+            f"{_scope_clause(scope)}"
             " AND to_tsvector('simple', page_id || ' ' || description || ' ' || content)"
             " @@ websearch_to_tsquery('simple', %s)"
             " ORDER BY rank DESC, page_id LIMIT %s OFFSET %s",
@@ -144,7 +183,11 @@ def search_pages(query: dict[str, list[str]]) -> dict[str, Any]:
     return response
 
 
-def load_page(page_id: str, *, include_deleted: bool = False) -> dict[str, Any]:
+def load_page(
+    page_id: str,
+    *,
+    include_deleted: bool = False,
+) -> dict[str, Any]:
     with db.transaction() as cur:
         cur.execute(
             "SELECT page_id, description, content, revision, deleted_at,"
@@ -152,9 +195,14 @@ def load_page(page_id: str, *, include_deleted: bool = False) -> dict[str, Any]:
             (page_id,),
         )
         row = cur.fetchone()
-        if row is not None and (include_deleted or row[4] is None):
+        if (
+            row is not None
+            and (include_deleted or row[4] is None)
+            and not is_individual_page_id(page_id)
+        ):
             cur.execute(
                 "SELECT page_id FROM memory_pages WHERE deleted_at IS NULL"
+                f"{_scope_clause('swarm')}"
                 " AND content LIKE %s ORDER BY page_id LIMIT 101",
                 (f"%[[{page_id}]]%",),
             )
@@ -166,7 +214,12 @@ def load_page(page_id: str, *, include_deleted: bool = False) -> dict[str, Any]:
     return {**_page_summary(row), "content": row[2], "backlinks": backlinks}
 
 
-def save_page(page_id: str, body: Any, *, actor: str) -> dict[str, Any]:
+def save_page(
+    page_id: str,
+    body: Any,
+    *,
+    actor: str,
+) -> dict[str, Any]:
     request = _object(body, "memory page request")
     _require_keys(
         request,
@@ -363,11 +416,21 @@ def _page_summary(row: tuple[Any, ...]) -> dict[str, Any]:
         "description": row[1],
         "revision": row[3],
         "deleted": row[4] is not None,
-        "links": list(dict.fromkeys(LINK_RE.findall(str(row[2]))))[:100],
+        "links": _page_links(str(row[0]), str(row[2])),
         "updated_by": row[5],
         "created_at": row[6],
         "updated_at": row[7],
     }
+
+
+def _page_links(page_id: str, content: str) -> list[str]:
+    if is_individual_page_id(page_id):
+        return []
+    return [
+        target
+        for target in dict.fromkeys(LINK_RE.findall(content))
+        if not is_individual_page_id(target)
+    ][:100]
 
 
 def _insert_revision(
@@ -405,6 +468,47 @@ def _page_id(value: str) -> str:
             "page_id must be a lowercase slug of at most 64 characters",
         )
     return decoded
+
+
+def is_individual_page_id(page_id: str) -> bool:
+    return INDIVIDUAL_PAGE_ID_RE.match(page_id) is not None
+
+
+def individual_page_id(value: str) -> str:
+    page_id = _page_id(value)
+    if not is_individual_page_id(page_id):
+        raise WorkspaceError(
+            HTTPStatus.CONFLICT,
+            "self-memory is unavailable for this thread identity",
+        )
+    return page_id
+
+
+def _require_swarm_page(page_id: str) -> None:
+    if is_individual_page_id(page_id):
+        # Do not reveal whether an identity-owned page exists through the
+        # ordinary shared-memory API.
+        raise WorkspaceError(HTTPStatus.NOT_FOUND, "memory page not found")
+
+
+def _memory_scope(query: dict[str, list[str]]) -> str:
+    scope = _one(query, "scope") or "swarm"
+    if scope not in {"swarm", "individual"}:
+        raise WorkspaceError(
+            HTTPStatus.BAD_REQUEST,
+            "scope must be swarm or individual",
+        )
+    return scope
+
+
+def _scope_clause(scope: str | None) -> str:
+    if scope is None:
+        return ""
+    prefixes = (
+        "(page_id LIKE 'app-%' OR page_id LIKE 'thread-%'"
+        " OR page_id LIKE 'schedule-%')"
+    )
+    return f" AND {prefixes}" if scope == "individual" else f" AND NOT {prefixes}"
 
 
 def _description(value: Any) -> str:

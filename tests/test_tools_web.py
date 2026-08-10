@@ -12,10 +12,13 @@ from host.tools.shared import web
 from host.tools.shared.web import (
     MAX_RESPONSE_BYTES,
     RESPONSE_TOO_LARGE_MESSAGE,
+    UnmappedProviderError,
     WebRequestError,
+    known_provider_transport_error,
     open_response_stream,
     request_bytes,
     stream_request_bytes,
+    unmapped_provider_error,
 )
 
 
@@ -43,6 +46,25 @@ def _serving(body: bytes) -> object:
 
 
 class WebResponseCapTests(unittest.TestCase):
+    def test_unmapped_provider_error_does_not_retain_provider_body(self) -> None:
+        source = WebRequestError(
+            "failed",
+            status=418,
+            body=b'{"message":"Authorization: Bearer top-secret-token"}',
+        )
+        error = unmapped_provider_error("Example", "request", source)
+        self.assertIsInstance(error, UnmappedProviderError)
+        self.assertEqual(error.provider, "Example")
+        self.assertEqual(error.operation, "request")
+        self.assertEqual(error.status, 418)
+        self.assertNotIn("top-secret-token", str(error))
+        self.assertFalse(hasattr(error, "body"))
+
+    def test_oversized_response_is_a_known_safe_transport_error(self) -> None:
+        error = WebRequestError(RESPONSE_TOO_LARGE_MESSAGE)
+        self.assertEqual(known_provider_transport_error(error), RESPONSE_TOO_LARGE_MESSAGE)
+        self.assertEqual(known_provider_transport_error(WebRequestError("request failed")), "")
+
     def test_tool_packages_centralize_urllib_requests(self) -> None:
         tools_root = Path(__file__).resolve().parents[1] / "host" / "tools"
         direct_users = []

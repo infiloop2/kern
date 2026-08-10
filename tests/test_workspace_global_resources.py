@@ -168,6 +168,118 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
         self.assertEqual(oversized_cursor.exception.status, HTTPStatus.BAD_REQUEST)
 
+    def test_individual_memory_is_hidden_from_swarm_agent_routes(self) -> None:
+        memory.save_page(
+            "thread-7",
+            {
+                "description": "Use when continuing this thread",
+                "content": "Private context",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        memory.save_page(
+            "shared-context",
+            {
+                "description": "Use across threads",
+                "content": "Private context is not shared.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        memory.save_page(
+            "thread-8",
+            {
+                "description": "Use when continuing another thread",
+                "content": "See [[thread-7]].",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+
+        self.assertEqual(
+            [
+                page["page_id"]
+                for page in memory.route_agent(
+                    "GET", "/agent/memory", None, {}
+                )["pages"]
+            ],
+            ["shared-context"],
+        )
+        self.assertEqual(
+            [
+                page["page_id"]
+                for page in memory.route_agent(
+                    "GET", "/agent/memory/search", None, {"q": ["context"]}
+                )["pages"]
+            ],
+            ["shared-context"],
+        )
+        for method, body, query in (
+            ("GET", None, {}),
+            (
+                "PUT",
+                {
+                    "description": "changed",
+                    "content": "changed",
+                    "expected_revision": 1,
+                },
+                {},
+            ),
+            ("DELETE", None, {"expected_revision": ["1"]}),
+        ):
+            with self.subTest(method=method), self.assertRaises(WorkspaceError) as hidden:
+                memory.route_agent(
+                    method, "/agent/memory/pages/thread-7", body, query
+                )
+            self.assertEqual(hidden.exception.status, HTTPStatus.NOT_FOUND)
+
+        self.assertEqual(
+            [
+                page["page_id"]
+                for page in memory.list_pages({"scope": ["individual"]})["pages"]
+            ],
+            ["thread-7", "thread-8"],
+        )
+        self.assertEqual(
+            [
+                page["page_id"]
+                for page in memory.search_pages(
+                    {"q": ["context"], "scope": ["individual"]}
+                )["pages"]
+            ],
+            ["thread-7"],
+        )
+        self.assertEqual(
+            agent_api.dispatch_call(
+                "GET", "/agent/self/memory", None, peer_thread_id="thread-7"
+            )["body"]["page"]["backlinks"],
+            [],
+        )
+
+    def test_individual_memory_is_excluded_from_the_link_graph(self) -> None:
+        for page_id, content in (
+            ("swarm-source", "See [[swarm-target]] and [[thread-7]]."),
+            ("swarm-target", "Shared target."),
+            ("thread-7", "See [[swarm-target]] and [[thread-8]]."),
+            ("thread-8", "Private target."),
+        ):
+            memory.save_page(
+                page_id,
+                {
+                    "description": f"Memory page {page_id}",
+                    "content": content,
+                    "expected_revision": 0,
+                },
+                actor="agent",
+            )
+
+        self.assertEqual(memory.load_page("swarm-source")["links"], ["swarm-target"])
+        self.assertEqual(memory.load_page("swarm-target")["backlinks"], ["swarm-source"])
+        self.assertEqual(memory.load_page("thread-7")["links"], [])
+        self.assertEqual(memory.load_page("thread-7")["backlinks"], [])
+        self.assertEqual(memory.load_page("thread-8")["backlinks"], [])
+
     def test_self_memory_is_resolved_from_peer_identity(self) -> None:
         with self.assertRaises(WorkspaceError) as missing:
             agent_api.dispatch_call(
@@ -206,8 +318,23 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
         self.assertEqual(stale.exception.status, HTTPStatus.CONFLICT)
 
-    def test_self_memory_rejects_missing_and_schedule_identities(self) -> None:
-        for peer_thread_id in (None, "schedule-42-run-9"):
+    def test_self_memory_accepts_app_and_chat_thread_kinds(self) -> None:
+        for peer_thread_id in ("app-3", "thread-7"):
+            with self.subTest(peer_thread_id=peer_thread_id):
+                created = agent_api.dispatch_call(
+                    "PUT",
+                    "/agent/self/memory",
+                    {
+                        "description": "Use when continuing this thread",
+                        "content": peer_thread_id,
+                        "expected_revision": 0,
+                    },
+                    peer_thread_id=peer_thread_id,
+                )
+                self.assertEqual(created["body"]["page"]["page_id"], peer_thread_id)
+
+    def test_self_memory_rejects_missing_schedule_and_unrecognized_identities(self) -> None:
+        for peer_thread_id in (None, "schedule-42-run-9", "legacy-thread"):
             with self.subTest(peer_thread_id=peer_thread_id):
                 with self.assertRaises(WorkspaceError) as conflict:
                     agent_api.dispatch_call(

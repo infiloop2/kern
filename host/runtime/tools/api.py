@@ -11,11 +11,13 @@ routes, no admin password involved and none required.
 
 The agent-facing HTTP surface is four routes:
 
-- ``GET /tools`` — the callable tool actions for the enabled tools, named
-  ``<tool_id>_<action>``, plus the built-ins: ``list_bundled_tools``,
-  and ``check_tool_approval``. The MCP shim separately aggregates the network
-  introspection and the stable Workspace/history tools into the agent-facing
-  tool list.
+- ``GET /tools`` — a constant four-entry declaration: ``list_bundled_tools``,
+  ``describe_tool``, ``call_tool``, and ``check_tool_approval``. It does not
+  enumerate the bundled actions and does not vary with the enablement set; the
+  catalog is reached by calling those declarations instead (see
+  ``host/agent_tool_surface.py`` for why the listing must stay constant). The
+  MCP shim separately aggregates the network introspection and the stable
+  Workspace/history tools into the agent-facing tool list.
 - ``POST /call`` — ``{"name": ..., "input": {...}}`` executes one action and
   returns either the JSON result shape from ``tools_host`` (``executed`` /
   ``pending_approval`` / ``failed``) or one exclusive binary asset response.
@@ -38,9 +40,10 @@ from pathlib import Path
 import re
 import threading
 import time
-from typing import Any, BinaryIO, cast
+from typing import Any, BinaryIO, NoReturn, cast
 from urllib.parse import quote, unquote
 
+from host import agent_tool_surface
 from host.constants import TOOLS_SOCKET_PATH
 from host.runtime.core import host_errors, state
 from host.runtime.core.unix_socket_service import (
@@ -50,6 +53,7 @@ from host.runtime.core.unix_socket_service import (
 )
 from host.runtime.tools import assets as tool_assets, tools_host
 from host.tools import OpenedStreamingAsset, StreamingAssetError
+from host.tools.shared.web import UnmappedProviderError
 
 SOCKET_PATH = os.environ.get("KERN_TOOLS_SOCKET", TOOLS_SOCKET_PATH)
 # Peers are scoped strictly by path: the agent gets exactly the MCP surface
@@ -77,65 +81,31 @@ STREAMING_MEDIA_TYPE_RE = re.compile(
     r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$"
 )
 
-CHECK_APPROVAL_TOOL = {
-    "name": "check_tool_approval",
-    "description": (
-        "Check the status of a tool action approval. Approval-gated actions "
-        "return an approval_id and wait for the operator to decide in the "
-        "Kern admin UI; poll this with that id to learn the outcome "
-        "(pending, approved, denied, expired, executed, or failed)."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "approval_id": {"type": "string"},
-        },
-        "required": ["approval_id"],
-        "additionalProperties": False,
-    },
-}
-
-# Always listed so the agent can distinguish "bundled but not enabled" (ask the
-# operator to enable it) from "no bundled tool at all" (build the capability
-# itself). It reads only manifests plus the enablement set — no credentials,
-# no third-party calls.
-LIST_BUNDLED_TOOLS_TOOL = {
-    "name": "list_bundled_tools",
-    "description": (
-        "List every tool bundled with this Kern host and whether it is "
-        "currently enabled. A tool listed here but not enabled exists on the "
-        "host but its actions stay hidden until the operator enables it (and, "
-        "for OAuth tools, connects it) under Home > Integrations in the admin UI — ask the "
-        "operator instead of building a replacement. A capability with no "
-        "entry here has no bundled tool at all."
-    ),
-    "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
-}
+CHECK_APPROVAL_TOOL = agent_tool_surface.CHECK_APPROVAL_TOOL
+LIST_BUNDLED_TOOLS_TOOL = agent_tool_surface.LIST_BUNDLED_TOOLS_TOOL
+DESCRIBE_TOOL_TOOL = agent_tool_surface.DESCRIBE_TOOL_TOOL
+CALL_TOOL_TOOL = agent_tool_surface.CALL_TOOL_TOOL
 
 
 def action_listing() -> list[dict[str, Any]]:
-    """The agent-callable actions for the currently enabled tools."""
-    listing: list[dict[str, Any]] = []
-    enabled = state.enabled_tool_ids()
-    for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
-        if tool_id not in enabled:
-            continue
-        manifest = tool.manifest
-        for spec in manifest.actions:
-            listing.append(
-                {
-                    "name": f"{tool_id}_{spec.id}",
-                    "description": f"{manifest.display_name}: {spec.description}",
-                    "input_schema": spec.input_schema,
-                }
-            )
-    listing.append(LIST_BUNDLED_TOOLS_TOOL)
-    listing.append(CHECK_APPROVAL_TOOL)
-    return listing
+    """The agent-facing tool declarations for this socket.
+
+    Deliberately constant: it does not consult the enablement set or the
+    bundled registry. Declarations head the model prompt, so a listing that
+    varied with operator state would re-encode the whole cached context on
+    every toggle. The catalog itself is reached through list_bundled_tools /
+    describe_tool / call_tool, whose results append instead
+    (host/agent_tool_surface.py).
+    """
+    return [dict(tool) for tool in agent_tool_surface.TOOLS_SOCKET_TOOLS]
 
 
 def _resolve_action(name: str) -> tuple[str, str] | None:
-    """Map a listed action name back to (tool_id, action)."""
+    """Map a flat ``<tool_id>_<action>`` name back to (tool_id, action).
+
+    These names are no longer listed — the agent addresses actions through
+    call_tool — but approval records and audit rows store them, so they stay
+    resolvable."""
     for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
         prefix = f"{tool_id}_"
         if name.startswith(prefix) and tool.manifest.action(name[len(prefix):]) is not None:
@@ -154,28 +124,114 @@ def call_action(
         return _check_approval(tool_input)
     if name == "list_bundled_tools":
         return _list_bundled_tools()
+    if name == "describe_tool":
+        return _describe_tool(tool_input)
+    if name == "call_tool":
+        return _call_tool(tool_input, asset_store)
+    # Flat "<tool_id>_<action_id>" names are no longer listed, but stay
+    # callable: approval records, audit rows, and any agent that learned a name
+    # before this change all address actions that way.
     resolved = _resolve_action(name)
     if resolved is None:
         raise tools_host.ToolCallError(f"Unknown tool: {name}.")
     return tools_host.execute_action(resolved[0], resolved[1], tool_input, asset_store)
 
 
+def _string_field(tool_input: Any, field: str) -> str:
+    if not isinstance(tool_input, dict):
+        raise tools_host.ToolCallError("Tool input must be an object.")
+    value = tool_input.get(field)
+    if not isinstance(value, str) or not value:
+        raise tools_host.ToolCallError(f"{field} must be a non-empty string.")
+    return value
+
+
 def _list_bundled_tools() -> dict[str, Any]:
     """The full bundled catalog with enablement, so the agent can tell the
-    operator which existing tool to enable instead of rebuilding it."""
+    operator which existing tool to enable instead of rebuilding it.
+
+    Action descriptions are included but input schemas are not: descriptions
+    are what the agent plans from, schemas are what it needs only once it
+    commits to a call (describe_tool)."""
     enabled = state.enabled_tool_ids()
-    tools = [
-        {
-            "tool_id": tool_id,
-            "display_name": tool.manifest.display_name,
-            "description": tool.manifest.description,
-            "connection": tool.manifest.connection,
-            "enabled": tool_id in enabled,
-            "action_ids": [spec.id for spec in tool.manifest.actions],
-        }
-        for tool_id, tool in tools_host.BUNDLED_TOOLS.items()
-    ]
+    tools = []
+    for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
+        manifest = tool.manifest
+        actions: list[dict[str, Any]] = []
+        for spec in manifest.actions:
+            action: dict[str, Any] = {"id": spec.id, "description": spec.description}
+            # Only the exceptional case is stated; absent means "direct".
+            if spec.approval == "operator":
+                action["approval"] = "operator"
+            actions.append(action)
+        tools.append(
+            {
+                "tool_id": tool_id,
+                "display_name": manifest.display_name,
+                "description": manifest.description,
+                "connection": manifest.connection,
+                "enabled": tool_id in enabled,
+                "actions": actions,
+            }
+        )
     return {"status": "executed", "result": {"tools": tools}}
+
+
+def _describe_tool(tool_input: Any) -> dict[str, Any]:
+    """One bundled tool's actions with their full input schemas."""
+    tool_id = _string_field(tool_input, "tool_id")
+    if set(tool_input) - {"tool_id"}:
+        raise tools_host.ToolCallError("describe_tool accepts only tool_id.")
+    tool = tools_host.BUNDLED_TOOLS.get(tool_id)
+    if tool is None:
+        raise tools_host.ToolCallError(
+            f"Unknown tool_id: {tool_id}. Call list_bundled_tools for the catalog."
+        )
+    manifest = tool.manifest
+    return {
+        "status": "executed",
+        "result": {
+            "tool_id": tool_id,
+            "display_name": manifest.display_name,
+            "enabled": tool_id in state.enabled_tool_ids(),
+            "actions": [
+                {
+                    "id": spec.id,
+                    "description": spec.description,
+                    "approval": spec.approval,
+                    "input_schema": spec.input_schema,
+                }
+                for spec in manifest.actions
+            ],
+        },
+    }
+
+
+def _call_tool(
+    tool_input: Any,
+    asset_store: tool_assets.ToolAssetStore | None,
+) -> dict[str, Any] | tools_host.StreamingAction:
+    """Invoke one bundled action addressed by tool_id and action_id."""
+    tool_id = _string_field(tool_input, "tool_id")
+    action_id = _string_field(tool_input, "action_id")
+    extra = set(tool_input) - {"tool_id", "action_id", "input"}
+    if extra:
+        raise tools_host.ToolCallError(
+            f"call_tool accepts only tool_id, action_id, and input; got {', '.join(sorted(extra))}."
+        )
+    tool = tools_host.BUNDLED_TOOLS.get(tool_id)
+    if tool is None:
+        raise tools_host.ToolCallError(
+            f"Unknown tool_id: {tool_id}. Call list_bundled_tools for the catalog."
+        )
+    if tool.manifest.action(action_id) is None:
+        raise tools_host.ToolCallError(
+            f"Unknown action_id for {tool_id}: {action_id}. Call describe_tool for its actions."
+        )
+    action_input = tool_input.get("input")
+    if action_input is None:
+        action_input = {}
+    return tools_host.execute_action(tool_id, action_id, action_input, asset_store)
 
 
 def _check_approval(tool_input: Any) -> dict[str, Any]:
@@ -246,6 +302,8 @@ def _operator_start_connect(
         return flow.start_connect({"redirect_uri": body["redirect_uri"]}, api)
     except (ValueError, KeyError, tools_host.ToolConfigKeyUnsetError) as exc:
         raise OperatorError(HTTPStatus.BAD_REQUEST, str(exc) or "invalid connect request") from exc
+    except UnmappedProviderError as exc:
+        _report_operator_provider_error(tool_id, "oauth_connect_start", exc)
     except Exception as exc:  # noqa: BLE001 - tool packages redact their messages
         raise OperatorError(HTTPStatus.BAD_GATEWAY, str(exc) or "tool connect flow failed") from exc
 
@@ -264,6 +322,8 @@ def _operator_complete_connect(
         result = flow.complete_connect(params, api)
     except (ValueError, KeyError, tools_host.ToolConfigKeyUnsetError) as exc:
         raise OperatorError(HTTPStatus.BAD_REQUEST, str(exc) or "invalid connect request") from exc
+    except UnmappedProviderError as exc:
+        _report_operator_provider_error(tool_id, "oauth_connect_complete", exc)
     except Exception as exc:  # noqa: BLE001 - tool packages redact their messages
         raise OperatorError(HTTPStatus.BAD_GATEWAY, str(exc) or "tool connect flow failed") from exc
     account = result.get("account") if isinstance(result, dict) else None
@@ -280,10 +340,30 @@ def _operator_disconnect(
     api = tools_host.host_api_for(tools_host.bundled_tool(tool_id), asset_store)
     try:
         flow.disconnect(api)
+    except UnmappedProviderError as exc:
+        _report_operator_provider_error(tool_id, "oauth_disconnect", exc)
     except Exception as exc:  # noqa: BLE001 - tool packages redact their messages
         raise OperatorError(HTTPStatus.BAD_GATEWAY, str(exc) or "tool disconnect failed") from exc
     state.record_tool_event(tool_id, "oauth_connect", "disconnected", "")
     return {"tool_id": tool_id, "connected": False}
+
+
+def _report_operator_provider_error(tool_id: str, action_id: str, exc: UnmappedProviderError) -> NoReturn:
+    host_errors.report_unexpected(
+        "tools.operator_provider_request",
+        exc,
+        context={
+            "tool_id": tool_id,
+            "action_id": action_id,
+            "provider": exc.provider,
+            "operation": exc.operation,
+            "http_status": exc.status,
+        },
+    )
+    raise OperatorError(
+        HTTPStatus.BAD_GATEWAY,
+        "Provider request failed. Check Host errors for details.",
+    ) from None
 
 
 def _operator_decide(
@@ -427,6 +507,19 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
                 self.wfile.flush()
         except StreamingAssetError as exc:
             error = str(exc) or "Tool asset stream failed."
+        except UnmappedProviderError as exc:
+            host_errors.report_unexpected(
+                "tools.streaming_provider_request",
+                exc,
+                context={
+                    "tool_id": streaming.tool_id,
+                    "action_id": streaming.action,
+                    "provider": exc.provider,
+                    "operation": exc.operation,
+                    "http_status": exc.status,
+                },
+            )
+            error = "Provider request failed. Check Host errors for details."
         except ValueError:
             error = "Tool returned invalid streaming asset metadata."
         except Exception as exc:

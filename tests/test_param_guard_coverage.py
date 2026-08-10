@@ -39,6 +39,7 @@ GUARDED_FIELDS = {
     ("runway", "edit_video", "prompt"),
     ("runway", "generate_image", "prompt"),
     ("runway", "generate_speech", "text"),
+    ("seedance", "generate_video", "prompt"),
     ("twitter", "search_tweets", "query"),
 }
 
@@ -121,6 +122,14 @@ EXEMPT_FIELDS = {
     ("runway", "generate_speech", "voice"): TYPED,
     ("runway", "get_task", "*"): TYPED,
     ("runway", "save_video", "*"): TYPED,
+    ("seedance", "generate_video", "image_url"): TYPED,
+    ("seedance", "generate_video", "resolution"): TYPED,
+    ("seedance", "generate_video", "ratio"): TYPED,
+    ("seedance", "generate_video", "duration_seconds"): TYPED,
+    ("seedance", "generate_video", "generate_audio"): TYPED,
+    ("seedance", "generate_video", "seed"): TYPED,
+    ("seedance", "get_task", "*"): TYPED,
+    ("seedance", "save_video", "*"): TYPED,
     ("twitter", "search_tweets", "max_results"): TYPED,
     ("twitter", "get_tweet_metrics", "*"): TYPED,
     ("twitter", "read_tweet", "*"): TYPED,
@@ -128,6 +137,7 @@ EXEMPT_FIELDS = {
     ("twitter", "get_trends", "*"): TYPED,
     ("twitter", "get_personalized_trends", "*"): TYPED,
     ("twitter", "post_tweet", "*"): APPROVAL_GATED,
+    ("twitter", "send_dm", "*"): APPROVAL_GATED,
 }
 
 # Tools whose Integration Guide must carry the shared parameter-guard line.
@@ -274,6 +284,21 @@ class BehavioralDenialTest(unittest.TestCase):
         # A secret/identifier encoded into the URL is denied.
         with self.assertRaises(ParamGuardDenied):
             runway._https_url(
+                {"image_url": "https://x.example.com/c?d=alice@example.com"}, "image_url", api
+            )
+
+    def test_seedance_prompt_and_reference_url_denied(self) -> None:
+        from host.tools import seedance
+
+        api = FakeHostAPI()
+        with self.assertRaises(ParamGuardDenied):
+            seedance._generation_request(api, {"prompt": "ssn 219-09-9999 poster"})
+        # A clean public https reference URL passes the guard unchanged.
+        clean = "https://images.example.com/cat.jpg"
+        self.assertEqual(seedance._https_url({"image_url": clean}, "image_url", api), clean)
+        # A secret/identifier encoded into the URL is denied.
+        with self.assertRaises(ParamGuardDenied):
+            seedance._https_url(
                 {"image_url": "https://x.example.com/c?d=alice@example.com"}, "image_url", api
             )
 

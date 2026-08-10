@@ -217,7 +217,8 @@ enabling network access, and adding optional tools.
   actions.
 - **Controlled tools:** bundled tool packages (Gmail, Google Calendar, Brave
   Search, X/Twitter, LinkedIn, LinkedIn Discovery, Instagram, Instagram
-  Discovery, Polymarket, Interactive Brokers, Runway media generation) connect
+  Discovery, Polymarket, Interactive Brokers, Runway media generation, Seedance
+  video generation) connect
   agents to third-party services through deterministic data paths, with
   operator approval required for outward-facing actions such as sending email
   or publishing a post

@@ -16,6 +16,10 @@
 
   <div class="global-layout">
     <aside class="global-index" aria-label="Items">
+      <div id="memory-scope-toggle" class="memory-scope-toggle" role="group" aria-label="Memory type">
+        <button class="active" type="button" data-memory-scope="swarm" aria-pressed="true">Swarm</button>
+        <button type="button" data-memory-scope="individual" aria-pressed="false">Individual</button>
+      </div>
       <label id="memory-search-wrap" class="global-search">
         <span class="sr-only">Search memory</span>
         <input id="memory-search" type="search" maxlength="200" placeholder="Search memory">
@@ -33,12 +37,12 @@
 
       <form id="memory-form" class="resource-form" hidden>
         <div class="form-grid">
-          <label><span>Page ID</span><input id="memory-page-id" maxlength="64" pattern="[a-z0-9][a-z0-9-]*" required></label>
+          <label><span>Page ID</span><input id="memory-page-id" maxlength="64" pattern="[a-z0-9][a-z0-9-]*" required><small id="memory-page-id-help"></small></label>
           <label class="wide"><span>When to use this page</span><input id="memory-description" maxlength="100" required></label>
           <label class="wide"><span>Content</span><textarea id="memory-content" maxlength="1000" rows="12"></textarea></label>
         </div>
         <div class="resource-meta" id="memory-meta"></div>
-        <div class="link-grid">
+        <div id="memory-link-graph" class="link-grid">
           <div><strong>Links</strong><div id="memory-links" class="chip-list"></div></div>
           <div><strong>Backlinks</strong><div id="memory-backlinks" class="chip-list"></div></div>
         </div>
