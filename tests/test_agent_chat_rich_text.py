@@ -19,7 +19,8 @@ class AgentChatRichTextTests(unittest.TestCase):
         source = (
             "# Status\n\n**done** and `safe`\n\n"
             "<img src=x onerror=alert(1)>\n\n"
-            "[bad](javascript:alert(1)) [good](https://example.com)\n\n"
+            "[bad](javascript:alert(1)) [good](https://example.com) "
+            "[reply](https://x.com/intent/tweet?in_reply_to=9001&text=Prepared%20reply)\n\n"
             "```js\nconst x = 1;\n```"
         )
         rendered = subprocess.run(
@@ -34,8 +35,37 @@ class AgentChatRichTextTests(unittest.TestCase):
         self.assertIn("&lt;img src=x onerror=alert(1)&gt;", rendered)
         self.assertNotIn("javascript:", rendered)
         self.assertIn('data-copy-href="https://example.com"', rendered)
-        self.assertNotIn("<a ", rendered)
+        self.assertIn(
+            '<a class="md-open-link" href="https://x.com/intent/tweet?in_reply_to=9001&amp;text=Prepared%20reply" '
+            'target="_blank" rel="noopener noreferrer">reply</a>',
+            rendered,
+        )
         self.assertIn('class="md-copy"', rendered)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
+    def test_only_bounded_x_reply_intents_open_directly(self) -> None:
+        renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
+        script = (
+            f"const rich = require({json.dumps(str(renderer))});"
+            "process.stdout.write(JSON.stringify(process.argv.slice(1).map(value => "
+            "rich.safeXReplyIntentHref(value))));"
+        )
+        values = [
+            "https://x.com/intent/tweet?in_reply_to=9001&text=Looks%20good",
+            "http://x.com/intent/tweet?in_reply_to=9001&text=no",
+            "https://x.com.evil.example/intent/tweet?in_reply_to=9001&text=no",
+            "https://x.com/intent/tweet?in_reply_to=not-numeric&text=no",
+            "https://x.com/intent/tweet?in_reply_to=9001&url=https%3A%2F%2Fevil.example",
+            "https://x.com/someone/status/9001",
+        ]
+        rendered = json.loads(subprocess.run(
+            ["node", "-e", script, *values],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout)
+
+        self.assertEqual(rendered, [values[0], "", "", "", "", ""])
 
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_activity_deltas_compact_to_one_bounded_snapshot(self) -> None:

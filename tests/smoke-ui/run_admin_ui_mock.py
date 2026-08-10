@@ -46,8 +46,14 @@ UI_ASSETS = {
     "/": (ADMIN_UI_DIR / "index.html", "text/html; charset=utf-8"),
     "/oauth/callback": (ADMIN_UI_DIR / "index.html", "text/html; charset=utf-8"),
     "/admin_ui.css": (ADMIN_UI_DIR / "admin_ui.css", "text/css; charset=utf-8"),
+    "/manifest.webmanifest": (ADMIN_UI_DIR / "manifest.webmanifest", "application/manifest+json"),
+    "/service-worker.js": (ADMIN_UI_DIR / "service-worker.js", "application/javascript; charset=utf-8"),
     "/favicon.ico": (ADMIN_UI_DIR / "favicon.svg", "image/svg+xml"),
     "/favicon.svg": (ADMIN_UI_DIR / "favicon.svg", "image/svg+xml"),
+    "/icons/kern-180.png": (ADMIN_UI_DIR / "icons/kern-180.png", "image/png"),
+    "/icons/kern-192.png": (ADMIN_UI_DIR / "icons/kern-192.png", "image/png"),
+    "/icons/kern-512.png": (ADMIN_UI_DIR / "icons/kern-512.png", "image/png"),
+    "/icons/kern-maskable-512.png": (ADMIN_UI_DIR / "icons/kern-maskable-512.png", "image/png"),
 }
 UI_ASSETS.update({
     f"/admin_ui/{module.name}": (module, "application/javascript; charset=utf-8")

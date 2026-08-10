@@ -103,8 +103,14 @@ UI_ASSETS = {
     # connect flows; the SPA reads the code/state query parameters on load.
     "/oauth/callback": (ADMIN_UI_DIR / "index.html", "text/html; charset=utf-8"),
     "/admin_ui.css": (ADMIN_UI_DIR / "admin_ui.css", "text/css; charset=utf-8"),
+    "/manifest.webmanifest": (ADMIN_UI_DIR / "manifest.webmanifest", "application/manifest+json"),
+    "/service-worker.js": (ADMIN_UI_DIR / "service-worker.js", "application/javascript; charset=utf-8"),
     "/favicon.ico": (ADMIN_UI_DIR / "favicon.svg", "image/svg+xml"),
     "/favicon.svg": (ADMIN_UI_DIR / "favicon.svg", "image/svg+xml"),
+    "/icons/kern-180.png": (ADMIN_UI_DIR / "icons/kern-180.png", "image/png"),
+    "/icons/kern-192.png": (ADMIN_UI_DIR / "icons/kern-192.png", "image/png"),
+    "/icons/kern-512.png": (ADMIN_UI_DIR / "icons/kern-512.png", "image/png"),
+    "/icons/kern-maskable-512.png": (ADMIN_UI_DIR / "icons/kern-maskable-512.png", "image/png"),
 }
 # The admin UI ships as native ES modules in host/runtime/admin_api/admin_ui/. The
 # served set is fixed at startup from the files present, so any other

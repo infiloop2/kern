@@ -37,6 +37,74 @@ import {
   setupPasskey, showPasskeyGuidance,
 } from "./passkeys.js";
 
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/service-worker.js", { scope: "/" }).catch(() => {
+      // Installation is progressive enhancement; the live admin UI remains
+      // fully usable if a browser or private session declines registration.
+    });
+  }, { once: true });
+}
+
+const IOS_INSTALL_DISMISSED_AT = "kern.ios-install-dismissed-at.v1";
+const IOS_INSTALL_REMIND_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+let iosInstallTimer = null;
+let iosInstallReturnFocus = null;
+
+function isIPhoneStandalone() {
+  return window.matchMedia("(display-mode: standalone)").matches
+    || window.navigator.standalone === true;
+}
+
+function shouldOfferIPhoneInstall() {
+  if (!/iPhone/i.test(navigator.userAgent) || isIPhoneStandalone()) return false;
+  try {
+    const dismissedAt = Number(localStorage.getItem(IOS_INSTALL_DISMISSED_AT) || 0);
+    return !dismissedAt || Date.now() - dismissedAt >= IOS_INSTALL_REMIND_AFTER_MS;
+  } catch (_error) {
+    return true;
+  }
+}
+
+function hideIPhoneInstallUi() {
+  $("ios-install-coach").hidden = true;
+  $("ios-install-overlay").hidden = true;
+  document.body.classList.remove("install-guide-open");
+}
+
+function scheduleIPhoneInstallCoach() {
+  hideIPhoneInstallUi();
+  if (iosInstallTimer) clearTimeout(iosInstallTimer);
+  if (!shouldOfferIPhoneInstall()) return;
+  iosInstallTimer = setTimeout(() => {
+    iosInstallTimer = null;
+    if (!$("app").hidden && shouldOfferIPhoneInstall()) $("ios-install-coach").hidden = false;
+  }, 3500);
+}
+
+function showIPhoneInstallGuide(trigger) {
+  iosInstallReturnFocus = trigger || null;
+  $("ios-install-coach").hidden = true;
+  $("ios-install-overlay").hidden = false;
+  document.body.classList.add("install-guide-open");
+  $("ios-install-done").focus();
+}
+
+function closeIPhoneInstallGuide() {
+  $("ios-install-overlay").hidden = true;
+  document.body.classList.remove("install-guide-open");
+  if (iosInstallReturnFocus?.isConnected) iosInstallReturnFocus.focus();
+  iosInstallReturnFocus = null;
+  if (shouldOfferIPhoneInstall()) $("ios-install-coach").hidden = false;
+}
+
+function dismissIPhoneInstall() {
+  try { localStorage.setItem(IOS_INSTALL_DISMISSED_AT, String(Date.now())); }
+  catch (_error) { /* Dismissal remains valid for this page load. */ }
+  hideIPhoneInstallUi();
+  iosInstallReturnFocus = null;
+}
+
 let activeTab = "home";
 let activeTabRefresh = Promise.resolve();
 const staticTabs = ["home", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics"];
@@ -162,6 +230,7 @@ function resetPageScroll() {
 
 function showLogin() {
   setMobileNavOpen(false);
+  hideIPhoneInstallUi();
   document.body.classList.remove("viewport-panel-open");
   $("login").hidden = false;
   $("app").hidden = true;
@@ -346,6 +415,7 @@ function showApp() {
   setMobileNavOpen(false);
   mountWorkspaces().then(refreshWorkspaceNavigation).catch(error => notice(error.message, "error"));
   refreshPasskeySetup();
+  scheduleIPhoneInstallCoach();
   loadPolicy().catch(() => {});
   // The provider redirects a tool OAuth connect back to /oauth/callback;
   // finish the exchange and return to that integration's Home detail page.
@@ -641,6 +711,9 @@ document.addEventListener("click", event => {
   const actions = {
     "login": () => login(),
     "logout": () => logout(),
+    "show-ios-install": () => showIPhoneInstallGuide(button),
+    "close-ios-install": () => closeIPhoneInstallGuide(),
+    "dismiss-ios-install": () => dismissIPhoneInstall(),
     "setup-passkey": () => setupPasskey(),
     "show-passkey-guidance": () => openPasskeyGuidance(),
     "toggle-mobile-nav": () => toggleMobileNav(),
@@ -743,10 +816,14 @@ document.addEventListener("click", event => {
 setUnauthorizedHandler(showLogin);
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
+  if (!$("ios-install-overlay").hidden) closeIPhoneInstallGuide();
   collapseRuntimeOverview();
   if (mobileNavOpen) setMobileNavOpen(false, true);
 });
 window.addEventListener("resize", () => setMobileNavOpen(mobileNavOpen));
+window.addEventListener("pageshow", () => {
+  if (isIPhoneStandalone()) hideIPhoneInstallUi();
+});
 window.addEventListener("popstate", event => {
   const route = event.state?.kernHomeRoute;
   if (route && route !== "home" && homeDetailTabs.has(route)) {

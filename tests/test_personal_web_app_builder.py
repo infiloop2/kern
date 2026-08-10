@@ -132,6 +132,15 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertNotIn("Blob", source)
         self.assertNotIn("iframe", index)
 
+    def test_generated_apps_only_open_valid_x_reply_intents(self) -> None:
+        source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
+        self.assertIn("function safeXReplyIntentHref(value)", source)
+        self.assertIn('url.hostname !== "x.com"', source)
+        self.assertIn('url.pathname !== "/intent/tweet"', source)
+        self.assertIn('const allowed = new Set(["in_reply_to", "text"])', source)
+        self.assertIn('clean.setAttribute("target", "_blank")', source)
+        self.assertIn('clean.setAttribute("rel", "noopener noreferrer")', source)
+
     def test_frame_does_not_render_a_conversation_transcript(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
         self.assertNotIn("[Workspace context]", source)

@@ -6,9 +6,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0a0d13">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Kern">
+<meta name="format-detection" content="telephone=no">
 <title>Kern</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" sizes="180x180" href="/icons/kern-180.png">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="alternate icon" href="/favicon.ico">
 <link rel="stylesheet" href="/admin_ui.css">
@@ -40,6 +47,36 @@
     <button class="ghost" data-action="logout" id="logout-button" hidden>Log out</button>
   </div>
 </header>
+
+<aside id="ios-install-coach" class="ios-install-coach" aria-labelledby="ios-install-title" hidden>
+  <img width="44" height="44" src="/icons/kern-180.png" alt="">
+  <span class="ios-install-copy">
+    <strong id="ios-install-title">Use Kern like an app</strong>
+    <span>Add Kern to your iPhone Home Screen for one-tap access.</span>
+  </span>
+  <span class="ios-install-actions">
+    <button class="primary sm" data-action="show-ios-install">Show me how</button>
+    <button class="ghost sm" data-action="dismiss-ios-install">Not now</button>
+  </span>
+</aside>
+
+<div id="ios-install-overlay" class="ios-install-overlay" hidden>
+  <button class="ios-install-backdrop" data-action="close-ios-install" aria-label="Close install instructions"></button>
+  <section class="ios-install-dialog" role="dialog" aria-modal="true" aria-labelledby="ios-install-dialog-title">
+    <img width="64" height="64" src="/icons/kern-180.png" alt="">
+    <div>
+      <p class="eyebrow">One-time setup</p>
+      <h2 id="ios-install-dialog-title">Add Kern to your Home Screen</h2>
+      <p class="muted">It will open in its own full-screen window with the Kern icon.</p>
+    </div>
+    <ol class="ios-install-steps">
+      <li><span class="ios-install-step-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4 4 4M6 11v8h12v-8"/></svg></span><span><strong>Tap Share</strong><small>Use the square-with-arrow button in your browser.</small></span></li>
+      <li><span class="ios-install-step-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 8v8M8 12h8"/></svg></span><span><strong>Choose Add to Home Screen</strong><small>You may need to scroll down in the Share menu.</small></span></li>
+      <li><span class="ios-install-step-number" aria-hidden="true">3</span><span><strong>Tap Add</strong><small>Kern will appear on your Home Screen.</small></span></li>
+    </ol>
+    <button id="ios-install-done" class="primary block" data-action="dismiss-ios-install">Got it</button>
+  </section>
+</div>
 
 <div id="notice" role="status"></div>
 
