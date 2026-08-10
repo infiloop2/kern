@@ -24,6 +24,11 @@ PASSWORD = "dev"
 PLAYWRIGHT_CACHE = Path.home() / ".cache/ms-playwright"
 CHROMIUM_EXECUTABLE_ENV = "PLAYWRIGHT_CHROMIUM_EXECUTABLE"
 IPHONE_VIEWPORT = {"width": 390, "height": 844}
+IPHONE_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 "
+    "Mobile/15E148 Safari/604.1"
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -135,7 +140,8 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 desktop.close()
 
                 mobile = browser.new_context(
-                    viewport=IPHONE_VIEWPORT, device_scale_factor=3, is_mobile=True, has_touch=True
+                    viewport=IPHONE_VIEWPORT, device_scale_factor=3, is_mobile=True,
+                    has_touch=True, user_agent=IPHONE_USER_AGENT,
                 )
                 mobile_page = mobile.new_page()
                 report_page_errors(mobile_page, "admin mobile")
@@ -158,7 +164,8 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 desktop_workspaces.close()
 
                 mobile_workspaces = browser.new_context(
-                    viewport=IPHONE_VIEWPORT, device_scale_factor=3, is_mobile=True, has_touch=True
+                    viewport=IPHONE_VIEWPORT, device_scale_factor=3, is_mobile=True,
+                    has_touch=True,
                 )
                 workspace_mobile_page = mobile_workspaces.new_page()
                 report_page_errors(workspace_mobile_page, "workspaces mobile")
@@ -1140,6 +1147,24 @@ def mobile_smoke(page, url: str) -> None:
     expect(page.locator("#mobile-nav-toggle")).to_have_attribute("aria-expanded", "false")
     expect(page.locator("#upgrade-notice")).to_have_count(0)
     expect(page.locator("#nav-backdrop")).to_be_hidden()
+    expect(page.locator('link[rel="manifest"]')).to_have_attribute("href", "/manifest.webmanifest")
+    expect(page.locator('link[rel="apple-touch-icon"]')).to_have_attribute(
+        "href", "/icons/kern-180.png"
+    )
+    manifest = page.evaluate("() => fetch('/manifest.webmanifest').then(response => response.json())")
+    if manifest.get("display") != "standalone" or manifest.get("short_name") != "Kern":
+        raise AssertionError(f"unexpected PWA manifest: {manifest}")
+    page.wait_for_function("() => !document.querySelector('#ios-install-coach').hidden", timeout=6_000)
+    install_coach = page.locator("#ios-install-coach")
+    expect(install_coach).to_be_visible()
+    expect(install_coach.locator("img")).to_have_attribute("src", "/icons/kern-180.png")
+    install_coach.get_by_role("button", name="Show me how").click()
+    install_dialog = page.get_by_role("dialog", name="Add Kern to your Home Screen")
+    expect(install_dialog).to_be_visible()
+    expect(install_dialog).to_contain_text("Tap Share")
+    expect(install_dialog).to_contain_text("Add to Home Screen")
+    install_dialog.get_by_role("button", name="Got it").click()
+    expect(install_coach).to_be_hidden()
     # On a phone the three usage boxes collapse behind a single pill so an open
     # app keeps the full screen; the boxes stay hidden until the pill is tapped.
     overview_toggle = page.locator(".runtime-overview-toggle")

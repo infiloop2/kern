@@ -119,7 +119,7 @@ binding; report any in-scope defect even if no item names it.
     external identity page can navigate or act on the authenticated admin UI.
 14. Verify browser-facing containment against outside origins:
     `frame-ancestors`/`X-Frame-Options`, CSP, referrer policy, MIME sniffing,
-    credential-free URLs, cache-control, service-worker absence, and
+    credential-free URLs, cache-control, service-worker scope and cache behavior, and
     consistent headers on success, redirects, static content, JSON, streams,
     and errors. Axis 03 owns agent data rendered after authentication.
 15. Run black-box and browser checks from public HTTPS/HTTP, SSH localhost,

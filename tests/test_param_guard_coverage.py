@@ -136,7 +136,6 @@ EXEMPT_FIELDS = {
     ("twitter", "user_tweets", "*"): TYPED,
     ("twitter", "get_trends", "*"): TYPED,
     ("twitter", "get_personalized_trends", "*"): TYPED,
-    ("twitter", "post_tweet", "*"): APPROVAL_GATED,
     ("twitter", "send_dm", "*"): APPROVAL_GATED,
 }
 

@@ -184,7 +184,7 @@ id needed by the next action.
 | LinkedIn Discovery | One-item `search_posts` | None | One Serper search. |
 | Polymarket | `list_markets`, `list_events`, `search`, `get_market`, `get_order_book`, and `price_history` | None | Six public read requests; no trading or authenticated spend. |
 | Runway | `get_task` for a deliberately missing task id | None | One authenticated lookup and zero generation credits. |
-| X | Minimum-10 `search_tweets`, one global trend, one personalized trend set; conditional `read_tweet` and maximum-5 `user_tweets`; denied `post_tweet` proposal | None | Search is billed for up to 10 returned posts, plus up to one post read and five user posts; trend endpoint charges follow the connected X plan. |
+| X | Minimum-10 `search_tweets`, one global trend, one personalized trend set; conditional `read_tweet` and maximum-5 `user_tweets` | None | Search is billed for up to 10 returned posts, plus up to one post read and five user posts; trend endpoint charges follow the connected X plan. Posting is intentionally absent; agents provide official X reply-intent links for operator review instead. |
 
 Codex and Claude Code each make one short `list_bundled_tools` agent call when
 their provider is available. That catalog call is local and has no third-party

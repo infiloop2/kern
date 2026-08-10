@@ -57,6 +57,8 @@ def _app_markup(count: int, title: str = "Weekly focus") -> str:
       <div class="sanitizer-probe containment-probe">
         <img src="https://browser-leak.invalid/image?secret=html">
         <a href="https://browser-leak.invalid/navigation?secret=anchor">Leave the app</a>
+        <a href="https://x.com/intent/tweet?in_reply_to=9001&amp;text=Prepared%20reply" id="x-reply-intent">Open reply in X</a>
+        <a href="https://x.com/intent/tweet?in_reply_to=not-a-post" id="invalid-x-reply-intent">Invalid reply</a>
         <svg>
           <script>window.__foreignScriptRan = true</script>
           <foreignObject><img src="https://browser-leak.invalid/svg?secret=foreign"></foreignObject>
@@ -1002,9 +1004,16 @@ def desktop_smoke(page: Any) -> None:
     expect(unlock_updates).to_have_attribute("aria-label", "Lock agent updates")
 
     generated = frame.locator("#generated-host")
+    expect(generated.locator("#x-reply-intent")).to_have_count(1)
+    expect(generated.locator("#x-reply-intent")).to_have_attribute(
+        "href", "https://x.com/intent/tweet?in_reply_to=9001&text=Prepared%20reply"
+    )
+    expect(generated.locator("#x-reply-intent")).to_have_attribute("target", "_blank")
+    expect(generated.locator("#x-reply-intent")).to_have_attribute("rel", "noopener noreferrer")
+    expect(generated.locator("#invalid-x-reply-intent")).to_have_count(0)
     expect(
         generated.locator(
-            "img, a, iframe, object, embed, svg, math, template, noscript, unknown-surface, script"
+            "a:not(#x-reply-intent), img, iframe, object, embed, svg, math, template, noscript, unknown-surface, script"
         )
     ).to_have_count(0)
     page.wait_for_timeout(300)

@@ -56,8 +56,9 @@ conclude the capability is gone.
 Approval-gated actions do not run right away: calling one returns a pending
 status with an unguessable `approval_id`, and the operator must approve it in
 the admin UI. Poll `check_tool_approval` with that id for the outcome. Do not
-re-issue the action to force it through; each approval runs exactly once, and
-a denial is final.
+re-issue the action while its approval is pending; poll that approval instead.
+A denial is final. After a terminal `failed` result, a new call may be
+appropriate if the operator wants to retry.
 
 Two read-only conversation-history tools are always available. Use
 `search_conversation_history` to find bounded user/assistant excerpts across
@@ -117,9 +118,11 @@ while after they unlock it; generated-App user actions remain available.
 
 Generated JavaScript runs in a capability worker with no DOM, network,
 storage, navigation, timers, imports, nested workers, or parent access. The
-renderer sanitizes HTML and CSS. Do not use links, images, SVG, canvas, media,
-iframes, scripts, inline styles/events, CSS URLs, external fonts, fetch,
-timers, or third-party libraries.
+renderer sanitizes HTML and CSS. Do not use links except official X reply
+intents of the form `https://x.com/intent/tweet?in_reply_to=ID&text=DRAFT`;
+these open outside the App for the operator to review and publish. Do not use
+images, SVG, canvas, media, iframes, scripts, inline styles/events, CSS URLs,
+external fonts, fetch, timers, or third-party libraries.
 
 Use `data-action="name"` on controls and `data-field="name"` on inputs. Put
 `data-enter-action="name"` on Enter-to-submit inputs. For drag and drop use

@@ -589,14 +589,9 @@ class StageToolChecks:
                 )
                 derived += 1
         print(f"    [derived coverage] twitter actions={derived}/2", flush=True)
-        self._queue_and_deny(
-            "twitter",
-            "twitter_post_tweet",
-            {"text": f"Kern stage proposal {os.urandom(3).hex()}"},
-        )
         return (
             f"search, global/personal trends, {derived} result-derived read(s), "
-            "publish proposal denied"
+            "and no API publishing surface"
         )
 
     def _check_runway_live(self) -> str:

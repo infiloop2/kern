@@ -703,6 +703,8 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('/favicon.ico', html)
         self.assertIn('/admin_ui.css', html)
         self.assertIn('<script type="module" src="/admin_ui/app.js"></script>', html)
+        self.assertIn('<link rel="manifest" href="/manifest.webmanifest">', html)
+        self.assertIn('<link rel="apple-touch-icon" sizes="180x180" href="/icons/kern-180.png">', html)
         self.assertIn(".brand-mark { display: block; flex: 0 0 30px; height: 30px; width: 30px; }", css)
         self.assertIn(".login-mark { display: inline-block; height: 44px; margin-bottom: 0.4rem; width: 44px; }", css)
         self.assertIn(".tab-button svg { display: block; height: 19px; width: 19px; }", css)
@@ -713,6 +715,14 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn(".home-card-icon svg {", css)
         self.assertIn("const runtime = button.dataset.runtime;", app_js)
         self.assertIn('"start-login": () => startLogin(runtime)', app_js)
+        for name, size in (
+            ("kern-180.png", 180), ("kern-192.png", 192),
+            ("kern-512.png", 512), ("kern-maskable-512.png", 512),
+        ):
+            data = (runtime / "admin_ui" / "icons" / name).read_bytes()
+            self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(int.from_bytes(data[16:20], "big"), size)
+            self.assertEqual(int.from_bytes(data[20:24], "big"), size)
         self.assertNotIn("animation: panel-in", css)
         self.assertIn("position: fixed", css)
         self.assertNotIn('id="tab-processes"', html)
@@ -2948,6 +2958,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
             ("/admin_ui.css", "text/css", ".shell"),
             ("/admin_ui/app.js", "application/javascript", "setInterval(tick, 5000)"),
             ("/admin_ui/health.js", "application/javascript", "/v1/health"),
+            ("/manifest.webmanifest", "application/manifest+json", '"display": "standalone"'),
+            ("/service-worker.js", "application/javascript", "self.clients.claim()"),
             ("/favicon.ico", "image/svg+xml", "<svg"),
             ("/favicon.svg", "image/svg+xml", "<svg"),
         ):
@@ -2958,6 +2970,17 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 self.assert_security_headers(response.headers)
                 body = response.read().decode()
             self.assertIn(expected, body)
+
+        for path in (
+            "/icons/kern-180.png", "/icons/kern-192.png", "/icons/kern-512.png",
+            "/icons/kern-maskable-512.png",
+        ):
+            request = urllib.request.Request(f"{self.base_url}{path}")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+                self.assertIn("image/png", response.headers["Content-Type"])
+                self.assert_security_headers(response.headers)
+                self.assertEqual(response.read(8), b"\x89PNG\r\n\x1a\n")
 
         request = urllib.request.Request(f"{self.base_url}/v1/health")
         _add_session_auth(request, self.session_token)
@@ -4205,12 +4228,18 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertFalse((runtime / "admin_ui" / "threads.js").exists())
         self.assertIn('<link rel="stylesheet" href="/admin_ui.css">', html)
         self.assertIn('<link rel="icon" type="image/svg+xml" href="/favicon.svg">', html)
+        self.assertIn('<link rel="manifest" href="/manifest.webmanifest">', html)
+        self.assertIn('name="apple-mobile-web-app-capable" content="yes"', html)
+        self.assertIn('name="apple-mobile-web-app-status-bar-style" content="black-translucent"', html)
+        self.assertIn('href="/icons/kern-180.png"', html)
         self.assertIn('<script type="module" src="/admin_ui/app.js"></script>', html)
         self.assertIn("Cache-Control", api)
         self.assertIn("no-store, max-age=0", api)
         self.assertIn('<img class="brand-mark" width="30" height="30" src="/favicon.svg" alt="">', html)
         self.assertIn('<img class="login-mark" width="44" height="44" src="/favicon.svg" alt="">', html)
         self.assertIn('ADMIN_UI_DIR / "favicon.svg"', api)
+        self.assertIn('ADMIN_UI_DIR / "manifest.webmanifest"', api)
+        self.assertIn('ADMIN_UI_DIR / "service-worker.js"', api)
         self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 3)
         self.assertNotIn('id="tab-processes"', html)
         self.assertNotIn('id="tab-host-diagnostics"', html)

@@ -53,7 +53,7 @@ X_AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
 X_TOKEN_URL = "https://api.x.com/2/oauth2/token"
 X_REVOKE_URL = "https://api.x.com/2/oauth2/revoke"
 X_API_BASE_URL = "https://api.x.com/2"
-X_OAUTH_SCOPES = ("tweet.read", "users.read", "tweet.write", "dm.read", "dm.write", "offline.access")
+X_OAUTH_SCOPES = ("tweet.read", "users.read", "dm.read", "dm.write", "offline.access")
 # offline.access is required at connect time: without it X issues no refresh
 # token, and the 2-hour access token would strand the connection.
 REQUIRED_X_SCOPES = frozenset(X_OAUTH_SCOPES)
@@ -62,7 +62,6 @@ X_RECONNECT_MESSAGE = "X (Twitter) is no longer connected. Please reconnect the 
 X_DM_RECONNECT_MESSAGE = "X direct-message permissions are missing. Reconnect X and approve DM access."
 DEFAULT_TOKEN_LIFETIME_SECONDS = 7200
 MAX_QUERY_CHARS = 512
-MAX_TWEET_CHARS = 4_000
 MAX_DM_CHARS = 10_000
 TWEET_ID_RE = re.compile(r"^[0-9]{1,25}$")
 USER_ID_RE = re.compile(r"^[0-9]{1,19}$")
@@ -97,7 +96,13 @@ X_OUTPUT_SCHEMA: JSONObject = {
 MANIFEST = ToolManifest(
     tool_id="twitter",
     display_name="X (Twitter)",
-    description="Connect your X account and let your agent search and read X posts, publish posts, replies, and quotes, and send direct messages with your approval.",
+    description=(
+        "Connect your X account and let your agent search and read X posts and send direct messages "
+        "with your approval. Posting is not available through this tool. To help the operator reply, "
+        "draft the reply and return a Markdown link to "
+        "https://x.com/intent/tweet?in_reply_to=<numeric-post-id>&text=<percent-encoded-reply>; "
+        "the operator reviews and publishes it in X."
+    ),
     connection="oauth",
     actions=(
         ActionSpec(id="search_tweets",
@@ -152,25 +157,6 @@ MANIFEST = ToolManifest(
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             output_schema=X_OUTPUT_SCHEMA,
         ),
-        ActionSpec(id="post_tweet",
-            description="Queue approval to publish exactly one standalone post, reply, or quote post from the connected account. Set neither target id for standalone, or exactly one reply/quote id; the target post is fetched and shown in the approval.",
-            data_policy=(
-                "Publishes a post from the connected X account, visible per the account's "
-                "audience settings. Queued for explicit approval; nothing reaches X until "
-                "you approve. Posting is billed to the deployment's X API credits. The "
-                "proposal and sanitized created-post id are available to the active model."
-            ),
-            input_schema=_schema(
-                {
-                    "text": {"type": "string", "description": "Post text."},
-                    "in_reply_to_tweet_id": {"type": "string", "description": "Reply to this post id."},
-                    "quote_tweet_id": {"type": "string", "description": "Quote this post id."},
-                },
-                ["text"],
-            ),
-            output_schema=X_OUTPUT_SCHEMA,
-            approval="operator",
-        ),
         ActionSpec(id="send_dm",
             description="Queue approval to send exactly one text-only direct message from the connected X account. Provide exactly one recipient username or permanent numeric user id; the resolved recipient and full message are shown in the approval.",
             data_policy=(
@@ -199,22 +185,22 @@ MANIFEST = ToolManifest(
         ConfigRequirement(key="X_BEARER_TOKEN", description="X developer app Bearer Token (app-only auth; used by trends lookups, which do not accept user-context tokens)."),
     ),
     protections=(
-        "Reading does not require approval. Publishing a post, reply, or quote post and sending a direct message happen only after your approval.",
-        "Public reads, public writes, and direct messages consume X pay-per-use credits. Your X credentials stay encrypted in write-only tool config.",
+        "Reading does not require approval. Sending a direct message happens only after your approval. Posts and replies are never published through this tool.",
+        "Public reads and direct messages consume X pay-per-use credits. Your X credentials stay encrypted in write-only tool config.",
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(PARAM_GUARD_TECHNICAL_DETAIL,),
     setup_steps=(
         SetupStep(
             title="Create an X developer project and app",
-            description="Sign in to the X Developer Console, create or select the project, and create the app that will own this integration. Enable the current pay-per-use API access and add enough credits for recent search, lookups, trends, and intended writes. Keep this app dedicated enough that its billing and credentials can be revoked without affecting unrelated systems.",
+            description="Sign in to the X Developer Console, create or select the project, and create the app that will own this integration. Enable the current pay-per-use API access and add enough credits for recent search, lookups, trends, and intended direct messages. Keep this app dedicated enough that its billing and credentials can be revoked without affecting unrelated systems.",
             link_url="https://developer.x.com/",
             link_label="Open the X Developer Portal",
         ),
         SetupStep(
             title="Configure user authentication",
             show_callback=True,
-            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, set App permissions to Read and write and Direct message, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. If X requires a Website URL, use your public Kern base URL: for a callback such as https://host.example/oauth/callback, use https://host.example. You do not need a separate website. Then save. Kern requests exactly tweet.read, users.read, tweet.write, dm.read, dm.write, and offline.access. X requires dm.read together with dm.write; offline.access lets X issue refresh tokens after the two-hour access token expires.",
+            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, select the app permission level that includes Direct Messages, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. If X requires a Website URL, use your public Kern base URL: for a callback such as https://host.example/oauth/callback, use https://host.example. You do not need a separate website. Then save. Kern requests exactly tweet.read, users.read, dm.read, dm.write, and offline.access; it does not request tweet.write. X requires dm.read together with dm.write; offline.access lets X issue refresh tokens after the two-hour access token expires.",
             link_url="https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code",
             link_label="View X OAuth 2.0 authorization-code documentation",
         ),
@@ -225,7 +211,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and connect Kern",
             show_config=True,
-            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, choose Connect, sign in as the account the agent may read, publish, and send direct messages from, and approve all six displayed scopes. Existing connections must disconnect and reconnect once to grant the new dm.read and dm.write scopes. Confirm the page shows the expected @username.",
+            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, choose Connect, sign in as the account the agent may read and send direct messages from, and approve all five displayed scopes. Existing connections must disconnect and reconnect once to grant the new dm.read and dm.write scopes. Confirm the page shows the expected @username. Replies use X's official Web Intent in the operator's browser and do not use these credentials.",
         ),
     ),
     data_summary=DataSummary(
@@ -234,7 +220,7 @@ MANIFEST = ToolManifest(
                 title="What leaves this host",
                 points=(
                     DataSummaryPoint(label="Reads", text="Search queries, post ids, usernames, trend locations, and paging values go to X directly. Query text is received and logged like any other request, so it is itself data sent to X. The search query first passes the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent."),
-                    DataSummaryPoint(label="Posts, replies, and quote posts", text="A post, reply, or quote post reaches X only after your approval. It sends exactly the approved text and, for a reply or quote post, the target post id."),
+                    DataSummaryPoint(label="Reply drafts", text="Kern does not send post or reply drafts through the API. An agent may put a numeric post id and percent-encoded draft in an official x.com reply-intent link; X receives them only when you open that link in your browser."),
                     DataSummaryPoint(label="Direct messages", text="Before approval, the supplied recipient username or user id goes to X for a recipient lookup so Kern can show the resolved account in the approval; message text does not. After approval, X receives the resolved permanent user id and exactly the approved message text."),
                 ),
             ),
@@ -242,7 +228,7 @@ MANIFEST = ToolManifest(
                 title="Where it can go",
                 points=(
                     DataSummaryPoint(label="X", text="Reads and the OAuth connection stay within X's services under the connected account."),
-                    DataSummaryPoint(label="The public internet", text="An approved post is published on X under your account's audience settings; public posts are broadly visible and reusable under X's terms."),
+                    DataSummaryPoint(label="The public internet", text="Nothing is published publicly by this tool. If you open a reply-intent link, X shows the draft for you to review and publish yourself."),
                     DataSummaryPoint(label="DM recipient", text="An approved direct message is available to the resolved recipient and is also processed and retained by X."),
                 ),
             ),
@@ -260,7 +246,7 @@ MANIFEST = ToolManifest(
             DataSummaryCard(
                 title="How long X retains it",
                 description=(
-                    "A published post or direct message stays on X until you or X remove it. X keeps account, security, and API records under its "
+                    "A direct message stays on X until you or X remove it. X keeps account, security, and API records under its "
                     "Privacy Policy with no single fixed period. Disconnect revokes the token where possible and always clears "
                     "the local credential, but does not delete X's own records."
                 ),
@@ -753,80 +739,6 @@ def _valid_tweet_id(value: JSONValue | None, *, field: str) -> str:
     return value.strip()
 
 
-def _post_proposal(tool_input: JSONObject) -> JSONObject:
-    extra = set(tool_input) - {"text", "in_reply_to_tweet_id", "quote_tweet_id"}
-    if extra:
-        raise ToolInputValidationError("X post tool input only supports text, in_reply_to_tweet_id, and quote_tweet_id.")
-    text = tool_input.get("text")
-    if not isinstance(text, str) or not text.strip():
-        raise ToolInputValidationError("X tool_input.text is required.")
-    text = text.strip()
-    # Reject rather than silently truncate: a truncated post would publish text
-    # the agent did not intend and the operator could not see in full.
-    if len(text) > MAX_TWEET_CHARS:
-        raise ToolInputValidationError(f"X post text must be at most {MAX_TWEET_CHARS} characters.")
-    proposal: JSONObject = {"text": text}
-    if tool_input.get("in_reply_to_tweet_id") is not None:
-        proposal["in_reply_to_tweet_id"] = _valid_tweet_id(tool_input.get("in_reply_to_tweet_id"), field="in_reply_to_tweet_id")
-    if tool_input.get("quote_tweet_id") is not None:
-        proposal["quote_tweet_id"] = _valid_tweet_id(tool_input.get("quote_tweet_id"), field="quote_tweet_id")
-    if "in_reply_to_tweet_id" in proposal and "quote_tweet_id" in proposal:
-        raise ToolInputValidationError("X post supports either in_reply_to_tweet_id or quote_tweet_id, not both.")
-    return proposal
-
-
-def _target_tweet_preview(access_token: str, tweet_id: str) -> JSONObject:
-    """Current state of the post being replied to or quoted, captured at
-    proposal time so the approval names the actual target and
-    execute_approved can detect deletion (rule 8)."""
-    params = encode_query({"tweet.fields": "author_id,created_at", "expansions": "author_id", "user.fields": "username"})
-    response = _api_get(access_token, f"/tweets/{tweet_id}?{params}", what="post lookup")
-    data = response.get("data")
-    if not isinstance(data, dict):
-        raise ToolInputValidationError("The referenced X post was not found.")
-    # Require a definite id: the post-approval re-check compares this against the
-    # approved id, so falling back to the requested id would make a response
-    # with no id trivially "match" and skip real verification.
-    resolved_id = data.get("id")
-    if not isinstance(resolved_id, str) or resolved_id != tweet_id:
-        raise ToolInputValidationError("The referenced X post was not found.")
-    usernames = _usernames_by_id(response)
-    author_id = data.get("author_id")
-    return {
-        "id": resolved_id,
-        "author_username": usernames.get(author_id if isinstance(author_id, str) else "", ""),
-        "text": clip_text(str(data.get("text") or ""), 300),
-    }
-
-
-def _post_summary(proposal: JSONObject, account_label: str, target: JSONObject | None) -> str:
-    text = str(proposal.get("text") or "")
-    # Disclose the full length so a summary-only reader knows how much is
-    # clipped; the operator can expand the exact payload to read all of it.
-    count = f"{len(text)}-char post"
-    account_label = clip_text(account_label, 80)
-    # Clip progressively so the whole summary stays within the host's
-    # 500-byte cap while every disclosure stays present.
-    for text_clip, target_clip in ((240, 120), (160, 80), (100, 40)):
-        if target is not None and "in_reply_to_tweet_id" in proposal:
-            summary = (
-                f"Reply on X as {account_label} to post {target.get('id')} by "
-                f"@{target.get('author_username') or 'unknown'} (\"{clip_text(str(target.get('text') or ''), target_clip)}\"), "
-                f"{count}: \"{clip_text(text, text_clip)}\""
-            )
-        elif target is not None:
-            summary = (
-                f"Quote-post on X as {account_label} of post {target.get('id')} by "
-                f"@{target.get('author_username') or 'unknown'} (\"{clip_text(str(target.get('text') or ''), target_clip)}\"), "
-                f"{count}: \"{clip_text(text, text_clip)}\""
-            )
-        else:
-            summary = f"Post on X as {account_label}, {count}: \"{clip_text(text, text_clip)}\""
-        if len(summary.encode("utf-8")) <= SUMMARY_MAX_BYTES:
-            return summary
-    return summary
-
-
 def _require_dm_scopes(api: HostAPI) -> None:
     existing = api.credentials.load()
     if existing is None:
@@ -940,28 +852,6 @@ class XTool:
                 return ActionExecuted(_get_trends(api, tool_input))
             if action == "get_personalized_trends":
                 return ActionExecuted(_personalized_trends(X_CREDENTIALS.access_token(api), tool_input))
-            if action == "post_tweet":
-                proposal = _post_proposal(tool_input)
-                access_token = X_CREDENTIALS.access_token(api)
-                account = X_CREDENTIALS.refresh_identity(api, access_token)
-                target_id = proposal.get("in_reply_to_tweet_id") or proposal.get("quote_tweet_id")
-                target: JSONObject | None = None
-                if isinstance(target_id, str):
-                    target = _target_tweet_preview(access_token, target_id)
-                post_payload: JSONObject = {
-                    "action": action,
-                    "tool_id": MANIFEST.tool_id,
-                    "x_account": {"id": account["id"], "label": account["label"]},
-                    "proposal": proposal,
-                }
-                if target is not None:
-                    post_payload["target_tweet"] = target
-                approval = api.approvals.request(
-                    action_id=action,
-                    summary=_post_summary(proposal, account["label"], target),
-                    payload=post_payload,
-                )
-                return ActionPendingApproval(approval.approval_id, approval.summary)
             if action == "send_dm":
                 proposal = _dm_proposal(tool_input)
                 _require_dm_scopes(api)
@@ -996,7 +886,7 @@ class XTool:
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
         try:
             # The host hands a loaded record: approved, and this tool's own.
-            if approval.action_id not in {"post_tweet", "send_dm"}:
+            if approval.action_id != "send_dm":
                 return ActionFailed("X approval action is invalid.")
             payload = approval.payload
             proposal = payload.get("proposal")
@@ -1010,81 +900,46 @@ class XTool:
                 return ActionFailed("X approval payload is invalid.")
             if approved_account.get("id") != current_account["id"]:
                 return ActionFailed("X account changed after approval. Please queue a new approval.")
-            if approval.action_id == "send_dm":
-                _require_dm_scopes(api)
-                approved_recipient = payload.get("recipient")
-                if not isinstance(approved_recipient, dict):
-                    return ActionFailed("X direct-message approval recipient is invalid.")
-                recipient_id = approved_recipient.get("id")
-                if not isinstance(recipient_id, str) or not USER_ID_RE.fullmatch(recipient_id):
-                    return ActionFailed("X direct-message approval recipient is invalid.")
-                current_recipient = _dm_recipient_preview(
-                    access_token,
-                    {"recipient_user_id": recipient_id},
+            _require_dm_scopes(api)
+            approved_recipient = payload.get("recipient")
+            if not isinstance(approved_recipient, dict):
+                return ActionFailed("X direct-message approval recipient is invalid.")
+            recipient_id = approved_recipient.get("id")
+            if not isinstance(recipient_id, str) or not USER_ID_RE.fullmatch(recipient_id):
+                return ActionFailed("X direct-message approval recipient is invalid.")
+            current_recipient = _dm_recipient_preview(
+                access_token,
+                {"recipient_user_id": recipient_id},
+            )
+            if (
+                current_recipient.get("id") != recipient_id
+                or current_recipient.get("username") != approved_recipient.get("username")
+            ):
+                return ActionFailed(
+                    "X direct-message recipient changed after approval. Please queue a new approval."
                 )
-                if (
-                    current_recipient.get("id") != recipient_id
-                    or current_recipient.get("username") != approved_recipient.get("username")
-                ):
-                    return ActionFailed(
-                        "X direct-message recipient changed after approval. Please queue a new approval."
-                    )
-                text = proposal_object.get("text")
-                if not isinstance(text, str) or not text or len(text) > MAX_DM_CHARS:
-                    return ActionFailed("X direct-message approval text is invalid.")
-                try:
-                    response = json_request(
-                        "POST",
-                        f"{X_API_BASE_URL}/dm_conversations/with/{recipient_id}/messages",
-                        headers={"authorization": f"Bearer {access_token}"},
-                        body={"text": text},
-                        failure_message="X direct-message request failed.",
-                        invalid_response_message="X direct-message request returned an invalid response.",
-                    )
-                except WebRequestError as exc:
-                    raise _mapped_web_error(exc, "direct-message") from exc
-                data = response.get("data")
-                event_id = data.get("dm_event_id") if isinstance(data, dict) else None
-                if not isinstance(event_id, str) or not TWEET_ID_RE.fullmatch(event_id):
-                    return ActionFailed("X did not confirm the new direct message.")
-                return ApprovalExecuted(
-                    f"Sent a direct message on X as {current_account['label']} to "
-                    f"@{current_recipient['username']} (event id {event_id})."
-                )
-            approved_target = payload.get("target_tweet")
-            if isinstance(approved_target, dict):
-                proposal_target = proposal_object.get("in_reply_to_tweet_id") or proposal_object.get("quote_tweet_id")
-                if approved_target.get("id") != proposal_target:
-                    return ActionFailed("X approval target is invalid. Please queue a new approval.")
-                # Rule 8: the referenced post must still exist (posts cannot be
-                # edited into something else on the API tier, but they can be
-                # deleted or hidden between proposal and approval).
-                current_target = _target_tweet_preview(access_token, str(approved_target.get("id") or ""))
-                if current_target.get("id") != approved_target.get("id"):
-                    return ActionFailed("The referenced X post changed after approval. Please queue a new approval.")
-            body: JSONObject = {"text": proposal_object.get("text")}
-            reply_id = proposal_object.get("in_reply_to_tweet_id")
-            if isinstance(reply_id, str):
-                body["reply"] = {"in_reply_to_tweet_id": reply_id}
-            quote_id = proposal_object.get("quote_tweet_id")
-            if isinstance(quote_id, str):
-                body["quote_tweet_id"] = quote_id
+            text = proposal_object.get("text")
+            if not isinstance(text, str) or not text or len(text) > MAX_DM_CHARS:
+                return ActionFailed("X direct-message approval text is invalid.")
             try:
                 response = json_request(
                     "POST",
-                    f"{X_API_BASE_URL}/tweets",
+                    f"{X_API_BASE_URL}/dm_conversations/with/{recipient_id}/messages",
                     headers={"authorization": f"Bearer {access_token}"},
-                    body=body,
-                    failure_message="X post request failed.",
-                    invalid_response_message="X post returned an invalid response.",
+                    body={"text": text},
+                    failure_message="X direct-message request failed.",
+                    invalid_response_message="X direct-message request returned an invalid response.",
                 )
             except WebRequestError as exc:
-                raise _mapped_web_error(exc, "post") from exc
+                raise _mapped_web_error(exc, "direct-message") from exc
             data = response.get("data")
-            posted_id = data.get("id") if isinstance(data, dict) else None
-            if not isinstance(posted_id, str) or not posted_id:
-                return ActionFailed("X did not confirm the new post.")
-            return ApprovalExecuted(f"Posted to X as {current_account['label']} (post id {posted_id}).")
+            event_id = data.get("dm_event_id") if isinstance(data, dict) else None
+            if not isinstance(event_id, str) or not TWEET_ID_RE.fullmatch(event_id):
+                return ActionFailed("X did not confirm the new direct message.")
+            return ApprovalExecuted(
+                f"Sent a direct message on X as {current_account['label']} to "
+                f"@{current_recipient['username']} (event id {event_id})."
+            )
         except ToolInputValidationError as exc:
             return ActionFailed(exc.message)
         except IntegrationReconnectRequired as exc:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import unittest
 from typing import Any
 from unittest.mock import patch
@@ -26,13 +25,13 @@ def connected_api(*, expires_at: int = FRESH_EXPIRES_AT) -> FakeHostAPI:
             "account": {
                 "id": "111",
                 "label": "@claw",
-                "scopes": ["tweet.read", "users.read", "tweet.write", "dm.read", "dm.write", "offline.access"],
+                "scopes": ["tweet.read", "users.read", "dm.read", "dm.write", "offline.access"],
             },
             "secret": {
                 "access_token": "x-access",
                 "expires_at": expires_at,
                 "refresh_token": "x-refresh-1",
-                "scope": "tweet.read users.read tweet.write dm.read dm.write offline.access",
+                "scope": "tweet.read users.read dm.read dm.write offline.access",
                 "token_type": "bearer",
             },
             "metadata": {"created_at": 1, "updated_at": 1},
@@ -58,10 +57,11 @@ class XToolReadTests(unittest.TestCase):
                 "user_tweets",
                 "get_trends",
                 "get_personalized_trends",
-                "post_tweet",
                 "send_dm",
             ],
         )
+        self.assertIn("x.com/intent/tweet", tool.manifest.description)
+        self.assertNotIn("tweet.write", twitter.X_OAUTH_SCOPES)
 
     def test_search_tweets_maps_results_and_authors(self) -> None:
         seen: dict[str, str] = {}
@@ -288,7 +288,7 @@ class XToolRefreshTests(unittest.TestCase):
                 self.assertEqual(kwargs["form"]["refresh_token"], "x-refresh-1")
                 self.assertTrue(kwargs["headers"]["authorization"].startswith("Basic "))
                 return {"access_token": "x-access-2", "refresh_token": "x-refresh-2", "expires_in": 7200,
-                        "scope": "tweet.read users.read tweet.write dm.read dm.write offline.access",
+                        "scope": "tweet.read users.read dm.read dm.write offline.access",
                         "token_type": "bearer"}
             return {"data": []}
 
@@ -320,7 +320,7 @@ class XToolRefreshTests(unittest.TestCase):
                 "access_token": "x-access-2",
                 "refresh_token": "x-refresh-2",
                 "expires_in": 7200,
-                "scope": "tweet.read users.read tweet.write offline.access",
+                "scope": "tweet.read users.read offline.access",
                 "token_type": "bearer",
             }
 
@@ -329,250 +329,6 @@ class XToolRefreshTests(unittest.TestCase):
         assert isinstance(result, ActionFailed)
         self.assertTrue(result.reconnect_required)
         self.assertIsNone(api.credentials.load())
-
-
-class XToolPostTests(unittest.TestCase):
-    def test_post_tweet_queues_approval_with_account_and_text(self) -> None:
-        api = connected_api()
-
-        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_json_request):
-            result = XTool().execute("post_tweet", {"text": "Hello world"}, api)
-        assert isinstance(result, ActionPendingApproval)
-        self.assertIn("@claw", result.summary)
-        self.assertIn("Hello world", result.summary)
-        record = api.approvals.get(result.approval_id)
-        assert record is not None
-        proposal = record.payload["proposal"]
-        assert isinstance(proposal, dict)
-        self.assertEqual(proposal["text"], "Hello world")
-        self.assertNotIn("target_tweet", record.payload)
-
-    def test_reply_captures_target_and_names_it_in_summary(self) -> None:
-        api = connected_api()
-
-        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            if "/tweets/9001?" in url:
-                return {"data": {"id": "9001", "text": "original post", "author_id": "222"},
-                        "includes": {"users": [{"id": "222", "username": "someone"}]}}
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_json_request):
-            result = XTool().execute("post_tweet", {"text": "Nice", "in_reply_to_tweet_id": "9001"}, api)
-        assert isinstance(result, ActionPendingApproval)
-        self.assertIn("Reply on X", result.summary)
-        self.assertIn("@someone", result.summary)
-        self.assertIn("original post", result.summary)
-
-    def test_reply_rejects_provider_response_for_a_different_target(self) -> None:
-        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            if "/tweets/9001?" in url:
-                return {"data": {"id": "9002", "text": "different post", "author_id": "222"}}
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_json_request):
-            result = XTool().execute(
-                "post_tweet", {"text": "Nice", "in_reply_to_tweet_id": "9001"}, connected_api()
-            )
-        assert isinstance(result, ActionFailed)
-        self.assertIn("not found", result.error)
-
-    def test_post_rejects_reply_and_quote_together(self) -> None:
-        result = XTool().execute(
-            "post_tweet", {"text": "x", "in_reply_to_tweet_id": "1", "quote_tweet_id": "2"}, connected_api()
-        )
-        self.assertIsInstance(result, ActionFailed)
-
-    def test_execute_approved_posts_and_reports_id(self) -> None:
-        api = connected_api()
-
-        def fake_pending(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_pending):
-            pending = XTool().execute("post_tweet", {"text": "Ship it"}, api)
-        assert isinstance(pending, ActionPendingApproval)
-        approved_record = api.approvals.approve(pending.approval_id)
-
-        posted: dict[str, Any] = {}
-
-        def fake_execute(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            if url.endswith("/tweets") and method == "POST":
-                posted["body"] = kwargs["body"]
-                return {"data": {"id": "424242", "text": "Ship it"}}
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_execute):
-            result = XTool().execute_approved(approved_record, api)
-        assert isinstance(result, ApprovalExecuted)
-        self.assertIn("424242", result.message)
-        self.assertEqual(posted["body"], {"text": "Ship it"})
-
-    def test_execute_approved_does_not_surface_provider_body(self) -> None:
-        api = connected_api()
-
-        def fake_pending(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_pending):
-            pending = XTool().execute("post_tweet", {"text": "Ship it"}, api)
-        assert isinstance(pending, ActionPendingApproval)
-        approved_record = api.approvals.approve(pending.approval_id)
-
-        def fake_execute(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            raise WebRequestError(
-                "failed",
-                status=403,
-                body=(
-                    b'{"title":"Forbidden","detail":"User is not permitted to create replies.",'
-                    b'"type":"https://api.x.com/2/problems/client-forbidden","status":403}'
-                ),
-            )
-
-        with (
-            patch.object(twitter, "json_request", fake_execute),
-            self.assertRaises(ProviderWarning) as caught,
-        ):
-            XTool().execute_approved(approved_record, api)
-        self.assertIn("HTTP 403", str(caught.exception))
-        self.assertNotIn("User is not permitted to create replies.", str(caught.exception))
-        self.assertNotIn("client-forbidden", str(caught.exception))
-        self.assertIn("client-forbidden", caught.exception.response_body)
-
-    def test_execute_approved_rejects_non_post_action(self) -> None:
-        api = connected_api()
-        with patch.object(twitter, "json_request", return_value=me_response()):
-            pending = XTool().execute("post_tweet", {"text": "Ship it"}, api)
-        assert isinstance(pending, ActionPendingApproval)
-        record = replace(api.approvals.approve(pending.approval_id), action_id="read_tweet")
-        with patch.object(twitter, "json_request") as request:
-            result = XTool().execute_approved(record, api)
-        assert isinstance(result, ActionFailed)
-        self.assertEqual(result.error, "X approval action is invalid.")
-        request.assert_not_called()
-
-    def test_numeric_inputs_reject_unicode_digits(self) -> None:
-        with patch.object(twitter, "json_request", return_value=me_response()):
-            result = XTool().execute(
-                "search_tweets", {"query": "x", "max_results": "²"}, connected_api()
-            )
-        assert isinstance(result, ActionFailed)
-        self.assertNotIn("invalid literal", result.error)
-
-    def test_execute_approved_fails_when_account_changed(self) -> None:
-        api = connected_api()
-
-        def fake_pending(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_pending):
-            pending = XTool().execute("post_tweet", {"text": "Ship it"}, api)
-        assert isinstance(pending, ActionPendingApproval)
-        approved_record = api.approvals.approve(pending.approval_id)
-
-        def fake_execute(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return {"data": {"id": "999", "name": "Other", "username": "other"}}
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_execute):
-            result = XTool().execute_approved(approved_record, api)
-        assert isinstance(result, ActionFailed)
-        self.assertTrue(result.reconnect_required)
-
-    def test_execute_approved_fails_when_target_deleted(self) -> None:
-        api = connected_api()
-
-        def fake_pending(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            if "/tweets/9001?" in url:
-                return {"data": {"id": "9001", "text": "original", "author_id": "222"},
-                        "includes": {"users": [{"id": "222", "username": "someone"}]}}
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_pending):
-            pending = XTool().execute("post_tweet", {"text": "Nice", "in_reply_to_tweet_id": "9001"}, api)
-        assert isinstance(pending, ActionPendingApproval)
-        approved_record = api.approvals.approve(pending.approval_id)
-
-        def fake_execute(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            if "/tweets/9001?" in url:
-                return {"errors": [{"title": "Not Found Error"}]}
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_execute):
-            result = XTool().execute_approved(approved_record, api)
-        assert isinstance(result, ActionFailed)
-        self.assertIn("not found", result.error.lower())
-
-    def test_execute_approved_rejects_target_binding_mismatch_without_posting(self) -> None:
-        api = connected_api()
-
-        def fake_pending(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            if "/tweets/9001?" in url:
-                return {"data": {"id": "9001", "text": "original", "author_id": "222"}}
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_pending):
-            pending = XTool().execute(
-                "post_tweet", {"text": "Nice", "in_reply_to_tweet_id": "9001"}, api
-            )
-        assert isinstance(pending, ActionPendingApproval)
-        approved_record = api.approvals.approve(pending.approval_id)
-        target = approved_record.payload["target_tweet"]
-        assert isinstance(target, dict)
-        target["id"] = "9002"
-
-        calls: list[tuple[str, str]] = []
-
-        def fake_execute(method: str, url: str, **kwargs: Any) -> JSONObject:
-            calls.append((method, url))
-            if "/users/me" in url:
-                return me_response()
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_execute):
-            result = XTool().execute_approved(approved_record, api)
-        assert isinstance(result, ActionFailed)
-        self.assertIn("target is invalid", result.error)
-        self.assertFalse(any(method == "POST" and url.endswith("/tweets") for method, url in calls))
-
-    def test_execute_never_posts_inline(self) -> None:
-        api = connected_api()
-        calls: list[str] = []
-
-        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
-            calls.append(f"{method} {url}")
-            if "/users/me" in url:
-                return me_response()
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_json_request):
-            XTool().execute("post_tweet", {"text": "Hello"}, api)
-        self.assertFalse(any(call.startswith("POST") and call.endswith("/tweets") for call in calls))
 
 
 class XToolDirectMessageTests(unittest.TestCase):
@@ -607,7 +363,7 @@ class XToolDirectMessageTests(unittest.TestCase):
         api = connected_api()
         stored = api.credentials.load()
         assert stored is not None
-        stored["account"]["scopes"] = ["tweet.read", "users.read", "tweet.write", "offline.access"]
+        stored["account"]["scopes"] = ["tweet.read", "users.read", "offline.access"]
         api.credentials.save(stored)
 
         with patch.object(twitter, "json_request") as request:
@@ -727,7 +483,7 @@ class XCredentialFlowTests(unittest.TestCase):
                 self.assertEqual(kwargs["form"]["grant_type"], "authorization_code")
                 self.assertTrue(kwargs["form"]["code_verifier"])
                 return {"access_token": "x-access", "refresh_token": "x-refresh", "expires_in": 7200,
-                        "scope": "tweet.read users.read tweet.write dm.read dm.write offline.access",
+                        "scope": "tweet.read users.read dm.read dm.write offline.access",
                         "token_type": "bearer"}
             if "/users/me" in url:
                 return me_response()
@@ -752,7 +508,7 @@ class XCredentialFlowTests(unittest.TestCase):
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             return {"access_token": "x-access", "expires_in": 7200,
-                    "scope": "tweet.read users.read tweet.write dm.read dm.write offline.access",
+                    "scope": "tweet.read users.read dm.read dm.write offline.access",
                     "token_type": "bearer"}
 
         with patch.object(twitter, "json_request", fake_json_request):

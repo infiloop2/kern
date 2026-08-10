@@ -16,6 +16,27 @@
     return "";
   }
 
+  function safeXReplyIntentHref(value) {
+    const href = String(value ?? "").trim();
+    if (!href || href.length > 8192) return "";
+    try {
+      const url = new URL(href);
+      if (
+        url.protocol !== "https:" || url.hostname !== "x.com" || url.port
+        || url.username || url.password || url.pathname !== "/intent/tweet" || url.hash
+      ) return "";
+      const allowed = new Set(["in_reply_to", "text"]);
+      for (const key of url.searchParams.keys()) if (!allowed.has(key)) return "";
+      const replyIds = url.searchParams.getAll("in_reply_to");
+      const texts = url.searchParams.getAll("text");
+      if (replyIds.length !== 1 || !/^[0-9]{1,25}$/.test(replyIds[0])) return "";
+      if (texts.length > 1 || (texts[0] || "").length > 4000) return "";
+      return url.href;
+    } catch (_error) {
+      return "";
+    }
+  }
+
   const TRUNCATION_SUFFIX = "\n… (truncated)";
   const ACTIVITY_HISTORY_OUTPUT_BYTES = 2 * 1024 * 1024;
   const MAX_BLOCKQUOTE_DEPTH = 16;
@@ -113,6 +134,13 @@
       const safe = escapeHtml(href);
       const textLabel = escapeHtml(label);
       const prefix = image ? "Image: " : "";
+      const xReplyIntent = !image && safeXReplyIntentHref(href);
+      if (xReplyIntent) {
+        return stash(
+          `<a class="md-open-link" href="${escapeHtml(xReplyIntent)}" target="_blank" ` +
+          `rel="noopener noreferrer">${textLabel}</a>`,
+        );
+      }
       return stash(
         `<button type="button" class="md-copy-link" data-copy-href="${safe}" ` +
         `title="Copy link">${prefix}${textLabel}</button>`,
@@ -247,6 +275,7 @@
 
   const api = {
     escapeHtml,
+    safeXReplyIntentHref,
     renderMarkdown,
     safeHref,
     clipUtf8,

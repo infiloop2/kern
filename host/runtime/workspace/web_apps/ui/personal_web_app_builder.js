@@ -321,8 +321,29 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
   send({ type: "ready" });
 }
 
+function safeXReplyIntentHref(value) {
+  const href = String(value ?? "").trim();
+  if (!href || href.length > 8192) return "";
+  try {
+    const url = new URL(href);
+    if (
+      url.protocol !== "https:" || url.hostname !== "x.com" || url.port
+      || url.username || url.password || url.pathname !== "/intent/tweet" || url.hash
+    ) return "";
+    const allowed = new Set(["in_reply_to", "text"]);
+    for (const key of url.searchParams.keys()) if (!allowed.has(key)) return "";
+    const replyIds = url.searchParams.getAll("in_reply_to");
+    const texts = url.searchParams.getAll("text");
+    if (replyIds.length !== 1 || !/^[0-9]{1,25}$/.test(replyIds[0])) return "";
+    if (texts.length > 1 || (texts[0] || "").length > 4000) return "";
+    return url.href;
+  } catch (_error) {
+    return "";
+  }
+}
+
 const allowedElements = new Set([
-  "ABBR", "ADDRESS", "ARTICLE", "ASIDE", "BDI", "BDO", "BLOCKQUOTE", "BR",
+  "A", "ABBR", "ADDRESS", "ARTICLE", "ASIDE", "BDI", "BDO", "BLOCKQUOTE", "BR",
   "BUTTON", "CAPTION", "CITE", "CODE", "DATA", "DATALIST", "DD", "DEL",
   "DETAILS", "DFN", "DIV", "DL", "DT", "EM", "FIELDSET", "FIGCAPTION",
   "FIGURE", "FOOTER", "FORM", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER",
@@ -334,7 +355,7 @@ const allowedElements = new Set([
   "VAR", "WBR",
 ]);
 const droppedElements = new Set([
-  "A", "AUDIO", "BASE", "EMBED", "IFRAME", "IMG", "LINK", "META", "OBJECT",
+  "AUDIO", "BASE", "EMBED", "IFRAME", "IMG", "LINK", "META", "OBJECT",
   "PICTURE", "SCRIPT", "SOURCE", "STYLE", "TRACK", "VIDEO",
 ]);
 const globalAttributes = new Set([
@@ -426,12 +447,19 @@ function cloneSafeNode(node, parent, budget, depth) {
   }
   if (node.nodeType !== Node.ELEMENT_NODE) return;
   if (droppedElements.has(node.tagName)) return;
+  const xReplyIntent = node.tagName === "A" ? safeXReplyIntentHref(node.getAttribute("href")) : "";
+  if (node.tagName === "A" && !xReplyIntent) return;
   if (!allowedElements.has(node.tagName)) {
     for (const child of node.childNodes) cloneSafeNode(child, parent, budget, depth + 1);
     return;
   }
   const clean = document.createElement(node.tagName.toLowerCase());
   for (const attribute of node.attributes) copySafeAttribute(node, clean, attribute.name, attribute.value);
+  if (node.tagName === "A") {
+    clean.setAttribute("href", xReplyIntent);
+    clean.setAttribute("target", "_blank");
+    clean.setAttribute("rel", "noopener noreferrer");
+  }
   if (clean.hasAttribute("data-drag-value")) clean.draggable = true;
   if (node.tagName === "BUTTON") clean.type = "button";
   if (node.tagName === "INPUT") {
