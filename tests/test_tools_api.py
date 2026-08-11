@@ -168,6 +168,31 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertIn("not an objective global ranking", described_action("instagram_discovery", "get_trending_reels")["description"])
         self.assertIn("not a LinkedIn feed", described_action("linkedin_discovery", "search_posts")["description"])
 
+    def test_agent_notes_are_always_stated_and_carried_once(self) -> None:
+        catalog = {entry["tool_id"]: entry for entry in
+                   tools_api.call_action("list_bundled_tools", {})["result"]["tools"]}
+        # Always stated, empty included, so "this tool has nothing to add" is
+        # distinguishable from "this surface does not carry it".
+        for tool_id, entry in catalog.items():
+            with self.subTest(tool_id=tool_id):
+                self.assertEqual(
+                    entry["agent_notes"],
+                    tools_host.BUNDLED_TOOLS[tool_id].manifest.agent_notes,
+                )
+        self.assertEqual(catalog["gmail"]["agent_notes"], "")
+        # An agent that plans from the catalog alone and never calls
+        # describe_tool still learns X cannot post or DM and what to hand back
+        # instead, so the reply-intent URL form must survive here.
+        self.assertIn("x.com/intent/tweet", catalog["twitter"]["agent_notes"])
+        self.assertIn("x.com/messages/compose", catalog["twitter"]["agent_notes"])
+
+        # One field per tool, so describe_tool does not carry it a second time.
+        described = tools_api.call_action("describe_tool", {"tool_id": "twitter"})["result"]
+        self.assertNotIn("agent_notes", described)
+        for action in described["actions"]:
+            with self.subTest(action=action["id"]):
+                self.assertNotIn("agent_notes", action)
+
     def test_describe_tool_reports_enablement_and_rejects_unknown_ids(self) -> None:
         described = tools_api.call_action("describe_tool", {"tool_id": "fake_notes"})
         self.assertTrue(described["result"]["enabled"])

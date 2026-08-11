@@ -243,6 +243,16 @@ class ToolTests(unittest.TestCase):
                 actions=(),
                 technical_details=("",),
             )
+        with self.assertRaisesRegex(ValueError, "ToolManifest.agent_notes"):
+            ToolManifest(
+                tool_id="bad_agent_text",
+                display_name="Bad",
+                description="Bad agent description.",
+                connection="enable_only",
+                data_summary=EXAMPLE_DATA_SUMMARY,
+                actions=(),
+                agent_notes="   ",
+            )
         with self.assertRaisesRegex(ValueError, "link_url and link_label"):
             ToolManifest(
                 tool_id="bad_step",

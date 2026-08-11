@@ -19,7 +19,8 @@ class AgentChatRichTextTests(unittest.TestCase):
         source = (
             "# Status\n\n**done** and `safe`\n\n"
             "<img src=x onerror=alert(1)>\n\n"
-            "[bad](javascript:alert(1)) [good](https://example.com) "
+            "[bad](javascript:alert(1)) [copy](https://example.com) "
+            "[github](https://github.com/infiversehq/kern) "
             "[reply](https://x.com/intent/tweet?in_reply_to=9001&text=Prepared%20reply)\n\n"
             "```js\nconst x = 1;\n```"
         )
@@ -36,27 +37,54 @@ class AgentChatRichTextTests(unittest.TestCase):
         self.assertNotIn("javascript:", rendered)
         self.assertIn('data-copy-href="https://example.com"', rendered)
         self.assertIn(
+            '<a class="md-open-link" href="https://github.com/infiversehq/kern" '
+            'title="https://github.com/infiversehq/kern" target="_blank" '
+            'rel="noopener noreferrer">github</a>',
+            rendered,
+        )
+        self.assertIn(
             '<a class="md-open-link" href="https://x.com/intent/tweet?in_reply_to=9001&amp;text=Prepared%20reply" '
+            'title="https://x.com/intent/tweet?in_reply_to=9001&amp;text=Prepared%20reply" '
             'target="_blank" rel="noopener noreferrer">reply</a>',
             rendered,
         )
         self.assertIn('class="md-copy"', rendered)
 
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
-    def test_only_bounded_x_reply_intents_open_directly(self) -> None:
+    def test_only_hardcoded_safe_navigation_hosts_open_directly(self) -> None:
         renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
         script = (
             f"const rich = require({json.dumps(str(renderer))});"
             "process.stdout.write(JSON.stringify(process.argv.slice(1).map(value => "
-            "rich.safeXReplyIntentHref(value))));"
+            "rich.safeNavigationHref(value))));"
         )
         values = [
+            "https://github.com/infiversehq/kern/pull/264",
+            "https://www.instagram.com/reel/ABC123/",
+            "https://www.linkedin.com/posts/alice_agents-123",
+            "https://polymarket.com/event/example-market",
+            "https://calendar.google.com/calendar/u/0/r/eventedit/abc",
+            "https://www.google.com/calendar/event?eid=YWJj&ctz=UTC",
+            "https://x.com/alice/status/9001",
             "https://x.com/intent/tweet?in_reply_to=9001&text=Looks%20good",
+            "https://twitter.com/messages/compose?recipient_id=123456789&text=Prepared%20DM",
+            "https://x.com/intent/tweet?in_reply_to=not-numeric&url=https%3A%2F%2Fexample.com",
+            "https://twitter.com/messages/compose?recipient_id=not-numeric&extra=value",
+            "https://docs.byteplus.com/en/docs/ModelArk/1361424",
+            "https://runwayml.com/privacy-policy",
+            "https://example.com/not-trusted",
+            "http://github.com/infiversehq/kern",
+            "https://github.com.evil.example/infiversehq/kern",
+            "https://user@github.com/infiversehq/kern",
+            "https://github.com:444/infiversehq/kern",
+            "https://github.com/login/oauth/authorize?client_id=attacker",
+            "https://www.instagram.com/oauth/authorize?client_id=attacker",
+            "https://www.linkedin.com/oauth/v2/authorization?client_id=attacker",
+            "https://x.com/i/oauth2/authorize?client_id=attacker",
+            "https://www.google.com/search?q=not-calendar",
+            "https://www.google.com/calendar/event?eid=abc&continue=https%3A%2F%2Fevil.example",
             "http://x.com/intent/tweet?in_reply_to=9001&text=no",
             "https://x.com.evil.example/intent/tweet?in_reply_to=9001&text=no",
-            "https://x.com/intent/tweet?in_reply_to=not-numeric&text=no",
-            "https://x.com/intent/tweet?in_reply_to=9001&url=https%3A%2F%2Fevil.example",
-            "https://x.com/someone/status/9001",
         ]
         rendered = json.loads(subprocess.run(
             ["node", "-e", script, *values],
@@ -65,7 +93,7 @@ class AgentChatRichTextTests(unittest.TestCase):
             text=True,
         ).stdout)
 
-        self.assertEqual(rendered, [values[0], "", "", "", "", ""])
+        self.assertEqual(rendered, values[:13] + [""] * (len(values) - 13))
 
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_activity_deltas_compact_to_one_bounded_snapshot(self) -> None:

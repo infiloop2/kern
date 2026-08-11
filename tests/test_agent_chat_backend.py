@@ -4,6 +4,7 @@ from http import HTTPStatus
 import json
 from pathlib import Path
 import socket
+import threading
 import unittest
 import unittest.mock
 from unittest.mock import call, patch
@@ -76,14 +77,41 @@ class AgentChatBackendTests(unittest.TestCase):
         source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
         css = (CHAT_DIR / "ui" / "agent_chat.css").read_text()
         self.assertNotIn('attachmentActivity = "Sending…"', source)
-        self.assertIn('sendButton.classList.toggle("sending", sendingMessage)', source)
+        self.assertIn('sendButton.classList.toggle("sending", selectedSending)', source)
+        self.assertIn("sendingMessageThreadKey === composerDraftKey()", source)
         self.assertIn(".send-button.sending::after", css)
         self.assertIn('attachmentActivity = "Stopping…"', source)
         self.assertNotIn("Waiting for agent to start", source)
         self.assertEqual(
             (backend.SEND_BUSY_RETRIES - 1) * backend.SEND_BUSY_RETRY_DELAY_SECONDS,
-            10,
+            5,
         )
+
+    def test_different_threads_do_not_share_the_send_lock(self) -> None:
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+
+        def hold_first() -> None:
+            with backend._message_send_lock("thread-1"):
+                first_entered.set()
+                release_first.wait(timeout=2)
+
+        def enter_second() -> None:
+            with backend._message_send_lock("thread-2"):
+                second_entered.set()
+
+        first = threading.Thread(target=hold_first)
+        second = threading.Thread(target=enter_second)
+        first.start()
+        self.assertTrue(first_entered.wait(timeout=1))
+        second.start()
+        self.assertTrue(second_entered.wait(timeout=1))
+        release_first.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
 
     def test_composer_hint_is_centered_under_the_composer(self) -> None:
         css = (CHAT_DIR / "ui" / "agent_chat.css").read_text()
@@ -109,6 +137,17 @@ class AgentChatBackendTests(unittest.TestCase):
         self.assertIn("sequence !== refreshSequence", source)
         self.assertIn("const sequence = ++selectedRefreshSequence;", source)
         self.assertIn("refreshSequence !== selectedRefreshSequence", source)
+
+    def test_transient_background_refresh_errors_are_delayed(self) -> None:
+        source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
+        self.assertIn("const REFRESH_ERROR_DISPLAY_DELAY_MS = 5000;", source)
+        self.assertIn("function deferRefreshError(message)", source)
+        self.assertIn("clearDeferredRefreshError();\n    setStatus(\"\", \"refresh\");", source)
+        refresh = source.split("async function refresh()", 1)[1].split(
+            "\nfunction renderThreads", 1
+        )[0]
+        self.assertIn("deferRefreshError(error.message);", refresh)
+        self.assertNotIn('setStatus(error.message, "refresh");', refresh)
 
     def test_composer_restores_the_new_thread_draft_on_startup(self) -> None:
         source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
@@ -140,9 +179,9 @@ class AgentChatBackendTests(unittest.TestCase):
     def test_stop_is_serialized_after_an_in_flight_send(self) -> None:
         source = (CHAT_DIR / "backend.py").read_text()
         stop_route = source.split('path.endswith("/stop")', 1)[1]
-        self.assertIn("with MESSAGE_SEND_LOCK:", stop_route)
+        self.assertIn("with _message_send_lock(thread_id):", stop_route)
         self.assertLess(
-            stop_route.index("with MESSAGE_SEND_LOCK:"),
+            stop_route.index("with _message_send_lock(thread_id):"),
             stop_route.index("call_admin_api("),
         )
 

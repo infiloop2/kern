@@ -212,6 +212,8 @@ MANIFEST = ToolManifest(
             ),
         ),
     ),
+    # Nothing to add beyond the description: it drives this tool on its own.
+    agent_notes="",
 )
 
 

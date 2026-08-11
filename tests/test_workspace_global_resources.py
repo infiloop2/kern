@@ -92,6 +92,76 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
         self.assertEqual(conflict.exception.status, HTTPStatus.CONFLICT)
 
+    def test_agent_memory_search_falls_back_to_weak_and_popular_pages(self) -> None:
+        pages = (
+            (
+                "popular-one",
+                "Use before production deployments",
+                "Production deployment checklist.",
+            ),
+            (
+                "popular-two",
+                "Use for durable context decisions",
+                "Durable context guidance.",
+            ),
+            (
+                "weak-match",
+                "Use before running Playwright",
+                "Browser testing guidance.",
+            ),
+            (
+                "recent-page",
+                "Use for a newly documented workflow",
+                "New workflow guidance.",
+            ),
+        )
+        for page_id, description, content in pages:
+            memory.save_page(
+                page_id,
+                {
+                    "description": description,
+                    "content": content,
+                    "expected_revision": 0,
+                },
+                actor="agent",
+            )
+
+        for _ in range(2):
+            strong = memory.search_swarm_pages(
+                {"q": ["production deployments"]}
+            )
+            self.assertEqual(strong["pages"][0]["page_id"], "popular-one")
+            self.assertNotIn("popular_pages", strong)
+        memory.search_swarm_pages({"q": ["durable context"]})
+        memory.search_pages({"q": ["production deployments"]})
+
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT page_id, strong_top_hit_count FROM memory_pages"
+                " WHERE page_id IN ('popular-one', 'popular-two') ORDER BY page_id"
+            )
+            self.assertEqual(
+                cur.fetchall(), [("popular-one", 2), ("popular-two", 1)]
+            )
+            cur.execute(
+                "UPDATE memory_pages SET updated_at = CASE page_id"
+                " WHEN 'recent-page' THEN '2026-04-04T00:00:00Z'"
+                " WHEN 'weak-match' THEN '2026-04-03T00:00:00Z'"
+                " WHEN 'popular-two' THEN '2026-04-02T00:00:00Z'"
+                " ELSE '2026-04-01T00:00:00Z' END"
+            )
+
+        fallback = memory.search_swarm_pages(
+            {"q": ["introspection playwright chromium cleanup"]}
+        )
+        self.assertEqual(fallback["match_mode"], "weak")
+        self.assertEqual(
+            [page["page_id"] for page in fallback["pages"]], ["weak-match"]
+        )
+        self.assertEqual(
+            fallback["popular_pages"][0]["page_id"], "popular-one"
+        )
+
     def test_memory_delete_and_operator_restore_are_forward_revisions(self) -> None:
         created = memory.save_page(
             "preferences",

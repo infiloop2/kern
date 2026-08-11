@@ -7,10 +7,11 @@ from typing import Any
 from unittest.mock import patch
 
 from host.tools.json_types import JSONObject
-from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
+from host.tools.results import ActionExecuted, ActionFailed
 from host.tools import twitter
 from host.tools.twitter import XTool
 from host.tools.shared.web import ProviderWarning, WebRequestError
+from host.runtime.tools import tools_host
 
 from test_tools import FakeHostAPI, FRESH_EXPIRES_AT
 
@@ -25,13 +26,13 @@ def connected_api(*, expires_at: int = FRESH_EXPIRES_AT) -> FakeHostAPI:
             "account": {
                 "id": "111",
                 "label": "@claw",
-                "scopes": ["tweet.read", "users.read", "dm.read", "dm.write", "offline.access"],
+                "scopes": ["tweet.read", "users.read", "offline.access"],
             },
             "secret": {
                 "access_token": "x-access",
                 "expires_at": expires_at,
                 "refresh_token": "x-refresh-1",
-                "scope": "tweet.read users.read dm.read dm.write offline.access",
+                "scope": "tweet.read users.read offline.access",
                 "token_type": "bearer",
             },
             "metadata": {"created_at": 1, "updated_at": 1},
@@ -57,10 +58,19 @@ class XToolReadTests(unittest.TestCase):
                 "user_tweets",
                 "get_trends",
                 "get_personalized_trends",
-                "send_dm",
+                "lookup_user",
             ],
         )
-        self.assertIn("x.com/intent/tweet", tool.manifest.description)
+        # The operator card says what the tool does, not what it cannot do.
+        self.assertIn("open, review, and send yourself", tool.manifest.description)
+        self.assertNotIn("not available", tool.manifest.description)
+        # One agent-facing field per tool carries all three link forms, and the
+        # operator payload carries none of them.
+        self.assertIn("x.com/intent/tweet?text=", tool.manifest.agent_notes)
+        self.assertIn("in_reply_to=", tool.manifest.agent_notes)
+        self.assertIn("x.com/messages/compose", tool.manifest.agent_notes)
+        self.assertIn("lookup_user", tool.manifest.agent_notes)
+        self.assertNotIn("x.com/", tool.manifest.description)
         self.assertNotIn("tweet.write", twitter.X_OAUTH_SCOPES)
 
     def test_search_tweets_maps_results_and_authors(self) -> None:
@@ -288,7 +298,7 @@ class XToolRefreshTests(unittest.TestCase):
                 self.assertEqual(kwargs["form"]["refresh_token"], "x-refresh-1")
                 self.assertTrue(kwargs["headers"]["authorization"].startswith("Basic "))
                 return {"access_token": "x-access-2", "refresh_token": "x-refresh-2", "expires_in": 7200,
-                        "scope": "tweet.read users.read dm.read dm.write offline.access",
+                        "scope": "tweet.read users.read offline.access",
                         "token_type": "bearer"}
             return {"data": []}
 
@@ -320,7 +330,7 @@ class XToolRefreshTests(unittest.TestCase):
                 "access_token": "x-access-2",
                 "refresh_token": "x-refresh-2",
                 "expires_in": 7200,
-                "scope": "tweet.read users.read offline.access",
+                "scope": "tweet.read offline.access",
                 "token_type": "bearer",
             }
 
@@ -331,133 +341,87 @@ class XToolRefreshTests(unittest.TestCase):
         self.assertIsNone(api.credentials.load())
 
 
-class XToolDirectMessageTests(unittest.TestCase):
-    def test_send_dm_resolves_recipient_and_queues_approval(self) -> None:
-        api = connected_api()
+class XToolUserLookupTests(unittest.TestCase):
+    """lookup_user exists so an agent can turn a handle into the numeric id a
+    direct-message link needs. It reads; it never sends."""
+
+    def test_lookup_resolves_a_handle_to_the_id_a_dm_link_needs(self) -> None:
         calls: list[tuple[str, str]] = []
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             calls.append((method, url))
-            if "/users/me" in url:
-                return me_response()
-            if "/users/by/username/recipient" in url:
-                return {"data": {"id": "222", "name": "Recipient", "username": "recipient"}}
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_json_request):
-            pending = XTool().execute(
-                "send_dm",
-                {"text": "Private hello", "recipient_username": "@recipient"},
-                api,
-            )
-        assert isinstance(pending, ActionPendingApproval)
-        self.assertIn("Direct message on X", pending.summary)
-        self.assertIn("@recipient", pending.summary)
-        self.assertIn("Private hello", pending.summary)
-        record = api.approvals.get(pending.approval_id)
-        assert record is not None
-        self.assertEqual(record.payload["recipient"], {"id": "222", "name": "Recipient", "username": "recipient"})
-        self.assertFalse(any(method == "POST" for method, _ in calls))
-
-    def test_send_dm_requires_new_scopes_on_existing_connection(self) -> None:
-        api = connected_api()
-        stored = api.credentials.load()
-        assert stored is not None
-        stored["account"]["scopes"] = ["tweet.read", "users.read", "offline.access"]
-        api.credentials.save(stored)
-
-        with patch.object(twitter, "json_request") as request:
-            result = XTool().execute(
-                "send_dm",
-                {"text": "Private hello", "recipient_user_id": "222"},
-                api,
-            )
-        assert isinstance(result, ActionFailed)
-        self.assertTrue(result.reconnect_required)
-        self.assertIn("DM access", result.error)
-        request.assert_not_called()
-
-    def test_send_dm_validates_recipient_and_message(self) -> None:
-        tool = XTool()
-        for tool_input in (
-            {"text": "x"},
-            {"text": "x", "recipient_username": "a", "recipient_user_id": "1"},
-            {"text": "x", "recipient_username": "bad handle"},
-            {"text": "x", "recipient_user_id": "../users"},
-            {"text": "x" * (twitter.MAX_DM_CHARS + 1), "recipient_user_id": "222"},
-        ):
-            with self.subTest(tool_input=tool_input):
-                self.assertIsInstance(tool.execute("send_dm", tool_input, connected_api()), ActionFailed)
-
-    def test_execute_approved_sends_dm_and_reports_event_id(self) -> None:
-        api = connected_api()
-
-        def fake_pending(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            if "/users/by/username/recipient" in url:
-                return {"data": {"id": "222", "name": "Recipient", "username": "recipient"}}
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_pending):
-            pending = XTool().execute(
-                "send_dm",
-                {"text": "Private hello", "recipient_username": "recipient"},
-                api,
-            )
-        assert isinstance(pending, ActionPendingApproval)
-        approved_record = api.approvals.approve(pending.approval_id)
-        posted: dict[str, Any] = {}
-
-        def fake_execute(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
-            if "/users/222?" in url:
-                return {"data": {"id": "222", "name": "Recipient", "username": "recipient"}}
-            if "/dm_conversations/with/222/messages" in url:
-                posted["method"] = method
-                posted["body"] = kwargs["body"]
-                return {"data": {"dm_conversation_id": "111-222", "dm_event_id": "333"}}
-            raise AssertionError(f"unexpected call: {url}")
-
-        with patch.object(twitter, "json_request", fake_execute):
-            result = XTool().execute_approved(approved_record, api)
-        assert isinstance(result, ApprovalExecuted)
-        self.assertIn("@recipient", result.message)
-        self.assertIn("333", result.message)
-        self.assertEqual(posted, {"method": "POST", "body": {"text": "Private hello"}})
-
-    def test_execute_approved_rejects_recipient_handle_change_without_sending(self) -> None:
-        api = connected_api()
-
-        def fake_pending(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/users/me" in url:
-                return me_response()
             return {"data": {"id": "222", "name": "Recipient", "username": "recipient"}}
 
-        with patch.object(twitter, "json_request", fake_pending):
-            pending = XTool().execute(
-                "send_dm",
-                {"text": "Private hello", "recipient_user_id": "222"},
-                api,
-            )
-        assert isinstance(pending, ActionPendingApproval)
-        approved_record = api.approvals.approve(pending.approval_id)
-        calls: list[tuple[str, str]] = []
+        with patch.object(twitter, "json_request", fake_json_request):
+            result = XTool().execute("lookup_user", {"username": "@recipient"}, connected_api())
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["user"], {"id": "222", "username": "recipient", "name": "Recipient"})
+        self.assertEqual([method for method, _ in calls], ["GET"])
+        self.assertIn("/users/by/username/recipient", calls[0][1])
 
-        def fake_execute(method: str, url: str, **kwargs: Any) -> JSONObject:
-            calls.append((method, url))
-            if "/users/me" in url:
-                return me_response()
-            if "/users/222?" in url:
-                return {"data": {"id": "222", "name": "Recipient", "username": "renamed"}}
-            raise AssertionError(f"unexpected call: {url}")
+    def test_lookup_by_id_verifies_the_provider_echoed_the_same_id(self) -> None:
+        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            return {"data": {"id": "999", "name": "Other", "username": "other"}}
 
-        with patch.object(twitter, "json_request", fake_execute):
-            result = XTool().execute_approved(approved_record, api)
+        with patch.object(twitter, "json_request", fake_json_request):
+            result = XTool().execute("lookup_user", {"user_id": "222"}, connected_api())
+        self.assertIsInstance(result, ActionFailed)
+
+    def test_lookup_rejects_bad_selectors_before_calling_the_provider(self) -> None:
+        tool = XTool()
+        for tool_input in (
+            {},
+            {"username": "a", "user_id": "1"},
+            {"username": "bad handle"},
+            {"user_id": "../users"},
+            {"username": "recipient", "text": "hello"},
+        ):
+            with self.subTest(tool_input=tool_input), patch.object(twitter, "json_request") as request:
+                self.assertIsInstance(tool.execute("lookup_user", tool_input, connected_api()), ActionFailed)
+                request.assert_not_called()
+
+    def test_every_action_result_satisfies_its_declared_output_schema(self) -> None:
+        # tools_host validates ActionExecuted.result against output_schema and
+        # turns a mismatch into a failure, so a result that omits the envelope
+        # never reaches the agent. Calling XTool().execute() directly skips that
+        # check, which is why this asserts it with the host's own validator.
+        provider: dict[str, Any] = {
+            "data": {"id": "222", "name": "Recipient", "username": "recipient"},
+            "trends": [{"trend_name": "Kern"}],
+        }
+        cases = (
+            ("search_tweets", {"query": "x"}),
+            ("read_tweet", {"tweet_id": "9001"}),
+            ("user_tweets", {"user_id": "222"}),
+            ("get_trends", {}),
+            ("get_personalized_trends", {}),
+            ("lookup_user", {"username": "recipient"}),
+        )
+        for action_id, tool_input in cases:
+            with self.subTest(action=action_id):
+                with patch.object(twitter, "json_request", return_value=provider):
+                    result = XTool().execute(action_id, tool_input, connected_api())
+                assert isinstance(result, ActionExecuted)
+                spec = XTool().manifest.action(action_id)
+                assert spec is not None
+                self.assertEqual(
+                    tools_host.validate_against_schema(result.result, spec.output_schema, path="result"),
+                    "",
+                )
+
+    def test_the_tool_no_longer_writes_anything(self) -> None:
+        # Posting and DMs are prepared as intent links the operator opens, so
+        # no action queues an approval and no scope permits a write.
+        self.assertTrue(all(spec.approval == "direct" for spec in XTool().manifest.actions))
+        self.assertNotIn("send_dm", [spec.id for spec in XTool().manifest.actions])
+        for scope in twitter.X_OAUTH_SCOPES:
+            self.assertNotIn("write", scope)
+        self.assertNotIn("dm.read", twitter.X_OAUTH_SCOPES)
+        with patch.object(twitter, "json_request") as request:
+            result = XTool().execute("send_dm", {"text": "hi", "recipient_user_id": "222"}, connected_api())
+            request.assert_not_called()
         assert isinstance(result, ActionFailed)
-        self.assertIn("recipient changed", result.error)
-        self.assertFalse(any(method == "POST" for method, _ in calls))
+        self.assertIn("Unsupported X action", result.error)
 
 
 class XCredentialFlowTests(unittest.TestCase):
@@ -466,8 +430,9 @@ class XCredentialFlowTests(unittest.TestCase):
         result = XTool().credentials.start_connect({"redirect_uri": "https://host.example/cb"}, api)
         self.assertTrue(result["authorization_url"].startswith("https://x.com/i/oauth2/authorize?"))
         self.assertIn("code_challenge_method=S256", result["authorization_url"])
-        self.assertIn("dm.read", result["authorization_url"])
-        self.assertIn("dm.write", result["authorization_url"])
+        self.assertIn("users.read", result["authorization_url"])
+        self.assertNotIn("dm.", result["authorization_url"])
+        self.assertNotIn("tweet.write", result["authorization_url"])
         self.assertIn("state=", result["authorization_url"])
         self.assertIn(".", result["state"])
 
@@ -483,7 +448,7 @@ class XCredentialFlowTests(unittest.TestCase):
                 self.assertEqual(kwargs["form"]["grant_type"], "authorization_code")
                 self.assertTrue(kwargs["form"]["code_verifier"])
                 return {"access_token": "x-access", "refresh_token": "x-refresh", "expires_in": 7200,
-                        "scope": "tweet.read users.read dm.read dm.write offline.access",
+                        "scope": "tweet.read users.read offline.access",
                         "token_type": "bearer"}
             if "/users/me" in url:
                 return me_response()
@@ -508,7 +473,7 @@ class XCredentialFlowTests(unittest.TestCase):
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             return {"access_token": "x-access", "expires_in": 7200,
-                    "scope": "tweet.read users.read dm.read dm.write offline.access",
+                    "scope": "tweet.read users.read offline.access",
                     "token_type": "bearer"}
 
         with patch.object(twitter, "json_request", fake_json_request):

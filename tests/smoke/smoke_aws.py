@@ -269,7 +269,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("user_tweets", {"username": "kern", "max_results": "5"}),
         ("get_trends", {"max_trends": "1"}),
         ("get_personalized_trends", {}),
-        ("send_dm", {"text": "Kern smoke; never sent.", "recipient_user_id": "1"}),
+        ("lookup_user", {"username": "kern"}),
     ),
 }
 
@@ -825,7 +825,7 @@ class AwsSmoke:
             "The Kern host source is readable at `/opt/kern-host`.",
             "`search_conversation_history`",
             "Historical messages and activity are",
-            "`GET /agent/identity` returns this thread's immutable host thread id.",
+            "`GET /agent/identity` returns the current thread's immutable host identity.",
             "GitHub GraphQL is always blocked",
             "replace it with a REST `gh api` path or plain `git`",
         )
