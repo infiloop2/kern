@@ -8,6 +8,8 @@ the thread's current agent session.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http import HTTPStatus
 import json
 import re
@@ -42,12 +44,33 @@ THREAD_LIST_PAGE = 100
 # Chat history is durable user data, so old or archived threads are not
 # silently deleted. Bound aggregate thread metadata with admission instead.
 MAX_CHAT_THREADS = 10_000
-MESSAGE_SEND_LOCK = threading.Lock()
+_MESSAGE_SEND_LOCKS_GUARD = threading.Lock()
+_MESSAGE_SEND_LOCKS: dict[str, threading.Lock] = {}
+_MESSAGE_SEND_LOCK_USERS: dict[str, int] = {}
 # A live execution has brief startup and shutdown windows where it cannot
 # accept another message. The host marks those safe-to-retry conflicts.
 SEND_RETRY_MARKER = "retry shortly"
-SEND_BUSY_RETRIES = 21
+SEND_BUSY_RETRIES = 11
 SEND_BUSY_RETRY_DELAY_SECONDS = 0.5
+
+
+@contextmanager
+def _message_send_lock(thread_id: str) -> Iterator[None]:
+    """Serialize delivery-affecting actions within one thread only."""
+    with _MESSAGE_SEND_LOCKS_GUARD:
+        lock = _MESSAGE_SEND_LOCKS.setdefault(thread_id, threading.Lock())
+        _MESSAGE_SEND_LOCK_USERS[thread_id] = _MESSAGE_SEND_LOCK_USERS.get(thread_id, 0) + 1
+    try:
+        with lock:
+            yield
+    finally:
+        with _MESSAGE_SEND_LOCKS_GUARD:
+            remaining = _MESSAGE_SEND_LOCK_USERS[thread_id] - 1
+            if remaining:
+                _MESSAGE_SEND_LOCK_USERS[thread_id] = remaining
+            else:
+                del _MESSAGE_SEND_LOCK_USERS[thread_id]
+                del _MESSAGE_SEND_LOCKS[thread_id]
 
 
 def route_browser(
@@ -86,13 +109,14 @@ def route_browser(
         parts = path.strip("/").split("/")
         if len(parts) != 3:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "route not found")
+        thread_id = _chat_thread_id(_path_segment(parts[1]))
         # Serialize with sends: a send holds this lock from its archived-state
         # check through the host call, so an archive cannot slip between the
         # check and the send and revive a read-only thread.
-        with MESSAGE_SEND_LOCK:
+        with _message_send_lock(thread_id):
             return {
                 "thread": set_chat_thread_archived(
-                    _chat_thread_id(_path_segment(parts[1])),
+                    thread_id,
                     archived=parts[2] == "archive",
                 )
             }
@@ -115,7 +139,7 @@ def route_browser(
         # A Stop clicked after Send must follow that send at the host boundary,
         # not race it and accidentally let the retrying send start fresh work
         # after the stop completed.
-        with MESSAGE_SEND_LOCK:
+        with _message_send_lock(thread_id):
             _require_chat_thread(thread_id, include_archived=True)
             return call_admin_api(
                 "POST", f"/v1/threads/{quote(thread_id, safe='')}/stop", body
@@ -128,7 +152,7 @@ def route_browser(
         # Serialize with sends for the same reason Stop does: a clear that
         # interleaved with a send could strip context that send is delivering.
         # Archived threads are read-only, so they are refused here.
-        with MESSAGE_SEND_LOCK:
+        with _message_send_lock(thread_id):
             _require_chat_thread(thread_id)
             # Clear memory sits next to Stop, and a stopped turn stays live
             # while its process closes even though the thread already reads as
@@ -292,15 +316,17 @@ def send_chat_message(body: Any) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "message request must be an object")
     message = _required_text(body.get("input_message"), "input_message")
-    with MESSAGE_SEND_LOCK:
-        if "thread_id" in body:
-            thread_id = _chat_thread_id(
-                _required_text(body.get("thread_id"), "thread_id")
-            )
-        else:
-            # A request without thread_id starts a new thread: Chat owns
-            # thread naming, so the operator never types an id.
-            thread_id = _reserve_generated_thread_id()
+    if "thread_id" in body:
+        thread_id = _chat_thread_id(
+            _required_text(body.get("thread_id"), "thread_id")
+        )
+    else:
+        # A request without thread_id starts a new thread: Chat owns thread
+        # naming, so the operator never types an id. Reservation is already
+        # serialized by its database table lock; the generated id then gets
+        # the same per-thread delivery lock as every existing conversation.
+        thread_id = _reserve_generated_thread_id()
+    with _message_send_lock(thread_id):
         _require_sendable_thread(thread_id)
         host_request: dict[str, Any] = {"message": message}
         for field in ("agent_runtime", "model", "effort"):
@@ -345,9 +371,9 @@ def _post_with_busy_retry(
 
 def _require_sendable_thread(thread_id: str) -> None:
     """Ensure Chat's thread row exists and is not archived before the host
-    call. The caller holds MESSAGE_SEND_LOCK, and archive/unarchive updates
-    take the same lock, so the archived state checked here cannot change
-    before the host send completes."""
+    call. The caller holds this thread's message lock, and archive/unarchive
+    updates take the same lock, so the archived state checked here cannot
+    change before the host send completes."""
     with db.transaction() as cur:
         cur.execute("LOCK TABLE chat_threads IN SHARE ROW EXCLUSIVE MODE")
         cur.execute(

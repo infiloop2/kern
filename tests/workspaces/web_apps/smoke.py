@@ -56,9 +56,12 @@ def _app_markup(count: int, title: str = "Weekly focus") -> str:
     return f"""
       <div class="sanitizer-probe containment-probe">
         <img src="https://browser-leak.invalid/image?secret=html">
-        <a href="https://browser-leak.invalid/navigation?secret=anchor">Leave the app</a>
+        <a href="https://browser-leak.invalid/navigation?secret=anchor" id="copy-only-link">Leave the app</a>
+        <a href="https://github.com/infiversehq/kern/pull/264" id="github-link">Open GitHub PR</a>
+        <a href="https://www.instagram.com/reel/ABC123/" id="instagram-link">Open Instagram Reel</a>
         <a href="https://x.com/intent/tweet?in_reply_to=9001&amp;text=Prepared%20reply" id="x-reply-intent">Open reply in X</a>
-        <a href="https://x.com/intent/tweet?in_reply_to=not-a-post" id="invalid-x-reply-intent">Invalid reply</a>
+        <a href="https://twitter.com/messages/compose?recipient_id=123456789&amp;text=Prepared%20DM" id="x-message-compose">Open message in X</a>
+        <a href="javascript:alert(1)" id="invalid-scheme-link">Invalid scheme</a>
         <svg>
           <script>window.__foreignScriptRan = true</script>
           <foreignObject><img src="https://browser-leak.invalid/svg?secret=foreign"></foreignObject>
@@ -1010,12 +1013,29 @@ def desktop_smoke(page: Any) -> None:
     )
     expect(generated.locator("#x-reply-intent")).to_have_attribute("target", "_blank")
     expect(generated.locator("#x-reply-intent")).to_have_attribute("rel", "noopener noreferrer")
-    expect(generated.locator("#invalid-x-reply-intent")).to_have_count(0)
+    expect(generated.locator("#github-link")).to_have_attribute(
+        "href", "https://github.com/infiversehq/kern/pull/264"
+    )
+    expect(generated.locator("#github-link")).to_have_attribute(
+        "title", "https://github.com/infiversehq/kern/pull/264"
+    )
+    expect(generated.locator("#instagram-link")).to_have_attribute(
+        "href", "https://www.instagram.com/reel/ABC123/"
+    )
+    expect(generated.locator("#x-message-compose")).to_have_attribute(
+        "href", "https://twitter.com/messages/compose?recipient_id=123456789&text=Prepared%20DM"
+    )
+    expect(generated.locator("#copy-only-link")).to_have_attribute(
+        "data-kern-copy-href", "https://browser-leak.invalid/navigation?secret=anchor"
+    )
+    expect(generated.locator("#copy-only-link")).to_have_js_property("tagName", "BUTTON")
+    expect(generated.locator("#invalid-scheme-link")).to_have_count(0)
     expect(
         generated.locator(
-            "a:not(#x-reply-intent), img, iframe, object, embed, svg, math, template, noscript, unknown-surface, script"
+            "img, iframe, object, embed, svg, math, template, noscript, unknown-surface, script"
         )
     ).to_have_count(0)
+    expect(generated.locator("a")).to_have_count(4)
     page.wait_for_timeout(300)
     if leaked:
         raise AssertionError(f"agent-authored UI caused browser requests: {leaked}")
@@ -1037,8 +1057,10 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#app-update-veil")).to_be_hidden()
     expect(frame.locator(".analysis")).to_contain_text("Two priorities remain open")
 
-    page.once("dialog", lambda dialog: dialog.accept("Weekly focus"))
     frame.get_by_role("button", name="Rename app", exact=True).click()
+    expect(frame.get_by_role("dialog", name="Rename app")).to_be_visible()
+    frame.locator("#rename-app-input").fill("Weekly focus")
+    frame.locator("#rename-app-form").get_by_role("button", name="Save").click()
     expect(frame.locator("#app-title")).to_have_text("Weekly focus")
     expect(page.locator("#web-apps-nav-items")).to_contain_text("Weekly focus")
 
@@ -1101,6 +1123,28 @@ def mobile_smoke(page: Any) -> None:
     frame = page.locator("#panel-workspace-web-apps")
     expect(frame.locator("#message")).to_be_visible()
     expect(frame.locator("#admin-overlay")).to_have_count(0)
+    expect(frame.locator("#app-title")).to_be_visible()
+    toolbar_overflow = frame.locator("#app-view-toolbar").evaluate(
+        "element => element.scrollWidth - element.clientWidth"
+    )
+    if toolbar_overflow > 1:
+        raise AssertionError(f"mobile Web App toolbar overflows by {toolbar_overflow}px")
+    frame.get_by_role("button", name="Rename app", exact=True).click()
+    expect(frame.get_by_role("dialog", name="Rename app")).to_be_visible()
+    if frame.locator("#rename-app-input").evaluate(
+        "element => parseFloat(getComputedStyle(element).fontSize)"
+    ) < 16:
+        raise AssertionError("mobile app rename input would trigger iOS focus zoom")
+    frame.locator("#rename-app-cancel").click()
+
+    _open_mobile_host_navigation(page)
+    drawer = page.locator("#sidebar").bounding_box()
+    viewport_height = page.evaluate("() => window.innerHeight")
+    if not drawer or abs(drawer["y"]) > 1 or abs(drawer["height"] - viewport_height) > 1:
+        raise AssertionError(
+            f"Web App host navigation does not fill the viewport: {drawer}, viewport={viewport_height}"
+        )
+    page.locator("#nav-backdrop").click(position={"x": 380, "y": 400})
     frame.locator("#settings-open").click()
     expect(frame.locator("#settings-popover")).to_be_visible()
     frame.locator("#settings-open").press("Escape")

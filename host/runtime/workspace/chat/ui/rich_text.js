@@ -16,25 +16,87 @@
     return "";
   }
 
-  function safeXReplyIntentHref(value) {
+  // This is deliberately a browser-navigation allowlist, not a reflection of
+  // Kern's agent network policy. Keep it to exact, human-facing provider
+  // hosts: API, OAuth, CDN, redirector, and arbitrary search-result hosts do
+  // not belong here.
+  const SAFE_NAVIGATION_HOSTS = new Set([
+    "api-dashboard.search.brave.com",
+    "calendar.google.com",
+    "console.byteplus.com",
+    "console.cloud.google.com",
+    "dev.runwayml.com",
+    "developer.x.com",
+    "developers.google.com",
+    "docs.byteplus.com",
+    "docs.dev.runwayml.com",
+    "docs.github.com",
+    "docs.polymarket.com",
+    "docs.x.com",
+    "github.com",
+    "help.runwayml.com",
+    "instagram.com",
+    "linkedin.com",
+    "mail.google.com",
+    "policies.google.com",
+    "polymarket.com",
+    "privacycenter.instagram.com",
+    "runwayml.com",
+    "search.brave.com",
+    "twitter.com",
+    "www.google.com",
+    "www.instagram.com",
+    "www.interactivebrokers.com",
+    "www.linkedin.com",
+    "x.com",
+  ]);
+
+  function parsedSafeNavigationUrl(value) {
     const href = String(value ?? "").trim();
-    if (!href || href.length > 8192) return "";
+    if (!href || href.length > 8192) return null;
     try {
       const url = new URL(href);
       if (
-        url.protocol !== "https:" || url.hostname !== "x.com" || url.port
-        || url.username || url.password || url.pathname !== "/intent/tweet" || url.hash
-      ) return "";
-      const allowed = new Set(["in_reply_to", "text"]);
-      for (const key of url.searchParams.keys()) if (!allowed.has(key)) return "";
-      const replyIds = url.searchParams.getAll("in_reply_to");
-      const texts = url.searchParams.getAll("text");
-      if (replyIds.length !== 1 || !/^[0-9]{1,25}$/.test(replyIds[0])) return "";
-      if (texts.length > 1 || (texts[0] || "").length > 4000) return "";
-      return url.href;
+        url.protocol !== "https:" || url.port || url.username || url.password
+        || !SAFE_NAVIGATION_HOSTS.has(url.hostname)
+      ) return null;
+      return url;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function safeNavigationHref(value) {
+    const url = parsedSafeNavigationUrl(value);
+    if (!url) return "";
+    let path;
+    try {
+      path = decodeURIComponent(url.pathname).toLowerCase();
     } catch (_error) {
       return "";
     }
+    if (url.hostname === "x.com" || url.hostname === "twitter.com") {
+      if (path.startsWith("/i/oauth2/")) return "";
+    }
+    if (
+      ["instagram.com", "www.instagram.com"].includes(url.hostname)
+      && path.startsWith("/oauth/")
+    ) return "";
+    if (
+      ["linkedin.com", "www.linkedin.com"].includes(url.hostname)
+      && path.startsWith("/oauth/")
+    ) return "";
+    if (url.hostname === "github.com" && path.startsWith("/login/oauth/")) return "";
+    if (url.hostname === "www.google.com") {
+      if (path !== "/calendar/event" || url.hash) return "";
+      const allowed = new Set(["ctz", "eid"]);
+      for (const key of url.searchParams.keys()) if (!allowed.has(key)) return "";
+      const eventIds = url.searchParams.getAll("eid");
+      const timeZones = url.searchParams.getAll("ctz");
+      if (eventIds.length !== 1 || !eventIds[0] || eventIds[0].length > 2048) return "";
+      if (timeZones.length > 1 || (timeZones[0] || "").length > 100) return "";
+    }
+    return url.href;
   }
 
   const TRUNCATION_SUFFIX = "\n… (truncated)";
@@ -134,10 +196,11 @@
       const safe = escapeHtml(href);
       const textLabel = escapeHtml(label);
       const prefix = image ? "Image: " : "";
-      const xReplyIntent = !image && safeXReplyIntentHref(href);
-      if (xReplyIntent) {
+      const navigationHref = !image && safeNavigationHref(href);
+      if (navigationHref) {
         return stash(
-          `<a class="md-open-link" href="${escapeHtml(xReplyIntent)}" target="_blank" ` +
+          `<a class="md-open-link" href="${escapeHtml(navigationHref)}" ` +
+          `title="${escapeHtml(navigationHref)}" target="_blank" ` +
           `rel="noopener noreferrer">${textLabel}</a>`,
         );
       }
@@ -275,7 +338,7 @@
 
   const api = {
     escapeHtml,
-    safeXReplyIntentHref,
+    safeNavigationHref,
     renderMarkdown,
     safeHref,
     clipUtf8,

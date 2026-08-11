@@ -371,10 +371,13 @@ class AdminUiStaticTests(unittest.TestCase):
         stylesheet = (
             Path(__file__).parents[1] / "host/runtime/workspace/chat/ui/agent_chat.css"
         ).read_text()
-        self.assertIn(
-            'api("POST", "/messages", request, AGENT_DELIVERY_TIMEOUT_MS)',
-            script,
-        )
+        send = script.split("async function sendMessageUnlocked()", 1)[1].split(
+            "\nasync function", 1
+        )[0]
+        self.assertIn('"POST",\n    "/messages",', send)
+        self.assertIn("MESSAGE_DELIVERY_TIMEOUT_MS,", send)
+        self.assertIn("DELIVERY_TIMEOUT_MESSAGE,", send)
+        self.assertIn("void Promise.all([refresh(), window.KernHost.refreshNavigation()])", send)
         self.assertIn(
             '["thread.message", "thread.activity", "thread.error", "thread.stopped",\n'
             '      "thread.memory_cleared"].includes(event.event_type)',
@@ -6553,6 +6556,17 @@ class ToolRoutesTests(unittest.TestCase):
             )
         for tool_id in ("ibkr", "instagram", "linkedin"):
             self.assertEqual(self.tool_entry(body, tool_id)["technical_details"], [])
+
+        # agent_notes is the one manifest field the operator never sees:
+        # it is how-to detail for the agent, and the operator-facing account of
+        # the same behaviour lives in protections, technical_details, and the
+        # data summary. X carries the only text today, so neither of its link
+        # forms may appear anywhere in this payload.
+        self.assertTrue(admin_api.tools_host.BUNDLED_TOOLS["twitter"].manifest.agent_notes)
+        for entry in body["tools"]:
+            self.assertNotIn("agent_notes", entry)
+        self.assertNotIn("intent/tweet", json.dumps(body))
+        self.assertNotIn("messages/compose", json.dumps(body))
 
     def test_config_and_enable_flow(self) -> None:
         # Config is scoped per tool: a key must be declared by that tool.

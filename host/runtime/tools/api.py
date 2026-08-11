@@ -152,7 +152,12 @@ def _list_bundled_tools() -> dict[str, Any]:
 
     Action descriptions are included but input schemas are not: descriptions
     are what the agent plans from, schemas are what it needs only once it
-    commits to a call (describe_tool)."""
+    commits to a call (describe_tool). agent_notes is the agent-only text that
+    adds to description, included for the same reason: it says what to do when
+    no action covers the need, which is a planning fact, and an agent that reads
+    only this catalog would otherwise never learn it. It is always stated, empty
+    included, so an agent can tell "this tool has nothing to add" from "this
+    surface does not carry it"."""
     enabled = state.enabled_tool_ids()
     tools = []
     for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
@@ -171,6 +176,7 @@ def _list_bundled_tools() -> dict[str, Any]:
                 "description": manifest.description,
                 "connection": manifest.connection,
                 "enabled": tool_id in enabled,
+                "agent_notes": manifest.agent_notes,
                 "actions": actions,
             }
         )
@@ -178,7 +184,10 @@ def _list_bundled_tools() -> dict[str, Any]:
 
 
 def _describe_tool(tool_input: Any) -> dict[str, Any]:
-    """One bundled tool's actions with their full input schemas."""
+    """One bundled tool's actions with their full input schemas.
+
+    Agent guidance is not repeated here: agent_notes is one field per tool and
+    the catalog already carried it."""
     tool_id = _string_field(tool_input, "tool_id")
     if set(tool_input) - {"tool_id"}:
         raise tools_host.ToolCallError("describe_tool accepts only tool_id.")
