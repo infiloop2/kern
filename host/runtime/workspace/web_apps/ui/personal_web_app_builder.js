@@ -75,6 +75,7 @@ let recoveryPoints = [];
 let runtimeStatusSequence = 0;
 let dismissedAgentMessageKey = null;
 let transientAgentStatus = null;
+let renameAppReturnFocus = null;
 
 const webAppsRoot = window.KernWorkspaceRoots["web-apps"];
 const $ = id => webAppsRoot.querySelector(`#${CSS.escape(id)}`);
@@ -321,27 +322,6 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
   send({ type: "ready" });
 }
 
-function safeXReplyIntentHref(value) {
-  const href = String(value ?? "").trim();
-  if (!href || href.length > 8192) return "";
-  try {
-    const url = new URL(href);
-    if (
-      url.protocol !== "https:" || url.hostname !== "x.com" || url.port
-      || url.username || url.password || url.pathname !== "/intent/tweet" || url.hash
-    ) return "";
-    const allowed = new Set(["in_reply_to", "text"]);
-    for (const key of url.searchParams.keys()) if (!allowed.has(key)) return "";
-    const replyIds = url.searchParams.getAll("in_reply_to");
-    const texts = url.searchParams.getAll("text");
-    if (replyIds.length !== 1 || !/^[0-9]{1,25}$/.test(replyIds[0])) return "";
-    if (texts.length > 1 || (texts[0] || "").length > 4000) return "";
-    return url.href;
-  } catch (_error) {
-    return "";
-  }
-}
-
 const allowedElements = new Set([
   "A", "ABBR", "ADDRESS", "ARTICLE", "ASIDE", "BDI", "BDO", "BLOCKQUOTE", "BR",
   "BUTTON", "CAPTION", "CITE", "CODE", "DATA", "DATALIST", "DD", "DEL",
@@ -447,18 +427,34 @@ function cloneSafeNode(node, parent, budget, depth) {
   }
   if (node.nodeType !== Node.ELEMENT_NODE) return;
   if (droppedElements.has(node.tagName)) return;
-  const xReplyIntent = node.tagName === "A" ? safeXReplyIntentHref(node.getAttribute("href")) : "";
-  if (node.tagName === "A" && !xReplyIntent) return;
+  const rawHref = node.tagName === "A" ? node.getAttribute("href") : "";
+  const navigationHref = node.tagName === "A" ? KernRichText.safeNavigationHref(rawHref) : "";
+  const copyHref = node.tagName === "A" && !navigationHref ? KernRichText.safeHref(rawHref) : "";
+  if (node.tagName === "A" && !navigationHref && !copyHref) {
+    for (const child of node.childNodes) cloneSafeNode(child, parent, budget, depth + 1);
+    return;
+  }
   if (!allowedElements.has(node.tagName)) {
     for (const child of node.childNodes) cloneSafeNode(child, parent, budget, depth + 1);
     return;
   }
-  const clean = document.createElement(node.tagName.toLowerCase());
+  const clean = document.createElement(node.tagName === "A" && copyHref ? "button" : node.tagName.toLowerCase());
   for (const attribute of node.attributes) copySafeAttribute(node, clean, attribute.name, attribute.value);
   if (node.tagName === "A") {
-    clean.setAttribute("href", xReplyIntent);
-    clean.setAttribute("target", "_blank");
-    clean.setAttribute("rel", "noopener noreferrer");
+    clean.removeAttribute("data-action");
+    clean.removeAttribute("data-enter-action");
+    clean.removeAttribute("data-drop-action");
+    if (navigationHref) {
+      clean.setAttribute("href", navigationHref);
+      clean.setAttribute("title", navigationHref);
+      clean.setAttribute("target", "_blank");
+      clean.setAttribute("rel", "noopener noreferrer");
+    } else {
+      clean.type = "button";
+      clean.classList.add("kern-copy-link");
+      clean.setAttribute("data-kern-copy-href", copyHref);
+      clean.setAttribute("title", "Copy link");
+    }
   }
   if (clean.hasAttribute("data-drag-value")) clean.draggable = true;
   if (node.tagName === "BUTTON") clean.type = "button";
@@ -585,7 +581,7 @@ function renderGenerated(html, css) {
     clearGeneratedDrag();
     const fragment = sanitizeHtml(html);
     const safeCss = sanitizeCssCached(css);
-    const styleText = `:host{display:block;min-height:100%;color:var(--text);background:var(--bg);font-family:system-ui,sans-serif}${safeCss}`;
+    const styleText = `:host{display:block;min-height:100%;color:var(--text);background:var(--bg);font-family:system-ui,sans-serif}.kern-copy-link{background:transparent;border:0;color:inherit;cursor:pointer;font:inherit;padding:0;text-decoration:underline;text-underline-offset:.15em}${safeCss}`;
     patchChildren(generatedRoot, fragment);
     // Commit safe content before installing styles. A browser-specific style
     // failure must never strand the operator on the stored Loading placeholder.
@@ -781,8 +777,16 @@ function appWritesBlocked() {
 }
 
 function generatedInteraction(event) {
-  if (!selectedAppId || appWritesBlocked()) return;
   if (!(event.target instanceof Element)) return;
+  const copyLink = event.target.closest("button[data-kern-copy-href]");
+  if (copyLink && generatedRoot.contains(copyLink)) {
+    event.preventDefault();
+    requestHostCopy(copyLink.dataset.kernCopyHref || "")
+      .then(() => showRuntimeStatus("Link copied", "success"))
+      .catch(() => showRuntimeStatus("Could not copy link", "error"));
+    return;
+  }
+  if (!selectedAppId || appWritesBlocked()) return;
   const changeControl = event.target.closest("input, select, textarea");
   if ((event.type === "click" && changeControl) || (event.type === "change" && !changeControl)) return;
   const target = event.target.closest("[data-action]");
@@ -1248,6 +1252,7 @@ async function handleWorkerDataAction(run, message) {
     run.worker.postMessage({ type: "data-result", request_id: message.request_id, ok: true, data: response.app.data });
   } catch (_error) {
     if (workerRun !== run) return;
+    run.mutationPending = false;
     run.worker.postMessage({ type: "data-result", request_id: message.request_id, ok: false });
     await refreshSelectedApp(run.appId);
   }
@@ -1986,6 +1991,15 @@ function compareAppVersions(left, right) {
   return left.revision - right.revision;
 }
 
+function appMutationInFlight(appId, currentRevision, observedRevision) {
+  return Boolean(
+    workerRun?.appId === appId
+    && workerRun.mutationPending
+    && workerRun.revision === currentRevision
+    && observedRevision === currentRevision + 1
+  );
+}
+
 function syncAppRefreshButton() {
   $("app-update-veil").hidden = !selectedAppId || !pendingApp || selectedAppOutsideActiveIndex;
   if (!pendingApp) return;
@@ -2159,10 +2173,16 @@ async function refreshSelectedApp(appId = selectedAppId) {
     // require a refresh click. Only replace an app the human can already use.
     applyAppVersion(next.app);
   } else if (compareAppVersions(next.app, currentApp) > 0) {
-    // Polling coalesces any number of background revisions into one latest
-    // version. The current canvas remains stable until the human refreshes it.
-    pendingApp = next.app;
-    syncAppRefreshButton();
+    // A state poll can observe a generated-App mutation after the transaction
+    // commits but before its response reaches this frame. That response adopts
+    // the revision and keeps the canvas interactive, so do not misclassify the
+    // app's own write as a background agent update in the meantime.
+    if (!appMutationInFlight(appId, currentApp.revision, next.app.revision)) {
+      // Polling coalesces any number of background revisions into one latest
+      // version. The current canvas remains stable until the human refreshes it.
+      pendingApp = next.app;
+      syncAppRefreshButton();
+    }
   }
   renderChat();
   syncAgentSettings(snapshot.session);
@@ -2224,16 +2244,34 @@ async function createAppOnce() {
   }
 }
 
+function setRenameAppOpen(open) {
+  const overlay = $("rename-app-overlay");
+  if (open) {
+    if (!selectedAppId || selectedAppOutsideActiveIndex) return;
+    renameAppReturnFocus = webAppsRoot.activeElement || $("rename-app");
+    $("rename-app-input").value = selectedAppName || selectedAppId;
+    $("rename-app-error").hidden = true;
+    overlay.hidden = false;
+    requestAnimationFrame(() => $("rename-app-input").select());
+    return;
+  }
+  overlay.hidden = true;
+  $("rename-app-save").disabled = false;
+  if (renameAppReturnFocus && renameAppReturnFocus.isConnected) renameAppReturnFocus.focus();
+  renameAppReturnFocus = null;
+}
+
 async function renameSelectedApp() {
   if (!selectedAppId || selectedAppOutsideActiveIndex) return;
   const appId = selectedAppId;
-  const requestedName = prompt("Rename app (max 100 characters):", selectedAppName || appId);
-  if (requestedName === null) return;
-  const name = requestedName.trim();
+  const name = $("rename-app-input").value.trim();
   if (!name) {
-    showRuntimeStatus("App name cannot be empty", "error");
+    $("rename-app-error").textContent = "Enter an app name.";
+    $("rename-app-error").hidden = false;
+    $("rename-app-input").focus();
     return;
   }
+  $("rename-app-save").disabled = true;
   const response = await api(
     "PUT",
     `/apps/${encodeURIComponent(appId)}/name`,
@@ -2242,6 +2280,7 @@ async function renameSelectedApp() {
   apps = apps.map(app => app.app_id === appId ? { ...app, name: response.app.name } : app);
   if (selectedAppId === appId) selectedAppName = response.app.name;
   syncWorkspaceControls();
+  setRenameAppOpen(false);
   await window.KernHost.refreshNavigation();
 }
 
@@ -2343,7 +2382,18 @@ webAppsRoot.addEventListener("click", event => {
     return;
   }
 });
-$("rename-app").addEventListener("click", () => renameSelectedApp().catch(error => showRuntimeStatus(error.message, "error")));
+$("rename-app").addEventListener("click", () => setRenameAppOpen(true));
+$("rename-app-close").addEventListener("click", () => setRenameAppOpen(false));
+$("rename-app-cancel").addEventListener("click", () => setRenameAppOpen(false));
+$("rename-app-backdrop").addEventListener("click", () => setRenameAppOpen(false));
+$("rename-app-form").addEventListener("submit", event => {
+  event.preventDefault();
+  renameSelectedApp().catch(error => {
+    $("rename-app-save").disabled = false;
+    $("rename-app-error").textContent = error.message;
+    $("rename-app-error").hidden = false;
+  });
+});
 $("lock-agent-updates").addEventListener("click", () => toggleAgentUpdateLock().catch(error => showRuntimeStatus(error.message, "error")));
 $("archive-app").addEventListener("click", () => archiveSelectedApp().catch(error => showRuntimeStatus(error.message, "error")));
 $("app-refresh").addEventListener("click", applyPendingAppVersion);
@@ -2398,6 +2448,11 @@ $("message").addEventListener("keydown", event => {
 $("message").addEventListener("input", saveComposerDraft);
 webAppsRoot.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
+  if (!$("rename-app-overlay").hidden) {
+    event.preventDefault();
+    setRenameAppOpen(false);
+    return;
+  }
   if (!$("settings-popover").hidden || !$("recovery-drawer").hidden) {
     event.preventDefault();
     closeAdmin();

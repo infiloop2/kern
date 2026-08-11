@@ -176,6 +176,8 @@ MANIFEST = ToolManifest(
         ),
         connect_step_description="Open Google Calendar under Home > Integrations and save the client ID and client secret you copied from the Web application client in the previous step under the two configuration keys below. Enable Calendar, then choose Connect and approve the requested Google permissions. Confirm that the page shows the expected connected email. A read can run immediately; an event change should appear under Approvals before Google receives it.",
     ),
+    # Nothing to add beyond the description: it drives this tool on its own.
+    agent_notes="",
 )
 
 

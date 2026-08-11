@@ -228,6 +228,35 @@ function resetPageScroll() {
   window.scrollTo({ top: 0, left: 0, behavior: "instant" });
 }
 
+let workspaceViewportRecovery = 0;
+function recoverWorkspaceViewport() {
+  if (!document.body.classList.contains("viewport-panel-open")
+      || !window.matchMedia(MOBILE_NAV_QUERY).matches) return;
+  cancelAnimationFrame(workspaceViewportRecovery);
+  workspaceViewportRecovery = requestAnimationFrame(() => {
+    workspaceViewportRecovery = requestAnimationFrame(() => {
+      /* Mobile Safari may pan the layout viewport to expose a focused field.
+         It does not always restore that pan when Send clears the field or the
+         keyboard closes. The workspaces own the visual viewport, so the page
+         itself must remain anchored while their internal scrollers move. */
+      resetPageScroll();
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    });
+  });
+}
+
+document.addEventListener("focusout", event => {
+  const target = event.composedPath()[0];
+  if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement)) return;
+  recoverWorkspaceViewport();
+  setTimeout(recoverWorkspaceViewport, 180);
+}, true);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", recoverWorkspaceViewport, { passive: true });
+  window.visualViewport.addEventListener("scroll", recoverWorkspaceViewport, { passive: true });
+}
+
 function showLogin() {
   setMobileNavOpen(false);
   hideIPhoneInstallUi();

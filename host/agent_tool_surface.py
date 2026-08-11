@@ -49,7 +49,9 @@ LIST_BUNDLED_TOOLS_TOOL: JSONObject = {
         "of running immediately. A tool listed here but not enabled exists on the host but "
         "cannot run until the operator enables it (and, for OAuth tools, connects it) under "
         "Home > Integrations in the admin UI — ask the operator instead of building a "
-        "replacement. A capability with no entry here has no bundled tool at all."
+        "replacement. A capability with no entry here has no bundled tool at all. "
+        "agent_notes adds to a tool's description: how to use it correctly, including what to do "
+        "when no action covers what you need; follow it. Empty means there is nothing to add."
     ),
     "input_schema": _NO_ARGUMENTS,
 }

@@ -328,6 +328,8 @@ MANIFEST = ToolManifest(
         ),
         connect_step_description="Open Gmail under Home > Integrations and save the client ID and client secret you copied from the Web application client in the previous step under the two configuration keys below. Enable Gmail, then choose Connect and approve the requested Google permissions. Confirm that the page shows the expected connected email. A read can run immediately; a send should appear under Approvals before Google receives it. The same client can also serve Google Calendar.",
     ),
+    # Nothing to add beyond the description: it drives this tool on its own.
+    agent_notes="",
 )
 
 

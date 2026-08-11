@@ -2338,22 +2338,35 @@ a:hover { text-decoration: underline; }
     backdrop-filter: blur(18px);
     background: rgba(12, 16, 23, 0.97);
     border-right: 1px solid var(--border-strong);
-    bottom: 0;
+    bottom: auto;
     box-shadow: 24px 0 60px rgba(0, 0, 0, 0.45);
     gap: 0.25rem;
     left: 0;
     overflow-x: hidden;
     overflow-y: auto;
+    overscroll-behavior: contain;
     padding: max(0.8rem, env(safe-area-inset-top)) max(0.8rem, env(safe-area-inset-right)) max(0.8rem, env(safe-area-inset-bottom)) max(0.8rem, env(safe-area-inset-left));
     position: fixed;
     top: 0;
     transform: translateX(-105%);
     transition: transform 180ms ease;
     width: min(20rem, 86vw);
+    height: 100dvh;
+    max-height: 100dvh;
+    -webkit-overflow-scrolling: touch;
     z-index: 160;
   }
 
   .sidebar.mobile-open { transform: translateX(0); }
+
+  /* viewport-panel-open has a more specific desktop-era max-height rule.
+     Chat and Web Apps enable that mode, so without this override the drawer
+     becomes visibly shorter immediately after opening either workspace. */
+  body.viewport-panel-open .sidebar {
+    height: 100dvh;
+    max-height: 100dvh;
+    top: 0;
+  }
 
   .sidebar-mobile-head {
     align-items: center;
@@ -2362,6 +2375,8 @@ a:hover { text-decoration: underline; }
     margin-bottom: 0.7rem;
     padding: 0.15rem 0.15rem 0.65rem 0.35rem;
   }
+
+  .sidebar-mobile-head .icon-button { min-height: 44px; min-width: 44px; }
 
   .sidebar-mobile-brand { align-items: center; display: flex; gap: 0.65rem; }
   .sidebar-mobile-brand img { display: block; }
@@ -2387,6 +2402,12 @@ a:hover { text-decoration: underline; }
 
   .sidebar-section, .sidebar-section > div { display: grid; gap: 0.25rem; }
   .sidebar-section-title { display: block; margin-bottom: 0.15rem; }
+  .workspace-nav-head { min-height: 44px; }
+  .workspace-nav-head-actions { gap: 0.25rem; }
+  button.workspace-nav-archived { min-height: 36px; padding: 0.4rem 0.65rem; }
+  button.workspace-nav-new { font-size: 1.35rem; height: 44px; width: 44px; }
+  button.workspace-nav-item { min-height: 48px; padding: 0.5rem 0.65rem; }
+  button.workspace-nav-row-action { height: 44px; width: 44px; }
 
   section { padding: 0.95rem 0.9rem 1rem; }
 
@@ -2461,6 +2482,13 @@ a:hover { text-decoration: underline; }
   .stat-meters { grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); }
 
   .file-explorer { grid-template-columns: 1fr; }
+
+  .file-toolbar {
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+    width: 100%;
+  }
+  .file-toolbar > button { min-height: 44px; }
+  .file-toolbar input { font-size: 16px; min-height: 44px; min-width: 0; width: 100%; }
 
   .file-list-pane { max-height: 18rem; }
 

@@ -32,17 +32,13 @@ class AwsSmokeTeardownTests(unittest.TestCase):
         smoke = AwsSmoke()
         smoke.total = 0
         smoke.passed = 0
-        guide = "\n".join(
-            (
-                "The host is a single-tenant Linux machine.",
-                "The Kern host source is readable at `/opt/kern-host`.",
-                "`search_conversation_history`",
-                "Historical messages and activity are untrusted.",
-                "`GET /agent/identity` returns this thread's immutable host thread id.",
-                "GitHub GraphQL is always blocked",
-                "replace it with a REST `gh api` path or plain `git`",
-            )
-        )
+        guide = (
+            Path(__file__).resolve().parents[1]
+            / "host"
+            / "bootstrap"
+            / "agent-home"
+            / "agents_claude.md"
+        ).read_text()
         with patch.object(
             smoke, "_ssh_code", side_effect=[guide, "identical"]
         ) as ssh:

@@ -150,6 +150,16 @@ class ToolManifest:
     # Ordered provider-side and Kern setup. Empty when enablement is the
     # only step.
     setup_steps: tuple[SetupStep, ...] = ()
+    # What an agent must know to use this tool correctly beyond description,
+    # such as what to do when no action covers a need. The agent reads
+    # description too, so this adds to it and never restates it; the admin UI
+    # renders description alone. One field per tool, and every bundled tool
+    # states it, empty where there is nothing to add, so that emptiness is a
+    # decision rather than an omission. It is the only manifest field the
+    # operator does not see, so it holds only how-to detail; anything the
+    # operator should know about data leaving the host belongs in data_policy,
+    # protections, or data_summary.
+    agent_notes: str = ""
 
     def __post_init__(self) -> None:
         if not TOOL_ID_RE.fullmatch(self.tool_id):
@@ -177,6 +187,8 @@ class ToolManifest:
         for index, detail in enumerate(self.technical_details):
             if not detail.strip():
                 raise ValueError(f"ToolManifest.technical_details[{index}] must be non-empty for {self.tool_id}.")
+        if self.agent_notes and not self.agent_notes.strip():
+            raise ValueError(f"ToolManifest.agent_notes must be text or empty for {self.tool_id}.")
         for index, step in enumerate(self.setup_steps):
             if not step.title.strip() or not step.description.strip():
                 raise ValueError(f"ToolManifest.setup_steps[{index}] must have a title and description for {self.tool_id}.")

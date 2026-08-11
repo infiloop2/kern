@@ -160,12 +160,15 @@ def desktop_smoke(page: Any) -> None:
     )
     frame.locator("#new-task-model").select_option("claude-opus-5")
     expect(frame.locator("#session-change-warning")).to_be_hidden()
-    page.once("dialog", lambda dialog: dialog.accept("Website refresh"))
     frame.get_by_role("button", name="Rename thread", exact=True).click()
+    expect(frame.get_by_role("dialog", name="Rename thread")).to_be_visible()
+    frame.locator("#rename-thread-input").fill("Website refresh")
+    frame.locator("#rename-thread-form").get_by_role("button", name="Save").click()
     expect(frame.locator(".thread-title")).to_have_text("Website refresh")
     expect(page.locator("#chat-nav-items")).to_contain_text("Website refresh")
-    page.once("dialog", lambda dialog: dialog.accept("website-redesign"))
     frame.get_by_role("button", name="Rename thread", exact=True).click()
+    frame.locator("#rename-thread-input").fill("website-redesign")
+    frame.locator("#rename-thread-form").get_by_role("button", name="Save").click()
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
     # Clearing working memory makes the boundary the visible start of Chat.
     # Retained events still exist for audit/history APIs, but the prior
@@ -361,6 +364,7 @@ def mobile_smoke(page: Any) -> None:
     page.locator("#nav-backdrop").click(position={"x": 380, "y": 400})
     _open_host_thread(page, "thread-1")
     expect(frame.locator("#thread-detail")).to_contain_text("Document the theming setup")
+    _assert_mobile_header_and_navigation(page, frame)
     _assert_frame_no_horizontal_overflow(frame, "Chat workspace")
     _assert_single_scroll(page, frame, "Chat workspace (mobile)")
     _assert_initial_tail(frame)
@@ -384,6 +388,36 @@ def _open_mobile_host_navigation(page: Any) -> None:
         return
     toggle.click()
     expect(page.locator("#sidebar")).to_have_class(re.compile(r"mobile-open"))
+
+
+def _assert_mobile_header_and_navigation(page: Any, frame: Any) -> None:
+    """Thread identity stays usable and the host drawer fills an app viewport."""
+    from playwright.sync_api import expect
+
+    expect(frame.locator(".thread-title")).to_be_visible()
+    expect(frame.locator(".thread-title")).to_have_text("thread-1")
+    expect(frame.get_by_role("button", name="Rename thread", exact=True)).to_be_visible()
+    header_overflow = frame.locator(".chat-head").evaluate(
+        "element => element.scrollWidth - element.clientWidth"
+    )
+    if header_overflow > 1:
+        raise AssertionError(f"mobile Chat header overflows by {header_overflow}px")
+
+    frame.get_by_role("button", name="Rename thread", exact=True).click()
+    rename_input = frame.locator("#rename-thread-input")
+    expect(frame.get_by_role("dialog", name="Rename thread")).to_be_visible()
+    if rename_input.evaluate("element => parseFloat(getComputedStyle(element).fontSize)") < 16:
+        raise AssertionError("mobile thread rename input would trigger iOS focus zoom")
+    frame.locator("#rename-thread-cancel").click()
+
+    _open_mobile_host_navigation(page)
+    drawer = page.locator("#sidebar").bounding_box()
+    viewport_height = page.evaluate("() => window.innerHeight")
+    if not drawer or abs(drawer["y"]) > 1 or abs(drawer["height"] - viewport_height) > 1:
+        raise AssertionError(
+            f"Chat host navigation does not fill the viewport: {drawer}, viewport={viewport_height}"
+        )
+    page.locator("#nav-backdrop").click(position={"x": 380, "y": 400})
 
 
 def _open_host_thread(page: Any, name: str) -> None:
@@ -913,6 +947,17 @@ def _assert_mobile_send_flow(page: Any, frame: Any) -> None:
     frame.get_by_role("button", name="Send").click()
     expect(frame.locator(".thread-title")).to_have_text(re.compile(r"^thread-[0-9]+$"))
     expect(frame.locator("#thread-detail")).to_contain_text("mobile smoke: check the deploy status")
+    _assert_mobile_app_owns_viewport(page, frame, "first mobile message sent")
+    # Re-focus after the New thread -> named thread transition, then model the
+    # iPhone keyboard closing. The host page must return to its original anchor
+    # instead of leaving the entire App shifted upward.
+    composer = frame.locator("#new-task")
+    composer.focus()
+    page.set_viewport_size({"width": 390, "height": 500})
+    composer.evaluate("element => element.blur()")
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.wait_for_timeout(220)
+    _assert_mobile_app_owns_viewport(page, frame, "first message keyboard dismissed")
     sent_bubble = frame.locator("#thread-detail .thread-user").last
     expect(sent_bubble).to_be_in_viewport()
     # A running thread cannot be archived (UX-014), so stop the turn first.
