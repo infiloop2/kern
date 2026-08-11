@@ -37,6 +37,7 @@ MAX_JAVASCRIPT_BYTES = 128 * 1024
 MAX_DATA_BYTES = 256 * 1024
 MAX_STATE_RESPONSE_BYTES = 900 * 1024
 MAX_CHAT_MESSAGE_BYTES = 50_000
+APP_MESSAGE_CONTEXT = "This request is for Web App `{app_id}`.\n\n---\n\n"
 MAX_APP_NAME_CHARS = 100
 # Apps are durable user projects, so maintenance must not silently delete
 # them. A creation quota gives their current state and per-app revision bounds
@@ -577,12 +578,13 @@ def create_message(body: Any, *, app_id: str) -> dict[str, Any]:
     request = _required_object(body, "message request")
     allowed = {"content", "agent_runtime", "model", "effort"}
     _require_keys(request, allowed, required={"content"})
+    context = APP_MESSAGE_CONTEXT.format(app_id=app_id)
     content = _bounded_required_text(
         request.get("content"),
         "content",
-        MAX_CHAT_MESSAGE_BYTES,
+        MAX_CHAT_MESSAGE_BYTES - len(context.encode()),
     )
-    host_request: dict[str, Any] = {"message": content}
+    host_request: dict[str, Any] = {"message": f"{context}{content}"}
     config_fields = ("agent_runtime", "model", "effort")
     supplied = [field for field in config_fields if field in request]
     if supplied:

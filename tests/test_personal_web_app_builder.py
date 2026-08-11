@@ -132,14 +132,17 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertNotIn("Blob", source)
         self.assertNotIn("iframe", index)
 
-    def test_generated_apps_only_open_valid_x_reply_intents(self) -> None:
+    def test_generated_apps_use_shared_safe_navigation_and_copy_fallback(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
-        self.assertIn("function safeXReplyIntentHref(value)", source)
-        self.assertIn('url.hostname !== "x.com"', source)
-        self.assertIn('url.pathname !== "/intent/tweet"', source)
-        self.assertIn('const allowed = new Set(["in_reply_to", "text"])', source)
+        self.assertNotIn("function safeXReplyIntentHref(value)", source)
+        self.assertIn("KernRichText.safeNavigationHref(rawHref)", source)
+        self.assertIn("KernRichText.safeHref(rawHref)", source)
+        self.assertIn('clean.setAttribute("title", navigationHref)', source)
         self.assertIn('clean.setAttribute("target", "_blank")', source)
         self.assertIn('clean.setAttribute("rel", "noopener noreferrer")', source)
+        self.assertIn('clean.setAttribute("data-kern-copy-href", copyHref)', source)
+        self.assertIn('event.target.closest("button[data-kern-copy-href]")', source)
+        self.assertIn('showRuntimeStatus("Link copied", "success")', source)
 
     def test_frame_does_not_render_a_conversation_transcript(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
@@ -208,6 +211,32 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("function applyPendingAppVersion()", source)
         self.assertIn("pendingApp = next.app", source)
         self.assertIn("pendingApp = null", source)
+        self.assertIn(
+            "function appMutationInFlight(appId, currentRevision, observedRevision)",
+            source,
+        )
+        self.assertIn("observedRevision === currentRevision + 1", source)
+        refresh = source.split("async function refreshSelectedApp", 1)[1].split(
+            "\nasync function refresh()", 1
+        )[0]
+        self.assertIn(
+            "if (!appMutationInFlight(appId, currentApp.revision, next.app.revision))",
+            refresh,
+        )
+        self.assertLess(
+            refresh.index(
+                "if (!appMutationInFlight(appId, currentApp.revision, next.app.revision))"
+            ),
+            refresh.index("pendingApp = next.app"),
+        )
+        mutation = source.split("async function handleWorkerDataAction", 1)[1].split(
+            "\nfunction validDataPath", 1
+        )[0]
+        failure = mutation.split("} catch (_error) {", 1)[1]
+        self.assertLess(
+            failure.index("run.mutationPending = false"),
+            failure.index("await refreshSelectedApp(run.appId)"),
+        )
         preview_failure = source.split("function applyAppVersion(app)", 1)[1].split(
             "function applyPendingAppVersion", 1
         )[0]
@@ -284,8 +313,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
             instructions.index("Swarm memory (global memory)"),
         )
         self.assertIn("GET /agent/self/memory", instructions)
-        self.assertIn("before handling the thread's first request", instructions)
-        self.assertIn("also search\nswarm memory", instructions)
+        self.assertIn("first request in each agent\nexecution", instructions)
+        self.assertIn("search swarm memory", instructions)
         self.assertIn("Global schedules", instructions)
         self.assertIn("GET /agent/identity", instructions)
         self.assertIn("search_conversation_history", instructions)
@@ -792,12 +821,14 @@ class ConversationTests(unittest.TestCase):
             "POST",
             "/v1/threads/app-5/messages",
             {
-                "message": "Build it.",
+                "message": (
+                    "This request is for Web App `app-5`.\n\n---\n\nBuild it."
+                ),
                 **self.SESSION,
             },
         )
 
-    def test_message_creation_sends_the_exact_user_message(self) -> None:
+    def test_message_creation_adds_app_context_before_the_user_message(self) -> None:
         with (
             patch.object(backend, "_require_web_app"),
             patch.object(
@@ -810,8 +841,30 @@ class ConversationTests(unittest.TestCase):
             )
         self.assertEqual(
             host.call_args.args[2]["message"],
-            "Morning check.",
+            "This request is for Web App `app-5`.\n\n---\n\nMorning check.",
         )
+
+    def test_message_creation_bounds_context_and_content_together(self) -> None:
+        context = backend.APP_MESSAGE_CONTEXT.format(app_id="app-5")
+        content = "x" * (backend.MAX_CHAT_MESSAGE_BYTES - len(context.encode()))
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(
+                backend, "call_admin_api", return_value={"status": "accepted"}
+            ) as host,
+        ):
+            backend.create_message({"content": content}, app_id="app-5")
+        self.assertEqual(
+            len(host.call_args.args[2]["message"].encode()),
+            backend.MAX_CHAT_MESSAGE_BYTES,
+        )
+
+        with (
+            patch.object(backend, "_require_web_app"),
+            self.assertRaises(backend.WorkspaceError) as error,
+        ):
+            backend.create_message({"content": f"{content}x"}, app_id="app-5")
+        self.assertEqual(error.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
 
     def test_message_creation_retries_transient_turn_lifecycle_conflicts(self) -> None:
         for message in (

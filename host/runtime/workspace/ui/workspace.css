@@ -66,13 +66,21 @@ button.sm { font-size: 0.7rem; min-height: 1.9rem; }
 button.danger { color: var(--danger); }
 [hidden] { display: none !important; }
 @media (max-width: 760px) {
-  .global-head { align-items: flex-start; padding: 0.85rem; }
-  .global-head-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .global-head { align-items: stretch; display: grid; gap: 0.75rem; padding: max(0.85rem, env(safe-area-inset-top)) 0.85rem 0.85rem; }
+  .global-head h1 { font-size: 1.35rem; }
+  .global-head p { font-size: 0.8rem; line-height: 1.45; }
+  .global-head-actions { display: grid; gap: 0.5rem; grid-template-columns: 1fr 1fr; }
+  .global-head-actions button { min-height: 44px; }
   .global-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
-  .global-index { border-bottom: 1px solid var(--border); border-right: 0; max-height: 34vh; }
+  .global-index { border-bottom: 1px solid var(--border); border-right: 0; max-height: min(34vh, 17rem); padding: 0.7rem 0.8rem; }
   .global-detail { padding: 0.9rem 0.8rem 3rem; }
   .form-grid, .link-grid, .schedule-columns { grid-template-columns: 1fr; }
   .form-grid .wide { grid-column: 1; }
   .resource-form input, .resource-form select, .resource-form textarea, .global-search input { font-size: 16px; }
-  .form-actions { flex-wrap: wrap; }
+  .memory-scope-toggle button { min-height: 44px; }
+  .global-list-item { min-height: 44px; padding: 0.7rem; }
+  .form-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .form-actions .spacer { display: none; }
+  .form-actions button { min-height: 44px; }
+  .form-actions .danger { grid-column: 1 / -1; grid-row: 2; }
 }

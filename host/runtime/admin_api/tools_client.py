@@ -165,6 +165,9 @@ def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> 
         ],
         "protections": list(manifest.protections),
         "technical_details": list(manifest.technical_details),
+        # manifest.agent_notes is deliberately absent: it is agent-only text that
+        # adds to description, and the operator-facing account of the same
+        # behaviour lives in protections, technical_details, and data_summary.
         "setup_steps": [
             {
                 "title": step.title,

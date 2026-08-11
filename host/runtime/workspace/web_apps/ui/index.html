@@ -46,7 +46,7 @@
           <button id="attach-file" class="attach-button" aria-label="Attach files" title="Attach up to 10 files (25 MiB each)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.2 10.8 4.7-4.7a2.4 2.4 0 0 1 3.4 3.4l-6.2 6.2a4 4 0 0 1-5.7-5.7l6.4-6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           </button>
-          <textarea id="message" rows="1" placeholder="Tell the agent what to change"></textarea>
+          <textarea id="message" rows="1" placeholder="Describe a change"></textarea>
           <button id="send-message" class="send-button" aria-label="Send message" title="Send">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.2 3.6 13.9 6.3-13.9 6.5 1.9-5.2 6.6-1.2-6.6-1.2-1.9-5.2Z" fill="currentColor"/></svg>
             <span>Send</span>
@@ -109,6 +109,24 @@
     <p class="panel-intro">Restore the interface and data together. A restore is saved as a new revision.</p>
     <div id="app-history-list" class="app-history-list"></div>
   </aside>
+  <div id="rename-app-overlay" class="rename-overlay" hidden>
+    <button id="rename-app-backdrop" class="rename-backdrop" type="button" aria-label="Cancel rename"></button>
+    <form id="rename-app-form" class="rename-sheet" role="dialog" aria-modal="true" aria-labelledby="rename-app-title">
+      <div class="rename-sheet-head">
+        <div><span class="rename-eyebrow">Web App</span><h2 id="rename-app-title">Rename app</h2></div>
+        <button id="rename-app-close" class="ghost icon-button" type="button" aria-label="Cancel rename">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <label for="rename-app-input">Name</label>
+      <input id="rename-app-input" maxlength="100" autocomplete="off" required>
+      <p id="rename-app-error" class="rename-error" role="alert" hidden></p>
+      <div class="rename-actions">
+        <button id="rename-app-cancel" class="ghost" type="button">Cancel</button>
+        <button id="rename-app-save" class="primary" type="submit">Save</button>
+      </div>
+    </form>
+  </div>
   <span id="runtime-status" class="runtime-status" role="status" hidden></span>
 </div>
 </body>

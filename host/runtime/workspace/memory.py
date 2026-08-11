@@ -25,6 +25,8 @@ DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 100
 MAX_REVISION_PAGE_LIMIT = 50
 MAX_SEARCH_BYTES = 200
+WEAK_SEARCH_LIMIT = 5
+FALLBACK_POPULAR_LIMIT = 5
 REVISION_RETAINED = 100
 DELETED_RETAIN_DAYS = 90
 MAX_BIGINT = 2**63 - 1
@@ -140,18 +142,19 @@ def search_pages(query: dict[str, list[str]]) -> dict[str, Any]:
         {"q", "cursor", "limit", "scope"},
         "memory search",
     )
-    return _search_pages(query, scope=_memory_scope(query))
+    return _search_pages(query, scope=_memory_scope(query), record_top_hit=False)
 
 
 def search_swarm_pages(query: dict[str, list[str]]) -> dict[str, Any]:
     _reject_query_keys(query, {"q", "cursor", "limit"}, "memory search")
-    return _search_pages(query, scope="swarm")
+    return _search_pages(query, scope="swarm", record_top_hit=True)
 
 
 def _search_pages(
     query: dict[str, list[str]],
     *,
     scope: str,
+    record_top_hit: bool,
 ) -> dict[str, Any]:
     needle = _one(query, "q")
     if not needle or len(needle.encode()) > MAX_SEARCH_BYTES:
@@ -175,12 +178,72 @@ def _search_pages(
             (needle, needle, limit + 1, offset),
         )
         rows = cur.fetchall()
+        if rows and offset == 0 and record_top_hit:
+            cur.execute(
+                "UPDATE memory_pages SET strong_top_hit_count = CASE"
+                " WHEN strong_top_hit_count < %s THEN strong_top_hit_count + 1"
+                " ELSE strong_top_hit_count END, last_strong_top_hit_at = %s"
+                " WHERE page_id = %s",
+                (MAX_BIGINT, _utc_now(), rows[0][0]),
+            )
+        if not rows and offset == 0:
+            weak_rows = _weak_search_rows(cur, needle, scope=scope)
+            weak_ids = {str(row[0]) for row in weak_rows}
+            popular_rows = [
+                row
+                for row in _popular_rows(
+                    cur,
+                    scope=scope,
+                    limit=FALLBACK_POPULAR_LIMIT + WEAK_SEARCH_LIMIT,
+                )
+                if str(row[0]) not in weak_ids
+            ][:FALLBACK_POPULAR_LIMIT]
+            return {
+                "pages": [_page_summary(row[:8]) for row in weak_rows],
+                "match_mode": "weak",
+                "popular_pages": [_page_summary(row[:8]) for row in popular_rows],
+            }
     more = len(rows) > limit
     rows = rows[:limit]
     response: dict[str, Any] = {"pages": [_page_summary(row[:8]) for row in rows]}
     if more:
         response["next_cursor"] = _encode_offset_cursor(offset + limit)
     return response
+
+
+def _weak_search_rows(cur: Any, needle: str, *, scope: str) -> list[tuple[Any, ...]]:
+    tokens = list(dict.fromkeys(re.findall(r"[^\W_]+", needle.casefold())))
+    if not tokens:
+        return []
+    weak_needle = " OR ".join(tokens)
+    cur.execute(
+        "SELECT page_id, description, content, revision, deleted_at,"
+        " updated_by, created_at, updated_at,"
+        " ts_rank(to_tsvector('simple', page_id || ' ' || description || ' ' || content),"
+        " websearch_to_tsquery('simple', %s)) AS rank"
+        " FROM memory_pages WHERE deleted_at IS NULL"
+        f"{_scope_clause(scope)}"
+        " AND to_tsvector('simple', page_id || ' ' || description || ' ' || content)"
+        " @@ websearch_to_tsquery('simple', %s)"
+        " ORDER BY rank DESC, page_id LIMIT %s",
+        (weak_needle, weak_needle, WEAK_SEARCH_LIMIT),
+    )
+    return cur.fetchall()
+
+
+def _popular_rows(cur: Any, *, scope: str, limit: int) -> list[tuple[Any, ...]]:
+    if limit == 0:
+        return []
+    cur.execute(
+        "SELECT page_id, description, content, revision, deleted_at,"
+        " updated_by, created_at, updated_at FROM memory_pages"
+        " WHERE deleted_at IS NULL AND strong_top_hit_count > 0"
+        f"{_scope_clause(scope)}"
+        " ORDER BY strong_top_hit_count DESC,"
+        " last_strong_top_hit_at DESC NULLS LAST, updated_at DESC, page_id LIMIT %s",
+        (limit,),
+    )
+    return cur.fetchall()
 
 
 def load_page(

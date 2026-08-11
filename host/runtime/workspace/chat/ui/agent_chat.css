@@ -218,6 +218,28 @@ button.thread-rename-button svg { height: 14px; width: 14px; }
   gap: 0.35rem;
 }
 
+/* Rename is an in-app surface instead of a browser prompt. Besides looking
+   native to Kern, this keeps the input above the iPhone keyboard and gives
+   every action a full touch target. */
+.rename-overlay { display: grid; inset: 0; place-items: center; position: absolute; z-index: 60; }
+.rename-overlay[hidden] { display: none; }
+.rename-backdrop { background: rgba(3, 5, 9, 0.68); border: 0; border-radius: 0; inset: 0; padding: 0; position: absolute; }
+.rename-sheet {
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55); display: grid; gap: 0.7rem;
+  max-width: calc(100% - 2rem); padding: 1rem; position: relative; width: 25rem;
+}
+.rename-sheet-head { align-items: center; display: flex; justify-content: space-between; }
+.rename-sheet-head h2 { font-size: 1.05rem; margin: 0.12rem 0 0; }
+.rename-sheet-head svg { height: 17px; width: 17px; }
+.rename-eyebrow { color: var(--accent); font-size: 0.62rem; font-weight: 750; letter-spacing: 0.11em; text-transform: uppercase; }
+.rename-sheet label { color: var(--text-dim); font-size: 0.72rem; font-weight: 650; }
+.rename-sheet input { background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; color: var(--text); font-size: 16px; min-height: 2.75rem; padding: 0.65rem 0.75rem; width: 100%; }
+.rename-sheet input:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
+.rename-error { color: var(--danger); font-size: 0.72rem; margin: -0.2rem 0 0; }
+.rename-actions { display: flex; gap: 0.55rem; justify-content: flex-end; }
+.rename-actions button { min-height: 2.75rem; min-width: 5.5rem; }
+
 button.activity-switch {
   align-items: center;
   background: transparent;
@@ -825,15 +847,34 @@ button.attachment-clear {
 
   #sidebar-open, #sidebar-close { display: inline-flex; }
 
-  .chat-head { gap: 0.4rem; padding: 0.45rem 0.6rem; }
-
-  .chat-head-actions { gap: 0.2rem; }
+  .chat-head {
+    align-items: center; display: grid; gap: 0.25rem 0.4rem;
+    grid-template-areas: "menu title" "actions actions";
+    grid-template-columns: 44px minmax(0, 1fr);
+    padding: max(0.35rem, env(safe-area-inset-top)) max(0.6rem, env(safe-area-inset-right)) 0.4rem max(0.6rem, env(safe-area-inset-left));
+  }
+  #sidebar-open { grid-area: menu; height: 44px; width: 44px; }
+  .chat-head-title { grid-area: title; }
+  .thread-title-row { justify-content: space-between; }
+  .thread-title { flex: 1 1 auto; font-size: 1rem; }
+  button.thread-rename-button { height: 44px; margin: -0.4rem 0; width: 44px; }
+  button.thread-rename-button svg { height: 17px; width: 17px; }
+  .chat-head-actions { display: grid; gap: 0.35rem; grid-area: actions; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
+  .chat-head-actions > button { justify-content: center; min-height: 44px; min-width: 0; }
 
   button.activity-switch,
   #archive-thread {
     padding-left: 0.5rem;
     padding-right: 0.5rem;
   }
+
+  .rename-overlay { align-items: end; }
+  .rename-sheet {
+    border-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0;
+    max-width: none; padding: 1rem max(1rem, env(safe-area-inset-right)) max(1rem, calc(0.75rem + env(safe-area-inset-bottom))) max(1rem, env(safe-area-inset-left));
+    width: 100%;
+  }
+  .rename-actions { display: grid; grid-template-columns: 1fr 1fr; }
 
   .chat-column { padding: 0.9rem 0.8rem 0.5rem; }
 

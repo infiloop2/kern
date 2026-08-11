@@ -27,10 +27,15 @@ const VIEW_STATE_LIMIT = 50;
 const ACTIVE_REFRESH_MS = 1000;
 const IDLE_REFRESH_MS = 5000;
 const WORKSPACE_API_TIMEOUT_MS = 30000;
-// The browser Workspace proxy can wait 50s for a synchronous provider
-// acknowledgement. Sends and Stop must outlive that hop or a retry can
-// duplicate a message the host accepted after the frame gave up.
+const REFRESH_ERROR_DISPLAY_DELAY_MS = 5000;
+// Prefer a responsive composer over waiting through the full synchronous
+// provider acknowledgement path. A timed-out request can still be accepted,
+// so the error explicitly tells the operator that retrying may duplicate it.
+const MESSAGE_DELIVERY_TIMEOUT_MS = 15 * 1000;
+// Stop still waits through the proxy because duplicating it is not useful.
 const AGENT_DELIVERY_TIMEOUT_MS = 60 * 1000;
+const DELIVERY_TIMEOUT_MESSAGE = "Delivery is taking longer than expected. "
+  + "You can try again; the message may be submitted twice.";
 const COMPOSER_DRAFTS_STORAGE_KEY = "kern.agent-chat.composer-drafts.v1";
 const COMPOSER_DRAFT_LIMIT = 50;
 let selectedThreadId = null;
@@ -46,6 +51,7 @@ let sessionOptions = {};
 let pendingAttachments = [];
 let attachmentActivity = null;
 let sendingMessage = false;
+let sendingMessageThreadKey = null;
 let refreshSequence = 0;
 let selectedRefreshSequence = 0;
 const ATTACHMENT_LIMIT = 10;
@@ -73,6 +79,9 @@ let renderedHistoryThread = null;
 const renderedEntryHtml = new Map();
 let forceScrollBottom = false;
 let statusOwner = null;
+let refreshErrorTimer = null;
+let pendingRefreshErrorMessage = "";
+let renameThreadReturnFocus = null;
 
 const chatRoot = window.KernWorkspaceRoots.chat;
 const $ = id => chatRoot.querySelector(`#${CSS.escape(id)}`);
@@ -116,6 +125,10 @@ function composerDraftKey(threadId = selectedThreadId) {
   return threadId === null ? "new" : `thread:${threadId}`;
 }
 
+function selectedThreadIsSending() {
+  return sendingMessage && sendingMessageThreadKey === composerDraftKey();
+}
+
 function persistComposerDrafts() {
   try {
     localStorage.setItem(COMPOSER_DRAFTS_STORAGE_KEY, JSON.stringify(composerDrafts));
@@ -148,11 +161,11 @@ function clearComposerDraft(threadId, submittedDraft) {
   return true;
 }
 
-function api(method, path, body, timeoutMs = WORKSPACE_API_TIMEOUT_MS) {
+function api(method, path, body, timeoutMs = WORKSPACE_API_TIMEOUT_MS, timeoutMessage = "request timed out") {
   if (!path.startsWith("/")) throw new Error("Chat API path must be absolute");
   return Promise.race([
     window.KernHost.api(method, "/v1/workspace/chat" + path, body),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("request timed out")), timeoutMs)),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs)),
   ]);
 }
 
@@ -193,6 +206,21 @@ function setStatus(message, owner = "action") {
   $("status").textContent = message;
 }
 
+function deferRefreshError(message) {
+  pendingRefreshErrorMessage = message;
+  if (refreshErrorTimer !== null) return;
+  refreshErrorTimer = setTimeout(() => {
+    refreshErrorTimer = null;
+    setStatus(pendingRefreshErrorMessage, "refresh");
+  }, REFRESH_ERROR_DISPLAY_DELAY_MS);
+}
+
+function clearDeferredRefreshError() {
+  if (refreshErrorTimer !== null) clearTimeout(refreshErrorTimer);
+  refreshErrorTimer = null;
+  pendingRefreshErrorMessage = "";
+}
+
 async function refresh() {
   const sequence = ++refreshSequence;
   const archivedView = showingArchivedThreads;
@@ -228,10 +256,11 @@ async function refresh() {
     }));
     if (selectedThreadId) await refreshSelectedThread();
     if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
+    clearDeferredRefreshError();
     setStatus("", "refresh");
   } catch (error) {
     if (sequence === refreshSequence && archivedView === showingArchivedThreads) {
-      setStatus(error.message, "refresh");
+      deferRefreshError(error.message);
     }
   }
 }
@@ -461,6 +490,7 @@ function updateComposerActions() {
     && selectedThreadRuntime === "hermes";
   $("new-task").disabled = activeBlock;
   const sendButton = $("create-task");
+  const selectedSending = selectedThreadIsSending();
   sendButton.disabled = (
     activeBlock
     || sendingMessage
@@ -468,10 +498,10 @@ function updateComposerActions() {
     || hasOversizedAttachment
     || !hasSessionOption
   );
-  sendButton.classList.toggle("sending", sendingMessage);
-  sendButton.setAttribute("aria-busy", String(sendingMessage));
-  sendButton.setAttribute("aria-label", sendingMessage ? "Sending message" : "Send");
-  sendButton.title = sendingMessage ? "Sending message" : "Send (Enter)";
+  sendButton.classList.toggle("sending", selectedSending);
+  sendButton.setAttribute("aria-busy", String(selectedSending));
+  sendButton.setAttribute("aria-label", selectedSending ? "Sending message" : "Send");
+  sendButton.title = selectedSending ? "Sending message" : "Send (Enter)";
   $("attach-file").disabled = (
     activeBlock
     || sendingMessage
@@ -988,11 +1018,13 @@ function renderThreadEntry(event, openActivities) {
 async function sendMessage() {
   if (sendingMessage || $("create-task").disabled) return;
   sendingMessage = true;
+  sendingMessageThreadKey = composerDraftKey();
   updateComposerActions();
   try {
     await sendMessageUnlocked();
   } finally {
     sendingMessage = false;
+    sendingMessageThreadKey = null;
     updateComposerActions();
   }
 }
@@ -1040,7 +1072,13 @@ async function sendMessageUnlocked() {
     ? `${message || (uploadedFiles.length === 1 ? "Please review the uploaded file." : "Please review the uploaded files.")}\n\n${fileReferences}`
     : message;
   request.input_message = inputMessage;
-  const result = await api("POST", "/messages", request, AGENT_DELIVERY_TIMEOUT_MS);
+  const result = await api(
+    "POST",
+    "/messages",
+    request,
+    MESSAGE_DELIVERY_TIMEOUT_MS,
+    DELIVERY_TIMEOUT_MESSAGE,
+  );
   // Any list poll that started before acceptance can still describe the
   // thread as idle. Fence it before committing the authoritative running
   // state below; the explicit refresh starts a new generation.
@@ -1072,7 +1110,11 @@ async function sendMessageUnlocked() {
     forceScrollBottom = true;
   }
   updateComposer();
-  await Promise.all([refresh(), window.KernHost.refreshNavigation()]);
+  // Acceptance is the send boundary. Do not keep the composer spinner active
+  // while the thread body and sidebar catch up in the background.
+  void Promise.all([refresh(), window.KernHost.refreshNavigation()]).catch(error => {
+    deferRefreshError(error.message);
+  });
 }
 
 async function stopRunningTurn() {
@@ -1130,16 +1172,34 @@ async function setSelectedThreadArchived() {
   await Promise.all([refresh(), window.KernHost.refreshNavigation()]);
 }
 
+function setRenameThreadOpen(open) {
+  const overlay = $("rename-thread-overlay");
+  if (open) {
+    if (!selectedThreadId) return;
+    renameThreadReturnFocus = chatRoot.activeElement || $("rename-thread");
+    $("rename-thread-input").value = selectedThreadName || selectedThreadId;
+    $("rename-thread-error").hidden = true;
+    overlay.hidden = false;
+    requestAnimationFrame(() => $("rename-thread-input").select());
+    return;
+  }
+  overlay.hidden = true;
+  $("rename-thread-save").disabled = false;
+  if (renameThreadReturnFocus && renameThreadReturnFocus.isConnected) renameThreadReturnFocus.focus();
+  renameThreadReturnFocus = null;
+}
+
 async function renameSelectedThread() {
   if (!selectedThreadId) return;
   const threadId = selectedThreadId;
-  const requestedName = prompt("Rename thread (max 100 characters):", selectedThreadName || threadId);
-  if (requestedName === null) return;
-  const name = requestedName.trim();
+  const name = $("rename-thread-input").value.trim();
   if (!name) {
-    setStatus("Thread name cannot be empty.");
+    $("rename-thread-error").textContent = "Enter a thread name.";
+    $("rename-thread-error").hidden = false;
+    $("rename-thread-input").focus();
     return;
   }
+  $("rename-thread-save").disabled = true;
   const response = await api(
     "PUT",
     `/threads/${encodeURIComponent(threadId)}/name`,
@@ -1157,6 +1217,7 @@ async function renameSelectedThread() {
   }
   renderThreads();
   setStatus("");
+  setRenameThreadOpen(false);
   await window.KernHost.refreshNavigation();
 }
 
@@ -1263,7 +1324,18 @@ $("new-thread").addEventListener("click", () => {
   $("new-task").focus();
 });
 $("archived-toggle").addEventListener("click", () => toggleArchivedThreads().catch(error => setStatus(error.message)));
-$("rename-thread").addEventListener("click", () => renameSelectedThread().catch(error => setStatus(error.message)));
+$("rename-thread").addEventListener("click", () => setRenameThreadOpen(true));
+$("rename-thread-close").addEventListener("click", () => setRenameThreadOpen(false));
+$("rename-thread-cancel").addEventListener("click", () => setRenameThreadOpen(false));
+$("rename-thread-backdrop").addEventListener("click", () => setRenameThreadOpen(false));
+$("rename-thread-form").addEventListener("submit", event => {
+  event.preventDefault();
+  renameSelectedThread().catch(error => {
+    $("rename-thread-save").disabled = false;
+    $("rename-thread-error").textContent = error.message;
+    $("rename-thread-error").hidden = false;
+  });
+});
 $("clear-memory").addEventListener("click", () => clearWorkingMemory().catch(error => setStatus(error.message)));
 $("archive-thread").addEventListener("click", () => setSelectedThreadArchived().catch(error => setStatus(error.message)));
 $("activity-toggle").addEventListener("click", toggleActivity);
@@ -1301,6 +1373,11 @@ $("new-task").addEventListener("keydown", event => {
   if (!sendKey) return;
   event.preventDefault();
   sendMessage().catch(error => setStatus(error.message));
+});
+chatRoot.addEventListener("keydown", event => {
+  if (event.key !== "Escape" || $("rename-thread-overlay").hidden) return;
+  event.preventDefault();
+  setRenameThreadOpen(false);
 });
 $("sidebar-open").addEventListener("click", () => setSidebarOpen(true));
 $("sidebar-close").addEventListener("click", () => setSidebarOpen(false, true));

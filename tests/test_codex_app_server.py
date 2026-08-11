@@ -422,23 +422,33 @@ class CodexAppServerTests(unittest.TestCase):
             workspace_proxy.PROXY_TIMEOUT_SECONDS,
         )
         repo_root = Path(__file__).resolve().parents[1]
-        frame_sources = (
-            repo_root / "host/runtime/workspace/chat/ui/agent_chat.js",
-            repo_root / "host/runtime/workspace/web_apps/ui/personal_web_app_builder.js",
+        web_app_source = (
+            repo_root / "host/runtime/workspace/web_apps/ui/personal_web_app_builder.js"
+        ).read_text()
+        match = re.search(
+            r"const AGENT_DELIVERY_TIMEOUT_MS = ([0-9]+) \* 1000;",
+            web_app_source,
         )
-        for source_path in frame_sources:
-            source = source_path.read_text()
-            match = re.search(
-                r"const AGENT_DELIVERY_TIMEOUT_MS = ([0-9]+) \* 1000;",
-                source,
-            )
-            self.assertIsNotNone(match, source_path)
-            assert match is not None
-            self.assertGreater(
-                int(match.group(1)) * 1000,
-                workspace_proxy.PROXY_TIMEOUT_SECONDS * 1000,
-            )
-            self.assertGreaterEqual(source.count("AGENT_DELIVERY_TIMEOUT_MS"), 3)
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertGreater(
+            int(match.group(1)) * 1000,
+            workspace_proxy.PROXY_TIMEOUT_SECONDS * 1000,
+        )
+
+        # Chat explicitly favors a short, retryable wait and warns that an
+        # operator retry can duplicate a steer whose acknowledgement was late.
+        chat_source = (
+            repo_root / "host/runtime/workspace/chat/ui/agent_chat.js"
+        ).read_text()
+        chat_match = re.search(
+            r"const MESSAGE_DELIVERY_TIMEOUT_MS = ([0-9]+) \* 1000;",
+            chat_source,
+        )
+        self.assertIsNotNone(chat_match)
+        assert chat_match is not None
+        self.assertEqual(int(chat_match.group(1)), 15)
+        self.assertIn("the message may be submitted twice", chat_source)
 
     def setUp(self) -> None:
         # The live-validation verdict is a process-global memo; isolate tests.

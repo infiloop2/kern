@@ -269,7 +269,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("user_tweets", {"username": "kern", "max_results": "5"}),
         ("get_trends", {"max_trends": "1"}),
         ("get_personalized_trends", {}),
-        ("send_dm", {"text": "Kern smoke; never sent.", "recipient_user_id": "1"}),
+        ("lookup_user", {"username": "kern"}),
     ),
 }
 

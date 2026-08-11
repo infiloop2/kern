@@ -626,10 +626,37 @@ button.latest-agent-stop svg { height: 12px; width: 12px; }
 .recovery-head svg { height: 17px; width: 17px; }
 .panel-intro { color: var(--text-dim); font-size: 0.76rem; line-height: 1.5; margin: 0; }
 
+.rename-overlay { display: grid; inset: 0; place-items: center; position: absolute; z-index: 60; }
+.rename-overlay[hidden] { display: none; }
+.rename-backdrop { background: rgba(3, 5, 9, 0.68); border: 0; border-radius: 0; inset: 0; padding: 0; position: absolute; }
+.rename-sheet {
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55); display: grid; gap: 0.7rem;
+  max-width: calc(100% - 2rem); padding: 1rem; position: relative; width: 25rem;
+}
+.rename-sheet-head { align-items: center; display: flex; justify-content: space-between; }
+.rename-sheet-head h2 { font-size: 1.05rem; margin: 0.12rem 0 0; }
+.rename-sheet-head svg { height: 17px; width: 17px; }
+.rename-eyebrow { color: var(--accent); font-size: 0.62rem; font-weight: 750; letter-spacing: 0.11em; text-transform: uppercase; }
+.rename-sheet label { color: var(--text-dim); font-size: 0.72rem; font-weight: 650; }
+.rename-sheet input { background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; color: var(--text); font-size: 16px; min-height: 2.75rem; padding: 0.65rem 0.75rem; width: 100%; }
+.rename-sheet input:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
+.rename-error { color: var(--danger); font-size: 0.72rem; margin: -0.2rem 0 0; }
+.rename-actions { display: flex; gap: 0.55rem; justify-content: flex-end; }
+.rename-actions button { min-height: 2.75rem; min-width: 5.5rem; }
+
 @media (max-width: 720px) {
-  .app-view-toolbar { align-items: center; }
-  .app-view-actions button span { display: none; }
-  button.app-toolbar-button { min-height: 2.75rem; min-width: 2.75rem; padding: 0.55rem; }
+  .app-view-toolbar {
+    align-items: center; display: grid; gap: 0.25rem;
+    grid-template-columns: minmax(0, 1fr);
+    padding-bottom: 0.2rem;
+  }
+  .app-view-mode { min-width: 0; }
+  .app-title-row { align-items: center; display: grid; gap: 0.1rem; }
+  .revision-label { font-size: 0.62rem; }
+  .app-view-actions { display: grid; gap: 0.2rem; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-left: 0; width: 100%; }
+  .app-view-actions button span { display: inline; font-size: 0.56rem; line-height: 1; }
+  button.app-toolbar-button { border-radius: 9px; flex-direction: column; gap: 0.2rem; min-height: 3rem; min-width: 0; padding: 0.35rem 0.15rem; width: 100%; }
   #recovery-close { min-height: 44px; min-width: 44px; }
   #stop-turn { min-height: 44px; }
   .agent-command-surface .attach-button,
@@ -637,6 +664,19 @@ button.latest-agent-stop svg { height: 12px; width: 12px; }
   .agent-command-surface .send-button { margin-right: 0; padding: 0; }
   .agent-command-surface .send-button span { display: none; }
   .agent-command-surface { padding: 0 max(0.7rem, env(safe-area-inset-right)) 0.5rem max(0.7rem, env(safe-area-inset-left)); }
+  .latest-agent-card { gap: 0.35rem; grid-template-columns: auto minmax(0, 1fr) auto; padding-left: 0; padding-right: 0; }
   .latest-agent-message { max-height: 4.3em; }
+  .latest-agent-stop { grid-column: 2; justify-self: start; }
+  .latest-agent-dismiss { align-self: start; grid-column: 3; grid-row: 1 / span 2; min-height: 44px; min-width: 44px; }
   .settings-popover { right: max(0.7rem, env(safe-area-inset-right)); width: calc(100vw - max(1.4rem, env(safe-area-inset-left) + env(safe-area-inset-right))); }
+  .settings-popover .agent-settings { grid-template-columns: 1fr; }
+  .settings-popover .agent-settings select { min-height: 44px; }
+  .recovery-drawer { padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) 1rem; width: 100%; }
+  .rename-overlay { align-items: end; }
+  .rename-sheet {
+    border-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0;
+    max-width: none; padding: 1rem max(1rem, env(safe-area-inset-right)) max(1rem, calc(0.75rem + env(safe-area-inset-bottom))) max(1rem, env(safe-area-inset-left));
+    width: 100%;
+  }
+  .rename-actions { display: grid; grid-template-columns: 1fr 1fr; }
 }
