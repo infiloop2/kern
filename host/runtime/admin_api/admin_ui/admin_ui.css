@@ -2242,6 +2242,14 @@ a:hover { text-decoration: underline; }
 
   body.viewport-panel-open .topbar { position: relative; }
 
+  /* While a workspace field owns the software keyboard, leave the host
+     controls available in the first row but collapse the usage row. This
+     gives the conversation the vertical room released by the keyboard and
+     restores the usage pill as soon as editing ends. */
+  body.viewport-panel-open.workspace-input-focused .runtime-overview {
+    display: none;
+  }
+
   body.viewport-panel-open #app {
     height: auto;
     min-height: 0;

@@ -231,6 +231,7 @@ function resetPageScroll() {
 let workspaceViewportRecovery = 0;
 function recoverWorkspaceViewport() {
   if (!document.body.classList.contains("viewport-panel-open")
+      || document.body.classList.contains("workspace-input-focused")
       || !window.matchMedia(MOBILE_NAV_QUERY).matches) return;
   cancelAnimationFrame(workspaceViewportRecovery);
   workspaceViewportRecovery = requestAnimationFrame(() => {
@@ -246,11 +247,46 @@ function recoverWorkspaceViewport() {
   });
 }
 
-document.addEventListener("focusout", event => {
-  const target = event.composedPath()[0];
-  if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement)) return;
+function isWorkspaceKeyboardInput(target) {
+  return target instanceof HTMLTextAreaElement || (
+    target instanceof HTMLInputElement
+    && ["text", "search", "email", "tel", "url", "password", "number"].includes(target.type)
+  );
+}
+
+let focusedWorkspaceInput = null;
+const focusedWorkspaceInputObserver = new MutationObserver(() => {
+  if (!focusedWorkspaceInput || focusedWorkspaceInput.isConnected) return;
+  releaseWorkspaceInputFocus();
   recoverWorkspaceViewport();
   setTimeout(recoverWorkspaceViewport, 180);
+});
+
+function releaseWorkspaceInputFocus() {
+  focusedWorkspaceInput = null;
+  focusedWorkspaceInputObserver.disconnect();
+  document.body.classList.remove("workspace-input-focused");
+}
+
+document.addEventListener("focusin", event => {
+  const target = event.composedPath()[0];
+  if (!isWorkspaceKeyboardInput(target)) return;
+  if (!document.body.classList.contains("viewport-panel-open")) return;
+  focusedWorkspaceInput = target;
+  focusedWorkspaceInputObserver.disconnect();
+  focusedWorkspaceInputObserver.observe(target.getRootNode(), { childList: true, subtree: true });
+  document.body.classList.add("workspace-input-focused");
+}, true);
+
+document.addEventListener("focusout", event => {
+  const target = event.composedPath()[0];
+  if (!isWorkspaceKeyboardInput(target)) return;
+  setTimeout(() => {
+    if (target !== focusedWorkspaceInput) return;
+    releaseWorkspaceInputFocus();
+    recoverWorkspaceViewport();
+    setTimeout(recoverWorkspaceViewport, 180);
+  }, 0);
 }, true);
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", recoverWorkspaceViewport, { passive: true });
@@ -260,7 +296,8 @@ if (window.visualViewport) {
 function showLogin() {
   setMobileNavOpen(false);
   hideIPhoneInstallUi();
-  document.body.classList.remove("viewport-panel-open");
+  releaseWorkspaceInputFocus();
+  document.body.classList.remove("viewport-panel-open", "workspace-input-focused");
   $("login").hidden = false;
   $("app").hidden = true;
   $("logout-button").hidden = true;
@@ -283,6 +320,9 @@ function showTab(name, workspaceActionSequence = null) {
     || name === "workspace-global";
   const viewportPanelOpen = workspaceOpen;
   document.body.classList.toggle("viewport-panel-open", viewportPanelOpen);
+  if (!viewportPanelOpen) {
+    releaseWorkspaceInputFocus();
+  }
   for (const tabName of staticTabs) {
     const tab = document.getElementById(`tab-${tabName}`);
     if (tab) tab.classList.toggle("active-tab", tabName === name || (tabName === "home" && homeDetailTabs.has(name)));

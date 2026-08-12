@@ -305,6 +305,24 @@ class AdminUiStaticTests(unittest.TestCase):
             "body.viewport-panel-open .workspace-panel {\n    height: 100%;",
             admin_css,
         )
+        self.assertIn("workspace-input-focused", app)
+        self.assertIn("function isWorkspaceKeyboardInput(target)", app)
+        self.assertIn(
+            '["text", "search", "email", "tel", "url", "password", "number"]',
+            app,
+        )
+        self.assertIn("focusedWorkspaceInput.isConnected", app)
+        self.assertIn(
+            "focusedWorkspaceInputObserver.observe(target.getRootNode(),",
+            app,
+        )
+        self.assertIn(
+            "body.viewport-panel-open.workspace-input-focused .runtime-overview",
+            admin_css,
+        )
+        self.assertIn("keepLatestMessageAboveComposer", (
+            root / "host/runtime/workspace/chat/ui/agent_chat.js"
+        ).read_text())
 
     def test_workspace_navigation_fences_stale_fetches_and_actions(self) -> None:
         app = (
