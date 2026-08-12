@@ -848,21 +848,22 @@ button.attachment-clear {
   #sidebar-open, #sidebar-close { display: inline-flex; }
 
   .chat-head {
-    align-items: center; display: grid; gap: 0.25rem 0.4rem;
-    grid-template-areas: "menu title" "actions actions";
-    grid-template-columns: 44px minmax(0, 1fr);
+    align-items: center;
+    display: flex;
+    gap: 0.35rem;
+    min-height: 3.25rem;
     /* The host toolbar already consumes the device's top safe area. Applying
        it again inside this nested workspace created an empty black band above
        the thread title on notched iPhones. */
-    padding: 0.35rem max(0.6rem, env(safe-area-inset-right)) 0.4rem max(0.6rem, env(safe-area-inset-left));
+    padding: 0.25rem max(0.5rem, env(safe-area-inset-right)) 0.25rem max(0.5rem, env(safe-area-inset-left));
   }
-  #sidebar-open { grid-area: menu; height: 44px; width: 44px; }
-  .chat-head-title { grid-area: title; }
-  .thread-title-row { justify-content: space-between; }
-  .thread-title { flex: 1 1 auto; font-size: 1rem; }
-  button.thread-rename-button { height: 44px; margin: -0.4rem 0; width: 44px; }
-  button.thread-rename-button svg { height: 17px; width: 17px; }
-  .chat-head-actions { display: grid; gap: 0.35rem; grid-area: actions; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
+  .chat-head-title { flex: 1 1 auto; }
+  .thread-title-row { justify-content: flex-start; }
+  .thread-title { flex: 1 1 auto; font-size: 0.9rem; }
+  .thread-subtitle { display: none; }
+  button.thread-rename-button { height: 44px; margin: -0.35rem 0; width: 36px; }
+  button.thread-rename-button svg { height: 16px; width: 16px; }
+  .chat-head-actions { display: flex; gap: 0; margin-left: auto; width: auto; }
   .chat-head-actions > button { justify-content: center; min-height: 44px; min-width: 0; }
 
   button.activity-switch,
