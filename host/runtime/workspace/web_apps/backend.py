@@ -67,6 +67,7 @@ CONVERSATION_EVENT_TYPES = (
 )
 MAX_PATH_DEPTH = 16
 MAX_PATH_KEY_BYTES = 128
+MAX_DATA_READ_PATHS = 16
 MAX_BATCH_OPERATIONS = 32
 JAVASCRIPT_FORBIDDEN = re.compile(r"\bimport\b")
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -699,18 +700,62 @@ def load_app_data(app_id: str) -> dict[str, Any]:
 
 def read_app_data_path(app_id: str, body: Any) -> dict[str, Any]:
     request = _required_object(body, "data read")
-    _require_keys(request, {"path"}, required={"path"})
-    path = _validated_path(request.get("path"))
+    _require_keys(request, {"path", "paths", "missing"}, required=set())
+    has_path = "path" in request
+    has_paths = "paths" in request
+    if has_path == has_paths:
+        raise WorkspaceError(
+            HTTPStatus.BAD_REQUEST,
+            "data read requires exactly one of path or paths",
+        )
+    missing = request.get("missing", "error")
+    if missing not in {"error", "null"}:
+        raise WorkspaceError(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "missing must be error or null",
+        )
+
+    if has_path:
+        paths = [_validated_path(request.get("path"))]
+    else:
+        raw_paths = request.get("paths")
+        if not isinstance(raw_paths, list) or not 1 <= len(raw_paths) <= MAX_DATA_READ_PATHS:
+            raise WorkspaceError(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                f"paths must contain 1 to {MAX_DATA_READ_PATHS} paths",
+            )
+        paths = [_validated_path(path) for path in raw_paths]
+        path_keys = [tuple(path) for path in paths]
+        if len(set(path_keys)) != len(path_keys):
+            raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "paths must be unique")
+
     state = load_app_data(app_id)
-    value: Any = state["data"]
-    for segment in path:
-        value = _child(value, segment)
-    return {
-        "revision": state["revision"],
-        "path": path,
-        "value": value,
-        "updated_at": state["updated_at"],
-    }
+    values = []
+    for path in paths:
+        value: Any = state["data"]
+        try:
+            for segment in path:
+                value = _child(value, segment)
+        except WorkspaceError:
+            if missing != "null":
+                raise
+            value = None
+        values.append({"path": path, "value": value})
+
+    if has_path:
+        result = {
+            "revision": state["revision"],
+            **values[0],
+            "updated_at": state["updated_at"],
+        }
+    else:
+        result = {
+            "revision": state["revision"],
+            "values": values,
+            "updated_at": state["updated_at"],
+        }
+    _require_state_response_fits(result)
+    return result
 
 
 def apply_agent_action(body: Any, app_id: str) -> dict[str, Any]:

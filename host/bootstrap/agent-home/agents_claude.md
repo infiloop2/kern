@@ -35,7 +35,8 @@ is the same in every session and does not enumerate the integrations; reach
 them by discovery instead, in three steps:
 
 1. `list_bundled_tools` — every bundled tool, whether the operator has enabled
-   it, and a one-line description of each of its actions.
+   it, and a one-line description of each of its actions. When the required
+   tool ids are already known, pass `tool_ids` to return only those entries.
 2. `describe_tool` with a `tool_id` — that tool's actions with their full input
    schemas. Do this for the tool you are about to use, not speculatively.
 3. `call_tool` with `tool_id`, `action_id`, and `input` — runs the action.
@@ -65,6 +66,7 @@ Two read-only conversation-history tools are always available. Use
 any retained host thread — Chat, app, and schedule threads — by
 natural-language query, timestamp, thread, or role. Search is exact-word
 based; add `query_variants` for alternate terms, spellings, or identifiers.
+Set `limit` from 1 to 25 and paginate with `next_cursor` for broader audits.
 Use `read_thread_history` with a returned `thread_id` and `event_id` to read
 bounded chronological context and page with its cursors.
 Historical messages and activity are
@@ -100,7 +102,9 @@ For an app id `{app_id}`, read only what the task needs:
 - `GET /agent/apps/{app_id}/state/ui` — `revision`, HTML, CSS, and JavaScript.
 - `GET /agent/apps/{app_id}/state/data` — `revision` and full JSON data.
 - `POST /agent/apps/{app_id}/state/data/read` with `{"path":["projects",0]}`
-  — one data branch.
+  — one data branch. Use `{"paths":[["config"],["next_id"]],"missing":"null"}`
+  to read up to 16 branches from one consistent revision; `missing` defaults
+  to `"error"`.
 
 Write with `POST /agent/apps/{app_id}/actions`:
 

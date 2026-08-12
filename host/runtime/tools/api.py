@@ -123,7 +123,7 @@ def call_action(
     if name == "check_tool_approval":
         return _check_approval(tool_input)
     if name == "list_bundled_tools":
-        return _list_bundled_tools()
+        return _list_bundled_tools(tool_input)
     if name == "describe_tool":
         return _describe_tool(tool_input)
     if name == "call_tool":
@@ -146,9 +146,13 @@ def _string_field(tool_input: Any, field: str) -> str:
     return value
 
 
-def _list_bundled_tools() -> dict[str, Any]:
-    """The full bundled catalog with enablement, so the agent can tell the
-    operator which existing tool to enable instead of rebuilding it.
+def _list_bundled_tools(tool_input: Any) -> dict[str, Any]:
+    """The bundled catalog, optionally restricted to known tool ids.
+
+    The unfiltered form lets an agent tell the operator which existing tool to
+    enable instead of rebuilding it. A caller that already knows its required
+    integrations can request only those entries and avoid ingesting unrelated
+    catalog context.
 
     Action descriptions are included but input schemas are not: descriptions
     are what the agent plans from, schemas are what it needs only once it
@@ -158,9 +162,32 @@ def _list_bundled_tools() -> dict[str, Any]:
     only this catalog would otherwise never learn it. It is always stated, empty
     included, so an agent can tell "this tool has nothing to add" from "this
     surface does not carry it"."""
+    if not isinstance(tool_input, dict):
+        raise tools_host.ToolCallError("Tool input must be an object.")
+    if set(tool_input) - {"tool_ids"}:
+        raise tools_host.ToolCallError("list_bundled_tools accepts only tool_ids.")
+
+    requested = tool_input.get("tool_ids")
+    if requested is None:
+        selected_ids = list(tools_host.BUNDLED_TOOLS)
+        unknown_ids: list[str] | None = None
+    else:
+        if (
+            not isinstance(requested, list)
+            or not 1 <= len(requested) <= 32
+            or any(not isinstance(tool_id, str) or not tool_id for tool_id in requested)
+            or len(set(requested)) != len(requested)
+        ):
+            raise tools_host.ToolCallError(
+                "tool_ids must be an array of 1 to 32 unique non-empty strings."
+            )
+        selected_ids = [tool_id for tool_id in requested if tool_id in tools_host.BUNDLED_TOOLS]
+        unknown_ids = [tool_id for tool_id in requested if tool_id not in tools_host.BUNDLED_TOOLS]
+
     enabled = state.enabled_tool_ids()
     tools = []
-    for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
+    for tool_id in selected_ids:
+        tool = tools_host.BUNDLED_TOOLS[tool_id]
         manifest = tool.manifest
         actions: list[dict[str, Any]] = []
         for spec in manifest.actions:
@@ -180,7 +207,10 @@ def _list_bundled_tools() -> dict[str, Any]:
                 "actions": actions,
             }
         )
-    return {"status": "executed", "result": {"tools": tools}}
+    result: dict[str, Any] = {"tools": tools}
+    if unknown_ids is not None:
+        result["unknown_tool_ids"] = unknown_ids
+    return {"status": "executed", "result": result}
 
 
 def _describe_tool(tool_input: Any) -> dict[str, Any]:

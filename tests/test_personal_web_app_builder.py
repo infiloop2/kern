@@ -652,6 +652,88 @@ class BrowserRoutingTests(unittest.TestCase):
             },
         )
 
+    def test_multi_path_read_returns_branches_from_one_revision(self) -> None:
+        state = {
+            "revision": 9,
+            "data": {
+                "config": {"paused": False, "lane1": {"daily_target": 5}},
+                "next_id": 25,
+            },
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state) as load:
+            result = backend.read_app_data_path(
+                "app-9",
+                {
+                    "paths": [
+                        ["config", "paused"],
+                        ["config", "lane1"],
+                        ["next_id"],
+                    ]
+                },
+            )
+        self.assertEqual(
+            result,
+            {
+                "revision": 9,
+                "values": [
+                    {"path": ["config", "paused"], "value": False},
+                    {
+                        "path": ["config", "lane1"],
+                        "value": {"daily_target": 5},
+                    },
+                    {"path": ["next_id"], "value": 25},
+                ],
+                "updated_at": "now",
+            },
+        )
+        load.assert_called_once_with("app-9")
+
+    def test_multi_path_read_can_return_null_for_missing_branches(self) -> None:
+        with patch.object(
+            backend,
+            "load_app_data",
+            return_value={"revision": 9, "data": {"days": {}}, "updated_at": "now"},
+        ):
+            result = backend.read_app_data_path(
+                "app-9",
+                {
+                    "paths": [["days", "2026-08-12"], ["missing"]],
+                    "missing": "null",
+                },
+            )
+        self.assertEqual(
+            result["values"],
+            [
+                {"path": ["days", "2026-08-12"], "value": None},
+                {"path": ["missing"], "value": None},
+            ],
+        )
+
+    def test_data_path_read_rejects_ambiguous_or_invalid_multi_path_requests(self) -> None:
+        invalid_requests = (
+            {},
+            {"path": ["one"], "paths": [["two"]]},
+            {"paths": []},
+            {"paths": [["same"], ["same"]]},
+            {"paths": [[f"key-{index}"] for index in range(17)]},
+            {"path": ["one"], "missing": "ignore"},
+        )
+        for request in invalid_requests:
+            with self.subTest(request=request), self.assertRaises(backend.WorkspaceError):
+                backend.read_app_data_path("app-9", request)
+
+    def test_multi_path_read_errors_on_missing_branch_by_default(self) -> None:
+        with (
+            patch.object(
+                backend,
+                "load_app_data",
+                return_value={"revision": 9, "data": {}, "updated_at": "now"},
+            ),
+            self.assertRaisesRegex(backend.WorkspaceError, "data path does not exist"),
+        ):
+            backend.read_app_data_path("app-9", {"paths": [["missing"]]})
+
     def test_revert_is_not_an_agent_route(self) -> None:
         # Reverting agent changes is a human control; the agent API must
         # not gain a revert verb.

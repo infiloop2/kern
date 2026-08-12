@@ -98,7 +98,8 @@ The bundled catalog is not enumerated in the listing. The agent reaches it by
 explicit discovery through three listed actions, whose results append to the
 context instead of rewriting its prefix:
 
-- **`list_bundled_tools`** returns the full bundled catalog — `tool_id`, display
+- **`list_bundled_tools`** returns the full bundled catalog by default, or only
+  the entries named in an optional `tool_ids` array — `tool_id`, display
   name, description, connection type, `enabled`, and each action's id and
   one-line description — from manifests plus the enablement set only (no
   credentials, no third-party calls). Action input schemas are deliberately
@@ -106,7 +107,9 @@ context instead of rewriting its prefix:
   distinguish *bundled but not enabled* (ask the operator to enable it under
   Home > Integrations) from *not bundled at all* (no host integration exists; the
   agent tells the operator the tool is not implemented and to file a feature
-  request), instead of inferring from an empty list.
+  request), instead of inferring from an empty list. Filtered responses include
+  `unknown_tool_ids`, so a known dependency can be checked without loading the
+  unrelated catalog.
 - **`describe_tool`** takes a `tool_id` and returns that tool's actions with
   their full input schemas — fetched once the agent has committed to using the
   tool, rather than carried in every prompt.

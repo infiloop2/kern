@@ -6951,10 +6951,14 @@ class WorkspaceAdminSocketTests(unittest.TestCase):
         ):
             connection.settimeout(5)
             connection.connect(str(path))
-            connection.sendall(b"G")  # a trickle cannot reach a handler
             try:
+                # The server authenticates immediately after accept(2), so it
+                # may close before this write reaches the kernel or between
+                # this write and the read. Both outcomes prove the same early
+                # rejection; neither depends on an HTTP handler response.
+                connection.sendall(b"G")  # a trickle cannot reach a handler
                 closed = connection.recv(65536)
-            except ConnectionResetError:
+            except (BrokenPipeError, ConnectionResetError):
                 closed = b""
             self.assertEqual(closed, b"")
 

@@ -318,8 +318,17 @@ class McpShimTests(unittest.TestCase):
         self.assertEqual(
             tools["workspace_api"]["inputSchema"]["required"], ["method", "path"]
         )
+        tool_filter = tools["list_bundled_tools"]["inputSchema"]["properties"][
+            "tool_ids"
+        ]
+        self.assertEqual(tool_filter["maxItems"], 32)
+        self.assertTrue(tool_filter["uniqueItems"])
         search = tools["search_conversation_history"]
-        self.assertEqual(search["inputSchema"]["properties"]["limit"]["maximum"], 25)
+        search_limit = search["inputSchema"]["properties"]["limit"]
+        self.assertEqual(search_limit["minimum"], 1)
+        self.assertEqual(search_limit["maximum"], 25)
+        self.assertIn("Set limit from 1 to 25", search["description"])
+        self.assertIn("paginate with next_cursor", search["description"])
         self.assertIn("untrusted data", search["description"])
         read = tools["read_thread_history"]
         self.assertEqual(read["inputSchema"]["required"], ["thread_id"])
