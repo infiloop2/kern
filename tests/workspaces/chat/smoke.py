@@ -409,6 +409,21 @@ def _assert_mobile_header_and_navigation(page: Any, frame: Any) -> None:
         raise AssertionError(
             f"nested Chat header reapplied the device safe area: {header_padding_top}px"
         )
+    header_box = frame.locator(".chat-head").bounding_box()
+    title_box = frame.locator(".chat-head-title").bounding_box()
+    actions_box = frame.locator(".chat-head-actions").bounding_box()
+    if not header_box or not title_box or not actions_box:
+        raise AssertionError("mobile Chat header controls are not visible")
+    if header_box["height"] > 54:
+        raise AssertionError(f"mobile Chat header is too tall: {header_box}")
+    vertical_offset = abs(
+        title_box["y"] + title_box["height"] / 2
+        - actions_box["y"] - actions_box["height"] / 2
+    )
+    if vertical_offset > 2:
+        raise AssertionError(
+            f"mobile Chat title and actions are not on one row: title={title_box}, actions={actions_box}"
+        )
 
     frame.get_by_role("button", name="Rename thread", exact=True).click()
     rename_input = frame.locator("#rename-thread-input")

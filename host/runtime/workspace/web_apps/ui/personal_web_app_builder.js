@@ -729,8 +729,8 @@ function syncCanvasState() {
   const firstRun = !snapshot.session;
   $("empty-title").textContent = firstRun ? "Build this app" : "Your app will appear here";
   $("empty-description").textContent = firstRun
-    ? "Describe what you want in the command box above."
-    : "Tell the agent what to build next in the command box above.";
+    ? "Describe what you want in the command box."
+    : "Tell the agent what to build next in the command box.";
 }
 
 function eventPayload(element, action = element.dataset.action, draggedValue = "") {

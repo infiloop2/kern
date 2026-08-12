@@ -647,28 +647,51 @@ button.latest-agent-stop svg { height: 12px; width: 12px; }
 
 @media (max-width: 720px) {
   .app-view-toolbar {
-    align-items: center; display: grid; gap: 0.25rem;
-    grid-template-columns: minmax(0, 1fr);
-    padding-bottom: 0.2rem;
+    align-items: center;
+    display: flex;
+    gap: 0.25rem;
+    min-height: 3.25rem;
+    padding: 0.25rem max(0.5rem, env(safe-area-inset-right)) 0.25rem max(0.5rem, env(safe-area-inset-left));
   }
-  .app-view-mode { min-width: 0; }
-  .app-title-row { align-items: center; display: grid; gap: 0.1rem; }
+  .app-view-mode { flex: 1 1 auto; min-width: 0; }
+  .app-title-row { align-items: baseline; display: flex; gap: 0.4rem; }
+  .app-view-mode strong { font-size: 0.9rem; }
   .revision-label { font-size: 0.62rem; }
-  .app-view-actions { display: grid; gap: 0.2rem; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-left: 0; width: 100%; }
-  .app-view-actions button span { display: inline; font-size: 0.56rem; line-height: 1; }
-  button.app-toolbar-button { border-radius: 9px; flex-direction: column; gap: 0.2rem; min-height: 3rem; min-width: 0; padding: 0.35rem 0.15rem; width: 100%; }
+  .app-view-actions { display: flex; gap: 0; margin-left: auto; width: auto; }
+  .app-view-actions button span { display: none; }
+  button.app-toolbar-button { border-radius: 9px; min-height: 44px; min-width: 36px; padding: 0; width: 36px; }
+  button.app-toolbar-button svg { height: 16px; width: 16px; }
+
+  /* On phones the app itself gets the uninterrupted middle of the viewport.
+     The command surface becomes a bottom dock, with safe-area padding supplied
+     by the installed PWA when it is running edge to edge. */
+  .app-view { grid-template-rows: auto minmax(0, 1fr) auto; }
+  .app-view-toolbar { grid-row: 1; }
+  .app-canvas { grid-row: 2; }
+  .agent-command-surface {
+    border-bottom: 0;
+    border-top: 1px solid var(--border);
+    grid-row: 3;
+    padding: 0.25rem max(0.7rem, env(safe-area-inset-right)) max(0.5rem, env(safe-area-inset-bottom)) max(0.7rem, env(safe-area-inset-left));
+  }
+  .agent-command-surface .latest-agent-card { grid-row: 1; padding-bottom: 0.35rem; padding-top: 0; }
+  .agent-command-surface .chat-composer { grid-row: 2; }
   #recovery-close { min-height: 44px; min-width: 44px; }
   #stop-turn { min-height: 44px; }
   .agent-command-surface .attach-button,
   .agent-command-surface .send-button { height: 44px; min-height: 44px; min-width: 44px; width: 44px; }
   .agent-command-surface .send-button { margin-right: 0; padding: 0; }
   .agent-command-surface .send-button span { display: none; }
-  .agent-command-surface { padding: 0 max(0.7rem, env(safe-area-inset-right)) 0.5rem max(0.7rem, env(safe-area-inset-left)); }
   .latest-agent-card { gap: 0.35rem; grid-template-columns: auto minmax(0, 1fr) auto; padding-left: 0; padding-right: 0; }
   .latest-agent-message { max-height: 4.3em; }
   .latest-agent-stop { grid-column: 2; justify-self: start; }
   .latest-agent-dismiss { align-self: start; grid-column: 3; grid-row: 1 / span 2; min-height: 44px; min-width: 44px; }
-  .settings-popover { right: max(0.7rem, env(safe-area-inset-right)); width: calc(100vw - max(1.4rem, env(safe-area-inset-left) + env(safe-area-inset-right))); }
+  .settings-popover {
+    bottom: calc(100% - 0.35rem);
+    right: max(0.7rem, env(safe-area-inset-right));
+    top: auto;
+    width: calc(100vw - max(1.4rem, env(safe-area-inset-left) + env(safe-area-inset-right)));
+  }
   .settings-popover .agent-settings { grid-template-columns: 1fr; }
   .settings-popover .agent-settings select { min-height: 44px; }
   .recovery-drawer { padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) 1rem; width: 100%; }

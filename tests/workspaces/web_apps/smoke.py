@@ -1129,6 +1129,38 @@ def mobile_smoke(page: Any) -> None:
     )
     if toolbar_overflow > 1:
         raise AssertionError(f"mobile Web App toolbar overflows by {toolbar_overflow}px")
+    toolbar_box = frame.locator("#app-view-toolbar").bounding_box()
+    title_box = frame.locator(".app-view-mode").bounding_box()
+    actions_box = frame.locator(".app-view-actions").bounding_box()
+    if not toolbar_box or not title_box or not actions_box:
+        raise AssertionError("mobile Web App toolbar controls are not visible")
+    if toolbar_box["height"] > 54:
+        raise AssertionError(f"mobile Web App toolbar is too tall: {toolbar_box}")
+    vertical_offset = abs(
+        title_box["y"] + title_box["height"] / 2
+        - actions_box["y"] - actions_box["height"] / 2
+    )
+    if vertical_offset > 2:
+        raise AssertionError(
+            f"mobile Web App title and actions are not on one row: title={title_box}, actions={actions_box}"
+        )
+    canvas_box = frame.locator(".app-canvas").bounding_box()
+    composer_box = frame.locator("#agent-command-surface").bounding_box()
+    shell_box = frame.locator("#builder-shell").bounding_box()
+    if not canvas_box or not composer_box or not shell_box:
+        raise AssertionError("mobile Web App canvas or bottom composer is not visible")
+    if canvas_box["y"] + canvas_box["height"] > composer_box["y"] + 1:
+        raise AssertionError(
+            f"mobile Web App composer is not below the canvas: canvas={canvas_box}, composer={composer_box}"
+        )
+    bottom_offset = abs(
+        composer_box["y"] + composer_box["height"]
+        - shell_box["y"] - shell_box["height"]
+    )
+    if bottom_offset > 1:
+        raise AssertionError(
+            f"mobile Web App composer is not docked to the bottom: shell={shell_box}, composer={composer_box}"
+        )
     frame.get_by_role("button", name="Rename app", exact=True).click()
     expect(frame.get_by_role("dialog", name="Rename app")).to_be_visible()
     if frame.locator("#rename-app-input").evaluate(
