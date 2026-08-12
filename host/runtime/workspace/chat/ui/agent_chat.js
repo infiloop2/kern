@@ -17,6 +17,8 @@ let threadEvents = [];
 let threadEventPages = freshThreadEventPages();
 let loadingOlderThreadEvents = false;
 let lastChatScrollTop = 0;
+let keepComposerTailVisible = false;
+let composerTailFrame = 0;
 let openThreadAtTail = false;
 // Keep each opened thread's loaded window for the lifetime of this mounted
 // surface. A browser reload intentionally starts fresh.
@@ -1277,6 +1279,17 @@ function autosizeComposer() {
   area.style.height = `${Math.min(area.scrollHeight, 200)}px`;
 }
 
+function keepLatestMessageAboveComposer() {
+  if (!keepComposerTailVisible) return;
+  cancelAnimationFrame(composerTailFrame);
+  composerTailFrame = requestAnimationFrame(() => {
+    if (!keepComposerTailVisible) return;
+    const scroller = $("chat-scroll");
+    scroller.scrollTop = scroller.scrollHeight;
+    lastChatScrollTop = scroller.scrollTop;
+  });
+}
+
 chatRoot.addEventListener("click", event => {
   const linkButton = event.target.closest && event.target.closest(".md-copy-link");
   if (linkButton) {
@@ -1347,6 +1360,12 @@ $("chat-scroll").addEventListener("scroll", () => {
   if (!movedUp || scroller.scrollTop > 160) return;
   loadOlderThreadEvents().catch(error => setStatus(error.message));
 }, { passive: true });
+$("chat-scroll").addEventListener("pointerdown", () => {
+  keepComposerTailVisible = false;
+}, { passive: true });
+$("chat-scroll").addEventListener("wheel", () => {
+  keepComposerTailVisible = false;
+}, { passive: true });
 $("stop-task").addEventListener("click", () => stopRunningTurn().catch(error => setStatus(error.message)));
 $("create-task").addEventListener("click", () => sendMessage().catch(error => setStatus(error.message)));
 $("attach-file").addEventListener("click", () => attachFile().catch(error => setStatus(error.message)));
@@ -1366,8 +1385,23 @@ $("composer-options").addEventListener("mouseleave", () => {
 });
 $("new-task").addEventListener("input", () => {
   autosizeComposer();
+  keepLatestMessageAboveComposer();
   saveComposerDraft();
 });
+$("new-task").addEventListener("focus", () => {
+  const scroller = $("chat-scroll");
+  keepComposerTailVisible = (
+    scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60
+  );
+  keepLatestMessageAboveComposer();
+});
+$("new-task").addEventListener("blur", () => {
+  keepComposerTailVisible = false;
+  cancelAnimationFrame(composerTailFrame);
+});
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", keepLatestMessageAboveComposer, { passive: true });
+}
 $("new-task").addEventListener("keydown", event => {
   const sendKey = event.key === "Enter" && !event.isComposing && (!event.shiftKey || event.metaKey || event.ctrlKey);
   if (!sendKey) return;

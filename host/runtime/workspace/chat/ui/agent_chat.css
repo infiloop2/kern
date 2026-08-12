@@ -851,7 +851,10 @@ button.attachment-clear {
     align-items: center; display: grid; gap: 0.25rem 0.4rem;
     grid-template-areas: "menu title" "actions actions";
     grid-template-columns: 44px minmax(0, 1fr);
-    padding: max(0.35rem, env(safe-area-inset-top)) max(0.6rem, env(safe-area-inset-right)) 0.4rem max(0.6rem, env(safe-area-inset-left));
+    /* The host toolbar already consumes the device's top safe area. Applying
+       it again inside this nested workspace created an empty black band above
+       the thread title on notched iPhones. */
+    padding: 0.35rem max(0.6rem, env(safe-area-inset-right)) 0.4rem max(0.6rem, env(safe-area-inset-left));
   }
   #sidebar-open { grid-area: menu; height: 44px; width: 44px; }
   .chat-head-title { grid-area: title; }

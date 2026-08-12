@@ -402,6 +402,13 @@ def _assert_mobile_header_and_navigation(page: Any, frame: Any) -> None:
     )
     if header_overflow > 1:
         raise AssertionError(f"mobile Chat header overflows by {header_overflow}px")
+    header_padding_top = frame.locator(".chat-head").evaluate(
+        "element => parseFloat(getComputedStyle(element).paddingTop)"
+    )
+    if header_padding_top > 12:
+        raise AssertionError(
+            f"nested Chat header reapplied the device safe area: {header_padding_top}px"
+        )
 
     frame.get_by_role("button", name="Rename thread", exact=True).click()
     rename_input = frame.locator("#rename-thread-input")
@@ -777,11 +784,23 @@ def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
         page.set_viewport_size({"width": width, "height": full_height})
         composer.focus()
         composer.fill("keyboard viewport probe")
+        expect(body).to_have_class(re.compile(r"\bworkspace-input-focused\b"))
+        expect(page.locator("#runtime-overview")).to_be_hidden()
         page.set_viewport_size({"width": width, "height": keyboard_height})
         _assert_mobile_app_owns_viewport(page, frame, f"{width}x{full_height} keyboard")
 
+        distance_from_bottom = frame.locator("#chat-scroll").evaluate(
+            "element => element.scrollHeight - element.scrollTop - element.clientHeight"
+        )
+        if distance_from_bottom > 1:
+            raise AssertionError(
+                f"keyboard detached the latest message from the composer: {distance_from_bottom}px"
+            )
+
         composer.evaluate("element => element.blur()")
         page.set_viewport_size({"width": width, "height": full_height})
+        expect(body).not_to_have_class(re.compile(r"\bworkspace-input-focused\b"))
+        expect(page.locator("#runtime-overview")).to_be_visible()
         _assert_mobile_app_owns_viewport(page, frame, f"{width}x{full_height} restored")
 
     composer.fill("")
