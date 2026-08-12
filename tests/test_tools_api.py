@@ -132,6 +132,9 @@ class ActionListingTests(ToolsApiTestCase):
             ["list_bundled_tools", "describe_tool", "call_tool", "check_tool_approval"],
         )
         self.assertTrue(all(entry["input_schema"]["type"] == "object" for entry in listing))
+        catalog_schema = listing[0]["input_schema"]["properties"]["tool_ids"]
+        self.assertEqual(catalog_schema["maxItems"], 32)
+        self.assertTrue(catalog_schema["uniqueItems"])
 
     def test_listing_does_not_move_with_operator_state(self) -> None:
         # The declarations head the model prompt, so anything that varies with
@@ -253,6 +256,37 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertEqual(gmail["connection"], "oauth")
         self.assertEqual(gmail["display_name"], "Gmail")
         self.assertIn("search_messages", [action["id"] for action in gmail["actions"]])
+
+    def test_list_bundled_tools_filters_known_ids_and_reports_unknown_ids(self) -> None:
+        result = tools_api.call_action(
+            "list_bundled_tools",
+            {"tool_ids": ["twitter", "missing-tool", "fake_notes"]},
+        )["result"]
+        self.assertEqual(
+            [entry["tool_id"] for entry in result["tools"]],
+            ["twitter", "fake_notes"],
+        )
+        self.assertEqual(result["unknown_tool_ids"], ["missing-tool"])
+        self.assertTrue(result["tools"][1]["enabled"])
+
+        unfiltered = tools_api.call_action("list_bundled_tools", {})["result"]
+        self.assertNotIn("unknown_tool_ids", unfiltered)
+
+    def test_list_bundled_tools_rejects_invalid_filters(self) -> None:
+        invalid_inputs = (
+            None,
+            {"extra": True},
+            {"tool_ids": []},
+            {"tool_ids": ["twitter", "twitter"]},
+            {"tool_ids": [""]},
+            {"tool_ids": [7]},
+            {"tool_ids": [f"tool-{index}" for index in range(33)]},
+        )
+        for tool_input in invalid_inputs:
+            with self.subTest(tool_input=tool_input), self.assertRaises(
+                tools_host.ToolCallError
+            ):
+                tools_api.call_action("list_bundled_tools", tool_input)
 
     def test_catalog_carries_descriptions_but_not_schemas(self) -> None:
         # Descriptions are what the agent plans from; schemas are what it needs

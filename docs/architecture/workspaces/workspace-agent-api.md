@@ -43,6 +43,11 @@ and activity contents remain unchanged; structured event `type` and `role`
 fields distinguish their original kind without turning history into a live
 user message.
 
+The Codex-visible `search_conversation_history` declaration states its 1–25
+result limit and pagination requirement in both JSON Schema (`minimum` and
+`maximum`) and prose, so clients that omit schema bounds from rendered
+signatures still receive the constraint.
+
 For Web Apps, `GET /agent/apps` returns active and archived apps. Every other
 route for App data contains an immutable id:
 
@@ -63,6 +68,12 @@ it rewinds the App's UI/data state.
 There is intentionally no mapping from the caller's conversation thread to an
 app. Any agent thread can work on any existing app when it knows or lists the
 app id; editable display names are never authorization or identity.
+
+`POST /agent/apps/{app_id}/state/data/read` accepts either `path` for its
+original single-branch response or `paths` for up to 16 branches read from one
+consistent revision. Multi-path responses return ordered `{path, value}`
+entries. `missing` defaults to `"error"`; `"null"` keeps sparse operational
+reads compact by returning `null` for absent branches.
 
 Global routes are:
 

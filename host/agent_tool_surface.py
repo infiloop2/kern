@@ -42,8 +42,9 @@ _NO_ARGUMENTS: JSONObject = {
 LIST_BUNDLED_TOOLS_TOOL: JSONObject = {
     "name": "list_bundled_tools",
     "description": (
-        "List every tool bundled with this Kern host: its tool_id, whether the operator "
-        "has enabled it, and a one-line description of each action. Start here, then call "
+        "List tools bundled with this Kern host: their tool_id, whether the operator "
+        "has enabled them, and a one-line description of each action. Omit tool_ids for "
+        "the full catalog, or pass known ids to return only those tools. Start here, then call "
         "describe_tool for the schemas of the actions you intend to use and call_tool to "
         "run one. An action marked approval=operator queues for operator approval instead "
         "of running immediately. A tool listed here but not enabled exists on the host but "
@@ -53,7 +54,20 @@ LIST_BUNDLED_TOOLS_TOOL: JSONObject = {
         "agent_notes adds to a tool's description: how to use it correctly, including what to do "
         "when no action covers what you need; follow it. Empty means there is nothing to add."
     ),
-    "input_schema": _NO_ARGUMENTS,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tool_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+                "maxItems": 32,
+                "uniqueItems": True,
+                "description": "Optional known tool ids to return instead of the full catalog.",
+            },
+        },
+        "additionalProperties": False,
+    },
 }
 
 DESCRIBE_TOOL_TOOL: JSONObject = {
