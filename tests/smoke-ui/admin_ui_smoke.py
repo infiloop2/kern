@@ -130,6 +130,12 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
             ) from exc
         try:
             if scope in {"all", "core"}:
+                route_restore = browser.new_context()
+                route_restore_page = route_restore.new_page()
+                report_page_errors(route_restore_page, "workspace route supersession")
+                workspace_route_supersession_smoke(route_restore_page, url)
+                route_restore.close()
+
                 desktop = browser.new_context()
                 desktop.grant_permissions(["clipboard-read", "clipboard-write"], origin=url.rstrip("/"))
                 desktop_page = desktop.new_page()
@@ -209,6 +215,141 @@ def log_in(page, url: str) -> None:
     page.locator("#password").fill(PASSWORD)
     page.get_by_role("button", name="Log in").click()
     expect(page.locator("#app")).to_be_visible()
+
+
+def workspace_route_supersession_smoke(page, url: str) -> None:
+    """A delayed initial deep link must not undo a newer navigation, and a
+    transient index failure must not poison later Workspace opens."""
+    from playwright.sync_api import expect
+
+    first_index = True
+
+    def fail_first_workspace_index(route) -> None:
+        nonlocal first_index
+        if first_index:
+            first_index = False
+            route.fulfill(
+                status=503,
+                content_type="application/json",
+                body='{"error":{"message":"temporary workspace index failure"}}',
+            )
+        else:
+            route.continue_()
+
+    page.route("**/v1/workspace/chat/threads*", fail_first_workspace_index)
+    page.goto(f"{url}#chat/thread-1")
+    page.evaluate(
+        """() => {
+          const nativeFetch = window.fetch.bind(window);
+          const chatReady = new Promise(resolve => { window.__releaseChatMount = resolve; });
+          window.fetch = (input, options) => String(input) === "/workspace/chat.html"
+            ? chatReady.then(() => nativeFetch(input, options))
+            : nativeFetch(input, options);
+        }"""
+    )
+    page.locator("#password").fill(PASSWORD)
+    page.get_by_role("button", name="Log in").click()
+    expect(page.locator("#app")).to_be_visible()
+    page.wait_for_function(
+        "() => history.state?.kernWorkspaceRoute === 'chat' "
+        "&& history.state?.itemId === 'thread-1'"
+    )
+    page.get_by_role("button", name="Home", exact=True).click()
+    expect(page).to_have_url(re.compile(r"#home$"))
+    page.evaluate("window.__releaseChatMount()")
+    page.wait_for_function("() => Boolean(window.KernWorkspaceRoots.chat)")
+    for _ in range(100):
+        if not first_index:
+            break
+        page.wait_for_timeout(100)
+    if first_index:
+        raise AssertionError("the initial Workspace index request was not exercised")
+    page.wait_for_timeout(100)
+    expect(page.locator("#panel-home")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#home$"))
+    page.get_by_role("button", name="New chat", exact=True).click()
+    expect(page.locator("#panel-workspace-chat")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#chat/new$"))
+
+    archived = page.request.post(
+        f"{url.rstrip('/')}/v1/workspace/chat/threads/thread-1/archive",
+        headers={"X-Kern-Csrf": "1"},
+    )
+    if not archived.ok:
+        raise AssertionError(f"could not prepare archived route regression: {archived.status}")
+    page.evaluate("window.KernHost.refreshNavigation()")
+    page.get_by_role("button", name="Home", exact=True).click()
+    page.get_by_role("button", name="Memory", exact=True).click()
+    expect(page.locator("#panel-workspace-global")).to_be_visible()
+    delayed_archived_routes = []
+
+    def delay_archived_index(route) -> None:
+        delayed_archived_routes.append(route)
+
+    page.route("**/v1/workspace/chat/threads?archived=true", delay_archived_index)
+    page.evaluate(
+        """() => {
+          history.pushState({ kernWorkspaceRoute: "chat", itemId: "thread-1" }, "", "#chat/thread-1");
+          dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+        }"""
+    )
+    for _ in range(100):
+        if delayed_archived_routes:
+            break
+        page.wait_for_timeout(25)
+    if not delayed_archived_routes:
+        raise AssertionError("the archived thread lookup was not delayed")
+    # Child-owned navigation must invalidate this older host restore even
+    # though it does not pass through a host sidebar action.
+    page.evaluate("window.KernHost.navigateWorkspace('memory')")
+    delayed_archived_routes.pop().continue_()
+    page.unroute("**/v1/workspace/chat/threads?archived=true", delay_archived_index)
+    page.wait_for_timeout(150)
+    expect(page.locator('[data-action="show-chat-archive"]')).to_have_attribute(
+        "aria-pressed", "false"
+    )
+    expect(page.locator("#panel-workspace-global")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#memory$"))
+    restored = page.request.post(
+        f"{url.rstrip('/')}/v1/workspace/chat/threads/thread-1/unarchive",
+        headers={"X-Kern-Csrf": "1"},
+    )
+    if not restored.ok:
+        raise AssertionError(f"could not clean up archived route regression: {restored.status}")
+
+    # A sidebar index is best-effort context, not a prerequisite for an
+    # unrelated global Workspace deep link.
+    page.unroute("**/v1/workspace/chat/threads*", fail_first_workspace_index)
+
+    def fail_chat_index(route) -> None:
+        route.fulfill(
+            status=503,
+            content_type="application/json",
+            body='{"error":{"message":"chat index unavailable"}}',
+        )
+
+    seeded_memory = page.request.put(
+        f"{url.rstrip('/')}/v1/workspace/memory/pages/route-regression",
+        headers={"X-Kern-Csrf": "1"},
+        data={
+            "description": "Use before planning a release",
+            "content": "Keep release notes concise.",
+            "expected_revision": 0,
+        },
+    )
+    if not seeded_memory.ok:
+        raise AssertionError(
+            f"could not prepare global route regression: {seeded_memory.status}"
+        )
+    page.route("**/v1/workspace/chat/threads*", fail_chat_index)
+    page.context.clear_cookies()
+    page.goto(f"{url}#memory/route-regression")
+    page.locator("#password").fill(PASSWORD)
+    page.get_by_role("button", name="Log in").click()
+    expect(page.locator("#panel-workspace-global")).to_be_visible()
+    expect(page.locator("#memory-page-id")).to_have_value("route-regression")
+    expect(page).to_have_url(re.compile(r"#memory/route-regression$"))
+    page.unroute("**/v1/workspace/chat/threads*", fail_chat_index)
 
 
 def login_error_mapping_smoke(page, url: str) -> None:
@@ -303,7 +444,8 @@ def open_home_integration(page, guide_id: str) -> None:
             page.get_by_role("button", name="Home", exact=True).click()
     card = page.locator(f"#home-integration-groups [data-guide='{guide_id}']")
     expect(card).to_be_visible()
-    card.click()
+    with page.expect_response(lambda response: "/v1/network/policy" in response.url):
+        card.click()
     expect(page.locator("#panel-network")).to_be_visible()
     expect(page.locator("#integration-detail-title")).not_to_have_text("Integration")
 
@@ -361,6 +503,27 @@ def desktop_smoke(page, url: str) -> None:
     expect(headings.nth(1)).to_have_text("Apps")
     # Home plus the two first-class global Workspace resources.
     expect(page.locator("#sidebar .tab-button")).to_have_count(3)
+    expect(
+        page.locator("#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']")
+    ).to_be_visible()
+    original_viewport = page.viewport_size
+    page.set_viewport_size({"width": 1000, "height": 420})
+    sidebar_scroll = page.locator("#sidebar").evaluate(
+        """element => ({
+          overflowY: getComputedStyle(element).overflowY,
+          clientHeight: element.clientHeight,
+          scrollHeight: element.scrollHeight,
+          scrollTop: (element.scrollTop = element.scrollHeight),
+        })"""
+    )
+    if sidebar_scroll["overflowY"] != "auto":
+        raise AssertionError(f"Home sidebar is not scrollable: {sidebar_scroll}")
+    if sidebar_scroll["scrollHeight"] <= sidebar_scroll["clientHeight"]:
+        raise AssertionError(f"Home sidebar did not overflow the short viewport: {sidebar_scroll}")
+    if sidebar_scroll["scrollTop"] <= 0:
+        raise AssertionError(f"Home sidebar could not scroll to its lower controls: {sidebar_scroll}")
+    if original_viewport:
+        page.set_viewport_size(original_viewport)
     page.get_by_role("button", name="New chat", exact=True).click()
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
     expect(page.locator("#panel-workspace-chat").locator(".chat-app")).to_be_visible()
@@ -407,6 +570,12 @@ def desktop_smoke(page, url: str) -> None:
     page.locator("#runtime-overview .runtime-summary[data-provider='openai']").click()
     page.locator("#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']").click()
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#chat/thread-1$"))
+    page.locator("#runtime-overview .runtime-summary[data-provider='openai']").click()
+    expect(page.locator("#integration-detail-title")).to_have_text("OpenAI")
+    page.go_back()
+    expect(page.locator("#panel-workspace-chat")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#chat/thread-1$"))
     page.locator("#panel-workspace-chat #archive-thread").click()
     expect(page.locator("#chat-nav-items")).not_to_contain_text("First chat")
     page.get_by_role("button", name="Home", exact=True).click()
@@ -497,10 +666,14 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#home-integration-groups .home-integration-group h3")).to_have_text(
         ["AI inference", "Tools", "Manual"]
     )
+    combined_access_notice = page.locator("#tools-cross-access-notice")
+    expect(combined_access_notice).to_be_visible()
+    expect(page.locator("#panel-home").locator("#tools-cross-access-notice")).to_have_count(1)
+    expect(page.locator("#panel-network").locator("#tools-cross-access-notice")).to_have_count(0)
     integration_cards = page.locator("#home-integration-groups .home-integration-card")
-    expect(integration_cards).to_have_count(19)
-    expect(integration_cards.locator(".integration-logo")).to_have_count(19)
-    expect(integration_cards.locator(".integration-logo[data-logo-source='brand']")).to_have_count(19)
+    expect(integration_cards).to_have_count(20)
+    expect(integration_cards.locator(".integration-logo")).to_have_count(20)
+    expect(integration_cards.locator(".integration-logo[data-logo-source='brand']")).to_have_count(20)
     if integration_cards.locator(".integration-logo:not([aria-hidden='true'])").count():
         raise AssertionError("integration logos must remain decorative inside their labelled card buttons")
     grouped_ordering = page.locator("#home-integration-groups .home-integration-group").evaluate_all("""groups =>
@@ -1211,7 +1384,7 @@ def mobile_smoke(page, url: str) -> None:
     # Chat and Apps remain in the navigation drawer; Home has no duplicate
     # hero action on mobile.
     expect(page.locator("#home-hero")).to_have_count(0)
-    expect(page.locator("#home-integration-groups .home-integration-card .integration-logo")).to_have_count(19)
+    expect(page.locator("#home-integration-groups .home-integration-card .integration-logo")).to_have_count(20)
     assert_no_horizontal_overflow(page, "home")
 
     # The drawer closes on backdrop click, Escape, and destination selection.

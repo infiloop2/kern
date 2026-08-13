@@ -34,10 +34,14 @@
     return `${Math.abs(days)}d ${days >= 0 ? "ago" : "from now"}`;
   }
 
-  async function open(resource) {
+  async function open(resource, itemId = null) {
     if (!new Set(["memory", "schedules"]).has(resource)) return;
     state.resource = resource;
-    if (resource === "memory") state.memoryScope = "swarm";
+    if (resource === "memory") {
+      state.memoryScope = itemId && /^(?:app|thread|schedule)-/.test(itemId)
+        ? "individual"
+        : "swarm";
+    }
     state.deleted = false;
     state.selected = null;
     state.creating = false;
@@ -50,7 +54,13 @@
     $("memory-scope-toggle").hidden = resource !== "memory";
     renderMemoryScope();
     hideForms();
+    const openingRoute = window.location.hash;
     await loadItems(false);
+    if (itemId !== null) {
+      if (window.location.hash !== openingRoute) return undefined;
+      return selectItem(String(itemId), true);
+    }
+    return true;
   }
 
   async function loadItems(
@@ -109,6 +119,7 @@
     state.selected = null;
     state.creating = false;
     hideForms();
+    window.KernHost.navigateWorkspace("memory");
     renderMemoryScope();
     void loadItems(false, $("memory-search").value);
   }
@@ -160,9 +171,10 @@
     $("global-empty").hidden = false;
   }
 
-  async function selectItem(id) {
+  async function selectItem(id, propagateTransientError = false) {
     state.creating = false;
     const sequence = ++state.sequence;
+    window.KernHost.navigateWorkspace(state.resource, String(id));
     const path = state.resource === "memory"
       ? `/memory/pages/${encodeURIComponent(id)}`
       : `/schedules/${encodeURIComponent(id)}`;
@@ -175,14 +187,26 @@
       if (state.resource === "memory") await renderMemory(sequence);
       else await renderSchedule(sequence);
       status("");
+      return true;
     } catch (error) {
       if (sequence === state.sequence) status(error.message || "Could not load item", "error");
+      if (propagateTransientError && error.status !== 404) throw error;
+      return false;
     }
+  }
+
+  function cancelItem() {
+    state.selected = null;
+    state.creating = false;
+    hideForms();
+    renderList();
+    window.KernHost.navigateWorkspace(state.resource);
   }
 
   function newItem() {
     state.selected = null;
     state.creating = true;
+    window.KernHost.navigateWorkspace(state.resource);
     $("global-empty").hidden = true;
     if (state.resource === "memory") {
       $("schedule-form").hidden = true;
@@ -278,6 +302,7 @@
   async function saveMemory(event) {
     event.preventDefault();
     const operationSequence = state.sequence;
+    const operationRoute = window.location.hash;
     const pageId = $("memory-page-id").value.trim();
     const individual = /^(?:app|thread|schedule)-/.test(pageId);
     if (individual !== (state.memoryScope === "individual")) {
@@ -296,10 +321,15 @@
     };
     try {
       const response = await api("PUT", `/memory/pages/${encodeURIComponent(pageId)}`, body);
-      if (operationSequence !== state.sequence || state.resource !== "memory") return;
+      if (
+        operationSequence !== state.sequence
+        || state.resource !== "memory"
+        || window.location.hash !== operationRoute
+      ) return;
       state.creating = false;
       state.selected = response.page;
       await loadItems(false, $("memory-search").value);
+      if (window.location.hash !== operationRoute) return;
       await selectItem(pageId);
       status("Memory page saved", "success");
     } catch (error) {
@@ -310,11 +340,17 @@
   async function deleteMemory() {
     if (!state.selected || !confirm(`Delete memory page “${state.selected.page_id}”?`)) return;
     const operationSequence = state.sequence;
+    const operationRoute = window.location.hash;
     try {
       await api("DELETE", `/memory/pages/${encodeURIComponent(state.selected.page_id)}?expected_revision=${state.selected.revision}`);
-      if (operationSequence !== state.sequence || state.resource !== "memory") return;
+      if (
+        operationSequence !== state.sequence
+        || state.resource !== "memory"
+        || window.location.hash !== operationRoute
+      ) return;
       state.selected = null;
       hideForms();
+      window.KernHost.navigateWorkspace("memory");
       await loadItems(false);
       status("Memory page moved to Deleted", "success");
     } catch (error) {
@@ -407,6 +443,7 @@
   async function saveSchedule(event) {
     event.preventDefault();
     const operationSequence = state.sequence;
+    const operationRoute = window.location.hash;
     const body = {
       name: $("schedule-name").value.trim(),
       message: $("schedule-message").value.trim(),
@@ -424,10 +461,15 @@
         ...body,
         expected_revision: state.selected.revision,
       });
-      if (operationSequence !== state.sequence || state.resource !== "schedules") return;
+      if (
+        operationSequence !== state.sequence
+        || state.resource !== "schedules"
+        || window.location.hash !== operationRoute
+      ) return;
       state.creating = false;
       state.selected = response.schedule;
       await loadItems(false);
+      if (window.location.hash !== operationRoute) return;
       await selectItem(String(response.schedule.id));
       status("Schedule saved", "success");
     } catch (error) {
@@ -438,11 +480,17 @@
   async function deleteSchedule() {
     if (!state.selected || !confirm(`Delete schedule “${state.selected.name}”?`)) return;
     const operationSequence = state.sequence;
+    const operationRoute = window.location.hash;
     try {
       await api("DELETE", `/schedules/${state.selected.id}?expected_revision=${state.selected.revision}`);
-      if (operationSequence !== state.sequence || state.resource !== "schedules") return;
+      if (
+        operationSequence !== state.sequence
+        || state.resource !== "schedules"
+        || window.location.hash !== operationRoute
+      ) return;
       state.selected = null;
       hideForms();
+      window.KernHost.navigateWorkspace("schedules");
       await loadItems(false);
       status("Schedule moved to Deleted", "success");
     } catch (error) {
@@ -515,6 +563,7 @@
   async function restoreRevision(resource, revision) {
     if (!state.selected || !confirm(`Restore revision ${revision}?`)) return;
     const operationSequence = state.sequence;
+    const operationRoute = window.location.hash;
     const selectedResource = resource === "memory" ? "memory" : "schedules";
     const base = resource === "memory"
       ? `/memory/pages/${encodeURIComponent(state.selected.page_id)}`
@@ -523,9 +572,14 @@
       await api("POST", `${base}/revisions/${revision}/restore`, {
         expected_revision: state.selected.revision,
       });
-      if (operationSequence !== state.sequence || state.resource !== selectedResource) return;
+      if (
+        operationSequence !== state.sequence
+        || state.resource !== selectedResource
+        || window.location.hash !== operationRoute
+      ) return;
       const id = selectedId();
       await loadItems(false);
+      if (window.location.hash !== operationRoute) return;
       await selectItem(id);
       status("Revision restored", "success");
     } catch (error) {
@@ -704,6 +758,7 @@
     state.deleted = !state.deleted;
     state.selected = null;
     hideForms();
+    window.KernHost.navigateWorkspace(state.resource);
     void loadItems(false);
   });
   $("global-load-more").addEventListener("click", () => void loadItems(true, $("memory-search").value));
@@ -732,10 +787,10 @@
   }
   $("memory-form").addEventListener("submit", saveMemory);
   $("memory-delete").addEventListener("click", () => void deleteMemory());
-  $("memory-cancel").addEventListener("click", hideForms);
+  $("memory-cancel").addEventListener("click", cancelItem);
   $("schedule-form").addEventListener("submit", saveSchedule);
   $("schedule-delete").addEventListener("click", () => void deleteSchedule());
-  $("schedule-cancel").addEventListener("click", hideForms);
+  $("schedule-cancel").addEventListener("click", cancelItem);
   $("schedule-cadence").addEventListener("change", syncCadence);
   $("schedule-runtime").addEventListener("change", () => syncSessionSelectors($("schedule-runtime").value));
   $("schedule-model").addEventListener("change", () => {

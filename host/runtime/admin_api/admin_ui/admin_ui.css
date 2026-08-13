@@ -681,7 +681,11 @@ main { min-width: 0; }
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
+  max-height: calc(100dvh - 5.4rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   position: sticky;
+  scrollbar-gutter: stable;
   top: 4.4rem;
 }
 
@@ -948,6 +952,8 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-word-python { color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45); }
 .integration-logo-npm_packages { background: #cb3837; border-radius: 8px; }
 .integration-logo-word-npm { font-family: ui-monospace, monospace; font-size: 0.94rem; letter-spacing: -0.12em; margin-left: -0.1em; }
+.integration-logo-tool-apify { background: #6c5ce7; }
+.integration-logo-word-apify { font-family: Arial, sans-serif; font-size: 1.55rem; }
 .integration-logo-tool-brave_search { background: #fb542b; }
 .integration-logo-tool-gmail { background: #fff; }
 .integration-logo-tool-gmail svg, .integration-logo-tool-google_calendar svg { height: 2.2rem; width: 2.2rem; }
@@ -1045,15 +1051,6 @@ body.viewport-panel-open #app {
 body.viewport-panel-open .shell { height: 100%; padding-bottom: 1rem; }
 
 body.viewport-panel-open main { min-height: 0; }
-
-/* With the page locked, a sidebar taller than the viewport (the apps
-   section grows with every retained chat/app) must scroll on its own or the
-   lower tabs become unreachable. */
-body.viewport-panel-open .sidebar {
-  max-height: calc(100dvh - 5.4rem);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
 
 /* ---------- Health tiles ---------- */
 
@@ -2367,9 +2364,8 @@ a:hover { text-decoration: underline; }
 
   .sidebar.mobile-open { transform: translateX(0); }
 
-  /* viewport-panel-open has a more specific desktop-era max-height rule.
-     Chat and Web Apps enable that mode, so without this override the drawer
-     becomes visibly shorter immediately after opening either workspace. */
+  /* The desktop sidebar leaves room for the top bar. The mobile drawer owns
+     the full viewport in every destination, including Chat and Web Apps. */
   body.viewport-panel-open .sidebar {
     height: 100dvh;
     max-height: 100dvh;

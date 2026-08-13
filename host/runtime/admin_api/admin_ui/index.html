@@ -179,6 +179,18 @@
               <p>Configure how agents use models, tools, and the internet.</p>
             </div>
           </div>
+          <div id="tools-cross-access-notice" class="access-notice access-notice-with-icon" role="note" hidden>
+            <svg class="access-notice-icon" width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
+              <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M10 8.5v5M10 5.9v.1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+            <span>
+              <strong>Review combined tool access.</strong>
+              The agent can use information from one enabled tool when acting through another.
+              Make sure this combined access is appropriate, especially for tools connected to
+              sensitive accounts such as Gmail, Google Calendar, or X.
+            </span>
+          </div>
           <div id="home-integration-groups" class="home-integration-groups">
             <div class="empty-state">Loading integrations…</div>
           </div>
@@ -266,18 +278,6 @@
         </section>
         <section class="network-group" aria-labelledby="tools-heading">
           <h2 id="tools-heading" class="network-group-heading">Tools</h2>
-          <div id="tools-cross-access-notice" class="access-notice access-notice-with-icon" role="note" hidden>
-            <svg class="access-notice-icon" width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
-              <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M10 8.5v5M10 5.9v.1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-            </svg>
-            <span>
-              <strong>Review combined tool access.</strong>
-              The agent can use information from one enabled tool when acting through another.
-              Make sure this combined access is appropriate, especially for tools connected to
-              sensitive accounts such as Gmail, Google Calendar, or X.
-            </span>
-          </div>
           <!-- Managed tool integrations and bundled tools share this list and
                are sorted together by their visible names. -->
           <div id="tools" class="integration-list"></div>

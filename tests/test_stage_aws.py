@@ -797,15 +797,19 @@ import tests.stage.stage_aws
 
     def test_live_rejected_credential_is_reclassified_as_unavailable(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
-        response = {
-            "result": {
-                "isError": True,
-                "content": [{"text": "Brave Search API rejected the configured API key."}],
+        for name, message in (
+            ("brave_search_search_web", "Brave Search API rejected the configured API key."),
+            ("apify_search_businesses", "Apify rejected the configured API key or Actor access."),
+        ):
+            response = {
+                "result": {
+                    "isError": True,
+                    "content": [{"text": message}],
+                }
             }
-        }
-        with patch.object(stage, "_shim_call", return_value=response):
-            with self.assertRaisesRegex(CredentialUnavailable, "rejected the configured API key"):
-                stage._shim_tool_result("brave_search_search_web", {"query": "Kern"})
+            with self.subTest(name=name), patch.object(stage, "_shim_call", return_value=response):
+                with self.assertRaisesRegex(CredentialUnavailable, "rejected the configured API key"):
+                    stage._shim_tool_result(name, {"query": "Kern"})
 
     def test_action_summary_appends_markdown(self) -> None:
         report = StageReport("all")

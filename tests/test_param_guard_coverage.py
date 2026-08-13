@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib
 import pkgutil
 import unittest
+from unittest.mock import patch
 
 import host.tools
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL, ParamGuardDenied
@@ -29,6 +30,8 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ("apify", "search_businesses", "location"),
+    ("apify", "search_businesses", "query"),
     ("brave_search", "search_web", "query"),
     ("instagram_discovery", "search_reels", "query"),
     ("instagram_discovery", "search_hashtag", "hashtag"),
@@ -54,6 +57,15 @@ TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning
 PROTOCOL = "provider protocol value on a fixed-destination typed path"
 
 EXEMPT_FIELDS = {
+    ("apify", "search_businesses", "limit"): TYPED,
+    ("apify", "search_businesses", "language"): TYPED,
+    ("apify", "search_businesses", "minimum_rating"): TYPED,
+    ("apify", "search_businesses", "website_filter"): TYPED,
+    ("apify", "search_businesses", "skip_closed"): TYPED,
+    ("apify", "get_business_details", "place_id"): TYPED,
+    ("apify", "get_business_details", "language"): TYPED,
+    ("apify", "get_business_details", "max_reviews"): TYPED,
+    ("apify", "get_business_details", "max_images"): TYPED,
     ("brave_search", "search_web", "count"): TYPED,
     ("gmail", "search_messages", "query"): CONNECTED_ACCOUNT_GUARDED,
     ("gmail", "search_messages", "start_time"): TYPED,
@@ -224,6 +236,23 @@ class BehavioralDenialTest(unittest.TestCase):
         self.assertIsInstance(result, ActionFailed)
         self.assertIn(fragment, result.error)
         self.assertIn("retry", result.error)
+
+    def test_apify_query_and_location_denied(self) -> None:
+        from host.tools.apify import BUNDLED_TOOL
+
+        api = FakeHostAPI(config={"APIFY_API_TOKEN": "k"})
+        result = BUNDLED_TOOL.execute(
+            "search_businesses",
+            {"query": "bakery AKIAIOSFODNN7EXAMPLE", "location": "London"},
+            api,
+        )
+        self.assert_denied(result, "credential")
+        result = BUNDLED_TOOL.execute(
+            "search_businesses",
+            {"query": "bakery", "location": "near code 482913"},
+            api,
+        )
+        self.assert_denied(result, "code")
 
     def test_brave_search_query_denied(self) -> None:
         from host.tools.brave_search import BUNDLED_TOOL
