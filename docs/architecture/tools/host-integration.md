@@ -12,7 +12,7 @@ are partitioned by `tool_id`.
 
 ## Where tool code runs, and its internet access
 
-Tool packages make outbound HTTPS calls to third parties (Google, Brave, X,
+Tool packages make outbound HTTPS calls to third parties (Google, Apify, Brave, X,
 LinkedIn, Serper, Meta/Instagram, ScrapeCreators, Polymarket, Interactive
 Brokers, Runway, and BytePlus ModelArk) and
 parse their responses, so unlike other host code they need direct egress and are

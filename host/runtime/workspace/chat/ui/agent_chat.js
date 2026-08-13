@@ -54,6 +54,7 @@ let pendingAttachments = [];
 let attachmentActivity = null;
 let sendingMessage = false;
 let sendingMessageThreadKey = null;
+let composerContextSequence = 0;
 let refreshSequence = 0;
 let selectedRefreshSequence = 0;
 const ATTACHMENT_LIMIT = 10;
@@ -251,6 +252,12 @@ async function refresh() {
       selectedThreadModel = selectedThread.model;
       selectedThreadEffort = selectedThread.effort;
       if (!keepPendingSessionChange) loadSelectedSessionControls();
+    } else if (selectedThreadId) {
+      const removedThreadId = selectedThreadId;
+      clearSelectedThread();
+      if (window.location.hash === `#chat/${encodeURIComponent(removedThreadId)}`) {
+        window.KernHost.navigateWorkspace("chat", null, true);
+      }
     }
     renderThreads();
     window.dispatchEvent(new CustomEvent("kern-chat-updated", {
@@ -597,6 +604,7 @@ async function showThread(threadId, name, runtime, model, effort, status, archiv
   activityToggleSequence += 1;
   clearActivityAnchorSpace();
   selectedRefreshSequence += 1;
+  if (threadId !== selectedThreadId) composerContextSequence += 1;
   selectedThreadId = threadId;
   selectedThreadName = name;
   selectedThreadRuntime = runtime;
@@ -604,6 +612,7 @@ async function showThread(threadId, name, runtime, model, effort, status, archiv
   selectedThreadEffort = effort;
   selectedThreadStatus = status || "idle";
   selectedThreadArchived = archived;
+  window.KernHost.navigateWorkspace("chat", threadId);
   restoreComposerDraft();
   loadSelectedSessionControls();
   restoreThreadView(threadId);
@@ -1045,6 +1054,7 @@ async function sendMessageUnlocked() {
   // generated successive name (thread-1, thread-2, ...).
   const startingNewThread = selectedThreadId === null;
   const submittedThreadId = selectedThreadId;
+  const submittedComposerContext = composerContextSequence;
   const changingSession = sessionConfigurationChanged();
   const request = { input_message: "" };
   if (startingNewThread || changingSession) {
@@ -1087,6 +1097,10 @@ async function sendMessageUnlocked() {
   refreshSequence += 1;
   const clearedSubmittedDraft = clearComposerDraft(submittedThreadId, submittedDraft);
   const stillViewingSubmittedThread = selectedThreadId === submittedThreadId;
+  const stillViewingSubmittedContext = (
+    stillViewingSubmittedThread
+    && composerContextSequence === submittedComposerContext
+  );
   if (
     clearedSubmittedDraft
     && stillViewingSubmittedThread
@@ -1097,12 +1111,12 @@ async function sendMessageUnlocked() {
   pendingAttachments = [];
   renderAttachments();
   autosizeComposer();
-  if (startingNewThread && stillViewingSubmittedThread) {
+  if (startingNewThread && stillViewingSubmittedContext) {
     // A brand-new thread has no prior event stream to keep; start its
     // newest-page accumulator clean so its first poll reads only this work.
     resetThreadEvents();
   }
-  if (stillViewingSubmittedThread) {
+  if (stillViewingSubmittedContext) {
     selectedThreadId = result.thread_id;
     if (startingNewThread) selectedThreadName = result.thread_id;
     selectedThreadRuntime = runtime;
@@ -1110,6 +1124,9 @@ async function sendMessageUnlocked() {
     selectedThreadEffort = effort;
     selectedThreadStatus = "running";
     forceScrollBottom = true;
+    if (startingNewThread && window.location.hash === "#chat/new") {
+      window.KernHost.navigateWorkspace("chat", result.thread_id, true);
+    }
   }
   updateComposer();
   // Acceptance is the send boundary. Do not keep the composer spinner active
@@ -1162,6 +1179,8 @@ async function clearWorkingMemory() {
 
 async function setSelectedThreadArchived() {
   if (!selectedThreadId) return;
+  const threadId = selectedThreadId;
+  const operationRoute = window.location.hash;
   const action = selectedThreadArchived ? "unarchive" : "archive";
   // A running turn keeps going after archiving and the archived view hides
   // Stop, so refuse to archive until the turn ends.
@@ -1169,8 +1188,11 @@ async function setSelectedThreadArchived() {
     setStatus("Stop the agent before archiving this thread.");
     return;
   }
-  await api("POST", `/threads/${encodeURIComponent(selectedThreadId)}/${action}`);
-  clearSelectedThread();
+  await api("POST", `/threads/${encodeURIComponent(threadId)}/${action}`);
+  if (selectedThreadId === threadId && window.location.hash === operationRoute) {
+    clearSelectedThread();
+    window.KernHost.navigateWorkspace("chat");
+  }
   await Promise.all([refresh(), window.KernHost.refreshNavigation()]);
 }
 
@@ -1229,6 +1251,7 @@ function clearSelectedThread() {
   activityToggleSequence += 1;
   clearActivityAnchorSpace();
   selectedRefreshSequence += 1;
+  composerContextSequence += 1;
   selectedThreadId = null;
   selectedThreadName = null;
   selectedThreadRuntime = null;
@@ -1246,11 +1269,13 @@ function clearSelectedThread() {
 function startNewThread() {
   showingArchivedThreads = false;
   clearSelectedThread();
+  window.KernHost.navigateWorkspace("chat");
 }
 
 async function toggleArchivedThreads() {
   showingArchivedThreads = !showingArchivedThreads;
   clearSelectedThread();
+  window.KernHost.navigateWorkspace("chat");
   await refresh();
 }
 

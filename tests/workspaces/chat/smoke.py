@@ -128,6 +128,7 @@ def desktop_smoke(page: Any) -> None:
     page.get_by_role("button", name="Home", exact=True).click()
     new_chat.click()
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#chat/new$"))
     frame = page.locator("#panel-workspace-chat")
 
     expect(frame.locator(".app-frame-title")).to_have_text("Agent Chat")
@@ -150,6 +151,46 @@ def desktop_smoke(page: Any) -> None:
 
     _open_host_thread(page, "website-redesign")
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
+    expect(page).to_have_url(re.compile(r"#chat/website-redesign$"))
+    # Desktop uses the host sidebar, so the equivalent in-frame control is
+    # hidden here; dispatch its registered action directly.
+    frame.locator("#new-thread").evaluate("button => button.click()")
+    expect(page).to_have_url(re.compile(r"#chat/new$"))
+    page.go_back()
+    expect(frame.locator(".thread-title")).to_have_text("website-redesign")
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#panel-workspace-chat")).to_be_visible()
+    expect(frame.locator(".thread-title")).to_have_text("website-redesign")
+    expect(page).to_have_url(re.compile(r"#chat/website-redesign$"))
+    page.evaluate(
+        """() => window.KernHost.api(
+          "POST",
+          "/v1/workspace/chat/threads/website-redesign/archive",
+          {},
+        )"""
+    )
+    page.evaluate("window.KernChat.refresh()")
+    expect(frame.locator(".thread-title")).to_have_text("New thread")
+    expect(page).to_have_url(re.compile(r"#chat/new$"))
+    page.evaluate(
+        """() => window.KernHost.api(
+          "POST",
+          "/v1/workspace/chat/threads/website-redesign/unarchive",
+          {},
+        )"""
+    )
+    page.evaluate("window.KernHost.refreshNavigation()")
+    _open_host_thread(page, "website-redesign")
+    expect(page).to_have_url(re.compile(r"#chat/website-redesign$"))
+    page.get_by_role("button", name="Home", exact=True).click()
+    expect(page).to_have_url(re.compile(r"#home$"))
+    page.go_back()
+    expect(page.locator("#panel-workspace-chat")).to_be_visible()
+    expect(frame.locator(".thread-title")).to_have_text("website-redesign")
+    frame.locator("#archived-toggle").evaluate("button => button.click()")
+    expect(frame.locator(".thread-title")).to_have_text("Archived threads")
+    expect(page).to_have_url(re.compile(r"#chat/new$"))
+    _open_host_thread(page, "website-redesign")
     expect(frame.get_by_role("switch", name="Activity", exact=True)).to_be_visible()
     expect(frame.locator("#new-task-runtime")).to_have_value("claude_code")
     expect(frame.locator("#new-task-runtime")).to_be_enabled()
@@ -220,6 +261,58 @@ def desktop_smoke(page: Any) -> None:
 
     _start_host_chat(page)
     expect(frame.locator(".thread-title")).to_have_text("New thread")
+    page.evaluate(
+        """() => {
+          const nativeApi = window.KernHost.api;
+          window.KernHost.api = (method, path, body) => {
+            if (method !== "POST" || path !== "/v1/workspace/chat/messages") {
+              return nativeApi(method, path, body);
+            }
+            return new Promise((resolve, reject) => {
+              window.__releaseSlowNewChat = () => {
+                window.KernHost.api = nativeApi;
+                return nativeApi(method, path, body).then(resolve, reject);
+              };
+            });
+          };
+        }"""
+    )
+    frame.locator("#new-task").fill("slow new thread")
+    frame.get_by_role("button", name="Send").click()
+    page.wait_for_function("() => typeof window.__releaseSlowNewChat === 'function'")
+    page.get_by_role("button", name="Home", exact=True).click()
+    page.evaluate("window.__releaseSlowNewChat()")
+    page.wait_for_timeout(150)
+    expect(page.locator("#panel-home")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#home$"))
+    _start_host_chat(page)
+    expect(frame.locator(".thread-title")).to_have_text("New thread")
+    page.evaluate(
+        """() => {
+          const nativeApi = window.KernHost.api;
+          window.KernHost.api = (method, path, body) => {
+            if (method !== "POST" || path !== "/v1/workspace/chat/messages") {
+              return nativeApi(method, path, body);
+            }
+            return new Promise((resolve, reject) => {
+              window.__releaseReplacedNewChat = () => {
+                window.KernHost.api = nativeApi;
+                return nativeApi(method, path, body).then(resolve, reject);
+              };
+            });
+          };
+        }"""
+    )
+    frame.locator("#new-task").fill("superseded new thread")
+    frame.get_by_role("button", name="Send").click()
+    page.wait_for_function("() => typeof window.__releaseReplacedNewChat === 'function'")
+    _start_host_chat(page)
+    expect(page).to_have_url(re.compile(r"#chat/new$"))
+    page.evaluate("window.__releaseReplacedNewChat()")
+    page.wait_for_timeout(150)
+    expect(frame.locator(".thread-title")).to_have_text("New thread")
+    expect(frame.locator("#new-task")).to_have_value("")
+    expect(page).to_have_url(re.compile(r"#chat/new$"))
     # The operator never types a thread id: the composer has no thread field
     # and the backend generates the next successive name on send.
     expect(frame.locator("#new-task-thread")).to_have_count(0)
@@ -332,9 +425,29 @@ def desktop_smoke(page: Any) -> None:
     page.once("dialog", lambda dialog: dialog.accept())
     frame.locator("#composer-running").get_by_role("button", name="Stop").click()
     expect(frame.locator("#composer-running")).to_be_hidden()
+    page.evaluate(
+        """threadId => {
+          const nativeApi = window.KernHost.api;
+          const archivePath = `/v1/workspace/chat/threads/${encodeURIComponent(threadId)}/archive`;
+          window.KernHost.api = (method, path, body) => {
+            if (method !== "POST" || path !== archivePath) return nativeApi(method, path, body);
+            return new Promise((resolve, reject) => {
+              window.__releaseSlowThreadArchive = () => {
+                window.KernHost.api = nativeApi;
+                return nativeApi(method, path, body).then(resolve, reject);
+              };
+            });
+          };
+        }""",
+        generated_thread,
+    )
     frame.get_by_role("button", name="Archive", exact=True).click()
-    expect(frame.locator(".thread-title")).to_have_text("New thread")
+    page.wait_for_function("() => typeof window.__releaseSlowThreadArchive === 'function'")
+    page.get_by_role("button", name="Home", exact=True).click()
+    page.evaluate("window.__releaseSlowThreadArchive()")
     expect(page.locator("#chat-nav-items")).not_to_contain_text(generated_thread)
+    expect(page.locator("#panel-home")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#home$"))
     _toggle_host_chat_archive(page)
     expect(page.locator("#chat-nav-items")).to_contain_text(generated_thread)
     _open_host_thread(page, generated_thread)
@@ -1005,6 +1118,7 @@ def _assert_mobile_send_flow(page: Any, frame: Any) -> None:
     expect(frame.locator("#composer-running")).to_be_hidden()
     frame.get_by_role("button", name="Archive", exact=True).click()
     expect(frame.locator(".thread-title")).to_have_text("New thread")
+    expect(page).to_have_url(re.compile(r"#chat/new$"))
 
 
 def _generate_thread_id() -> str:

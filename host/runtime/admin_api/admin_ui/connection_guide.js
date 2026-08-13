@@ -18,6 +18,7 @@ const INTEGRATION_LOGOS = {
   github: `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 .7A11.5 11.5 0 0 0 8.4 23c.6.1.8-.3.8-.6v-2.2c-3.4.7-4.1-1.4-4.1-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .7Z"/></svg>`,
   python_packages: `<span class="integration-logo-word integration-logo-word-python"><b>Py</b></span>`,
   npm_packages: `<span class="integration-logo-word integration-logo-word-npm">npm</span>`,
+  "tool:apify": `<span class="integration-logo-word integration-logo-word-apify">A</span>`,
   "tool:brave_search": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2.2" d="m16 3 10 4.2-1 14.2L16 28l-9-6.6L6 7.2 16 3Z"/><path fill="currentColor" d="M11 8.8h7c4 0 5.2 5 2.1 6.5 3.8 1.3 2.5 7.7-2 7.7H11V8.8Zm4 3v2.4h2.7c1.6 0 1.6-2.4 0-2.4H15Zm0 5.2v3h3c1.9 0 1.9-3 0-3h-3Z"/></svg>`,
   "tool:gmail": `<svg viewBox="0 0 32 32"><path class="gmail-blue" d="M4 10v15h5V14.3Z"/><path class="gmail-red" d="M4 10 8 7l8 6.2L24 7l4 3v15h-5V14.2L16 20 9 14.3V25H4Z"/><path class="gmail-yellow" d="m24 7 4 3-5 4.2V8Z"/><path class="gmail-green" d="M23 14.2 28 10v15h-5Z"/></svg>`,
   "tool:google_calendar": `<svg viewBox="0 0 32 32"><path class="calendar-blue" d="M6 5h20v22H6z"/><path class="calendar-green" d="M6 5h14v7H6z"/><path class="calendar-yellow" d="M6 12h7v15H6z"/><path class="calendar-red" d="M20 5h6v7h-6z"/><path fill="#fff" d="M13 14h6.3c3.1 0 4.7 1.6 4.7 3.7 0 1.5-.9 2.7-2.3 3.1v.1c1.7.3 2.7 1.5 2.7 3.2 0 .5-.1 1-.2 1.4H20c.2-.4.3-.8.3-1.3 0-1.3-.9-2.1-2.5-2.1h-1.5v-2.7h1.4c1.4 0 2.2-.7 2.2-1.8 0-1-.8-1.7-2.1-1.7H13V14Z"/></svg>`,
@@ -197,6 +198,7 @@ export async function refreshConnectionGuide() {
   try {
     const response = await api("GET", "/v1/tools");
     const tools = Array.isArray(response.tools) ? response.tools : [];
+    $("tools-cross-access-notice").hidden = tools.filter(tool => tool.enabled).length < 2;
     const toolState = new Map(tools.map(tool => [`tool:${tool.tool_id}`, tool.enabled === true]));
     loadedGuides = allGuides(tools).map(guide => ({ ...guide, enabled: toolState.get(guide.id) === true }));
     if (!loadedGuides.some(guide => guide.id === selectedGuideId)) {

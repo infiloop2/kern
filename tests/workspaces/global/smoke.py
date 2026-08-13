@@ -544,6 +544,7 @@ def desktop_smoke(page: Any) -> None:
     surface = page.locator("#panel-workspace-global")
     expect(surface).to_be_visible()
     expect(surface.locator("#global-title")).to_have_text("Memory")
+    expect(page).to_have_url(re.compile(r"#memory$"))
     surface.get_by_role("button", name="New page", exact=True).click()
     surface.locator("#memory-page-id").fill("release-preferences")
     surface.locator("#memory-description").fill("Use before planning a release")
@@ -575,6 +576,15 @@ def desktop_smoke(page: Any) -> None:
     surface.get_by_role("button", name="Save page", exact=True).click()
     expect(surface.locator("#global-list")).to_contain_text("release-preferences")
     expect(surface.locator("#memory-links")).to_contain_text("rollback-plan")
+    expect(page).to_have_url(re.compile(r"#memory/release-preferences$"))
+    page.reload(wait_until="domcontentloaded")
+    expect(surface).to_be_visible()
+    expect(surface.locator("#memory-page-id")).to_have_value("release-preferences")
+    expect(page).to_have_url(re.compile(r"#memory/release-preferences$"))
+    surface.get_by_role("button", name="Cancel", exact=True).click()
+    expect(surface.locator("#global-empty")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#memory$"))
+    surface.locator("[data-item-id='release-preferences']").click()
     surface.locator("#memory-content").fill("Keep release notes concise.")
     surface.get_by_role("button", name="Save page", exact=True).click()
     expect(surface.locator("#memory-history")).to_contain_text("Revision 1")
@@ -594,6 +604,7 @@ def desktop_smoke(page: Any) -> None:
 
     page.get_by_role("button", name="Schedules", exact=True).click()
     expect(surface.locator("#global-title")).to_have_text("Schedules")
+    expect(page).to_have_url(re.compile(r"#schedules$"))
     surface.get_by_role("button", name="New schedule", exact=True).click()
     expect(surface.locator("#schedule-enabled")).to_have_count(0)
     surface.locator("#schedule-name").fill("Morning review")
@@ -614,9 +625,146 @@ def desktop_smoke(page: Any) -> None:
     surface.locator("#schedule-time").fill("09:00")
     surface.get_by_role("button", name="Save schedule", exact=True).click()
     expect(surface.locator("#global-list")).to_contain_text("Morning review")
+    expect(page).to_have_url(re.compile(r"#schedules/1$"))
+    page.reload(wait_until="domcontentloaded")
+    expect(surface).to_be_visible()
+    expect(surface.locator("#schedule-name")).to_have_value("Morning review")
+    expect(page).to_have_url(re.compile(r"#schedules/1$"))
+    surface.get_by_role("button", name="Cancel", exact=True).click()
+    expect(surface.locator("#global-empty")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#schedules$"))
+    surface.locator("[data-item-id='1']").click()
     expect(surface.locator("#schedule-runs")).to_contain_text("schedule-1-run-1")
     surface.get_by_role("button", name="Messages", exact=True).click()
     expect(surface.locator("#schedule-runs")).to_contain_text("Scheduled work completed.")
+
+    # A slow item fetch cannot overwrite a newer host-level navigation after
+    # the operator has left the global Workspace panel.
+    page.get_by_role("button", name="Memory", exact=True).click()
+    page.evaluate(
+        """() => {
+          const nativeApi = window.KernHost.api;
+          window.KernHost.api = (method, path, body) => {
+            if (method !== "GET" || path !== "/v1/workspace/memory/pages/release-preferences") {
+              return nativeApi(method, path, body);
+            }
+            return new Promise((resolve, reject) => {
+              window.__releaseMemoryDetail = () => {
+                window.KernHost.api = nativeApi;
+                return nativeApi(method, path, body).then(resolve, reject);
+              };
+            });
+          };
+        }"""
+    )
+    surface.locator("[data-item-id='release-preferences']").click()
+    expect(page).to_have_url(re.compile(r"#memory/release-preferences$"))
+    page.get_by_role("button", name="Home", exact=True).click()
+    page.evaluate("window.__releaseMemoryDetail()")
+    page.wait_for_timeout(150)
+    expect(page.locator("#panel-home")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#home$"))
+
+    # A slow save that completes after leaving Memory must not replace Home's
+    # URL with the item it saved.
+    page.get_by_role("button", name="Memory", exact=True).click()
+    surface.locator("[data-item-id='release-preferences']").click()
+    expect(surface.locator("#memory-page-id")).to_have_value("release-preferences")
+    page.evaluate(
+        """() => {
+          const nativeApi = window.KernHost.api;
+          window.KernHost.api = (method, path, body) => {
+            if (method !== "PUT" || path !== "/v1/workspace/memory/pages/release-preferences") {
+              return nativeApi(method, path, body);
+            }
+            return new Promise((resolve, reject) => {
+              window.__releaseMemorySave = () => {
+                window.KernHost.api = nativeApi;
+                return nativeApi(method, path, body).then(resolve, reject);
+              };
+            });
+          };
+        }"""
+    )
+    surface.locator("#memory-content").fill("Saved after leaving Memory.")
+    surface.get_by_role("button", name="Save page", exact=True).click()
+    page.wait_for_function("() => typeof window.__releaseMemorySave === 'function'")
+    page.get_by_role("button", name="Home", exact=True).click()
+    page.evaluate("window.__releaseMemorySave()")
+    page.wait_for_timeout(150)
+    expect(page.locator("#panel-home")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#home$"))
+
+    # Restoring a deep link also loads its collection before selecting the
+    # item. Leaving during that first request must cancel the later selection.
+    page.evaluate(
+        """() => {
+          const nativeApi = window.KernHost.api;
+          window.KernHost.api = (method, path, body) => {
+            if (method !== "GET" || !path.startsWith("/v1/workspace/memory?")) {
+              return nativeApi(method, path, body);
+            }
+            return new Promise((resolve, reject) => {
+              window.__releaseMemoryRouteList = () => {
+                window.KernHost.api = nativeApi;
+                return nativeApi(method, path, body).then(resolve, reject);
+              };
+            });
+          };
+          history.pushState(
+            { kernWorkspaceRoute: "memory", itemId: "release-preferences" },
+            "",
+            "#memory/release-preferences",
+          );
+          dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+        }"""
+    )
+    page.wait_for_function("() => typeof window.__releaseMemoryRouteList === 'function'")
+    page.get_by_role("button", name="Home", exact=True).click()
+    page.evaluate("window.__releaseMemoryRouteList()")
+    page.wait_for_timeout(150)
+    expect(page.locator("#panel-home")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#home$"))
+
+    # A transient detail failure preserves the bookmark for retry instead of
+    # treating the item as deleted and replacing it with Home.
+    page.evaluate(
+        """() => {
+          const nativeApi = window.KernHost.api;
+          window.KernHost.api = (method, path, body) => {
+            if (method !== "GET" || path !== "/v1/workspace/memory/pages/release-preferences") {
+              return nativeApi(method, path, body);
+            }
+            window.KernHost.api = nativeApi;
+            const error = new Error("Memory is temporarily unavailable.");
+            error.status = 503;
+            return Promise.reject(error);
+          };
+          history.pushState(
+            { kernWorkspaceRoute: "memory", itemId: "release-preferences" },
+            "",
+            "#memory/release-preferences",
+          );
+          dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+        }"""
+    )
+    expect(page).to_have_url(re.compile(r"#memory/release-preferences$"))
+    expect(page.locator("#notice")).to_have_text("Memory is temporarily unavailable.")
+    page.get_by_role("button", name="Home", exact=True).click()
+
+    page.evaluate(
+        """() => {
+          history.pushState(
+            { kernWorkspaceRoute: "memory", itemId: "missing-memory-page" },
+            "",
+            "#memory/missing-memory-page",
+          );
+          dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+        }"""
+    )
+    expect(page.locator("#panel-home")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#home$"))
+    expect(page.locator("#notice")).to_have_text("That Workspace item is no longer available.")
 
 
 def mobile_smoke(page: Any) -> None:

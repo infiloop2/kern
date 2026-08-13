@@ -178,6 +178,20 @@ SMOKE_MANAGED_DOMAINS = (
     "bedrock-runtime.us-west-2.amazonaws.com",
 )
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
+    "apify": (
+        (
+            "search_businesses",
+            {"query": "bakery", "location": "London, United Kingdom", "limit": "1"},
+        ),
+        (
+            "get_business_details",
+            {
+                "place_id": "ChIJN1t_tDeuEmsRUsoyG83frY4",
+                "max_reviews": "0",
+                "max_images": "0",
+            },
+        ),
+    ),
     "brave_search": (("search_web", {"query": "Kern"}),),
     "gmail": (
         ("search_messages", {}),

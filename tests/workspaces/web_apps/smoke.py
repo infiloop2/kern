@@ -903,6 +903,33 @@ def desktop_smoke(page: Any) -> None:
         lambda request: leaked.append(request.url)
         if "browser-leak.invalid" in request.url else None,
     )
+    existing_app_count = page.locator("#web-apps-nav-items .workspace-nav-item").count()
+    page.evaluate(
+        """() => {
+          const nativeApi = window.KernHost.api;
+          window.KernHost.api = (method, path, body) => {
+            if (method !== "POST" || path !== "/v1/workspace/web-apps/apps") {
+              return nativeApi(method, path, body);
+            }
+            return new Promise((resolve, reject) => {
+              window.__releaseSlowAppCreate = () => {
+                window.KernHost.api = nativeApi;
+                return nativeApi(method, path, body).then(resolve, reject);
+              };
+            });
+          };
+        }"""
+    )
+    _start_host_app(page)
+    expect(page).to_have_url(re.compile(r"#apps$"))
+    page.wait_for_function("() => typeof window.__releaseSlowAppCreate === 'function'")
+    page.get_by_role("button", name="Home", exact=True).click()
+    page.evaluate("window.__releaseSlowAppCreate()")
+    expect(page.locator("#web-apps-nav-items .workspace-nav-item")).to_have_count(
+        existing_app_count + 1
+    )
+    expect(page.locator("#panel-home")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#home$"))
     _start_host_app(page)
     frame = page.locator("#panel-workspace-web-apps")
     expect(frame.locator("#app-view")).to_be_visible()
@@ -910,6 +937,33 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#message")).to_be_visible()
     expect(frame.locator("#app-title")).to_have_text(re.compile(r"^app-[0-9]+$"))
     first_app = frame.locator("#app-title").inner_text().strip()
+    expect(page).to_have_url(re.compile(rf"#apps/{re.escape(first_app)}$"))
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#panel-workspace-web-apps")).to_be_visible()
+    expect(frame.locator("#app-title")).to_have_text(first_app)
+    expect(page).to_have_url(re.compile(rf"#apps/{re.escape(first_app)}$"))
+    page.evaluate(
+        """appId => window.KernHost.api(
+          "POST",
+          `/v1/workspace/web-apps/apps/${encodeURIComponent(appId)}/archive`,
+          {},
+        )""",
+        first_app,
+    )
+    page.evaluate("window.KernWebApps.refresh()")
+    expect(frame.locator("#empty-title")).to_have_text("Choose an app")
+    expect(page).to_have_url(re.compile(r"#apps$"))
+    page.evaluate(
+        """appId => window.KernHost.api(
+          "POST",
+          `/v1/workspace/web-apps/apps/${encodeURIComponent(appId)}/unarchive`,
+          {},
+        )""",
+        first_app,
+    )
+    page.evaluate("window.KernHost.refreshNavigation()")
+    _open_host_app(page, first_app)
+    expect(page).to_have_url(re.compile(rf"#apps/{re.escape(first_app)}$"))
     # Active sidebar rows are direct navigation only; lifecycle actions live
     # in the selected resource toolbar.
     expect(page.locator("#web-apps-nav-items .workspace-nav-row-action")).to_have_count(0)
@@ -1081,10 +1135,52 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#message")).to_have_value("Keep this unsent human draft.")
 
     # Archive is explicit in the App toolbar and returns to the library.
+    page.evaluate(
+        """appId => {
+          const nativeApi = window.KernHost.api;
+          const archivePath = `/v1/workspace/web-apps/apps/${encodeURIComponent(appId)}/archive`;
+          window.KernHost.api = (method, path, body) => {
+            if (method !== "POST" || path !== archivePath) return nativeApi(method, path, body);
+            return new Promise((resolve, reject) => {
+              window.__releaseSlowAppArchive = () => {
+                window.KernHost.api = nativeApi;
+                return nativeApi(method, path, body).then(resolve, reject);
+              };
+            });
+          };
+        }""",
+        "app-1",
+    )
     page.once("dialog", lambda dialog: dialog.accept())
     frame.get_by_role("button", name="Archive app", exact=True).click()
+    page.wait_for_function("() => typeof window.__releaseSlowAppArchive === 'function'")
+    page.get_by_role("button", name="Home", exact=True).click()
+    page.evaluate("window.__releaseSlowAppArchive()")
+    expect(page.locator("#web-apps-nav-items")).not_to_contain_text("Weekly focus")
+    expect(page.locator("#panel-home")).to_be_visible()
+    expect(page).to_have_url(re.compile(r"#home$"))
+    page.evaluate(
+        """() => {
+          history.pushState({ kernWorkspaceRoute: "apps", itemId: null }, "", "#apps");
+          dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+        }"""
+    )
     expect(frame.locator("#app-view-toolbar")).to_be_hidden()
     expect(frame.locator("#empty-title")).to_have_text("Choose an app")
+    expect(page).to_have_url(re.compile(r"#apps$"))
+    page.evaluate(
+        """() => {
+          history.replaceState(null, "", "#apps");
+          dispatchEvent(new PopStateEvent("popstate", { state: null }));
+        }"""
+    )
+    page.wait_for_function(
+        "() => history.state?.kernWorkspaceRoute === 'apps' && history.state?.itemId === null"
+    )
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#panel-workspace-web-apps")).to_be_visible()
+    expect(frame.locator("#empty-title")).to_have_text("Choose an app")
+    expect(page).to_have_url(re.compile(r"#apps$"))
     expect(page.locator("#web-apps-nav-items")).not_to_contain_text("Weekly focus")
 
     # Archived Apps remain inspectable but cannot expose controls that only

@@ -10,6 +10,7 @@ on:
         options:
           - all
           - all_runtimes
+          - apify
           - brave_search
           - gmail
           - google_calendar
@@ -196,6 +197,7 @@ jobs:
           # persistent stage host. The all suite preflights every tool, skips
           # unavailable credentials, and runs every available tool independently.
           # See docs/development/persistent-aws-stage.md.
+          KERN_STAGE_APIFY_API_TOKEN: ${{ secrets.KERN_STAGE_APIFY_API_TOKEN }}
           KERN_STAGE_BRAVE_SEARCH_API_KEY: ${{ secrets.KERN_STAGE_BRAVE_SEARCH_API_KEY }}
           KERN_STAGE_IBKR_OAUTH_CONSUMER_KEY: ${{ secrets.KERN_STAGE_IBKR_OAUTH_CONSUMER_KEY }}
           KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN }}

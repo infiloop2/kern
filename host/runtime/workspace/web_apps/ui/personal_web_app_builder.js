@@ -2114,7 +2114,7 @@ function clearSelectedApp() {
   return true;
 }
 
-async function showApp(app, outsideActiveIndex = false) {
+async function showApp(app, outsideActiveIndex = false, updateHistory = true) {
   saveComposerDraft();
   saveSelectedConversationView();
   appSelectionSequence += 1;
@@ -2128,6 +2128,7 @@ async function showApp(app, outsideActiveIndex = false) {
   selectedAppName = app.name;
   selectedAgentUpdatesLocked = Boolean(app.agent_updates_locked);
   selectedAppOutsideActiveIndex = outsideActiveIndex;
+  if (updateHistory) window.KernHost.navigateWorkspace("apps", app.app_id);
   recoveryPoints = [];
   dismissedAgentMessageKey = dismissedAgentMessages[app.app_id] || null;
   transientAgentStatus = null;
@@ -2202,7 +2203,11 @@ async function refresh() {
       selectedAgentUpdatesLocked = Boolean(selected.agent_updates_locked);
       selectedAppOutsideActiveIndex = false;
     } else if (selectedAppId && !selectedAppOutsideActiveIndex) {
+      const removedAppId = selectedAppId;
       clearSelectedApp();
+      if (window.location.hash === `#apps/${encodeURIComponent(removedAppId)}`) {
+        window.KernHost.navigateWorkspace("apps", null, true);
+      }
     }
     window.dispatchEvent(new CustomEvent("kern-web-apps-updated", {
       detail: { apps },
@@ -2234,6 +2239,7 @@ async function createAppOnce() {
     const response = await api("POST", "/apps", {});
     await Promise.all([refresh(), window.KernHost.refreshNavigation()]);
     if (selectionSequence !== appSelectionSequence) return response.app;
+    if (window.location.hash !== "#apps") return response.app;
     const app = apps.find(candidate => candidate.app_id === response.app.app_id) || response.app;
     await showApp(app);
     return app;
@@ -2322,8 +2328,12 @@ async function archiveSelectedApp() {
     return;
   }
   if (!confirm(`Archive ${selectedAppName || appId}?`)) return;
+  const operationRoute = window.location.hash;
   await api("POST", `/apps/${encodeURIComponent(appId)}/archive`, {});
-  if (selectedAppId === appId) clearSelectedApp();
+  if (selectedAppId === appId && window.location.hash === operationRoute) {
+    clearSelectedApp();
+    window.KernHost.navigateWorkspace("apps");
+  }
   await Promise.all([refresh(), window.KernHost.refreshNavigation()]);
 }
 
@@ -2465,6 +2475,7 @@ function afterInitialization(action, ...args) {
 }
 
 window.KernWebApps = {
+  clear: (...args) => afterInitialization(clearSelectedApp, ...args),
   create: (...args) => afterInitialization(createApp, ...args),
   open: (...args) => afterInitialization(showApp, ...args),
   refresh: (...args) => afterInitialization(refresh, ...args),

@@ -320,6 +320,7 @@ class StageToolChecks:
 
     def _check_tool_provider(self, tool_id: str) -> str:
         specialized = {
+            "apify": self._check_apify_live,
             "brave_search": self._check_brave_live,
             "gmail": self._check_gmail_live,
             "google_calendar": self._check_calendar_live,
@@ -368,6 +369,37 @@ class StageToolChecks:
         suffix = "; publish proposal denied" if tool_id == "linkedin" else ""
         read_count = len(calls) + (1 if tool_id == "ibkr" else 0)
         return f"{read_count} live read(s) completed{suffix}"
+
+    def _check_apify_live(self) -> str:
+        search = self._successful_tool_call(
+            "apify_search_businesses",
+            {
+                "query": "bakery",
+                "location": "London, United Kingdom",
+                "limit": "1",
+                "skip_closed": False,
+            },
+        )
+        businesses = search.get("businesses")
+        first = (
+            businesses[0]
+            if isinstance(businesses, list)
+            and businesses
+            and isinstance(businesses[0], dict)
+            else {}
+        )
+        place_id = first.get("place_id")
+        if not isinstance(place_id, str) or not place_id:
+            raise AssertionError(f"Apify search returned no place id: {search}")
+        self._successful_tool_call(
+            "apify_get_business_details",
+            {
+                "place_id": place_id,
+                "max_reviews": "1",
+                "max_images": "1",
+            },
+        )
+        return "one bounded business search and one exact detail lookup completed"
 
     def _check_brave_live(self) -> str:
         name = "brave_search_search_web"

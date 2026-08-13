@@ -70,7 +70,11 @@ export async function api(method, path, body, extraHeaders) {
   });
   const data = await response.json();
   if (response.status === 401) { unauthorizedHandler(); throw new Error("unauthorized"); }
-  if (!response.ok) throw new Error(data.error ? data.error.message : response.statusText);
+  if (!response.ok) {
+    const error = new Error(data.error ? data.error.message : response.statusText);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 

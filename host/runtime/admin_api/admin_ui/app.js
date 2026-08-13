@@ -124,6 +124,7 @@ let workspaceNavigationActionSequence = 0;
 const workspacePendingMutations = new Set();
 // Login preload and an immediate navigation click share the same mount.
 const workspaceMounts = new Map();
+let workspaceInitialization = null;
 window.KernWorkspaceRoots = {};
 
 function showLoginError(message) {
@@ -367,6 +368,56 @@ function recordHomeRoute(view, guideId = "", replace = false) {
   history[replace ? "replaceState" : "pushState"](state, "", homeRouteUrl(view, guideId));
 }
 
+function workspaceRouteUrl(resource, itemId = null) {
+  if (resource === "chat") {
+    return itemId ? `#chat/${encodeURIComponent(itemId)}` : "#chat/new";
+  }
+  if (resource === "apps") {
+    return itemId ? `#apps/${encodeURIComponent(itemId)}` : "#apps";
+  }
+  if (resource === "memory" || resource === "schedules") {
+    return itemId ? `#${resource}/${encodeURIComponent(itemId)}` : `#${resource}`;
+  }
+  return "#home";
+}
+
+function workspaceRouteFromLocation() {
+  const match = location.hash.match(/^#(chat|apps|memory|schedules)(?:\/(.+))?$/);
+  if (!match) return null;
+  try {
+    const resource = match[1];
+    const encodedItemId = match[2] || "";
+    if (resource === "chat" && encodedItemId === "new") {
+      return { resource, itemId: null };
+    }
+    if (resource === "chat" && !encodedItemId) return null;
+    return { resource, itemId: encodedItemId ? decodeURIComponent(encodedItemId) : null };
+  } catch (_) {
+    return null;
+  }
+}
+
+function recordWorkspaceRoute(resource, itemId = null, replace = false) {
+  const state = { kernWorkspaceRoute: resource, itemId };
+  history[replace ? "replaceState" : "pushState"](
+    state,
+    "",
+    workspaceRouteUrl(resource, itemId),
+  );
+}
+
+function navigateWorkspaceRoute(resource, itemId = null, replace = false) {
+  const url = workspaceRouteUrl(resource, itemId);
+  const current = history.state;
+  if (location.hash === url) {
+    if (current?.kernWorkspaceRoute === resource && current.itemId === itemId) return false;
+    recordWorkspaceRoute(resource, itemId, true);
+    return true;
+  }
+  recordWorkspaceRoute(resource, itemId, replace);
+  return true;
+}
+
 function openHomeView(view, guideId = "", updateHistory = true) {
   if (!homeDetailTabs.has(view)) return;
   if (view === "network") {
@@ -375,7 +426,9 @@ function openHomeView(view, guideId = "", updateHistory = true) {
     openConnectionGuide(guideId);
   }
   if (updateHistory) {
-    if (!history.state?.kernHomeRoute) recordHomeRoute("home", "", true);
+    if (!history.state?.kernHomeRoute && !history.state?.kernWorkspaceRoute) {
+      recordHomeRoute("home", "", true);
+    }
     recordHomeRoute(view, guideId);
   }
   showTab(view);
@@ -482,7 +535,8 @@ function showApp() {
   $("mobile-nav-toggle").hidden = false;
   $("runtime-overview").hidden = false;
   setMobileNavOpen(false);
-  mountWorkspaces().then(refreshWorkspaceNavigation).catch(error => notice(error.message, "error"));
+  const workspaceReady = initializeWorkspaces();
+  workspaceReady.catch(error => notice(error.message, "error"));
   refreshPasskeySetup();
   scheduleIPhoneInstallCoach();
   loadPolicy().catch(() => {});
@@ -504,15 +558,33 @@ function showApp() {
       .then(() => completeToolConnect(callbackSearch))
       .catch(error => notice(error.message, "error"));
   } else {
-    if (!history.state?.kernHomeRoute) {
-      const route = homeRouteFromLocation();
-      recordHomeRoute(route.view, route.guideId, true);
-    }
-    const route = history.state?.kernHomeRoute;
-    if (route && route !== "home" && homeDetailTabs.has(route)) {
-      openHomeView(route, history.state.guideId || "", false);
-    } else {
+    const workspaceRoute = workspaceRouteFromLocation();
+    if (workspaceRoute) {
+      // Preserve copied deep links even if the first Workspace mount/index
+      // request fails before the asynchronous restore can begin.
+      navigateWorkspaceRoute(workspaceRoute.resource, workspaceRoute.itemId, true);
       showTab("home");
+      void workspaceReady
+        .then(() => {
+          const currentRoute = workspaceRouteFromLocation();
+          if (
+            currentRoute?.resource !== workspaceRoute.resource
+            || currentRoute.itemId !== workspaceRoute.itemId
+          ) return;
+          return restoreWorkspaceRoute(workspaceRoute);
+        })
+        .catch(error => notice(error.message, "error"));
+    } else {
+      if (!history.state?.kernHomeRoute) {
+        const locationRoute = homeRouteFromLocation();
+        recordHomeRoute(locationRoute.view, locationRoute.guideId, true);
+      }
+      const route = history.state?.kernHomeRoute;
+      if (route && route !== "home" && homeDetailTabs.has(route)) {
+        openHomeView(route, history.state.guideId || "", false);
+      } else {
+        showTab("home");
+      }
     }
   }
   // Guard the recurring tick so a re-login within the same page load (the login
@@ -528,6 +600,11 @@ window.KernHost = {
   apiUpload,
   refreshNavigation() {
     return refreshWorkspaceNavigation();
+  },
+  navigateWorkspace(resource, itemId = null, replace = false) {
+    if (navigateWorkspaceRoute(resource, itemId, replace)) {
+      workspaceNavigationActionSequence += 1;
+    }
   },
   chooseFiles(maximum = 10) {
     return new Promise(resolve => {
@@ -555,6 +632,23 @@ async function mountWorkspaces() {
   await mountWorkspace("chat", "panel-workspace-chat", "/workspace/chat.html");
   await mountWorkspace("web-apps", "panel-workspace-web-apps", "/workspace/web-apps.html");
   await mountWorkspace("global", "panel-workspace-global", "/workspace/global.html");
+}
+
+function initializeWorkspaces() {
+  if (!workspaceInitialization) {
+    workspaceInitialization = mountWorkspaces().catch(error => {
+      workspaceInitialization = null;
+      throw error;
+    });
+    // Sidebar indexes are helpful context, but they are not a prerequisite
+    // for mounting any Workspace. In particular, Chat/App index failures must
+    // not block independent Memory or Schedule routes.
+    void workspaceInitialization.then(
+      () => refreshWorkspaceNavigation().catch(error => notice(error.message, "error")),
+      () => {},
+    );
+  }
+  return workspaceInitialization;
 }
 
 async function mountWorkspace(name, panelId, htmlPath) {
@@ -652,13 +746,15 @@ function renderWorkspaceNavigation() {
   }
 }
 
-async function openWorkspaceGlobal(resource) {
+async function openWorkspaceGlobal(resource, itemId = null, updateHistory = true) {
   const actionSequence = ++workspaceNavigationActionSequence;
-  await mountWorkspaces();
+  await initializeWorkspaces();
   if (actionSequence !== workspaceNavigationActionSequence) return;
   if (!showTab("workspace-global", actionSequence)) return;
-  await window.KernWorkspaceGlobal.open(resource);
+  if (updateHistory) navigateWorkspaceRoute(resource, itemId);
+  const opened = await window.KernWorkspaceGlobal.open(resource, itemId);
   renderWorkspaceNavigation();
+  return opened;
 }
 
 function renderWorkspaceRows(containerId, items, action, archived) {
@@ -716,33 +812,126 @@ function renderWorkspaceRows(containerId, items, action, archived) {
   }
 }
 
-async function openWorkspaceChat(threadId) {
+async function findChatNavItem(threadId) {
+  let thread = chatNavItems.find(item => item.thread_id === threadId);
+  if (thread) return { item: thread, archived: chatNavArchived, items: chatNavItems };
+  for (const archived of [false, true]) {
+    const response = await api(
+      "GET",
+      archived ? "/v1/workspace/chat/threads?archived=true" : "/v1/workspace/chat/threads",
+    );
+    const items = response.threads || [];
+    thread = items.find(item => item.thread_id === threadId);
+    if (!thread) continue;
+    return { item: thread, archived, items };
+  }
+  return null;
+}
+
+async function openWorkspaceNewChat(updateHistory = true) {
+  const actionSequence = ++workspaceNavigationActionSequence;
+  await initializeWorkspaces();
+  if (actionSequence !== workspaceNavigationActionSequence) return false;
+  chatNavArchived = false;
+  if (!showTab("workspace-chat", actionSequence)) return false;
+  if (updateHistory) navigateWorkspaceRoute("chat");
+  window.KernChat.newThread();
+  await refreshWorkspaceNavigation();
+  return true;
+}
+
+async function openWorkspaceChat(threadId, updateHistory = true) {
   if (workspacePendingMutations.has(`chat:${threadId}`)) return;
   const actionSequence = ++workspaceNavigationActionSequence;
-  await mountWorkspaces();
+  await initializeWorkspaces();
   if (actionSequence !== workspaceNavigationActionSequence) return;
-  const thread = chatNavItems.find(item => item.thread_id === threadId);
-  if (!thread) return;
+  const found = await findChatNavItem(threadId);
+  if (actionSequence !== workspaceNavigationActionSequence) return;
+  if (!found) return false;
+  chatNavArchived = found.archived;
+  chatNavItems = found.items;
+  renderWorkspaceNavigation();
   if (!showTab("workspace-chat", actionSequence)) return;
+  if (updateHistory) navigateWorkspaceRoute("chat", threadId);
   try {
-    await window.KernChat.openThread(thread);
+    await window.KernChat.openThread(found.item);
   } catch (error) {
     if (actionSequence === workspaceNavigationActionSequence) throw error;
   }
+  return true;
 }
 
-async function openWorkspaceWebApp(appId) {
+async function findWebAppNavItem(appId) {
+  let selected = webAppNavItems.find(item => item.app_id === appId);
+  if (selected) {
+    return { item: selected, archived: webAppsNavArchived, items: webAppNavItems };
+  }
+  for (const archived of [false, true]) {
+    const response = await api(
+      "GET",
+      archived ? "/v1/workspace/web-apps/apps?archived=true" : "/v1/workspace/web-apps/apps",
+    );
+    const items = response.apps || [];
+    selected = items.find(item => item.app_id === appId);
+    if (!selected) continue;
+    return { item: selected, archived, items };
+  }
+  return null;
+}
+
+async function openWorkspaceWebApp(appId, updateHistory = true) {
   if (workspacePendingMutations.has(`web-apps:${appId}`)) return;
   const actionSequence = ++workspaceNavigationActionSequence;
-  await mountWorkspaces();
+  await initializeWorkspaces();
   if (actionSequence !== workspaceNavigationActionSequence) return;
-  const app = webAppNavItems.find(item => item.app_id === appId);
-  if (!app) return;
+  const found = await findWebAppNavItem(appId);
+  if (actionSequence !== workspaceNavigationActionSequence) return;
+  if (!found) return false;
+  webAppsNavArchived = found.archived;
+  webAppNavItems = found.items;
+  renderWorkspaceNavigation();
   if (!showTab("workspace-web-apps", actionSequence)) return;
+  if (updateHistory) navigateWorkspaceRoute("apps", appId);
   try {
-    await window.KernWebApps.open(app, webAppsNavArchived);
+    await window.KernWebApps.open(found.item, webAppsNavArchived, false);
   } catch (error) {
     if (actionSequence === workspaceNavigationActionSequence) throw error;
+  }
+  return true;
+}
+
+async function openWorkspaceAppLibrary(updateHistory = true) {
+  const actionSequence = ++workspaceNavigationActionSequence;
+  await initializeWorkspaces();
+  if (actionSequence !== workspaceNavigationActionSequence) return false;
+  webAppsNavArchived = false;
+  if (!showTab("workspace-web-apps", actionSequence)) return false;
+  if (updateHistory) navigateWorkspaceRoute("apps");
+  await window.KernWebApps.clear();
+  return true;
+}
+
+async function restoreWorkspaceRoute(route) {
+  // Direct loads and copied collection URLs start without history state. Make
+  // the current entry a real Workspace entry before any asynchronous restore
+  // work so opening a Home detail can preserve it for browser Back.
+  navigateWorkspaceRoute(route.resource, route.itemId, true);
+  let opened = true;
+  if (route.resource === "chat") {
+    opened = route.itemId
+      ? await openWorkspaceChat(route.itemId, false)
+      : await openWorkspaceNewChat(false);
+  } else if (route.resource === "apps") {
+    opened = route.itemId
+      ? await openWorkspaceWebApp(route.itemId, false)
+      : await openWorkspaceAppLibrary(false);
+  } else {
+    opened = await openWorkspaceGlobal(route.resource, route.itemId, false);
+  }
+  if (opened === false) {
+    recordHomeRoute("home", "", true);
+    showTab("home");
+    notice("That Workspace item is no longer available.", "error");
   }
 }
 
@@ -788,13 +977,7 @@ document.addEventListener("click", event => {
     "toggle-mobile-nav": () => toggleMobileNav(),
     "close-mobile-nav": () => setMobileNavOpen(false, true),
     "new-chat": async () => {
-      const actionSequence = ++workspaceNavigationActionSequence;
-      await mountWorkspaces();
-      if (actionSequence !== workspaceNavigationActionSequence) return;
-      chatNavArchived = false;
-      if (!showTab("workspace-chat", actionSequence)) return;
-      window.KernChat.newThread();
-      await refreshWorkspaceNavigation();
+      await openWorkspaceNewChat();
     },
     "new-web-app": async () => {
       const actionSequence = ++workspaceNavigationActionSequence;
@@ -802,6 +985,7 @@ document.addEventListener("click", event => {
       if (actionSequence !== workspaceNavigationActionSequence) return;
       webAppsNavArchived = false;
       if (!showTab("workspace-web-apps", actionSequence)) return;
+      navigateWorkspaceRoute("apps");
       await window.KernWebApps.create();
       await refreshWorkspaceNavigation();
     },
@@ -894,6 +1078,11 @@ window.addEventListener("pageshow", () => {
   if (isIPhoneStandalone()) hideIPhoneInstallUi();
 });
 window.addEventListener("popstate", event => {
+  const workspaceRoute = workspaceRouteFromLocation();
+  if (workspaceRoute) {
+    void restoreWorkspaceRoute(workspaceRoute).catch(error => notice(error.message, "error"));
+    return;
+  }
   const route = event.state?.kernHomeRoute;
   if (route && route !== "home" && homeDetailTabs.has(route)) {
     openHomeView(route, event.state.guideId || "", false);
