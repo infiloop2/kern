@@ -14,6 +14,12 @@ can break when a harness package is upgraded.
 | Claude Code | `@anthropic-ai/claude-code` | `2.1.220` | `claude_code` | `host/runtime/admin_api/claude_code.py` |
 | Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/admin_api/hermes_agent.py` |
 
+The `script` runtime (`host/runtime/admin_api/script_runner.py`) is on that
+same adapter contract but is not a harness: it runs a bash script from the
+agent home, so it depends on nothing external, pins no version, and appears in
+no row above. Nothing in this document applies to it beyond the shared
+launcher and scope boundary — see `docs/architecture/services-and-runtimes.md`.
+
 Bootstrap installs the npm packages globally with npm, installs Hermes with
 uv into its own dedicated Python 3.12 venv (`/usr/local/lib/hermes-venv`; the
 base image's Python is too old for it), and verifies the exact version

@@ -236,6 +236,7 @@ class StageToolChecks:
                     "not connected",
                     "rejected the configured api key",
                     "rejected the configured bearer token",
+                    "rejected the personal-use script credentials",
                     "rejected the request as unauthorized",
                 )
             ):
@@ -326,9 +327,12 @@ class StageToolChecks:
             "google_calendar": self._check_calendar_live,
             "instagram_discovery": self._check_instagram_discovery_live,
             "polymarket": self._check_polymarket_live,
+            "reddit": self._check_reddit_live,
             "twitter": self._check_twitter_live,
+            "openai_images": self._check_openai_images_live,
             "runway": self._check_runway_live,
             "seedance": self._check_seedance_live,
+            "zoho_mail": self._check_zoho_mail_live,
         }.get(tool_id)
         if specialized is not None:
             return specialized()
@@ -480,6 +484,54 @@ class StageToolChecks:
             "proposals denied, draft created and deleted"
         )
 
+    def _check_zoho_mail_live(self) -> str:
+        folders_result = self._successful_tool_call("zoho_mail_list_folders", {})
+        self._successful_tool_call(
+            "zoho_mail_search_messages", {"search_key": "entire:Kern", "limit": "1"}
+        )
+        folders = folders_result.get("folders")
+        first_folder = (
+            folders[0]
+            if isinstance(folders, list) and folders and isinstance(folders[0], dict)
+            else {}
+        )
+        folder_id = first_folder.get("folder_id")
+        read_count = 2
+        if isinstance(folder_id, str) and folder_id:
+            messages_result = self._successful_tool_call(
+                "zoho_mail_list_messages", {"folder_id": folder_id, "limit": "1"}
+            )
+            read_count += 1
+            messages = messages_result.get("messages")
+            first_message = (
+                messages[0]
+                if isinstance(messages, list) and messages and isinstance(messages[0], dict)
+                else {}
+            )
+            message_id = first_message.get("message_id")
+            message_folder_id = first_message.get("folder_id") or folder_id
+            if (
+                isinstance(message_id, str)
+                and message_id
+                and isinstance(message_folder_id, str)
+                and message_folder_id
+            ):
+                self._successful_tool_call(
+                    "zoho_mail_read_message",
+                    {"folder_id": message_folder_id, "message_id": message_id},
+                )
+                read_count += 1
+        self._queue_and_deny(
+            "zoho_mail",
+            "zoho_mail_send_email",
+            {
+                "to": "stage@example.com",
+                "subject": f"Kern stage check {os.urandom(4).hex()}",
+                "blocks": [{"type": "paragraph", "text": "Stage proposal; never sent."}],
+            },
+        )
+        return f"{read_count} bounded mailbox read(s) completed; send proposal denied"
+
     def _check_calendar_live(self) -> str:
         self._successful_tool_call("google_calendar_read_events", {})
         unique_title = f"Kern stage check {os.urandom(4).hex()}"
@@ -626,6 +678,63 @@ class StageToolChecks:
             "and no API publishing surface"
         )
 
+    def _check_reddit_live(self) -> str:
+        self._successful_tool_call("reddit_get_profile", {})
+        home = self._successful_tool_call("reddit_get_home_feed", {"limit": "5"})
+        self._successful_tool_call(
+            "reddit_get_subreddit_posts", {"subreddit": "popular", "limit": "1"}
+        )
+        search = self._successful_tool_call(
+            "reddit_search_posts", {"query": "Kern", "limit": "5"}
+        )
+        candidates = []
+        for result in (search, home):
+            posts = result.get("posts")
+            if isinstance(posts, list):
+                candidates.extend(post for post in posts if isinstance(post, dict))
+        post_id = next(
+            (post.get("id") for post in candidates if isinstance(post.get("id"), str) and post.get("id")),
+            None,
+        )
+        derived = 0
+        if isinstance(post_id, str):
+            self._successful_tool_call(
+                "reddit_read_post", {"post_id": post_id, "comment_limit": "5"}
+            )
+            derived = 1
+        self._queue_and_deny(
+            "reddit",
+            "reddit_create_post",
+            {
+                "subreddit": "test",
+                "title": f"Kern stage proposal {os.urandom(3).hex()}",
+                "kind": "self",
+                "text": "Stage proposal; never published.",
+            },
+        )
+        comment_proposals = 0
+        parent_id = next(
+            (
+                post.get("fullname")
+                for post in candidates
+                if isinstance(post.get("fullname"), str) and post.get("fullname")
+            ),
+            None,
+        )
+        if isinstance(parent_id, str):
+            self._queue_and_deny(
+                "reddit",
+                "reddit_create_comment",
+                {"parent_id": parent_id, "text": "Kern stage proposal; never published."},
+            )
+            comment_proposals = 1
+        print(f"    [derived coverage] reddit actions={derived + comment_proposals}/2", flush=True)
+        return (
+            "profile, home feed, subreddit, and search reads plus "
+            f"{derived} discussion read(s); post proposal denied and "
+            f"{comment_proposals} comment proposal(s) denied"
+        )
+
     def _check_runway_live(self) -> str:
         name = "runway_get_task"
         result, text = self._shim_tool_response(
@@ -657,6 +766,49 @@ class StageToolChecks:
                 f"isError={result.get('isError')}, message={text}"
             )
         return "authenticated missing-task probe completed without generation spend"
+
+    def _check_openai_images_live(self) -> str:
+        """Generate one image for real: OpenAI has no read-only endpoint behind
+        this tool, and the cheapest model at low quality costs about a cent. The
+        spend is worth it because this is the only proof of the whole binary
+        path — provider call, base64 decode, socket relay, and the agent-owned
+        file the shim writes under /tool_assets."""
+        name = "openai_images_generate_image"
+        result, text = self._shim_tool_response(
+            name,
+            {
+                "prompt": "a plain teal circle on a white background",
+                "model": "gpt-image-1-mini",
+                "quality": "low",
+                "size": "1024x1024",
+            },
+        )
+        lower = text.lower()
+        if "rejected the configured api key" in lower or "verified api organization" in lower:
+            raise CredentialUnavailable(f"{name}: {text}")
+        if result.get("isError"):
+            raise AssertionError(f"{name} failed: {text}")
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(f"{name} returned non-JSON result text: {text!r}") from exc
+        path = parsed.get("path") if isinstance(parsed, dict) else None
+        if (
+            not isinstance(path, str)
+            or not path.startswith("/tool_assets/")
+            or parsed.get("media_type") != "image/png"
+            or not isinstance(parsed.get("size_bytes"), int)
+        ):
+            raise AssertionError(f"{name} returned an unusable saved image: {parsed}")
+        # The bytes must exist as a private agent-owned file, not just in the
+        # response. Then remove it so repeated stage runs do not accumulate.
+        local = f"/mnt/kern-agent/agent-home{path}"
+        stat_line = self._ssh_code(f"sudo stat -c '%U:%a:%s' {shlex.quote(local)}").strip()
+        owner, mode, size = (stat_line.split(":") + ["", "", ""])[:3]
+        if owner != "kern-agent" or mode != "600" or size != str(parsed["size_bytes"]):
+            raise AssertionError(f"saved image is not a private agent file: {stat_line!r}")
+        self._ssh_code(f"sudo -u kern-agent rm -f {shlex.quote(local)}")
+        return f"generated and saved one image ({parsed['size_bytes']} bytes) into the agent workspace"
 
     def _successful_tool_call(self, name: str, arguments: dict) -> dict:
         result = self._shim_tool_result(name, arguments)

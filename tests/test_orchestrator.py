@@ -49,6 +49,7 @@ DEFAULT_SESSION = {
     "codex": ("gpt-5.6-terra", "high"),
     "claude_code": ("claude-opus-5", "high"),
     "hermes": ("qwen.qwen3-coder-next", "high"),
+    "script": ("bash", "fixed"),
 }
 
 
@@ -572,6 +573,34 @@ class OrchestratorTests(unittest.TestCase):
             orchestrator.steer_live_turn("hermes-busy", "hermes", "hello")
         self.assertEqual(caught.exception.status.value, 409)
         self.assertIn("Hermes cannot accept another message", caught.exception.message)
+
+    def test_script_live_turn_rejects_steers(self) -> None:
+        # One turn is one process with no channel into it, exactly as for
+        # Hermes, so a second message waits instead of steering.
+        server = FakeServer()
+        server.started = 1
+        self.register_live_turn("script", "schedule-1-run-1", server)
+        with self.assertRaises(ApiError) as caught:
+            orchestrator.steer_live_turn(
+                "schedule-1-run-1", "script", "/mnt/kern-agent/agent-home/other.sh"
+            )
+        self.assertEqual(caught.exception.status.value, 409)
+        self.assertIn("Script cannot accept another message", caught.exception.message)
+
+    def test_the_script_runtime_needs_no_provider_connection(self) -> None:
+        # No managed integration gates it, and no policy disables it: there is
+        # no provider credential or endpoint behind it to enable.
+        save_policy({"network_integrations": {}}, "2026-06-08T00:00:01Z")
+        self.assertFalse(orchestrator.runtime_network_enabled("codex"))
+        self.assertTrue(orchestrator.runtime_network_enabled("script"))
+        self.assertEqual(orchestrator.refresh_runtime_status("script"), "active")
+        self.assertEqual(orchestrator.runtime_status("script"), "active")
+        # And it is admissible on that status alone, with no login to await.
+        turn = self.admit("schedule-2-run-1", runtime="script")
+        self.assertEqual(turn.runtime_type, "script")
+        self.assertIs(
+            orchestrator._provider_module("script"), orchestrator.script_runner
+        )
 
     def test_direct_steers_do_not_accumulate_in_a_host_mailbox(self) -> None:
         model, effort = DEFAULT_SESSION["codex"]
@@ -2692,6 +2721,62 @@ class StartBackgroundLoopsOrderTests(unittest.TestCase):
         # is spawned, so a turn cannot be admitted against a stale token.
         self.assertEqual(order[0], "refresh")
         self.assertIn("thread", order)
+
+    def test_start_background_loops_publishes_unmanaged_runtimes_immediately(self) -> None:
+        # A script schedule can fire while the provider probes are still
+        # running, and an occurrence is attempted once: a runtime with nothing
+        # to probe must not be left "loading" behind them, or that occurrence
+        # fails permanently against a runtime that is never unavailable.
+        with orchestrator._RUNTIME_STATUS_LOCK:
+            orchestrator._RUNTIME_STATUSES.clear()
+        self.addCleanup(orchestrator._RUNTIME_STATUSES.clear)
+        observed: list[str] = []
+        with (
+            patch(
+                "host.runtime.admin_api.orchestrator.github_credential.reconcile",
+                side_effect=lambda: observed.append(
+                    orchestrator.runtime_status("script")
+                ),
+            ),
+            patch(
+                "host.runtime.admin_api.orchestrator.threading.Thread",
+                side_effect=lambda *a, **k: _NoopThread(),
+            ),
+        ):
+            orchestrator.start_background_loops()
+        # Already active by the time anything slow runs, not merely by the end.
+        self.assertEqual(observed, ["active"])
+        self.assertEqual(orchestrator.runtime_status("script"), "active")
+
+    def test_unmanaged_runtimes_are_published_once_and_never_polled(self) -> None:
+        # That publish is the whole of their status lifecycle. The poller
+        # re-derives statuses that change underneath the host — a login
+        # expiring, a token rotating — and an unmanaged runtime has none of
+        # that, so polling it would re-publish a constant and open an empty
+        # transaction to do it.
+        class StopLoop(Exception):
+            pass
+
+        polled: list[str] = []
+
+        def fake_refresh(runtime_type: str) -> str:
+            polled.append(runtime_type)
+            return "active"
+
+        def fake_sleep(seconds: float) -> None:
+            raise StopLoop
+
+        with (
+            patch.object(orchestrator, "refresh_runtime_status", fake_refresh),
+            patch.object(orchestrator.time, "monotonic", lambda: 0.0),
+            patch.object(orchestrator.time, "sleep", fake_sleep),
+        ):
+            with self.assertRaises(StopLoop):
+                orchestrator.runtime_status_loop()
+
+        self.assertEqual(polled, ["codex", "claude_code", "hermes"])
+        for runtime_type in orchestrator.UNMANAGED_RUNTIMES:
+            self.assertNotIn(runtime_type, polled)
 
 
 class ClaudeLiveStatusTests(unittest.TestCase):

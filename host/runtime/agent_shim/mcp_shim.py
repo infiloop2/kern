@@ -58,7 +58,13 @@ WORKSPACE_API_TOOL_NAME = "workspace_api"
 SEARCH_CONVERSATION_HISTORY_TOOL_NAME = "search_conversation_history"
 READ_THREAD_HISTORY_TOOL_NAME = "read_thread_history"
 NETWORK_TOOL_NAMES = agent_tool_surface.NETWORK_TOOL_NAMES
-REQUEST_TIMEOUT_SECONDS = 120
+# One tool call's whole budget, and the socket timeout on every forwarded
+# request. Sized for the slowest legitimate action rather than the typical one:
+# synchronous image generation returns only when the render is done, which at
+# high quality is minutes, and a harness that gets a socket error instead of a
+# result has spent the provider's credits for nothing. The tools service caps
+# concurrent agent calls, so a stuck call blocks one of those slots, not the host.
+REQUEST_TIMEOUT_SECONDS = 300
 PENDING_APPROVAL_HINT = (
     "This action needs operator approval. Tell the user to approve or deny it "
     "under Home > Integrations in the Kern admin UI, then check the outcome with the "
@@ -104,8 +110,9 @@ STAGE_IMAGE_TOOL = {
     "name": "stage_image",
     "description": (
         "Stream an agent-workspace JPEG, PNG, or WebP into the private Kern tools "
-        "service for Runway. Returns a short-lived image_asset_id to pass directly to "
-        "runway_generate_video; never store it as durable app state."
+        "service for Runway or OpenAI Image Generation. Returns a short-lived, "
+        "tool-scoped image_asset_id to pass directly to runway_generate_video or "
+        "openai_images_generate_image; never store it as durable app state."
     ),
     "inputSchema": {
         "type": "object",
@@ -117,7 +124,7 @@ STAGE_IMAGE_TOOL = {
             },
             "for_tool": {
                 "type": "string",
-                "enum": ["runway"],
+                "enum": ["runway", "openai_images"],
                 "description": "Destination tool; staged ids cannot cross tools.",
             },
         },
@@ -399,9 +406,11 @@ def _stage_asset(arguments: dict[str, Any], *, kind: str) -> dict[str, Any]:
     if not isinstance(path, str) or not path:
         raise RuntimeError(f"{action} path must be a non-empty string.")
     public_path, local_path = _workspace_local_path(path)
-    allowed_tools = {"runway", "instagram"} if kind == "video" else {"runway"}
+    allowed_tools = (
+        {"runway", "instagram"} if kind == "video" else {"runway", "openai_images"}
+    )
     if for_tool not in allowed_tools:
-        choices = "runway or instagram" if kind == "video" else "runway"
+        choices = "runway or instagram" if kind == "video" else "runway or openai_images"
         raise RuntimeError(f"{action} for_tool must be {choices}.")
     suffix = os.path.splitext(public_path)[1].lower()
     media_types = (
@@ -497,7 +506,8 @@ def _workspace_api_tool() -> dict[str, Any]:
         "description": (
             "Call Kern's bounded agent-facing Workspace API for Web Apps, global memory, "
             "global schedules, and current thread identity. App routes use an explicit "
-            "immutable app id; GET /agent/apps lists the available ids. Returns "
+            "immutable app id; GET /agent/apps lists the available ids, and POST "
+            "/agent/apps creates a new app only when the operator explicitly asks. Returns "
             '{"status": <HTTP status>, "body": <response JSON>} so you can read '
             "validation errors and retry within this turn. Use only routes and "
             "request shapes documented by the host instructions."

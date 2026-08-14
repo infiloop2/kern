@@ -3,9 +3,12 @@ from __future__ import annotations
 import unittest
 
 from host.session_options import (
+    INTERACTIVE_SESSION_OPTIONS,
+    SCRIPT_SESSION_OPTIONS,
     SESSION_OPTIONS,
     public_session_options,
     recorded_session_config,
+    schedule_session_options,
     session_config_error,
 )
 
@@ -13,7 +16,7 @@ from host.session_options import (
 class SessionOptionsTests(unittest.TestCase):
     def test_exposes_only_the_operator_session_options(self) -> None:
         self.assertEqual(
-            SESSION_OPTIONS,
+            INTERACTIVE_SESSION_OPTIONS,
             {
                 "codex": {
                     "gpt-5.6-terra": ("high", "max", "ultra"),
@@ -31,6 +34,43 @@ class SessionOptionsTests(unittest.TestCase):
                     "moonshotai.kimi-k2.5": ("high",),
                 },
             },
+        )
+
+    def test_the_script_runtime_has_one_fixed_configuration(self) -> None:
+        self.assertEqual(SCRIPT_SESSION_OPTIONS, {"script": {"bash": ("fixed",)}})
+        self.assertEqual(
+            SESSION_OPTIONS,
+            {**INTERACTIVE_SESSION_OPTIONS, **SCRIPT_SESSION_OPTIONS},
+        )
+
+    def test_the_script_runtime_runs_only_where_it_is_opted_into(self) -> None:
+        # Conversational surfaces leave allow_script off, so the runtime they
+        # cannot use is rejected by name rather than reaching an adapter that
+        # would read their prompt as a path.
+        self.assertIsNotNone(session_config_error("script", "bash", "fixed"))
+        self.assertIsNone(
+            session_config_error("script", "bash", "fixed", allow_script=True)
+        )
+        # Opting in widens the runtimes, not the models: the one script
+        # configuration is still the only one.
+        for model, effort in (("bash", "high"), ("python", "fixed"), ("bash", "max")):
+            with self.subTest(model=model, effort=effort):
+                self.assertIsNotNone(
+                    session_config_error("script", model, effort, allow_script=True)
+                )
+        # ...and it leaves the model runtimes exactly as they were.
+        self.assertIsNone(
+            session_config_error("codex", "gpt-5.6-sol", "ultra", allow_script=True)
+        )
+        self.assertIsNotNone(
+            session_config_error("codex", "gpt-5.6-luna", "ultra", allow_script=True)
+        )
+
+    def test_only_schedules_offer_the_script_runtime(self) -> None:
+        self.assertNotIn("script", public_session_options())
+        self.assertEqual(schedule_session_options()["script"], {"bash": ["fixed"]})
+        self.assertEqual(
+            schedule_session_options()["codex"], public_session_options()["codex"]
         )
 
     def test_rejects_cross_runtime_and_luna_ultra_combinations(self) -> None:
@@ -79,7 +119,9 @@ class SessionOptionsTests(unittest.TestCase):
             ["high", "max", "ultracode"],
         )
         options["codex"]["gpt-5.6-luna"].append("invalid")
+        schedule_session_options()["script"]["bash"].append("invalid")
         self.assertEqual(SESSION_OPTIONS["codex"]["gpt-5.6-luna"], ("high", "max"))
+        self.assertEqual(SESSION_OPTIONS["script"]["bash"], ("fixed",))
 
 
 if __name__ == "__main__":

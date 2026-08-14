@@ -1257,6 +1257,45 @@ def mobile_smoke(page: Any) -> None:
         raise AssertionError(
             f"mobile Web App composer is not docked to the bottom: shell={shell_box}, composer={composer_box}"
         )
+    built_app_id = page.evaluate(
+        """async () => {
+          const response = await window.KernHost.api("GET", "/v1/workspace/web-apps/apps");
+          return response.apps.find(app => app.revision > 0 && !app.archived)?.app_id || null;
+        }"""
+    )
+    if not built_app_id:
+        raise AssertionError("mobile smoke has no generated App to exercise keyboard focus")
+    _open_host_app(page, built_app_id)
+    generated_input = frame.locator("#generated-host").locator("#enter-action")
+    expect(generated_input).to_be_visible()
+    if generated_input.evaluate(
+        "element => parseFloat(getComputedStyle(element).fontSize)"
+    ) < 16:
+        raise AssertionError("generated App input would trigger iOS focus zoom")
+    generated_input.focus()
+    expect(page.locator("body")).to_have_class(re.compile(r"\bworkspace-input-focused\b"))
+    page.evaluate(
+        """() => {
+          document.body.classList.remove('workspace-input-focused');
+          window.__workspaceViewportRecoveryCalls = 0;
+          const nativeScrollTo = window.scrollTo;
+          window.__restoreScrollTo = () => { window.scrollTo = nativeScrollTo; };
+          window.scrollTo = (...args) => {
+            window.__workspaceViewportRecoveryCalls += 1;
+            return nativeScrollTo.apply(window, args);
+          };
+          visualViewport.dispatchEvent(new Event('scroll'));
+        }"""
+    )
+    page.wait_for_timeout(100)
+    recovery_calls = page.evaluate("() => window.__workspaceViewportRecoveryCalls")
+    page.evaluate("() => window.__restoreScrollTo()")
+    if recovery_calls:
+        raise AssertionError(
+            "host viewport recovery fought a focused generated App field: "
+            f"{recovery_calls} forced scrolls"
+        )
+    generated_input.evaluate("element => element.blur()")
     frame.get_by_role("button", name="Rename app", exact=True).click()
     expect(frame.get_by_role("dialog", name="Rename app")).to_be_visible()
     if frame.locator("#rename-app-input").evaluate(

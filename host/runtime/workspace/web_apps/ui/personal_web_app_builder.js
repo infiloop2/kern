@@ -352,6 +352,10 @@ const allowedInputTypes = new Set([
   "checkbox", "color", "date", "datetime-local", "email", "month", "number", "radio",
   "range", "search", "tel", "text", "time", "week",
 ]);
+// iOS zooms and pans the visual viewport when a focused text control computes
+// below 16px. Generated Apps may choose smaller typography, but their editable
+// controls must remain stable while the software keyboard owns the viewport.
+const generatedMobileTextControlCss = `@media(max-width:720px){input:not([type]),input[type="text"],input[type="search"],input[type="email"],input[type="tel"],input[type="url"],input[type="password"],input[type="number"],textarea,select{font-size:max(16px,1em)!important}}`;
 const allowedCssProperties = new Set(`
   accent-color align-content align-items align-self animation animation-delay
   animation-direction animation-duration animation-fill-mode animation-iteration-count
@@ -581,7 +585,7 @@ function renderGenerated(html, css) {
     clearGeneratedDrag();
     const fragment = sanitizeHtml(html);
     const safeCss = sanitizeCssCached(css);
-    const styleText = `:host{display:block;min-height:100%;color:var(--text);background:var(--bg);font-family:system-ui,sans-serif}.kern-copy-link{background:transparent;border:0;color:inherit;cursor:pointer;font:inherit;padding:0;text-decoration:underline;text-underline-offset:.15em}${safeCss}`;
+    const styleText = `:host{display:block;min-height:100%;color:var(--text);background:var(--bg);font-family:system-ui,sans-serif}.kern-copy-link{background:transparent;border:0;color:inherit;cursor:pointer;font:inherit;padding:0;text-decoration:underline;text-underline-offset:.15em}${safeCss}${generatedMobileTextControlCss}`;
     patchChildren(generatedRoot, fragment);
     // Commit safe content before installing styles. A browser-specific style
     // failure must never strand the operator on the stored Loading placeholder.

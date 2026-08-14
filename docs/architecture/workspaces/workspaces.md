@@ -33,6 +33,20 @@ and an unavailable configuration becomes a failed run with a visible error.
 Schedules have no separate pause flag: deleting one stops future occurrences,
 and restoring it schedules the next occurrence from restoration time.
 
+A schedule may also select the `script` runtime (`bash`/`fixed`), which runs a
+static bash script from the agent home instead of a model turn — recurring work
+that needs no reasoning. Its message field is the script's absolute path, and
+that is the one definition field whose shape depends on the runtime: the
+spelling is validated when the schedule is written (`host/agent_scripts.py`),
+while whether the file exists is decided by the launcher at run time, because
+the Workspace service cannot read the agent's private home. Everything else is
+unchanged — same thread per firing, same run history, same no-overlap rule —
+except that a script run resumes nothing and has a fixed fifteen-minute budget.
+Schedules are the only surface that offers this runtime, and the host enforces
+that rather than relying on it: the send path admits the script runtime only on
+`schedule-*` threads, so a Chat or App thread cannot be rotated onto a runtime
+that would read its next message as a filename.
+
 Workspace retains at most 10,000 memory pages and 100 schedules. Each resource
 keeps its latest 100 revisions; deleted resources remain restorable for 90
 days. Terminal schedule runs remain for 90 days and are also capped to the

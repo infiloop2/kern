@@ -135,6 +135,53 @@ class AwsSmokeTeardownTests(unittest.TestCase):
 
         self.assertEqual(smoke.passed, 1)
 
+    def test_script_launcher_probe_runs_the_real_launcher_and_confines_paths(self) -> None:
+        smoke = AwsSmoke()
+        smoke.total = 0
+        smoke.passed = 0
+        commands: list[str] = []
+
+        def fake_ssh(command: str) -> str:
+            commands.append(command)
+            if "--thread-scope smoke-agent-script" in command:
+                return "kern-smoke-script-ok\nkern-agent"
+            if "echo status=$?" in command:
+                # The demoted side owns the not-found status; root owns the
+                # usage rejections.
+                return "status=66" if "kern-smoke-absent.sh" in command else "status=64"
+            return ""
+
+        with patch.object(smoke, "_ssh_code", side_effect=fake_ssh):
+            smoke.check_installed_agent_script_launcher()
+
+        joined = "\n".join(commands)
+        self.assertIn("sudo -u kern-admin", joined)
+        self.assertIn("/usr/local/lib/kern-host/run-agent-script", joined)
+        # The probe writes and removes its own script, and never leaves a
+        # named scope behind for the next run of the same thread id.
+        self.assertIn("sudo -u kern-agent tee", joined)
+        self.assertIn("rm -f /mnt/kern-agent/agent-home/kern-smoke-script.sh", joined)
+        self.assertIn("stop kern-agent-thread-smoke-agent-script.scope", joined)
+        self.assertEqual(smoke.passed, 1)
+
+    def test_script_launcher_probe_fails_when_a_confined_path_is_accepted(self) -> None:
+        smoke = AwsSmoke()
+        smoke.total = 0
+        smoke.passed = 0
+
+        def fake_ssh(command: str) -> str:
+            if "--thread-scope smoke-agent-script" in command:
+                return "kern-smoke-script-ok\nkern-agent"
+            return "status=0" if "echo status=$?" in command else ""
+
+        with (
+            patch.object(smoke, "_ssh_code", side_effect=fake_ssh),
+            self.assertRaises(AssertionError) as caught,
+        ):
+            smoke.check_installed_agent_script_launcher()
+        self.assertIn("/etc/hostname", str(caught.exception))
+        self.assertEqual(smoke.passed, 0)
+
     def test_precredential_bedrock_probe_runs_real_hermes_launcher(self) -> None:
         smoke = AwsSmoke()
         smoke.total = 0

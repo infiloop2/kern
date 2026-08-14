@@ -14,7 +14,7 @@ are partitioned by `tool_id`.
 
 Tool packages make outbound HTTPS calls to third parties (Google, Apify, Brave, X,
 LinkedIn, Serper, Meta/Instagram, ScrapeCreators, Polymarket, Interactive
-Brokers, Runway, and BytePlus ModelArk) and
+Brokers, Runway, BytePlus ModelArk, and OpenAI) and
 parse their responses, so unlike other host code they need direct egress and are
 the host code most exposed to attacker-influenced data. They run in a **dedicated
 `kern-tools` service** — its own Linux user, running
@@ -160,9 +160,12 @@ context instead of rewriting its prefix:
   exclusive-create, mode-0600 file in its mode-0700 asset directory.
   The tools service accepts only the authenticated agent peer, receives
   filename/type/length but no pathname, and stores a mode-0600 private copy in
-  its mode-0700 asset directory. The returned random id is scoped to either
-  Runway or Instagram. Runway deletes its input copy after Runway accepts the
-  generation or editing task. Instagram deletes its copy after publishing.
+  its mode-0700 asset directory. The returned random id is scoped to exactly one
+  destination tool: a video to Runway or Instagram, an image to Runway or OpenAI
+  image generation. Runway deletes its input copy after Runway accepts the
+  generation or editing task. OpenAI image generation deletes its reference
+  copies once OpenAI has returned a usable image. Instagram deletes its copy
+  after publishing.
   Every remaining id expires after about
   26 hours. The next staging/access check
   removes it immediately after expiry, and an hourly service sweep removes it
@@ -198,6 +201,27 @@ context instead of rewriting its prefix:
   later, the agent explicitly stages it for Instagram and passes the resulting
   `video_asset_id` into `instagram_post_reel`; the Instagram package and shim
   interface stay unchanged.
+
+  `openai_images_generate_image` shows why this is the general answer for
+  generated media rather than a save-action convention. OpenAI's GPT Image
+  models are synchronous and return the image as base64 inside the JSON
+  response — there is no task id and no hosted output URL, so there is nothing a
+  later save action could re-read. The package therefore decodes the payload in
+  the tools service, checks the bytes against the format the caller asked for,
+  and returns them as that call's exclusive `StreamingAsset`. The agent's whole
+  view of the result is the `{path, media_type, size_bytes}` the shim reports
+  after writing the file, so megabytes of base64 never enter model context or
+  the tool audit log. That call also accepts staged workspace images as
+  generation references, which is the staging path above run in the opposite
+  direction over the same private spool.
+
+  A synchronous render is also the slowest tool call the host makes, which is
+  what sets the shim's 300-second per-call budget: the whole render happens
+  inside one `tools/call`, and a socket timeout there would discard an image the
+  operator has already paid for. Packages keep their own provider timeout under
+  that budget so the failure the agent reads is the package's, not the
+  transport's, and the tools service's concurrency cap bounds what a slow call
+  can hold.
 
   One process lock owns every index and quota transition. An upload reserves
   its declared count and bytes under that lock, then streams outside it so a

@@ -69,6 +69,21 @@ MAX_PATH_DEPTH = 16
 MAX_PATH_KEY_BYTES = 128
 MAX_DATA_READ_PATHS = 16
 MAX_BATCH_OPERATIONS = 32
+# A shape response answers "which branch should I read" and must stay far
+# cheaper than the document it describes, so every dimension it walks is
+# bounded and every cut it makes is marked where the caller would otherwise
+# read absence as completeness.
+MAX_SHAPE_DEPTH = 6
+MAX_SHAPE_OBJECT_KEYS = 64
+MAX_SHAPE_ARRAY_SAMPLE = 200
+MAX_SHAPE_NODES = 1000
+# A repeated short string is a category worth naming. A string that never
+# repeats is an identifier, and copying identifiers would turn the map back
+# into the data it exists to avoid returning.
+MAX_SHAPE_ENUM_VALUES = 8
+MIN_SHAPE_ENUM_OBSERVATIONS = 4
+MIN_SHAPE_ENUM_VALUE_OBSERVATIONS = 2
+MAX_SHAPE_ENUM_VALUE_BYTES = 40
 JAVASCRIPT_FORBIDDEN = re.compile(r"\bimport\b")
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # Message creation and other writes on one workspace must not interleave.
@@ -203,6 +218,15 @@ def route_agent(
         if query:
             raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent app listing takes no query")
         return list_all_web_apps()
+    if method == "POST" and path == "/agent/apps":
+        if query:
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent app creation takes no query")
+        if body not in (None, {}):
+            raise WorkspaceError(
+                HTTPStatus.BAD_REQUEST,
+                "agent app creation accepts no fields",
+            )
+        return {"app": create_web_app(actor="agent")}
 
     match = re.fullmatch(r"/agent/apps/([^/]+)(/.*)", path)
     if match is None:
@@ -222,6 +246,8 @@ def route_agent(
         return {"app": load_app_ui(app_id)}
     if method == "GET" and resource == "/state/data":
         return {"app": load_app_data(app_id)}
+    if method == "GET" and resource == "/state/data/shape":
+        return {"app": load_app_data_shape(app_id)}
     if method == "POST" and resource == "/state/data/read":
         return {"app": read_app_data_path(app_id, body)}
     if method == "POST" and resource == "/actions":
@@ -341,7 +367,7 @@ def _web_app_summary(
     }
 
 
-def create_web_app() -> dict[str, Any]:
+def create_web_app(*, actor: str = "user") -> dict[str, Any]:
     # Match Agent Chat's allocator. The insert reserves an id across concurrent
     # creators, and every existing id remains counted so one is never reused.
     while True:
@@ -380,7 +406,7 @@ def create_web_app() -> dict[str, Any]:
                     cur,
                     app_id,
                     revision=0,
-                    actor="user",
+                    actor=actor,
                     kind="created",
                     restored_from=None,
                     html="",
@@ -696,6 +722,188 @@ def load_app_data(app_id: str) -> dict[str, Any]:
         "data": _decoded_data(row[1]),
         "updated_at": row[2],
     }
+
+
+def load_app_data_shape(app_id: str) -> dict[str, Any]:
+    """Return the data document's structure without returning the document.
+
+    An agent choosing a targeted read must first know which branches exist and
+    which are worth the tokens, and reading the whole document to answer that
+    is the cost the narrow read routes exist to avoid. The shape is derived
+    from the same stored data on every call, so it cannot describe a revision
+    that no longer exists; there is deliberately no writable copy to drift.
+
+    Paths in the response are the paths ``read_app_data_path`` accepts, so the
+    map's whole purpose is to be spent on a following narrow read.
+    """
+    state = load_app_data(app_id)
+    return {
+        "revision": state["revision"],
+        "updated_at": state["updated_at"],
+        "shape": _data_shape([state["data"]], 0, _ShapeBudget(MAX_SHAPE_NODES)),
+    }
+
+
+class _ShapeBudget:
+    """Bounds one shape response to a fixed number of described nodes."""
+
+    def __init__(self, limit: int) -> None:
+        self.remaining = limit
+
+    def take(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
+
+
+def _data_shape(values: list[Any], depth: int, budget: _ShapeBudget) -> dict[str, Any]:
+    """Describe one position from every value observed there.
+
+    Array elements are merged into a single ``items`` node so an array of a
+    thousand records costs one record's description. Merging is also what makes
+    a category visible: one observation cannot show that a field repeats.
+    """
+    node = _shape_node(values, depth, budget)
+    # A merged position has no single encoded size, so the size belongs to the
+    # array that holds it rather than to a representative element.
+    if len(values) == 1 and node["type"] in {"object", "array", "string"}:
+        node["bytes"] = _encoded_size(values[0])
+    return node
+
+
+def _shape_node(values: list[Any], depth: int, budget: _ShapeBudget) -> dict[str, Any]:
+    kinds = sorted({_shape_kind(value) for value in values})
+    if len(kinds) > 1:
+        return {"type": "mixed", "types": kinds}
+    if kinds[0] == "object":
+        return _object_shape(values, depth, budget)
+    if kinds[0] == "array":
+        return _array_shape(values, depth, budget)
+    return _scalar_shape(kinds[0], values)
+
+
+def _shape_kind(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    return "number"
+
+
+def _object_shape(
+    values: list[Any], depth: int, budget: _ShapeBudget
+) -> dict[str, Any]:
+    node: dict[str, Any] = {"type": "object"}
+    if depth >= MAX_SHAPE_DEPTH:
+        node["truncated"] = True
+        return node
+    observed: dict[str, list[Any]] = {}
+    for value in values:
+        for key, child in value.items():
+            observed.setdefault(key, []).append(child)
+    keys: dict[str, Any] = {}
+    for key in sorted(observed):
+        if len(keys) >= MAX_SHAPE_OBJECT_KEYS or not budget.take():
+            node["truncated"] = True
+            break
+        child_shape = _data_shape(observed[key], depth + 1, budget)
+        # Absent from some observed records, so a caller reading it must handle
+        # the gap rather than trust the merged description.
+        if len(observed[key]) < len(values):
+            child_shape["optional"] = True
+        # A write validates the path it targets but not the keys inside the
+        # value it stores, so a document can hold a key the read route will not
+        # traverse. Naming it beats hiding it: the branch exists, and only a
+        # full data read can reach it.
+        if not _addressable_key(key):
+            child_shape["addressable"] = False
+        keys[key] = child_shape
+    node["keys"] = keys
+    return node
+
+
+def _array_shape(
+    values: list[Any], depth: int, budget: _ShapeBudget
+) -> dict[str, Any]:
+    node: dict[str, Any] = {"type": "array"}
+    # A merged position holds one array per observed record, so no single
+    # length is true of all of them and a summed one would advertise an index
+    # that the record a caller reads does not have. Sizes describe a single
+    # observation, exactly as `bytes` does.
+    if len(values) == 1:
+        node["length"] = len(values[0])
+    elements = [element for value in values for element in value]
+    if not elements:
+        return node
+    if depth >= MAX_SHAPE_DEPTH:
+        node["truncated"] = True
+        return node
+    if len(elements) > MAX_SHAPE_ARRAY_SAMPLE:
+        # Categories below are drawn from a prefix, so an enum here may be
+        # incomplete. Saying so keeps a partial map from reading as a total one.
+        node["sampled"] = MAX_SHAPE_ARRAY_SAMPLE
+        elements = elements[:MAX_SHAPE_ARRAY_SAMPLE]
+    if not budget.take():
+        node["truncated"] = True
+        return node
+    node["items"] = _data_shape(elements, depth + 1, budget)
+    return node
+
+
+def _scalar_shape(kind: str, values: list[Any]) -> dict[str, Any]:
+    node: dict[str, Any] = {"type": kind}
+    if kind != "string":
+        return node
+    distinct = sorted(set(values))
+    # Categories repeat and identifiers do not, so the position must average at
+    # least two observations per distinct value. Merely requiring one repeat
+    # would let a field of names with a single coincidental duplicate publish
+    # every name it holds.
+    if (
+        len(values) >= MIN_SHAPE_ENUM_OBSERVATIONS
+        and len(distinct) * MIN_SHAPE_ENUM_VALUE_OBSERVATIONS <= len(values)
+        and len(distinct) <= MAX_SHAPE_ENUM_VALUES
+        and all(_enum_value_fits(value) for value in distinct)
+    ):
+        node["enum"] = distinct
+    return node
+
+
+def _utf8_length(text: str) -> int | None:
+    """Return the UTF-8 size, or None when the string cannot be encoded.
+
+    JSON may escape a lone surrogate, which parses into a ``str`` that no UTF-8
+    measurement accepts, so a stored document can hold one. Describing that
+    document must not fail on it.
+    """
+    try:
+        return len(text.encode())
+    except UnicodeEncodeError:
+        return None
+
+
+def _addressable_key(key: str) -> bool:
+    """Whether ``read_app_data_path`` accepts this key as a path segment."""
+    size = _utf8_length(key)
+    # `_validated_path` measures segments the same way, so a key that cannot be
+    # measured is a key the read route refuses.
+    return bool(key) and size is not None and size <= MAX_PATH_KEY_BYTES
+
+
+def _enum_value_fits(value: str) -> bool:
+    size = _utf8_length(value)
+    return size is not None and size <= MAX_SHAPE_ENUM_VALUE_BYTES
+
+
+def _encoded_size(value: Any) -> int:
+    return len(json.dumps(value, separators=(",", ":")).encode())
 
 
 def read_app_data_path(app_id: str, body: Any) -> dict[str, Any]:

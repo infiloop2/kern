@@ -55,6 +55,7 @@ route for App data contains an immutable id:
 /agent/apps/{app_id}/state/meta
 /agent/apps/{app_id}/state/ui
 /agent/apps/{app_id}/state/data
+/agent/apps/{app_id}/state/data/shape
 /agent/apps/{app_id}/state/data/read
 /agent/apps/{app_id}/actions
 ```
@@ -74,6 +75,46 @@ original single-branch response or `paths` for up to 16 branches read from one
 consistent revision. Multi-path responses return ordered `{path, value}`
 entries. `missing` defaults to `"error"`; `"null"` keeps sparse operational
 reads compact by returning `null` for absent branches.
+
+`GET /agent/apps/{app_id}/state/data/shape` answers the question a narrow read
+requires an answer to first: which branches exist, and which are worth the
+tokens. It returns per node a `type`, an object's `keys`, and an array's merged
+`items`. Array elements merge into one `items` node, so describing a thousand
+records costs one record.
+
+Object keys in the map are read-route path segments. An array's `items` node
+describes that array's elements rather than naming a segment, so a caller
+substitutes an index for it: the map's `leads.items.status` is read as
+`["leads", 0, "status"]`. Being spendable on a narrow read is the only reason
+the map is worth returning.
+
+A write validates the path it targets but not the object keys inside the value
+it stores, so a document can hold an empty or oversized key that
+`_validated_path` refuses as a segment. Such a key is marked `addressable:
+false` rather than omitted: the branch exists, and hiding it would make the map
+lie about the document, while marking it says only that a full data read is the
+way to reach it.
+
+Sizes — an array's `length` and an object, array, or string's encoded `bytes` —
+describe a single observed value only. A merged position holds one value per
+observed record, so no single size is true of all of them; a summed `length`
+would advertise an index that the record a caller actually reads does not have.
+
+The shape is derived from the stored document on every call. There is
+deliberately no route that writes it: a stored map would need to be kept in
+sync with `data_json`, and a map that is wrong is worse than none because
+callers act on it. For the same reason every bound it applies is marked in
+place — `truncated` where depth, key count, or the node budget cut the walk,
+`sampled` where only an array prefix was read — so a partial map is never
+mistaken for a total one.
+
+Values are summarized, never copied. Strings collapse to an `enum` only when a
+position was observed at least four times, holds at most eight distinct short
+values, and averages at least two observations per distinct value. Categories
+repeat and identifiers do not, and returning identifiers would rebuild the
+document the route exists to avoid returning; requiring only one repeated value
+would let a field of names with a single coincidental duplicate publish every
+name it holds. Keys absent from some merged records are marked `optional`.
 
 Global routes are:
 

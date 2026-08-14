@@ -738,6 +738,120 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         self.assertEqual(run["status"], "failed")
         self.assertEqual(run["error_message"], "model is no longer offered")
 
+    def test_a_script_schedule_carries_a_path_and_rejects_anything_else(self) -> None:
+        script_session = {
+            "agent_runtime": "script",
+            "model": "bash",
+            "effort": "fixed",
+        }
+
+        def create(name: str, message: str) -> dict:
+            return schedules.create_schedule(
+                {
+                    "name": name,
+                    "message": message,
+                    "cadence": "interval",
+                    "interval_minutes": 60,
+                    **script_session,
+                },
+                actor="agent",
+            )
+
+        schedule = create("Nightly backup", "/mnt/kern-agent/agent-home/backup.sh")
+        self.assertEqual(schedule["message"], "/mnt/kern-agent/agent-home/backup.sh")
+
+        # The message field means something else for this runtime, so a prompt
+        # is rejected while the schedule is being written rather than becoming
+        # a failed run an hour later.
+        for message in (
+            "Summarize open work.",
+            "/etc/cron.daily/backup.sh",
+            "/mnt/kern-agent/agent-home/../../etc/backup.sh",
+            "/mnt/kern-agent/agent-home/backup.sh; rm -rf /",
+        ):
+            with self.subTest(message=message):
+                with self.assertRaises(WorkspaceError) as rejected:
+                    create("Bad script", message)
+                self.assertEqual(rejected.exception.status, HTTPStatus.BAD_REQUEST)
+
+        # An edit is held to the same contract, in both directions.
+        with self.assertRaises(WorkspaceError):
+            schedules.update_schedule(
+                schedule["id"],
+                {
+                    "expected_revision": schedule["revision"],
+                    "name": schedule["name"],
+                    "message": "Summarize open work.",
+                    "cadence": "interval",
+                    "interval_minutes": 60,
+                    **script_session,
+                },
+                actor="user",
+            )
+        # ...and a model runtime still takes an ordinary prompt.
+        prompted = schedules.update_schedule(
+            schedule["id"],
+            {
+                "expected_revision": schedule["revision"],
+                "name": schedule["name"],
+                "message": "Summarize open work.",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                **SESSION,
+            },
+            actor="user",
+        )
+        self.assertEqual(prompted["message"], "Summarize open work.")
+
+    def test_a_script_run_submits_the_path_as_the_thread_message(self) -> None:
+        schedule = schedules.create_schedule(
+            {
+                "name": "Nightly backup",
+                "message": "/mnt/kern-agent/agent-home/scripts/backup.sh",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                "agent_runtime": "script",
+                "model": "bash",
+                "effort": "fixed",
+            },
+            actor="user",
+        )
+        with db.transaction() as cur:
+            cur.execute(
+                "UPDATE schedules SET next_run_at = %s WHERE id = %s",
+                ("2026-08-07T09:00:00Z", schedule["id"]),
+            )
+        calls: list[tuple[str, str, object]] = []
+
+        def host(method: str, path: str, body: object = None) -> dict:
+            calls.append((method, path, body))
+            return {
+                "status": "accepted",
+                "thread": {"thread_id": "schedule-1-run-1", "status": "running"},
+            }
+
+        with patch.object(schedules, "call_admin_api", side_effect=host):
+            self.assertEqual(
+                schedules.run_due(datetime(2026, 8, 7, 10, 0, tzinfo=timezone.utc)), 1
+            )
+        # A script run is an ordinary schedule run: same fresh thread, same
+        # submission shape, with the path where the prompt would be.
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "POST",
+                    "/v1/threads/schedule-1-run-1/messages",
+                    {
+                        "message": "/mnt/kern-agent/agent-home/scripts/backup.sh",
+                        "agent_runtime": "script",
+                        "model": "bash",
+                        "effort": "fixed",
+                    },
+                )
+            ],
+        )
+
     def test_schedule_admission_failure_is_terminal_without_retry(self) -> None:
         schedule = schedules.create_schedule(
             {
@@ -956,6 +1070,9 @@ class WorkspaceIdentityTests(unittest.TestCase):
             "GET", "/agent/schedules/session-options", None, {}
         )
         self.assertIn("codex", response["session_options"])
+        # Schedules are the surface that offers the script runtime, so the
+        # agent can discover it here rather than having to know it exists.
+        self.assertEqual(response["session_options"]["script"], {"bash": ["fixed"]})
         with self.assertRaises(WorkspaceError):
             schedules.route_agent(
                 "GET", "/agent/schedules/session-options", None, {"extra": ["1"]}

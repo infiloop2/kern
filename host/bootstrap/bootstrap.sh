@@ -860,6 +860,7 @@ HELPER_NAMES=(
   run-claude-code
   read-claude-account
   run-hermes
+  run-agent-script
   stop-agent-thread
   read-aws-account
   clear-agent-auth
@@ -962,7 +963,7 @@ cat > /etc/sudoers.d/kern-host <<'SUDOERS'
 # structurally never receives them. Hermes signs with a fixed routing identity
 # and the proxy re-signs.
 Defaults!/usr/local/lib/kern-host/read-aws-account env_keep += "KERN_BEDROCK_AWS_ACCESS_KEY_ID KERN_BEDROCK_AWS_SECRET_ACCESS_KEY"
-kern-admin ALL=(root) NOPASSWD: /usr/local/lib/kern-host/reboot-host, /usr/local/lib/kern-host/run-codex-app-server, /usr/local/lib/kern-host/read-codex-account-id, /usr/local/lib/kern-host/run-claude-code, /usr/local/lib/kern-host/read-claude-account, /usr/local/lib/kern-host/run-hermes, /usr/local/lib/kern-host/stop-agent-thread, /usr/local/lib/kern-host/read-aws-account, /usr/local/lib/kern-host/clear-agent-auth, /usr/local/lib/kern-host/read-agent-file, /usr/local/lib/kern-host/upload-agent-file, /usr/local/lib/kern-host/check-for-upgrade, /usr/local/lib/kern-host/mint-github-app-token, /usr/local/lib/kern-host/audit-github-repo, /usr/local/lib/kern-host/approve-github-push
+kern-admin ALL=(root) NOPASSWD: /usr/local/lib/kern-host/reboot-host, /usr/local/lib/kern-host/run-codex-app-server, /usr/local/lib/kern-host/read-codex-account-id, /usr/local/lib/kern-host/run-claude-code, /usr/local/lib/kern-host/read-claude-account, /usr/local/lib/kern-host/run-hermes, /usr/local/lib/kern-host/run-agent-script, /usr/local/lib/kern-host/stop-agent-thread, /usr/local/lib/kern-host/read-aws-account, /usr/local/lib/kern-host/clear-agent-auth, /usr/local/lib/kern-host/read-agent-file, /usr/local/lib/kern-host/upload-agent-file, /usr/local/lib/kern-host/check-for-upgrade, /usr/local/lib/kern-host/mint-github-app-token, /usr/local/lib/kern-host/audit-github-repo, /usr/local/lib/kern-host/approve-github-push
 SUDOERS
 chmod 440 /etc/sudoers.d/kern-host
   # A malformed sudoers drop-in would otherwise surface only when the admin

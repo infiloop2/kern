@@ -943,7 +943,7 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-smile { bottom: 0.48rem; fill: none; height: 0.55rem !important; position: absolute; stroke: currentColor; stroke-linecap: round; stroke-width: 1.7; width: 2rem !important; }
 .integration-logo-search { --logo-badge: #0a66c2; bottom: 0.15rem; fill: var(--logo-badge); height: 1.25rem !important; position: absolute; right: 0.15rem; stroke: #fff; stroke-linecap: round; stroke-width: 2; width: 1.25rem !important; }
 
-.integration-logo-openai { background: #fff; color: #111; }
+.integration-logo-openai, .integration-logo-tool-openai_images { background: #fff; color: #111; }
 .integration-logo-claude { background: #d97757; color: #fff8f0; }
 .integration-logo-bedrock { background: #172033; color: #ffb23f; }
 .integration-logo-github { background: #f5f5f5; color: #181717; }
@@ -967,9 +967,12 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-tool-linkedin, .integration-logo-tool-linkedin_discovery { --logo-badge: #0a66c2; background: #0a66c2; }
 .integration-logo-word-linkedin { font-family: Arial, sans-serif; font-size: 1.5rem; letter-spacing: -0.08em; margin-left: -0.06em; }
 .integration-logo-tool-polymarket { background: #635bff; }
+.integration-logo-tool-reddit { background: #ff4500; }
 .integration-logo-tool-runway { background: #f4f4f2; color: #111; }
 .integration-logo-word-runway { font-family: Georgia, serif; font-size: 1.8rem; font-weight: 500; }
 .integration-logo-tool-twitter { background: #050505; }
+.integration-logo-tool-zoho_mail { background: #fff; color: #1665d8; }
+.integration-logo-word-zoho { font-family: Arial, sans-serif; font-size: 0.82rem; letter-spacing: -0.06em; }
 .integration-logo-custom_domain { background: var(--accent-soft); border-color: rgba(69, 214, 196, 0.35); color: var(--accent); }
 
 .home-integration-card-top {

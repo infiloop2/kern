@@ -95,12 +95,27 @@ read-only to agents.
 Use the id the operator gives you, or list apps and confirm the immutable id;
 never choose an app from its editable name alone.
 
+Create a new app with `POST /agent/apps` without a request body, but only when
+the operator explicitly asks you to create a new app. The response contains the
+new immutable `app_id`; use that id for all subsequent reads and writes.
+
 For an app id `{app_id}`, read only what the task needs:
 
 - `GET /agent/apps/{app_id}/state/meta` — revision, update time, byte sizes, and
   `agent_updates_locked`.
 - `GET /agent/apps/{app_id}/state/ui` — `revision`, HTML, CSS, and JavaScript.
 - `GET /agent/apps/{app_id}/state/data` — `revision` and full JSON data.
+- `GET /agent/apps/{app_id}/state/data/shape` — the data document's keys,
+  types, and per-branch `bytes` without its values, so you can pick a narrow
+  read instead of pulling the whole document to find out what is in it. Object
+  keys in the map are path segments for the read route below; an array's
+  `items` describes its elements rather than naming a segment, so read one with
+  an index — the map's `leads.items.status` is `["leads",0,"status"]`. Short
+  strings that repeat across records appear as `enum`; a `truncated` or
+  `sampled` marker means the map is partial there, and `addressable: false`
+  marks a key no read path can reach, so fetch that branch with a full data
+  read. It is read-only and derived on every call, so it cannot go stale and
+  there is nothing to update.
 - `POST /agent/apps/{app_id}/state/data/read` with `{"path":["projects",0]}`
   — one data branch. Use `{"paths":[["config"],["next_id"]],"missing":"null"}`
   to read up to 16 branches from one consistent revision; `missing` defaults
@@ -219,6 +234,24 @@ host thread; it does not resume the thread that created the schedule.
 Edits affect future runs only. Kern never overlaps two runs of one schedule or
 silently substitutes a runtime, model, or effort; an unavailable setting
 produces a visible failed run.
+
+#### Script schedules
+
+The `script` runtime (`model` `bash`, `effort` `fixed`) runs a static bash
+script instead of a model turn — for recurring work that needs no reasoning,
+such as a backup, a sync, or a health check. Choose it when the task is fully
+determined; choose a model runtime when the task needs judgement.
+
+For a script schedule, `message` is the script's absolute path rather than a
+prompt: an existing `.sh` file under `/mnt/kern-agent/agent-home`, spelled with
+letters, numbers, `.`, `_`, `-`, and `/` only. Write the script first, make it
+work when you run it yourself, then schedule the path.
+
+Each run executes the file as it is on disk at that moment with `bash`, from
+the agent home, with the same network policy and 15-minute budget every run
+gets. Its combined output is recorded as the run's message, and a non-zero exit
+fails the run visibly; nothing is retried. Editing the file changes what the
+next run does without touching the schedule.
 
 ## Network
 

@@ -306,6 +306,8 @@ class AdminUiStaticTests(unittest.TestCase):
             admin_css,
         )
         self.assertIn("workspace-input-focused", app)
+        self.assertIn("isWorkspaceKeyboardInput(deepActiveElement())", app)
+        self.assertIn("while (active?.shadowRoot?.activeElement)", app)
         self.assertIn("function isWorkspaceKeyboardInput(target)", app)
         self.assertIn(
             '["text", "search", "email", "tel", "url", "password", "number"]',
@@ -3688,6 +3690,79 @@ class AdminApiIntegrationTests(unittest.TestCase):
             ["thread.message", "thread.message"],
         )
 
+    def test_a_schedule_thread_runs_the_script_runtime_on_the_ordinary_path(self) -> None:
+        # The admin API is the executor for every runtime the host offers, so
+        # it accepts the configuration a script schedule submits — the
+        # conversational surfaces do their own gating on the way in.
+        set_runtime_statuses(codex="active", claude_code="active", script="active")
+        with patch.object(orchestrator, "launch_turn") as launch:
+            _, accepted = self.request(
+                "POST",
+                "/v1/threads/schedule-5-run-2/messages",
+                {
+                    "message": "/mnt/kern-agent/agent-home/scripts/backup.sh",
+                    "agent_runtime": "script",
+                    "model": "bash",
+                    "effort": "fixed",
+                },
+            )
+        self.assertEqual(accepted["thread"]["agent_runtime"], "script")
+        self.assertEqual(accepted["thread"]["model"], "bash")
+        self.assertEqual(accepted["thread"]["effort"], "fixed")
+        # The path is launched verbatim: the adapter, not the API, reads it.
+        _turn, launch_message, provider_session_id = launch.call_args.args
+        self.assertEqual(
+            launch_message, "/mnt/kern-agent/agent-home/scripts/backup.sh"
+        )
+        self.assertIsNone(provider_session_id)
+        stored = state.thread_session_config("schedule-5-run-2")
+        self.assertEqual(stored["agent_runtime"], "script")
+
+        for fields in (
+            {"agent_runtime": "script", "model": "python", "effort": "fixed"},
+            {"agent_runtime": "script", "model": "bash", "effort": "high"},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(
+                    "POST",
+                    "/v1/threads/schedule-6-run-1/messages",
+                    {"message": "/mnt/kern-agent/agent-home/backup.sh", **fields},
+                )
+            self.assertEqual(error.exception.code, 400)
+
+    def test_only_schedule_threads_can_run_the_script_runtime(self) -> None:
+        # A Chat or App thread rotated onto the script runtime would start
+        # reading the user's next sentence as a filename. The Workspace
+        # surfaces decline to offer it; this is the executor enforcing it on
+        # the one thing a direct caller cannot forge — the thread id.
+        set_runtime_statuses(codex="active", claude_code="active", script="active")
+        script_config = {"agent_runtime": "script", "model": "bash", "effort": "fixed"}
+        for thread_id in ("thread-9", "app-9"):
+            with self.subTest(thread_id=thread_id), self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(
+                    "POST",
+                    f"/v1/threads/{thread_id}/messages",
+                    {"message": "/mnt/kern-agent/agent-home/backup.sh", **script_config},
+                )
+            self.assertEqual(error.exception.code, 400)
+            detail = error.exception.read().decode()
+            self.assertIn("agent_runtime must be one of", detail)
+            self.assertNotIn("script", detail)
+            self.assertIsNone(state.thread_session_config(thread_id))
+
+        # An existing conversational thread cannot be rotated onto it either.
+        seed_thread_session("thread-rotatable", "codex")
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request(
+                "POST",
+                "/v1/threads/thread-rotatable/messages",
+                {"message": "/mnt/kern-agent/agent-home/backup.sh", **script_config},
+            )
+        self.assertEqual(error.exception.code, 400)
+        self.assertEqual(
+            state.thread_session_config("thread-rotatable")["agent_runtime"], "codex"
+        )
+
     def test_thread_on_a_superseded_model_can_switch_to_an_offered_model(self) -> None:
         seed_thread_session(
             "thread-legacy-alias-thread",
@@ -3940,6 +4015,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
                     cur, "claude_code", f"thread-claude-chat-{n}", f"session_{n}",
                     f"2026-06-09T{n // 60:02d}:{n % 60:02d}:00Z", "claude-opus-5", "high",
                 )
+                # A script schedule creates a session row per firing, so the
+                # cap has to reach every runtime that can own a thread — not
+                # only the ones with a provider account.
+                state.save_thread_session(
+                    cur, "script", f"schedule-1-run-{n}", None,
+                    f"2026-06-10T{n // 60:02d}:{n % 60:02d}:00Z", "bash", "fixed",
+                )
             state.append_agent_event(
                 cur,
                 "thread.message",
@@ -3953,6 +4035,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
         remaining = {thread["thread_id"] for thread in state.page_thread_summaries(None, 100)}
         codex_history = {thread for thread in remaining if thread.startswith("thread-codex-chat-")}
         claude_history = {thread for thread in remaining if thread.startswith("thread-claude-chat-")}
+        script_history = {thread for thread in remaining if thread.startswith("schedule-1-run-")}
+        self.assertEqual(
+            script_history,
+            {f"schedule-1-run-{n}" for n in range(5, map_limit + 5)},
+        )
         self.assertEqual(
             codex_history,
             {"thread-codex-chat-0", *(f"thread-codex-chat-{n}" for n in range(5, map_limit + 5))},
@@ -6520,6 +6607,7 @@ class ToolRoutesTests(unittest.TestCase):
                 "polymarket",
                 "runway",
                 "twitter",
+                "zoho_mail",
             }.issubset({entry["tool_id"] for entry in body["tools"]})
         )
         gmail = self.tool_entry(body, "gmail")

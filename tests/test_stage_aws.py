@@ -800,6 +800,10 @@ import tests.stage.stage_aws
         for name, message in (
             ("brave_search_search_web", "Brave Search API rejected the configured API key."),
             ("apify_search_businesses", "Apify rejected the configured API key or Actor access."),
+            (
+                "reddit_get_profile",
+                "Reddit rejected the personal-use script credentials. Check the app type.",
+            ),
         ):
             response = {
                 "result": {
@@ -808,8 +812,9 @@ import tests.stage.stage_aws
                 }
             }
             with self.subTest(name=name), patch.object(stage, "_shim_call", return_value=response):
-                with self.assertRaisesRegex(CredentialUnavailable, "rejected the configured API key"):
+                with self.assertRaises(CredentialUnavailable) as raised:
                     stage._shim_tool_result(name, {"query": "Kern"})
+                self.assertIn(message, str(raised.exception))
 
     def test_action_summary_appends_markdown(self) -> None:
         report = StageReport("all")

@@ -38,6 +38,7 @@
 | `mint-github-app-token` helper | root | admin API via sudo | Mints installation-wide GitHub App tokens through root egress because the admin service has none; the proxy repo guard is the per-repository boundary. |
 | `audit-github-repo` helper | root | admin API via sudo | Reads GitHub repository/security facts with the working token and returns facts without storing secrets. |
 | `approve-github-push` helper | root | admin API via sudo | Replays or cleans up a push held by the `.github` approval gate using the proxy-state quarantine mirror and a working GitHub token piped on stdin. |
+| `run-agent-script` helper | starts as root, then `kern-agent` | admin API via sudo | Runs one scheduled bash script from the agent home in the ordinary agent scope, with a scope `RuntimeMaxSec` backstop behind the 15-minute turn timeout. |
 | `stop-agent-thread` helper | root | admin API via sudo | Frees a thread's transient agent scope after a stop: SIGKILLs the scope's cgroup, stops the unit, and clears any failed remnant. |
 | `reboot-host` helper | root | admin API via sudo | Requests a host reboot. |
 
@@ -85,6 +86,22 @@ with the selected `--model` and `--effort`, then resumes the Claude session id
 recorded for the user thread. Both OAuth runtimes persist login/session state under
 `agent-home`, so restarted admin services can
 re-derive active status from the agent user's home directory.
+
+The `script` runtime is the one runtime with no model behind it: a schedule
+may select it to run a static bash script from the agent home instead of a
+model turn, with the script's path in place of the prompt. It runs on the same
+turn machinery — admission, run history, stop, the per-thread scope — through
+the same kind of sudo launcher, so a scheduled script is confined exactly as an
+agent turn is. Having no provider connection, it needs no login and is always
+active — its status is published once at startup and the status poller, which
+exists to re-derive what can change underneath the host, leaves it alone;
+having no session, every run starts fresh; and having no mid-turn channel, it
+cannot be steered. Its turn budget is a fixed fifteen minutes
+rather than an operator setting, enforced by the admin API and backstopped by
+the scope's `RuntimeMaxSec`. It is offered only where a schedule is
+configured — Chat and the Web App builder are conversational surfaces and
+reject it — and the send path enforces the same boundary on the thread id, so
+only a `schedule-*` thread can run it however the request arrives.
 
 ## Reboot and restart
 
