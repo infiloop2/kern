@@ -862,7 +862,7 @@ class AwsSmoke:
         """Pin the operator guidance actually installed into each agent runtime."""
         self._step("deployed agent host guidance")
         guide = self._ssh_code(
-            "sudo -u kern-agent sed -n '1,260p' /mnt/kern-agent/agent-home/AGENTS.md"
+            "sudo -u kern-agent cat /mnt/kern-agent/agent-home/AGENTS.md"
         )
         required = (
             "The host is a single-tenant Linux machine.",
@@ -1401,12 +1401,27 @@ class AwsSmoke:
         schedule_options = self._api(
             "GET", f"{schedules_base}/session-options"
         ).get("session_options")
-        if schedule_options != workspace_options["/v1/workspace/chat"]:
+        if not isinstance(schedule_options, dict):
             raise AssertionError(
-                f"Workspace schedules returned inconsistent session options: {schedule_options}"
+                f"Workspace schedules returned invalid session options: {schedule_options}"
+            )
+        managed_schedule_options = {
+            runtime: schedule_options.get(runtime) for runtime in SMOKE_RUNTIMES
+        }
+        if managed_schedule_options != workspace_options["/v1/workspace/chat"]:
+            raise AssertionError(
+                "Workspace schedules returned inconsistent managed-runtime "
+                f"session options: {schedule_options}"
+            )
+        if (
+            set(schedule_options) != {*SMOKE_RUNTIMES, "script"}
+            or schedule_options.get("script") != {"bash": ["fixed"]}
+        ):
+            raise AssertionError(
+                f"Workspace schedules returned invalid script session options: {schedule_options}"
             )
         runtime = SMOKE_RUNTIMES[0]
-        runtime_models = (schedule_options or {}).get(runtime)
+        runtime_models = schedule_options.get(runtime)
         if not isinstance(runtime_models, dict) or not runtime_models:
             raise AssertionError(f"Workspace schedules omitted {runtime} models: {schedule_options}")
         model, efforts = next(iter(runtime_models.items()))

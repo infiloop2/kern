@@ -44,6 +44,10 @@ class AwsSmokeTeardownTests(unittest.TestCase):
         ) as ssh:
             smoke.check_agent_home_guidance()
         self.assertEqual((smoke.passed, smoke.total), (1, 1))
+        self.assertEqual(
+            ssh.call_args_list[0].args[0],
+            "sudo -u kern-agent cat /mnt/kern-agent/agent-home/AGENTS.md",
+        )
         self.assertIn("sudo -u kern-agent cmp", ssh.call_args_list[1].args[0])
 
     def test_provider_free_smoke_covers_all_workspace_resources(self) -> None:
@@ -54,14 +58,20 @@ class AwsSmokeTeardownTests(unittest.TestCase):
         memory_base = "/v1/workspace/memory"
         schedules_base = "/v1/workspace/schedules"
         schedule_created = False
-        session_options = {
+        workspace_session_options = {
             runtime: {f"{runtime}-model": ["high"]} for runtime in SMOKE_RUNTIMES
+        }
+        schedule_session_options = {
+            **workspace_session_options,
+            "script": {"bash": ["fixed"]},
         }
 
         def fake_api(method: str, path: str, body: dict | None = None) -> dict:
             nonlocal schedule_created
+            if (method, path) == ("GET", f"{schedules_base}/session-options"):
+                return {"session_options": schedule_session_options}
             if method == "GET" and path.endswith("/session-options"):
-                return {"session_options": session_options}
+                return {"session_options": workspace_session_options}
             if method == "GET" and path.startswith("/v1/workspace/chat/threads"):
                 return {"threads": []}
             if (method, path) == ("POST", f"{builder_base}/apps"):
