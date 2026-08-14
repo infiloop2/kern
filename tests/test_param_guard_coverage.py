@@ -36,6 +36,7 @@ GUARDED_FIELDS = {
     ("instagram_discovery", "search_reels", "query"),
     ("instagram_discovery", "search_hashtag", "hashtag"),
     ("linkedin_discovery", "search_posts", "query"),
+    ("openai_images", "generate_image", "prompt"),
     ("polymarket", "search", "query"),
     ("polymarket", "get_market", "slug"),
     ("runway", "generate_video", "prompt"),
@@ -43,7 +44,11 @@ GUARDED_FIELDS = {
     ("runway", "generate_image", "prompt"),
     ("runway", "generate_speech", "text"),
     ("seedance", "generate_video", "prompt"),
+    ("reddit", "get_subreddit_posts", "subreddit"),
+    ("reddit", "search_posts", "query"),
+    ("reddit", "search_posts", "subreddit"),
     ("twitter", "search_tweets", "query"),
+    ("zoho_mail", "search_messages", "search_key"),
 }
 
 # (tool_id, action_id, field) -> reason it is deliberately not guarded.
@@ -120,6 +125,31 @@ EXEMPT_FIELDS = {
     ("polymarket", "list_events", "*"): TYPED,
     ("polymarket", "get_order_book", "*"): TYPED,
     ("polymarket", "price_history", "*"): TYPED,
+    ("reddit", "get_home_feed", "sort"): TYPED,
+    ("reddit", "get_home_feed", "time_filter"): TYPED,
+    ("reddit", "get_home_feed", "limit"): TYPED,
+    ("reddit", "get_home_feed", "after"): PROTOCOL,
+    ("reddit", "get_subreddit_posts", "sort"): TYPED,
+    ("reddit", "get_subreddit_posts", "time_filter"): TYPED,
+    ("reddit", "get_subreddit_posts", "limit"): TYPED,
+    ("reddit", "get_subreddit_posts", "after"): PROTOCOL,
+    ("reddit", "search_posts", "sort"): TYPED,
+    ("reddit", "search_posts", "time_filter"): TYPED,
+    ("reddit", "search_posts", "limit"): TYPED,
+    ("reddit", "search_posts", "after"): PROTOCOL,
+    ("reddit", "read_post", "*"): TYPED,
+    ("reddit", "create_post", "subreddit"): APPROVAL_GATED,
+    ("reddit", "create_post", "title"): APPROVAL_GATED,
+    ("reddit", "create_post", "kind"): TYPED,
+    ("reddit", "create_post", "text"): APPROVAL_GATED,
+    ("reddit", "create_post", "url"): APPROVAL_GATED,
+    ("reddit", "create_comment", "parent_id"): APPROVAL_GATED,
+    ("reddit", "create_comment", "text"): APPROVAL_GATED,
+    ("openai_images", "generate_image", "model"): TYPED,
+    ("openai_images", "generate_image", "size"): TYPED,
+    ("openai_images", "generate_image", "quality"): TYPED,
+    ("openai_images", "generate_image", "output_format"): TYPED,
+    ("openai_images", "generate_image", "image_asset_ids"): TYPED,
     ("runway", "generate_video", "model"): TYPED,
     ("runway", "generate_video", "image_url"): TYPED,
     ("runway", "generate_video", "image_asset_id"): TYPED,
@@ -149,6 +179,11 @@ EXEMPT_FIELDS = {
     ("twitter", "get_trends", "*"): TYPED,
     ("twitter", "get_personalized_trends", "*"): TYPED,
     ("twitter", "lookup_user", "*"): TYPED,
+    ("zoho_mail", "search_messages", "start"): TYPED,
+    ("zoho_mail", "search_messages", "limit"): TYPED,
+    ("zoho_mail", "list_messages", "*"): TYPED,
+    ("zoho_mail", "read_message", "*"): TYPED,
+    ("zoho_mail", "send_email", "*"): APPROVAL_GATED,
 }
 
 # Tools whose Integration Guide must carry the shared parameter-guard line.
@@ -262,6 +297,17 @@ class BehavioralDenialTest(unittest.TestCase):
         )
         self.assert_denied(result, "credential")
 
+    def test_zoho_mail_search_query_denied(self) -> None:
+        from host.tools.zoho_mail import BUNDLED_TOOL
+        from test_tools_zoho_mail import connected_api
+
+        result = BUNDLED_TOOL.execute(
+            "search_messages",
+            {"search_key": "entire:AKIAIOSFODNN7EXAMPLE"},
+            connected_api(),
+        )
+        self.assert_denied(result, "credential")
+
     def test_polymarket_search_and_slug_denied(self) -> None:
         from host.tools.polymarket import BUNDLED_TOOL
 
@@ -293,6 +339,15 @@ class BehavioralDenialTest(unittest.TestCase):
             "search_posts", {"query": "posts by alice.smith@acme.com"}, api
         )
         self.assert_denied(result, "email address")
+
+    def test_openai_images_prompt_denied(self) -> None:
+        from host.tools.openai_images import BUNDLED_TOOL
+
+        api = FakeHostAPI(config={"OPENAI_API_KEY": "sk-test"})
+        result = BUNDLED_TOOL.execute(
+            "generate_image", {"prompt": "poster reading ssn 219-09-9999"}, api
+        )
+        self.assert_denied(result, "Social Security number")
 
     def test_runway_prompt_and_speech_denied(self) -> None:
         from host.tools import runway
@@ -335,6 +390,25 @@ class BehavioralDenialTest(unittest.TestCase):
 
         with self.assertRaises(ParamGuardDenied):
             twitter._search_tweets("token", {"query": "call +1 415 555 2671"}, FakeHostAPI())
+
+    def test_reddit_search_query_denied(self) -> None:
+        from host.tools import reddit
+
+        api = FakeHostAPI()
+        with self.assertRaises(ParamGuardDenied):
+            reddit._search_posts(api, {"query": "verify AKIAIOSFODNN7EXAMPLE now"})
+
+    def test_reddit_subreddit_denied(self) -> None:
+        from host.tools import reddit
+
+        api = FakeHostAPI()
+        with self.assertRaises(ParamGuardDenied):
+            reddit._get_subreddit_posts(api, {"subreddit": "AKIAIOSFODNN7EXAMPLE"})
+        with self.assertRaises(ParamGuardDenied):
+            reddit._search_posts(
+                api,
+                {"query": "Kern", "subreddit": "AKIAIOSFODNN7EXAMPLE"},
+            )
 
     def test_guarded_value_reaches_request_unchanged(self) -> None:
         # The guard returns the identical object for clean values; the

@@ -170,6 +170,9 @@ PRODUCT_THREAD_ID_RE = re.compile(
 PRODUCT_THREAD_PREFIX_RE = re.compile(
     r"(?=^[a-z0-9-]{1,64}$)^(?:app|thread|schedule)-[a-z0-9-]*$"
 )
+# Scheduled runs are the one kind of thread that may run a script instead of a
+# conversation; the send path enforces that on the thread id itself.
+SCHEDULE_THREAD_PREFIX = "schedule-"
 UTC_TIMESTAMP_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 RFC3339_TIMESTAMP_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
@@ -1402,8 +1405,10 @@ def prune_state() -> None:
             .isoformat(),
         )
         # Threads with retained events keep their canonical row; unreferenced
-        # mappings use the ordinary per-runtime LRU cap.
-        for runtime_type in AGENT_RUNTIME_TYPES:
+        # mappings use the ordinary per-runtime LRU cap. Every runtime that can
+        # own a thread is pruned, not just the ones with a provider account: a
+        # frequent script schedule creates a session row per firing.
+        for runtime_type in sorted(AGENT_RUNTIMES):
             state.prune_thread_sessions(cur, runtime_type, THREAD_MAP_LIMIT)
     tools_host.maintain_approvals()
 
@@ -1866,7 +1871,7 @@ def send_thread_message(
     message = _message(body)
     with _thread_send_lock(thread_id):
         session_config = state.thread_session_config(thread_id)
-        agent_runtime, model, effort = _resolve_session_config(body, session_config)
+        agent_runtime, model, effort = _resolve_session_config(body, session_config, thread_id)
         switching_session = _session_configuration_changed(
             session_config, agent_runtime, model, effort
         )
@@ -1882,7 +1887,7 @@ def send_thread_message(
                 # same-thread messages ordered, while this snapshot keeps the
                 # initial session row and turn events in one commit.
                 session_config = state.thread_session_config(thread_id, cur)
-                agent_runtime, model, effort = _resolve_session_config(body, session_config)
+                agent_runtime, model, effort = _resolve_session_config(body, session_config, thread_id)
                 switching_session = _session_configuration_changed(
                     session_config, agent_runtime, model, effort
                 )
@@ -2695,10 +2700,25 @@ def _agent_runtime(body: dict[str, Any]) -> str:
     return value
 
 
-def _session_config(body: dict[str, Any], runtime: str) -> tuple[str, str]:
+def _runs_scripts(thread_id: str) -> bool:
+    """Whether this thread may run the script runtime.
+
+    The script runtime reads a thread's message as a path to a bash script
+    rather than as conversation, so a Chat or App thread rotated onto it would
+    start treating the user's next sentence as a filename. The Workspace
+    surfaces already refuse to offer it, but this is the executor: the boundary
+    is enforced here, on the one thing a direct caller cannot forge, so a send
+    that bypasses those surfaces cannot rotate a product thread onto it either.
+    """
+    return thread_id.startswith(SCHEDULE_THREAD_PREFIX)
+
+
+def _session_config(
+    body: dict[str, Any], runtime: str, *, allow_script: bool
+) -> tuple[str, str]:
     model = body.get("model")
     effort = body.get("effort")
-    error = session_config_error(runtime, model, effort)
+    error = session_config_error(runtime, model, effort, allow_script=allow_script)
     if error is not None:
         raise ApiError(HTTPStatus.BAD_REQUEST, error)
     assert isinstance(model, str) and isinstance(effort, str)
@@ -2708,7 +2728,9 @@ def _session_config(body: dict[str, Any], runtime: str) -> tuple[str, str]:
 def _resolve_session_config(
     body: dict[str, Any],
     session_config: dict[str, Any] | None,
+    thread_id: str,
 ) -> tuple[str, str, str]:
+    allow_script = _runs_scripts(thread_id)
     stored = None
     if session_config is not None:
         stored = (
@@ -2722,7 +2744,7 @@ def _resolve_session_config(
     if stored is not None:
         # A superseded configuration stays readable and can be replaced, but
         # cannot start another provider session as-is.
-        if session_config_error(*stored) is not None and (
+        if session_config_error(*stored, allow_script=allow_script) is not None and (
             not supplied or tuple(body.get(field) for field in fields) == stored
         ):
             raise ApiError(
@@ -2738,7 +2760,9 @@ def _resolve_session_config(
                 "agent_runtime, model, and effort must be provided together",
             )
         requested_runtime = _agent_runtime(body)
-        requested_model, requested_effort = _session_config(body, requested_runtime)
+        requested_model, requested_effort = _session_config(
+            body, requested_runtime, allow_script=allow_script
+        )
         return requested_runtime, requested_model, requested_effort
     if not supplied:
         raise ApiError(
@@ -2752,7 +2776,7 @@ def _resolve_session_config(
         )
 
     agent_runtime = _agent_runtime(body)
-    model, effort = _session_config(body, agent_runtime)
+    model, effort = _session_config(body, agent_runtime, allow_script=allow_script)
     return agent_runtime, model, effort
 
 

@@ -1722,7 +1722,12 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn(f"HTTPS_PROXY=http://127.0.0.1:{PROXY_PORT}", helper)
 
     def test_agent_launchers_expose_the_proxy_ca_to_python_package_clients(self) -> None:
-        for name in ("run-codex-app-server", "run-claude-code", "run-hermes"):
+        for name in (
+            "run-codex-app-server",
+            "run-claude-code",
+            "run-hermes",
+            "run-agent-script",
+        ):
             with self.subTest(name=name):
                 launcher = Path(f"host/bootstrap/helpers/{name}.sh").read_text()
                 self.assertIn(
@@ -1746,6 +1751,7 @@ class DeployUnitTests(unittest.TestCase):
             "reboot-host",
             "check-for-upgrade",
             "run-hermes",
+            "run-agent-script",
         ):
             script = (Path(f"host/bootstrap/helpers/{name}.sh").read_text()).replace("@PROXY_PORT@", "7445")
             with tempfile.NamedTemporaryFile("w", delete=False) as handle:
@@ -1759,6 +1765,76 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn('AWS_REGION="${region}"', launcher)
         self.assertNotIn("config.yaml", launcher)
         self.assertNotIn(".hermes/.env", launcher)
+
+    def test_run_agent_script_is_installed_and_reachable_through_sudo(self) -> None:
+        bootstrap = render._render_bootstrap()
+        self.assertIn("\n  run-agent-script\n", bootstrap)
+        self.assertIn("/usr/local/lib/kern-host/run-agent-script", bootstrap)
+
+    def test_run_agent_script_scope_outlives_the_host_side_turn_timeout(self) -> None:
+        # The scope limit is the backstop, so it must sit behind the admin
+        # API's own timeout rather than pre-empting its clearer message.
+        from host.agent_scripts import (
+            SCRIPT_SCOPE_MAX_SECONDS,
+            SCRIPT_TIMEOUT_SECONDS,
+        )
+
+        launcher = Path("host/bootstrap/helpers/run-agent-script.sh").read_text()
+        self.assertIn(f"RuntimeMaxSec={SCRIPT_SCOPE_MAX_SECONDS}", launcher)
+        self.assertGreater(SCRIPT_SCOPE_MAX_SECONDS, SCRIPT_TIMEOUT_SECONDS)
+        self.assertIn("BindsTo=kern-admin-api.service", launcher)
+
+    def test_run_agent_script_admits_only_a_script_path_in_the_agent_home(self) -> None:
+        # Root validates the spelling before it builds anything; the file
+        # checks belong to the demoted side and are not exercised here.
+        raw = Path("host/bootstrap/helpers/run-agent-script.sh").read_text().replace(
+            "@PROXY_PORT@", "7445"
+        )
+        harness = raw.replace(
+            "cd /mnt/kern-agent/agent-home", "cd /"
+        ).replace("exec systemd-run", "exec echo systemd-run")
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".sh") as handle:
+            handle.write(harness)
+            script_path = handle.name
+        self.addCleanup(lambda: Path(script_path).unlink(missing_ok=True))
+
+        def forwarded(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["bash", script_path, *args], capture_output=True, text=True, check=False
+            )
+
+        accepted = forwarded(
+            "--thread-scope",
+            "schedule-3-run-7",
+            "/mnt/kern-agent/agent-home/scripts/backup.sh",
+        )
+        self.assertEqual(accepted.returncode, 0)
+        self.assertIn("--unit kern-agent-thread-schedule-3-run-7", accepted.stdout)
+        self.assertIn("runuser -u kern-agent", accepted.stdout)
+        # The path reaches bash as one positional argument, never as part of a
+        # command string, so its spelling cannot become syntax.
+        self.assertTrue(
+            accepted.stdout.rstrip().endswith(
+                "run-agent-script /mnt/kern-agent/agent-home/scripts/backup.sh"
+            ),
+            accepted.stdout,
+        )
+
+        for rejected in (
+            (),
+            ("/etc/cron.daily/backup.sh",),
+            ("/mnt/kern-agent/agent-home/backup",),
+            ("/mnt/kern-agent/agent-home/../../etc/backup.sh",),
+            ("/mnt/kern-agent/agent-home/scripts/../backup.sh",),
+            ("/mnt/kern-agent/agent-home/./backup.sh",),
+            ("/mnt/kern-agent/agent-home/backup.sh", "extra"),
+            ("--thread-scope", "bad id", "/mnt/kern-agent/agent-home/backup.sh"),
+            ("-rf", "/mnt/kern-agent/agent-home/backup.sh"),
+        ):
+            with self.subTest(args=rejected):
+                result = forwarded(*rejected)
+                self.assertEqual(result.returncode, 64)
+                self.assertEqual(result.stdout, "")
 
     def test_run_claude_code_launcher_combines_web_search_and_thread_scope(self) -> None:
         # The launcher — not its caller — translates the operator's web-search

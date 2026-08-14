@@ -74,6 +74,7 @@ from host.runtime.admin_api import (
     github_credential,
     github_repo_audit,
     hermes_agent,
+    script_runner,
 )
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.core.state import (
@@ -103,8 +104,19 @@ _MANAGED_PROVIDER_BY_RUNTIME = {
 }
 CLAUDE_IDENTITY_ATTESTATION = "anthropic_oauth_profile"
 OPENAI_OPERATOR_APPROVAL = "codex_device_login"
-RUNTIME_LABELS = {"codex": "Codex", "claude_code": "Claude Code", "hermes": "Hermes"}
+RUNTIME_LABELS = {
+    "codex": "Codex",
+    "claude_code": "Claude Code",
+    "hermes": "Hermes",
+    "script": "Script",
+}
 OAUTH_RUNTIMES = ("codex", "claude_code")
+# Runtimes with no managed provider connection to enable, log in to, or probe.
+# They are available whenever the host is.
+UNMANAGED_RUNTIMES = ("script",)
+# Runtimes that map one turn to one process and expose no mid-turn channel, so
+# a second message must wait for the turn instead of steering it.
+NON_STEERABLE_RUNTIMES = ("hermes", "script")
 DEACTIVATED_REASON = "agent runtime deactivated because its managed network provider is disabled"
 
 
@@ -303,10 +315,11 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
                 if runtime_type == "claude_code":
                     state.set_oauth_login(cur, "claude", None)
                     save_claude_account(account_value, cur)
-                elif runtime_type == "hermes":
+                elif runtime_type == "hermes" or runtime_type in UNMANAGED_RUNTIMES:
                     # The Bedrock account row is written once at credential
-                    # submission and only cleared by a disconnect; the status
-                    # refresh has nothing to store for it.
+                    # submission and only cleared by a disconnect, and an
+                    # unmanaged runtime has no account at all; the status
+                    # refresh has nothing to store for either.
                     pass
                 else:
                     state.set_oauth_login(cur, "codex", None)
@@ -989,6 +1002,12 @@ def _stop_runtime_processes(runtime_type: str, reason: str) -> None:
 
 
 def runtime_status_loop() -> None:
+    # Only the managed runtimes are polled. This loop exists to re-derive a
+    # status that can change underneath the host — a login expiring, a token
+    # rotating, a credential being revoked — and an unmanaged runtime has none
+    # of that: its status comes from a constant, so a poll would re-publish an
+    # unchangeable value and open an empty transaction to do it.
+    # ``start_background_loops`` publishes those runtimes once instead.
     refresh_targets = ("codex", "claude_code", "hermes")
     next_check_at = {runtime_type: 0.0 for runtime_type in refresh_targets}
     while True:
@@ -1011,6 +1030,24 @@ def runtime_status_loop() -> None:
 
 
 def start_background_loops() -> None:
+    # Publish the unmanaged runtimes once, here, before anything slow runs.
+    # This is the whole of their status lifecycle: they have no provider to
+    # probe and no credential to expire, so there is nothing for the status
+    # poller to re-derive later and they are deliberately absent from it.
+    #
+    # It happens first because the wait has a cost. A scheduled script
+    # occurrence firing before this line would be admitted against a "loading"
+    # status, and occurrences are attempted once by design, so it would fail
+    # permanently for a runtime that is never unavailable. Taking the status
+    # from the adapter keeps that module authoritative; the write is one
+    # in-memory record, so it needs no database and cannot fail or wait.
+    #
+    # No ``agent_runtime.active`` event is recorded for these: that event marks
+    # the transition into being usable, and a runtime that is usable from
+    # process start never makes it.
+    for runtime_type in UNMANAGED_RUNTIMES:
+        status, _error, _account = _provider_module(runtime_type).account_status()
+        _set_runtime_status(runtime_type, status)
     # Converge GitHub credentials before any turn can be admitted: after a
     # restart the persisted App installation token may already be expired, and
     # a turn's first git/gh call must not run against a stale token file.
@@ -1148,10 +1185,11 @@ def steer_live_turn(thread_id: str, runtime_type: str, message: str) -> bool:
     with turn.delivery_lock:
         if turn.phase != ExecutionPhase.RUNNING:
             raise _retryable_phase_error(turn.phase)
-        if runtime_type == "hermes":
+        if runtime_type in NON_STEERABLE_RUNTIMES:
+            label = RUNTIME_LABELS.get(runtime_type, runtime_type)
             raise ApiError(
                 HTTPStatus.CONFLICT,
-                "Hermes cannot accept another message while running; wait for it to finish",
+                f"{label} cannot accept another message while running; wait for it to finish",
             )
         server = turn.server
         if server is None:
@@ -1574,6 +1612,8 @@ def _provider_module(runtime_type: str | None = None) -> Any:
         return claude_code
     if runtime_type == "hermes":
         return hermes_agent
+    if runtime_type == "script":
+        return script_runner
     return codex_app_server
 
 
@@ -1598,6 +1638,12 @@ def _new_agent_server(
             on_ready=on_ready,
             on_session_id=on_session_id,
         )
+    if runtime_type == "script":
+        return script_runner.ScriptSession(
+            thread_id=thread_id,
+            on_ready=on_ready,
+            on_session_id=on_session_id,
+        )
     return codex_app_server.CodexAppServer(
         thread_id=thread_id,
         on_ready=on_ready,
@@ -1610,6 +1656,12 @@ def _live_key(runtime_type: str, thread_id: Any) -> str:
 
 
 def runtime_network_enabled(runtime_type: str) -> bool:
+    # An unmanaged runtime gates on nothing: it holds no provider credential
+    # and reaches no provider endpoint. Whatever network its work performs is
+    # policed by the ordinary per-integration policy, like any agent shell
+    # command, so there is no runtime-level connection to enable or disable.
+    if runtime_type in UNMANAGED_RUNTIMES:
+        return True
     provider = _MANAGED_PROVIDER_BY_RUNTIME.get(runtime_type)
     integrations = network_policy.load_policy().get("network_integrations", {})
     if not provider or not isinstance(integrations, dict):

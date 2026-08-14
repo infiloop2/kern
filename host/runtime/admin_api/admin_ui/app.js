@@ -233,6 +233,7 @@ let workspaceViewportRecovery = 0;
 function recoverWorkspaceViewport() {
   if (!document.body.classList.contains("viewport-panel-open")
       || document.body.classList.contains("workspace-input-focused")
+      || isWorkspaceKeyboardInput(deepActiveElement())
       || !window.matchMedia(MOBILE_NAV_QUERY).matches) return;
   cancelAnimationFrame(workspaceViewportRecovery);
   workspaceViewportRecovery = requestAnimationFrame(() => {
@@ -246,6 +247,15 @@ function recoverWorkspaceViewport() {
       document.body.scrollTop = 0;
     });
   });
+}
+
+function deepActiveElement() {
+  // Apps render inside the Workspace shadow root and then a generated-App
+  // shadow root. Safari can retarget focus events at either host, so consult
+  // the live focus chain before forcing the outer page back to the top.
+  let active = document.activeElement;
+  while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+  return active;
 }
 
 function isWorkspaceKeyboardInput(target) {

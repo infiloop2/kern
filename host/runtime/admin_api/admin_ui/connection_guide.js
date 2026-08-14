@@ -28,11 +28,17 @@ const INTEGRATION_LOGOS = {
   "tool:linkedin": `<span class="integration-logo-word integration-logo-word-linkedin">in</span>`,
   "tool:linkedin_discovery": `<span class="integration-logo-word integration-logo-word-linkedin">in</span><svg class="integration-logo-search" viewBox="0 0 20 20"><circle cx="8" cy="8" r="5"/><path d="m12 12 5 5"/></svg>`,
   "tool:polymarket": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2.2" d="m7 8 18-4v20L7 28V8Z"/><path fill="currentColor" d="m11 11 9-2-4.2 7.2L20 22l-9 2V11Z"/></svg>`,
+  "tool:reddit": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m18 9 1.4-5 4.4 1.1"/><circle cx="25.3" cy="5.5" r="2" fill="none" stroke="currentColor" stroke-width="2"/><ellipse cx="16" cy="18" rx="10.5" ry="8" fill="none" stroke="currentColor" stroke-width="2"/><path fill="currentColor" d="M12.5 16.5a1.8 1.8 0 1 1-3.6 0 1.8 1.8 0 0 1 3.6 0Zm10.6 0a1.8 1.8 0 1 1-3.6 0 1.8 1.8 0 0 1 3.6 0Z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M11.5 21c2.6 2 6.4 2 9 0"/></svg>`,
   "tool:runway": `<span class="integration-logo-word integration-logo-word-runway">R</span>`,
   "tool:seedance": `<svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="11" fill="none" stroke="currentColor" stroke-width="2.2"/><path fill="currentColor" d="M13 10.5 22 16l-9 5.5v-11Z"/></svg>`,
   "tool:twitter": `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M18.2 2h3.7l-8.1 9.3L23.3 22h-7.5l-5.9-7.7L3.2 22H-.5l8.7-9.9L-.9 2h7.7l5.3 7 6.1-7Zm-1.3 18.1h2L5.7 3.8H3.5l13.4 16.3Z"/></svg>`,
+  "tool:zoho_mail": `<span class="integration-logo-word integration-logo-word-zoho">Zoho</span>`,
   custom_domain: `<svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="11" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M5 16h22M16 5c3.3 3.1 5 6.8 5 11s-1.7 7.9-5 11M16 5c-3.3 3.1-5 6.8-5 11s1.7 7.9 5 11" fill="none" stroke="currentColor" stroke-width="2"/></svg>`,
 };
+
+// The bundled OpenAI image tool carries the same brand mark as the managed
+// OpenAI network integration: one definition, two guide ids.
+INTEGRATION_LOGOS["tool:openai_images"] = INTEGRATION_LOGOS.openai;
 
 function integrationLogo(guide) {
   const mark = INTEGRATION_LOGOS[guide.id];

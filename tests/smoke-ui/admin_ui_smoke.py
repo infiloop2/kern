@@ -29,6 +29,17 @@ IPHONE_USER_AGENT = (
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 "
     "Mobile/15E148 Safari/604.1"
 )
+STATIC_HOME_INTEGRATION_IDS = frozenset(
+    {"openai", "claude", "bedrock", "github", "python_packages", "npm_packages", "custom_domain"}
+)
+BUNDLED_TOOL_IDS = frozenset(
+    path.parent.name
+    for path in (REPO_ROOT / "host/tools").glob("*/__init__.py")
+    if path.parent.name != "shared"
+)
+EXPECTED_HOME_INTEGRATION_IDS = STATIC_HOME_INTEGRATION_IDS | {
+    f"tool:{tool_id}" for tool_id in BUNDLED_TOOL_IDS
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -671,9 +682,21 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#panel-home").locator("#tools-cross-access-notice")).to_have_count(1)
     expect(page.locator("#panel-network").locator("#tools-cross-access-notice")).to_have_count(0)
     integration_cards = page.locator("#home-integration-groups .home-integration-card")
-    expect(integration_cards).to_have_count(20)
-    expect(integration_cards.locator(".integration-logo")).to_have_count(20)
-    expect(integration_cards.locator(".integration-logo[data-logo-source='brand']")).to_have_count(20)
+    integration_count = len(EXPECTED_HOME_INTEGRATION_IDS)
+    expect(integration_cards).to_have_count(integration_count)
+    rendered_integration_ids = set(
+        integration_cards.evaluate_all("cards => cards.map(card => card.dataset.guide)")
+    )
+    if rendered_integration_ids != EXPECTED_HOME_INTEGRATION_IDS:
+        raise AssertionError(
+            "Home integration cards do not match the bundled and static integrations: "
+            f"missing={sorted(EXPECTED_HOME_INTEGRATION_IDS - rendered_integration_ids)}, "
+            f"extra={sorted(rendered_integration_ids - EXPECTED_HOME_INTEGRATION_IDS)}"
+        )
+    expect(integration_cards.locator(".integration-logo")).to_have_count(integration_count)
+    expect(integration_cards.locator(".integration-logo[data-logo-source='brand']")).to_have_count(
+        integration_count
+    )
     if integration_cards.locator(".integration-logo:not([aria-hidden='true'])").count():
         raise AssertionError("integration logos must remain decorative inside their labelled card buttons")
     grouped_ordering = page.locator("#home-integration-groups .home-integration-group").evaluate_all("""groups =>
@@ -1384,7 +1407,9 @@ def mobile_smoke(page, url: str) -> None:
     # Chat and Apps remain in the navigation drawer; Home has no duplicate
     # hero action on mobile.
     expect(page.locator("#home-hero")).to_have_count(0)
-    expect(page.locator("#home-integration-groups .home-integration-card .integration-logo")).to_have_count(20)
+    expect(page.locator("#home-integration-groups .home-integration-card .integration-logo")).to_have_count(
+        len(EXPECTED_HOME_INTEGRATION_IDS)
+    )
     assert_no_horizontal_overflow(page, "home")
 
     # The drawer closes on backdrop click, Escape, and destination selection.

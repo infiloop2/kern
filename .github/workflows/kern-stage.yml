@@ -19,10 +19,13 @@ on:
           - instagram_discovery
           - linkedin
           - linkedin_discovery
+          - openai_images
           - polymarket
+          - reddit
           - runway
           - seedance
           - twitter
+          - zoho_mail
           - claude
           - codex
           - pi
@@ -205,9 +208,14 @@ jobs:
           KERN_STAGE_IBKR_SIGNATURE_KEY: ${{ secrets.KERN_STAGE_IBKR_SIGNATURE_KEY }}
           KERN_STAGE_IBKR_ENCRYPTION_KEY: ${{ secrets.KERN_STAGE_IBKR_ENCRYPTION_KEY }}
           KERN_STAGE_IBKR_DH_PRIME: ${{ secrets.KERN_STAGE_IBKR_DH_PRIME }}
+          KERN_STAGE_REDDIT_CLIENT_ID: ${{ secrets.KERN_STAGE_REDDIT_CLIENT_ID }}
+          KERN_STAGE_REDDIT_CLIENT_SECRET: ${{ secrets.KERN_STAGE_REDDIT_CLIENT_SECRET }}
+          KERN_STAGE_REDDIT_USERNAME: ${{ secrets.KERN_STAGE_REDDIT_USERNAME }}
+          KERN_STAGE_REDDIT_PASSWORD: ${{ secrets.KERN_STAGE_REDDIT_PASSWORD }}
           KERN_STAGE_SCRAPECREATORS_API_KEY: ${{ secrets.KERN_STAGE_SCRAPECREATORS_API_KEY }}
           KERN_STAGE_SERPERAPI_API_KEY: ${{ secrets.KERN_STAGE_SERPERAPI_API_KEY }}
           KERN_STAGE_RUNWAY_API_SECRET: ${{ secrets.KERN_STAGE_RUNWAY_API_SECRET }}
+          KERN_STAGE_OPENAI_API_KEY: ${{ secrets.KERN_STAGE_OPENAI_API_KEY }}
           KERN_STAGE_SEEDANCE_ARK_API_KEY: ${{ secrets.KERN_STAGE_SEEDANCE_ARK_API_KEY }}
         run: |
           set -euo pipefail

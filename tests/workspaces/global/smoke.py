@@ -12,7 +12,7 @@ from typing import Any
 from host.runtime.workspace import memory as memory_backend
 from host.runtime.workspace import schedules as schedule_backend
 from host.runtime.workspace.host_api import WorkspaceError
-from host.session_options import public_session_options
+from host.session_options import schedule_session_options
 
 
 LOCK = threading.RLock()
@@ -70,7 +70,7 @@ def route_workspace_api(
             return {"page": _restore_memory(restore_match.group(1), int(restore_match.group(2)), body, api_error)}
 
         if relative == "schedules/session-options" and method == "GET":
-            return {"session_options": public_session_options()}
+            return {"session_options": schedule_session_options()}
         if relative == "schedules":
             if method == "GET":
                 return _list_schedules(query, api_error)
@@ -621,6 +621,15 @@ def desktop_smoke(page: Any) -> None:
         raise AssertionError(f"schedule message should grow instead of scrolling: {dimensions}")
     if dimensions["scrollWidth"] > dimensions["clientWidth"] + 1:
         raise AssertionError(f"schedule message should wrap instead of scrolling: {dimensions}")
+    # The script runtime reads this field as a path, so the form has to say so
+    # before the operator types a prompt into it.
+    expect(surface.locator("#schedule-message-label")).to_have_text("Message")
+    surface.locator("#schedule-runtime").select_option("script")
+    expect(surface.locator("#schedule-message-label")).to_have_text("Script path")
+    expect(surface.locator("#schedule-model")).to_have_value("bash")
+    expect(surface.locator("#schedule-effort")).to_have_value("fixed")
+    surface.locator("#schedule-runtime").select_option("codex")
+    expect(surface.locator("#schedule-message-label")).to_have_text("Message")
     surface.locator("#schedule-cadence").select_option("daily")
     surface.locator("#schedule-time").fill("09:00")
     surface.get_by_role("button", name="Save schedule", exact=True).click()

@@ -254,6 +254,9 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("generatedStyleSheet.replaceSync(styleText)", source)
         self.assertIn('generatedStyleLink.rel = "stylesheet"', source)
         self.assertIn('new Blob([styleText], { type: "text/css" })', source)
+        self.assertIn("generatedMobileTextControlCss", source)
+        self.assertIn("font-size:max(16px,1em)!important", source)
+        self.assertIn("${safeCss}${generatedMobileTextControlCss}", source)
         self.assertGreaterEqual(source.count("current === generatedStyleLink"), 2)
         self.assertIn("parent.insertBefore(want, generatedStyleLink)", source)
         self.assertIn("MAX_RENDER_NODES = 5000", source)
@@ -331,6 +334,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('"action":"batch","expected_revision"', instructions)
         self.assertIn("communicate primarily by changing the App", instructions)
         self.assertIn("/agent/apps/{app_id}/state/data/read", instructions)
+        self.assertIn("/agent/apps/{app_id}/state/data/shape", instructions)
         self.assertIn("/agent/memory/pages/{page_id}", instructions)
         self.assertIn("/agent/schedules/{id}", instructions)
         self.assertNotIn("/agent/apps/{app_id}/instructions", instructions)
@@ -568,6 +572,29 @@ class BrowserRoutingTests(unittest.TestCase):
         self.assertIn("retry again in a while", error.exception.message)
         apply.assert_not_called()
 
+    def test_agent_can_create_an_app_only_through_the_collection_route(self) -> None:
+        created = {"app_id": "app-10", "revision": 0}
+        with patch.object(
+            backend, "create_web_app", return_value=created
+        ) as create:
+            self.assertEqual(
+                backend.route_agent("POST", "/agent/apps", None),
+                {"app": created},
+            )
+            self.assertEqual(
+                backend.route_agent("POST", "/agent/apps", {}),
+                {"app": created},
+            )
+        self.assertEqual(create.call_count, 2)
+        create.assert_called_with(actor="agent")
+
+        for body, query in (({"name": "surprise"}, None), (None, {"x": ["1"]})):
+            with self.subTest(body=body, query=query), self.assertRaises(
+                backend.WorkspaceError
+            ) as error:
+                backend.route_agent("POST", "/agent/apps", body, query)
+            self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+
     def test_agent_state_meta_is_resolved_to_the_exact_workspace(self) -> None:
         with (
             patch.object(backend, "_require_web_app") as require,
@@ -733,6 +760,280 @@ class BrowserRoutingTests(unittest.TestCase):
             self.assertRaisesRegex(backend.WorkspaceError, "data path does not exist"),
         ):
             backend.read_app_data_path("app-9", {"paths": [["missing"]]})
+
+    def test_data_shape_describes_branches_without_returning_the_document(self) -> None:
+        state = {
+            "revision": 9,
+            "data": {
+                "leads": [
+                    {"name": "one", "status": "qualified", "score": 100},
+                    {"name": "two", "status": "qualified", "score": 87},
+                    {"name": "three", "status": "rejected", "score": 48},
+                    {"name": "four", "status": "identified", "score": 70},
+                    {"name": "five", "status": "qualified", "score": 82},
+                    {"name": "six", "status": "rejected", "score": 46},
+                ],
+                "strategy": {"text": "plan"},
+            },
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state) as load:
+            result = backend.load_app_data_shape("app-9")
+        self.assertEqual(result["revision"], 9)
+        self.assertEqual(result["updated_at"], "now")
+        leads = result["shape"]["keys"]["leads"]
+        self.assertEqual(leads["type"], "array")
+        self.assertEqual(leads["length"], 6)
+        item_keys = leads["items"]["keys"]
+        self.assertEqual(item_keys["score"], {"type": "number"})
+        # A repeated short string is a category worth naming.
+        self.assertEqual(
+            item_keys["status"]["enum"], ["identified", "qualified", "rejected"]
+        )
+        # A string that never repeats is an identifier, so its values stay out.
+        self.assertEqual(item_keys["name"], {"type": "string"})
+        encoded = json.dumps(result["shape"])
+        for value in ("one", "two", "three", "four", "five", "six", "plan"):
+            self.assertNotIn(value, encoded)
+        load.assert_called_once_with("app-9")
+
+    def test_data_shape_sizes_branches_so_a_narrow_read_can_be_chosen(self) -> None:
+        state = {
+            "revision": 3,
+            "data": {"tab": "leads", "notes": "n" * 500, "rows": [1, 2, 3]},
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state):
+            shape = backend.load_app_data_shape("app-9")["shape"]
+        self.assertEqual(shape["keys"]["notes"]["bytes"], 502)
+        self.assertEqual(shape["keys"]["rows"], {"type": "array", "length": 3, "items": {"type": "number"}, "bytes": 7})
+        # Numbers and booleans carry no size; the question a size answers is
+        # only ever asked about a container or a long string.
+        self.assertNotIn("bytes", shape["keys"]["rows"]["items"])
+
+    def test_data_shape_marks_keys_missing_from_some_records(self) -> None:
+        state = {
+            "revision": 3,
+            "data": {"rows": [{"id": 1, "claimed_at": "2026-08-14"}, {"id": 2}]},
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state):
+            shape = backend.load_app_data_shape("app-9")["shape"]
+        item_keys = shape["keys"]["rows"]["items"]["keys"]
+        self.assertTrue(item_keys["claimed_at"]["optional"])
+        self.assertNotIn("optional", item_keys["id"])
+
+    def test_data_shape_marks_every_cut_it_makes(self) -> None:
+        deep: dict[str, Any] = {"leaf": "value"}
+        for _ in range(backend.MAX_SHAPE_DEPTH + 2):
+            deep = {"nested": deep}
+        state = {
+            "revision": 3,
+            "data": {
+                "deep": deep,
+                "many": [{"index": index} for index in range(backend.MAX_SHAPE_ARRAY_SAMPLE + 5)],
+                "wide": {f"key-{index}": index for index in range(backend.MAX_SHAPE_OBJECT_KEYS + 5)},
+            },
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state):
+            shape = backend.load_app_data_shape("app-9")["shape"]
+        node = shape["keys"]["deep"]
+        while "keys" in node and "nested" in node["keys"]:
+            node = node["keys"]["nested"]
+        self.assertTrue(node["truncated"])
+        wide = shape["keys"]["wide"]
+        self.assertEqual(len(wide["keys"]), backend.MAX_SHAPE_OBJECT_KEYS)
+        self.assertTrue(wide["truncated"])
+        many = shape["keys"]["many"]
+        self.assertEqual(many["length"], backend.MAX_SHAPE_ARRAY_SAMPLE + 5)
+        # The categories below come from a prefix, so the map says so rather
+        # than letting a partial read look like a total one.
+        self.assertEqual(many["sampled"], backend.MAX_SHAPE_ARRAY_SAMPLE)
+
+    def test_data_shape_stays_bounded_for_a_pathological_document(self) -> None:
+        # Wide at every level, so the node budget binds before the key cap can
+        # and the walk cannot cost more than the document it describes.
+        state = {
+            "revision": 3,
+            "data": {
+                f"key-{outer}": {
+                    f"sub-{inner}": f"value-{inner}" for inner in range(64)
+                }
+                for outer in range(64)
+            },
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state):
+            shape = backend.load_app_data_shape("app-9")["shape"]
+
+        def count(node: dict[str, Any]) -> int:
+            total = 1
+            for child in node.get("keys", {}).values():
+                total += count(child)
+            if "items" in node:
+                total += count(node["items"])
+            return total
+
+        self.assertLessEqual(count(shape), backend.MAX_SHAPE_NODES + 1)
+        self.assertTrue(
+            any(child.get("truncated") for child in shape["keys"].values()),
+            "a walk cut short by the node budget must say where it stopped",
+        )
+
+    def test_data_shape_reports_mixed_element_types(self) -> None:
+        state = {
+            "revision": 3,
+            "data": {"rows": [1, "two", {"three": 3}], "empty": []},
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state):
+            shape = backend.load_app_data_shape("app-9")["shape"]
+        self.assertEqual(
+            shape["keys"]["rows"]["items"],
+            {"type": "mixed", "types": ["number", "object", "string"]},
+        )
+        self.assertEqual(shape["keys"]["empty"]["length"], 0)
+        self.assertNotIn("items", shape["keys"]["empty"])
+
+    def test_data_shape_never_advertises_an_index_a_record_lacks(self) -> None:
+        state = {
+            "revision": 3,
+            "data": {"rows": [{"tags": ["a"]}, {"tags": ["b", "c"]}]},
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state):
+            shape = backend.load_app_data_shape("app-9")["shape"]
+            tags = shape["keys"]["rows"]["items"]["keys"]["tags"]
+            # Summing the merged arrays would claim length 3 and send a caller
+            # to ["rows", 0, "tags", 2], which does not exist.
+            self.assertNotIn("length", tags)
+            self.assertEqual(tags["items"]["type"], "string")
+            with self.assertRaises(backend.WorkspaceError):
+                backend.read_app_data_path("app-9", {"path": ["rows", 0, "tags", 2]})
+        # The unmerged array above it keeps the length that is true of it.
+        self.assertEqual(shape["keys"]["rows"]["length"], 2)
+
+    def test_data_shape_marks_keys_the_read_route_cannot_address(self) -> None:
+        # A write validates its own path but not the keys inside the value it
+        # stores, so a document can hold a key no read path can reach.
+        oversized = "k" * (backend.MAX_PATH_KEY_BYTES + 1)
+        state = {
+            "revision": 3,
+            "data": {"config": {"": 1, oversized: 2, "ok": 3}},
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state):
+            shape = backend.load_app_data_shape("app-9")["shape"]
+            for key in ("", oversized):
+                with self.subTest(key=key[:8]):
+                    # Named, not hidden: the branch exists and a full data read
+                    # reaches it even though a narrow one cannot.
+                    self.assertFalse(shape["keys"]["config"]["keys"][key]["addressable"])
+                    with self.assertRaises(backend.WorkspaceError):
+                        backend.read_app_data_path("app-9", {"path": ["config", key]})
+            self.assertNotIn("addressable", shape["keys"]["config"]["keys"]["ok"])
+            self.assertEqual(
+                backend.read_app_data_path("app-9", {"path": ["config", "ok"]})["value"],
+                3,
+            )
+
+    def test_data_shape_survives_a_stored_lone_surrogate(self) -> None:
+        # JSON escapes a lone surrogate, so `_validated_data` stores it and
+        # `_decoded_data` returns a str that no UTF-8 measurement accepts.
+        # Describing the document must not turn it into a 500.
+        surrogate = json.loads('"\\ud800"')
+        state = {
+            "revision": 3,
+            "data": {
+                "rows": [{"tag": surrogate} for _ in range(4)],
+                "config": {surrogate: 1},
+            },
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state):
+            shape = backend.load_app_data_shape("app-9")["shape"]
+            # The read route measures segments the same way and refuses it, so
+            # the marker matches what a caller would actually get.
+            with self.assertRaises(UnicodeEncodeError):
+                backend.read_app_data_path("app-9", {"path": ["config", surrogate]})
+        self.assertFalse(shape["keys"]["config"]["keys"][surrogate]["addressable"])
+        # An unmeasurable value cannot be shown to fit the enum bound.
+        self.assertEqual(
+            shape["keys"]["rows"]["items"]["keys"]["tag"], {"type": "string"}
+        )
+
+    def test_data_shape_keeps_one_off_values_out_of_enums(self) -> None:
+        state = {
+            "revision": 3,
+            "data": {
+                # One coincidental duplicate must not publish every name held.
+                "owners": [{"who": name} for name in ("alice", "bob", "alice", "carol")],
+                "rows": [
+                    {"status": status}
+                    for status in ("new", "done", "new", "done", "new", "blocked")
+                ],
+            },
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state):
+            shape = backend.load_app_data_shape("app-9")["shape"]
+        self.assertEqual(
+            shape["keys"]["owners"]["items"]["keys"]["who"], {"type": "string"}
+        )
+        # A category set still resolves even when its rarest member appears once.
+        self.assertEqual(
+            shape["keys"]["rows"]["items"]["keys"]["status"]["enum"],
+            ["blocked", "done", "new"],
+        )
+
+    def test_data_shape_paths_are_accepted_by_the_targeted_read(self) -> None:
+        state = {
+            "revision": 9,
+            "data": {"config": {"paused": False}, "leads": [{"name": "one"}]},
+            "updated_at": "now",
+        }
+        with patch.object(backend, "load_app_data", return_value=state):
+            shape = backend.load_app_data_shape("app-9")["shape"]
+            # The map is only worth returning if it can be spent on a read.
+            paths = [[key] for key in shape["keys"]]
+            result = backend.read_app_data_path("app-9", {"paths": paths})
+            # `items` describes elements rather than naming a segment, so a
+            # caller substitutes an index for it. The literal must not read.
+            item_key = next(iter(shape["keys"]["leads"]["items"]["keys"]))
+            self.assertEqual(
+                backend.read_app_data_path(
+                    "app-9", {"path": ["leads", 0, item_key]}
+                )["value"],
+                "one",
+            )
+            with self.assertRaises(backend.WorkspaceError):
+                backend.read_app_data_path(
+                    "app-9", {"path": ["leads", "items", item_key]}
+                )
+        self.assertEqual(
+            [entry["path"] for entry in result["values"]], [["config"], ["leads"]]
+        )
+
+    def test_data_shape_is_a_read_only_route(self) -> None:
+        shape = {"revision": 3, "shape": {"type": "object", "keys": {}}}
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "load_app_data_shape", return_value=shape) as load,
+        ):
+            self.assertEqual(
+                backend.route_agent("GET", "/agent/apps/app-9/state/data/shape", None),
+                {"app": shape},
+            )
+            # There is deliberately no writable copy of the map to drift from
+            # the data it describes.
+            for method in ("POST", "PUT", "DELETE"):
+                with self.subTest(method=method), self.assertRaises(backend.WorkspaceError) as error:
+                    backend.route_agent(
+                        method, "/agent/apps/app-9/state/data/shape", {"shape": {}}
+                    )
+                self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
+        load.assert_called_once_with("app-9")
 
     def test_revert_is_not_an_agent_route(self) -> None:
         # Reverting agent changes is a human control; the agent API must
@@ -909,6 +1210,32 @@ class ConversationTests(unittest.TestCase):
                 **self.SESSION,
             },
         )
+
+    def test_apps_neither_offer_nor_accept_the_script_runtime(self) -> None:
+        # An App is built by a conversation. The script runtime would read the
+        # message as a path, so it is absent from the builder's own option
+        # matrix — which is what fills the runtime selector — and refused by
+        # the send path even when asked for directly.
+        self.assertNotIn(
+            "script", backend.route_browser("GET", "/session-options", None, {})["session_options"]
+        )
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "call_admin_api") as host,
+            self.assertRaises(backend.WorkspaceError) as rejected,
+        ):
+            backend.create_message(
+                {
+                    "content": "Build it.",
+                    "agent_runtime": "script",
+                    "model": "bash",
+                    "effort": "fixed",
+                },
+                app_id="app-5",
+            )
+        self.assertEqual(rejected.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertNotIn("script", rejected.exception.message)
+        host.assert_not_called()
 
     def test_message_creation_adds_app_context_before_the_user_message(self) -> None:
         with (
@@ -1399,6 +1726,17 @@ class AgenticWebAppDbTests(unittest.TestCase):
 
         self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
         self.assertIn("already retains 0 Web Apps", error.exception.message)
+
+    def test_agent_created_app_records_agent_provenance(self) -> None:
+        created = backend.route_agent("POST", "/agent/apps", None)["app"]
+
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT actor, kind FROM web_app_revisions"
+                " WHERE app_id = %s AND revision = 0",
+                (created["app_id"],),
+            )
+            self.assertEqual(cur.fetchone(), ("agent", "created"))
 
     def test_scheduled_revision_pruning_trims_an_idle_app(self) -> None:
         backend.create_web_app()

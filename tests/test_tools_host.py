@@ -217,6 +217,7 @@ class ToolRegistryTests(unittest.TestCase):
                 "runway",
                 "seedance",
                 "twitter",
+                "zoho_mail",
             }.issubset(tools_host.BUNDLED_TOOLS)
         )
 

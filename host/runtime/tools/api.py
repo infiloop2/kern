@@ -67,8 +67,8 @@ MAX_REQUEST_BODY_BYTES = 256 * 1024
 MAX_VIDEO_BODY_BYTES = tool_assets.MAX_VIDEO_BYTES
 MAX_IMAGE_BODY_BYTES = tool_assets.MAX_IMAGE_BYTES
 # Tool calls block a handler thread on third-party requests (30s timeouts in
-# the packages), so cap concurrency instead of letting a runaway agent stack
-# threads.
+# most packages, minutes for a synchronous image render), so cap concurrency
+# instead of letting a runaway agent stack threads.
 MAX_CONCURRENT_CALLS = 8
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
 _UPLOAD_SLOTS = threading.BoundedSemaphore(2)
@@ -681,7 +681,9 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
             return
         try:
             tool_id = self.headers.get("X-Kern-Tool") or ""
-            allowed_tools = {"runway", "instagram"} if kind == "video" else {"runway"}
+            allowed_tools = (
+                {"runway", "instagram"} if kind == "video" else {"runway", "openai_images"}
+            )
             if tool_id not in allowed_tools:
                 self._send_json(
                     HTTPStatus.BAD_REQUEST,

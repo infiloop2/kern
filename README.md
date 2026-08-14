@@ -215,10 +215,10 @@ enabling network access, and adding optional tools.
   as an unprivileged Linux user, while filesystem and network controls prevent
   broad host-state access, unapproved data leaks, and unexpected internet
   actions.
-- **Controlled tools:** bundled tool packages (Gmail, Google Calendar, Brave
-  Search, X/Twitter, LinkedIn, LinkedIn Discovery, Instagram, Instagram
+- **Controlled tools:** bundled tool packages (Gmail, Zoho Mail, Google Calendar,
+  Brave Search, X/Twitter, LinkedIn, LinkedIn Discovery, Instagram, Instagram
   Discovery, Polymarket, Interactive Brokers, Runway media generation, Seedance
-  video generation) connect
+  video generation, OpenAI image generation) connect
   agents to third-party services through deterministic data paths, with
   operator approval required for outward-facing actions such as sending email
   or publishing a post
@@ -226,7 +226,8 @@ enabling network access, and adding optional tools.
 - **Built-in workspaces:** **Chat** provides threaded agent conversations and
   **Apps** provides isolated, agent-generated Web App workspaces with durable
   UI, data, and checkpoints. Host-global **Memory** and **Schedules** are
-  available to every agent. These are fixed host capabilities—not installable
+  available to every agent; a schedule runs an agent turn or, for recurring
+  work that needs no reasoning, a static bash script from the agent home. These are fixed host capabilities—not installable
   packages—and share one restricted service behind the authenticated admin UI. See
   [docs/architecture/workspaces/workspaces.md](./docs/architecture/workspaces/workspaces.md).
 

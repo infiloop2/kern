@@ -729,7 +729,7 @@ class MigrateRunnerTests(unittest.TestCase):
                     )
                 self.assertEqual(
                     migrate.up(quiet=True),
-                    [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36],
+                    [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37],
                 )
                 with db.transaction() as cur:
                     # Migration 0026 removed the old ledger; every later
@@ -742,7 +742,7 @@ class MigrateRunnerTests(unittest.TestCase):
                         [(int(version), str(name)) for version, name in cur.fetchall()],
                         [
                             (version, migrations[version].name)
-                            for version in range(1, 37)
+                            for version in range(1, 38)
                         ],
                     )
                     cur.execute(

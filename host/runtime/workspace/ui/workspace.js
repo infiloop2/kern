@@ -4,6 +4,10 @@
   const root = window.KernWorkspaceRoots.global;
   const $ = id => root.getElementById(id);
   const api = (method, path, body) => window.KernHost.api(method, `/v1/workspace${path}`, body);
+  // The one runtime whose schedule message is a path, not a prompt
+  // (host/session_options.py, host/agent_scripts.py).
+  const SCRIPT_RUNTIME = "script";
+  const SCRIPT_PATH_PLACEHOLDER = "/mnt/kern-agent/agent-home/scripts/nightly-backup.sh";
   const state = {
     resource: "memory",
     memoryScope: "swarm",
@@ -416,6 +420,18 @@
     fillSelect($("schedule-model"), models, model && models.includes(model) ? model : models[0]);
     const efforts = state.sessionOptions[selectedRuntime]?.[$("schedule-model").value] || [];
     fillSelect($("schedule-effort"), efforts, effort && efforts.includes(effort) ? effort : efforts[0]);
+    syncMessageField();
+  }
+
+  // The script runtime reads the same field as a path to a bash script in the
+  // agent home rather than as a prompt, so the form says which one it wants.
+  function syncMessageField() {
+    const script = $("schedule-runtime").value === SCRIPT_RUNTIME;
+    const message = $("schedule-message");
+    $("schedule-message-label").textContent = script ? "Script path" : "Message";
+    message.rows = script ? 2 : 7;
+    message.placeholder = script ? SCRIPT_PATH_PLACEHOLDER : "";
+    resizeTextarea("schedule-message");
   }
 
   function fillSelect(select, values, selected) {

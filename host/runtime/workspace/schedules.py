@@ -9,9 +9,10 @@ import threading
 from typing import Any
 from urllib.parse import quote
 
+from host.agent_scripts import script_path_error
 from host.runtime.core import db, host_errors
 from host.runtime.workspace.host_api import WorkspaceError, call_admin_api
-from host.session_options import public_session_options
+from host.session_options import SCRIPT_RUNTIME, schedule_session_options
 
 
 MAX_SCHEDULES = 100
@@ -54,7 +55,7 @@ def route_browser(
     if path == "/schedules/session-options" and method == "GET":
         if query:
             raise WorkspaceError(HTTPStatus.BAD_REQUEST, "session options do not accept query parameters")
-        return {"session_options": public_session_options()}
+        return {"session_options": schedule_session_options()}
     if path == "/schedules":
         if method == "GET":
             return list_schedules(query)
@@ -113,7 +114,7 @@ def route_agent(
                 HTTPStatus.BAD_REQUEST,
                 "session options do not accept query parameters",
             )
-        return {"session_options": public_session_options()}
+        return {"session_options": schedule_session_options()}
     if path == "/agent/schedules":
         if method == "GET":
             return list_active_schedules(query)
@@ -772,6 +773,16 @@ def _validated_fields(value: dict[str, Any]) -> dict[str, Any]:
                 HTTPStatus.BAD_REQUEST,
                 f"{label} must be between 1 and {MAX_SESSION_VALUE_CHARS} characters",
             )
+    if session["agent_runtime"] == SCRIPT_RUNTIME:
+        # A script schedule's message is the script's path, so the one thing
+        # this layer can check about it changes shape entirely. Whether the
+        # file exists is the launcher's decision at run time — the workspace
+        # cannot read the agent's private home — but a path that could never
+        # run is rejected here, while the operator is still editing the form,
+        # instead of becoming a failed run in an hour.
+        error = script_path_error(message)
+        if error is not None:
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, error)
     return {
         "name": name, "message": message, "cadence": cadence,
         "interval_minutes": interval, "daily_time": daily,

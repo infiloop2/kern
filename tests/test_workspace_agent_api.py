@@ -94,6 +94,20 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
             "GET", "/agent/apps/app-2/state/meta", None, {}
         )
 
+    def test_agent_app_creation_is_dispatched_without_a_request_body(self) -> None:
+        socket_path = self.start_server()
+        created = {"app": {"app_id": "app-3", "revision": 0}}
+        with patch.object(web_apps, "route_agent", return_value=created) as route:
+            status, body = self.http(
+                socket_path,
+                "POST",
+                "/call",
+                {"method": "POST", "path": "/agent/apps"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"status": 200, "body": created})
+        route.assert_called_once_with("POST", "/agent/apps", None, {})
+
     def test_conversation_history_route_is_dispatched_to_host_proxy(self) -> None:
         socket_path = self.start_server()
         with patch.object(
@@ -314,6 +328,8 @@ class McpShimTests(unittest.TestCase):
         tools = {tool["name"]: tool for tool in listing["result"]["tools"]}
         description = tools["workspace_api"]["description"]
         self.assertIn("GET /agent/apps", description)
+        self.assertIn("POST /agent/apps", description)
+        self.assertIn("only when the operator explicitly asks", description)
         self.assertIn("explicit immutable app id", description)
         self.assertEqual(
             tools["workspace_api"]["inputSchema"]["required"], ["method", "path"]

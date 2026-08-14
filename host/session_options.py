@@ -5,6 +5,13 @@ starting a thread, or sending new work to one — and never where a recorded
 configuration is read back. A recorded configuration may predate the current
 matrix, and history stays readable: use `session_config_error` on the way in
 and `recorded_session_config` on the way out.
+
+The script runtime is part of the same matrix but is offered only where a
+schedule is configured: it runs a static bash script instead of a model turn,
+so it has nothing to say in a conversation and cannot build a Web App. Its
+model and effort are the single fixed pair below, which keeps one shape —
+runtime, model, effort — across schedules, threads, and run history rather
+than making every reader special-case a runtime with no model.
 """
 
 from __future__ import annotations
@@ -12,7 +19,11 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
-SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
+SCRIPT_RUNTIME = "script"
+SCRIPT_MODEL = "bash"
+SCRIPT_EFFORT = "fixed"
+
+INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     "codex": {
         "gpt-5.6-terra": ("high", "max", "ultra"),
         "gpt-5.6-sol": ("high", "max", "ultra"),
@@ -37,25 +48,53 @@ SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 
+SCRIPT_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
+    SCRIPT_RUNTIME: {SCRIPT_MODEL: (SCRIPT_EFFORT,)},
+}
+
+# Every configuration the host can execute. The surfaces below decide which
+# part of it they offer.
+SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
+    **INTERACTIVE_SESSION_OPTIONS,
+    **SCRIPT_SESSION_OPTIONS,
+}
+
 
 def public_session_options() -> dict[str, dict[str, list[str]]]:
-    """Return the JSON-facing option matrix as a fresh mutable payload."""
+    """The conversational option matrix, as a fresh mutable payload."""
+    return _public(INTERACTIVE_SESSION_OPTIONS)
+
+
+def schedule_session_options() -> dict[str, dict[str, list[str]]]:
+    """The option matrix a schedule may choose from: conversation or script."""
+    return _public(SESSION_OPTIONS)
+
+
+def _public(matrix: Mapping[str, dict[str, tuple[str, ...]]]) -> dict[str, dict[str, list[str]]]:
     return {
         runtime: {model: list(efforts) for model, efforts in models.items()}
-        for runtime, models in SESSION_OPTIONS.items()
+        for runtime, models in matrix.items()
     }
 
 
-def session_config_error(runtime: str, model: object, effort: object) -> str | None:
+def session_config_error(
+    runtime: str, model: object, effort: object, *, allow_script: bool = False
+) -> str | None:
     """Reject a configuration that may not start a thread or run new work.
 
     This is the write gate. Applying it to a configuration read back from
     storage would retire the history of every thread whose model left the
     matrix; use `recorded_session_config` there.
+
+    ``allow_script`` is the opt-in for the two callers that own script work —
+    the schedule that configures it and the admin API that runs it. A caller
+    that leaves it off states that its surface is conversational, so the
+    script runtime is rejected there by name rather than by omission.
     """
-    models = SESSION_OPTIONS.get(runtime)
+    offered = SESSION_OPTIONS if allow_script else INTERACTIVE_SESSION_OPTIONS
+    models = offered.get(runtime)
     if models is None:
-        return "agent_runtime must be one of " + ", ".join(f"'{name}'" for name in SESSION_OPTIONS)
+        return "agent_runtime must be one of " + ", ".join(f"'{name}'" for name in offered)
     if not isinstance(model, str) or model not in models:
         return f"model must be one of {', '.join(models)} for {runtime}"
     efforts = models[model]

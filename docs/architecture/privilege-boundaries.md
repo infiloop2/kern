@@ -73,6 +73,15 @@ the root volume as root-owned code.
   hash are printed.
 - `run-hermes` — starts one Hermes query as `kern-agent`, passes the
   prompt over stdin, and uses the same dummy AWS and agent-slice boundary.
+- `run-agent-script` — runs one scheduled bash script as `kern-agent` in the
+  same agent-slice, per-thread scope, and proxy environment a model turn gets,
+  so a scheduled script is exactly as confined as an agent turn and no more
+  privileged. Root builds that boundary and validates the path's spelling —
+  an absolute `.sh` path under `agent-home`, no relative segments — but never
+  opens it: the symlink and regular-file checks run after the demotion, where
+  an agent-planted symlink can reach nothing the agent could not already
+  reach. The scope carries `RuntimeMaxSec` as the backstop for the admin API's
+  own 15-minute turn timeout.
 - `stop-agent-thread` — SIGKILLs and stops the transient
   `kern-agent-thread-<thread_id>.scope` cgroup and clears any failed
   remnant, so a stopped turn frees its thread's scope name. It validates the

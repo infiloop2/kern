@@ -263,6 +263,29 @@ class AgentChatBackendTests(unittest.TestCase):
             },
         )
 
+    def test_chat_refuses_the_script_runtime(self) -> None:
+        # Chat is a conversation. The script runtime would read the message as
+        # a path, so it is rejected here rather than at the adapter, and never
+        # reaches the host.
+        with (
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend.call_admin_api") as admin_call,
+            self.assertRaises(backend.WorkspaceError) as rejected,
+        ):
+            backend.send_chat_message(
+                {
+                    "thread_id": "thread-7",
+                    "input_message": "/mnt/kern-agent/agent-home/backup.sh",
+                    "agent_runtime": "script",
+                    "model": "bash",
+                    "effort": "fixed",
+                }
+            )
+        self.assertEqual(rejected.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertIn("agent_runtime must be one of", rejected.exception.message)
+        self.assertNotIn("script", rejected.exception.message)
+        admin_call.assert_not_called()
+
     def test_send_retries_transient_turn_lifecycle_conflicts(self) -> None:
         for message in (
             "the agent is starting; retry shortly",

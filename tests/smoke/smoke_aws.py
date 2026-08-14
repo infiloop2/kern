@@ -264,6 +264,21 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("list_events", {"limit": "1"}),
         ("search", {"query": "bitcoin", "limit_per_type": "1"}),
     ),
+    "reddit": (
+        ("get_profile", {}),
+        ("get_home_feed", {"limit": "1"}),
+        ("get_subreddit_posts", {"subreddit": "popular", "limit": "1"}),
+        ("search_posts", {"query": "Kern", "limit": "1"}),
+        ("read_post", {"post_id": "abc", "comment_limit": "1"}),
+        (
+            "create_post",
+            {"subreddit": "popular", "title": "Kern smoke", "kind": "self", "text": "Never published."},
+        ),
+        ("create_comment", {"parent_id": "t3_abc", "text": "Never published."}),
+    ),
+    "openai_images": (
+        ("generate_image", {"prompt": "Kern smoke"}),
+    ),
     "runway": (
         ("generate_video", {"prompt": "Kern smoke", "image_asset_id": "$RUNWAY_IMAGE"}),
         ("edit_video", {"prompt": "Kern smoke", "video_asset_id": "$RUNWAY_VIDEO"}),
@@ -284,6 +299,20 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("get_trends", {"max_trends": "1"}),
         ("get_personalized_trends", {}),
         ("lookup_user", {"username": "kern"}),
+    ),
+    "zoho_mail": (
+        ("search_messages", {"search_key": "entire:Kern", "limit": "1"}),
+        ("list_folders", {}),
+        ("list_messages", {"folder_id": "1", "limit": "1"}),
+        ("read_message", {"folder_id": "1", "message_id": "1"}),
+        (
+            "send_email",
+            {
+                "to": "stage@example.com",
+                "subject": "Kern smoke",
+                "blocks": [{"type": "paragraph", "text": "Smoke test; never sent."}],
+            },
+        ),
     ),
 }
 
@@ -333,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
         smoke.check_proxy_concurrency()
         smoke.check_pre_login_provider_guards()
         smoke.check_precredential_bedrock_harness_launchers()
+        smoke.check_installed_agent_script_launcher()
         smoke.check_tools_surface()
         smoke.check_network_event_prune_race()
         print(f"\n{smoke.passed}/{smoke.total} checks passed")
@@ -2634,6 +2664,69 @@ class AwsSmoke:
         self._ok(
             "the real Hermes launch path reached the proxy's local missing-credential denial; "
             "no AWS credential was stored and no upstream model call was possible"
+        )
+
+    def check_installed_agent_script_launcher(self) -> None:
+        """Run a real agent-home script through the installed launcher.
+
+        The script runtime needs no provider credential, so unlike the model
+        runtimes its whole production path can be proven on a fresh host: the
+        admin sudo entry, root's path validation, the systemd scope, the
+        demotion to kern-agent, the demoted file checks, and the script's own
+        output and exit status.
+        """
+        self._step("installed script launcher runs an agent-home script and confines its path")
+        script = "/mnt/kern-agent/agent-home/kern-smoke-script.sh"
+        missing = "/mnt/kern-agent/agent-home/kern-smoke-absent.sh"
+        self._ssh_code(
+            f"sudo -u kern-agent tee {shlex.quote(script)} >/dev/null <<'KERNSMOKE'\n"
+            "echo kern-smoke-script-ok\n"
+            "id -un\n"
+            "KERNSMOKE"
+        )
+        try:
+            output = self._ssh_code(
+                "sudo -u kern-admin -- timeout 60 sudo -n "
+                "/usr/local/lib/kern-host/run-agent-script "
+                f"--thread-scope smoke-agent-script {shlex.quote(script)} 2>&1 | tail -c 400"
+            )
+            if "kern-smoke-script-ok" not in output:
+                raise AssertionError(
+                    f"installed script launcher did not run the script; output={output!r}"
+                )
+            if "kern-agent" not in output:
+                raise AssertionError(
+                    f"the script did not run as the agent user; output={output!r}"
+                )
+
+            # Root's spelling check and the demoted side's file check, with
+            # their distinct exit statuses: a usage rejection never becomes a
+            # process, and a missing script is only discovered as kern-agent.
+            probes = (
+                ("/etc/hostname", 64),
+                ("/mnt/kern-agent/agent-home/../../etc/hostname", 64),
+                ("/mnt/kern-agent/agent-home/kern-smoke-script.txt", 64),
+                (missing, 66),
+            )
+            for path, expected in probes:
+                status = self._ssh_code(
+                    "sudo -u kern-admin -- timeout 60 sudo -n "
+                    "/usr/local/lib/kern-host/run-agent-script "
+                    f"{shlex.quote(path)} >/dev/null 2>&1; echo status=$?"
+                ).strip()
+                if status != f"status={expected}":
+                    raise AssertionError(
+                        f"script launcher accepted or misreported {path!r}: {status}"
+                    )
+        finally:
+            self._ssh_code(
+                "sudo systemctl stop kern-agent-thread-smoke-agent-script.scope "
+                ">/dev/null 2>&1 || true"
+            )
+            self._ssh_code(f"sudo -u kern-agent rm -f {shlex.quote(script)}")
+        self._ok(
+            "the real script launch path ran an agent-home script as kern-agent and "
+            "refused paths outside the agent home"
         )
 
     def check_tools_surface(self) -> None:
