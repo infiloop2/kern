@@ -662,6 +662,20 @@ class PolicyTests(unittest.TestCase):
             "github_write_repo_required",
         )
 
+        # Workflow dispatch is an api.github.com REST route; the same path on
+        # GitHub's release-upload host does not inherit the exception.
+        self.assertEqual(
+            github_request_denied(
+                policy,
+                "POST",
+                "uploads.github.com",
+                "/repos/infiversehq/kern-tools/actions/workflows/deploy.yml/dispatches",
+                "",
+                b'{"ref":"main"}',
+            ),
+            "github_repo_admin_write_denied",
+        )
+
         # API writes: a repo-scoped mutation on a write repo passes; the same on
         # an unlisted repo needs a write repo.
         self.assertIsNone(
@@ -782,11 +796,13 @@ class PolicyTests(unittest.TestCase):
                     ),
                     "github_repo_admin_write_denied",
                 )
-        # Normal repo-scoped writes (issues, contents, workflow re-runs, and
-        # non-protection branch operations) on the write repo still pass.
+        # Normal repo-scoped writes (issues, contents, workflow dispatches and
+        # re-runs, and non-protection branch operations) on the write repo
+        # still pass.
         for write_path in (
             "issues",
             "contents/docs/README.md",
+            "actions/workflows/deploy.yml/dispatches",
             "actions/runs/1/rerun",
             "branches/main/rename",
         ):
@@ -796,6 +812,20 @@ class PolicyTests(unittest.TestCase):
                         policy, "POST", "api.github.com", f"/repos/infiversehq/kern-tools/{write_path}", "", b""
                     )
                 )
+
+        # A workflow dispatch is still a scoped write, so the same exact route
+        # cannot target a repository the operator did not list.
+        self.assertEqual(
+            github_request_denied(
+                policy,
+                "POST",
+                "api.github.com",
+                "/repos/other/repo/actions/workflows/deploy.yml/dispatches",
+                "",
+                b'{"ref":"main"}',
+            ),
+            "github_write_repo_required",
+        )
 
     def test_require_dot_github_approval_rides_into_guard(self) -> None:
         controls = parse_network_controls(

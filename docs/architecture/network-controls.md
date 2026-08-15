@@ -90,9 +90,10 @@ The proxy enforces, per request:
   is allowed (the agent may read any repository the injected token reaches);
   the guard only gates writes, which must target a repository in
   `write_repositories`. Writes that reach past repository content — repository
-  administration, forks/generate/transfer, publishing, running code outside the
-  proxy — are denied even for a write repository, under one reason
-  (`github_repo_admin_write_denied`). GraphQL is denied entirely until a real
+  administration, forks/generate/transfer, publishing, and automation
+  administration — are denied even for a write repository, under one reason
+  (`github_repo_admin_write_denied`). Dispatching an existing workflow is
+  treated as a repository-scoped write. GraphQL is denied entirely until a real
   GraphQL parser lands, because a `POST /graphql` can mutate and repository
   references in request bodies cannot be verified with path rules. Denials
   carry write-scope reasons in network events. The decision tables live in

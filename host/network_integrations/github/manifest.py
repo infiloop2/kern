@@ -29,8 +29,9 @@ MANIFEST = IntegrationManifest(
     description=(
         "GitHub access with the host-injected working credential: reads of any repository "
         "the credential reaches are allowed, pushes and API writes must target a configured "
-        "write repository, and repository administration (access grants, hooks, publishing, "
-        "workflow control) is denied even there. Optionally holds pushes that change "
+        "write repository, workflow dispatches are allowed in those repositories, and other "
+        "repository administration (access grants, hooks, publishing, workflow control) is "
+        "denied even there. Optionally holds pushes that change "
         ".github/ paths for operator approval. Also permits read-only GitHub Actions log, "
         "artifact, summary, and cache downloads from GitHub's documented Azure Blob hosts."
     ),
@@ -49,9 +50,10 @@ MANIFEST = IntegrationManifest(
         DenialReason(
             "github_repo_admin_write_denied",
             "This write reaches past repository content — repository settings, access grants, "
-            "hooks, publishing, protection rules, or workflow/automation control — and is "
-            "always denied, even for a configured write repository. Repository administration "
-            "is done by the operator directly on GitHub.",
+            "hooks, publishing, protection rules, or workflow/automation administration — and "
+            "is denied even for a configured write repository. Dispatching an existing workflow "
+            "is the exception; other repository administration is done by the operator directly "
+            "on GitHub.",
         ),
         DenialReason(
             "github_graphql_denied",

@@ -4,8 +4,10 @@ Runs in the proxy for hosts under the GitHub apexes. When the integration is
 enabled, every read is allowed (an agent's utility comes from many data-in
 paths — read any repo, public or private, that the injected token reaches).
 The controlled side is writes: a mutation must target a configured write
-repository, and the subset that reaches past repository content is denied
-outright. So the guard only ever gates writes; reads pass through.
+repository, and the subset that reaches past repository content is denied.
+Dispatching an existing workflow is treated as a repository-scoped write; the
+remaining workflow administration routes stay denied. So the guard only ever
+gates writes; reads pass through.
 
 This module also owns the two post-decision hooks on GitHub domains: the
 ``.github`` push-approval gate (``gate_response``, engine in ``push_gate``)
@@ -441,9 +443,22 @@ def _github_repo_admin_write_denied(parts: list[str], method: str, *, host: str)
             # identity claims future workflows present — security
             # administration, not repository content.
             return "github_repo_admin_write_denied"
+        if (
+            host == "api.github.com"
+            and tail[:1] == ["workflows"]
+            and len(tail) == 3
+            and method == "POST"
+            and tail[-1] == "dispatches"
+        ):
+            # The caller still applies the repository write allowlist after
+            # this admin-route classifier. This exact route runs an existing
+            # workflow; workflow enable/disable and run administration remain
+            # denied.
+            return None
         if tail[:1] == ["workflows"] and parts[-1] in {"enable", "disable", "dispatches"}:
-            # Turning a workflow off (CI, security scans) or dispatching one;
-            # re-running an existing run stays a plain write.
+            # Turning a workflow off (CI, security scans), using the wrong
+            # method/shape for a dispatch, or otherwise administering it stays
+            # denied. Re-running an existing run stays a plain write.
             return "github_repo_admin_write_denied"
         if tail[:1] == ["runs"] and (
             method == "DELETE"
