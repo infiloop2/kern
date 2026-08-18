@@ -18,6 +18,7 @@ MAX_LIST_ENTRIES = 1000
 MAX_READ_BYTES = 1024 * 1024
 MAX_STREAM_BYTES = 200_000_000
 MAX_IMAGE_STREAM_BYTES = 25 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 200_000_000
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 NONBLOCK = getattr(os, "O_NONBLOCK", 0)
@@ -223,9 +224,46 @@ def stream_path(raw_path: str) -> None:
             os.close(file_fd)
 
 
+def download_path(raw_path: str) -> None:
+    parts = parse_path(raw_path)
+    if not parts:
+        fail(3, "path is not a regular file")
+    parent_fd = open_agent_dir(parts[:-1])
+    try:
+        try:
+            file_fd = os.open(parts[-1], os.O_RDONLY | NOFOLLOW | NONBLOCK, dir_fd=parent_fd)
+        except FileNotFoundError:
+            fail(2, "path not found")
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                fail(3, "symlinks are not supported")
+            raise
+    finally:
+        os.close(parent_fd)
+    try:
+        info = os.fstat(file_fd)
+        if not stat.S_ISREG(info.st_mode):
+            fail(3, "path is not a regular file")
+        if not 0 <= info.st_size <= MAX_DOWNLOAD_BYTES:
+            fail(3, f"file is larger than {MAX_DOWNLOAD_BYTES} bytes")
+        header = {
+            "path": public_path_for(parts),
+            "size_bytes": info.st_size,
+            "media_type": "application/octet-stream",
+        }
+        sys.stdout.buffer.write(json.dumps(header, sort_keys=True).encode() + b"\n")
+        sys.stdout.buffer.flush()
+        with os.fdopen(file_fd, "rb") as source:
+            file_fd = -1
+            shutil.copyfileobj(source, sys.stdout.buffer, length=1024 * 1024)
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
-        fail(3, "usage: read-agent-file <list|read|stream> <path>")
+        fail(3, "usage: read-agent-file <list|read|stream|download> <path>")
     action, raw_path = argv[1], argv[2]
     if action == "list":
         list_path(raw_path)
@@ -236,7 +274,10 @@ def main(argv: list[str]) -> int:
     if action == "stream":
         stream_path(raw_path)
         return 0
-    fail(3, "operation must be list, read, or stream")
+    if action == "download":
+        download_path(raw_path)
+        return 0
+    fail(3, "operation must be list, read, stream, or download")
     return 1
 
 

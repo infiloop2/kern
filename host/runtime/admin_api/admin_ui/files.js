@@ -8,7 +8,8 @@ const FILE_LIST_ENTRY_LIMIT = 1000;
 let currentFilePath = "/";
 let fileEntries = [];
 let activeFileUrl = null;
-let fileNavigationSequence = 0;
+let fileActionSequence = 0;
+let currentViewerPath = null;
 
 function fileMessage(message, isError) {
   const node = $("file-message");
@@ -23,25 +24,21 @@ function parentPath(path) {
   return index <= 0 ? "/" : normalized.slice(0, index);
 }
 
-export async function loadAgentFiles(path = currentFilePath, navigate = false) {
-  if (navigate) fileNavigationSequence += 1;
-  const navigationSequence = fileNavigationSequence;
+export async function loadAgentFiles(path = currentFilePath, navigate = false, actionSequence = null) {
+  const requestSequence = actionSequence ?? (
+    navigate ? ++fileActionSequence : fileActionSequence
+  );
+  const requestIsStale = () => requestSequence !== fileActionSequence;
   try {
     fileMessage("");
     const response = await api("GET", `/v1/agent-files?path=${encodeURIComponent(path || "/")}`);
-    if (
-      navigationSequence !== fileNavigationSequence
-      || (!navigate && path !== currentFilePath)
-    ) return;
+    if (requestIsStale() || (!navigate && path !== currentFilePath)) return;
     currentFilePath = response.path || "/";
     fileEntries = Array.isArray(response.entries) ? response.entries : [];
     $("file-path").value = currentFilePath;
     renderFileList(response);
   } catch (error) {
-    if (
-      navigationSequence !== fileNavigationSequence
-      || (!navigate && path !== currentFilePath)
-    ) return;
+    if (requestIsStale() || (!navigate && path !== currentFilePath)) return;
     fileMessage(error.message, true);
   }
 }
@@ -58,13 +55,18 @@ export function loadParentDirectory() {
   return loadAgentFiles(parentPath(currentFilePath), true);
 }
 
-async function readAgentFile(path) {
+async function readAgentFile(path, actionSequence = null, fallbackPath = "") {
+  const requestSequence = actionSequence ?? ++fileActionSequence;
+  const requestIsStale = () => requestSequence !== fileActionSequence;
   try {
     fileMessage("");
+    prepareFileViewer(path);
+    showFileDownload(path);
     const isVideo = /\.(mp4|mov)$/i.test(path);
     const isImage = /\.(jpe?g|png|webp)$/i.test(path);
     if (isVideo || isImage) {
       const blob = await apiBlob(`/v1/agent-files/content?path=${encodeURIComponent(path)}`);
+      if (requestIsStale()) return;
       if (isVideo) {
         if (!["video/mp4", "video/quicktime"].includes(blob.type)) {
           throw new Error("file is not a supported video");
@@ -79,8 +81,13 @@ async function readAgentFile(path) {
       return;
     }
     const response = await api("GET", `/v1/agent-files/read?path=${encodeURIComponent(path)}`);
+    if (requestIsStale()) return;
     renderFileContent(response);
   } catch (error) {
+    if (requestIsStale()) return;
+    if (error.status === 404 && fallbackPath && fallbackPath !== path) {
+      return readAgentFile(fallbackPath, requestSequence);
+    }
     fileMessage(error.message, true);
   }
 }
@@ -91,6 +98,36 @@ export async function openAgentPath(path, type) {
     return;
   }
   await readAgentFile(path);
+}
+
+export async function openLinkedAgentFile(path, fallbackPath = "") {
+  const filePath = String(path || "");
+  const actionSequence = ++fileActionSequence;
+  await Promise.all([
+    loadAgentFiles(parentPath(filePath), true, actionSequence),
+    readAgentFile(filePath, actionSequence, String(fallbackPath || "")),
+  ]);
+}
+
+export async function downloadViewedFile() {
+  const downloadPath = currentViewerPath;
+  if (!downloadPath) return;
+  try {
+    fileMessage("");
+    const blob = await apiBlob(
+      `/v1/agent-files/download?path=${encodeURIComponent(downloadPath)}`,
+    );
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = downloadPath.split("/").pop() || "download";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  } catch (error) {
+    fileMessage(error.message, true);
+  }
 }
 
 function renderFileList(listing = {}) {
@@ -176,6 +213,14 @@ function renderFileImage(path, blob) {
   image.hidden = false;
 }
 
+function prepareFileViewer(path) {
+  resetFileMedia();
+  $("file-viewer-title").textContent = path;
+  const content = $("file-content");
+  content.textContent = "";
+  content.hidden = true;
+}
+
 function resetFileMedia() {
   if (activeFileUrl) URL.revokeObjectURL(activeFileUrl);
   activeFileUrl = null;
@@ -186,6 +231,11 @@ function resetFileMedia() {
   image.hidden = true;
   image.removeAttribute("src");
   image.alt = "";
+}
+
+function showFileDownload(path) {
+  currentViewerPath = path || null;
+  $("file-download").hidden = !currentViewerPath;
 }
 
 export function goToFilePath() {

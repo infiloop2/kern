@@ -610,6 +610,17 @@ def desktop_smoke(page, url: str) -> None:
     page.locator("#chat-nav-items [data-action='unarchive-chat'][data-item-id='thread-1']").click()
     page.locator('[data-action="show-chat-archive"]').click()
 
+    page.locator("#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']").click()
+    workspace_link = page.locator("#panel-workspace-chat").get_by_role("button", name="README.md")
+    expect(workspace_link).to_be_visible()
+    workspace_link.click()
+    expect(page.locator("#panel-files")).to_be_visible()
+    expect(page.locator("#file-path")).to_have_value("/workspace/acme-web")
+    expect(page.locator("#file-viewer-title")).to_contain_text("/workspace/acme-web/README.md")
+    expect(page.locator("#file-content")).to_contain_text("Marketing site for Acme")
+    page.locator("#panel-files .home-back").click()
+    expect(page.locator("#panel-home")).to_be_visible()
+
     with page.expect_response(lambda response: "/v1/events" in response.url):
         page.locator("#panel-home").get_by_role("button", name=re.compile(r"Agent audit")).click()
     expect(page.locator("#panel-agent-log")).to_be_visible()
@@ -624,6 +635,9 @@ def desktop_smoke(page, url: str) -> None:
     page.locator("#panel-agent-log .home-back").click()
     page.locator("#panel-home").get_by_role("button", name=re.compile(r"Agent workspace")).click()
     expect(page.locator("#panel-files")).to_be_visible()
+    expect(page.locator("#file-path")).to_have_value("/workspace/acme-web")
+    page.locator("#file-path").fill("/")
+    page.locator("#file-path").press("Enter")
     expect(page.locator("#file-list th").nth(0)).to_have_text("name")
     expect(page.locator("#file-list th").nth(1)).to_have_text("type")
     expect(page.locator("#file-list")).to_contain_text(".codex")
@@ -652,6 +666,12 @@ def desktop_smoke(page, url: str) -> None:
     page.locator("#file-list").get_by_role("button", name="notes.txt").click()
     expect(page.locator("#file-viewer-title")).to_contain_text("/workspace/notes.txt")
     expect(page.locator("#file-content")).to_contain_text("Mobile audit fixes")
+    with page.expect_download() as download_info:
+        page.locator("#file-download").click()
+    if download_info.value.suggested_filename != "notes.txt":
+        raise AssertionError(
+            f"unexpected workspace download name: {download_info.value.suggested_filename}"
+        )
     page.locator("#file-list").get_by_role("button", name="screenshot.png").click()
     expect(page.locator("#file-viewer-title")).to_contain_text("/workspace/screenshot.png")
     expect(page.locator("#file-image")).to_be_visible()
@@ -1523,7 +1543,7 @@ def mobile_smoke(page, url: str) -> None:
 
 
 def iphone_pwa_swipe_smoke(page, url: str) -> None:
-    """The installed iPhone app owns the back-edge gesture as drawer navigation."""
+    """The installed iPhone app owns both browser-history edge gestures."""
     from playwright.sync_api import expect
 
     log_in(page, url)
@@ -1561,6 +1581,12 @@ def iphone_pwa_swipe_smoke(page, url: str) -> None:
     expect(page.locator("#mobile-nav-close")).to_be_focused()
 
     page.locator("#mobile-nav-close").click()
+    right_result = perform_iphone_edge_swipe(page, edge="right")
+    if right_result != {"startAllowed": True, "moveAllowed": False}:
+        raise AssertionError(f"iPhone PWA did not claim its forward edge: {right_result}")
+    expect(page.locator("#mobile-nav-toggle")).to_have_attribute("aria-expanded", "false")
+    expect(page.locator("#sidebar")).not_to_have_class(re.compile(r"mobile-open"))
+
     toggle_touch_allowed = page.locator("#mobile-nav-toggle").evaluate(
         """target => {
           const touch = new Touch({
@@ -1626,6 +1652,49 @@ def iphone_pwa_swipe_smoke(page, url: str) -> None:
 
     page.get_by_role("button", name="New chat", exact=True).click()
     expect(page.locator("body")).to_have_class(re.compile(r"\bviewport-panel-open\b"))
+    page.set_viewport_size(IPHONE_VIEWPORT)
+    page.wait_for_function(
+        "() => getComputedStyle(document.documentElement)"
+        ".getPropertyValue('--kern-viewport-height').trim() === "
+        "`${visualViewport?.height || innerHeight}px`"
+    )
+    full_viewport_height = page.evaluate(
+        "() => getComputedStyle(document.documentElement)"
+        ".getPropertyValue('--kern-viewport-height').trim()"
+    )
+    composer = page.locator("#new-task")
+    composer.focus()
+    expect(page.locator("body")).to_have_class(re.compile(r"\bworkspace-input-focused\b"))
+    page.set_viewport_size({"width": IPHONE_VIEWPORT["width"], "height": 500})
+    frozen_keyboard_height = page.evaluate(
+        "() => getComputedStyle(document.documentElement)"
+        ".getPropertyValue('--kern-viewport-height').trim()"
+    )
+    if frozen_keyboard_height != full_viewport_height:
+        raise AssertionError(
+            "iPhone PWA resized the host while its keyboard owned the viewport: "
+            f"before={full_viewport_height}, keyboard={frozen_keyboard_height}"
+        )
+    page.set_viewport_size({"width": 844, "height": 390})
+    page.wait_for_function(
+        "() => getComputedStyle(document.documentElement)"
+        ".getPropertyValue('--kern-viewport-height').trim() === "
+        "`${document.documentElement.clientHeight}px`"
+    )
+    landscape_height = page.evaluate(
+        "() => getComputedStyle(document.documentElement)"
+        ".getPropertyValue('--kern-viewport-height').trim()"
+    )
+    page.set_viewport_size({"width": 844, "height": 230})
+    if page.evaluate(
+        "() => getComputedStyle(document.documentElement)"
+        ".getPropertyValue('--kern-viewport-height').trim()"
+    ) != landscape_height:
+        raise AssertionError("iPhone PWA did not freeze the rotated keyboard viewport")
+    composer.evaluate("element => element.blur()")
+    page.set_viewport_size(IPHONE_VIEWPORT)
+    expect(page.locator("body")).not_to_have_class(re.compile(r"\bworkspace-input-focused\b"))
+
     for height in (500, IPHONE_VIEWPORT["height"]):
         page.set_viewport_size({"width": IPHONE_VIEWPORT["width"], "height": height})
         page.wait_for_function(
@@ -1644,10 +1713,12 @@ def iphone_pwa_swipe_smoke(page, url: str) -> None:
             )
 
 
-def perform_iphone_edge_swipe(page):
+def perform_iphone_edge_swipe(page, *, edge: str = "left"):
     return page.evaluate(
-        """() => {
-          const target = document.elementFromPoint(12, 300) || document.body;
+        """edge => {
+          const startX = edge === "left" ? 12 : innerWidth - 12;
+          const finishX = edge === "left" ? 90 : innerWidth - 90;
+          const target = document.elementFromPoint(startX, 300) || document.body;
           const send = (type, x, y, active) => {
             const touch = new Touch({
               identifier: 1, target, clientX: x, clientY: y,
@@ -1661,11 +1732,12 @@ def perform_iphone_edge_swipe(page):
             });
             return target.dispatchEvent(event);
           };
-          const startAllowed = send("touchstart", 12, 300, true);
-          const moveAllowed = send("touchmove", 90, 304, true);
-          send("touchend", 90, 304, false);
+          const startAllowed = send("touchstart", startX, 300, true);
+          const moveAllowed = send("touchmove", finishX, 304, true);
+          send("touchend", finishX, 304, false);
           return { startAllowed, moveAllowed };
-        }"""
+        }""",
+        edge,
     )
 
 

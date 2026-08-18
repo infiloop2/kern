@@ -12,7 +12,8 @@ import {
   refreshProviderUsage, rebootHost, startLogin, toggleRuntimeOverview,
 } from "./health.js";
 import {
-  ensureFilesLoaded, goToFilePath, loadParentDirectory, openAgentPath,
+  downloadViewedFile, ensureFilesLoaded, goToFilePath, loadParentDirectory,
+  openAgentPath, openLinkedAgentFile,
   refreshFiles,
 } from "./files.js";
 import { refreshAgentProcesses } from "./processes.js";
@@ -234,33 +235,26 @@ function bindIPhoneStandaloneSidebarSwipe() {
 
   const edgeWidth = 32;
   const openDistance = 64;
-  const interactiveRoles = new Set([
-    "button", "checkbox", "combobox", "link", "menuitem", "menuitemcheckbox",
-    "menuitemradio", "option", "radio", "searchbox", "slider", "spinbutton",
-    "switch", "tab", "textbox",
-  ]);
   let swipe = null;
 
   document.addEventListener("touchstart", event => {
     swipe = null;
-    const interactiveTarget = event.composedPath().some(target => {
-      if (!(target instanceof Element)) return false;
-      return target.matches(
-        "button, a[href], input, select, textarea, label, summary, "
-        + "[contenteditable]:not([contenteditable='false']), [draggable='true']",
-      ) || interactiveRoles.has(target.getAttribute("role")) || target.tabIndex >= 0;
-    });
     if (
       mobileNavOpen
       || $("app").hidden
       || document.body.classList.contains("install-guide-open")
       || !window.matchMedia(MOBILE_NAV_QUERY).matches
       || event.touches.length !== 1
-      || interactiveTarget
     ) return;
     const touch = event.touches[0];
-    if (touch.clientX > edgeWidth) return;
-    swipe = { identifier: touch.identifier, x: touch.clientX, y: touch.clientY };
+    const edge = touch.clientX <= edgeWidth
+      ? "left"
+      : touch.clientX >= window.innerWidth - edgeWidth ? "right" : null;
+    if (!edge) return;
+    // Do not cancel touchstart: edge controls still receive ordinary taps.
+    // Claim only a later, clearly horizontal move so vertical scrolling and
+    // control activation remain native while iOS history navigation does not.
+    swipe = { edge, identifier: touch.identifier, x: touch.clientX, y: touch.clientY };
   }, { capture: true, passive: false });
 
   document.addEventListener("touchmove", event => {
@@ -270,17 +264,18 @@ function bindIPhoneStandaloneSidebarSwipe() {
       swipe = null;
       return;
     }
-    const horizontal = touch.clientX - swipe.x;
+    const direction = swipe.edge === "left" ? 1 : -1;
+    const horizontal = (touch.clientX - swipe.x) * direction;
     const vertical = Math.abs(touch.clientY - swipe.y);
     if (horizontal < 0 || vertical > Math.max(24, horizontal)) {
       swipe = null;
       return;
     }
-    // Leave an edge-origin vertical scroll native. Claim only a clearly
-    // horizontal movement, early enough to suppress iOS history navigation.
+    // Claim both iOS history edges. The left edge doubles as Kern's drawer
+    // gesture; the right edge is swallowed without changing application state.
     if (horizontal < 10 || horizontal <= vertical) return;
     if (event.cancelable) event.preventDefault();
-    if (horizontal < openDistance) return;
+    if (swipe.edge !== "left" || horizontal < openDistance) return;
     swipe = null;
     setMobileNavOpen(true);
   }, { capture: true, passive: false });
@@ -290,13 +285,37 @@ function bindIPhoneStandaloneSidebarSwipe() {
   }
 }
 
+let iPhoneStandaloneViewportBaseline = null;
+let workspaceKeyboardViewportBaselineHeight = 0;
+function layoutViewportSize() {
+  return {
+    height: document.documentElement.clientHeight || window.innerHeight,
+    width: document.documentElement.clientWidth || window.innerWidth,
+  };
+}
+
 function syncIPhoneStandaloneViewport() {
   if (!isIPhoneStandalone()) return;
+  const layout = layoutViewportSize();
+  const orientationChanged = Boolean(
+    iPhoneStandaloneViewportBaseline
+    && Math.abs(layout.width - iPhoneStandaloneViewportBaseline.width) > 80
+  );
+  const keyboardOwnsViewport = workspaceKeyboardOwnsViewport();
+  if (keyboardOwnsViewport && !orientationChanged) return;
   // iOS can leave dynamic viewport units at the keyboard-reduced height after
-  // a standalone app transition. The visual viewport reports the actual usable
-  // app window, so give the full-screen workspace a concrete height to return
-  // to without moving or scrolling the viewport itself.
-  const height = window.visualViewport?.height || window.innerHeight;
+  // a standalone app transition. Use its height only while no software keyboard
+  // owns it: resizing the layout to the keyboard and letting iOS pan the focused
+  // input at the same time moves the composer twice and leaves it at the top.
+  // Rotation changes the layout width, so use its new full height even if the
+  // keyboard remains open instead of retaining the other orientation's pixels.
+  const height = keyboardOwnsViewport
+    ? layout.height
+    : window.visualViewport?.height || layout.height;
+  if (orientationChanged && keyboardOwnsViewport) {
+    workspaceKeyboardViewportBaselineHeight = layout.height;
+  }
+  iPhoneStandaloneViewportBaseline = { height, width: layout.width };
   document.documentElement.style.setProperty("--kern-viewport-height", `${height}px`);
 }
 
@@ -305,14 +324,40 @@ function resetPageScroll() {
 }
 
 let workspaceViewportRecovery = 0;
+function visualViewportIsContracted() {
+  const viewport = window.visualViewport;
+  return Boolean(
+    viewport
+    && workspaceKeyboardViewportBaselineHeight
+    && viewport.height < workspaceKeyboardViewportBaselineHeight - 80
+  );
+}
+
+function workspaceKeyboardOwnsViewport() {
+  if (document.body.classList.contains("workspace-input-focused")
+      || isWorkspaceKeyboardInput(deepActiveElement())) return true;
+  if (visualViewportIsContracted()) return true;
+  // The viewport has expanded after focus ended, so later same-width changes
+  // are real layout changes rather than the tail of this keyboard session.
+  workspaceKeyboardViewportBaselineHeight = 0;
+  return false;
+}
+
+function workspaceViewportCanRecover() {
+  return document.body.classList.contains("viewport-panel-open")
+    && !workspaceKeyboardOwnsViewport()
+    && window.matchMedia(MOBILE_NAV_QUERY).matches;
+}
+
 function recoverWorkspaceViewport() {
-  if (!document.body.classList.contains("viewport-panel-open")
-      || document.body.classList.contains("workspace-input-focused")
-      || isWorkspaceKeyboardInput(deepActiveElement())
-      || !window.matchMedia(MOBILE_NAV_QUERY).matches) return;
+  if (!workspaceViewportCanRecover()) return;
   cancelAnimationFrame(workspaceViewportRecovery);
   workspaceViewportRecovery = requestAnimationFrame(() => {
     workspaceViewportRecovery = requestAnimationFrame(() => {
+      // Focus can return while these frames are queued. Re-check immediately
+      // before scrolling so a stale keyboard-close recovery cannot move the
+      // page out from under the field the operator is typing in.
+      if (!workspaceViewportCanRecover()) return;
       /* Mobile Safari may pan the layout viewport to expose a focused field.
          It does not always restore that pan when Send clears the field or the
          keyboard closes. The workspaces own the visual viewport, so the page
@@ -359,6 +404,9 @@ document.addEventListener("focusin", event => {
   const target = event.composedPath()[0];
   if (!isWorkspaceKeyboardInput(target)) return;
   if (!document.body.classList.contains("viewport-panel-open")) return;
+  const currentHeight = window.visualViewport?.height || layoutViewportSize().height;
+  workspaceKeyboardViewportBaselineHeight = iPhoneStandaloneViewportBaseline?.height
+    || Math.max(workspaceKeyboardViewportBaselineHeight, currentHeight);
   focusedWorkspaceInput = target;
   focusedWorkspaceInputObserver.disconnect();
   focusedWorkspaceInputObserver.observe(target.getRootNode(), { childList: true, subtree: true });
@@ -378,7 +426,6 @@ document.addEventListener("focusout", event => {
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", syncIPhoneStandaloneViewport, { passive: true });
   window.visualViewport.addEventListener("resize", recoverWorkspaceViewport, { passive: true });
-  window.visualViewport.addEventListener("scroll", recoverWorkspaceViewport, { passive: true });
 }
 
 function showLogin() {
@@ -693,6 +740,10 @@ window.KernHost = {
     if (navigateWorkspaceRoute(resource, itemId, replace)) {
       workspaceNavigationActionSequence += 1;
     }
+  },
+  openAgentFile(path, fallbackPath = "") {
+    openHomeView("files");
+    return openLinkedAgentFile(path, fallbackPath);
   },
   chooseFiles(maximum = 10) {
     return new Promise(resolve => {
@@ -1112,6 +1163,7 @@ document.addEventListener("click", event => {
     "reboot-host": () => rebootHost(),
     "file-up": () => loadParentDirectory(),
     "file-go": () => goToFilePath(),
+    "download-file": () => downloadViewedFile(),
     "open-file-path": () => openAgentPath(path, fileType),
     "load-policy": () => loadPolicy(),
     "toggle-github-repo-audit": () => toggleGithubRepoAudit(button.dataset.repoKey),

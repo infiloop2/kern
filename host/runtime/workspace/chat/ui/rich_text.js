@@ -16,6 +16,24 @@
     return "";
   }
 
+  const AGENT_HOME_PATH = "/mnt/kern-agent/agent-home";
+
+  function workspaceFilePath(value) {
+    const path = String(value ?? "").trim();
+    if (!path || path.length > 4096 || path.includes("\0")) return "";
+    if (path !== AGENT_HOME_PATH && !path.startsWith(`${AGENT_HOME_PATH}/`)) return "";
+    const relative = path.slice(AGENT_HOME_PATH.length);
+    if (relative.split("/").includes("..")) return "";
+    return relative || "/";
+  }
+
+  function workspaceFileFallbackPath(value) {
+    const path = String(value ?? "").trim();
+    const stripped = path.replace(/:\d+(?::\d+)?$/, "");
+    if (stripped === path) return "";
+    return workspaceFilePath(stripped);
+  }
+
   // This is deliberately a browser-navigation allowlist, not a reflection of
   // Kern's agent network policy. Keep it to exact, human-facing provider
   // hosts: API, OAuth, CDN, redirector, and arbitrary search-result hosts do
@@ -190,7 +208,21 @@
     let text = String(source ?? "");
     text = text.replace(/`([^`\n]+)`/g, (_, code) =>
       stash(`<code>${escapeHtml(code)}</code>`));
-    text = text.replace(/(!?)\[([^\]\n]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, image, label, rawHref) => {
+    text = text.replace(/(!?)\[([^\]\n]+)\]\((?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"]*")?\)/g,
+      (_, image, label, bracketedHref, plainHref) => {
+      const rawHref = bracketedHref || plainHref;
+      const filePath = !image && workspaceFilePath(rawHref);
+      if (filePath) {
+        const fallbackPath = workspaceFileFallbackPath(rawHref);
+        const fallbackAttribute = fallbackPath
+          ? ` data-fallback-path="${escapeHtml(fallbackPath)}"`
+          : "";
+        return stash(
+          `<button type="button" class="md-open-file" ` +
+          `data-file-path="${escapeHtml(filePath)}"${fallbackAttribute} ` +
+          `title="Open in Agent workspace">${escapeHtml(label)}</button>`,
+        );
+      }
       const href = safeHref(rawHref);
       if (!href) return image ? `[image: ${label}]` : label;
       const safe = escapeHtml(href);
@@ -339,6 +371,8 @@
   const api = {
     escapeHtml,
     safeNavigationHref,
+    workspaceFilePath,
+    workspaceFileFallbackPath,
     renderMarkdown,
     safeHref,
     clipUtf8,

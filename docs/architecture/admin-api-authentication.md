@@ -205,7 +205,7 @@ the [Admin API reference](../api/AdminAPI.md).
 | `GET /v1/agent-runtime/{status,account}`, runtime refresh, OAuth login/completion, Bedrock credential, and linked-account reset routes | Session + CSRF | Normal shared handler on both operator paths |
 | `GET /v1/threads`, `/v1/threads/<id>`, thread message/stop/event routes, and `GET /v1/events` | Session + CSRF | Operator sees the host-wide thread namespace |
 | `GET\|POST\|PUT\|DELETE /v1/workspace/{chat,web-apps}/...` | Session + CSRF | Proxy targets only the fixed Workspace backend and adds a fixed route prefix without forwarding credentials |
-| `GET /v1/agent-files`, file read/content/upload routes, and `GET /v1/agent-processes` | Session + CSRF | Content and upload use bounded streaming handlers after authentication |
+| `GET /v1/agent-files`, file read/content/download/upload routes, and `GET /v1/agent-processes` | Session + CSRF | Content, download, and upload use bounded streaming handlers after authentication |
 | `GET\|PUT /v1/network/policy`, `GET /v1/network/events`, and GitHub credential/audit/pending-push routes under `/v1/network-tools/` | Session + CSRF | Method-specific mutation validation and root-helper boundaries still apply |
 | Tool catalog/config/enablement/OAuth/approval routes and tool events under `/v1/tools` | Session + CSRF | Tool-specific authorization and approval state run after operator authentication |
 | `GET /v1/host-diagnostics[/<seq>]` and `POST /v1/host-runtime/reboot` | Session + CSRF | Diagnostic read or fixed privileged helper after authentication |

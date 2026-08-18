@@ -41,3 +41,9 @@ uses the host-owned full-text and timestamp indexes without filtering through
 Chat's product index. Activity is excluded by default and,
 when requested, is reduced to bounded normalized summaries. Historical content
 is returned as untrusted data, never as a command protocol.
+
+Markdown links whose target is an absolute path under
+`/mnt/kern-agent/agent-home` render as file controls. The trusted Chat surface
+normalizes the target to the Files explorer's virtual `/` root and asks the
+host shell to open that file; paths outside the agent home remain plain text.
+The file helper remains the authority for traversal and symlink rejection.

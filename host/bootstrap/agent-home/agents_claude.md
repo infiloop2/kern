@@ -80,6 +80,12 @@ in generated Apps. Kern opens links on its hardcoded safe-navigation providers
 in a new tab and renders every other valid link as a copy-link control. Never
 put secrets in URLs or disguise a link's destination.
 
+In Chat, link a file under the agent home with ordinary Markdown whose target
+is its absolute `/mnt/kern-agent/agent-home/...` path. You may append `:line`
+or `:line:column`; Kern opens the file in the Agent Workspace viewer. Wrap a
+target containing spaces in angle brackets. Do not link paths outside the
+agent home.
+
 The `kern` MCP server always exposes `workspace_api`. It reaches only the
 host's agent-facing `/agent/` Workspace routes documented below. Do not guess
 or probe routes; treat returned HTTP statuses and JSON bodies as Workspace

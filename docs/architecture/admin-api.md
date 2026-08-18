@@ -164,10 +164,11 @@ Route handlers are thin: validate the documented protocol, read or update
 admin state (the local Postgres database — see
 [Admin state storage](admin-state-storage.md)), and delegate to the
 orchestrator, the selected runtime client, or the fixed sudo helpers. Agent
-file list/read routes cross into the private agent home through
+file list/read/content/download routes cross into the private agent home through
 `read-agent-file`, which demotes to `kern-agent`, confines paths to
 `agent-home`, rejects symlinks, caps listing scan work and responses at 1,000
-entries, opens files nonblocking, and caps reads at 1 MiB.
+entries, opens files nonblocking, caps text reads at 1 MiB, and caps media and
+download streams at their documented limits.
 
 The raw upload route uses a separate fixed `upload-agent-file` helper. The
 admin service requires an exact `Content-Length`, caps it at 25 MiB, and

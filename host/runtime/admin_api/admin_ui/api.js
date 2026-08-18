@@ -91,7 +91,9 @@ export async function apiBlob(path) {
       const data = await response.json();
       message = data.error ? data.error.message : message;
     } catch (_) {}
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   return response.blob();
 }
