@@ -468,6 +468,7 @@ class AdminUiStaticTests(unittest.TestCase):
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui"
         app = (runtime / "app.js").read_text()
         api = (runtime / "api.js").read_text()
+        files = (runtime / "files.js").read_text()
         chat = (
             Path(__file__).parents[1] / "host/runtime/workspace/chat/ui/agent_chat.js"
         ).read_text()
@@ -482,10 +483,34 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("chooseFiles", app)
         self.assertIn("apiUpload", app)
         self.assertIn("refreshNavigation()", app)
+        self.assertIn('openAgentFile(path, fallbackPath = "")', app)
+        self.assertIn("openLinkedAgentFile(path, fallbackPath)", app)
+        self.assertLess(
+            files.index("showFileDownload(path);"),
+            files.index("const blob = await apiBlob"),
+        )
+        self.assertLess(
+            files.index("prepareFileViewer(path);"),
+            files.index("showFileDownload(path);"),
+        )
+        self.assertIn("let fileActionSequence = 0", files)
+        self.assertIn("requestSequence !== fileActionSequence", files)
+        self.assertGreaterEqual(files.count("requestIsStale()"), 3)
+        self.assertIn("await Promise.all([", files)
+        self.assertIn("loadAgentFiles(parentPath(filePath), true, actionSequence)", files)
+        self.assertIn(
+            'readAgentFile(filePath, actionSequence, String(fallbackPath || ""))',
+            files,
+        )
+        self.assertIn("error.status === 404 && fallbackPath", files)
+        self.assertIn("const downloadPath = currentViewerPath", files)
+        self.assertIn("encodeURIComponent(downloadPath)", files)
+        self.assertIn('downloadPath.split("/").pop()', files)
         self.assertIn("upload failed (${response.status})", api)
         self.assertIn("/v1/agent-files/upload?filename=", api)
         self.assertIn("window.KernHost.chooseFiles", chat)
         self.assertIn("window.KernHost.refreshNavigation()", chat)
+        self.assertIn("window.KernHost.openAgentFile", chat)
         self.assertIn("window.KernHost.chooseFiles", web_apps)
         self.assertIn("window.KernHost.refreshNavigation()", web_apps)
         self.assertNotIn("postMessage", chat)
@@ -642,7 +667,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('document.querySelector("main").inert = mobileNavOpen', app_js)
         self.assertIn(".sidebar.mobile-open { transform: translateX(0); }", css)
 
-    def test_iphone_standalone_left_edge_swipe_owns_navigation(self) -> None:
+    def test_iphone_standalone_edges_do_not_navigate_browser_history(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
         app_js = (runtime / "admin_ui" / "app.js").read_text()
         css = (runtime / "admin_ui/admin_ui.css").read_text()
@@ -651,17 +676,22 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('if (!isIPhoneStandalone()) return;', app_js)
         self.assertIn('document.addEventListener("touchstart"', app_js)
         self.assertIn('document.addEventListener("touchmove"', app_js)
-        self.assertIn("|| interactiveTarget", app_js)
-        self.assertIn('"button", "checkbox", "combobox", "link", "menuitem"', app_js)
-        self.assertIn('interactiveRoles.has(target.getAttribute("role"))', app_js)
-        self.assertNotIn("summary, [role]", app_js)
+        self.assertIn('touch.clientX >= window.innerWidth - edgeWidth ? "right"', app_js)
+        self.assertNotIn("interactiveTarget", app_js)
         self.assertIn("if (event.cancelable) event.preventDefault();", app_js)
         self.assertIn("setMobileNavOpen(true);", app_js)
         self.assertIn("html.iphone-standalone, html.iphone-standalone body {", css)
         self.assertIn("overscroll-behavior-x: none;", css)
         self.assertIn("function syncIPhoneStandaloneViewport()", app_js)
+        self.assertIn("workspaceKeyboardOwnsViewport()", app_js)
+        self.assertIn("function visualViewportIsContracted()", app_js)
+        self.assertIn("workspaceKeyboardViewportBaselineHeight - 80", app_js)
+        self.assertIn("workspaceKeyboardViewportBaselineHeight = 0", app_js)
+        self.assertIn("Math.abs(layout.width - iPhoneStandaloneViewportBaseline.width) > 80", app_js)
+        self.assertIn("keyboardOwnsViewport\n    ? layout.height", app_js)
         self.assertIn('style.setProperty("--kern-viewport-height"', app_js)
         self.assertIn("height: var(--kern-viewport-height, 100dvh);", css)
+        self.assertNotIn('visualViewport.addEventListener("scroll"', app_js)
 
     def test_provider_usage_rings_have_warning_and_critical_thresholds(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
@@ -3155,6 +3185,42 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(
             popen.call_args.args[0][-2:],
             ["stream", "/workspace/screenshot.png"],
+        )
+
+    def test_agent_file_download_streams_arbitrary_file_as_attachment(self) -> None:
+        payload = b"<svg>downloaded, never rendered</svg>"
+        process = MagicMock()
+        process.stdout = io.BytesIO(
+            json.dumps({
+                "path": "/workspace/design mock.svg",
+                "size_bytes": len(payload),
+                "media_type": "application/octet-stream",
+            }).encode() + b"\n" + payload
+        )
+        process.stderr = io.BytesIO()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/agent-files/download?path=%2Fworkspace%2Fdesign%20mock.svg"
+        )
+        _add_session_auth(request, self.session_token)
+        with (
+            patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process) as popen,
+            urllib.request.urlopen(request, timeout=5) as response,
+        ):
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers["Content-Type"], "application/octet-stream")
+            self.assertEqual(
+                response.headers["Content-Disposition"],
+                "attachment; filename=\"design_mock.svg\"; "
+                "filename*=UTF-8''design%20mock.svg",
+            )
+            self.assertEqual(response.read(), payload)
+
+        self.assertEqual(
+            popen.call_args.args[0][-2:],
+            ["download", "/workspace/design mock.svg"],
         )
 
     def test_agent_file_content_rejects_mismatched_helper_media_type(self) -> None:

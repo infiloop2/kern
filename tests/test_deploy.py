@@ -2059,6 +2059,27 @@ class DeployUnitTests(unittest.TestCase):
             self.assertEqual(exc.exception.code, 3)
             self.assertIn("only MP4, MOV, JPEG, PNG, or WebP", output.getvalue())
 
+    def test_agent_file_helper_downloads_arbitrary_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            home_path = Path(home)
+            payload = b"<svg>kept as download bytes</svg>"
+            (home_path / "payload.svg").write_bytes(payload)
+            namespace = self._agent_file_helper_namespace(home_path)
+
+            output = io.BytesIO()
+            stdout = io.TextIOWrapper(output, encoding="utf-8")
+            with patch("sys.stdout", stdout):
+                namespace["download_path"]("/payload.svg")  # type: ignore[index, operator]
+                stdout.flush()
+
+            raw_header, streamed = output.getvalue().split(b"\n", 1)
+            self.assertEqual(json.loads(raw_header), {
+                "media_type": "application/octet-stream",
+                "path": "/payload.svg",
+                "size_bytes": len(payload),
+            })
+            self.assertEqual(streamed, payload)
+
     def _agent_file_helper_namespace(self, home_path: Path) -> dict[str, object]:
         helper = Path("host/bootstrap/helpers/read-agent-file.sh").read_text()
         body = helper.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]

@@ -2017,11 +2017,27 @@ select {
 
 .file-viewer-pane { display: grid; grid-template-rows: auto minmax(16rem, 1fr); }
 
-.file-viewer-pane > .muted {
+.file-viewer-heading {
+  align-items: center;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 0.6rem;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 0.35rem 0.45rem 0.35rem 0.7rem;
+}
+
+.file-viewer-heading > .muted {
   font-family: var(--font-mono);
   font-size: 0.78rem;
-  padding: 0.5rem 0.7rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.file-viewer-heading > button {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  padding: 0.28rem 0.55rem;
 }
 
 button.file-entry {

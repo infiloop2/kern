@@ -590,7 +590,8 @@ def seed_state() -> None:
                 "README gains a Theming section: the token file, the data-theme contract, how System/Light/Dark "
                 "resolve, and the no-flash boot script with a warning not to move it below the stylesheet.\n\n"
                 "Opened acme/acme-web#214 with the store, settings control, tests, boot script, and docs. CI is "
-                "green (lint + 6 tests). Requested review from @frontend."
+                "green (lint + 6 tests). Requested review from @frontend. "
+                "See [README.md](/mnt/kern-agent/agent-home/workspace/acme-web/README.md:1)."
             ),
             "created_min": 2848,
             "started_min": 2847,
@@ -984,6 +985,15 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
                 self._send(HTTPStatus.OK, b"\x00\x00\x00\x18ftypmp42mock-video", "video/mp4")
+                return
+            if method == "GET" and parsed.path == "/v1/agent-files/download":
+                file_path = (parse_qs(parsed.query).get("path") or [""])[0]
+                file = read_agent_file(file_path)
+                self._send(
+                    HTTPStatus.OK,
+                    file["content"].encode(),
+                    "application/octet-stream",
+                )
                 return
             if method == "POST" and parsed.path == "/v1/agent-files/upload":
                 length = int(self.headers.get("Content-Length", "0") or "0")
@@ -2262,7 +2272,7 @@ def read_agent_file(path: str) -> dict[str, Any]:
         ),
     }
     if path not in contents:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "path is not a regular file")
+        raise ApiError(HTTPStatus.NOT_FOUND, "path not found")
     content = contents[path]
     return {
         "path": path,

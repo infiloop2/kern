@@ -26,6 +26,7 @@
   padding-left: 0.85rem;
 }
 .md-copy-link,
+.md-open-file,
 .md-open-link {
   background: transparent;
   border: 0;
@@ -38,6 +39,7 @@
   text-decoration: underline;
   text-underline-offset: 0.15em;
 }
+.md-open-file:focus-visible,
 .md-open-link:focus-visible {
   border-radius: 3px;
   outline: 2px solid var(--accent);

@@ -43,7 +43,7 @@ import subprocess
 import threading
 import time
 from typing import Any, Callable, cast, NamedTuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
@@ -250,6 +250,7 @@ AGENT_FILE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 AGENT_FILE_UPLOAD_FILENAME_MAX_BYTES = 200
 AGENT_FILE_STREAM_MAX_BYTES = 200_000_000
 AGENT_FILE_IMAGE_STREAM_MAX_BYTES = 25 * 1024 * 1024
+AGENT_FILE_DOWNLOAD_MAX_BYTES = 200_000_000
 AGENT_FILE_STREAM_MEDIA_TYPES = {
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
@@ -356,6 +357,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if method == "GET" and path.path == "/v1/agent-files/content":
                 self._send_agent_file(_agent_file_path(parse_qs(path.query)))
+                return
+            if method == "GET" and path.path == "/v1/agent-files/download":
+                self._send_agent_file(
+                    _agent_file_path(parse_qs(path.query)),
+                    download=True,
+                )
                 return
             if method == "POST" and path.path == "/v1/agent-files/upload":
                 self._send_agent_file_upload(parse_qs(path.query))
@@ -665,20 +672,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_agent_file(self, path: str) -> None:
-        expected_media_type = AGENT_FILE_STREAM_MEDIA_TYPES.get(Path(path).suffix.lower())
+    def _send_agent_file(self, path: str, *, download: bool = False) -> None:
+        expected_media_type = (
+            "application/octet-stream"
+            if download
+            else AGENT_FILE_STREAM_MEDIA_TYPES.get(Path(path).suffix.lower())
+        )
         if expected_media_type is None:
             raise ApiError(
                 HTTPStatus.BAD_REQUEST,
                 "agent file streaming supports only MP4, MOV, JPEG, PNG, or WebP files",
             )
-        maximum_size = (
-            AGENT_FILE_IMAGE_STREAM_MAX_BYTES
-            if expected_media_type.startswith("image/")
-            else AGENT_FILE_STREAM_MAX_BYTES
-        )
+        if download:
+            maximum_size = AGENT_FILE_DOWNLOAD_MAX_BYTES
+        else:
+            maximum_size = (
+                AGENT_FILE_IMAGE_STREAM_MAX_BYTES
+                if expected_media_type.startswith("image/")
+                else AGENT_FILE_STREAM_MAX_BYTES
+            )
         process = subprocess.Popen(
-            [*AGENT_FILE_HELPER_COMMAND, "stream", path],
+            [*AGENT_FILE_HELPER_COMMAND, "download" if download else "stream", path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -716,7 +730,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(size_bytes))
             self._send_ui_cache_headers()
             for name, value in UNTRUSTED_FILE_SECURITY_HEADERS.items():
-                self.send_header(name, value)
+                if name != "Content-Disposition":
+                    self.send_header(name, value)
+            self.send_header(
+                "Content-Disposition",
+                _agent_file_content_disposition(path) if download else "inline",
+            )
             self.end_headers()
             remaining = size_bytes
             try:
@@ -2950,6 +2969,14 @@ def _agent_file_path(query: dict[str, list[str]]) -> str:
     if len(value) > 4096:
         raise ApiError(HTTPStatus.BAD_REQUEST, "path is too long")
     return value
+
+
+def _agent_file_content_disposition(path: str) -> str:
+    filename = Path(path).name or "download"
+    clipped = filename.encode("utf-8")[:180].decode("utf-8", errors="ignore") or "download"
+    fallback = re.sub(r"[^A-Za-z0-9._-]", "_", clipped)[:120] or "download"
+    encoded = quote(clipped, safe="")
+    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
 
 
 def _agent_file_upload_filename(query: dict[str, list[str]]) -> str:

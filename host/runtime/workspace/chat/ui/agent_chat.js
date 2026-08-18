@@ -1316,6 +1316,15 @@ function keepLatestMessageAboveComposer() {
 }
 
 chatRoot.addEventListener("click", event => {
+  const fileButton = event.target.closest && event.target.closest(".md-open-file");
+  if (fileButton) {
+    window.KernHost.openAgentFile(
+      fileButton.dataset.filePath || "",
+      fileButton.dataset.fallbackPath || "",
+    )
+      .catch(error => setStatus(error.message));
+    return;
+  }
   const linkButton = event.target.closest && event.target.closest(".md-copy-link");
   if (linkButton) {
     const original = linkButton.textContent;

@@ -873,6 +873,8 @@ runtime is disabled because its managed provider integration is disabled.
 ```text
 GET /v1/agent-files?path=<path>
 GET /v1/agent-files/read?path=<path>
+GET /v1/agent-files/content?path=<path>
+GET /v1/agent-files/download?path=<path>
 POST /v1/agent-files/upload?filename=<name>
 ```
 
@@ -882,6 +884,8 @@ Agent file endpoints:
 | --- | --- | --- | --- | --- |
 | `GET` | `/v1/agent-files?path=<path>` | `path` query parameter is optional; default `/` | Agent file list response | Lists one directory under the agent home, including hidden entries. |
 | `GET` | `/v1/agent-files/read?path=<path>` | `path` query parameter is optional; default `/` | Agent file read response | Reads one regular file under the agent home as a UTF-8 text preview. |
+| `GET` | `/v1/agent-files/content?path=<path>` | Required `path` query parameter | Bounded image or video bytes | Streams supported media inline for the Files viewer. |
+| `GET` | `/v1/agent-files/download?path=<path>` | Required `path` query parameter | Bounded regular-file bytes with `Content-Disposition: attachment` | Downloads any regular file up to 200,000,000 bytes without rendering its contents. |
 | `POST` | `/v1/agent-files/upload?filename=<name>` | Raw file bytes; `Content-Length` is required | `{"file": {...}}` | Uploads one file into the agent home's `user-files/` directory. The body is capped at 25 MiB. |
 
 The API treats `/` as `/mnt/kern-agent/agent-home`. Paths that resolve

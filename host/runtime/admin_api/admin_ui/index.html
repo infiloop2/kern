@@ -254,7 +254,10 @@
               <table id="file-list"></table>
             </div>
             <div class="file-viewer-pane">
-              <div id="file-viewer-title" class="muted">Select a file to preview it here.</div>
+              <div class="file-viewer-heading">
+                <span id="file-viewer-title" class="muted">Select a file to preview it here.</span>
+                <button id="file-download" class="ghost compact" data-action="download-file" hidden>Download</button>
+              </div>
               <pre id="file-content" class="file-content"></pre>
               <video id="file-video" class="file-video" controls playsinline hidden></video>
               <img id="file-image" class="file-image" alt="" hidden>

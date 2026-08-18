@@ -96,6 +96,51 @@ class AgentChatRichTextTests(unittest.TestCase):
         self.assertEqual(rendered, values[:13] + [""] * (len(values) - 13))
 
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
+    def test_agent_home_markdown_links_open_workspace_files(self) -> None:
+        renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
+        script = (
+            f"const rich = require({json.dumps(str(renderer))});"
+            "process.stdout.write(rich.renderMarkdown(process.argv[1]));"
+        )
+        source = (
+            "[app.py](/mnt/kern-agent/agent-home/project/app.py:12) "
+            "[report](</mnt/kern-agent/agent-home/My Project/report.md:3>) "
+            "[outside](/etc/passwd) "
+            "[escape](/mnt/kern-agent/agent-home/../admin/secret.txt)"
+        )
+        rendered = subprocess.run(
+            ["node", "-e", script, source],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        self.assertIn(
+            'class="md-open-file" data-file-path="/project/app.py:12" '
+            'data-fallback-path="/project/app.py"',
+            rendered,
+        )
+        self.assertIn(
+            'class="md-open-file" data-file-path="/My Project/report.md:3" '
+            'data-fallback-path="/My Project/report.md"',
+            rendered,
+        )
+        self.assertNotIn('data-file-path="/etc/passwd"', rendered)
+        self.assertNotIn("secret.txt", rendered)
+
+        numeric_name = subprocess.run(
+            [
+                "node", "-e", script,
+                "[run](/mnt/kern-agent/agent-home/reports/run:2026)",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        self.assertIn('data-file-path="/reports/run:2026"', numeric_name)
+        self.assertIn('data-fallback-path="/reports/run"', numeric_name)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_activity_deltas_compact_to_one_bounded_snapshot(self) -> None:
         renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
         script = (
