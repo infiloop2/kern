@@ -33,7 +33,7 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `config` | Agent name and admin password hash, a single format-checked row replaced during each provisioning bootstrap; upgrade/recover carry the stored password forward. |
 | `operator_connections` | Operator access endpoints, one row per mode (duplicates impossible by key); per-mode field requirements are row constraints, and the Cloudflare tunnel token is encrypted. |
 | `admin_passkey_config`, `admin_passkeys` | The single administrator's stable WebAuthn user handle plus enrolled credential ids, RP domains, ES256 public keys, counters, transport/backup metadata, and timestamps. No private passkey material is stored. Upgrade/recover preserve these rows; only explicit root `reconfigure --reset-admin-passkeys` removes them. |
-| `agent_events` | Agent runtime and turn events with a direct `thread_id` column (`NULL` for runtime events, indexed with `seq` for per-thread paging) and typed payload columns (message/source, error, runtime, provider-neutral activity JSON); pruned to the newest 1,000,000. The event log is the single durable record of a thread's turn history — turns themselves are orchestrator memory, and the former `tasks`/`task_steers` tables were dropped by migration `0005_thread_only_turns.sql`, which also renamed `task.*` event types to `turn.*` and replaced the events' `task_id` with `thread_id`. A synchronous steer is appended only after provider acknowledgement; there is no steer mailbox or delivery-marker table. |
+| `agent_events` | Agent runtime and turn events with a direct `thread_id` column (`NULL` for runtime events, indexed with `seq` for per-thread paging) and typed payload columns (message/source, error, runtime, provider-neutral activity JSON); pruned to the newest 10,000,000. The event log is the single durable record of a thread's turn history — turns themselves are orchestrator memory, and the former `tasks`/`task_steers` tables were dropped by migration `0005_thread_only_turns.sql`, which also renamed `task.*` event types to `turn.*` and replaced the events' `task_id` with `thread_id`. A synchronous steer is appended only after provider acknowledgement; there is no steer mailbox or delivery-marker table. |
 | `thread_sessions` | One canonical row per user `thread_id`: current runtime, provider session/thread id, model, effort, recency, and durable idle/running state. An idle configuration change atomically replaces runtime/model/effort and clears the provider session before admitting the next run; the retained `agent_events` remain the thread's handoff source. Rows referenced by retained events stay; unreferenced rows beyond the 100,000 most recently used per runtime are pruned. |
 | `chat_threads` | Chat's immutable `thread-N` ids, editable display names, and archive state. Messages and provider state remain in the host thread tables above. |
 | `web_apps` | Web Apps' immutable `app-N` ids, editable names, archive state, generated UI bundle, durable JSON data, and one optimistic revision counter. |
@@ -103,15 +103,15 @@ those slots or the database are unavailable. Nested
 transactions on one thread take separate connections so a read inside a
 mutation sees the last committed state.
 
-Growth stays bounded by deliberately high caps (1M rows per ordinary audit
-log — agent, network, and tool events each — 10k host-diagnostic rows, 100k session
+Growth stays bounded by deliberately high caps (10M agent-event rows, 1M rows
+each for network and tool events, 10k host-diagnostic rows, 100k session
 mappings per runtime, and 10k decided tool approvals). Ordinary audit logs use
 O(1)-planning primary-key range deletes below `MAX(seq) - N`; host diagnostics find
 the oldest boundary among the newest N rows because a coalesced row rotates
 its sequence without adding a row. Logs prune on their own append cadence, the
-rest on the hourly maintenance pass. The admin volume is sized for those caps;
-time-based auto-cleanup and volume monitoring can replace them later without
-touching the storage API.
+rest on the hourly maintenance pass. Count and field-size limits bound growth,
+while health reports actual admin-volume usage so capacity can be expanded
+before retained data fills it.
 
 ## Access control
 

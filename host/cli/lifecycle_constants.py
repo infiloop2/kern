@@ -9,10 +9,10 @@ VERSION_TAG_KEY = "kern-host-version"
 SSH_USER = "kern-operator"
 INSTANCE_TYPE = "t3.small"
 ROOT_VOLUME_SIZE_GB = 16
-# Sized for the event retention caps (1M network + 1M agent events with
-# bounded row sizes) plus Postgres overhead; health reports the mount's usage.
+# Default durable admin storage. Audit logs have count and field-size bounds;
+# health reports actual usage so operators can expand storage before it fills.
 ADMIN_VOLUME_SIZE_GB = 16
-AGENT_VOLUME_SIZE_GB = 8
+AGENT_VOLUME_SIZE_GB = 16
 ADMIN_VOLUME_DEVICE = "/dev/sdf"
 AGENT_VOLUME_DEVICE = "/dev/sdg"
 SSH_WAIT_ATTEMPTS = 60

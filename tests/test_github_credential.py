@@ -213,6 +213,8 @@ class WorkflowTriggerParsingTests(unittest.TestCase):
             [w["code"] for w in warnings],
             ["secrets_exposed_to_pr_workflows", "workflows_execute_pushes"],
         )
+        self.assertEqual([w["severity"] for w in warnings], ["warning", "warning"])
+        self.assertIn("does not check out or run untrusted pull request code", warnings[0]["message"])
         workflow_run_warnings = github_repo_audit._warnings(
             {"visibility": "private", "pages_public": False,
              "workflows": [{"path": "w.yml", "triggers": ["workflow_run"]}]}

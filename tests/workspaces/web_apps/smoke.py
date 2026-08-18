@@ -166,14 +166,20 @@ def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
           .replace('No analysis yet.', data.analysis || 'No analysis yet.'),
         initialCss,
       );
-      app.onLoad(() => {{
+      app.onLoad(async () => {{
         {oversize_probe}
         app.askAgent('{LOAD_ONLY_PROMPT}');
-        renderDashboard(app.data());
-      }});
+        const [count, analysis] = await Promise.all([
+          app.read(['count']),
+          app.read(['analysis']),
+        ]);
+        renderDashboard({{ count, analysis }});
+      }}, {{ data: 'targeted' }});
       app.on('increment', async () => {{
-        const next = await app.set(['count'], app.data().count + 1);
-        renderDashboard(next);
+        const count = await app.read(['count']);
+        const analysis = await app.read(['analysis']);
+        const next = await app.set(['count'], count + 1);
+        renderDashboard({{ count: next, analysis }});
       }});
       app.on('toggle-review', event => app.notify(event.checked ? 'Review marked complete' : 'Review reopened', 'success'));
       app.on('move-priority', event => app.notify(
@@ -186,7 +192,11 @@ def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
         'success',
       ));
     """,
-        "data": {"count": 2, "priorities": ["Ship builder", "Review security"]},
+        "data": {
+            "count": 2,
+            "analysis": "No analysis yet.",
+            "priorities": ["Ship builder", "Review security"],
+        },
         "updated_at": "2026-07-22T10:00:00Z",
     }
 
@@ -243,6 +253,23 @@ def _route_workspace_api(
             app = copy.deepcopy(workspace["app"])
             app["agent_updates_locked"] = bool(workspace["agent_updates_locked"])
             return {"app": app}
+        if method == "GET" and resource == "state/ui":
+            app = workspace["app"]
+            return {"app": {
+                "revision": app["revision"],
+                "html": app["html"],
+                "css": app["css"],
+                "javascript": app["javascript"],
+                "updated_at": app["updated_at"],
+                "agent_updates_locked": bool(workspace["agent_updates_locked"]),
+            }}
+        if method == "GET" and resource == "state/data":
+            app = workspace["app"]
+            return {"app": {
+                "revision": app["revision"],
+                "data": copy.deepcopy(app["data"]),
+                "updated_at": app["updated_at"],
+            }}
         if method == "GET" and resource == "conversation":
             return {
                 "session": copy.deepcopy(workspace["session"]),
@@ -262,6 +289,8 @@ def _route_workspace_api(
             return _stop_turn(workspace)
         if method == "POST" and resource == "runtime/actions":
             return _runtime_action(workspace, body)
+        if method == "POST" and resource == "runtime/data/read":
+            return _runtime_data_read(workspace, body)
         if method == "POST" and resource == "messages":
             return _create_message(workspace, body)
         if method == "POST" and resource == "runtime/agent-requests":
@@ -551,10 +580,27 @@ def _runtime_action(
     return {
         "app": {
             "revision": app["revision"],
-            "data": copy.deepcopy(updated),
             "updated_at": app["updated_at"],
         }
     }
+
+
+def _runtime_data_read(
+    workspace: dict[str, Any], body: Any
+) -> dict[str, Any]:
+    request = builder_backend._required_object(body, "data read")
+    builder_backend._require_keys(request, {"path"}, required={"path"})
+    path = builder_backend._validated_path(request.get("path"))
+    value: Any = workspace["app"]["data"]
+    for segment in path:
+        value = builder_backend._child(value, segment)
+    app = workspace["app"]
+    return {"app": {
+        "revision": app["revision"],
+        "path": path,
+        "value": copy.deepcopy(value),
+        "updated_at": app["updated_at"],
+    }}
 
 
 def _create_message(

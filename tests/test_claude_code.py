@@ -24,6 +24,25 @@ class ClaudeCodeTests(unittest.TestCase):
         web_search.start()
         self.addCleanup(web_search.stop)
 
+    def test_missing_session_errors_are_classified_narrowly(self) -> None:
+        for message in (
+            "Session 123e4567-e89b-12d3-a456-426614174000 not found",
+            "Session 123e4567-e89b-12d3-a456-426614174000 was not found.",
+            "Session not found",
+            "No conversation found with session ID: old-session",
+        ):
+            with self.subTest(message=message):
+                self.assertTrue(claude_code._missing_session_error(message))
+
+        for message in (
+            "Project not found",
+            "Claude returned no answer text",
+            "Session expired",
+            "usage limit reached",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(claude_code._missing_session_error(message))
+
     def test_structured_assistant_content_emits_text_reasoning_and_tool(self) -> None:
         emitted = []
         claude_code._emit_claude_content(
@@ -940,6 +959,42 @@ time.sleep(120)
         finally:
             with claude_code._login_lock:
                 claude_code._login_process = original
+
+    def test_run_turn_reports_a_missing_resumed_session_separately(self) -> None:
+        script = r"""
+import json, sys
+
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "result",
+    "subtype": "error_during_execution",
+    "is_error": True,
+    "result": "Session deleted-session not found",
+}), flush=True)
+"""
+        original_cwd = claude_code.AGENT_CWD
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude_code.AGENT_CWD = tmp
+                server = claude_code.ClaudeCodeSession(
+                    [sys.executable, "-u", "-c", script],
+                    on_ready=lambda: True,
+                )
+                self.addCleanup(server.close)
+                with self.assertRaisesRegex(
+                    claude_code.ClaudeSessionNotFoundError,
+                    "deleted-session",
+                ):
+                    claude_code.run_turn(
+                        server,
+                        "continue",
+                        "deleted-session",
+                        "claude-opus-5",
+                        "high",
+                        lambda _message: None,
+                    )
+        finally:
+            claude_code.AGENT_CWD = original_cwd
 
     def test_close_login_process_clears_handle_when_close_fails(self) -> None:
         class FakeLoginProcess:

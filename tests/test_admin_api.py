@@ -410,7 +410,7 @@ class AdminUiStaticTests(unittest.TestCase):
             script,
         )
         self.assertIn("forceScrollBottom = true;\n  await refresh();", script)
-        self.assertIn('let showingActivity = true;', script)
+        self.assertIn('let showingActivity = false;', script)
         self.assertIn('classList.toggle("activity-hidden", !showingActivity)', script)
         self.assertIn('"--activity-anchor-space"', script)
         self.assertIn("toggleSequence !== activityToggleSequence", script)
@@ -422,9 +422,11 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("activityToggleSequence += 1;", clear_selected)
         self.assertIn("clearActivityAnchorSpace();", clear_selected)
         self.assertIn("var(--activity-anchor-space, 0px)", stylesheet)
-        self.assertIn('id="activity-toggle"', (
+        activity_markup = (
             Path(__file__).parents[1] / "host/runtime/workspace/chat/ui/index.html"
-        ).read_text())
+        ).read_text()
+        self.assertIn('id="activity-toggle"', activity_markup)
+        self.assertIn('aria-checked="false" title="Show agent activity"', activity_markup)
         self.assertIn(".chat-app.activity-hidden .thread-activity", stylesheet)
         self.assertIn('class="thread-entry thread-activity"', script)
         self.assertIn('querySelectorAll(".thread-entry:not(.thread-activity)")', script)
@@ -639,6 +641,27 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('document.querySelector(".topbar").inert = mobileNavOpen', app_js)
         self.assertIn('document.querySelector("main").inert = mobileNavOpen', app_js)
         self.assertIn(".sidebar.mobile-open { transform: translateX(0); }", css)
+
+    def test_iphone_standalone_left_edge_swipe_owns_navigation(self) -> None:
+        runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
+        app_js = (runtime / "admin_ui" / "app.js").read_text()
+        css = (runtime / "admin_ui/admin_ui.css").read_text()
+
+        self.assertIn("function bindIPhoneStandaloneSidebarSwipe()", app_js)
+        self.assertIn('if (!isIPhoneStandalone()) return;', app_js)
+        self.assertIn('document.addEventListener("touchstart"', app_js)
+        self.assertIn('document.addEventListener("touchmove"', app_js)
+        self.assertIn("|| interactiveTarget", app_js)
+        self.assertIn('"button", "checkbox", "combobox", "link", "menuitem"', app_js)
+        self.assertIn('interactiveRoles.has(target.getAttribute("role"))', app_js)
+        self.assertNotIn("summary, [role]", app_js)
+        self.assertIn("if (event.cancelable) event.preventDefault();", app_js)
+        self.assertIn("setMobileNavOpen(true);", app_js)
+        self.assertIn("html.iphone-standalone, html.iphone-standalone body {", css)
+        self.assertIn("overscroll-behavior-x: none;", css)
+        self.assertIn("function syncIPhoneStandaloneViewport()", app_js)
+        self.assertIn('style.setProperty("--kern-viewport-height"', app_js)
+        self.assertIn("height: var(--kern-viewport-height, 100dvh);", css)
 
     def test_provider_usage_rings_have_warning_and_critical_thresholds(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
@@ -2410,15 +2433,17 @@ class AdminApiIntegrationTests(unittest.TestCase):
         data = json.dumps({"password": "admin-secret"}).encode()
 
         def login(headers: dict[str, str]):
-            request = urllib.request.Request(f"{self.base_url}/v1/login", data=data, method="POST")
-            request.add_header("Content-Type", "application/json")
-            for name, value in headers.items():
-                request.add_header(name, value)
-            try:
-                with urllib.request.urlopen(request, timeout=5) as response:
-                    return response.status
-            except urllib.error.HTTPError as error:
-                return error.code
+            request_headers = b"".join(
+                f"{name}: {value}\r\n".encode() for name, value in headers.items()
+            )
+            response = self.raw_request(
+                b"POST /v1/login HTTP/1.1\r\n"
+                + request_headers
+                + b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(data)}\r\n\r\n".encode()
+                + data
+            )
+            return int(response.split(b" ", 2)[1])
 
         base = {
             "Host": "admin.example.com",

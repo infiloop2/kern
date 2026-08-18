@@ -15,8 +15,12 @@ PUBLIC_GITHUB_REPOSITORY = "infiloop2/kern"
 # configured. Secrets never ride in CLI arguments.
 OPERATOR_TUNNEL_TOKEN_ENV_NAME = "KERN_CLOUDFLARE_TUNNEL_TOKEN"
 ADMIN_API_PORT = 7443
-# Request/response body cap shared by the admin API and Workspace proxy hop.
+# Public request body cap shared by the admin API and Workspace proxy hop.
 MAX_REQUEST_BODY_BYTES = 1024 * 1024
+# Web Apps may return one complete 10 MiB JSON document to a compatible app.
+# Keep that larger response allowance isolated to Workspace responses; public
+# Admin API requests remain capped above.
+MAX_WORKSPACE_RESPONSE_BODY_BYTES = 24 * 1024 * 1024
 PROXY_PORT = 7445
 WORKSPACE_PORT = 7450
 # Agent preview ports: a fixed loopback TCP range the agent may bind its own

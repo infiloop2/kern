@@ -14,7 +14,6 @@ being published against data that changed after the agent read it.
 
 from __future__ import annotations
 
-import copy
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 import json
@@ -24,6 +23,7 @@ import time
 from typing import Any
 from urllib.parse import quote, unquote
 
+from host.constants import MAX_WORKSPACE_RESPONSE_BODY_BYTES
 from host.runtime.core import db
 from host.runtime.workspace.host_api import WorkspaceError, call_admin_api
 from host.session_options import public_session_options, recorded_session_config, session_config_error
@@ -34,8 +34,10 @@ MAX_REQUEST_BODY_BYTES = 768 * 1024
 MAX_HTML_BYTES = 128 * 1024
 MAX_CSS_BYTES = 64 * 1024
 MAX_JAVASCRIPT_BYTES = 128 * 1024
-MAX_DATA_BYTES = 256 * 1024
-MAX_STATE_RESPONSE_BYTES = 900 * 1024
+MAX_DATA_BYTES = 10 * 1024 * 1024
+# The proxy cap includes the response envelope and json.dumps whitespace. UI
+# source can also expand when escaped, so leave a full MiB of transport room.
+MAX_STATE_RESPONSE_BYTES = MAX_WORKSPACE_RESPONSE_BODY_BYTES - 1024 * 1024
 MAX_CHAT_MESSAGE_BYTES = 50_000
 APP_MESSAGE_CONTEXT = "This request is for Web App `{app_id}`.\n\n---\n\n"
 MAX_APP_NAME_CHARS = 100
@@ -43,10 +45,11 @@ MAX_APP_NAME_CHARS = 100
 # them. A creation quota gives their current state and per-app revision bounds
 # a finite aggregate storage ceiling instead.
 MAX_WEB_APPS = 100
-# Sparse retention caps one App below 100 rows, so one bounded response can
-# present every restorable point without a second recovery paging UI.
-REVISION_PAGE_LIMIT = 100
-REVISION_EXACT_RETAINED = 20
+# Sparse retention caps one App at 17 rows, so one bounded response can present
+# every restorable point without a second recovery paging UI.
+REVISION_PAGE_LIMIT = 17
+REVISION_MAX_RETAINED = 17
+REVISION_EXACT_RETAINED = 5
 REVISION_RETAIN_DAYS = 7
 CONVERSATION_MESSAGE_BYTES = 120 * 1024
 THREAD_LIST_PAGE = 100
@@ -144,6 +147,19 @@ def _route_browser(
         if resource == "state":
             return {"app": load_app_state(app_id)}
         return browser_conversation(app_id)
+
+    match = re.fullmatch(r"/apps/([^/]+)/state/(ui|data)", path)
+    if method == "GET" and match:
+        app_id, resource = _path_segment(match.group(1)), match.group(2)
+        return {
+            "app": load_app_ui(app_id) if resource == "ui" else load_app_data(app_id)
+        }
+
+    match = re.fullmatch(r"/apps/([^/]+)/runtime/data/read", path)
+    if method == "POST" and match:
+        return {
+            "app": read_app_data_path(_path_segment(match.group(1)), body)
+        }
 
     match = re.fullmatch(r"/apps/([^/]+)/conversation/events", path)
     if method == "GET" and match:
@@ -690,7 +706,8 @@ def load_app_ui(app_id: str) -> dict[str, Any]:
     _require_web_app(app_id)
     with db.transaction() as cur:
         cur.execute(
-            "SELECT revision, html, css, javascript, updated_at"
+            "SELECT revision, html, css, javascript, updated_at,"
+            " agent_updates_locked"
             " FROM web_apps WHERE app_id = %s",
             (app_id,),
         )
@@ -703,6 +720,7 @@ def load_app_ui(app_id: str) -> dict[str, Any]:
         "css": row[2],
         "javascript": row[3],
         "updated_at": row[4],
+        "agent_updates_locked": bool(row[5]),
     }
 
 
@@ -1034,7 +1052,10 @@ def _publish_ui(
         if row[0] != expected_revision:
             raise WorkspaceError(HTTPStatus.CONFLICT, "the app changed; read state and retry")
         current = _state_row(row)
-        data = copy.deepcopy(current["data"])
+        # The decoded row is transaction-local; mutate it directly instead of
+        # cloning a document that may be 10 MiB. A validation failure still
+        # rolls back before any SQL update.
+        data = current["data"]
         for name, path, value in operations:
             data = _mutate_data(data, name, path, value)
         data_json = _validated_data(data)
@@ -1057,18 +1078,19 @@ def _publish_ui(
         )
         changed = cur.fetchone()
         assert changed is not None
-        _record_state_revision(cur, app_id, _state_row(changed), actor, "ui", None)
-    return _state_row(changed)
+        _record_state_row_revision(cur, app_id, changed, actor, "ui", None)
+    return {"revision": changed[0], "updated_at": changed[5]}
 
 
 def apply_runtime_action(body: Any, app_id: str) -> dict[str, Any]:
     state = _apply_data_action(body, app_id, actor="app")
-    # The generated UI needs the authoritative document to render from, but
-    # never the bundle it is already running.
+    # The trusted frame and capability worker apply the acknowledged operation
+    # to their local full-document compatibility copy. Targeted-data apps do
+    # not hold that copy at all. Either way, echoing up to 10 MiB after every
+    # mutation is unnecessary.
     return {
         "app": {
             "revision": state["revision"],
-            "data": state["data"],
             "updated_at": state["updated_at"],
         }
     }
@@ -1163,17 +1185,12 @@ def _apply_data_operations(
         if row[0] != version:
             raise WorkspaceError(HTTPStatus.CONFLICT, "the app changed; read state and retry")
         current = _state_row(row)
-        updated = copy.deepcopy(current["data"])
+        # This is a private decode of the locked database row, so no defensive
+        # 10 MiB clone is needed before applying the transactional operations.
+        updated = current["data"]
         for name, path, value in operations:
             updated = _mutate_data(updated, name, path, value)
         data_json = _validated_data(updated)
-        candidate = {
-            **current,
-            "revision": version + 1,
-            "data": updated,
-            "updated_at": now,
-        }
-        _require_state_response_fits(candidate)
         cur.execute(
             "UPDATE web_apps SET data_json = %s, revision = revision + 1,"
             " updated_at = %s"
@@ -1183,8 +1200,8 @@ def _apply_data_operations(
         )
         changed = cur.fetchone()
         assert changed is not None
-        _record_state_revision(cur, app_id, _state_row(changed), actor, "data", None)
-    return _state_row(changed)
+        _record_state_row_revision(cur, app_id, changed, actor, "data", None)
+    return {"revision": changed[0], "updated_at": changed[5]}
 
 
 # --- Unified revisions -------------------------------------------------------
@@ -1239,33 +1256,68 @@ def _record_state_revision(
     _prune_revisions(cur, app_id, datetime.now(timezone.utc))
 
 
+def _record_state_row_revision(
+    cur: Any,
+    app_id: str,
+    row: tuple[Any, ...],
+    actor: str,
+    kind: str,
+    restored_from: int | None,
+) -> None:
+    """Record an already-validated database row without decoding its data."""
+    _insert_revision(
+        cur,
+        app_id,
+        revision=row[0],
+        actor=actor,
+        kind=kind,
+        restored_from=restored_from,
+        html=row[1],
+        css=row[2],
+        javascript=row[3],
+        data_json=row[4],
+        now=row[5],
+    )
+    _prune_revisions(cur, app_id, datetime.now(timezone.utc))
+
+
 def _prune_revisions(cur: Any, app_id: str, now: datetime) -> None:
-    """Keep exact recent revisions and progressively sparse UTC buckets."""
+    """Keep five exact revisions and sparse recovery points for seven days."""
     cur.execute(
         "SELECT revision, created_at FROM web_app_revisions"
         " WHERE app_id = %s ORDER BY revision DESC",
         (app_id,),
     )
     rows = cur.fetchall()
-    keep = {int(row[0]) for row in rows[:REVISION_EXACT_RETAINED]}
+    preferred = {int(row[0]) for row in rows[:REVISION_EXACT_RETAINED]}
     buckets: set[tuple[str, int]] = set()
     for revision, created_at in rows[REVISION_EXACT_RETAINED:]:
         created = datetime.strptime(str(created_at), TIME_FORMAT).replace(
             tzinfo=timezone.utc
         )
         age = max(timedelta(0), now - created)
-        timestamp = int(created.timestamp())
         if age < timedelta(days=1):
-            bucket = ("hour", timestamp // 3600)
+            bucket = ("four-hour", int(age.total_seconds()) // (4 * 3600))
         elif age < timedelta(days=REVISION_RETAIN_DAYS):
-            bucket = ("three-hour", timestamp // (3 * 3600))
+            bucket = ("day", age.days)
         else:
             continue
         if bucket in buckets:
             continue
         buckets.add(bucket)
-        keep.add(int(revision))
-    stale = [int(revision) for revision, _created_at in rows if int(revision) not in keep]
+        preferred.add(int(revision))
+
+    keep: set[int] = set()
+    for revision, _created_at in rows:
+        revision = int(revision)
+        if revision not in preferred or len(keep) >= REVISION_MAX_RETAINED:
+            continue
+        keep.add(revision)
+    stale = [
+        int(revision)
+        for revision, _created_at in rows
+        if int(revision) not in keep
+    ]
     if stale:
         placeholders = ",".join("%s" for _ in stale)
         cur.execute(

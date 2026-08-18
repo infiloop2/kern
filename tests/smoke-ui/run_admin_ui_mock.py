@@ -2360,10 +2360,10 @@ def github_repo_audits_locked() -> list[dict[str, Any]]:
             "warnings": [
                 {
                     "code": "secrets_exposed_to_pr_workflows",
-                    "severity": "critical",
+                    "severity": "warning",
                     "message": "Workflows use pull_request_target, which runs with the base "
-                    "repository's secrets against PR-influenced context. Restrict or remove "
-                    "these triggers.",
+                    "repository's permissions and secrets against PR-influenced context. Review "
+                    "the workflow to ensure it does not run untrusted pull request code.",
                 },
                 {
                     "code": "unprotected_default_branch",

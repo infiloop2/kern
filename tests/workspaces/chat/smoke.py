@@ -675,6 +675,12 @@ def _assert_rich_activity_stream(page: Any, frame: Any) -> None:
     from playwright.sync_api import expect
 
     history = frame.locator("#thread-detail")
+    toggle = frame.get_by_role("switch", name="Activity", exact=True)
+    expect(toggle).to_have_attribute("aria-checked", "false")
+    expect(toggle).to_have_attribute("title", "Show agent activity")
+    toggle.click()
+    expect(toggle).to_have_attribute("aria-checked", "true")
+    expect(toggle).to_have_attribute("title", "Hide agent activity")
     expected = {
         "reasoning": ("Reasoning", "Reasoning"),
         "plan": ("Fix first-paint ordering", "Plan"),
@@ -870,7 +876,7 @@ def _assert_thread_switch_opens_latest(page: Any, frame: Any) -> None:
 
 def _assert_mobile_composer_ergonomics(frame: Any) -> None:
     """iOS-critical input ergonomics: 16px fields so focus does not zoom the
-    page, and thumb-sized primary controls."""
+    page, and thumb-sized controls share one compact settings row."""
     composer_font = frame.locator("#new-task").evaluate(
         "element => parseFloat(getComputedStyle(element).fontSize)"
     )
@@ -882,6 +888,19 @@ def _assert_mobile_composer_ergonomics(frame: Any) -> None:
     attach_box = frame.locator("#attach-file").bounding_box()
     if not attach_box or attach_box["height"] < 43 or attach_box["width"] < 43:
         raise AssertionError(f"attach button is below thumb size on a phone: {attach_box}")
+    options_box = frame.locator("#composer-options").bounding_box()
+    bar_box = frame.locator(".composer-bar").bounding_box()
+    if not options_box or not bar_box:
+        raise AssertionError("composer settings row is not visible on a phone")
+    centers = [
+        box["y"] + box["height"] / 2
+        for box in (attach_box, options_box, send_box)
+    ]
+    if max(centers) - min(centers) > 2 or bar_box["height"] > 45:
+        raise AssertionError(
+            "attach, runtime settings, and Send are not on one compact row: "
+            f"attach={attach_box}, settings={options_box}, send={send_box}, bar={bar_box}"
+        )
     clipped = frame.locator(".composer").evaluate(
         "element => element.getBoundingClientRect().bottom > window.innerHeight + 1"
     )

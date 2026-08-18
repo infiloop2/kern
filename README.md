@@ -34,10 +34,10 @@ You need:
 ### Cost
 
 Kern deploys one `t3.small` EC2 instance, one public IPv4 address, and
-40 GiB of gp3 disk, plus a Cloudflare Tunnel. A newly
+48 GiB of gp3 disk, plus a Cloudflare Tunnel. A newly
 created [AWS Free Tier](https://aws.amazon.com/free/) account usually costs
 `$0` while its included credits remain; outside those credits, expect about
-`$22/month` in `us-east-1`.
+`$23/month` in `us-east-1`.
 [Cloudflare's free plan](https://www.cloudflare.com/plans/zero-trust-services/)
 costs `$0` for limited personal use. AI provider usage is billed separately
 through your Codex or Claude Code subscription.

@@ -25,7 +25,7 @@ The categories are:
 | `operator_connections` | fixed | At most one SSH and one tunnel row. |
 | `counters` | fixed | Internal named counters only. |
 | `thread_sessions` | retention | Event-referenced sessions are bounded by retained events; unreferenced sessions retain the newest 100,000 per runtime. |
-| `agent_events` | retention | Newest 1,000,000 rows, with at most 499 rows of amortization slack; message text is length-bounded. |
+| `agent_events` | retention | Newest 10,000,000 rows, with at most 499 rows of amortization slack; message text is length-bounded. |
 | `oauth_logins` | fixed | At most one row for each supported OAuth runtime. |
 | `provider_accounts` | fixed | At most one row for each supported provider. |
 | `network_events` | retention | Newest 1,000,000 rows, with at most 499 rows of amortization slack. |
@@ -60,6 +60,6 @@ The categories are:
 | `schedules` | quota | At most 100 retained schedules; deleted schedules are removed after 90 days once runs are gone. |
 | `schedule_revisions` | retention | Newest 100 revisions per retained schedule; cascades with its schedule. |
 | `schedule_runs` | retention | Active run plus terminal runs newer than 90 days, capped to newest 1,000 per schedule. |
-| `web_app_revisions` | retention | Newest 20 exact revisions plus sparse hourly/three-hour buckets for seven days; cascades with its quota-bounded App. |
+| `web_app_revisions` | retention | Newest 5 exact revisions, then one recovery point per four-hour interval during the first day and one per day from day two through day seven, capped at 17 revisions; cascades with its quota-bounded App. |
 
 When adding or renaming a table, update this inventory in the same change.

@@ -32,6 +32,16 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertTrue(source.startswith('(() => {\n"use strict";'))
         self.assertTrue(source.rstrip().endswith("})();"))
 
+    def test_capability_worker_supports_opt_in_targeted_data(self) -> None:
+        source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
+        self.assertIn('read(path) { return read(path); }', source)
+        self.assertIn('options.data === "targeted"', source)
+        self.assertIn('/runtime/data/read', source)
+        self.assertIn('/state/ui', source)
+        self.assertIn('/state/data', source)
+        self.assertIn('JSON.parse(JSON.stringify(message.value))', source)
+        self.assertEqual(source.count("Object.defineProperty(parent, leaf"), 2)
+
     def test_ui_is_an_app_first_canvas_with_one_command_surface(self) -> None:
         index = (APP_DIR / "ui" / "index.html").read_text()
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
@@ -337,6 +347,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("/agent/apps/{app_id}/state/data/shape", instructions)
         self.assertIn("/agent/memory/pages/{page_id}", instructions)
         self.assertIn("/agent/schedules/{id}", instructions)
+        self.assertIn("/agent/schedules/recent-failures", instructions)
         self.assertNotIn("/agent/apps/{app_id}/instructions", instructions)
         self.assertNotIn("replace_app", instructions)
         self.assertNotIn("replace_data", instructions)
@@ -472,6 +483,7 @@ class AgentActionValidationTests(unittest.TestCase):
         self.assertEqual(invalid.exception.status, HTTPStatus.BAD_REQUEST)
 
     def test_bundle_and_data_caps_are_encoded_byte_caps(self) -> None:
+        self.assertEqual(backend.MAX_DATA_BYTES, 10 * 1024 * 1024)
         with self.assertRaises(backend.WorkspaceError) as html_error:
             backend._bounded_string(
                 "é" * (backend.MAX_HTML_BYTES // 2 + 1),
@@ -482,6 +494,15 @@ class AgentActionValidationTests(unittest.TestCase):
         with self.assertRaises(backend.WorkspaceError) as data_error:
             backend._validated_data({"value": "é" * (backend.MAX_DATA_BYTES // 2)})
         self.assertEqual(data_error.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+
+        overhead = len('{"value":""}'.encode())
+        self.assertTrue(
+            backend._validated_data({"value": "x" * (backend.MAX_DATA_BYTES - overhead)})
+        )
+        with self.assertRaises(backend.WorkspaceError):
+            backend._validated_data(
+                {"value": "x" * (backend.MAX_DATA_BYTES - overhead + 1)}
+            )
 
 
 class BrowserRoutingTests(unittest.TestCase):
@@ -502,6 +523,26 @@ class BrowserRoutingTests(unittest.TestCase):
             )
         load.assert_called_once_with("app-2")
         conversation.assert_called_once_with("app-3")
+
+    def test_browser_can_load_ui_and_read_only_the_requested_data_branch(self) -> None:
+        ui = {"revision": 4, "javascript": ""}
+        branch = {"revision": 4, "path": ["rows"], "value": [1, 2]}
+        with (
+            patch.object(backend, "load_app_ui", return_value=ui) as load_ui,
+            patch.object(backend, "read_app_data_path", return_value=branch) as read,
+        ):
+            self.assertEqual(
+                backend.route_browser("GET", "/apps/app-2/state/ui", None),
+                {"app": ui},
+            )
+            self.assertEqual(
+                backend.route_browser(
+                    "POST", "/apps/app-2/runtime/data/read", {"path": ["rows"]}
+                ),
+                {"app": branch},
+            )
+        load_ui.assert_called_once_with("app-2")
+        read.assert_called_once_with("app-2", {"path": ["rows"]})
 
     def test_message_routes_use_the_same_context_only_delivery(self) -> None:
         with (
@@ -1355,6 +1396,15 @@ class RuntimeDataActionTests(unittest.TestCase):
         self.assertIn("app_id = %s", cursor.execute.call_args_list[0].args[0])
         self.assertEqual(cursor.execute.call_args_list[0].args[1], ("app-3",))
 
+    def test_runtime_mutation_does_not_echo_the_complete_document(self) -> None:
+        state = {"revision": 8, "data": {"large": "x" * 1000}, "updated_at": "now"}
+        with patch.object(backend, "_apply_data_action", return_value=state):
+            result = backend.apply_runtime_action(
+                {"action": "set", "expected_revision": 7, "path": ["x"], "value": 1},
+                "app-3",
+            )
+        self.assertEqual(result, {"app": {"revision": 8, "updated_at": "now"}})
+
 
 class AgenticWebAppMockTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1516,10 +1566,22 @@ class AgenticWebAppMockTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(changed["app"]["data"]["count"], 7)
+        self.assertNotIn("data", changed["app"])
         self.assertEqual(changed["app"]["revision"], 2)
-        # Data writes never echo the bundle back to the frame.
+        # Data writes never echo the bundle or full document back to the frame.
         self.assertNotIn("html", changed["app"])
+        self.assertEqual(
+            builder_mock._route_workspace_api(
+                "POST", "apps/app-1/runtime/data/read", {"path": ["count"]}
+            )["app"]["value"],
+            7,
+        )
+        self.assertNotIn(
+            "data",
+            builder_mock._route_workspace_api(
+                "GET", "apps/app-1/state/ui", None
+            )["app"],
+        )
         self.assertEqual(
             builder_mock._route_workspace_api(
                 "GET", "apps/app-2/state", None
@@ -1759,7 +1821,52 @@ class AgenticWebAppDbTests(unittest.TestCase):
             )
             self.assertEqual(
                 [int(row[0]) for row in cur.fetchall()],
-                list(range(6, 26)),
+                list(range(21, 26)),
+            )
+
+    def test_revision_pruning_retains_four_hour_and_daily_recovery_points(self) -> None:
+        backend.create_web_app()
+        retained_at = datetime(2026, 8, 17, 12, tzinfo=timezone.utc)
+        ages = [
+            timedelta(days=8),
+            timedelta(hours=150),
+            timedelta(hours=126),
+            timedelta(hours=102),
+            timedelta(hours=78),
+            timedelta(hours=54),
+            timedelta(hours=30),
+            timedelta(hours=21),
+            timedelta(hours=17),
+            timedelta(hours=13),
+            timedelta(hours=9),
+            timedelta(hours=5),
+            timedelta(hours=1),
+            timedelta(minutes=50),
+            timedelta(minutes=40),
+            timedelta(minutes=30),
+            timedelta(minutes=20),
+            timedelta(minutes=10),
+        ]
+        with db.transaction() as cur:
+            for revision, age in enumerate(ages, start=1):
+                cur.execute(
+                    "INSERT INTO web_app_revisions"
+                    " (app_id, revision, actor, kind, restored_from, html, css,"
+                    " javascript, data_json, created_at)"
+                    " VALUES ('app-1', %s, 'user', 'data', NULL, '', '', '', '{}', %s)",
+                    (revision, (retained_at - age).strftime(backend.TIME_FORMAT)),
+                )
+
+        backend.prune_revisions(retained_at)
+
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT revision FROM web_app_revisions"
+                " WHERE app_id = 'app-1' ORDER BY revision"
+            )
+            self.assertEqual(
+                [int(row[0]) for row in cur.fetchall()],
+                list(range(2, 19)),
             )
 
     def test_batch_is_atomic_and_advances_one_revision(self) -> None:

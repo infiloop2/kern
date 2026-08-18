@@ -173,11 +173,11 @@ def _warnings(facts: dict[str, Any]) -> list[dict[str, str]]:
             warnings.append(
                 {
                     "code": "secrets_exposed_to_pr_workflows",
-                    "severity": "critical",
+                    "severity": "warning",
                     "message": f"Workflows use {', '.join(dangerous)}, which runs with the base "
-                    "repository's secrets against PR-influenced context — the classic Actions "
-                    "exfiltration primitive. Restrict or remove these triggers, or require approval "
-                    "for outside workflow runs.",
+                    "repository's permissions and secrets against PR-influenced context. Review each "
+                    "workflow to ensure it does not check out or run untrusted pull request code with "
+                    "those privileges; restrict or remove the trigger if that cannot be guaranteed.",
                 }
             )
         warnings.append(

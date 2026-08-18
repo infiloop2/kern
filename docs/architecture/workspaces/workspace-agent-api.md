@@ -30,7 +30,7 @@ after an event cursor, or center context on a search hit. These routes can read
 any retained host thread, including Chat, app, and schedule threads.
 
 Workspace is a deliberately narrow transport proxy here: its peer identity,
-connection/call limits, 256 KiB request cap, 1 MiB response cap, fixed route
+connection/call limits, 256 KiB request cap, 24 MiB response cap, fixed route
 map, method check, and query-string rejection apply before the request reaches
 the host. The host Admin API owns the one public field-validation contract,
 opaque cursor creation and validation, indexed `agent_events` query, role
@@ -125,6 +125,7 @@ Global routes are:
 /agent/memory/search?q=...
 /agent/memory/pages/{page_id}
 /agent/schedules[?limit=...&before=...]
+/agent/schedules/recent-failures[?limit=...&before=...]
 /agent/schedules/session-options
 /agent/schedules/{schedule_id}
 ```
@@ -146,10 +147,18 @@ separately. Existing pages keep their ids and are classified in place by this
 prefix rule; the distinction makes the prior individual-memory convention an
 enforced API boundary.
 
+The recent-failures route returns retained failed-run summaries for active
+schedules, newest first. Summaries include the schedule name, thread id,
+runtime selection, timestamps, and a bounded error message, but never the
+snapshotted prompt. Deleted schedules remain browser-only. This gives agents a
+direct health signal without exposing complete run history or retained thread
+events.
+
 Memory and schedule writes use an `expected_revision` compare-and-swap so
 parallel agents cannot silently overwrite each other. Agents have ordinary
-CRUD only; the browser-only API exposes deleted resources, revision history,
-restoration, schedule run history, and retained host-thread events. Memory
+CRUD plus bounded recent failure summaries; the browser-only API exposes
+deleted resources, revision history, restoration, complete schedule run
+history, and retained host-thread events. Memory
 list/search responses are paginated and omit page bodies. Swarm page content
 may link to another swarm page as `[[page-id]]`; Kern derives links and
 backlinks without a separate graph store. Individual pages are excluded from

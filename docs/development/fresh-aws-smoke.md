@@ -46,7 +46,7 @@ the IAM policy), and generates an ephemeral operator SSH key it discards at
 teardown. So you write no config and create no key.
 
 Cost: one `t3.small`, one 16 GiB root gp3 volume, one 16 GiB encrypted admin
-volume, and one 8 GiB encrypted agent volume for a few minutes. Teardown
+volume, and one 16 GiB encrypted agent volume for a few minutes. Teardown
 removes the instance root volume, both
 data volumes, and the smoke security group even if deploy fails before writing a
 result file. The harness launcher probes have no Bedrock credential and the

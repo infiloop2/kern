@@ -49,14 +49,16 @@ DEFAULT_PROXY_STATE_DIR = Path("/mnt/kern-admin/proxy-state")
 #   (turn admission, steer delivery, stop, finish). Nothing enters mutation()
 #   while holding it — keep it that way, or the lock graph grows a cycle.
 _MUTATION_LOCK = threading.RLock()
-# Every audit log (agent events, network events, tool events) keeps only the
-# most recent MAX_EVENTS entries; the prune runs every PRUNE_EVERY appends so
-# its cost stays amortized.
-MAX_EVENTS = 1_000_000
+# Conversation history gets a deeper retained window than the high-volume
+# network and tool audit logs. Each log prunes every PRUNE_EVERY appends so
+# the cost stays amortized.
+AGENT_EVENT_LIMIT = 10_000_000
+NETWORK_EVENT_LIMIT = 1_000_000
+TOOL_EVENT_LIMIT = 1_000_000
 PRUNE_EVERY = 500
 # Bound each stored message, not just the row count: a pathological multi-
 # megabyte streamed message would otherwise grow durable Postgres storage far
-# past the apparent MAX_EVENTS cap. The bound sits well above any normal
+# past the apparent AGENT_EVENT_LIMIT cap. The bound sits well above any normal
 # assistant message; an over-limit value is truncated with a marker rather
 # than dropped so replay stays coherent.
 MAX_EVENT_MESSAGE_CHARS = 128 * 1024
@@ -572,6 +574,26 @@ def save_thread_provider_session(
         raise ValueError(f"thread {thread_id!r} run {run_number} does not exist")
 
 
+def clear_thread_provider_session(
+    cur: Any,
+    thread_id: str,
+    run_number: int,
+    provider_session_id: str,
+) -> None:
+    """Clear one provider session after the provider confirms it is missing."""
+    cur.execute(
+        "UPDATE thread_sessions SET provider_session_id = NULL"
+        " WHERE thread_id = %s AND run_number = %s AND provider_session_id = %s"
+        " RETURNING 1",
+        (thread_id, run_number, provider_session_id),
+    )
+    if cur.fetchone() is None:
+        raise ValueError(
+            f"thread {thread_id!r} run {run_number} no longer has provider session"
+            f" {provider_session_id!r}"
+        )
+
+
 def touch_thread_session(cur: Any, thread_id: str, last_used_at: str) -> None:
     """Refresh one existing thread's recency without changing its provider
     session or current runtime configuration."""
@@ -909,8 +931,9 @@ def append_agent_event(
     return seq
 
 
-def _prune_events(cur: Any, table: str) -> None:
-    # Shared retention for the three audit logs (agent, network, tool events).
+def _prune_events(cur: Any, table: str, limit: int) -> None:
+    # Shared pruning mechanism for the three audit logs (agent, network, tool
+    # events), with the retained depth selected by the caller.
     # seq is a serial, so newest-N retention is a primary-key range
     # delete below MAX(seq) - N: two index-endpoint lookups and the excess
     # rows, instead of scanning N index entries per prune. Seq gaps from
@@ -919,7 +942,7 @@ def _prune_events(cur: Any, table: str) -> None:
     cur.execute(
         f"DELETE FROM {table} WHERE"
         f" seq <= (SELECT COALESCE(MAX(seq), 0) FROM {table}) - %s",
-        (MAX_EVENTS,),
+        (limit,),
     )
 
 
@@ -950,13 +973,17 @@ def _page_before(
 
 
 def prune_agent_events(cur: Any) -> None:
-    _prune_events(cur, "agent_events")
+    _prune_events(cur, "agent_events", AGENT_EVENT_LIMIT)
 
 
 def prune_event_logs(cur: Any) -> None:
     """Apply all append-only event caps independent of insert cadence."""
-    for table in ("agent_events", "network_events", "tool_events"):
-        _prune_events(cur, table)
+    for table, limit in (
+        ("agent_events", AGENT_EVENT_LIMIT),
+        ("network_events", NETWORK_EVENT_LIMIT),
+        ("tool_events", TOOL_EVENT_LIMIT),
+    ):
+        _prune_events(cur, table, limit)
 
 
 def page_agent_events_before(
@@ -1887,7 +1914,7 @@ def append_network_event(
 def prune_network_events(cur: Any) -> None:
     """Runs on the proxy's request path (every PRUNE_EVERY appends), so it
     must never scan the whole retained log — see _prune_events."""
-    _prune_events(cur, "network_events")
+    _prune_events(cur, "network_events", NETWORK_EVENT_LIMIT)
 
 
 def _network_event_dict(row: Any) -> dict[str, Any]:
@@ -2087,7 +2114,7 @@ def record_tool_event(
 ) -> None:
     """Append one tool audit event in its own transaction. seq is a serial:
     unique and increasing, with harmless gaps from aborted transactions.
-    Prunes to MAX_EVENTS amortized, like the agent event log."""
+    Prunes to TOOL_EVENT_LIMIT amortized, like the other event logs."""
     with mutation() as cur:
         cur.execute(
             "INSERT INTO tool_events (created_at, tool_id, action_id, outcome, detail, arguments)"
@@ -2095,7 +2122,7 @@ def record_tool_event(
             (utc_now(), tool_id, action_id, outcome, detail, db.jsonb(arguments) if arguments is not None else None),
         )
         if int(cur.fetchone()[0]) % PRUNE_EVERY == 0:
-            _prune_events(cur, "tool_events")
+            _prune_events(cur, "tool_events", TOOL_EVENT_LIMIT)
 
 
 def page_tool_events_before(

@@ -44,6 +44,12 @@ RUN_COLUMNS = (
     "id, schedule_id, thread_id, message, agent_runtime, model, effort, status,"
     " error_message, scheduled_for, finished_at"
 )
+QUALIFIED_RUN_COLUMNS = (
+    "schedule_runs.id, schedule_runs.schedule_id, schedule_runs.thread_id,"
+    " schedule_runs.message, schedule_runs.agent_runtime, schedule_runs.model,"
+    " schedule_runs.effort, schedule_runs.status, schedule_runs.error_message,"
+    " schedule_runs.scheduled_for, schedule_runs.finished_at"
+)
 
 
 def route_browser(
@@ -120,6 +126,8 @@ def route_agent(
             return list_active_schedules(query)
         if method == "POST":
             return {"schedule": create_schedule(body, actor="agent")}
+    if path == "/agent/schedules/recent-failures" and method == "GET":
+        return list_recent_failures(query)
     match = re.fullmatch(rf"/agent/schedules/{ID_CAPTURE}", path)
     if match:
         schedule_id = _positive_id(match.group(1))
@@ -428,6 +436,37 @@ def list_runs(schedule_id: int, query: dict[str, list[str]]) -> dict[str, Any]:
     more = len(rows) > limit
     rows = rows[:limit]
     response: dict[str, Any] = {"runs": [_run_summary(_run_row(row)) for row in rows]}
+    if more and rows:
+        response["next_before"] = rows[-1][0]
+    return response
+
+
+def list_recent_failures(query: dict[str, list[str]]) -> dict[str, Any]:
+    """Return retained failed runs for schedules that are still active."""
+    _reject_query_keys(query, {"before", "limit"}, "recent schedule failures")
+    before = _optional_positive_int(query, "before")
+    limit = _limit(query)
+    clause = " AND schedule_runs.id < %s" if before is not None else ""
+    params: list[Any] = []
+    if before is not None:
+        params.append(before)
+    with db.transaction() as cur:
+        cur.execute(
+            f"SELECT {QUALIFIED_RUN_COLUMNS}, schedules.name"
+            " FROM schedule_runs JOIN schedules ON schedules.id = schedule_runs.schedule_id"
+            " WHERE schedules.deleted_at IS NULL AND schedule_runs.status = 'failed'"
+            f"{clause} ORDER BY schedule_runs.id DESC LIMIT %s",
+            (*params, limit + 1),
+        )
+        rows = cur.fetchall()
+    more = len(rows) > limit
+    rows = rows[:limit]
+    failures = []
+    for row in rows:
+        failure = _run_summary(_run_row(row[:11]))
+        failure["schedule_name"] = row[11]
+        failures.append(failure)
+    response: dict[str, Any] = {"failures": failures}
     if more and rows:
         response["next_before"] = rows[-1][0]
     return response

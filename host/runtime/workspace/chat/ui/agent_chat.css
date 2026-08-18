@@ -899,24 +899,21 @@ button.attachment-clear {
     margin-right: 0.15rem;
   }
 
-  /* A native <select> sizes to its widest option and resists flex-shrinking, so
-     at 16px these three read as oversized lozenges that wrap or overflow. Lay
-     them out as a fixed three-column grid on their own full-width row (attach
-     and send drop to the row below): minmax(0, ...) tracks pin the columns to
-     the container width so a long value truncates inside its cell instead of
-     pushing the row past the composer edge. The model column is widest since
-     its value is the longest and most worth reading. Each chip gets a filled
-     surface, compact radius, and a small custom chevron for the dropdown. */
-  .composer-bar { flex-wrap: wrap; min-width: 0; }
+  /* Keep attachment, session settings, and Send on one compact control row.
+     minmax(0, ...) pins native selects to the remaining width so their widest
+     options cannot push either action onto a second line. */
+  .composer-bar {
+    display: grid;
+    gap: 0.35rem;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    min-width: 0;
+  }
   .composer-options {
     display: grid;
-    flex-basis: 100%;
     grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.75fr) minmax(0, 0.95fr);
     min-width: 0;
-    order: 1;
   }
-  .attach-button { order: 2; }
-  .send-button { order: 3; }
+  .session-options-note { left: auto; right: 0; }
 
   .composer-pill {
     appearance: none;
