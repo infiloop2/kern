@@ -1015,6 +1015,86 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(seen_config, [("claude-fable-5", "ultracode")] * 2)
         self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "claude-session-1")
 
+    def test_missing_claude_session_is_cleared_for_an_explicit_retry(self) -> None:
+        save_attested_claude_account("acct", access_token_sha256="f" * 64)
+        with state.mutation() as cur:
+            state.save_thread_session(
+                cur,
+                "claude_code",
+                "thread-stale-claude",
+                "deleted-session",
+                state.utc_now(),
+                "claude-opus-5",
+                "high",
+            )
+            state.append_agent_event(
+                cur,
+                "thread.message",
+                "thread-stale-claude",
+                {"message": "remember this decision", "source": "user"},
+            )
+
+        attempts: list[tuple[str, str | None]] = []
+
+        def fake_run_turn(
+            server,
+            input_message,
+            session_id,
+            model,
+            effort,
+            on_message,
+            finish_turn=None,
+        ):
+            del server, model, effort, on_message, finish_turn
+            attempts.append((input_message, session_id))
+            if session_id is not None:
+                raise orchestrator.claude_code.ClaudeSessionNotFoundError(
+                    f"Session {session_id} not found"
+                )
+            return "replacement-session", "done"
+
+        with (
+            patch.object(orchestrator.claude_code, "ClaudeCodeSession", FakeServer),
+            patch.object(orchestrator.claude_code, "run_turn", fake_run_turn),
+            patch.object(
+                orchestrator.claude_code,
+                "account_status",
+                return_value=("active", None, {"account_id": "acct", "access_token_sha256": "f" * 64}),
+            ),
+        ):
+            response = service.send_thread_message(
+                "thread-stale-claude",
+                {"message": "continue the work"},
+            )
+            self.assertEqual(response["status"], "accepted")
+            self.wait_until_idle("thread-stale-claude")
+            self.assertEqual(attempts, [("continue the work", "deleted-session")])
+            self.assertIsNone(
+                state.thread_session_config("thread-stale-claude")["provider_session_id"]
+            )
+            self.assertIn(
+                "thread.error",
+                [event["event_type"] for event in thread_events("thread-stale-claude")],
+            )
+
+            retry = service.send_thread_message(
+                "thread-stale-claude",
+                {"message": "retry now"},
+            )
+            self.assertEqual(retry["status"], "accepted")
+            self.wait_until_idle("thread-stale-claude")
+
+        self.assertIsNone(attempts[1][1])
+        self.assertIn("remember this decision", attempts[1][0])
+        self.assertIn("User:\ncontinue the work", attempts[1][0])
+        self.assertIn("CURRENT USER MESSAGE ---\nretry now", attempts[1][0])
+        self.assertEqual(len(FakeServer.instances), 2)
+        self.assertTrue(all(server.closed for server in FakeServer.instances))
+        self.assertEqual(
+            state.thread_session_config("thread-stale-claude")["provider_session_id"],
+            "replacement-session",
+        )
+
     def test_claude_finish_turn_atomically_chooses_between_steer_and_finish(self) -> None:
         # Direct steer delivery and the finish decision share the turn's
         # delivery lock. A steer delivered first is observed as one additional

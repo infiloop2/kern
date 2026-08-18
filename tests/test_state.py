@@ -893,12 +893,12 @@ class StateStorageTests(unittest.TestCase):
 
     def test_event_logs_prune_to_the_newest_cap(self) -> None:
         # Retention is a primary-key range delete below MAX(seq) - cap: cheap
-        # enough for the append cadence even at the 10M production caps, pinned
-        # here with small ones.
+        # enough for the append cadence even at the 10M agent-event production
+        # cap, pinned here with small limits.
         with state.mutation() as cur:
             for index in range(8):
                 state.append_agent_event(cur, "thread.message", None, {"message": f"m{index}", "source": "user"})
-        with patch.object(state, "MAX_EVENTS", 5), state.mutation() as cur:
+        with patch.object(state, "AGENT_EVENT_LIMIT", 5), state.mutation() as cur:
             state.prune_agent_events(cur)
         seqs = [event["seq"] for event in read_agent_events()]
         self.assertEqual(len(seqs), 5)
@@ -906,11 +906,19 @@ class StateStorageTests(unittest.TestCase):
 
         for index in range(8):
             state.append_network_event("https", "GET", "example.com", 443, f"/p{index}", "", True)
-        with patch.object(state, "MAX_EVENTS", 5), state.mutation() as cur:
+        with patch.object(state, "NETWORK_EVENT_LIMIT", 5), state.mutation() as cur:
             state.prune_network_events(cur)
         network_seqs = [event["seq"] for event in read_network_events()]
         self.assertEqual(len(network_seqs), 5)
         self.assertEqual(network_seqs, sorted(network_seqs))
+
+        for index in range(8):
+            state.record_tool_event("calendar", "list", "succeeded", f"event {index}")
+        with patch.object(state, "TOOL_EVENT_LIMIT", 5), state.mutation() as cur:
+            state.prune_event_logs(cur)
+        tool_seqs = [event["seq"] for event in state.page_tool_events_before(None)]
+        self.assertEqual(len(tool_seqs), 5)
+        self.assertEqual(tool_seqs, sorted(tool_seqs, reverse=True))
 
     def test_network_event_url_fields_are_size_capped(self) -> None:
         # The agent's own request stream feeds this log; without field caps a

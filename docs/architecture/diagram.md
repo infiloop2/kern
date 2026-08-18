@@ -41,7 +41,7 @@ flowchart LR
             direction TB
             rootvol["Root EBS, 16 GiB, replaceable<br/>OS, trusted code, systemd, nftables, helpers<br/>root-owned trust boundary"]
             adminvol["Admin EBS, 16 GiB, durable<br/>Postgres data, admin-home, proxy CA/certs, Git quarantine, temporary tool media<br/>service-owned private subtrees"]
-            agentvol["Agent EBS, 8 GiB, durable<br/>agent-home auth, sessions, caches, workspaces<br/>root-owned managed config"]
+            agentvol["Agent EBS, 16 GiB, durable<br/>agent-home auth, sessions, caches, workspaces<br/>root-owned managed config"]
         end
     end
 

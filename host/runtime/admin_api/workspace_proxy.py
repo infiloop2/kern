@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from host.constants import (
     LOOPBACK,
     MAX_REQUEST_BODY_BYTES,
+    MAX_WORKSPACE_RESPONSE_BODY_BYTES,
     WORKSPACE_ADMIN_API_TIMEOUT_SECONDS,
     WORKSPACE_PORT,
 )
@@ -63,7 +64,7 @@ def _proxy(
         )
         conn.request(method, target, body=encoded, headers=headers)
         response = conn.getresponse()
-        raw = response.read(MAX_REQUEST_BODY_BYTES + 1)
+        raw = response.read(MAX_WORKSPACE_RESPONSE_BODY_BYTES + 1)
     except OSError as exc:
         raise ApiError(
             HTTPStatus.BAD_GATEWAY, "workspaces backend unavailable"
@@ -71,7 +72,7 @@ def _proxy(
     finally:
         if conn is not None:
             conn.close()
-    if len(raw) > MAX_REQUEST_BODY_BYTES:
+    if len(raw) > MAX_WORKSPACE_RESPONSE_BODY_BYTES:
         host_errors.report_warning(
             "admin_api.workspace_proxy",
             "Workspace service returned an oversized response.",

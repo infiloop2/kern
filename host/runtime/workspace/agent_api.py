@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from host.constants import MAX_WORKSPACE_RESPONSE_BODY_BYTES
 from host.runtime.core import host_errors
 from host.runtime.core.unix_socket_service import (
     UnixSocketRequestHandler,
@@ -31,7 +32,7 @@ from host.runtime.workspace.web_apps import backend as web_apps
 
 AGENT_PEER_USER = "kern-agent"
 MAX_REQUEST_BODY_BYTES = 256 * 1024
-MAX_RESPONSE_BODY_BYTES = 1024 * 1024
+MAX_RESPONSE_BODY_BYTES = MAX_WORKSPACE_RESPONSE_BODY_BYTES
 MAX_CONCURRENT_CALLS = 8
 MAX_CONCURRENT_CONNECTIONS = 16
 ALLOWED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})

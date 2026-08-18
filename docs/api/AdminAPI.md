@@ -750,7 +750,7 @@ log: the first request returns the newest events, and `before=<seq>`
 continues with events whose `seq` is lower than that cursor. `limit=<n>` is
 optional, defaults to 100, and must be between 1 and 100.
 
-The host retains only the most recent 1,000,000 agent events; older events are
+The host retains only the most recent 10,000,000 agent events; older events are
 discarded and can no longer be listed.
 
 Event list response:

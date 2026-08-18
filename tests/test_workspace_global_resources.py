@@ -738,6 +738,92 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         self.assertEqual(run["status"], "failed")
         self.assertEqual(run["error_message"], "model is no longer offered")
 
+    def test_agent_recent_failures_are_bounded_paged_and_active_only(self) -> None:
+        active = schedules.create_schedule(
+            {
+                "name": "Active review",
+                "message": "Review open work",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                **SESSION,
+            },
+            actor="agent",
+        )
+        deleted = schedules.create_schedule(
+            {
+                "name": "Deleted review",
+                "message": "Review old work",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                **SESSION,
+            },
+            actor="agent",
+        )
+        schedules.delete_schedule(
+            deleted["id"], {"expected_revision": ["1"]}, actor="agent"
+        )
+
+        def insert_run(
+            schedule_id: int, suffix: str, status: str, error: str | None
+        ) -> int:
+            with db.transaction() as cur:
+                cur.execute(
+                    "INSERT INTO schedule_runs"
+                    " (schedule_id, thread_id, message, agent_runtime, model, effort,"
+                    " status, error_message, scheduled_for, finished_at)"
+                    " VALUES (%s, %s, 'private prompt', %s, %s, %s, %s, %s,"
+                    " '2026-08-17T10:00:00Z', '2026-08-17T10:01:00Z')"
+                    " RETURNING id",
+                    (
+                        schedule_id,
+                        f"schedule-{schedule_id}-run-{suffix}",
+                        SESSION["agent_runtime"],
+                        SESSION["model"],
+                        SESSION["effort"],
+                        status,
+                        error,
+                    ),
+                )
+                row = cur.fetchone()
+                assert row is not None
+                return int(row[0])
+
+        older_id = insert_run(active["id"], "1", "failed", "older failure")
+        insert_run(active["id"], "2", "succeeded", None)
+        latest_id = insert_run(active["id"], "3", "failed", "x" * 600)
+        insert_run(deleted["id"], "4", "failed", "deleted failure")
+
+        first = schedules.route_agent(
+            "GET", "/agent/schedules/recent-failures", None, {"limit": ["1"]}
+        )
+        self.assertEqual(len(first["failures"]), 1)
+        failure = first["failures"][0]
+        self.assertEqual(failure["id"], latest_id)
+        self.assertEqual(failure["schedule_id"], active["id"])
+        self.assertEqual(failure["schedule_name"], "Active review")
+        self.assertEqual(failure["status"], "failed")
+        self.assertEqual(len(failure["error_message"]), 500)
+        self.assertNotIn("message", failure)
+        self.assertEqual(first["next_before"], latest_id)
+
+        second = schedules.route_agent(
+            "GET",
+            "/agent/schedules/recent-failures",
+            None,
+            {"limit": ["1"], "before": [str(first["next_before"])]},
+        )
+        self.assertEqual([item["id"] for item in second["failures"]], [older_id])
+        self.assertNotIn("next_before", second)
+
+        with self.assertRaises(WorkspaceError) as invalid_query:
+            schedules.route_agent(
+                "GET",
+                "/agent/schedules/recent-failures",
+                None,
+                {"status": ["succeeded"]},
+            )
+        self.assertEqual(invalid_query.exception.status, HTTPStatus.BAD_REQUEST)
+
     def test_a_script_schedule_carries_a_path_and_rejects_anything_else(self) -> None:
         script_session = {
             "agent_runtime": "script",
@@ -1064,6 +1150,22 @@ class WorkspaceIdentityTests(unittest.TestCase):
         schedule_route.assert_called_once_with("GET", "/agent/schedules", None, {})
         with self.assertRaises(WorkspaceError):
             agent_api.dispatch_call("GET", "/agent/memory?unexpected=", None)
+
+    def test_agent_dispatch_exposes_recent_schedule_failures(self) -> None:
+        expected = {"failures": [{"id": 7, "status": "failed"}]}
+        with patch.object(
+            schedules, "route_agent", return_value=expected
+        ) as schedule_route:
+            response = agent_api.dispatch_call(
+                "GET", "/agent/schedules/recent-failures?limit=5", None
+            )
+        self.assertEqual(response, {"status": 200, "body": expected})
+        schedule_route.assert_called_once_with(
+            "GET",
+            "/agent/schedules/recent-failures",
+            None,
+            {"limit": ["5"]},
+        )
 
     def test_agent_can_discover_valid_schedule_session_options(self) -> None:
         response = schedules.route_agent(

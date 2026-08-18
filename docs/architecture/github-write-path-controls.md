@@ -11,8 +11,15 @@ The toggle lives under `network_integrations.github` next to
 `write_repositories`. Reads are unchanged, and normal writes to configured write
 repositories still pass. The guard denies REST write paths that can create or
 move `.github` changes without entering `git-receive-pack`, including
-`contents/.github...`, `git/{refs,trees,commits}`, merge APIs, and pull-merge
-APIs. Those denials use `github_dot_github_rest_write_denied`.
+`contents/.github...`, `git/{refs,trees,commits}`, and lower-level branch merge
+APIs. Those denials use `github_dot_github_rest_write_denied`. Pull-request
+merges remain allowed for configured write repositories; the same REST endpoint
+supports regular (`merge`) and squash (`squash`) merge methods (as well as
+`rebase`). This is a deliberate exception: merging a PR can land `.github/`
+changes without entering Kern's local push-approval queue. Agent-authored PR
+content already crossed the gate when its branch was pushed; the merge API only
+promotes content already present on GitHub. PR branches populated elsewhere are
+governed by the configured repository-scoped merge permission.
 
 ## Push Flow
 

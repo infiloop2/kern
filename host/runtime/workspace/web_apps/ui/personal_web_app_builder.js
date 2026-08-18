@@ -237,6 +237,7 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
   }
 
   let durableData = {};
+  let targetedData = false;
   let requestId = 0;
   let loadHandler = null;
   const handlers = new Map();
@@ -249,14 +250,38 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
   };
   const mutation = (action, path, value, includeValue) => new Promise((resolve, reject) => {
     const id = `mutation-${++requestId}`;
-    pending.set(id, { resolve, reject });
+    pending.set(id, { resolve, reject, action, path: clone(path) });
     const message = { type: "data-action", request_id: id, action, path: clone(path) };
     if (includeValue) message.value = clone(value);
     send(message);
   });
+  const read = path => new Promise((resolve, reject) => {
+    const id = `read-${++requestId}`;
+    pending.set(id, { resolve, reject });
+    send({ type: "data-read", request_id: id, path: clone(path) });
+  });
+  const applyMutation = (root, action, path, value) => {
+    const updated = clone(root);
+    let parent = updated;
+    for (const segment of path.slice(0, -1)) parent = parent[segment];
+    const leaf = path[path.length - 1];
+    if (action === "append") parent[leaf].push(clone(value));
+    else if (action === "delete") {
+      if (Array.isArray(parent)) parent.splice(leaf, 1);
+      else delete parent[leaf];
+    } else if (Array.isArray(parent)) parent[leaf] = clone(value);
+    else Object.defineProperty(parent, leaf, {
+      value: clone(value), writable: true, enumerable: true, configurable: true,
+    });
+    return updated;
+  };
   const api = Object.freeze({
-    onLoad(handler) {
+    onLoad(handler, options = {}) {
       if (typeof handler !== "function") throw new TypeError("handler must be a function");
+      if (!options || typeof options !== "object" || ![undefined, "targeted"].includes(options.data)) {
+        throw new TypeError("onLoad data mode must be targeted when provided");
+      }
+      targetedData = options.data === "targeted";
       loadHandler = handler;
     },
     on(action, handler) {
@@ -264,7 +289,11 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
       if (typeof handler !== "function") throw new TypeError("handler must be a function");
       handlers.set(action, handler);
     },
-    data() { return clone(durableData); },
+    data() {
+      if (targetedData) throw new Error("app.data() is unavailable in targeted data mode; use app.read(path)");
+      return clone(durableData);
+    },
+    read(path) { return read(path); },
     render(html, css = "") {
       if (typeof html !== "string" || typeof css !== "string") {
         throw new TypeError("render content must be strings");
@@ -303,11 +332,25 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
       if (!waiter) return;
       pending.delete(message.request_id);
       if (message.ok) {
-        durableData = clone(message.data);
-        waiter.resolve(clone(durableData));
+        if (targetedData) {
+          waiter.resolve(waiter.action === "delete" ? null : clone(message.value));
+        } else {
+          durableData = applyMutation(
+            durableData, waiter.action, waiter.path, message.value,
+          );
+          waiter.resolve(clone(durableData));
+        }
       } else {
         waiter.reject(new Error("Data update failed"));
       }
+      return;
+    }
+    if (message.type === "read-result") {
+      const waiter = pending.get(message.request_id);
+      if (!waiter) return;
+      pending.delete(message.request_id);
+      if (message.ok) waiter.resolve(clone(message.value));
+      else waiter.reject(new Error("Data read failed"));
       return;
     }
     if (message.type === "event") {
@@ -319,7 +362,12 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
         }));
     }
   });
-  send({ type: "ready" });
+  // The generated source is appended after this bootstrap invocation. Defer
+  // readiness one microtask so its top-level onLoad registration can select
+  // targeted data before the trusted frame decides whether to fetch data.
+  resolvePromise().then(() => send({
+    type: "ready", data_mode: targetedData ? "targeted" : "full",
+  }));
 }
 
 const allowedElements = new Set([
@@ -981,6 +1029,31 @@ function discardArmedWorker() {
   armedWorker = null;
 }
 
+async function hydrateCapabilityData(holder, dataMode) {
+  if (!["full", "targeted"].includes(dataMode)) return false;
+  holder.dataMode = dataMode;
+  if (dataMode === "targeted") holder.data = {};
+  else if (holder.data === undefined) {
+    let response;
+    try {
+      response = await api(
+        "GET", `/apps/${encodeURIComponent(holder.appId)}/state/data`,
+      );
+    } catch (_error) {
+      return false;
+    }
+    if (!response.app || response.app.revision !== holder.revision) {
+      void refreshSelectedApp(holder.appId);
+      return false;
+    }
+    holder.data = response.app.data;
+  }
+  if (snapshot.app?.revision === holder.revision && selectedAppId === holder.appId) {
+    snapshot.app = { ...snapshot.app, data: holder.data, data_mode: dataMode };
+  }
+  return true;
+}
+
 function armCapabilityWorker() {
   if (
     !selectedAppId || appWritesBlocked() || workerRun
@@ -1019,7 +1092,7 @@ function armCapabilityWorker() {
     if (armed.run) armed.run.finish("error");
     else discard();
   });
-  worker.addEventListener("message", event => {
+  worker.addEventListener("message", async event => {
     if (armed.run) {
       handleWorkerMessage(armed.run, event.data);
       return;
@@ -1030,6 +1103,10 @@ function armCapabilityWorker() {
       return;
     }
     if (message.type === "ready" && armed.state === "arming") {
+      if (!await hydrateCapabilityData(armed, message.data_mode)) {
+        discard();
+        return;
+      }
       clearTimeout(armed.timer);
       armed.timer = setTimeout(discard, WORKER_TURN_TIMEOUT_MS);
       worker.postMessage({ type: "init", data: armed.data, load: false });
@@ -1077,6 +1154,7 @@ async function runCapabilityWorker(pendingEvent = null) {
     worker,
     appId,
     data: app.data,
+    dataMode: app.data_mode || null,
     revision: app.revision,
     state: armed ? "event" : "starting",
     event: pendingEvent,
@@ -1161,6 +1239,10 @@ async function handleWorkerMessage(run, message) {
     return;
   }
   if (message.type === "ready" && run.state === "starting") {
+    if (!await hydrateCapabilityData(run, message.data_mode)) {
+      run.finish("error", "data-load");
+      return;
+    }
     clearTimeout(run.timer);
     run.timer = setTimeout(() => run.finish("timeout", "execution"), WORKER_TURN_TIMEOUT_MS);
     run.state = "initializing";
@@ -1208,6 +1290,60 @@ async function handleWorkerMessage(run, message) {
     return;
   }
   if (message.type === "data-action") await handleWorkerDataAction(run, message);
+  if (message.type === "data-read") await handleWorkerDataRead(run, message);
+}
+
+function applyLocalDataAction(data, message) {
+  const updated = structuredClone(data);
+  let parent = updated;
+  for (const segment of message.path.slice(0, -1)) parent = parent[segment];
+  const leaf = message.path[message.path.length - 1];
+  if (message.action === "append") parent[leaf].push(structuredClone(message.value));
+  else if (message.action === "delete") {
+    if (Array.isArray(parent)) parent.splice(leaf, 1);
+    else delete parent[leaf];
+  } else if (Array.isArray(parent)) parent[leaf] = structuredClone(message.value);
+  else Object.defineProperty(parent, leaf, {
+    value: structuredClone(message.value),
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  return updated;
+}
+
+async function handleWorkerDataRead(run, message) {
+  if (
+    !["initializing", "event"].includes(run.state)
+    || typeof message.request_id !== "string"
+    || !/^read-[1-9][0-9]{0,8}$/.test(message.request_id)
+    || !validDataPath(message.path)
+  ) {
+    run.finish("error");
+    return;
+  }
+  try {
+    const response = await api(
+      "POST",
+      `/apps/${encodeURIComponent(run.appId)}/runtime/data/read`,
+      { path: message.path },
+    );
+    if (workerRun !== run || selectedAppId !== run.appId) return;
+    if (!response.app || response.app.revision !== run.revision) {
+      run.worker.postMessage({ type: "read-result", request_id: message.request_id, ok: false });
+      await refreshSelectedApp(run.appId);
+      return;
+    }
+    run.worker.postMessage({
+      type: "read-result",
+      request_id: message.request_id,
+      ok: true,
+      value: response.app.value,
+    });
+  } catch (_error) {
+    if (workerRun !== run) return;
+    run.worker.postMessage({ type: "read-result", request_id: message.request_id, ok: false });
+  }
 }
 
 async function handleWorkerDataAction(run, message) {
@@ -1231,7 +1367,19 @@ async function handleWorkerDataAction(run, message) {
     expected_revision: run.revision,
     path: message.path,
   };
-  if (message.action !== "delete") body.value = message.value;
+  let canonicalValue;
+  if (message.action !== "delete") {
+    try {
+      // The HTTP hop serializes JSON, so apply and acknowledge exactly the
+      // normalized value the backend receives (Date -> string, NaN -> null,
+      // Map -> object, and so on), never the pre-serialization worker value.
+      canonicalValue = JSON.parse(JSON.stringify(message.value));
+    } catch (_error) {
+      run.finish("error");
+      return;
+    }
+    body.value = canonicalValue;
+  }
   try {
     const response = await api(
       "POST",
@@ -1239,13 +1387,17 @@ async function handleWorkerDataAction(run, message) {
       body,
     );
     if (workerRun !== run || selectedAppId !== run.appId) return;
+    const acknowledged = { ...message, value: canonicalValue };
+    const updatedData = run.dataMode === "full"
+      ? applyLocalDataAction(run.data, acknowledged)
+      : run.data;
     snapshot.app = {
       ...snapshot.app,
-      data: response.app.data,
+      data: updatedData,
       revision: response.app.revision,
       updated_at: response.app.updated_at,
     };
-    run.data = response.app.data;
+    run.data = updatedData;
     run.revision = response.app.revision;
     renderedRevision = response.app.revision;
     // A successful generated-App write used the displayed revision, so this
@@ -1253,7 +1405,12 @@ async function handleWorkerDataAction(run, message) {
     pendingApp = null;
     syncAppRefreshButton();
     run.mutationPending = false;
-    run.worker.postMessage({ type: "data-result", request_id: message.request_id, ok: true, data: response.app.data });
+    run.worker.postMessage({
+      type: "data-result",
+      request_id: message.request_id,
+      ok: true,
+      value: canonicalValue,
+    });
   } catch (_error) {
     if (workerRun !== run) return;
     run.mutationPending = false;
@@ -2153,7 +2310,7 @@ async function refreshSelectedApp(appId = selectedAppId) {
   if (!appId || appId !== selectedAppId) return;
   const refreshSequence = ++selectedRefreshSequence;
   const [stateResponse, conversationResponse] = await Promise.all([
-    api("GET", `/apps/${encodeURIComponent(appId)}/state`),
+    api("GET", `/apps/${encodeURIComponent(appId)}/state/ui`),
     api("GET", `/apps/${encodeURIComponent(appId)}/conversation`),
   ]);
   if (appId !== selectedAppId || selectedRefreshSequence !== refreshSequence) return;

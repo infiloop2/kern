@@ -1442,15 +1442,42 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
             if turn.phase not in (ExecutionPhase.STARTING, ExecutionPhase.RUNNING):
                 return
         if runtime_type == "claude_code":
-            new_provider_session_id, _output = provider.run_turn(
-                server,
-                input_message,
-                provider_session_id,
-                turn.model,
-                turn.effort,
-                on_agent_message,
-                finish_claude_turn,
-            )
+            try:
+                new_provider_session_id, _output = provider.run_turn(
+                    server,
+                    input_message,
+                    provider_session_id,
+                    turn.model,
+                    turn.effort,
+                    on_agent_message,
+                    finish_claude_turn,
+                )
+            except claude_code.ClaudeSessionNotFoundError as exc:
+                if not provider_session_id:
+                    raise
+                # The durable host thread is still valid, but this provider
+                # session is known to be gone. Clear only this run's exact
+                # mapping and surface the failed turn; the user's next send
+                # starts a fresh session through the normal history handoff.
+                with turn.delivery_lock:
+                    if turn.phase != ExecutionPhase.RUNNING:
+                        return
+                    after_commit: list[Callable[[], None]] = []
+                    with state.mutation(after_commit=after_commit) as cur:
+                        state.clear_thread_provider_session(
+                            cur,
+                            thread_id,
+                            turn.run_number,
+                            provider_session_id,
+                        )
+                        _record_turn_finished(
+                            cur,
+                            after_commit,
+                            turn,
+                            error_message=str(exc),
+                        )
+                    turn.provider_session_id = None
+                return
         else:
             new_provider_session_id, _output = provider.run_turn(
                 server,

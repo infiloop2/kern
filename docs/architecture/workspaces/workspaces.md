@@ -32,6 +32,9 @@ field shapes when written; runtime availability is checked when each run starts,
 and an unavailable configuration becomes a failed run with a visible error.
 Schedules have no separate pause flag: deleting one stops future occurrences,
 and restoring it schedules the next occurrence from restoration time.
+Agents can read a bounded, newest-first list of retained failures for active
+schedules without receiving prompts, deleted schedules, successful runs, or
+complete event history; the operator UI retains the full run-history surface.
 
 A schedule may also select the `script` runtime (`bash`/`fixed`), which runs a
 static bash script from the agent home instead of a model turn — recurring work

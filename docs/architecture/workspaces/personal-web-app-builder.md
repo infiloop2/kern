@@ -40,12 +40,23 @@ that counter once. `publish_ui` may include up to 32 targeted data operations,
 allowing a data-contract change and its compatible interface to land in one
 transaction without replacing the full data document.
 
+App data may occupy up to 10 MiB. Compatible generated Apps receive the full
+document once at worker initialization and apply acknowledged mutations to
+their local copy; mutation responses never echo the document. Large-data Apps
+can register `onLoad` with `{data: "targeted"}` and use asynchronous
+`app.read(path)` calls instead. In targeted mode the browser loads the UI
+bundle without the data document, and `app.data()` is unavailable so a large
+document cannot be pulled accidentally. In that mode `set` and `append`
+resolve to the submitted value, `delete` resolves to `null`, and callers can
+read the resulting stored branch when they need the authoritative container.
+
 Each retained revision is a complete UI-and-data snapshot. Recovery always
 restores both together as a new forward revision; App name and archive state
-remain outside revision history. Retention keeps the newest 20 revisions
-exactly, then the newest revision in each one-hour UTC bucket for the first day
-and each three-hour UTC bucket through day seven. Global Memory and Schedules
-are separate Workspace resources and are never included in App recovery.
+remain outside revision history. Retention keeps the newest five revisions
+exactly, then one recovery point per four-hour interval during the first day
+and one per day from day two through day seven, up to 17 snapshots per App.
+Global Memory and Schedules are separate Workspace resources and are never
+included in App recovery.
 
 Polling never swaps a newer App underneath an interactive canvas. A successful
 mutation from the displayed generated App advances it immediately. Any newer

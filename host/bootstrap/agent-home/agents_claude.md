@@ -135,7 +135,15 @@ preserves unmentioned data. Carry the returned revision forward rather than
 re-reading. A 409 means another writer changed the App: read the relevant
 resource and retry. Paths are object keys and non-negative array indexes,
 1–16 segments. Limits: 128 KiB HTML, 64 KiB CSS, 128 KiB JavaScript, and
-256 KiB data.
+10 MiB total data. Individual agent requests remain capped at 256 KiB, so grow
+large documents through targeted operations.
+
+Generated Apps normally receive the full data document once when their worker
+loads. For large datasets, register
+`app.onLoad(async () => { ... }, {data: "targeted"})` and use
+`await app.read(["path", 0])`; targeted mode does not load the full document
+and intentionally makes `app.data()` unavailable. Mutation acknowledgements
+do not return the full document in either mode.
 
 An agent write may return 423 when the user has temporarily locked agent
 updates while using the App. Do not keep retrying immediately or attempt a
@@ -153,12 +161,15 @@ Use `data-action="name"` on controls and `data-field="name"` on inputs. Put
 `data-drag-value="item-id"`, `data-drop-action="name"`, and optionally
 `data-drop-value="target-id"`; the handler receives `draggedValue`.
 
-The frozen `app` global provides `app.onLoad(handler)`, `app.on(action,
-handler)`, `app.data()`, `app.render(html, css)`, `app.set`, `app.delete`,
-`app.append`, `app.askAgent(message)`, and `app.notify(message, level)`.
-Always register `app.onLoad` and render from `app.data()`. A worker turn is
-terminated after three seconds; durable state belongs in the JSON document,
-never worker memory.
+The frozen `app` global provides `app.onLoad(handler, options)`, `app.on(action,
+handler)`, `app.data()`, `app.read(path)`, `app.render(html, css)`, `app.set`,
+`app.delete`, `app.append`, `app.askAgent(message)`, and
+`app.notify(message, level)`. Always register `app.onLoad`. Use `app.data()` in
+the default compatibility mode or `app.read(path)` in targeted mode. In
+targeted mode `set` and `append` resolve to the submitted value and `delete`
+resolves to `null`; read again when the resulting stored branch is needed. A
+worker turn is terminated after three seconds; durable state belongs in the
+JSON document, never worker memory.
 
 When working in an `app-*` thread, communicate primarily by changing the App's
 interface or data. Do not narrate routine implementation work in chat; send a
@@ -220,6 +231,10 @@ Schedules are shared by every agent thread. Each firing starts an independent
 host thread; it does not resume the thread that created the schedule.
 
 - `GET /agent/schedules?limit=40&before=...` lists active schedules.
+- `GET /agent/schedules/recent-failures?limit=40&before=...` lists retained
+  failed runs for active schedules, newest first. Each summary includes the
+  schedule name, thread id, runtime selection, timestamps, and bounded error;
+  prompts and deleted schedules are excluded.
 - `GET /agent/schedules/session-options` lists the currently valid runtime,
   model, and effort combinations.
 - `GET /agent/schedules/{id}` fetches one schedule.

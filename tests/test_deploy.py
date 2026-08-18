@@ -496,7 +496,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("us-east-1a", create_calls[0])
         self.assertIn("--encrypted", create_calls[0])
         self.assertEqual(create_calls[0][create_calls[0].index("--size") + 1], "16")
-        self.assertEqual(create_calls[1][create_calls[1].index("--size") + 1], "8")
+        self.assertEqual(create_calls[1][create_calls[1].index("--size") + 1], "16")
         attach_calls = [call for call in calls if call[:2] == ("ec2", "attach-volume")]
         self.assertEqual(len(attach_calls), 2)
         self.assertIn("/dev/sdf", attach_calls[0])
@@ -2206,7 +2206,7 @@ class FakeCliIntegrationTests(unittest.TestCase):
             self.assertIn("gp3", volume_creates[0])
             self.assertIn("--encrypted", volume_creates[0])
             self.assertEqual(volume_creates[0][volume_creates[0].index("--size") + 1], "16")
-            self.assertEqual(volume_creates[1][volume_creates[1].index("--size") + 1], "8")
+            self.assertEqual(volume_creates[1][volume_creates[1].index("--size") + 1], "16")
             volume_attaches = [call for call in calls if call[1:3] == ["ec2", "attach-volume"]]
             self.assertEqual(len(volume_attaches), 2)
             self.assertIn("vol-admin", volume_attaches[0])

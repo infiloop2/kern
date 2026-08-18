@@ -165,6 +165,18 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 mobile_smoke(mobile_page, url)
                 mobile.close()
 
+                iphone_pwa = browser.new_context(
+                    viewport=IPHONE_VIEWPORT, device_scale_factor=3, is_mobile=True,
+                    has_touch=True, user_agent=IPHONE_USER_AGENT,
+                )
+                iphone_pwa.add_init_script(
+                    "Object.defineProperty(navigator, 'standalone', {get: () => true})"
+                )
+                iphone_pwa_page = iphone_pwa.new_page()
+                report_page_errors(iphone_pwa_page, "admin iPhone PWA swipe")
+                iphone_pwa_swipe_smoke(iphone_pwa_page, url)
+                iphone_pwa.close()
+
             if scope in {"all", "workspaces"}:
                 fallback_workspaces = browser.new_context()
                 fallback_page = fallback_workspaces.new_page()
@@ -1341,6 +1353,10 @@ def mobile_smoke(page, url: str) -> None:
     expect(page.locator("#agent-name")).to_have_text("Host: kern-mock")
     expect(page.locator("#mobile-nav-toggle")).to_be_visible()
     expect(page.locator("#mobile-nav-toggle")).to_have_attribute("aria-expanded", "false")
+    edge_swipe = perform_iphone_edge_swipe(page)
+    if edge_swipe != {"startAllowed": True, "moveAllowed": True}:
+        raise AssertionError(f"ordinary iPhone Safari claimed the PWA-only swipe: {edge_swipe}")
+    expect(page.locator("#mobile-nav-toggle")).to_have_attribute("aria-expanded", "false")
     expect(page.locator("#upgrade-notice")).to_have_count(0)
     expect(page.locator("#nav-backdrop")).to_be_hidden()
     expect(page.locator('link[rel="manifest"]')).to_have_attribute("href", "/manifest.webmanifest")
@@ -1504,6 +1520,153 @@ def mobile_smoke(page, url: str) -> None:
     expect(page.locator("#host-diagnostics")).to_contain_text("agentic_web_app.request")
     expect(page.locator("#host-diagnostics")).to_contain_text("orchestrator.execution")
     assert_no_horizontal_overflow(page, "host diagnostics")
+
+
+def iphone_pwa_swipe_smoke(page, url: str) -> None:
+    """The installed iPhone app owns the back-edge gesture as drawer navigation."""
+    from playwright.sync_api import expect
+
+    log_in(page, url)
+    expect(page.locator("#mobile-nav-toggle")).to_have_attribute("aria-expanded", "false")
+    expect(page.locator("#ios-install-coach")).to_be_hidden()
+    vertical_result = page.evaluate(
+        """() => {
+          const target = document.elementFromPoint(12, 300) || document.body;
+          const send = (type, x, y, active) => {
+            const touch = new Touch({
+              identifier: 9, target, clientX: x, clientY: y,
+              screenX: x, screenY: y, pageX: x, pageY: y,
+            });
+            return target.dispatchEvent(new TouchEvent(type, {
+              bubbles: true, cancelable: true,
+              touches: active ? [touch] : [], targetTouches: active ? [touch] : [],
+              changedTouches: [touch],
+            }));
+          };
+          const startAllowed = send("touchstart", 12, 300, true);
+          const moveAllowed = send("touchmove", 15, 350, true);
+          send("touchend", 15, 350, false);
+          return { startAllowed, moveAllowed };
+        }"""
+    )
+    if vertical_result != {"startAllowed": True, "moveAllowed": True}:
+        raise AssertionError(f"iPhone PWA blocked a vertical edge scroll: {vertical_result}")
+    expect(page.locator("#mobile-nav-toggle")).to_have_attribute("aria-expanded", "false")
+    result = perform_iphone_edge_swipe(page)
+    if result != {"startAllowed": True, "moveAllowed": False}:
+        raise AssertionError(f"iPhone PWA did not claim its edge swipe: {result}")
+    expect(page.locator("#mobile-nav-toggle")).to_have_attribute("aria-expanded", "true")
+    expect(page.locator("#sidebar")).to_have_class(re.compile(r"mobile-open"))
+    expect(page.locator("#nav-backdrop")).to_be_visible()
+    expect(page.locator("#mobile-nav-close")).to_be_focused()
+
+    page.locator("#mobile-nav-close").click()
+    toggle_touch_allowed = page.locator("#mobile-nav-toggle").evaluate(
+        """target => {
+          const touch = new Touch({
+            identifier: 2, target, clientX: 16, clientY: 24,
+            screenX: 16, screenY: 24, pageX: 16, pageY: 24,
+          });
+          return target.dispatchEvent(new TouchEvent("touchstart", {
+            bubbles: true, cancelable: true, touches: [touch],
+            targetTouches: [touch], changedTouches: [touch],
+          }));
+        }"""
+    )
+    if not toggle_touch_allowed:
+        raise AssertionError("iPhone PWA edge handling swallowed a navigation control tap")
+    label_touch_allowed = page.evaluate(
+        """() => {
+          const label = document.createElement("label");
+          label.textContent = "Edge label";
+          document.body.append(label);
+          const touch = new Touch({
+            identifier: 3, target: label, clientX: 16, clientY: 100,
+            screenX: 16, screenY: 100, pageX: 16, pageY: 100,
+          });
+          const allowed = label.dispatchEvent(new TouchEvent("touchstart", {
+            bubbles: true, cancelable: true, touches: [touch],
+            targetTouches: [touch], changedTouches: [touch],
+          }));
+          label.remove();
+          return allowed;
+        }"""
+    )
+    if not label_touch_allowed:
+        raise AssertionError("iPhone PWA edge handling swallowed a form label tap")
+    status_result = page.evaluate(
+        """() => {
+          const target = document.createElement("div");
+          target.setAttribute("role", "status");
+          document.body.append(target);
+          const send = (type, x, y, active) => {
+            const touch = new Touch({
+              identifier: 4, target, clientX: x, clientY: y,
+              screenX: x, screenY: y, pageX: x, pageY: y,
+            });
+            return target.dispatchEvent(new TouchEvent(type, {
+              bubbles: true, cancelable: true,
+              touches: active ? [touch] : [], targetTouches: active ? [touch] : [],
+              changedTouches: [touch],
+            }));
+          };
+          const startAllowed = send("touchstart", 12, 180, true);
+          const moveAllowed = send("touchmove", 90, 184, true);
+          send("touchend", 90, 184, false);
+          target.remove();
+          return { startAllowed, moveAllowed };
+        }"""
+    )
+    if status_result != {"startAllowed": True, "moveAllowed": False}:
+        raise AssertionError(f"ARIA status disabled the PWA edge swipe: {status_result}")
+    expect(page.locator("#sidebar")).to_have_class(re.compile(r"mobile-open"))
+    page.locator("#mobile-nav-close").click()
+    page.locator("#mobile-nav-toggle").click()
+    expect(page.locator("#sidebar")).to_have_class(re.compile(r"mobile-open"))
+
+    page.get_by_role("button", name="New chat", exact=True).click()
+    expect(page.locator("body")).to_have_class(re.compile(r"\bviewport-panel-open\b"))
+    for height in (500, IPHONE_VIEWPORT["height"]):
+        page.set_viewport_size({"width": IPHONE_VIEWPORT["width"], "height": height})
+        page.wait_for_function(
+            "() => getComputedStyle(document.documentElement)"
+            ".getPropertyValue('--kern-viewport-height').trim() === "
+            "`${visualViewport?.height || innerHeight}px`"
+        )
+        body_height = page.locator("body").evaluate(
+            "element => element.getBoundingClientRect().height"
+        )
+        viewport_height = page.evaluate("() => visualViewport?.height || innerHeight")
+        if abs(body_height - viewport_height) > 1:
+            raise AssertionError(
+                f"iPhone PWA left unused viewport space: body={body_height}, "
+                f"viewport={viewport_height}"
+            )
+
+
+def perform_iphone_edge_swipe(page):
+    return page.evaluate(
+        """() => {
+          const target = document.elementFromPoint(12, 300) || document.body;
+          const send = (type, x, y, active) => {
+            const touch = new Touch({
+              identifier: 1, target, clientX: x, clientY: y,
+              screenX: x, screenY: y, pageX: x, pageY: y,
+            });
+            const event = new TouchEvent(type, {
+              bubbles: true, cancelable: true,
+              touches: active ? [touch] : [],
+              targetTouches: active ? [touch] : [],
+              changedTouches: [touch],
+            });
+            return target.dispatchEvent(event);
+          };
+          const startAllowed = send("touchstart", 12, 300, true);
+          const moveAllowed = send("touchmove", 90, 304, true);
+          send("touchend", 90, 304, false);
+          return { startAllowed, moveAllowed };
+        }"""
+    )
 
 
 def open_mobile_navigation(page) -> None:

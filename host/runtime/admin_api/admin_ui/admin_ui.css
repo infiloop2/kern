@@ -2232,7 +2232,7 @@ a:hover { text-decoration: underline; }
   body.viewport-panel-open {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
-    height: 100dvh;
+    height: var(--kern-viewport-height, 100dvh);
     /* The global 100vh minimum is the large viewport on iOS and otherwise
        defeats 100dvh when the software keyboard contracts the visible area.
        A fixed toolbar row plus a shrinkable content row gives the host exactly
@@ -2359,8 +2359,8 @@ a:hover { text-decoration: underline; }
     transform: translateX(-105%);
     transition: transform 180ms ease;
     width: min(20rem, 86vw);
-    height: 100dvh;
-    max-height: 100dvh;
+    height: var(--kern-viewport-height, 100dvh);
+    max-height: var(--kern-viewport-height, 100dvh);
     -webkit-overflow-scrolling: touch;
     z-index: 160;
   }
@@ -2370,8 +2370,8 @@ a:hover { text-decoration: underline; }
   /* The desktop sidebar leaves room for the top bar. The mobile drawer owns
      the full viewport in every destination, including Chat and Web Apps. */
   body.viewport-panel-open .sidebar {
-    height: 100dvh;
-    max-height: 100dvh;
+    height: var(--kern-viewport-height, 100dvh);
+    max-height: var(--kern-viewport-height, 100dvh);
     top: 0;
   }
 
@@ -2513,6 +2513,10 @@ a:hover { text-decoration: underline; }
 @media (display-mode: standalone) {
   html, body { overscroll-behavior-y: none; }
   .topbar { user-select: none; }
+}
+
+html.iphone-standalone, html.iphone-standalone body {
+  overscroll-behavior-x: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

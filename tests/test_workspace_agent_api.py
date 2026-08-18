@@ -24,6 +24,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class AgentWorkspaceSocketTests(unittest.TestCase):
+    def test_response_cap_can_carry_a_complete_maximum_app_document(self) -> None:
+        self.assertGreater(
+            agent_api.MAX_RESPONSE_BODY_BYTES,
+            2 * web_apps.MAX_DATA_BYTES,
+        )
+
     def start_server(self, *, agent_uids: frozenset[int] | None = None) -> str:
         socket_dir = tempfile.TemporaryDirectory()
         self.addCleanup(socket_dir.cleanup)

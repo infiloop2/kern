@@ -123,7 +123,8 @@ local uid. Path prefixes select Chat or Web Apps; no operator credential or
 identity header is forwarded. Agent calls use the separately
 peer-authenticated `/run/kern-workspace/agent.sock`, not this TCP listener.
 
-The agent, network, and tool event logs each keep the newest 1,000,000 entries.
+The agent event log keeps the newest 10,000,000 entries. The network and tool
+event logs each keep the newest 1,000,000 entries.
 
 `/v1/health` derives network status from policy validity and proxy liveness. If
 the persisted policy cannot be parsed or the proxy process is not listening,

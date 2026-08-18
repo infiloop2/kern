@@ -356,7 +356,7 @@ def _github_api_request_denied(
         if not _github_repo_writable(write_repos, owner, repo):
             return "github_write_repo_required"
         if require_approval:
-            dot_github_denial = _github_dot_github_rest_write_denied(parts, method)
+            dot_github_denial = _github_dot_github_rest_write_denied(parts)
             if dot_github_denial is not None:
                 return dot_github_denial
         return None
@@ -366,11 +366,13 @@ def _github_api_request_denied(
     return "github_write_repo_required"
 
 
-def _github_dot_github_rest_write_denied(parts: list[str], method: str) -> str | None:
+def _github_dot_github_rest_write_denied(parts: list[str]) -> str | None:
     """REST writes that can create a .github-changing commit without entering
     git-receive-pack. Path-specific content writes are denied only when the path
-    is under .github; lower-level object/ref and merge APIs are denied as
-    opaque content-moving surfaces while approval mode is enabled."""
+    is under .github; lower-level object/ref and branch merge APIs are denied as
+    opaque content-moving surfaces while approval mode is enabled. Pull-request
+    merges remain ordinary repository-scoped writes, including when the PR
+    changes .github content."""
     if len(parts) < 4:
         return None
     sub = parts[3]
@@ -381,8 +383,6 @@ def _github_dot_github_rest_write_denied(parts: list[str], method: str) -> str |
     if sub == "git" and len(parts) >= 5 and parts[4] in {"commits", "refs", "trees"}:
         return "github_dot_github_rest_write_denied"
     if sub in {"merges", "merge-upstream"}:
-        return "github_dot_github_rest_write_denied"
-    if sub == "pulls" and method == "PUT" and len(parts) >= 6 and parts[5] == "merge":
         return "github_dot_github_rest_write_denied"
     return None
 

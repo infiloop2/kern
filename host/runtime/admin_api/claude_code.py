@@ -80,8 +80,22 @@ class ClaudeAuthenticationError(ClaudeCodeError):
     pass
 
 
+class ClaudeSessionNotFoundError(ClaudeCodeError):
+    """The requested local Claude session no longer exists."""
+
+
 class ClaudeTimeout(ClaudeCodeError):
     pass
+
+
+_MISSING_SESSION_PATTERNS = (
+    re.compile(r"^session(?:\s+\S+)?\s+(?:was\s+)?not found[.!]?$", re.IGNORECASE),
+    re.compile(r"^no (?:conversation|session) found(?:\s+with\s+session\s+id.*)?[.!]?$", re.IGNORECASE),
+)
+
+
+def _missing_session_error(message: str) -> bool:
+    return any(pattern.fullmatch(message.strip()) for pattern in _MISSING_SESSION_PATTERNS)
 
 
 @dataclass(frozen=True)
@@ -383,6 +397,8 @@ class ClaudeCodeSession:
                         or message.get("subtype")
                         or "Claude turn failed"
                     )
+                    if session_id and _missing_session_error(error):
+                        raise ClaudeSessionNotFoundError(error)
                     raise ClaudeCodeError(error)
                 final = agent_activity.clean_text(
                     message.get("result") or last_message or "Task completed."

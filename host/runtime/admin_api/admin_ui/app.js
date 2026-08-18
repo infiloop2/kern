@@ -52,8 +52,10 @@ let iosInstallTimer = null;
 let iosInstallReturnFocus = null;
 
 function isIPhoneStandalone() {
-  return window.matchMedia("(display-mode: standalone)").matches
-    || window.navigator.standalone === true;
+  return /iPhone/i.test(navigator.userAgent) && (
+    window.matchMedia("(display-mode: standalone)").matches
+    || window.navigator.standalone === true
+  );
 }
 
 function shouldOfferIPhoneInstall() {
@@ -225,6 +227,79 @@ function toggleMobileNav() {
   setMobileNavOpen(!mobileNavOpen, mobileNavOpen);
 }
 
+function bindIPhoneStandaloneSidebarSwipe() {
+  if (!isIPhoneStandalone()) return;
+  document.documentElement.classList.add("iphone-standalone");
+  syncIPhoneStandaloneViewport();
+
+  const edgeWidth = 32;
+  const openDistance = 64;
+  const interactiveRoles = new Set([
+    "button", "checkbox", "combobox", "link", "menuitem", "menuitemcheckbox",
+    "menuitemradio", "option", "radio", "searchbox", "slider", "spinbutton",
+    "switch", "tab", "textbox",
+  ]);
+  let swipe = null;
+
+  document.addEventListener("touchstart", event => {
+    swipe = null;
+    const interactiveTarget = event.composedPath().some(target => {
+      if (!(target instanceof Element)) return false;
+      return target.matches(
+        "button, a[href], input, select, textarea, label, summary, "
+        + "[contenteditable]:not([contenteditable='false']), [draggable='true']",
+      ) || interactiveRoles.has(target.getAttribute("role")) || target.tabIndex >= 0;
+    });
+    if (
+      mobileNavOpen
+      || $("app").hidden
+      || document.body.classList.contains("install-guide-open")
+      || !window.matchMedia(MOBILE_NAV_QUERY).matches
+      || event.touches.length !== 1
+      || interactiveTarget
+    ) return;
+    const touch = event.touches[0];
+    if (touch.clientX > edgeWidth) return;
+    swipe = { identifier: touch.identifier, x: touch.clientX, y: touch.clientY };
+  }, { capture: true, passive: false });
+
+  document.addEventListener("touchmove", event => {
+    if (!swipe) return;
+    const touch = [...event.touches].find(item => item.identifier === swipe.identifier);
+    if (!touch) {
+      swipe = null;
+      return;
+    }
+    const horizontal = touch.clientX - swipe.x;
+    const vertical = Math.abs(touch.clientY - swipe.y);
+    if (horizontal < 0 || vertical > Math.max(24, horizontal)) {
+      swipe = null;
+      return;
+    }
+    // Leave an edge-origin vertical scroll native. Claim only a clearly
+    // horizontal movement, early enough to suppress iOS history navigation.
+    if (horizontal < 10 || horizontal <= vertical) return;
+    if (event.cancelable) event.preventDefault();
+    if (horizontal < openDistance) return;
+    swipe = null;
+    setMobileNavOpen(true);
+  }, { capture: true, passive: false });
+
+  for (const eventName of ["touchend", "touchcancel"]) {
+    document.addEventListener(eventName, () => { swipe = null; }, { capture: true });
+  }
+}
+
+function syncIPhoneStandaloneViewport() {
+  if (!isIPhoneStandalone()) return;
+  // iOS can leave dynamic viewport units at the keyboard-reduced height after
+  // a standalone app transition. The visual viewport reports the actual usable
+  // app window, so give the full-screen workspace a concrete height to return
+  // to without moving or scrolling the viewport itself.
+  const height = window.visualViewport?.height || window.innerHeight;
+  document.documentElement.style.setProperty("--kern-viewport-height", `${height}px`);
+}
+
 function resetPageScroll() {
   window.scrollTo({ top: 0, left: 0, behavior: "instant" });
 }
@@ -242,6 +317,7 @@ function recoverWorkspaceViewport() {
          It does not always restore that pan when Send clears the field or the
          keyboard closes. The workspaces own the visual viewport, so the page
          itself must remain anchored while their internal scrollers move. */
+      syncIPhoneStandaloneViewport();
       resetPageScroll();
       document.documentElement.scrollTop = 0;
       document.body.scrollTop = 0;
@@ -300,6 +376,7 @@ document.addEventListener("focusout", event => {
   }, 0);
 }, true);
 if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", syncIPhoneStandaloneViewport, { passive: true });
   window.visualViewport.addEventListener("resize", recoverWorkspaceViewport, { passive: true });
   window.visualViewport.addEventListener("scroll", recoverWorkspaceViewport, { passive: true });
 }
@@ -331,6 +408,7 @@ function showTab(name, workspaceActionSequence = null) {
     || name === "workspace-global";
   const viewportPanelOpen = workspaceOpen;
   document.body.classList.toggle("viewport-panel-open", viewportPanelOpen);
+  syncIPhoneStandaloneViewport();
   if (!viewportPanelOpen) {
     releaseWorkspaceInputFocus();
   }
@@ -1083,9 +1161,17 @@ document.addEventListener("keydown", event => {
   collapseRuntimeOverview();
   if (mobileNavOpen) setMobileNavOpen(false, true);
 });
-window.addEventListener("resize", () => setMobileNavOpen(mobileNavOpen));
+window.addEventListener("resize", () => {
+  setMobileNavOpen(mobileNavOpen);
+  syncIPhoneStandaloneViewport();
+});
 window.addEventListener("pageshow", () => {
+  syncIPhoneStandaloneViewport();
   if (isIPhoneStandalone()) hideIPhoneInstallUi();
+});
+window.addEventListener("orientationchange", syncIPhoneStandaloneViewport);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") syncIPhoneStandaloneViewport();
 });
 window.addEventListener("popstate", event => {
   const workspaceRoute = workspaceRouteFromLocation();
@@ -1100,6 +1186,7 @@ window.addEventListener("popstate", event => {
     showTab("home");
   }
 });
+bindIPhoneStandaloneSidebarSwipe();
 $("github-credential-mode").addEventListener("change", toggleGithubCredentialMode);
 $("password").addEventListener("keydown", event => { if (event.key === "Enter") login(); });
 $("file-path").addEventListener("keydown", event => { if (event.key === "Enter") goToFilePath(); });

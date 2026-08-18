@@ -908,12 +908,37 @@ class PolicyTests(unittest.TestCase):
             "/repos/infiversehq/kern-tools/git/commits",
             "/repos/infiversehq/kern-tools/merges",
             "/repos/infiversehq/kern-tools/merge-upstream",
-            "/repos/infiversehq/kern-tools/pulls/12/merge",
         ):
             with self.subTest(blocked=blocked):
                 self.assertEqual(
                     github_request_denied(policy, "PUT", "api.github.com", blocked, "", b""),
                     "github_dot_github_rest_write_denied",
+                )
+        # A PR merge is still scoped to an operator-configured write repo.
+        # The one REST route supports both regular and squash merge methods.
+        for merge_method in ("merge", "squash"):
+            body = json.dumps({"merge_method": merge_method}).encode()
+            with self.subTest(merge_method=merge_method):
+                self.assertIsNone(
+                    github_request_denied(
+                        policy,
+                        "PUT",
+                        "api.github.com",
+                        "/repos/infiversehq/kern-tools/pulls/12/merge",
+                        "",
+                        body,
+                    )
+                )
+                self.assertEqual(
+                    github_request_denied(
+                        policy,
+                        "PUT",
+                        "api.github.com",
+                        "/repos/other/repo/pulls/12/merge",
+                        "",
+                        body,
+                    ),
+                    "github_write_repo_required",
                 )
         self.assertIsNone(
             github_request_denied(

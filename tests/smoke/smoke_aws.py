@@ -69,7 +69,7 @@ Environment assumptions (each is checked, with a clear failure if missing):
      docs/development/fresh-aws-smoke.md for how to create a scoped IAM user.
 
 Cost: one t3.small plus a 16 GiB root gp3 volume, a 16 GiB encrypted admin
-volume, and an 8 GiB encrypted agent volume for the few minutes the test runs
+volume, and a 16 GiB encrypted agent volume for the few minutes the test runs
 (about one US cent). The launcher probes cannot incur model inference cost
 because no Bedrock credential exists. Teardown
 removes the instance root volume and all tagged smoke data volumes.
