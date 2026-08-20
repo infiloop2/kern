@@ -36,8 +36,37 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
     def connect(self) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
-        sock.connect(self._socket_path)
+        try:
+            sock.connect(self._socket_path)
+        except OSError:
+            # `close()` only reaches sockets that reached self.sock, so a failed
+            # connect would otherwise leak the descriptor on every retry.
+            sock.close()
+            raise
         self.sock = sock
+
+
+def active_agent_runtimes() -> list[str] | None:
+    """Runtime types the operator has activated.
+
+    `None` means the host could not report activation. Callers must treat that
+    as "unknown" rather than "none active", so a transient status failure
+    narrows nothing: the operator keeps every option a working host offers.
+    """
+    try:
+        response = call_admin_api("GET", "/v1/agent-runtime/status")
+    except WorkspaceError:
+        return None
+    records = response.get("runtimes")
+    if not isinstance(records, list):
+        return None
+    return sorted(
+        record["type"]
+        for record in records
+        if isinstance(record, dict)
+        and isinstance(record.get("type"), str)
+        and record.get("status") == "active"
+    )
 
 
 def call_admin_api(method: str, path: str, body: Any = None) -> dict[str, Any]:

@@ -24,7 +24,7 @@ MIGRATIONS_DIR = REPO_ROOT / "host" / "migrations"
 
 
 class AgenticWebAppContractTests(unittest.TestCase):
-    def test_app_summary_forwards_the_latest_host_event_sequence(self) -> None:
+    def test_app_summary_forwards_the_latest_host_event_and_message_sequences(self) -> None:
         summary = backend._web_app_summary(
             (
                 "app-1",
@@ -42,10 +42,12 @@ class AgenticWebAppContractTests(unittest.TestCase):
                 "effort": "high",
                 "last_used_at": "2026-08-18T10:02:00Z",
                 "latest_event_seq": 42,
+                "latest_message_seq": 40,
             },
         )
 
         self.assertEqual(summary["latest_event_seq"], 42)
+        self.assertEqual(summary["latest_message_seq"], 40)
 
     def test_fixed_workspace_identity(self) -> None:
         self.assertFalse((APP_DIR / "agent.md").exists())

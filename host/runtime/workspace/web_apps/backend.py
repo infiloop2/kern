@@ -25,7 +25,7 @@ from urllib.parse import quote, unquote
 
 from host.constants import MAX_WORKSPACE_RESPONSE_BODY_BYTES
 from host.runtime.core import db
-from host.runtime.workspace.host_api import WorkspaceError, call_admin_api
+from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
 from host.session_options import public_session_options, recorded_session_config, session_config_error
 
 
@@ -148,7 +148,10 @@ def _route_browser(
     query: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     if method == "GET" and path == "/session-options":
-        return {"session_options": public_session_options()}
+        return {
+            "session_options": public_session_options(),
+            "active_runtimes": active_agent_runtimes(),
+        }
     if method == "GET" and path == "/apps":
         return list_web_apps(query or {})
     if method == "POST" and path == "/apps":
@@ -396,6 +399,7 @@ def _web_app_summary(
     status = "idle"
     last_used_at = row[4]
     latest_event_seq = 0
+    latest_message_seq = 0
     if host_summary is not None:
         host_status = host_summary.get("status")
         if host_status not in {"idle", "running"}:
@@ -406,6 +410,7 @@ def _web_app_summary(
         session = _thread_session_config(host_summary)
         last_used_at = str(host_summary.get("last_used_at") or row[4])
         latest_event_seq = max(0, int(host_summary.get("latest_event_seq") or 0))
+        latest_message_seq = max(0, int(host_summary.get("latest_message_seq") or 0))
     return {
         "app_id": row[0],
         "name": row[1],
@@ -414,6 +419,7 @@ def _web_app_summary(
         "updated_at": row[4],
         "last_used_at": last_used_at,
         "latest_event_seq": latest_event_seq,
+        "latest_message_seq": latest_message_seq,
         "session": session,
         "status": status,
         "archived": bool(row[5]),

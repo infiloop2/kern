@@ -156,11 +156,14 @@ class Outbound(Protocol):
     fields are guarded and why.
     """
 
-    def guard_request_parameter_string(self, value: str, *, allow_identifiers: bool = False) -> str:
-        """Guard an agent-controlled free-text request value. ``allow_identifiers=True``
-        skips the personal-identifier rules for a query against an account the
-        operator already connected (a mailbox search), where identifiers are
-        legitimate search syntax; secret/credential shapes are still denied."""
+    def guard_request_parameter_string(
+        self,
+        value: str,
+        *,
+        allow_identifiers: bool = False,
+        allow_machine_tokens: bool = False,
+    ) -> str:
+        """Guard one request value, with narrow identifier and opaque-token exceptions."""
         ...
 
 

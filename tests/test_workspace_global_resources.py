@@ -14,8 +14,9 @@ from unittest.mock import patch
 import pg_harness
 
 from host.runtime.core import db
-from host.runtime.workspace import agent_api, memory, schedules
+from host.runtime.workspace import agent_api, getting_started, memory, schedules
 from host.runtime.workspace.host_api import WorkspaceError
+from host.runtime.workspace.web_apps import backend as web_apps
 
 
 SESSION = {
@@ -45,6 +46,68 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
         self.addCleanup(db.close_pool)
+
+    def test_onboarding_status_is_derived_from_live_resources(self) -> None:
+        active = patch.object(
+            getting_started, "active_agent_runtimes", return_value=["codex"]
+        )
+        with active:
+            status = getting_started.completion_status()
+        self.assertEqual(
+            status,
+            {
+                "provider_ready": True,
+                "chat_created": False,
+                "app_created": False,
+                "schedule_created": False,
+                "dismissed": False,
+            },
+        )
+
+        # Chat writes this row while sending, and it is the Workspace-owned
+        # signal the checklist is allowed to read.
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO chat_threads (thread_id, archived)"
+                " VALUES ('thread-7', FALSE)"
+            )
+
+        web_apps.create_web_app()
+        schedules.create_schedule(
+            {
+                "name": "Daily plan",
+                "message": "Review priorities",
+                "cadence": "daily",
+                "interval_minutes": None,
+                "daily_time": "09:00",
+                **SESSION,
+            },
+            actor="user",
+        )
+
+        with active:
+            self.assertEqual(
+                getting_started.completion_status(),
+                {
+                    "provider_ready": True,
+                    "chat_created": True,
+                    "app_created": True,
+                    "schedule_created": True,
+                    "dismissed": False,
+                },
+            )
+
+        # Nothing is latched: deactivating every provider takes the first step
+        # back to incomplete rather than leaving a stale tick behind.
+        with patch.object(getting_started, "active_agent_runtimes", return_value=[]):
+            self.assertIs(
+                getting_started.completion_status()["provider_ready"], False
+            )
+
+        with active:
+            self.assertIs(getting_started.dismiss()["dismissed"], True)
+            # Dismissing twice stays a no-op rather than raising on the key.
+            self.assertIs(getting_started.dismiss()["dismissed"], True)
 
     def test_memory_is_global_paged_linked_searchable_and_revision_guarded(self) -> None:
         first = memory.save_page(

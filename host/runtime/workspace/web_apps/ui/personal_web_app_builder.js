@@ -37,6 +37,7 @@ const textDecoder = new TextDecoder();
 let requestCounter = 0;
 const localFiles = new Map();
 let sessionOptions = {};
+let activeRuntimes = null;
 let apps = [];
 let selectedAppId = null;
 let selectedAppName = null;
@@ -2237,6 +2238,9 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
     || hasOversizedAttachment
     || !modelSelect.value
     || !effortSelect.value
+    // A deactivated runtime cannot run the message, so sending it would only
+    // surface a host rejection after the fact.
+    || !runtimeRunnable($("runtime").value)
   );
   const composerSending = messageBusyApps.has(selectedAppId);
   $("send-message").classList.toggle("sending", composerSending);
@@ -2255,19 +2259,46 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
   );
 }
 
+// Two different questions. Null active runtimes means the host could not
+// report activation, so neither gate applies: an unknown status must never
+// hide a usable provider or block sending.
+
+// Can it be shown as the selection? Only a session the app actually ran with
+// keeps its runtime here after that provider is turned off, so the settings
+// still show the truth. An unconfigured app has no such claim: it opens on a
+// fallback nobody chose, which must not be dressed up as usable.
+function runtimeSelectable(runtime) {
+  if (!Array.isArray(activeRuntimes)) return true;
+  if (establishedSession && runtime === establishedSession.agent_runtime) return true;
+  return activeRuntimes.includes(runtime);
+}
+
+// Can the host actually run it? A deactivated runtime is refused on admission,
+// so an established session gets no exemption here: displaying its recorded
+// configuration is honest, offering to send another message on it is not.
+function runtimeRunnable(runtime) {
+  if (!Array.isArray(activeRuntimes)) return true;
+  return activeRuntimes.includes(runtime);
+}
+
 function setRuntimeOptions(preferredRuntime = null) {
   const labels = { codex: "Codex", claude_code: "Claude Code", hermes: "Hermes" };
   const current = preferredRuntime || $("runtime").value;
   const runtimes = Object.keys(sessionOptions);
   if (current && !runtimes.includes(current)) runtimes.push(current);
-  $("runtime").replaceChildren(...runtimes.map(
-    value => new Option(labels[value] || value, value)
-  ));
+  $("runtime").replaceChildren(...runtimes.map(value => {
+    const label = labels[value] || value;
+    const available = runtimeSelectable(value);
+    const option = new Option(available ? label : `${label} (not activated)`, value);
+    option.disabled = !available;
+    return option;
+  }));
   if (runtimes.includes(current)) $("runtime").value = current;
 }
 
 function defaultSessionConfig() {
-  const runtime = Object.keys(sessionOptions)[0] || "";
+  const offered = Object.keys(sessionOptions);
+  const runtime = offered.find(runtimeRunnable) || offered[0] || "";
   const models = sessionOptions[runtime] || {};
   const model = Object.keys(models)[0] || "";
   const effort = (models[model] || [])[0] || "";
@@ -2407,13 +2438,17 @@ function applyPendingAppVersion() {
 function markSelectedAppSeen() {
   if (!selectedAppId || renderedRevision < 0) return;
   const listed = apps.find(app => app.app_id === selectedAppId);
-  const renderedEventSeq = Number(activeConversationEventPage().newestSeq) || 0;
+  const renderedMessageSeq = conversationEvents.reduce((latest, event) => (
+    event.event_type === "thread.message"
+      ? Math.max(latest, Number(event.seq) || 0)
+      : latest
+  ), 0);
   window.KernHost.markWorkspaceSeen("apps", {
     app_id: selectedAppId,
     last_used_at: listed?.last_used_at || snapshot.app?.updated_at || "",
-    latest_event_seq: Math.max(
-      Number(listed?.latest_event_seq) || 0,
-      renderedEventSeq,
+    latest_message_seq: Math.max(
+      Number(listed?.latest_message_seq) || 0,
+      renderedMessageSeq,
     ),
     revision: renderedRevision,
   });
@@ -2568,9 +2603,34 @@ async function refreshSelectedApp(appId = selectedAppId) {
   markSelectedAppSeen();
 }
 
+// Connecting a provider from Home must reach an already-mounted panel without
+// a page reload. The option matrix itself is static, so only a change in
+// activation is re-rendered, leaving a model or effort mid-edit alone.
+async function refreshRuntimeActivation(refreshSequence) {
+  if (!Object.keys(sessionOptions).length) return;
+  const options = await api("GET", "/session-options");
+  if (refreshSequence !== appsRefreshSequence) return;
+  const nextActive = Array.isArray(options.active_runtimes) ? options.active_runtimes : null;
+  if (JSON.stringify(nextActive) === JSON.stringify(activeRuntimes)) return;
+  activeRuntimes = nextActive;
+  // An unconfigured app opens on a fallback nobody chose. If activation has
+  // since made a different runtime usable, move onto it and rebuild the model
+  // and effort with it, so connecting a provider makes an already-mounted app
+  // runnable without reopening it. An established session is left alone: its
+  // recorded configuration is a fact about what the app ran with.
+  if (!establishedSession && !runtimeRunnable($("runtime").value)) {
+    const opening = defaultSessionConfig();
+    setRuntimeOptions(opening.agent_runtime || null);
+    setSessionOptions(opening.model, opening.effort);
+    return;
+  }
+  setRuntimeOptions($("runtime").value || null);
+}
+
 async function refresh() {
   const refreshSequence = ++appsRefreshSequence;
   try {
+    await refreshRuntimeActivation(refreshSequence);
     const response = await api("GET", "/apps");
     if (refreshSequence !== appsRefreshSequence) return;
     apps = response.apps || [];
@@ -2728,6 +2788,7 @@ async function initialize() {
   try {
     const options = await api("GET", "/session-options");
     sessionOptions = options.session_options || {};
+    activeRuntimes = Array.isArray(options.active_runtimes) ? options.active_runtimes : null;
     setRuntimeOptions();
     setSessionOptions();
   } catch (_error) {

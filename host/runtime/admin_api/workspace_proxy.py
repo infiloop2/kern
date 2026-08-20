@@ -21,6 +21,7 @@ from host.runtime.core import host_errors
 
 PROXY_TIMEOUT_SECONDS = WORKSPACE_ADMIN_API_TIMEOUT_SECONDS + 10
 ROUTE_PREFIXES = {
+    "/v1/workspace/getting-started": "/getting-started",
     "/v1/workspace/chat": "/chat",
     "/v1/workspace/web-apps": "/apps",
     "/v1/workspace/memory": "/memory",

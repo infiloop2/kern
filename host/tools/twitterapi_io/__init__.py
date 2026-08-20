@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any, cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
@@ -20,7 +21,8 @@ from host.tools.manifest import (
     ToolManifest,
 )
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
-from host.tools.shared.inputs import ToolInputValidationError, schema
+from host.tools.shared.inputs import ToolInputValidationError, int_field, schema
+from host.tools.shared.oauth2 import now
 from host.tools.shared.web import (
     UnmappedProviderError,
     WebRequestError,
@@ -32,11 +34,18 @@ from host.tools.shared.web import (
 from host.tools.tool import Tool
 
 SEARCH_ENDPOINT = "https://api.twitterapi.io/twitter/tweet/advanced_search"
-MAX_QUERY_CHARS = 100
+MAX_QUERY_CHARS = 512
+MAX_WIRE_QUERY_CHARS = 1_024
 MAX_POSTS = 20
+DEFAULT_MAX_RESULTS = 10
+DEFAULT_LOOKBACK_HOURS = 7 * 24
+MAX_LOOKBACK_HOURS = 30 * 24
+MAX_EXCLUDED_USERNAMES = 10
 MAX_POST_TEXT_CHARS = 25_000
 QUERY_TYPES = frozenset({"Latest", "Top"})
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+EXCLUDE_REPLY_RE = re.compile(r"(?<!\S)-(?:is:reply|filter:replies)(?!\S)")
+EXCLUDE_RETWEET_RE = re.compile(r"(?<!\S)-(?:is:retweet|filter:nativeretweets)(?!\S)")
 
 OUTPUT_SCHEMA: JSONObject = {
     "type": "object",
@@ -58,12 +67,14 @@ MANIFEST = ToolManifest(
             id="search_tweets",
             description=(
                 "Run one bounded public-post search using X advanced-search syntax. "
-                "The query is limited to 100 characters and one provider page of at most 20 posts."
+                "Accepts queries up to 512 characters, defaults to the last seven days, and "
+                "returns a caller-selected maximum of 1-20 posts from one provider page."
             ),
             data_policy=(
-                "Sends the guarded search query (at most 100 characters), Latest/Top selection, "
-                "and the configured API key to TwitterAPI.io. Returns at most 20 public X posts "
-                "from one read-only request; runs directly with no approval."
+                "Sends the guarded search query (at most 512 characters), Latest/Top selection, "
+                "structured recency and exclusion controls, and the configured API key to "
+                "TwitterAPI.io. One read-only request can return and bill up to 20 public X posts; "
+                "max_results only bounds what Kern returns to the agent. Runs directly with no approval."
             ),
             input_schema=schema(
                 {
@@ -71,12 +82,42 @@ MANIFEST = ToolManifest(
                         "type": "string",
                         "description": (
                             "Public X advanced-search expression, including operators such as "
-                            "from:, lang:, quotes, OR, and exclusions; 1-100 characters."
+                            "from:, lang:, quotes, OR, and exclusions; 1-512 characters. "
+                            "Kern translates -is:reply and -is:retweet to provider syntax."
                         ),
                     },
                     "query_type": {
                         "type": "string",
                         "description": "Latest (default) or Top.",
+                    },
+                    "max_results": {
+                        "type": "string",
+                        "description": (
+                            "1-20; maximum posts Kern returns (default 10). The provider can still return "
+                            "and bill up to 20 posts for its one fixed-size page."
+                        ),
+                    },
+                    "lookback_hours": {
+                        "type": "string",
+                        "description": (
+                            "0-720; only return posts this many hours old or newer "
+                            "(default 168; 0 disables). "
+                            "Kern sends the provider-supported since_time operator."
+                        ),
+                    },
+                    "exclude_replies": {
+                        "type": "boolean",
+                        "description": "Exclude replies in the provider query and defensively from its response.",
+                    },
+                    "exclude_retweets": {
+                        "type": "boolean",
+                        "description": "Exclude native retweets in the provider query and defensively from its response.",
+                    },
+                    "exclude_usernames": {
+                        "type": "array",
+                        "maxItems": MAX_EXCLUDED_USERNAMES,
+                        "items": {"type": "string"},
+                        "description": "Up to 10 X usernames to exclude with provider -from: filters.",
                     },
                 },
                 ["query"],
@@ -93,12 +134,13 @@ MANIFEST = ToolManifest(
     protections=(
         "Read-only: the tool cannot post, like, follow, message, or change an X account.",
         (
-            "Each action makes exactly one fixed-endpoint request and returns at most 20 posts; "
-            "there is no agent-controlled cursor or pagination loop."
+            "Each action makes exactly one fixed-endpoint request. The provider can return and bill "
+            "up to 20 posts; Kern returns at most max_results and exposes the provider read count. "
+            "There is no agent-controlled cursor or pagination loop."
         ),
         (
-            "Search text is rejected above 100 characters and passes the host parameter guard "
-            "before it leaves the host."
+            "Base search text is rejected above 512 characters and passes the host parameter "
+            "guard before Kern appends strictly validated typed filters."
         ),
         "The API key remains in write-only host config and is never returned to the agent.",
         PARAM_GUARD_PROTECTION,
@@ -140,8 +182,9 @@ MANIFEST = ToolManifest(
                     DataSummaryPoint(
                         label="Search",
                         text=(
-                            "The trimmed query text (1-100 characters) passes once as free text "
-                            "through the full default host parameter guard before leaving: "
+                            "The trimmed query text (1-512 characters) passes once as free text through "
+                            "the full default host parameter guard before Kern translates supported "
+                            "operators and appends strictly validated recency and exclusion controls: "
                             "secret, credential, personal-identifier, encoded, and random-looking "
                             "shapes are denied. "
                             "The accepted query and strict Latest/Top selection leave in one request."
@@ -208,14 +251,70 @@ MANIFEST = ToolManifest(
         ),
     ),
     agent_notes=(
-        "Use this tool for inexpensive public-post discovery when it is enabled. It returns one "
-        "page only; narrow the query instead of trying to paginate. Use the official X tool for "
-        "connected-account reads, profile counts, or actions this tool does not provide."
+        "Use this tool for inexpensive public-post discovery when it is enabled. For parity with "
+        "official X discovery, pass the full query (up to 512 characters), set max_results, choose "
+        "the narrowest useful lookback_hours, and use the structured reply/retweet/username "
+        "exclusions. It returns one provider page only; provider_posts_returned and "
+        "billable_post_reads can exceed the displayed posts because TwitterAPI.io has no page-size "
+        "parameter. Use the official X tool for connected-account reads, profile counts, or actions "
+        "this tool does not provide."
     ),
 )
 
 
-def _search_parameters(tool_input: JSONObject, api: HostAPI) -> dict[str, str]:
+@dataclass(frozen=True)
+class SearchRequest:
+    parameters: dict[str, str]
+    max_results: int
+    exclude_replies: bool
+    exclude_retweets: bool
+
+
+def _boolean_field(tool_input: JSONObject, key: str) -> bool:
+    value = tool_input.get(key, False)
+    if not isinstance(value, bool):
+        raise ToolInputValidationError(f"TwitterAPI.io tool_input.{key} must be a boolean.")
+    return value
+
+
+def _excluded_usernames(tool_input: JSONObject, api: HostAPI) -> list[str]:
+    value = tool_input.get("exclude_usernames", [])
+    if not isinstance(value, list) or len(value) > MAX_EXCLUDED_USERNAMES:
+        raise ToolInputValidationError(
+            f"TwitterAPI.io tool_input.exclude_usernames must contain at most {MAX_EXCLUDED_USERNAMES} usernames."
+        )
+    usernames: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ToolInputValidationError(
+                "TwitterAPI.io tool_input.exclude_usernames contains an invalid X username."
+            )
+        username = _username(api.outbound.guard_request_parameter_string(item))
+        if not username:
+            raise ToolInputValidationError(
+                "TwitterAPI.io tool_input.exclude_usernames contains an invalid X username."
+            )
+        lowercase = username.lower()
+        if lowercase not in usernames:
+            usernames.append(lowercase)
+    return usernames
+
+
+def _search_request(tool_input: JSONObject, api: HostAPI) -> SearchRequest:
+    supported = {
+        "query",
+        "query_type",
+        "max_results",
+        "lookback_hours",
+        "exclude_replies",
+        "exclude_retweets",
+        "exclude_usernames",
+    }
+    extra = set(tool_input) - supported
+    if extra:
+        raise ToolInputValidationError(
+            "TwitterAPI.io search tool input contains unsupported fields."
+        )
     raw_query = tool_input.get("query")
     if not isinstance(raw_query, str) or not raw_query.strip():
         raise ToolInputValidationError("TwitterAPI.io query is required.")
@@ -224,13 +323,60 @@ def _search_parameters(tool_input: JSONObject, api: HostAPI) -> dict[str, str]:
         raise ToolInputValidationError(
             f"TwitterAPI.io query must be at most {MAX_QUERY_CHARS} characters."
         )
+    query = api.outbound.guard_request_parameter_string(query)
     query_type = tool_input.get("query_type", "Latest")
     if not isinstance(query_type, str) or query_type not in QUERY_TYPES:
         raise ToolInputValidationError("TwitterAPI.io query_type must be Latest or Top.")
-    return {
-        "query": api.outbound.guard_request_parameter_string(query),
-        "queryType": query_type,
-    }
+    max_results = int_field(
+        tool_input,
+        "max_results",
+        provider="TwitterAPI.io",
+        default=DEFAULT_MAX_RESULTS,
+        low=1,
+        high=MAX_POSTS,
+    )
+    lookback_hours = int_field(
+        tool_input,
+        "lookback_hours",
+        provider="TwitterAPI.io",
+        default=DEFAULT_LOOKBACK_HOURS,
+        low=0,
+        high=MAX_LOOKBACK_HOURS,
+    )
+    exclude_replies = _boolean_field(tool_input, "exclude_replies") or bool(
+        EXCLUDE_REPLY_RE.search(query)
+    )
+    exclude_retweets = _boolean_field(tool_input, "exclude_retweets") or bool(
+        EXCLUDE_RETWEET_RE.search(query)
+    )
+    query = re.sub(r"(?<!\S)-is:reply(?!\S)", "-filter:replies", query)
+    query = re.sub(r"(?<!\S)-is:retweet(?!\S)", "-filter:nativeretweets", query)
+    suffixes: list[str] = []
+    if exclude_replies and "-filter:replies" not in query.split():
+        suffixes.append("-filter:replies")
+    if exclude_retweets and "-filter:nativeretweets" not in query.split():
+        suffixes.append("-filter:nativeretweets")
+    suffixes.extend(f"-from:{username}" for username in _excluded_usernames(tool_input, api))
+    if lookback_hours and not re.search(r"(?<!\S)since_time:\d+(?!\S)", query):
+        suffixes.append(f"since_time:{now() - lookback_hours * 3600}")
+    provider_query = " ".join((query, *suffixes))
+    if len(provider_query) > MAX_WIRE_QUERY_CHARS:
+        raise ToolInputValidationError(
+            f"TwitterAPI.io query plus structured filters must be at most {MAX_WIRE_QUERY_CHARS} characters."
+        )
+    return SearchRequest(
+        parameters={
+            "query": provider_query,
+            "queryType": query_type,
+        },
+        max_results=max_results,
+        exclude_replies=exclude_replies,
+        exclude_retweets=exclude_retweets,
+    )
+
+
+def _search_parameters(tool_input: JSONObject, api: HostAPI) -> dict[str, str]:
+    return _search_request(tool_input, api).parameters
 
 
 def _search(api_key: str, parameters: dict[str, str]) -> dict[str, Any]:
@@ -318,20 +464,41 @@ def _normalized_post(value: object) -> JSONObject | None:
         "author_username": author_username,
         "author_name": _clipped_string(author.get("name"), 256),
         "public_metrics": metrics,
+        "is_reply": value.get("isReply") is True or bool(_numeric_id(value.get("inReplyToId"))),
+        "is_retweet": value.get("type") == "retweet"
+        or isinstance(value.get("retweeted_tweet"), dict)
+        or text.startswith("RT @"),
     }
     return result
 
 
-def _normalized_posts(response: dict[str, Any]) -> list[JSONObject]:
+def _normalized_posts(
+    response: dict[str, Any],
+    *,
+    max_results: int,
+    exclude_replies: bool,
+    exclude_retweets: bool,
+) -> tuple[list[JSONObject], int, int, int]:
     raw_posts = response.get("tweets")
     if not isinstance(raw_posts, list):
         raise RuntimeError("TwitterAPI.io returned an invalid search response.")
-    posts: list[JSONObject] = []
-    for value in raw_posts[:MAX_POSTS]:
+    provider_posts = raw_posts[:MAX_POSTS]
+    eligible: list[JSONObject] = []
+    filtered = 0
+    for value in provider_posts:
         normalized = _normalized_post(value)
-        if normalized is not None:
-            posts.append(normalized)
-    return posts
+        if normalized is None:
+            filtered += 1
+            continue
+        if exclude_replies and normalized["is_reply"] is True:
+            filtered += 1
+            continue
+        if exclude_retweets and normalized["is_retweet"] is True:
+            filtered += 1
+            continue
+        eligible.append(normalized)
+    truncated = max(0, len(eligible) - max_results)
+    return eligible[:max_results], len(provider_posts), filtered, truncated
 
 
 class TwitterApiIoTool(Tool):
@@ -347,14 +514,27 @@ class TwitterApiIoTool(Tool):
         if action != "search_tweets":
             return ActionFailed("Unsupported TwitterAPI.io action.")
         try:
-            parameters = _search_parameters(tool_input, api)
-            response = _search(api.config["TWITTERAPI_IO_API_KEY"], parameters)
-            posts = _normalized_posts(response)
+            request = _search_request(tool_input, api)
+            response = _search(api.config["TWITTERAPI_IO_API_KEY"], request.parameters)
+            posts, provider_posts, filtered, truncated = _normalized_posts(
+                response,
+                max_results=request.max_results,
+                exclude_replies=request.exclude_replies,
+                exclude_retweets=request.exclude_retweets,
+            )
             result: JSONObject = {
                 "status": "success_executed",
-                "message": f"TwitterAPI.io returned {len(posts)} public post(s).",
-                "query": parameters["query"],
-                "query_type": parameters["queryType"],
+                "message": (
+                    f"TwitterAPI.io returned {len(posts)} public post(s) from "
+                    f"{provider_posts} provider result(s)."
+                ),
+                "provider": "twitterapi_io",
+                "query": request.parameters["query"],
+                "query_type": request.parameters["queryType"],
+                "provider_posts_returned": provider_posts,
+                "billable_post_reads": max(1, provider_posts),
+                "locally_filtered_posts": filtered,
+                "locally_truncated_posts": truncated,
                 "posts": cast(list[JSONValue], posts),
             }
             return ActionExecuted(result)

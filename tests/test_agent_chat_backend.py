@@ -62,7 +62,10 @@ class AgentChatBackendTests(unittest.TestCase):
                         "qwen.qwen3-coder-next": ["high"],
                         "moonshotai.kimi-k2.5": ["high"],
                     },
-                }
+                },
+                # No admin socket in this test, so activation is unknown and the
+                # UI gates nothing rather than hiding every provider.
+                "active_runtimes": None,
             },
         )
 
@@ -497,6 +500,7 @@ class AgentChatBackendTests(unittest.TestCase):
                     "effort": "high",
                     "last_used_at": "2026-07-17T10:00:00Z",
                     "latest_event_seq": 12,
+                    "latest_message_seq": 10,
                     "status": "running",
                 },
                 {
@@ -547,6 +551,7 @@ class AgentChatBackendTests(unittest.TestCase):
         self.assertEqual(first["status"], "running")
         self.assertEqual(first["name"], "Customer launch")
         self.assertEqual(first["latest_event_seq"], 12)
+        self.assertEqual(first["latest_message_seq"], 10)
         self.assertFalse(first["archived"])
         self.assertEqual(response["threads"][1]["status"], "idle")
 

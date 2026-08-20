@@ -166,7 +166,7 @@ def _without_thread_activity_markers(response: dict[str, Any]) -> dict[str, Any]
     thread = {
         key: value
         for key, value in response["thread"].items()
-        if key not in {"last_used_at", "latest_event_seq"}
+        if key not in {"last_used_at", "latest_event_seq", "latest_message_seq"}
     }
     return {**response, "thread": thread}
 
@@ -385,7 +385,8 @@ class AdminUiStaticTests(unittest.TestCase):
             'window.addEventListener("storage"', 1
         )[0]
         self.assertNotIn("workspaceLastSeen.active", mark_seen)
-        self.assertIn("Number(item.latest_event_seq)", app)
+        self.assertIn("Number(item.latest_message_seq)", app)
+        self.assertNotIn("Number(item.latest_event_seq)", app)
         self.assertIn("current.activity > (Number(seen.activity) || 0)", app)
         self.assertIn("current.revision > (Number(seen.revision) || 0)", app)
         self.assertIn("mergeWorkspaceLastSeen(loadWorkspaceLastSeen(), workspaceLastSeen)", app)
@@ -393,12 +394,23 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('initializeArchivedWorkspaceLastSeen("apps", webAppNavItems, webAppsNavArchived)', app)
         self.assertIn('dot.setAttribute("aria-label", "New activity")', app)
         self.assertIn("document.visibilityState !== \"visible\"", app)
-        self.assertIn('window.KernHost.markWorkspaceSeen("chat", visibleThread)', chat)
+        open_chat = app.split("async function openWorkspaceChat", 1)[1].split(
+            "async function findWebAppNavItem", 1
+        )[0]
+        self.assertNotIn('markWorkspaceSeen("chat"', open_chat)
+        self.assertIn('window.KernHost.markWorkspaceSeen("chat", {', chat)
+        self.assertIn("latest_message_seq: acknowledgedMessageSeq", chat)
+        self.assertIn(
+            '["thread.message", "thread.memory_cleared"].includes(event.event_type)',
+            chat,
+        )
+        self.assertIn("markSelectedThreadSeen({ thread_id: threadId });", chat)
         self.assertIn("const refreshedThreadId = selectedThreadId;", chat)
         self.assertIn("if (rendered && selectedThreadId === refreshedThreadId && visibleThread)", chat)
         self.assertIn('window.KernHost.markWorkspaceSeen("apps", {', web_apps)
-        self.assertIn("Number(listed?.latest_event_seq) || 0", web_apps)
-        self.assertIn("renderedEventSeq", web_apps)
+        self.assertIn("Number(listed?.latest_message_seq) || 0", web_apps)
+        self.assertIn("renderedMessageSeq", web_apps)
+        self.assertIn('event.event_type === "thread.message"', web_apps)
         self.assertIn("revision: renderedRevision", web_apps)
         self.assertIn(".workspace-nav-unseen {", admin_css)
 
@@ -814,6 +826,52 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn(".home-upgrade-notice {", css)
         self.assertIn(".upgrade-popover {", css)
         self.assertNotIn(".upgrade-notice:hover .upgrade-popover", css)
+
+    def test_home_getting_started_checklist_uses_durable_progress_and_chat_prompts(self) -> None:
+        root = Path(__file__).parents[1]
+        runtime = root / "host/runtime/admin_api"
+        html = (runtime / "admin_ui/index.html").read_text()
+        app = (runtime / "admin_ui/app.js").read_text()
+        checklist = (runtime / "admin_ui/getting_started.js").read_text()
+        chat = (root / "host/runtime/workspace/chat/ui/agent_chat.js").read_text()
+        css = (runtime / "admin_ui/admin_ui.css").read_text()
+
+        self.assertLess(html.index('id="getting-started"'), html.index("Host health"))
+        self.assertIn('/v1/workspace/getting-started', checklist)
+        # All four steps read the same server-derived payload; none of them is
+        # recomputed in the browser from cached runtime records.
+        for step in ("provider_ready", "chat_created", "app_created", "schedule_created"):
+            self.assertIn(f"workspaceStatus.{step} === true", checklist)
+        self.assertNotIn("RUNTIME_PROVIDERS", checklist)
+        # Dismissal is a host decision, not a per-browser one, so it must go to
+        # the server rather than to local storage.
+        self.assertNotIn("localStorage", checklist)
+        self.assertIn(
+            'api("POST", "/v1/workspace/getting-started/dismiss")',
+            checklist,
+        )
+        self.assertIn("workspaceStatus.dismissed === true", checklist)
+        self.assertIn(
+            'workspaceStatus = await api("GET", "/v1/workspace/getting-started")',
+            checklist,
+        )
+        self.assertIn('data-guide="openai"', checklist)
+        self.assertIn('data-guide="claude"', checklist)
+        self.assertIn('data-guide="bedrock"', checklist)
+        self.assertIn('data-action="getting-started-prompt"', checklist)
+        self.assertIn("Ask your agent to create an app", checklist)
+        self.assertIn("Ask your agent to create a schedule", checklist)
+        self.assertIn("Create a daily 09:00 UTC schedule", checklist)
+        self.assertNotIn("Create a weekday", checklist)
+        self.assertIn("refreshGettingStarted()", app)
+        self.assertIn("window.KernChat.newThread(prompt)", app)
+        self.assertIn('newThread(prompt = "")', chat)
+        # A starter prompt replaces an unsent draft outright; no confirmation.
+        self.assertNotIn("Replace your unsent new-chat draft", chat)
+        self.assertIn("saveComposerDraft();", chat)
+        self.assertIn(".getting-started-progress", css)
+        self.assertIn(".getting-started-step.complete", css)
+        self.assertNotIn("style=", checklist)
 
     def test_icons_have_intrinsic_sizes_and_share_the_favicon_asset(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
@@ -2893,6 +2951,36 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(body, {"status": "ok"})
         self.assertEqual(captured["request"][1], "/memory?limit=50")
 
+        with patch("host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection", FakeConnection):
+            body = workspace_api_proxy.route_request(
+                "GET", "/v1/workspace/getting-started", {}, None
+            )
+        self.assertEqual(body, {"status": "ok"})
+        self.assertEqual(captured["request"][1], "/getting-started")
+
+    def test_admin_router_dispatches_getting_started_to_workspace(self) -> None:
+        expected = {
+            "chat_created": False,
+            "app_created": False,
+            "schedule_created": False,
+        }
+        with patch.object(
+            workspace_api_proxy,
+            "route_request",
+            return_value=expected,
+        ) as proxy:
+            response = admin_api.route(
+                "GET",
+                "/v1/workspace/getting-started",
+                {},
+                None,
+                principal=admin_api.OperatorPrincipal("test-session"),
+            )
+        self.assertEqual(response, expected)
+        proxy.assert_called_once_with(
+            "GET", "/v1/workspace/getting-started", {}, None
+        )
+
     def test_workspace_proxy_warns_on_invalid_backend_response(self) -> None:
         class FakeResponse:
             status = 200
@@ -4134,6 +4222,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "last_used_at",
                 "status",
                 "latest_event_seq",
+                "latest_message_seq",
             },
         )
 
@@ -4205,6 +4294,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "last_used_at": "2026-06-08T00:00:03Z",
                 "status": "idle",
                 "latest_event_seq": 0,
+                "latest_message_seq": 0,
             },
         )
 
@@ -6881,7 +6971,7 @@ class ToolRoutesTests(unittest.TestCase):
         read = next(action for action in gmail["actions"] if action["id"] == "read_message")
         self.assertEqual(read["approval"], "direct")
         self.assertTrue(all(gmail["protections"]))
-        self.assertEqual(gmail["technical_details"], [])
+        self.assertIn("parameter guard", " ".join(gmail["technical_details"]).lower())
         self.assertGreaterEqual(len(gmail["setup_steps"]), 5)
         self.assertIn("Google Cloud", gmail["setup_steps"][0]["description"])
         self.assertTrue(any(step["image_path"] for step in gmail["setup_steps"]))

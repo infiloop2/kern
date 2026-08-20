@@ -31,6 +31,7 @@ from host.tools.shared.oauth2 import (
     access_token_is_fresh,
     clear_if_still_loaded,
     now,
+    require_scopes,
     signed_state,
     verify_state,
 )
@@ -332,6 +333,7 @@ class LinkedInCredentialStore:
         existing = api.credentials.load()
         if existing is None:
             raise IntegrationReconnectRequired(LINKEDIN_RECONNECT_MESSAGE)
+        require_scopes(api, existing, REQUIRED_LINKEDIN_SCOPES, reconnect_message=LINKEDIN_RECONNECT_MESSAGE)
         payload = cast(Mapping[str, object], existing["secret"])
         if not access_token_is_fresh(payload, now()):
             clear_if_still_loaded(api, existing)

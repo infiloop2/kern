@@ -279,6 +279,15 @@ class XToolReadTests(unittest.TestCase):
         assert isinstance(result, ActionFailed)
         self.assertTrue(result.reconnect_required)
 
+    def test_missing_scope_requires_reconnect(self) -> None:
+        api = connected_api()
+        assert api.credentials.record is not None
+        api.credentials.record["account"]["scopes"] = ["tweet.read", "offline.access"]
+        result = XTool().execute("search_tweets", {"query": "x"}, api)
+        assert isinstance(result, ActionFailed)
+        self.assertTrue(result.reconnect_required)
+        self.assertIsNone(api.credentials.load())
+
     def test_not_connected_maps_to_reconnect(self) -> None:
         api = FakeHostAPI()
         api.config["X_OAUTH_CLIENT_ID"] = "x-client"

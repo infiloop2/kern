@@ -17,6 +17,7 @@
     selected: null,
     creating: false,
     sessionOptions: null,
+    activeRuntimes: null,
     sequence: 0,
   };
 
@@ -362,10 +363,15 @@
     }
   }
 
+  // Re-read every time the schedule form is rendered: connecting a provider
+  // from Home must reach an already-mounted panel without a page reload. The
+  // option matrix itself is static, so only activation can change.
   async function ensureSessionOptions() {
-    if (state.sessionOptions) return;
     const response = await api("GET", "/schedules/session-options");
     state.sessionOptions = response.session_options;
+    state.activeRuntimes = Array.isArray(response.active_runtimes)
+      ? response.active_runtimes
+      : null;
   }
 
   function resetScheduleForm() {
@@ -411,10 +417,27 @@
     renderRuns(runs.runs || [], false, runs.next_before);
   }
 
+  // Kern runs the script runtime itself, so it is never an operator-connected
+  // provider and is never gated. Unknown activation gates nothing, and a saved
+  // schedule keeps its own runtime selectable after that provider is turned off.
+  function scheduleRuntimeUnavailable(value, current) {
+    if (value === SCRIPT_RUNTIME || value === current) return false;
+    if (!Array.isArray(state.activeRuntimes)) return false;
+    return !state.activeRuntimes.includes(value);
+  }
+
   function syncSessionSelectors(runtime, model, effort) {
     if (!state.sessionOptions) return;
     const runtimes = Object.keys(state.sessionOptions);
-    fillSelect($("schedule-runtime"), runtimes, runtime || runtimes[0]);
+    const chosen = runtime
+      || runtimes.find(value => !scheduleRuntimeUnavailable(value, null))
+      || runtimes[0];
+    fillSelect(
+      $("schedule-runtime"),
+      runtimes,
+      chosen,
+      value => scheduleRuntimeUnavailable(value, runtime),
+    );
     const selectedRuntime = $("schedule-runtime").value;
     const models = Object.keys(state.sessionOptions[selectedRuntime] || {});
     fillSelect($("schedule-model"), models, model && models.includes(model) ? model : models[0]);
@@ -434,12 +457,14 @@
     resizeTextarea("schedule-message");
   }
 
-  function fillSelect(select, values, selected) {
+  function fillSelect(select, values, selected, unavailable = null) {
     select.replaceChildren();
     for (const value of values) {
       const option = document.createElement("option");
       option.value = value;
-      option.textContent = value.replaceAll("_", " ");
+      const label = value.replaceAll("_", " ");
+      option.disabled = Boolean(unavailable && unavailable(value));
+      option.textContent = option.disabled ? `${label} (not activated)` : label;
       option.selected = value === selected;
       select.append(option);
     }

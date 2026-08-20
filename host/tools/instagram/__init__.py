@@ -34,6 +34,7 @@ from host.tools.shared.oauth2 import (
     access_token_is_fresh,
     clear_if_still_loaded,
     now,
+    require_scopes,
     save_if_still_connected,
     signed_state,
     verify_state,
@@ -53,6 +54,7 @@ IG_TOKEN_URL = "https://api.instagram.com/oauth/access_token"
 IG_GRAPH_BASE_URL = "https://graph.instagram.com"
 IG_GRAPH_VERSION = "v25.0"
 IG_OAUTH_SCOPES = ("instagram_business_basic", "instagram_business_content_publish")
+REQUIRED_IG_SCOPES = frozenset(IG_OAUTH_SCOPES)
 IG_RECONNECT_MESSAGE = "Instagram is no longer connected. Please reconnect the tool."
 LONG_LIVED_TOKEN_LIFETIME_SECONDS = 60 * 24 * 3600
 # Long-lived tokens refresh in place while still valid; refresh opportunistically
@@ -332,6 +334,15 @@ class InstagramCredentialStore:
         except WebRequestError as exc:
             raise _connect_web_error(exc, "OAuth token exchange") from exc
         short_lived = _short_lived_token(token_response)
+        granted_scopes = _granted_permissions(token_response)
+        missing = REQUIRED_IG_SCOPES - set(granted_scopes)
+        if missing:
+            # Nothing was saved yet, so an already-connected account survives a
+            # reconnect the user under-approved.
+            raise RuntimeError(
+                "Instagram connection is missing required permissions: "
+                f"{', '.join(sorted(missing))}. Reconnect and approve every displayed permission."
+            )
         try:
             long_lived = json_request(
                 "GET",
@@ -353,7 +364,7 @@ class InstagramCredentialStore:
             raise RuntimeError("Instagram long-lived token exchange returned no access token.")
         expires_in = long_lived.get("expires_in")
         me = _fetch_me(access_token)
-        account = _account_from_me(me, list(IG_OAUTH_SCOPES))
+        account = _account_from_me(me, granted_scopes)
         existing = api.credentials.load()
         created_at = existing["metadata"].get("created_at") if existing is not None else None
         current_time = now()
@@ -390,6 +401,7 @@ class InstagramCredentialStore:
         existing = api.credentials.load()
         if existing is None:
             raise IntegrationReconnectRequired(IG_RECONNECT_MESSAGE)
+        require_scopes(api, existing, REQUIRED_IG_SCOPES, reconnect_message=IG_RECONNECT_MESSAGE)
         payload = cast(Mapping[str, object], existing["secret"])
         if not access_token_is_fresh(payload, now()):
             # Drop the dead token so connection_status stops reporting connected
@@ -464,6 +476,30 @@ def _short_lived_token(token_response: JSONObject) -> str:
     if not isinstance(candidate, str) or not candidate:
         raise RuntimeError("Instagram OAuth token exchange returned no access token.")
     return candidate
+
+
+def _granted_permissions(token_response: JSONObject) -> list[str]:
+    """The permissions the user actually granted, from whichever shape the code
+    exchange used (`permissions` is a comma-separated string in the flat
+    response and a list in the wrapped one). A response that reports none is a
+    failed connect, not an assumed full grant: recording the requested scopes
+    unverified is exactly the fabricated snapshot this tool now refuses to
+    store — later calls would pass the required-scope check and fail at Meta
+    instead."""
+    candidate: JSONValue = token_response.get("permissions")
+    if not candidate:
+        data = token_response.get("data")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            candidate = cast(JSONObject, data[0]).get("permissions")
+    if isinstance(candidate, str):
+        granted = [permission.strip() for permission in candidate.split(",") if permission.strip()]
+    elif isinstance(candidate, list):
+        granted = [permission.strip() for permission in candidate if isinstance(permission, str) and permission.strip()]
+    else:
+        granted = []
+    if not granted:
+        raise RuntimeError("Instagram OAuth token exchange reported no granted permissions.")
+    return granted
 
 
 IG_CREDENTIALS = InstagramCredentialStore()

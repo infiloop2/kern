@@ -427,6 +427,10 @@ def page_thread_summaries(
             "SELECT thread_id, agent_runtime, model, effort, last_used_at, run_status,"
             " COALESCE((SELECT seq FROM agent_events"
             " WHERE agent_events.thread_id = thread_sessions.thread_id"
+            " ORDER BY seq DESC LIMIT 1), 0),"
+            " COALESCE((SELECT seq FROM agent_events"
+            " WHERE agent_events.thread_id = thread_sessions.thread_id"
+            " AND event_type = 'thread.message'"
             " ORDER BY seq DESC LIMIT 1), 0)"
             f" FROM thread_sessions{where}"
             " ORDER BY COALESCE(last_used_at, '') DESC, thread_id DESC LIMIT %s",
@@ -441,6 +445,7 @@ def page_thread_summaries(
                 "last_used_at": last_used_at or "",
                 "status": str(run_status),
                 "latest_event_seq": int(latest_event_seq),
+                "latest_message_seq": int(latest_message_seq),
             }
             for (
                 thread_id,
@@ -450,20 +455,24 @@ def page_thread_summaries(
                 last_used_at,
                 run_status,
                 latest_event_seq,
+                latest_message_seq,
             ) in cur.fetchall()
         ]
 
 
-def latest_agent_event_seq(thread_id: str) -> int:
-    """Newest retained event sequence for one thread, or zero before activity."""
+def latest_thread_event_seqs(thread_id: str) -> tuple[int, int]:
+    """Newest retained event and message sequences from one database snapshot."""
     with db.transaction() as cur:
         cur.execute(
-            "SELECT seq FROM agent_events WHERE thread_id = %s"
-            " ORDER BY seq DESC LIMIT 1",
-            (thread_id,),
+            "SELECT"
+            " COALESCE((SELECT seq FROM agent_events WHERE thread_id = %s"
+            " ORDER BY seq DESC LIMIT 1), 0),"
+            " COALESCE((SELECT seq FROM agent_events WHERE thread_id = %s"
+            " AND event_type = 'thread.message' ORDER BY seq DESC LIMIT 1), 0)",
+            (thread_id, thread_id),
         )
         row = cur.fetchone()
-    return int(row[0]) if row is not None else 0
+    return (int(row[0]), int(row[1])) if row is not None else (0, 0)
 
 
 def recover_interrupted_thread_runs(cur: Any) -> list[tuple[str, int]]:

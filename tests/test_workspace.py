@@ -5,10 +5,10 @@ from __future__ import annotations
 from http import HTTPStatus
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from host.constants import SERVICE_ACCOUNTS
-from host.runtime.workspace import service
+from host.runtime.workspace import getting_started, service
 from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.web_apps import backend as web_apps
 
@@ -226,6 +226,114 @@ class WorkspaceTests(unittest.TestCase):
         ):
             handler._handle("GET")
         read_body.assert_called_once_with(web_apps.MAX_REQUEST_BODY_BYTES)
+
+    def test_getting_started_derives_every_step_from_live_state(self) -> None:
+        transaction = MagicMock()
+        cursor = transaction.__enter__.return_value
+        cursor.fetchone.return_value = (True, False, True, False)
+        with (
+            patch.object(getting_started.db, "transaction", return_value=transaction),
+            patch.object(
+                getting_started, "active_agent_runtimes", return_value=["codex"]
+            ),
+        ):
+            self.assertEqual(
+                getting_started.completion_status(),
+                {
+                    "provider_ready": True,
+                    "chat_created": True,
+                    "app_created": False,
+                    "schedule_created": True,
+                    "dismissed": False,
+                },
+            )
+        query = cursor.execute.call_args_list[0].args[0]
+        # Nothing is latched: each step reads the resource it describes.
+        self.assertIn("FROM chat_threads", query)
+        self.assertIn("FROM web_apps", query)
+        self.assertIn("FROM schedules", query)
+        self.assertIn("FROM workspace_onboarding_dismissal", query)
+        # Every table read here must be Workspace-owned: this role holds no
+        # grant on host-owned tables, so reaching for one is a runtime failure.
+        self.assertNotIn("thread_sessions", query)
+
+    def test_getting_started_provider_step_follows_live_activation(self) -> None:
+        transaction = MagicMock()
+        cursor = transaction.__enter__.return_value
+        cursor.fetchone.return_value = (True, True, True, False)
+        cases = (
+            (["codex"], True),
+            ([], False),
+            # Unknown activation reads as incomplete: the checklist only nudges,
+            # so re-showing a step costs less than ticking an unconfirmed one.
+            (None, False),
+            # Kern runs the script runtime, so it can never stand in for a
+            # provider the operator was supposed to connect.
+            (["script"], False),
+            (["script", "hermes"], True),
+        )
+        for activation, expected in cases:
+            with (
+                patch.object(getting_started.db, "transaction", return_value=transaction),
+                patch.object(
+                    getting_started, "active_agent_runtimes", return_value=activation
+                ),
+            ):
+                status = getting_started.completion_status()
+            self.assertIs(status["provider_ready"], expected, activation)
+
+    def test_getting_started_dismissal_is_recorded_for_the_whole_host(self) -> None:
+        transaction = MagicMock()
+        cursor = transaction.__enter__.return_value
+        cursor.fetchone.return_value = (False, False, False, True)
+        with (
+            patch.object(getting_started.db, "transaction", return_value=transaction),
+            patch.object(getting_started, "active_agent_runtimes", return_value=[]),
+        ):
+            self.assertIs(getting_started.dismiss()["dismissed"], True)
+        insert = cursor.execute.call_args_list[0].args[0]
+        self.assertIn("INSERT INTO workspace_onboarding_dismissal", insert)
+        # Dismissing twice must stay a no-op rather than raising on the key.
+        self.assertIn("ON CONFLICT (singleton) DO NOTHING", insert)
+
+    def test_tcp_routes_getting_started_status_without_mutation(self) -> None:
+        handler = object.__new__(service.Handler)
+        handler.path = "/getting-started"
+        handler.headers = {}
+        with (
+            patch.object(service.Handler, "_read_body", return_value=None) as read_body,
+            patch.object(service.Handler, "_send_json") as send_json,
+            patch.object(
+                service.getting_started,
+                "route_browser",
+                return_value={"chat_created": False},
+            ) as status_route,
+        ):
+            handler._handle("GET")
+        read_body.assert_called_once()
+        status_route.assert_called_once_with("GET", "/getting-started", None, {})
+        send_json.assert_called_once_with(HTTPStatus.OK, {"chat_created": False})
+
+    def test_tcp_routes_the_getting_started_dismiss_subpath(self) -> None:
+        # The browser posts to a subpath of the checklist route. Matching only
+        # the exact path 404s every dismissal before the handler is reached.
+        handler = object.__new__(service.Handler)
+        handler.path = "/getting-started/dismiss"
+        handler.headers = {}
+        with (
+            patch.object(service.Handler, "_read_body", return_value=None),
+            patch.object(service.Handler, "_send_json") as send_json,
+            patch.object(
+                service.getting_started,
+                "route_browser",
+                return_value={"dismissed": True},
+            ) as dismiss_route,
+        ):
+            handler._handle("POST")
+        dismiss_route.assert_called_once_with(
+            "POST", "/getting-started/dismiss", None, {}
+        )
+        send_json.assert_called_once_with(HTTPStatus.OK, {"dismissed": True})
 
     def test_tcp_rejects_agent_routes(self) -> None:
         handler = object.__new__(service.Handler)

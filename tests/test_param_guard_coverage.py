@@ -33,36 +33,42 @@ GUARDED_FIELDS = {
     ("apify", "search_businesses", "location"),
     ("apify", "search_businesses", "query"),
     ("brave_search", "search_web", "query"),
+    ("gmail", "search_messages", "query"),
+    ("gmail", "read_message", "message_id"),
+    ("gmail", "read_thread", "thread_id"),
+    ("gmail", "list_drafts", "page_token"),
+    ("gmail", "list_drafts", "query"),
     ("google_search_console", "inspect_url", "inspection_url"),
     ("instagram_discovery", "search_reels", "query"),
     ("instagram_discovery", "search_hashtag", "hashtag"),
+    ("instagram_discovery", "get_reels_by_audio", "cursor"),
     ("linkedin_discovery", "search_posts", "query"),
     ("openai_images", "generate_image", "prompt"),
     ("polymarket", "search", "query"),
     ("polymarket", "get_market", "slug"),
     ("runway", "generate_video", "prompt"),
+    ("runway", "generate_video", "image_url"),
     ("runway", "edit_video", "prompt"),
+    ("runway", "edit_video", "video_url"),
     ("runway", "generate_image", "prompt"),
     ("runway", "generate_speech", "text"),
     ("seedance", "generate_video", "prompt"),
+    ("seedance", "generate_video", "image_url"),
     ("reddit", "get_subreddit_posts", "subreddit"),
     ("reddit", "search_posts", "query"),
     ("reddit", "search_posts", "subreddit"),
     ("twitter", "search_tweets", "query"),
     ("web_fetch", "fetch_page", "url"),
     ("twitterapi_io", "search_tweets", "query"),
+    ("twitterapi_io", "search_tweets", "exclude_usernames"),
     ("zoho_mail", "search_messages", "search_key"),
 }
 
 # (tool_id, action_id, field) -> reason it is deliberately not guarded.
-# Categories follow the architecture doc's scope rule.
+# Every entry is exact: wildcards would let a newly added action or field
+# inherit an exemption without an explicit audit decision.
 APPROVAL_GATED = "approval-gated content: the operator approval is the control"
-CONNECTED_ACCOUNT_GUARDED = (
-    "connected-account mailbox query: guarded via allow_identifiers=True "
-    "(secret/credential shapes denied, personal identifiers including one-time codes allowed as search syntax)"
-)
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
-PROTOCOL = "provider protocol value on a fixed-destination typed path"
 
 EXEMPT_FIELDS = {
     ("apify", "search_businesses", "limit"): TYPED,
@@ -74,26 +80,22 @@ EXEMPT_FIELDS = {
     ("apify", "get_business_details", "language"): TYPED,
     ("apify", "get_business_details", "max_reviews"): TYPED,
     ("apify", "get_business_details", "max_images"): TYPED,
-    ("brave_search", "search_web", "count"): TYPED,
-    ("gmail", "search_messages", "query"): CONNECTED_ACCOUNT_GUARDED,
     ("gmail", "search_messages", "start_time"): TYPED,
     ("gmail", "search_messages", "end_time"): TYPED,
-    ("gmail", "read_message", "message_id"): TYPED,
-    ("gmail", "read_thread", "thread_id"): TYPED,
-    ("gmail", "list_drafts", "query"): CONNECTED_ACCOUNT_GUARDED,
-    ("gmail", "list_drafts", "page_token"): PROTOCOL,
     ("gmail", "list_drafts", "include_spam_trash"): TYPED,
-    ("gmail", "send_email", "*"): APPROVAL_GATED,
+    ("gmail", "send_email", "to"): APPROVAL_GATED,
+    ("gmail", "send_email", "subject"): APPROVAL_GATED,
+    ("gmail", "send_email", "blocks"): APPROVAL_GATED,
     ("gmail", "message_action", "action"): TYPED,
-    ("gmail", "message_action", "message_ids"): TYPED,
+    ("gmail", "message_action", "message_ids"): APPROVAL_GATED,
     ("gmail", "message_action", "label_ids"): APPROVAL_GATED,
     ("gmail", "label_action", "action"): TYPED,
-    ("gmail", "label_action", "label_id"): TYPED,
+    ("gmail", "label_action", "label_id"): APPROVAL_GATED,
     ("gmail", "label_action", "name"): APPROVAL_GATED,
     ("gmail", "label_action", "background_color"): TYPED,
     ("gmail", "label_action", "text_color"): TYPED,
     ("gmail", "draft_action", "action"): TYPED,
-    ("gmail", "draft_action", "draft_id"): TYPED,
+    ("gmail", "draft_action", "draft_id"): APPROVAL_GATED,
     ("gmail", "draft_action", "to"): APPROVAL_GATED,
     ("gmail", "draft_action", "subject"): APPROVAL_GATED,
     ("gmail", "draft_action", "blocks"): APPROVAL_GATED,
@@ -121,40 +123,57 @@ EXEMPT_FIELDS = {
     ("google_search_console", "inspect_url", "language_code"): TYPED,
     ("google_search_console", "submit_sitemap", "site_url"): TYPED,
     ("google_search_console", "submit_sitemap", "sitemap_url"): APPROVAL_GATED,
-    ("ibkr", "*", "*"): TYPED,
-    ("instagram", "*", "*"): APPROVAL_GATED,
+    ("ibkr", "get_positions", "account_id"): TYPED,
+    ("ibkr", "get_account_summary", "account_id"): TYPED,
+    ("ibkr", "get_trades", "account_id"): TYPED,
+    ("ibkr", "get_trades", "days"): TYPED,
+    ("instagram", "get_recent_media", "limit"): TYPED,
+    ("instagram", "post_reel", "video_asset_id"): TYPED,
+    ("instagram", "post_reel", "caption"): APPROVAL_GATED,
+    ("instagram", "post_reel", "share_to_feed"): TYPED,
     ("instagram_discovery", "search_reels", "page"): TYPED,
     ("instagram_discovery", "search_reels", "date_posted"): TYPED,
     ("instagram_discovery", "search_reels", "limit"): TYPED,
     ("instagram_discovery", "search_hashtag", "reels_only"): TYPED,
     ("instagram_discovery", "search_hashtag", "date_posted"): TYPED,
-    ("instagram_discovery", "search_hashtag", "cursor"): PROTOCOL,
+    ("instagram_discovery", "search_hashtag", "cursor"): TYPED,
     ("instagram_discovery", "search_hashtag", "limit"): TYPED,
     ("instagram_discovery", "get_trending_reels", "limit"): TYPED,
-    ("instagram_discovery", "get_reels_by_audio", "*"): TYPED,
-    ("instagram_discovery", "get_reel_details", "*"): TYPED,
+    ("instagram_discovery", "get_reels_by_audio", "audio_id"): TYPED,
+    ("instagram_discovery", "get_reels_by_audio", "limit"): TYPED,
+    ("instagram_discovery", "get_reel_details", "url"): TYPED,
     ("linkedin_discovery", "search_posts", "page"): TYPED,
     ("linkedin_discovery", "search_posts", "limit"): TYPED,
-    ("linkedin", "*", "*"): APPROVAL_GATED,
+    ("linkedin", "create_post", "text"): APPROVAL_GATED,
+    ("linkedin", "create_post", "visibility"): TYPED,
     ("polymarket", "search", "limit_per_type"): TYPED,
     ("polymarket", "get_market", "market_id"): TYPED,
-    ("polymarket", "list_markets", "*"): TYPED,
-    ("polymarket", "list_events", "*"): TYPED,
-    ("polymarket", "get_order_book", "*"): TYPED,
-    ("polymarket", "price_history", "*"): TYPED,
+    ("polymarket", "list_markets", "limit"): TYPED,
+    ("polymarket", "list_markets", "offset"): TYPED,
+    ("polymarket", "list_markets", "order"): TYPED,
+    ("polymarket", "list_markets", "include_closed"): TYPED,
+    ("polymarket", "list_events", "limit"): TYPED,
+    ("polymarket", "list_events", "offset"): TYPED,
+    ("polymarket", "list_events", "order"): TYPED,
+    ("polymarket", "list_events", "include_closed"): TYPED,
+    ("polymarket", "get_order_book", "token_id"): TYPED,
+    ("polymarket", "price_history", "token_id"): TYPED,
+    ("polymarket", "price_history", "interval"): TYPED,
     ("reddit", "get_home_feed", "sort"): TYPED,
     ("reddit", "get_home_feed", "time_filter"): TYPED,
     ("reddit", "get_home_feed", "limit"): TYPED,
-    ("reddit", "get_home_feed", "after"): PROTOCOL,
+    ("reddit", "get_home_feed", "after"): TYPED,
     ("reddit", "get_subreddit_posts", "sort"): TYPED,
     ("reddit", "get_subreddit_posts", "time_filter"): TYPED,
     ("reddit", "get_subreddit_posts", "limit"): TYPED,
-    ("reddit", "get_subreddit_posts", "after"): PROTOCOL,
+    ("reddit", "get_subreddit_posts", "after"): TYPED,
     ("reddit", "search_posts", "sort"): TYPED,
     ("reddit", "search_posts", "time_filter"): TYPED,
     ("reddit", "search_posts", "limit"): TYPED,
-    ("reddit", "search_posts", "after"): PROTOCOL,
-    ("reddit", "read_post", "*"): TYPED,
+    ("reddit", "search_posts", "after"): TYPED,
+    ("reddit", "read_post", "post_id"): TYPED,
+    ("reddit", "read_post", "comment_sort"): TYPED,
+    ("reddit", "read_post", "comment_limit"): TYPED,
     ("reddit", "create_post", "subreddit"): APPROVAL_GATED,
     ("reddit", "create_post", "title"): APPROVAL_GATED,
     ("reddit", "create_post", "kind"): TYPED,
@@ -168,40 +187,53 @@ EXEMPT_FIELDS = {
     ("openai_images", "generate_image", "output_format"): TYPED,
     ("openai_images", "generate_image", "image_asset_ids"): TYPED,
     ("runway", "generate_video", "model"): TYPED,
-    ("runway", "generate_video", "image_url"): TYPED,
     ("runway", "generate_video", "image_asset_id"): TYPED,
     ("runway", "generate_video", "ratio"): TYPED,
     ("runway", "generate_video", "duration_seconds"): TYPED,
     ("runway", "generate_video", "seed"): TYPED,
     ("runway", "edit_video", "video_asset_id"): TYPED,
-    ("runway", "edit_video", "video_url"): TYPED,
     ("runway", "edit_video", "seed"): TYPED,
     ("runway", "generate_image", "ratio"): TYPED,
     ("runway", "generate_image", "quality"): TYPED,
     ("runway", "generate_speech", "voice"): TYPED,
-    ("runway", "get_task", "*"): TYPED,
-    ("runway", "save_video", "*"): TYPED,
-    ("seedance", "generate_video", "image_url"): TYPED,
+    ("runway", "get_task", "task_id"): TYPED,
+    ("runway", "get_task", "output_kind"): TYPED,
+    ("runway", "save_video", "task_id"): TYPED,
     ("seedance", "generate_video", "resolution"): TYPED,
     ("seedance", "generate_video", "ratio"): TYPED,
     ("seedance", "generate_video", "duration_seconds"): TYPED,
     ("seedance", "generate_video", "generate_audio"): TYPED,
     ("seedance", "generate_video", "seed"): TYPED,
-    ("seedance", "get_task", "*"): TYPED,
-    ("seedance", "save_video", "*"): TYPED,
+    ("seedance", "get_task", "task_id"): TYPED,
+    ("seedance", "save_video", "task_id"): TYPED,
     ("twitter", "search_tweets", "max_results"): TYPED,
-    ("twitter", "get_tweet_metrics", "*"): TYPED,
-    ("twitter", "read_tweet", "*"): TYPED,
-    ("twitter", "user_tweets", "*"): TYPED,
-    ("twitter", "get_trends", "*"): TYPED,
-    ("twitter", "get_personalized_trends", "*"): TYPED,
-    ("twitter", "lookup_user", "*"): TYPED,
+    ("twitter", "read_tweet", "tweet_id"): TYPED,
+    ("twitter", "user_tweets", "username"): TYPED,
+    ("twitter", "user_tweets", "user_id"): TYPED,
+    ("twitter", "user_tweets", "max_results"): TYPED,
+    ("twitter", "get_trends", "woeid"): TYPED,
+    ("twitter", "get_trends", "max_trends"): TYPED,
+    ("twitter", "lookup_user", "username"): TYPED,
+    ("twitter", "lookup_user", "user_id"): TYPED,
     ("twitterapi_io", "search_tweets", "query_type"): TYPED,
+    ("twitterapi_io", "search_tweets", "max_results"): TYPED,
+    ("twitterapi_io", "search_tweets", "lookback_hours"): TYPED,
+    ("twitterapi_io", "search_tweets", "exclude_replies"): TYPED,
+    ("twitterapi_io", "search_tweets", "exclude_retweets"): TYPED,
     ("zoho_mail", "search_messages", "start"): TYPED,
     ("zoho_mail", "search_messages", "limit"): TYPED,
-    ("zoho_mail", "list_messages", "*"): TYPED,
-    ("zoho_mail", "read_message", "*"): TYPED,
-    ("zoho_mail", "send_email", "*"): APPROVAL_GATED,
+    ("zoho_mail", "list_messages", "folder_id"): TYPED,
+    ("zoho_mail", "list_messages", "start"): TYPED,
+    ("zoho_mail", "list_messages", "limit"): TYPED,
+    ("zoho_mail", "read_message", "folder_id"): TYPED,
+    ("zoho_mail", "read_message", "message_id"): TYPED,
+    ("zoho_mail", "send_email", "from_address"): TYPED,
+    ("zoho_mail", "send_email", "to"): TYPED,
+    ("zoho_mail", "send_email", "cc"): TYPED,
+    ("zoho_mail", "send_email", "bcc"): TYPED,
+    ("zoho_mail", "send_email", "subject"): APPROVAL_GATED,
+    ("zoho_mail", "send_email", "mail_format"): TYPED,
+    ("zoho_mail", "send_email", "blocks"): APPROVAL_GATED,
 }
 
 # Tools whose Integration Guide must carry the shared parameter-guard line.
@@ -219,29 +251,21 @@ def _bundled_manifests():
 
 
 def _classified(tool_id: str, action_id: str, field: str) -> bool:
-    if (tool_id, action_id, field) in GUARDED_FIELDS:
-        return True
-    for key in (
-        (tool_id, action_id, field),
-        (tool_id, action_id, "*"),
-        (tool_id, "*", "*"),
-    ):
-        if key in EXEMPT_FIELDS:
-            return True
-    return False
+    key = (tool_id, action_id, field)
+    return key in GUARDED_FIELDS or key in EXEMPT_FIELDS
 
 
 class CompletenessTest(unittest.TestCase):
     def test_every_action_input_field_is_classified(self) -> None:
         unclassified = []
-        seen_tools = set()
+        seen_fields = set()
         for manifest in _bundled_manifests():
-            seen_tools.add(manifest.tool_id)
             for action in manifest.actions:
                 properties = action.input_schema.get("properties")
                 if not isinstance(properties, dict):
                     continue
                 for field in properties:
+                    seen_fields.add((manifest.tool_id, action.id, field))
                     if not _classified(manifest.tool_id, action.id, field):
                         unclassified.append((manifest.tool_id, action.id, field))
         self.assertEqual(
@@ -250,18 +274,35 @@ class CompletenessTest(unittest.TestCase):
             "Classify each field as GUARDED (and add the guard call plus a "
             "behavioral test) or EXEMPT with a reason.",
         )
-        # The guarded set must not name fields that do not exist.
-        for tool_id, action_id, field in GUARDED_FIELDS:
-            self.assertIn(tool_id, seen_tools)
+        # The guarded set must not retain a stale tool, action, or field.
+        self.assertEqual(
+            GUARDED_FIELDS - seen_fields,
+            set(),
+            "Every guarded field must exist in a bundled action schema.",
+        )
+        self.assertEqual(
+            set(EXEMPT_FIELDS) - seen_fields,
+            set(),
+            "Every exemption must name one current action field exactly.",
+        )
 
     def test_no_field_is_both_guarded_and_exempt(self) -> None:
-        for tool_id, action_id, field in GUARDED_FIELDS:
-            self.assertNotIn((tool_id, action_id, field), EXEMPT_FIELDS)
-            # No wildcard may shadow an action that has guarded fields:
-            # otherwise dropping the field from GUARDED_FIELDS would silently
-            # reclassify it as exempt instead of failing completeness.
-            self.assertNotIn((tool_id, action_id, "*"), EXEMPT_FIELDS)
-            self.assertNotIn((tool_id, "*", "*"), EXEMPT_FIELDS)
+        self.assertEqual(GUARDED_FIELDS & set(EXEMPT_FIELDS), set())
+
+    def test_exemptions_are_exact_and_approval_exemptions_are_operator_gated(self) -> None:
+        actions = {
+            (manifest.tool_id, action.id): action
+            for manifest in _bundled_manifests()
+            for action in manifest.actions
+        }
+        for (tool_id, action_id, field), reason in EXEMPT_FIELDS.items():
+            self.assertNotIn("*", (tool_id, action_id, field))
+            if reason == APPROVAL_GATED:
+                self.assertEqual(
+                    actions[(tool_id, action_id)].approval,
+                    "operator",
+                    f"{tool_id}.{action_id}.{field} is exempt only while operator-gated",
+                )
 
     def test_guarded_tools_declare_the_shared_guide_protection(self) -> None:
         for manifest in _bundled_manifests():
@@ -355,6 +396,29 @@ class BehavioralDenialTest(unittest.TestCase):
         )
         self.assert_denied(result, "credential")
 
+    def test_gmail_page_token_denied(self) -> None:
+        from host.tools import gmail
+
+        with self.assertRaises(ParamGuardDenied):
+            gmail._draft_list_parameters(
+                {"page_token": "AKIAIOSFODNN7EXAMPLE"}, FakeHostAPI()
+            )
+
+    def test_gmail_direct_read_ids_are_guarded_as_machine_tokens(self) -> None:
+        from host.tools import gmail
+
+        api = FakeHostAPI()
+        self.assertEqual(
+            gmail._direct_provider_token(
+                {"message_id": "abcdef1234567890"}, "message_id", api
+            ),
+            "abcdef1234567890",
+        )
+        with self.assertRaises(ParamGuardDenied):
+            gmail._direct_provider_token(
+                {"thread_id": "AKIAIOSFODNN7EXAMPLE"}, "thread_id", api
+            )
+
     def test_polymarket_search_and_slug_denied(self) -> None:
         from host.tools.polymarket import BUNDLED_TOOL
 
@@ -377,6 +441,12 @@ class BehavioralDenialTest(unittest.TestCase):
         self.assert_denied(result, "code")
         result = BUNDLED_TOOL.execute("search_hashtag", {"hashtag": "sale4829134881234"}, api)
         self.assert_denied(result, "digits")
+        result = BUNDLED_TOOL.execute(
+            "get_reels_by_audio",
+            {"audio_id": "1392969992841787", "cursor": "AKIAIOSFODNN7EXAMPLE"},
+            api,
+        )
+        self.assert_denied(result, "credential")
 
     def test_linkedin_discovery_query_denied(self) -> None:
         from host.tools.linkedin_discovery import BUNDLED_TOOL
@@ -558,7 +628,7 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             )
         )
 
-    def test_github_reads_guard_query_values_without_token_rules(self) -> None:
+    def test_github_reads_guard_query_values_with_machine_tokens_allowed(self) -> None:
         from host.network_integrations.github import guard
         from host.network_integrations.github.manifest import GitHubIntegration
 
@@ -631,6 +701,45 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             config, "POST", "api.github.com", "/repos/o/r/issues", "q=alice%40example.com", [], b"",
         )
         self.assertNotEqual(write_denial, "request_param_pii_denied")
+
+    def test_network_parameter_guard_flags_match_tool_semantics(self) -> None:
+        from host.network_integrations.base import request_param_denial
+
+        machine = "x7Kp2mQv9zR4tYw8LbN3"
+        self.assertEqual(
+            request_param_denial("", f"q={machine}"),
+            "request_param_encoded_blob_denied",
+        )
+        self.assertIsNone(
+            request_param_denial("", f"q={machine}", allow_machine_tokens=True)
+        )
+        self.assertEqual(
+            request_param_denial("", "q=alice%40example.com"),
+            "request_param_pii_denied",
+        )
+        self.assertIsNone(
+            request_param_denial(
+                "", "q=alice%40example.com", allow_identifiers=True
+            )
+        )
+        # Form-style plus decoding must not erase the keyword context. The
+        # explicit secret rule remains active when machine tokens are allowed.
+        self.assertEqual(
+            request_param_denial(
+                "",
+                f"q=api+key+{machine}",
+                allow_machine_tokens=True,
+            ),
+            "request_param_secret_denied",
+        )
+        self.assertEqual(
+            request_param_denial(
+                "/search/code",
+                "q=foo+bar&access_token=aaaaaaaaaaaaaaaa",
+                allow_machine_tokens=True,
+            ),
+            "request_param_secret_denied",
+        )
 
     def test_github_read_only_hosts_guard_forwarded_headers(self) -> None:
         from host.network_integrations.github import guard
@@ -978,8 +1087,8 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         self.assertIn("numeric", result.error)
 
     def test_gmail_path_ids_require_the_gmail_id_grammar(self) -> None:
-        # TYPED exemption backing: free agent text must never reach the Gmail
-        # API path, only a provider-shaped id. Each id kind has its own
+        # Guarded input plus strict grammar: free agent text must never reach
+        # the Gmail API path, only a provider-shaped id. Each id kind has its own
         # grammar (hex message/thread ids, "r<digits>" draft ids, uppercase or
         # "Label_<n>" label ids), so prose that fits a generic charset — e.g.
         # "please_forward_alice" — is rejected before any request is built.

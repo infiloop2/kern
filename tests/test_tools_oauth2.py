@@ -66,5 +66,56 @@ class OAuthCredentialGuardTests(unittest.TestCase):
         self.assertEqual(api.credentials.load(), reconnected)
 
 
+class RequireScopesTests(unittest.TestCase):
+    @staticmethod
+    def credential(scopes: list[str], *, account_id: str = "one", token: str = "token") -> dict[str, object]:
+        return {
+            "account": {"id": account_id, "label": account_id, "scopes": scopes},
+            "secret": {"access_token": token, "expires_at": 2_000_000_000},
+            "metadata": {"created_at": 1, "updated_at": 1},
+        }
+
+    def test_a_grant_covering_the_requirement_passes_and_keeps_the_credential(self) -> None:
+        api = FakeHostAPI()
+        # A grant wider than the requirement (a scope the tool no longer asks
+        # for) stays usable: only a shortfall forces a reconnect.
+        stored = self.credential(["read", "write", "legacy"])
+        api.credentials.save(stored)
+        oauth2.require_scopes(
+            api,
+            stored,  # type: ignore[arg-type]
+            frozenset({"read", "write"}),
+            reconnect_message="reconnect",
+        )
+        self.assertEqual(api.credentials.load(), stored)
+
+    def test_a_grant_short_of_the_requirement_clears_the_credential_and_requires_reconnect(self) -> None:
+        api = FakeHostAPI()
+        stored = self.credential(["read"])
+        api.credentials.save(stored)
+        with self.assertRaises(IntegrationReconnectRequired):
+            oauth2.require_scopes(
+                api,
+                stored,  # type: ignore[arg-type]
+                frozenset({"read", "write"}),
+                reconnect_message="reconnect",
+            )
+        self.assertIsNone(api.credentials.load())
+
+    def test_a_reconnect_racing_the_check_survives_it(self) -> None:
+        api = FakeHostAPI()
+        loaded = self.credential(["read"], account_id="one", token="old")
+        reconnected = self.credential(["read", "write"], account_id="two", token="new")
+        api.credentials.save(reconnected)
+        with self.assertRaises(IntegrationReconnectRequired):
+            oauth2.require_scopes(
+                api,
+                loaded,  # type: ignore[arg-type]
+                frozenset({"read", "write"}),
+                reconnect_message="reconnect",
+            )
+        self.assertEqual(api.credentials.load(), reconnected)
+
+
 if __name__ == "__main__":
     unittest.main()

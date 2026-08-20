@@ -12,6 +12,7 @@ from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApprov
 from host.tools import instagram
 from host.tools.instagram import InstagramTool
 from host.tools.shared.web import WebRequestError
+from host.tools.tool import OAuthCompleteConnectResult
 
 from test_tools import FakeHostAPI, FRESH_EXPIRES_AT
 
@@ -95,6 +96,15 @@ class InstagramReadTests(unittest.TestCase):
             with self.subTest(value=value):
                 result = InstagramTool().execute("get_recent_media", {"limit": value}, connected_api())
                 self.assertIsInstance(result, ActionFailed)
+
+    def test_missing_scope_requires_reconnect(self) -> None:
+        api = connected_api()
+        assert api.credentials.record is not None
+        api.credentials.record["account"]["scopes"] = ["instagram_business_basic"]
+        result = InstagramTool().execute("get_profile", {}, api)
+        assert isinstance(result, ActionFailed)
+        self.assertTrue(result.reconnect_required)
+        self.assertIsNone(api.credentials.load())
 
     def test_expired_token_requires_reconnect(self) -> None:
         result = InstagramTool().execute("get_profile", {}, connected_api(expires_at=1))
@@ -387,8 +397,11 @@ class InstagramReelTests(unittest.TestCase):
 
 
 class InstagramCredentialFlowTests(unittest.TestCase):
-    def test_complete_connect_exchanges_short_then_long_lived_token(self) -> None:
-        api = FakeHostAPI()
+    def complete_connect(
+        self, exchange_response: JSONObject, *, api: FakeHostAPI | None = None
+    ) -> OAuthCompleteConnectResult:
+        """Run a full connect against a given code-exchange response."""
+        api = api if api is not None else FakeHostAPI()
         api.config["INSTAGRAM_APP_ID"] = "ig-app"
         api.config["INSTAGRAM_APP_SECRET"] = "ig-secret"
         flow = InstagramTool().credentials
@@ -398,7 +411,7 @@ class InstagramCredentialFlowTests(unittest.TestCase):
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             if url == instagram.IG_TOKEN_URL:
-                return {"data": [{"access_token": "short-token", "user_id": 178414, "permissions": "..."}]}
+                return exchange_response
             if "/access_token?" in url:
                 self.assertIn("grant_type=ig_exchange_token", url)
                 self.assertIn("access_token=short-token", url)
@@ -409,14 +422,73 @@ class InstagramCredentialFlowTests(unittest.TestCase):
             raise AssertionError(f"unexpected call: {url}")
 
         with patch.object(instagram, "json_request", fake_json_request):
-            result = flow.complete_connect(
+            return flow.complete_connect(
                 {"code": "auth-code", "state": start["state"], "redirect_uri": "https://host.example/cb"}, api
             )
+
+    def test_complete_connect_exchanges_short_then_long_lived_token(self) -> None:
+        api = FakeHostAPI()
+        result = self.complete_connect(
+            {
+                "data": [{
+                    "access_token": "short-token",
+                    "user_id": 178414,
+                    "permissions": "instagram_business_basic,instagram_business_content_publish",
+                }]
+            },
+            api=api,
+        )
         self.assertEqual(result["account"]["id"], "17841400000000000")
         self.assertEqual(result["account"]["label"], "@clawcreates")
         stored = api.credentials.load()
         assert stored is not None
         self.assertEqual(stored["secret"]["access_token"], "long-token")
+
+    def test_complete_connect_records_the_permissions_the_provider_reported(self) -> None:
+        api = FakeHostAPI()
+        # The wrapped response reports permissions as a list; a grant wider than
+        # the requested scopes is recorded as granted rather than trimmed.
+        result = self.complete_connect(
+            {
+                "data": [{
+                    "access_token": "short-token",
+                    "permissions": [
+                        "instagram_business_basic",
+                        "instagram_business_content_publish",
+                        "instagram_business_manage_comments",
+                    ],
+                }]
+            },
+            api=api,
+        )
+        self.assertEqual(
+            result["account"]["scopes"],
+            ["instagram_business_basic", "instagram_business_content_publish", "instagram_business_manage_comments"],
+        )
+        stored = api.credentials.load()
+        assert stored is not None
+        self.assertEqual(stored["account"]["scopes"], result["account"]["scopes"])
+
+    def test_complete_connect_rejects_a_response_reporting_no_permissions(self) -> None:
+        # An unverifiable grant fails the connect: recording the requested
+        # scopes would pass every later required-scope check on a snapshot the
+        # provider never confirmed.
+        api = connected_api()
+        before = api.credentials.load()
+        with self.assertRaises(RuntimeError) as caught:
+            self.complete_connect({"access_token": "short-token", "user_id": 178414}, api=api)
+        self.assertIn("no granted permissions", str(caught.exception))
+        self.assertEqual(api.credentials.load(), before)
+
+    def test_complete_connect_rejects_an_under_approved_grant_and_keeps_the_connection(self) -> None:
+        api = connected_api()
+        before = api.credentials.load()
+        with self.assertRaises(RuntimeError) as caught:
+            self.complete_connect(
+                {"data": [{"access_token": "short-token", "permissions": "instagram_business_basic"}]}, api=api
+            )
+        self.assertIn("instagram_business_content_publish", str(caught.exception))
+        self.assertEqual(api.credentials.load(), before)
 
 
 if __name__ == "__main__":
