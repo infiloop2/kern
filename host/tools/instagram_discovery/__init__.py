@@ -98,7 +98,7 @@ MANIFEST = ToolManifest(
                     "query": {"type": "string", "description": "Keyword or phrase to find in public Reels, up to 200 characters."},
                     "limit": {"type": "string", "description": "Maximum unique Reels returned from this response, 1-25 (default 10); changing it does not change the one-credit request cost."},
                     "date_posted": {"type": "string", "enum": list(DATE_WINDOWS), "description": "Optional Google-indexed relative window: last-hour, last-day, last-week, last-month, or last-year."},
-                    "page": {"type": "string", "description": "Provider results page, 1-100 (default 1); each page is a separate one-credit request."},
+                    "page": {"type": "string", "description": "Provider results page, 1-11 (default 1); each page is a separate one-credit request."},
                 },
                 "additionalProperties": False,
             },
@@ -149,7 +149,7 @@ MANIFEST = ToolManifest(
                     "reels_only": {"type": "boolean", "description": "Return only Reels (default true); false also permits public images and carousels."},
                     "limit": {"type": "string", "description": "Maximum unique results returned, 1-25 (default 10); changing it does not change the one-credit request cost."},
                     "date_posted": {"type": "string", "enum": list(DATE_WINDOWS), "description": "Optional Google-indexed relative window: last-hour, last-day, last-week, last-month, or last-year."},
-                    "cursor": {"type": "string", "description": "Opaque next_cursor from the prior search_hashtag result; omit for the first page. Each cursor request spends one credit."},
+                    "cursor": {"type": "string", "description": "Next-page number from the prior search_hashtag result; 1-11. Omit for the first page. Each cursor request spends one credit."},
                 },
                 "additionalProperties": False,
             },
@@ -329,15 +329,39 @@ def _date_window(value: JSONValue | None) -> str:
     return value
 
 
-def _cursor(value: JSONValue | None) -> str:
+def _hashtag_cursor(value: JSONValue | None) -> str:
     if value is None:
         return ""
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("cursor must be a non-empty string when supplied.")
-    cursor = value.strip()
-    if len(cursor) > 1_000:
-        raise ValueError("cursor must be at most 1000 characters.")
-    return cursor
+    if (
+        not isinstance(value, str)
+        or not value.isascii()
+        or not value.isdecimal()
+        or len(value) > 2
+        or not 1 <= int(value) <= 11
+    ):
+        raise ValueError("cursor must be a next-page number from 1 to 11.")
+    return value
+
+
+def _audio_cursor(value: JSONValue | None, api: HostAPI) -> str:
+    if value is None:
+        return ""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 1_000
+        or not value.isascii()
+        or not value.isprintable()
+        or any(char.isspace() for char in value)
+    ):
+        raise ValueError(
+            "cursor must be the opaque next_cursor from the prior audio lookup."
+        )
+    return api.outbound.guard_request_parameter_string(
+        value,
+        allow_identifiers=value.isdecimal(),
+        allow_machine_tokens=True,
+    )
 
 
 def _query(value: JSONValue | None) -> str:
@@ -590,16 +614,30 @@ def _provider_request(api_key: str, path: str, params: Mapping[str, str]) -> JSO
     return response
 
 
-def _list_result(response: JSONObject, *, limit: int, label: str) -> ActionExecuted:
+def _response_cursor(response: JSONObject) -> str:
+    value = _first(
+        response.get("cursor"),
+        response.get("next_cursor"),
+        _nested(response, "data", "cursor"),
+    )
+    return value if isinstance(value, str) and len(value) <= 1_000 else ""
+
+
+def _list_result(
+    response: JSONObject, *, limit: int, label: str, cursor: str = ""
+) -> ActionExecuted:
     reels = _normalized_reels(response, limit=limit)
-    cursor = _text(_first(response.get("cursor"), response.get("next_cursor"), _nested(response, "data", "cursor")), limit=1_000)
     has_more_raw = _first(response.get("has_more"), _nested(response, "data", "has_more"))
     result: JSONObject = {
         "status": "success_executed",
         "message": f"{label} returned {len(reels)} unique public result(s).",
         "reels": cast(list[JSONValue], reels),
         "next_cursor": cursor,
-        "has_more": bool(has_more_raw) if isinstance(has_more_raw, bool) else bool(cursor),
+        "has_more": (
+            has_more_raw and bool(cursor)
+            if isinstance(has_more_raw, bool)
+            else bool(cursor)
+        ),
     }
     return ActionExecuted(result)
 
@@ -618,7 +656,7 @@ class InstagramDiscoveryTool(Tool):
             api_key = api.config["SCRAPECREATORS_API_KEY"]
             limit = bounded_int(tool_input.get("limit"), name="limit", default=10, minimum=1, maximum=MAX_RESULTS)
             if action == "search_reels":
-                params = {"query": api.outbound.guard_request_parameter_string(_query(tool_input.get("query"))), "page": str(bounded_int(tool_input.get("page"), name="page", default=1, minimum=1, maximum=100))}
+                params = {"query": api.outbound.guard_request_parameter_string(_query(tool_input.get("query"))), "page": str(bounded_int(tool_input.get("page"), name="page", default=1, minimum=1, maximum=11))}
                 date_posted = _date_window(tool_input.get("date_posted"))
                 if date_posted:
                     params["date_posted"] = date_posted
@@ -631,18 +669,32 @@ class InstagramDiscoveryTool(Tool):
                     raise ValueError("reels_only must be true or false.")
                 params = {"hashtag": api.outbound.guard_request_parameter_string(_hashtag(tool_input.get("hashtag"))), "media_type": "reels" if reels_only else "all"}
                 date_posted = _date_window(tool_input.get("date_posted"))
-                cursor = _cursor(tool_input.get("cursor"))
+                cursor = _hashtag_cursor(tool_input.get("cursor"))
                 if date_posted:
                     params["date_posted"] = date_posted
                 if cursor:
                     params["cursor"] = cursor
-                return _list_result(_provider_request(api_key, HASHTAG_PATH, params), limit=limit, label="Hashtag search")
+                response = _provider_request(api_key, HASHTAG_PATH, params)
+                try:
+                    cursor = _hashtag_cursor(_response_cursor(response))
+                except ValueError:
+                    cursor = ""
+                return _list_result(
+                    response, limit=limit, label="Hashtag search", cursor=cursor
+                )
             if action == "get_reels_by_audio":
                 params = {"audio_id": _audio_id(tool_input.get("audio_id"))}
-                cursor = _cursor(tool_input.get("cursor"))
+                cursor = _audio_cursor(tool_input.get("cursor"), api)
                 if cursor:
                     params["cursor"] = cursor
-                return _list_result(_provider_request(api_key, AUDIO_REELS_PATH, params), limit=limit, label="Audio lookup")
+                response = _provider_request(api_key, AUDIO_REELS_PATH, params)
+                try:
+                    cursor = _audio_cursor(_response_cursor(response), api)
+                except ValueError:
+                    cursor = ""
+                return _list_result(
+                    response, limit=limit, label="Audio lookup", cursor=cursor
+                )
             if action == "get_reel_details":
                 response = _provider_request(
                     api_key,

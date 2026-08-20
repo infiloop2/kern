@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 from host.runtime.core import db
-from host.runtime.workspace.host_api import WorkspaceError, call_admin_api
+from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
 from host.session_options import public_session_options, recorded_session_config, session_config_error
 
 
@@ -80,7 +80,10 @@ def route_browser(
     query: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     if method == "GET" and path == "/session-options":
-        return {"session_options": public_session_options()}
+        return {
+            "session_options": public_session_options(),
+            "active_runtimes": active_agent_runtimes(),
+        }
     if method == "GET" and path == "/threads":
         query = query or {}
         unexpected = sorted(set(query) - {"archived"})
@@ -250,6 +253,7 @@ def _chat_thread_summary(
         "archived": archived,
         "last_used_at": str(summary.get("last_used_at") or ""),
         "latest_event_seq": max(0, int(summary.get("latest_event_seq") or 0)),
+        "latest_message_seq": max(0, int(summary.get("latest_message_seq") or 0)),
         "status": status,
     }
 

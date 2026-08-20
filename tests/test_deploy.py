@@ -1867,6 +1867,25 @@ class DeployUnitTests(unittest.TestCase):
                     "TMPDIR=/mnt/kern-agent/agent-home/.tmp",
                     launcher,
                 )
+                self.assertIn("--property=MemoryHigh=35%", launcher)
+                self.assertIn("--property=MemoryMax=50%", launcher)
+                self.assertIn("--property=MemorySwapMax=3G", launcher)
+                self.assertIn("--property=TasksMax=1024", launcher)
+
+    def test_agent_slice_leaves_startup_headroom_between_runtime_scopes(self) -> None:
+        bootstrap = render._render_bootstrap()
+        self.assertIn("MemoryHigh=75%", bootstrap)
+        self.assertIn("MemoryMax=80%", bootstrap)
+        self.assertNotIn("MemoryHigh=70%", bootstrap)
+
+    def test_host_test_wrapper_explains_ci_only_postgres_coverage(self) -> None:
+        wrapper = Path("tests/scripts/test").read_text()
+        self.assertIn('${GITHUB_ACTIONS:-}', wrapper)
+        self.assertIn(
+            "Live Kern host: PostgreSQL integration tests are skipped; "
+            "GitHub Actions runs them.",
+            wrapper,
+        )
 
     def test_agent_scratch_is_reaped_after_abrupt_runtime_exit(self) -> None:
         bootstrap = render._render_bootstrap()

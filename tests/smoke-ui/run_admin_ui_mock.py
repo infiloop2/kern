@@ -257,6 +257,15 @@ class MockState:
             ),
             default=0,
         )
+        latest_message_seq = max(
+            (
+                int(event["seq"])
+                for event in self.agent_events
+                if event.get("thread_id") == thread["thread_id"]
+                and event.get("event_type") == "thread.message"
+            ),
+            default=0,
+        )
         return {
             "thread_id": thread["thread_id"],
             "agent_runtime": thread["agent_runtime"],
@@ -265,6 +274,7 @@ class MockState:
             "last_used_at": thread["last_used_at"],
             "status": "running" if thread.get("_running") else "idle",
             "latest_event_seq": latest_event_seq,
+            "latest_message_seq": latest_message_seq,
         }
 
     def runtime_status(self, runtime: str) -> str:

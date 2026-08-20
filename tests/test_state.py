@@ -180,11 +180,17 @@ class StateStorageTests(unittest.TestCase):
                 "thread-t1",
                 {"message": "hello", "source": "user"},
             )
-            latest_event_seq = state.append_agent_event(
+            latest_message_seq = state.append_agent_event(
                 cur,
                 "thread.message",
                 "thread-t1",
                 {"message": "same-second follow-up", "source": "agent"},
+            )
+            latest_event_seq = state.append_agent_event(
+                cur,
+                "thread.activity",
+                "thread-t1",
+                {"activity": {"kind": "status", "title": "Still working"}},
             )
             seed_thread(
                 cur,
@@ -212,12 +218,19 @@ class StateStorageTests(unittest.TestCase):
                 "last_used_at": "2026-06-08T00:00:01Z",
                 "status": "idle",
                 "latest_event_seq": latest_event_seq,
+                "latest_message_seq": latest_message_seq,
             },
         )
         # A never-used thread reads as an empty last_used_at, not None.
         self.assertEqual(summaries["thread-t2"]["last_used_at"], "")
         self.assertEqual(summaries["thread-t2"]["latest_event_seq"], 0)
+        self.assertEqual(summaries["thread-t2"]["latest_message_seq"], 0)
         self.assertEqual(summaries["thread-t2"]["agent_runtime"], "claude_code")
+        self.assertEqual(
+            state.latest_thread_event_seqs("thread-t1"),
+            (latest_event_seq, latest_message_seq),
+        )
+        self.assertEqual(state.latest_thread_event_seqs("thread-t2"), (0, 0))
 
     def test_thread_summary_pages_use_stable_sort_key_and_prefix_filter(self) -> None:
         with state.mutation() as cur:

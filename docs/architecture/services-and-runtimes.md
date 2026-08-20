@@ -10,7 +10,7 @@
 | `kern-host-errors.service` | `kern-admin` | Follows structured error and warning records from journald and copies them best-effort into the bounded Postgres host-diagnostics log. |
 | `kern-workspace.service` | `kern-workspace` | One Chat, Web Apps, global Memory, and Schedules backend on `127.0.0.1:7450` (reachable only from the admin API), plus the peer-authenticated agent socket `/run/kern-workspace/agent.sock`. Its Postgres role has explicit DML-only access to the Workspace tables in `public` and no egress. |
 | `kern-cloudflared.service` | `cloudflared` | Optional Cloudflare Tunnel connector for Cloudflare Tunnel operator endpoints. Installed only when `operator_connections` contains `cloudflare_tunnel`. |
-| `kern_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; `MemoryHigh=70%`/`MemoryMax=80%`/`MemorySwapMax=5G` contain a runaway agent's RAM and swap to its own cgroup; `TasksMax=4096` stops a fork bomb from exhausting kernel PIDs. |
+| `kern_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; aggregate `MemoryHigh=75%`/`MemoryMax=80%`/`MemorySwapMax=5G` protect the host, while lower per-scope limits contain one busy thread before it stalls its peers; `TasksMax=4096` stops a slice-wide fork bomb from exhausting kernel PIDs. |
 | `kern_workspace.slice` | — | Cgroup slice for the fixed Workspace service. `CPUWeight=50` keeps host control services responsive under contention. |
 
 ## Process Inventory
@@ -64,15 +64,21 @@ service cgroup and compete with the host services for resources. The slice's
 `CPUWeight=50` versus `system.slice`'s default 100 keeps the admin API, proxy,
 and Postgres responsive while an agent build or test run saturates the cores,
 and costs the agent nothing when the host services are idle (weights, unlike
-quotas, are work-conserving). `MemoryHigh=70%` reclaims agent pages to swap
-under pressure and `MemoryMax=80%` OOM-kills inside the agent cgroup, so a
-runaway agent process dies instead of triggering a host-wide OOM kill; the
-admin API records the failed turn and the host stays up. `MemorySwapMax=5G`
+quotas, are work-conserving). Every transient scope has `MemoryHigh=35%`,
+`MemoryMax=50%`, `MemorySwapMax=3G`, and `TasksMax=1024`; a runaway turn is
+therefore reclaimed or killed before it consumes the whole shared slice and
+stalls another Claude or Codex startup. The parent slice's `MemoryHigh=75%`
+and `MemoryMax=80%` remain aggregate backstops, so a runaway agent process
+dies instead of triggering a host-wide OOM kill; the admin API records the
+failed turn and the host stays up. Parent `MemorySwapMax=5G`
 keeps 1G of the 6G swapfile available to host services (systemd 249 offers no
 percentage form for swap, and bootstrap owns the swapfile size). `TasksMax=4096`
 bounds agent threads and processes so a fork bomb cannot exhaust kernel PIDs,
 which would otherwise block the admin API from spawning helpers at all. Each
-launcher points `TMPDIR` at the separate agent volume. Each
+launcher points `TMPDIR` at the separate agent volume. The PostgreSQL test
+harness self-detects the live host and shows a clear skip message there;
+GitHub Actions remains authoritative for that suite without adding
+repository-specific variables to general agent environments. Each
 scope is `BindsTo=kern-admin-api.service`: leaving the admin API's
 cgroup must not decouple lifecycles, so when the admin service stops,
 restarts, or crashes, systemd stops the scopes too and no orphaned runtime

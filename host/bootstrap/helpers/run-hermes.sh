@@ -56,6 +56,10 @@ export AWS_SECRET_ACCESS_KEY="kern-bedrock-dummy-secret"
 exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   "${unit_args[@]}" \
   --property=BindsTo=kern-admin-api.service \
+  --property=MemoryHigh=35% \
+  --property=MemoryMax=50% \
+  --property=MemorySwapMax=3G \
+  --property=TasksMax=1024 \
   /usr/sbin/runuser -u kern-agent -- env \
   HOME=/mnt/kern-agent/agent-home \
   TMPDIR=/mnt/kern-agent/agent-home/.tmp \

@@ -30,7 +30,11 @@ from host.tools.results import (
     ApprovalResult,
 )
 from host.tools.tool import CredentialFlow
-from host.param_guard import ParamGuardDenied
+from host.param_guard import (
+    PARAM_GUARD_PROTECTION,
+    PARAM_GUARD_TECHNICAL_DETAIL,
+    ParamGuardDenied,
+)
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.shared.google import GoogleCredentialStore, IntegrationReconnectRequired, google_oauth_setup_steps
 from host.tools.shared.inputs import clip_text, schema as _schema
@@ -308,8 +312,9 @@ MANIFEST = ToolManifest(
     protections=(
         "OAuth tokens stay in the host credential store and are never exposed to the agent. The connection is bound to the Google account you approve.",
         "Reads run directly. Sending mail or changing messages, labels, and drafts waits for explicit operator approval.",
-        "Mailbox search queries pass the host parameter guard: values shaped like a secret or credential are denied before the request is sent.",
+        PARAM_GUARD_PROTECTION,
     ),
+    technical_details=(PARAM_GUARD_TECHNICAL_DETAIL,),
     setup_steps=google_oauth_setup_steps(
         project_step_description="Open Google Cloud Console, choose the project picker, and create a dedicated project if you do not already have one for Kern.",
         enable_api_step=SetupStep(
@@ -378,8 +383,11 @@ def _gmail_search_query(tool_input: JSONObject, api: HostAPI) -> str:
     if query_text:
         # Mailbox search against the connected account: personal identifiers
         # are legitimate syntax (from:alice@example.com) and Google already
-        # holds the mail, so allow_identifiers; only secret/credential shapes deny.
-        query_text = api.outbound.guard_request_parameter_string(query_text, allow_identifiers=True)
+        # holds the mail, so allow_identifiers permits them while secret and
+        # credential shapes still deny.
+        query_text = api.outbound.guard_request_parameter_string(
+            query_text, allow_identifiers=True
+        )
     start_epoch = _gmail_search_time_epoch(tool_input, "start_time")
     end_epoch = _gmail_search_time_epoch(tool_input, "end_time")
     if start_epoch and end_epoch and start_epoch >= end_epoch:
@@ -403,16 +411,49 @@ def _draft_list_parameters(tool_input: JSONObject, api: HostAPI) -> JSONObject:
     parameters: JSONObject = {"maxResults": DEFAULT_DRAFT_PAGE_LIMIT}
     query = _single_line_text(tool_input.get("query"))
     if query:
-        parameters["q"] = api.outbound.guard_request_parameter_string(query, allow_identifiers=True)
-    page_token = _single_line_text(tool_input.get("page_token"))
-    if page_token:
-        parameters["pageToken"] = page_token
+        parameters["q"] = api.outbound.guard_request_parameter_string(
+            query, allow_identifiers=True
+        )
+    raw_page_token = tool_input.get("page_token")
+    if raw_page_token is not None:
+        if (
+            not isinstance(raw_page_token, str)
+            or not raw_page_token
+            or not raw_page_token.isascii()
+            or not raw_page_token.isprintable()
+            or any(char.isspace() for char in raw_page_token)
+        ):
+            raise ToolInputValidationError(
+                "Gmail tool input page_token must be the opaque token returned by list_drafts."
+            )
+        parameters["pageToken"] = api.outbound.guard_request_parameter_string(
+            raw_page_token, allow_machine_tokens=True
+        )
     include_spam_trash = tool_input.get("include_spam_trash")
     if isinstance(include_spam_trash, bool):
         parameters["includeSpamTrash"] = include_spam_trash
     elif include_spam_trash is not None:
         raise ToolInputValidationError("Gmail tool input include_spam_trash must be a boolean.")
     return parameters
+
+
+def _direct_provider_token(tool_input: JSONObject, key: str, api: HostAPI) -> str:
+    value = tool_input.get(key)
+    if (
+        not isinstance(value, str)
+        or not value
+        or not value.isascii()
+        or not value.isprintable()
+        or any(character.isspace() for character in value)
+    ):
+        raise ToolInputValidationError(
+            f"Gmail tool input {key} must be the opaque id returned by Gmail."
+        )
+    return api.outbound.guard_request_parameter_string(
+        value,
+        allow_identifiers=True,
+        allow_machine_tokens=True,
+    )
 
 
 def _single_line_text_list(value: Any) -> list[str]:
@@ -1104,15 +1145,11 @@ class GmailTool:
         if action == "read_message":
             if set(tool_input) - {"message_id"}:
                 raise ToolInputValidationError("Gmail read message only supports message_id.")
-            message_id = string_value(tool_input, ("message_id",))
-            if not message_id:
-                raise ToolInputValidationError("Gmail read message requires message_id.")
+            message_id = _direct_provider_token(tool_input, "message_id", api)
             response = execute_gmail_api_request(access_token, gmail_operation_request("users.messages.get", {"id": message_id, "format": "full"}))
             return {"status": "success_executed", "message": "Gmail message loaded.", "gmailMessage": gmail_readable_message(response)}
         if action == "read_thread":
-            thread_id = string_value(tool_input, ("thread_id",))
-            if not thread_id:
-                raise ToolInputValidationError("Gmail read thread requires thread_id.")
+            thread_id = _direct_provider_token(tool_input, "thread_id", api)
             response = execute_gmail_api_request(access_token, gmail_operation_request("users.threads.get", {"id": thread_id, "format": "metadata", "metadataHeaders": ["From", "To", "Cc", "Bcc", "Subject", "Date"]}))
             raw_messages = response.get("messages")
             messages = raw_messages if isinstance(raw_messages, list) else []
@@ -1148,7 +1185,14 @@ class GmailTool:
             }
             next_page_token = response.get("nextPageToken")
             if isinstance(next_page_token, str):
-                normalized["nextPageToken"] = next_page_token[:2_048]
+                try:
+                    normalized["nextPageToken"] = _draft_list_parameters(
+                        {"page_token": next_page_token}, api
+                    )["pageToken"]
+                except (ParamGuardDenied, ToolInputValidationError):
+                    # Never return a cursor that the same action would reject
+                    # when the agent submits it for the next page.
+                    pass
             return {"status": "success_executed", "message": "Gmail drafts loaded.", "drafts": normalized}
         raise ToolInputValidationError("Unsupported Gmail read action.")
 

@@ -25,11 +25,29 @@ WORKSPACE_ROUTES = {
 }
 _SMOKE_MODULES: dict[str, ModuleType | None] = {}
 _DEMO_MODE = False
+_DISMISSED = False
 
 
 def set_demo_mode(enabled: bool) -> None:
     global _DEMO_MODE
     _DEMO_MODE = enabled
+
+
+def _set_dismissed() -> None:
+    global _DISMISSED
+    _DISMISSED = True
+
+
+def _onboarding_status() -> dict[str, Any]:
+    # Demo mode explores the finished checklist; the default empty state is a
+    # fresh host, where no step has been reached yet.
+    return {
+        "provider_ready": _DEMO_MODE,
+        "chat_created": _DEMO_MODE,
+        "app_created": _DEMO_MODE,
+        "schedule_created": _DEMO_MODE,
+        "dismissed": _DISMISSED,
+    }
 
 
 def route_workspace_api(
@@ -40,6 +58,11 @@ def route_workspace_api(
     api_error: ApiErrorFactory,
     host_api: HostApi,
 ) -> dict[str, Any] | None:
+    if method == "GET" and path == "/v1/workspace/getting-started":
+        return _onboarding_status()
+    if method == "POST" and path == "/v1/workspace/getting-started/dismiss":
+        _set_dismissed()
+        return _onboarding_status()
     matched = next(
         ((prefix, target) for prefix, target in WORKSPACE_ROUTES.items()
          if path == prefix or path.startswith(prefix + "/")),

@@ -113,6 +113,24 @@ def access_token_is_fresh(
     )
 
 
+def require_scopes(
+    api: HostAPI, loaded: StoredCredential, required: frozenset[str], *, reconnect_message: str
+) -> None:
+    """Fail closed when the stored grant no longer covers what the tool needs.
+
+    ``account["scopes"]`` is a snapshot taken at connect, so a deploy that adds
+    a required scope leaves every existing connection short of it. Checking the
+    snapshot before the token is used turns that into the operator-visible
+    reconnect flow on the next call, instead of an opaque provider 403 (or,
+    where the provider never reports scopes on refresh, no signal at all).
+    The insufficient credential is cleared — behind the same
+    ``clear_if_still_loaded`` guard as every other failure path, so a reconnect
+    racing this call survives."""
+    if required - set(loaded["account"]["scopes"]):
+        clear_if_still_loaded(api, loaded)
+        raise IntegrationReconnectRequired(reconnect_message)
+
+
 def save_if_still_connected(
     api: HostAPI, loaded: StoredCredential, credential: StoredCredential, *, reconnect_message: str
 ) -> None:

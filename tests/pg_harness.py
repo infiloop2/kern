@@ -22,17 +22,128 @@ binaries.
 from __future__ import annotations
 
 import atexit
+from collections.abc import Callable
+import ctypes
+from functools import partial
 import glob
 import os
 from pathlib import Path
 import pwd
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 _STARTED = False
 _SKIP_REASON: str | None = None
+_HOST_SKIP_MESSAGE = (
+    "PostgreSQL integration tests are CI-only on a live Kern host; "
+    "they were skipped to protect agent runtime capacity. Rebase onto current main "
+    "and let GitHub Actions run the database suite."
+)
+
+_PR_SET_PDEATHSIG = 1
+_LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+def _bind_server_to_test_process(parent_pid: int) -> None:
+    """Ask Linux to terminate postgres if its test process disappears."""
+    if _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGINT, 0, 0, 0) != 0:
+        os._exit(127)
+    # Close the small race where the parent exits before prctl is installed.
+    if os.getppid() != parent_pid:
+        os.kill(os.getpid(), signal.SIGINT)
+
+
+def _parent_death_hook(parent_pid: int) -> Callable[[], None] | None:
+    """Return the Linux parent-death hook; other platforms use cleanup only."""
+    if sys.platform != "linux" or not hasattr(_LIBC, "prctl"):
+        return None
+    return partial(_bind_server_to_test_process, parent_pid)
+
+
+def _stop_postgres(postgres: subprocess.Popen[bytes]) -> None:
+    """Stop a foreground test postmaster without waiting on pooled clients."""
+    if postgres.poll() is not None:
+        return
+    try:
+        # PostgreSQL maps SIGINT to fast shutdown: disconnect clients, roll
+        # back active transactions, and exit cleanly. SIGTERM is smart
+        # shutdown and can wait forever on the process-wide test pool.
+        postgres.send_signal(signal.SIGINT)
+        postgres.wait(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            postgres.kill()
+            postgres.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _wait_for_postgres(
+    postgres: subprocess.Popen[bytes],
+    pg_isready: Path,
+    socket_dir: Path,
+    postgres_log: Path,
+    env: dict[str, str],
+    *,
+    timeout_seconds: float = 30,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Wait against one wall-clock deadline, not a number of fast polls."""
+    deadline = monotonic() + timeout_seconds
+    while True:
+        if postgres.poll() is not None:
+            detail = postgres_log.read_text(errors="replace")[-2_000:]
+            raise RuntimeError(f"scratch PostgreSQL exited during startup: {detail}")
+        ready = subprocess.run(
+            [
+                str(pg_isready),
+                "-h",
+                str(socket_dir),
+                "-U",
+                "postgres",
+                "-d",
+                "postgres",
+                "-t",
+                "1",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            env=env,
+        )
+        if ready.returncode == 0:
+            return
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"scratch PostgreSQL did not become ready within {timeout_seconds:g} seconds"
+            )
+        sleep(min(0.1, remaining))
+
+
+def _host_skip_reason() -> str | None:
+    """Keep scratch database servers off the live single-tenant host.
+
+    GitHub Actions is the authoritative environment for these integration
+    tests. The filesystem/user check covers both the canonical test wrapper
+    and direct test invocations without changing the environment inherited by
+    unrelated agent work.
+    """
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        return None
+    try:
+        username = pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        username = ""
+    if username == "kern-agent" and Path("/opt/kern-host").is_dir():
+        return _HOST_SKIP_MESSAGE
+    return None
 
 
 def _subprocess_env(work_dir: Path) -> dict[str, str]:
@@ -83,6 +194,10 @@ def ensure_database() -> None:
     global _STARTED, _SKIP_REASON
     if _SKIP_REASON is not None:
         raise unittest.SkipTest(_SKIP_REASON)
+    host_skip = _host_skip_reason()
+    if host_skip is not None:
+        _SKIP_REASON = host_skip
+        raise unittest.SkipTest(_SKIP_REASON)
     if _STARTED:
         return
     pg_bin = _find_pg_bin()
@@ -98,16 +213,15 @@ def ensure_database() -> None:
     # bytes and temp dirs under deep workspaces can exceed that.
     socket_dir = Path(tempfile.mkdtemp(prefix="tcpg.", dir="/tmp"))
 
+    postgres: subprocess.Popen[bytes] | None = None
+    postgres_log = data_dir.parent / "postgres.log"
+    log_handle = None
+
     def cleanup() -> None:
-        try:
-            subprocess.run(
-                [str(pg_bin / "pg_ctl"), "-D", str(data_dir), "stop", "-m", "immediate"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-        except OSError:
-            pass
+        if postgres is not None:
+            _stop_postgres(postgres)
+        if log_handle is not None:
+            log_handle.close()
         shutil.rmtree(data_dir.parent, ignore_errors=True)
         shutil.rmtree(socket_dir, ignore_errors=True)
 
@@ -154,24 +268,45 @@ def ensure_database() -> None:
             "UTF8",
         ]
     )
-    # Durability off: the cluster is thrown away with the process, and the
-    # test suite hits the disk hard without this.
-    options = (
-        f"-c listen_addresses='' -c unix_socket_directories='{socket_dir}'"
-        " -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
-    )
-    run_setup(
-        [
-            str(pg_bin / "pg_ctl"),
-            "-D",
-            str(data_dir),
-            "-l",
-            str(data_dir.parent / "postgres.log"),
-            "-o",
-            options,
-            "start",
-        ],
-    )
+    # Run the postmaster in the foreground and retain its process handle.
+    # pg_ctl daemonization would reparent it to pid 1, leaving a live server
+    # behind when a test runner is killed before Python can run atexit hooks.
+    # Durability is off because this cluster is thrown away with the process.
+    try:
+        log_handle = postgres_log.open("ab", buffering=0)
+        postgres = subprocess.Popen(
+            [
+                str(pg_bin / "postgres"),
+                "-D",
+                str(data_dir),
+                "-c",
+                "listen_addresses=",
+                "-c",
+                f"unix_socket_directories={socket_dir}",
+                "-c",
+                "fsync=off",
+                "-c",
+                "synchronous_commit=off",
+                "-c",
+                "full_page_writes=off",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+            preexec_fn=_parent_death_hook(os.getpid()),
+        )
+        _wait_for_postgres(
+            postgres,
+            pg_bin / "pg_isready",
+            socket_dir,
+            postgres_log,
+            env,
+        )
+    except BaseException:
+        abort_setup()
+        raise
     os.environ["KERN_DB_SOCKET_DIR"] = str(socket_dir)
     os.environ["KERN_DB_NAME"] = "kern_test"
     os.environ["KERN_DB_USER"] = "postgres"

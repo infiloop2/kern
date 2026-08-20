@@ -650,6 +650,26 @@ class ToolTests(unittest.TestCase):
         self.assertIn("credential", result.error)
         self.assertIn("retry", result.error)
 
+    def test_gmail_direct_read_ids_deny_secret_shaped_values(self) -> None:
+        api = connected_google_api(gmail.MANIFEST.tool_id, gmail.REQUIRED_GMAIL_SCOPES)
+
+        def fail_if_called(access_token: str, request: JSONObject) -> JSONObject:
+            raise AssertionError("a denied id must not reach the Gmail API")
+
+        with patch.object(gmail_api, "execute_gmail_api_request", side_effect=fail_if_called):
+            for action, field in (
+                ("read_message", "message_id"),
+                ("read_thread", "thread_id"),
+            ):
+                with self.subTest(action=action):
+                    result = GmailTool().execute(
+                        action, {field: "AKIAIOSFODNN7EXAMPLE"}, api
+                    )
+                    self.assertIsInstance(result, ActionFailed)
+                    assert isinstance(result, ActionFailed)
+                    self.assertIn("credential", result.error)
+                    self.assertIn("retry", result.error)
+
     def test_gmail_write_queues_exact_payload_then_executes_after_approval(self) -> None:
         api = connected_google_api(gmail.MANIFEST.tool_id, gmail.REQUIRED_GMAIL_SCOPES)
         tool = GmailTool()
@@ -1258,6 +1278,30 @@ class ToolTests(unittest.TestCase):
         drafts = cast(dict, result["drafts"])
         self.assertEqual(len(cast(list, drafts["drafts"])), gmail.DEFAULT_DRAFT_PAGE_LIMIT)
         self.assertEqual(preview.call_count, gmail.DEFAULT_DRAFT_PAGE_LIMIT)
+
+    def test_gmail_returns_only_page_tokens_the_guard_will_accept(self) -> None:
+        api = FakeHostAPI()
+        for token, returned in (("x" * 1_024, True), ("x" * 1_025, False)):
+            with self.subTest(token_bytes=len(token)):
+                with patch.object(
+                    gmail,
+                    "execute_gmail_api_request",
+                    return_value={"drafts": [], "nextPageToken": token},
+                ):
+                    result = gmail.GmailTool()._execute_read(
+                        "list_drafts", {}, "token", api
+                    )
+                drafts = cast(dict, result["drafts"])
+                if returned:
+                    self.assertEqual(drafts["nextPageToken"], token)
+                    self.assertEqual(
+                        gmail._draft_list_parameters(
+                            {"page_token": drafts["nextPageToken"]}, api
+                        )["pageToken"],
+                        token,
+                    )
+                else:
+                    self.assertNotIn("nextPageToken", drafts)
 
     def test_calendar_create_summary_includes_all_accepted_fields(self) -> None:
         proposal = {

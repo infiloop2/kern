@@ -32,6 +32,7 @@ from host.tools.shared.oauth2 import (
     clear_if_still_loaded,
     now,
     pkce_verifier_and_challenge,
+    require_scopes,
     save_if_still_connected,
     signed_state,
     verify_state,
@@ -425,6 +426,7 @@ class XCredentialStore:
         existing = api.credentials.load()
         if existing is None:
             raise IntegrationReconnectRequired(X_RECONNECT_MESSAGE)
+        require_scopes(api, existing, REQUIRED_X_SCOPES, reconnect_message=X_RECONNECT_MESSAGE)
         payload = cast(Mapping[str, object], existing["secret"])
         if access_token_is_fresh(payload, now()):
             return str(payload.get("access_token") or "")

@@ -13,6 +13,7 @@ from host.tools.shared.oauth2 import (
     access_token_is_fresh,
     clear_if_still_loaded,
     now,
+    require_scopes,
     save_if_still_connected,
     signed_state,
     verify_state,
@@ -459,10 +460,7 @@ class GoogleCredentialStore:
         if existing is None:
             raise IntegrationReconnectRequired(f"{self.tool_id} is not connected.")
         token_payload = existing["secret"]
-        missing_scopes = self.required_scopes - set(existing["account"]["scopes"])
-        if missing_scopes:
-            clear_if_still_loaded(api, existing)
-            raise IntegrationReconnectRequired(self.reconnect_message)
+        require_scopes(api, existing, self.required_scopes, reconnect_message=self.reconnect_message)
         payload = cast(Mapping[str, object], token_payload)
         if access_token_is_fresh(payload, now()):
             return google_access_token_from_payload(payload)

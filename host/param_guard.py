@@ -45,9 +45,10 @@ REASON_PII = "request_param_pii_denied"
 # Kept here so every Integration Guide renders the identical sentence and a
 # wording change is a one-line diff.
 PARAM_GUARD_PROTECTION = (
-    "Request parameters pass the host parameter guard: values shaped like a "
-    "secret, credential, or sensitive identifier are denied before the request "
-    "is sent."
+    "Request parameters pass the host parameter guard before they are sent. "
+    "Recognized secret and credential shapes are always denied; personal "
+    "identifiers and machine-shaped tokens are allowed only for fields that "
+    "require them."
 )
 
 # The expanded guide description (Home integration page technical details).
@@ -56,8 +57,11 @@ PARAM_GUARD_TECHNICAL_DETAIL = (
     "Parameter guard: free-text request parameters sent without operator "
     "approval are limited to 1,024 bytes and checked against deterministic "
     "rules for secrets, credentials, personal and financial identifiers, and "
-    "encoded or random-looking payloads; a match denies the action before "
-    "anything is sent."
+    "encoded or random-looking payloads. Personal-identifier checks are skipped "
+    "only for fields whose validated grammar requires them, and generic "
+    "machine-token checks only for opaque provider-token fields; explicit "
+    "secret and credential checks always apply. A match denies the action "
+    "before anything is sent."
 )
 
 
@@ -79,21 +83,28 @@ class ParamGuardDenied(ValueError):
         self.denial = denial
 
 
-def guard_request_parameter_string(value: str, *, allow_identifiers: bool = False) -> str:
+def guard_request_parameter_string(
+    value: str,
+    *,
+    allow_identifiers: bool = False,
+    allow_machine_tokens: bool = False,
+) -> str:
     """Apply the standard guard set; return ``value`` unchanged or raise.
 
     The error message is descriptive so the agent can rephrase and retry, and
     it never echoes the offending value.
 
-    ``allow_identifiers=True`` skips the personal-identifier guards (email, phone,
-    card, digit runs, etc.) while still denying secret/credential shapes and
-    encoded payloads. Use it only for a query against an account the operator
-    already connected (a mailbox search), where a personal identifier is
-    legitimate search syntax (``from:alice@example.com``) and the destination
-    already holds that data, but a credential from another context still does
-    not belong in the query.
+    ``allow_identifiers=True`` skips the personal-identifier guards for a
+    field whose validated grammar requires identifiers, such as a mailbox
+    query or provider cursor. ``allow_machine_tokens=True`` skips
+    the two generic token-shape heuristics for provider-issued opaque tokens.
+    Both retain the length, text, secret, and credential rules.
     """
-    denial = find_denial(value, allow_identifiers=allow_identifiers)
+    denial = find_denial(
+        value,
+        allow_identifiers=allow_identifiers,
+        allow_machine_tokens=allow_machine_tokens,
+    )
     if denial is not None:
         raise ParamGuardDenied(denial)
     return value
@@ -103,25 +114,15 @@ def guard_request_parameter_string(value: str, *, allow_identifiers: bool = Fals
 def find_denial(
     value: str,
     *,
-    token_rules: bool = True,
     allow_identifiers: bool = False,
-    allow_unnatural_token: bool = False,
+    allow_machine_tokens: bool = False,
 ) -> GuardDenial | None:
     """Run the guards over one decoded value and return the first denial.
 
-    ``token_rules=False`` (the GitHub read path) disables the two token-shape
-    guards - the unbroken-token rule and the unnatural-token score - because
-    revision ids, blob shas, and ref names are legitimately long and
-    machine-shaped there.
-
-    ``allow_identifiers=True`` (connected-account mailbox queries) skips the
-    personal-identifier guards, because a personal identifier is legitimate
-    search syntax against an account the operator already owns, while still
-    denying secret/credential shapes and encoded payloads.
-
-    ``allow_unnatural_token=True`` skips only the final random-looking-token
-    heuristic. Destination-specific callers must separately validate the
-    provider token's exact grammar.
+    ``allow_identifiers`` skips the personal-identifier guards for a field
+    whose validated grammar requires them. ``allow_machine_tokens`` skips both
+    generic token-shape heuristics for provider-issued opaque tokens, but keeps
+    every specific secret and (unless independently allowed) identifier rule.
     """
     # G1 LENGTH - the floor that works when every other guard misses. Lone
     # surrogates (JSON escapes can produce them) cannot encode; treat them
@@ -153,7 +154,7 @@ def find_denial(
     tokens = value.split()
     # G3 TOKEN_RUN - anti-smuggling: no legitimate query or prompt needs an
     # unbroken token this long, but base64/hex payloads do.
-    if token_rules:
+    if not allow_machine_tokens:
         for token in tokens:
             if len(token) > MAX_UNBROKEN_TOKEN_CHARS and not _is_plain_https_url(token):
                 return GuardDenial(
@@ -166,9 +167,8 @@ def find_denial(
     return _find_pattern_denial(
         value,
         tokens,
-        token_rules=token_rules,
         allow_identifiers=allow_identifiers,
-        allow_unnatural_token=allow_unnatural_token,
+        allow_machine_tokens=allow_machine_tokens,
     )
 
 
@@ -212,9 +212,8 @@ def _find_pattern_denial(
     value: str,
     tokens: list[str],
     *,
-    token_rules: bool,
     allow_identifiers: bool,
-    allow_unnatural_token: bool,
+    allow_machine_tokens: bool,
 ) -> GuardDenial | None:
     value, tokens = _mask_public_addresses(value, tokens)
     # --- Secret-shaped values -------------------------------------------
@@ -234,7 +233,7 @@ def _find_pattern_denial(
     if _HEX64_RE.search(value) or _WIF_RE.search(value):
         return _secret("CRYPTO_KEY", "a raw cryptographic key")
     # G10 CRED_URL
-    if _has_credential_url(tokens):
+    if _has_credential_url(value, tokens):
         return _secret("CRED_URL", "a URL embedding credentials or a token")
     # G18 ENTROPY_NEAR_KEYWORD
     if _has_entropy_near_keyword(value):
@@ -244,9 +243,9 @@ def _find_pattern_denial(
         return _secret("PASSWORD_KEYWORD", "a password")
 
     # --- Structured personal/financial identifiers ----------------------
-    # Skipped for connected-account queries (allow_identifiers): an email address or
-    # phone number is legitimate mailbox-search syntax against an account the
-    # operator already owns.
+    # Skipped only for fields whose validated grammar requires identifiers: an
+    # email address can be legitimate mailbox-search syntax, while a validated
+    # opaque object id or cursor can legitimately contain a long digit run.
     if not allow_identifiers:
         # G16 EMAIL
         if _EMAIL_RE.search(value):
@@ -280,7 +279,7 @@ def _find_pattern_denial(
             return _pii("DIGIT_RUN", f"an unbroken run of {MIN_BARE_DIGIT_RUN}-{MAX_BARE_DIGIT_RUN} digits (phone-, card-, or account-number length)")
     # G5 UNNATURAL_TOKEN - scored gibberish check, run last in code because
     # everything with a more specific shape should be named first.
-    if token_rules and not allow_unnatural_token and _has_unnatural_token(tokens):
+    if not allow_machine_tokens and _has_unnatural_token(tokens):
         return GuardDenial(
             "UNNATURAL_TOKEN",
             REASON_ENCODED_BLOB,
@@ -399,10 +398,10 @@ def _has_seed_phrase(tokens: list[str]) -> bool:
     return False
 
 
-# Query keys that name a credential. One explicit list, shared by the
-# CRED_URL guard (URLs inside tool parameters) and the proxy pair check
-# (which sees keys and values separately): a 16+ char value under one of
-# these keys is a transmitted secret regardless of the value's shape.
+# Query keys that name a credential. CRED_URL uses this one explicit list for
+# URLs inside tool parameters and URLs reconstructed by the network proxy: a
+# 16+ char value under one of these keys is a transmitted secret regardless of
+# the value's shape.
 CREDENTIAL_QUERY_KEYS: frozenset[str] = frozenset({
     "access_token",
     "api_key",
@@ -426,13 +425,25 @@ def is_credential_query_key(key: str) -> bool:
     return key.lower() in CREDENTIAL_QUERY_KEYS
 
 
-def _has_credential_url(tokens: list[str]) -> bool:
-    # G10: userinfo in a URL, or a long value under a credential-named query key.
-    for token in tokens:
-        if "://" not in token:
+def _has_credential_url(value: str, tokens: list[str]) -> bool:
+    """Detect credentials in complete URLs and URL-shaped tokens.
+
+    The complete-value candidate matters after form decoding: a legitimate
+    ``+`` becomes a space inside a query value, but later credential pairs
+    still belong to the same URL and must remain visible to this rule.
+    """
+    stripped = value.strip()
+    candidates = list(tokens)
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", stripped):
+        candidates.insert(0, stripped)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen or "://" not in candidate:
             continue
+        seen.add(candidate)
         try:
-            parsed = urllib.parse.urlsplit(token)
+            parsed = urllib.parse.urlsplit(candidate)
         except ValueError:
             return True  # unparseable URL-shaped token: treat as suspect
         if parsed.hostname and "@" in parsed.netloc:
@@ -728,5 +739,15 @@ class OutboundGuardService:
     implementation and tools exercise the real guard everywhere.
     """
 
-    def guard_request_parameter_string(self, value: str, *, allow_identifiers: bool = False) -> str:
-        return guard_request_parameter_string(value, allow_identifiers=allow_identifiers)
+    def guard_request_parameter_string(
+        self,
+        value: str,
+        *,
+        allow_identifiers: bool = False,
+        allow_machine_tokens: bool = False,
+    ) -> str:
+        return guard_request_parameter_string(
+            value,
+            allow_identifiers=allow_identifiers,
+            allow_machine_tokens=allow_machine_tokens,
+        )

@@ -160,10 +160,10 @@ def request_denied(
     # is not already open by design. What does matter — the agent's
     # Authorization — is stripped and replaced in rewrite_request_headers.
     if guarded_host and method in {"GET", "HEAD"}:
-        # Query values on the REST/web hosts are agent-authored. Token rules
-        # stay off: revision ids, blob shas and ref names are legitimately
-        # machine-shaped here.
-        param_denial = request_param_denial("", query, token_rules=False)
+        # Query values on the REST/web hosts are agent-authored. Generic
+        # machine-token checks stay off: revision ids, blob shas and ref names
+        # are legitimately machine-shaped here. Every specific rule remains.
+        param_denial = request_param_denial("", query, allow_machine_tokens=True)
         if param_denial is not None:
             return param_denial
     if not guarded_host:
@@ -187,11 +187,10 @@ def _github_actions_blob_request_denied(
     The global parameter guard deliberately remains destination-agnostic and
     continues to reject credential-named ``sig`` query values. Here, after the
     GitHub integration has selected an HTTPS, GET/HEAD-only Azure Blob host,
-    inspect each decoded signature with every global guard except the final
-    UNNATURAL_TOKEN heuristic, require Azure's Base64 HMAC-SHA256 signature
-    shape, then substitute a neutral value before applying the unchanged
-    full-query guard. All non-``sig`` query keys and values retain the
-    standard checks.
+    inspect the decoded signature with only generic machine-token checks
+    disabled, require Azure's exact Base64 HMAC-SHA256 signature shape, then
+    substitute a neutral value before applying the unchanged full-query guard.
+    All non-``sig`` query keys and values retain the standard checks.
     """
     try:
         pairs = parse_qsl(
@@ -212,7 +211,7 @@ def _github_actions_blob_request_denied(
         if key.lower() != "sig":
             sanitized.append((key, value))
             continue
-        denial = find_denial(value, allow_unnatural_token=True)
+        denial = find_denial(value, allow_machine_tokens=True)
         if denial is not None:
             return denial.reason
         if AZURE_SAS_SIGNATURE_RE.fullmatch(value) is None:

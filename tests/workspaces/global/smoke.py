@@ -23,10 +23,12 @@ SCHEDULE_HISTORY: dict[int, list[dict[str, Any]]] = {}
 RUNS: dict[int, list[dict[str, Any]]] = {}
 NEXT_SCHEDULE_ID = 1
 NEXT_RUN_ID = 1
+DEMO_MODE = False
 
 
 def configure_mock(*, demo_mode: bool = False) -> None:
-    global NEXT_SCHEDULE_ID, NEXT_RUN_ID
+    global NEXT_SCHEDULE_ID, NEXT_RUN_ID, DEMO_MODE
+    DEMO_MODE = demo_mode
     with LOCK:
         MEMORY.clear()
         MEMORY_HISTORY.clear()
@@ -70,7 +72,12 @@ def route_workspace_api(
             return {"page": _restore_memory(restore_match.group(1), int(restore_match.group(2)), body, api_error)}
 
         if relative == "schedules/session-options" and method == "GET":
-            return {"session_options": schedule_session_options()}
+            # Hermes is deliberately left deactivated so the smoke covers the
+            # gated rendering for real; no journey selects it.
+            return {
+                "session_options": schedule_session_options(),
+                "active_runtimes": ["codex"] if DEMO_MODE else ["claude_code", "codex"],
+            }
         if relative == "schedules":
             if method == "GET":
                 return _list_schedules(query, api_error)
@@ -630,6 +637,16 @@ def desktop_smoke(page: Any) -> None:
     expect(surface.locator("#schedule-effort")).to_have_value("fixed")
     surface.locator("#schedule-runtime").select_option("codex")
     expect(surface.locator("#schedule-message-label")).to_have_text("Message")
+    # A provider the operator has not activated stays visible but unusable.
+    # Kern runs the script runtime itself, so it is never gated.
+    hermes = surface.locator("#schedule-runtime option[value='hermes']")
+    expect(hermes).to_have_text("hermes (not activated)")
+    if not hermes.evaluate("option => option.disabled"):
+        raise AssertionError("a deactivated runtime must not be selectable")
+    if surface.locator("#schedule-runtime option[value='script']").evaluate(
+        "option => option.disabled"
+    ):
+        raise AssertionError("the script runtime must never be gated")
     surface.locator("#schedule-cadence").select_option("daily")
     surface.locator("#schedule-time").fill("09:00")
     surface.get_by_role("button", name="Save schedule", exact=True).click()

@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 from host.agent_scripts import script_path_error
 from host.runtime.core import db, host_errors
-from host.runtime.workspace.host_api import WorkspaceError, call_admin_api
+from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
 from host.session_options import SCRIPT_RUNTIME, schedule_session_options
 
 
@@ -61,7 +61,10 @@ def route_browser(
     if path == "/schedules/session-options" and method == "GET":
         if query:
             raise WorkspaceError(HTTPStatus.BAD_REQUEST, "session options do not accept query parameters")
-        return {"session_options": schedule_session_options()}
+        return {
+            "session_options": schedule_session_options(),
+            "active_runtimes": active_agent_runtimes(),
+        }
     if path == "/schedules":
         if method == "GET":
             return list_schedules(query)

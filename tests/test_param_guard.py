@@ -144,15 +144,36 @@ class FindDenialTest(unittest.TestCase):
         userinfo_url = "https://user:pass@example.com/" + "a" * 120
         self.assertIsNotNone(find_denial(f"read {userinfo_url}"))
 
-    def test_token_rules_off_allows_machine_shaped_github_values(self) -> None:
+    def test_allow_machine_tokens_allows_machine_shapes_only(self) -> None:
         # The GitHub read path disables both token-shape guards: long refs
         # and commit shas are legitimate there...
         sha = "9c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b"
-        self.assertIsNone(find_denial(sha, token_rules=False))
-        self.assertIsNone(find_denial("A" * 200, token_rules=False))
+        self.assertIsNone(find_denial(sha, allow_machine_tokens=True))
+        self.assertIsNone(find_denial("A" * 200, allow_machine_tokens=True))
         # ...but every other guard still applies.
-        self.assertIsNotNone(find_denial("alice@example.com", token_rules=False))
-        self.assertIsNotNone(find_denial("AKIAIOSFODNN7EXAMPLE", token_rules=False))
+        self.assertIsNotNone(find_denial("alice@example.com", allow_machine_tokens=True))
+        self.assertIsNotNone(find_denial("AKIAIOSFODNN7EXAMPLE", allow_machine_tokens=True))
+
+    def test_optional_exceptions_are_independent_and_can_be_combined(self) -> None:
+        machine = "x7Kp2mQv9zR4tYw8LbN3"
+        self.assertIsNotNone(find_denial(machine, allow_identifiers=True))
+        self.assertIsNotNone(
+            find_denial("alice@example.com", allow_machine_tokens=True)
+        )
+        self.assertIsNone(
+            find_denial(
+                f"alice@example.com {machine}",
+                allow_identifiers=True,
+                allow_machine_tokens=True,
+            )
+        )
+        self.assertIsNotNone(
+            find_denial(
+                "api key x7Kp2mQv9zR4tYw8LbN3",
+                allow_identifiers=True,
+                allow_machine_tokens=True,
+            )
+        )
 
     # --- Secret rules ---------------------------------------------------
 
@@ -204,6 +225,17 @@ class FindDenialTest(unittest.TestCase):
             "?sig=HhC%2FUPa%2FtitCP1DLVLa0ZnGPCw0RT338fxdeQ04ZoPw%3D",
             "CRED_URL",
         )
+        decoded = find_denial(
+            "https://example.com/search?q=foo bar&access_token=aaaaaaaaaaaaaaaa",
+            allow_machine_tokens=True,
+        )
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertEqual(decoded.guard, "CRED_URL")
+        self.assert_guard(
+            "https://example.com/?access_token=" + "a" * 15 + ")",
+            "CRED_URL",
+        )
         self.assertIsNone(find_denial("read https://example.com/page?id=42&sort=asc"))
 
     def test_entropy_near_keyword_denies_but_needs_the_keyword(self) -> None:
@@ -214,16 +246,6 @@ class FindDenialTest(unittest.TestCase):
         denial = find_denial(f"lookup {token} details")
         assert denial is not None
         self.assertNotEqual(denial.guard, "ENTROPY_NEAR_KEYWORD")
-
-    def test_allow_unnatural_token_skips_only_that_final_heuristic(self) -> None:
-        token = "x7Kp2mQv9zR4tYw8LbN3"
-        self.assertIsNone(find_denial(token, allow_unnatural_token=True))
-        denial = find_denial(
-            "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
-            allow_unnatural_token=True,
-        )
-        assert denial is not None
-        self.assertEqual(denial.guard, "CRED_PREFIX")
 
     def test_password_requires_a_connective(self) -> None:
         self.assert_guard("password: hunter2secret", "PASSWORD_KEYWORD")
@@ -309,7 +331,7 @@ class FindDenialTest(unittest.TestCase):
 class AllowIdentifiersTest(unittest.TestCase):
     def test_allows_identifiers_but_still_denies_secrets_and_codes(self) -> None:
         # allow_identifiers skips the personal-identifier guards (mailbox
-        # search syntax), but keeps secrets, one-time codes, and encoded blobs.
+        # search syntax), but keeps secrets and encoded blobs.
         for allowed in (
             "from:alice@example.com invoice",
             "subject:budget from:boss@acme.com",

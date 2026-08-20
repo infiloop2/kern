@@ -856,8 +856,9 @@ def desktop_smoke(page, url: str) -> None:
         "What it enables",
         "Connection",
         "What happens to your data",
+        "Technical notes",
     ])
-    expect(gmail_guide.locator(".guide-technical-details")).to_have_count(0)
+    expect(gmail_guide.locator(".guide-technical-details")).to_contain_text("Parameter guard")
     expect(gmail_guide.locator(":scope > .guide-section").nth(1).locator(":scope > p")).to_have_count(0)
     expect(gmail_guide).to_contain_text("send_email")
     expect(gmail_guide).to_contain_text("approval required")

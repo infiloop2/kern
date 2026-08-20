@@ -1101,9 +1101,9 @@ install_service_units() {
 #   gives the agent every core, but when host services need CPU they are
 #   guaranteed about two thirds of it. A hard CPUQuota would waste idle
 #   cores, so none is set.
-# - MemoryHigh reclaims (to the swapfile) before MemoryMax OOM-kills inside
-#   the agent cgroup, so a runaway agent build dies instead of triggering a
-#   host-wide OOM kill that could take out Postgres or the proxy.
+# - The slice-wide MemoryHigh is a last-resort aggregate backstop. Each
+#   transient runtime scope has a lower MemoryHigh and MemoryMax, so reclaim
+#   is charged to the busy thread before unrelated runtime startups stall.
 # - MemorySwapMax leaves 1G of the 6G root-volume swapfile (created above)
 #   for host services. systemd 249 has no percentage form for swap limits,
 #   but this script owns the swapfile size, so the absolute value cannot
@@ -1117,7 +1117,7 @@ Description=Kern Agent Runtimes
 
 [Slice]
 CPUWeight=50
-MemoryHigh=70%
+MemoryHigh=75%
 MemoryMax=80%
 MemorySwapMax=5G
 TasksMax=4096

@@ -69,6 +69,15 @@ class LinkedInToolTests(unittest.TestCase):
         self.assertEqual(result.result["email"], "claw@example.com")
         self.assertEqual(result.result["picture"], "https://media.licdn.com/profile.jpg")
 
+    def test_missing_scope_requires_reconnect(self) -> None:
+        api = connected_api()
+        assert api.credentials.record is not None
+        api.credentials.record["account"]["scopes"] = ["openid", "profile", "email"]
+        result = LinkedInTool().execute("get_profile", {}, api)
+        assert isinstance(result, ActionFailed)
+        self.assertTrue(result.reconnect_required)
+        self.assertIsNone(api.credentials.load())
+
     def test_expired_token_requires_reconnect(self) -> None:
         api = connected_api(expires_at=1)
         result = LinkedInTool().execute("get_profile", {}, api)

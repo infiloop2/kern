@@ -234,7 +234,12 @@ def _route_workspace_api(
     query: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     if method == "GET" and relative == "session-options":
-        return {"session_options": public_session_options()}
+        # Hermes is deliberately left deactivated so the smoke covers the gated
+        # rendering for real; no journey selects it. Demo mode narrows further.
+        return {
+            "session_options": public_session_options(),
+            "active_runtimes": ["codex"] if DEMO_MODE else ["claude_code", "codex"],
+        }
     with MOCK_LOCK:
         _progress_turns()
         if method == "GET" and relative == "apps":
@@ -341,6 +346,14 @@ def _app_summary(workspace: dict[str, Any]) -> dict[str, Any]:
         "last_used_at": max(workspace["app"]["updated_at"], workspace["last_used_at"]),
         "latest_event_seq": max(
             (int(event["seq"]) for event in workspace["events"]),
+            default=0,
+        ),
+        "latest_message_seq": max(
+            (
+                int(event["seq"])
+                for event in workspace["events"]
+                if event["event_type"] == "thread.message"
+            ),
             default=0,
         ),
         "session": copy.deepcopy(workspace["session"]),
@@ -1095,6 +1108,12 @@ def desktop_smoke(page: Any) -> None:
             f"generated app should have one sanitized stylesheet, got {generated_sheet_count}"
         )
     expect(frame.locator("#runtime")).to_be_enabled()
+    # A provider the operator has not activated stays visible but unusable.
+    hermes = frame.locator("#runtime option[value='hermes']")
+    expect(hermes).to_have_text("Hermes (not activated)")
+    if not hermes.evaluate("option => option.disabled"):
+        raise AssertionError("a deactivated runtime must not be selectable")
+    expect(frame.locator("#runtime option[value='codex']")).to_have_text("Codex")
     expect(frame.locator("#latest-agent-card")).to_be_visible()
     frame.get_by_role("button", name="Dismiss agent message", exact=True).click()
     expect(frame.locator("#latest-agent-card")).to_be_hidden()

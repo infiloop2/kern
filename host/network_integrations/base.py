@@ -264,36 +264,53 @@ def _strict_unquote_header(value: str) -> str:
         value = decoded
 
 
-def request_param_denial(path: str, query: str, *, token_rules: bool = True) -> str | None:
+def request_param_denial(
+    path: str,
+    query: str,
+    *,
+    allow_identifiers: bool = False,
+    allow_machine_tokens: bool = False,
+) -> str | None:
     """Run the parameter guard over a managed-integration request's URL and
     return the first denial code.
 
-    The whole reconstructed URL (`https://host<path>?<query>`) is decoded and
-    scanned as one value rather than parsing path segments and query pairs
-    individually. This keeps the proxy path simple and still enforces the
-    credential-named-query-key rule, because scanning a full URL routes
-    through the same `CRED_URL` guard (G10) that parses the query and denies
-    a credential key carrying a long value - so `?access_token=<16+ chars>`
-    is caught without the proxy reparsing anything. The unbroken URL is a
-    plain `https` URL, so the token-length rule does not fire on it; long or
-    encoded payloads inside a path segment are caught by the unnatural-token
-    rule instead.
+    The reconstructed URL (`https://host<path>?<query>`) is scanned both before
+    and after percent/form decoding. The first scan preserves the exact request
+    structure; the second inspects the semantic values sent upstream.
+    The unbroken URL is a plain `https` URL, so the token-length rule does not
+    fire on it; long or encoded payloads inside a path segment are caught by
+    the unnatural-token rule instead.
 
     Percent-decoding is strict: bytes that are not valid UTF-8 would be
     smoothed into replacement characters by lenient decoding (and pass the
     printable rule) while the raw bytes still went upstream - a binary
     exfiltration channel - so invalid encodings deny outright.
     """
-    raw = "https://host" + path
-    if query:
-        raw += "?" + query
     try:
-        decoded = urllib.parse.unquote(raw, errors="strict")
+        decoded_path = urllib.parse.unquote(path, errors="strict")
+        # Validate every percent escape as UTF-8 before either scan. The parsed
+        # pairs are intentionally discarded; CRED_URL owns credential policy.
+        urllib.parse.parse_qsl(query, keep_blank_values=True, errors="strict")
+        # Query strings use form semantics: a literal + is a space, while an
+        # actual plus is encoded as %2B. Decode the two URL components
+        # separately so path pluses remain literal and keyword adjacency in a
+        # query is evaluated exactly as the destination receives it.
+        decoded_query = urllib.parse.unquote_plus(query, errors="strict")
     except UnicodeDecodeError:
         return "request_param_encoded_blob_denied"
-    denial = find_denial(decoded, token_rules=token_rules)
-    if denial is not None:
-        return denial.reason
+    raw_url = "https://host" + path
+    decoded_url = "https://host" + decoded_path
+    if query:
+        raw_url += "?" + query
+        decoded_url += "?" + decoded_query
+    for candidate in (raw_url, decoded_url):
+        denial = find_denial(
+            candidate,
+            allow_identifiers=allow_identifiers,
+            allow_machine_tokens=allow_machine_tokens,
+        )
+        if denial is not None:
+            return denial.reason
     # An integration exemption excuses a header from the *semantic* guards,
     # because the value legitimately looks like the thing they detect — an
     # operator-approved credential really is a credential. It does not excuse

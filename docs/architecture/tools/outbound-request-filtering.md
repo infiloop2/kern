@@ -11,21 +11,30 @@ an automatic action bound for a public or third-party destination:
 
 ```python
 api.outbound.guard_request_parameter_string(value)                        # public / third-party
-api.outbound.guard_request_parameter_string(value, allow_identifiers=True) # connected-account query
+api.outbound.guard_request_parameter_string(value, allow_identifiers=True) # validated identifier-bearing field
+api.outbound.guard_request_parameter_string(value, allow_machine_tokens=True) # opaque provider token
+api.outbound.guard_request_parameter_string(value, allow_identifiers=True, allow_machine_tokens=True) # validated opaque token that can be identifier-shaped
 ```
 
 The default form is for values sent to a public or third-party destination.
-`allow_identifiers=True` is the one sanctioned call-site variation, for a
-query against an account the operator already connected (a Gmail mailbox
-search): it skips only the personal-identifier rules, because an email
-address or phone number is legitimate search syntax against an account that
-already holds that data (`from:alice@example.com` must not be denied), while
-secret/credential shapes and encoded payloads are still denied. Apart from
-that flag the caller passes the value and nothing else — no limits, thresholds, guard
-selections, or policy objects — so a call site cannot weaken the check;
-tightening or loosening is a host-side reviewed change. The proxy also runs
-these rules over decoded request-URL values on the managed integrations
-(`request_param_denial` in `host/network_integrations/base.py`).
+The two optional flags are false by default and each removes one narrow class
+of false positive. `allow_identifiers=True` is for a field whose validated
+grammar legitimately permits identifiers, such as mailbox-search syntax
+(`from:alice@example.com`) or a numeric or hexadecimal provider token. It
+skips only the personal-identifier rules. Secret/credential shapes and encoded
+payloads are still denied.
+`allow_machine_tokens=True` is for an opaque provider token (pagination
+cursors and GitHub revision/ref query values): it skips G3 `TOKEN_RUN` and G4
+`UNNATURAL_TOKEN`, while length, printable-text, explicit secret/credential,
+and personal-identifier rules still apply. In particular it does not skip G18
+`ENTROPY_NEAR_KEYWORD`, whose explicit `api key` / `token` / `credential`
+context makes it a secret rule rather than a generic entropy heuristic.
+
+The tool API and managed-network helper expose these same names and semantics.
+Callers receive no limits, thresholds, guard lists, or policy objects;
+tightening or loosening remains a host-side reviewed change. The proxy runs
+the rules over decoded request-URL values through `request_param_denial` in
+`host/network_integrations/base.py`.
 
 **Why the URL and not the headers.** A channel needs a reader. GitHub, PyPI and
 npm are first-party destinations that reflect no request header back, so a
@@ -176,7 +185,10 @@ Surface membership is deliberately **not** enumerated per tool here — that
 inventory changes with every tool release and lives where it is enforced:
 `tests/test_param_guard_coverage.py` classifies every bundled action input
 field as guarded or exempt (with a reason) and fails the build on any new,
-unclassified field. The categories:
+unclassified field. Every classification names one exact tool, action, and
+field; wildcard exemptions are forbidden so a new input can never inherit an
+old decision. Approval exemptions are also checked against the action's
+operator-gated manifest contract. The categories:
 
 **Guarded** — agent-controlled free text of automatic actions to public or
 third-party destinations:
@@ -194,9 +206,16 @@ third-party destinations:
 - package-registry names and query values on the agent network path
   (`python_packages`, `npm_packages` integrations) — a "package lookup"
   whose name encodes a secret is a classic small-payload channel;
-- GitHub read-path query values (search `q=` and filters), with both
-  token-shape guards (G3, G4) disabled there because revision ids, blob
-  shas, and cursors are legitimately long and machine-shaped;
+- provider-issued opaque ids and pagination tokens (Gmail message/thread ids
+  and draft cursor, plus the Instagram audio cursor) via
+  `allow_machine_tokens=True`, after the call site checks that a token is
+  present and within its provider-specific bound. Strictly validated Gmail
+  message/thread ids and numeric Instagram audio cursors also use
+  `allow_identifiers=True`, because their valid forms can contain a 10–16
+  digit run;
+- GitHub read-path query values (search `q=` and filters) via
+  `allow_machine_tokens=True`, because revision ids, blob shas, and cursors
+  are legitimately long and machine-shaped;
 - connected-account mailbox queries (Gmail `search_messages`, `list_drafts`)
   via `allow_identifiers=True`: secret/credential shapes and encoded payloads
   denied; personal identifiers (including one-time codes) allowed as search
@@ -207,24 +226,25 @@ them is inspected, and the operator's domain/method/path rule is the whole
 boundary.
 
 On the proxy path the whole reconstructed URL (`https://host<path>?<query>`)
-is decoded and scanned as one value rather than parsing segments and query
-pairs individually. This keeps the proxy simple and still enforces the
-credential-named-query-key rule for free: scanning a full URL routes through
-the same `CRED_URL` guard (G10) that denies a credential key carrying a 16+
-character value, so `?access_token=<long value>` is caught without the proxy
-reparsing anything. Percent-decoding is strict — bytes that are not valid
-UTF-8 deny outright rather than being smoothed into replacement characters
-while the raw bytes travel upstream.
+is scanned before and after percent/form decoding. The first scan preserves
+the exact request structure; the second inspects the semantic values sent
+upstream. G10
+also parses a complete URL value even when decoded spaces divide its ordinary
+whitespace tokens, so an earlier `q=two+words` cannot hide a later
+`access_token=<long value>`. Percent-decoding is strict — bytes that are not
+valid UTF-8 deny outright rather than being smoothed into replacement
+characters while the raw bytes travel upstream. Query decoding applies
+form-style `+`-as-space semantics, while path pluses remain literal, so keyword
+adjacency is evaluated exactly as the destination interprets it.
 
 **Exempt**, with the reason recorded per field in the coverage test:
 
 - approval-gated content (message bodies, posts, captions, event details):
   the operator approval is the control, and denying expected personal
   content would break the product's purpose;
-- connected-account object ids (message, thread, draft, label, event ids):
-  opaque provider identifiers with existing bounds (mailbox *queries* are
-  guarded by the connected-account variant above, which still allows the
-  `from:alice@example.com` syntax);
+- connected-account object ids used only by approval-gated changes (draft,
+  label, and event ids): the operator approval is the control. Direct Gmail
+  message/thread ids are guarded as machine tokens instead;
 - typed values (enums, numeric ranges, timestamps, strict id grammars,
   normalized provider URLs, bounded opaque cursors): grammar validation is
   stricter than scanning;
@@ -236,8 +256,8 @@ while the raw bytes travel upstream.
   tarball paths) and GitHub signed-URL parameters, which are
   provider-generated, not agent free text.
 
-Package tests prove each guarded call site sends the guarded return value,
-and behavioral tests drive every guarded surface with a denying value and
+Package tests prove guarded call sites send the guarded return value, and
+behavioral tests drive each guarded input family with a denying value and
 assert the descriptive message reaches the caller.
 
 ## Errors and observability
@@ -262,9 +282,10 @@ its Integration Guide's protections — defined once as
 `PARAM_GUARD_PROTECTION` in `host/param_guard.py` so the wording cannot
 drift per tool:
 
-> Request parameters pass the host parameter guard: values shaped like a
-> secret, credential, or sensitive identifier are denied before the request
-> is sent.
+> Request parameters pass the host parameter guard before they are sent.
+> Recognized secret and credential shapes are always denied; personal
+> identifiers and machine-shaped tokens are allowed only for fields that
+> require them.
 
 Each guarded tool's Integration Guide additionally renders an expanded
 description in its technical-details section — `PARAM_GUARD_TECHNICAL_DETAIL`,
@@ -292,9 +313,11 @@ cannot.
   approval-gated or connected-account and already bounded by shipped limits.
 - **Caller-supplied `max_bytes`, guard lists, strictness classes, or named
   per-surface guard sets.** Each was a knob at the call site least likely to
-  get security review; each collapsed in turn to the zero-argument call.
-  Current surfaces do not diverge enough to earn per-surface selection; the
-  one sanctioned variation (GitHub's token-shape exemption) is host code.
+  get security review. The two retained booleans correspond directly to the
+  only recurring false-positive classes: personal identifiers in connected
+  mailbox queries and machine-shaped provider tokens. They default false,
+  compose without changing any other rule, and are implemented identically
+  for tool and managed-network call sites.
 - **Central per-field policy registry.** Duplicated the tool-local shipped
   limits and the coverage-test machinery while adding a second place every
   field must be maintained.

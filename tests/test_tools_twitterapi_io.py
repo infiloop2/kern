@@ -24,9 +24,10 @@ class TwitterApiIoToolTests(unittest.TestCase):
         self.assertEqual(manifest.connection, "enable_only")
         self.assertEqual([action.id for action in manifest.actions], ["search_tweets"])
         copy = " ".join(manifest.protections)
-        self.assertIn("100 characters", copy)
+        self.assertIn("512 characters", copy)
         self.assertIn("parameter guard", copy)
         self.assertIn("one fixed-endpoint request", copy)
+        self.assertIn("provider read count", copy)
         search_copy = manifest.data_summary.cards[0].points[0].text
         self.assertIn("full default host parameter guard", search_copy)
         self.assertNotIn("recursively decoded", search_copy)
@@ -41,7 +42,12 @@ class TwitterApiIoToolTests(unittest.TestCase):
         with patch.object(twitterapi_io, "json_request", side_effect=fake_json_request):
             result = twitterapi_io.BUNDLED_TOOL.execute(
                 "search_tweets",
-                {"query": "AI agents -filter:retweets", "query_type": "Top"},
+                {
+                    "query": "AI agents -filter:retweets",
+                    "query_type": "Top",
+                    "lookback_hours": 0,
+                    "max_results": 7,
+                },
                 api(),
             )
 
@@ -59,19 +65,67 @@ class TwitterApiIoToolTests(unittest.TestCase):
         self.assertEqual(captured["headers"], {"X-API-Key": "secret-key"})
         self.assertNotIn("body", captured)
 
-    def test_query_is_required_and_rejected_above_100_characters(self) -> None:
+    def test_query_is_required_and_rejected_above_512_characters(self) -> None:
         with patch.object(twitterapi_io, "_search", return_value={"tweets": []}) as search:
-            for tool_input in ({}, {"query": "   "}, {"query": "x" * 101}):
+            for tool_input in ({}, {"query": "   "}, {"query": "x" * 513}):
                 with self.subTest(tool_input=tool_input):
                     result = twitterapi_io.BUNDLED_TOOL.execute(
                         "search_tweets", tool_input, api()
                     )
                     self.assertIsInstance(result, ActionFailed)
             result = twitterapi_io.BUNDLED_TOOL.execute(
-                "search_tweets", {"query": ("ai agents " * 11)[:100]}, api()
+                "search_tweets", {"query": ("ai agents " * 52)[:512]}, api()
             )
         self.assertNotIsInstance(result, ActionFailed)
         search.assert_called_once()
+
+    def test_search_adds_recency_and_structured_exclusions(self) -> None:
+        with patch.object(twitterapi_io, "now", return_value=1_800_000_000):
+            request = twitterapi_io._search_request(
+                {
+                    "query": "AI agents -is:reply -is:retweet",
+                    "lookback_hours": 8,
+                    "exclude_usernames": ["Builder", "builder", "Other_User"],
+                    "max_results": 6,
+                },
+                api(),
+            )
+
+        self.assertEqual(request.max_results, 6)
+        self.assertTrue(request.exclude_replies)
+        self.assertTrue(request.exclude_retweets)
+        self.assertEqual(
+            request.parameters["query"],
+            (
+                "AI agents -filter:replies -filter:nativeretweets "
+                "-from:builder -from:other_user since_time:1799971200"
+            ),
+        )
+
+    def test_search_defaults_to_seven_days_and_ten_visible_results(self) -> None:
+        with patch.object(twitterapi_io, "now", return_value=1_800_000_000):
+            request = twitterapi_io._search_request({"query": "Kern"}, api())
+
+        self.assertEqual(request.max_results, 10)
+        self.assertEqual(request.parameters["query"], "Kern since_time:1799395200")
+
+    def test_search_options_are_strict(self) -> None:
+        invalid_inputs = (
+            {"query": "Kern", "max_results": 0},
+            {"query": "Kern", "max_results": 21},
+            {"query": "Kern", "lookback_hours": 721},
+            {"query": "Kern", "exclude_replies": "yes"},
+            {"query": "Kern", "exclude_retweets": 1},
+            {"query": "Kern", "exclude_usernames": ["invalid-handle"]},
+            {"query": "Kern", "exclude_usernames": ["a"] * 11},
+            {"query": "Kern", "cursor": "not-supported"},
+        )
+        for tool_input in invalid_inputs:
+            with self.subTest(tool_input=tool_input):
+                result = twitterapi_io.BUNDLED_TOOL.execute(
+                    "search_tweets", tool_input, api()
+                )
+                self.assertIsInstance(result, ActionFailed)
 
     def test_query_type_is_strict(self) -> None:
         for value in ("latest", "Recent", "", 7):
@@ -89,7 +143,14 @@ class TwitterApiIoToolTests(unittest.TestCase):
                 api(),
             )
 
-    def test_response_is_normalized_and_bounded_to_20_posts(self) -> None:
+    def test_excluded_usernames_pass_through_parameter_guard(self) -> None:
+        with self.assertRaises(ParamGuardDenied):
+            twitterapi_io._search_parameters(
+                {"query": "Kern", "exclude_usernames": ["4155552671"]},
+                api(),
+            )
+
+    def test_response_is_normalized_and_bounded_to_requested_posts(self) -> None:
         provider_posts = [
             {
                 "id": str(100 + index),
@@ -115,7 +176,9 @@ class TwitterApiIoToolTests(unittest.TestCase):
             return_value={"tweets": provider_posts, "next_cursor": "ignored"},
         ):
             result = twitterapi_io.BUNDLED_TOOL.execute(
-                "search_tweets", {"query": "Kern"}, api()
+                "search_tweets",
+                {"query": "Kern", "max_results": 20, "lookback_hours": 0},
+                api(),
             )
 
         self.assertIsInstance(result, ActionExecuted)
@@ -124,6 +187,11 @@ class TwitterApiIoToolTests(unittest.TestCase):
         self.assertIsInstance(posts, list)
         assert isinstance(posts, list)
         self.assertEqual(len(posts), 19)
+        self.assertEqual(result.result["provider"], "twitterapi_io")
+        self.assertEqual(result.result["provider_posts_returned"], 20)
+        self.assertEqual(result.result["billable_post_reads"], 20)
+        self.assertEqual(result.result["locally_filtered_posts"], 1)
+        self.assertEqual(result.result["locally_truncated_posts"], 0)
         first = posts[0]
         self.assertEqual(first["author_username"], "builder")
         self.assertEqual(
@@ -138,6 +206,52 @@ class TwitterApiIoToolTests(unittest.TestCase):
             },
         )
         self.assertNotIn("next_cursor", result.result)
+
+    def test_response_defensively_filters_replies_and_retweets_before_output_cap(self) -> None:
+        provider_posts = [
+            {"id": "1", "text": "reply", "isReply": True},
+            {"id": "2", "text": "RT @builder repost", "type": "retweet"},
+            {"id": "3", "text": "first"},
+            {"id": "4", "text": "second"},
+            {"id": "5", "text": "third"},
+        ]
+        with patch.object(
+            twitterapi_io,
+            "_search",
+            return_value={"tweets": provider_posts},
+        ):
+            result = twitterapi_io.BUNDLED_TOOL.execute(
+                "search_tweets",
+                {
+                    "query": "Kern",
+                    "lookback_hours": 0,
+                    "max_results": 2,
+                    "exclude_replies": True,
+                    "exclude_retweets": True,
+                },
+                api(),
+            )
+
+        self.assertIsInstance(result, ActionExecuted)
+        assert isinstance(result, ActionExecuted)
+        posts = result.result["posts"]
+        assert isinstance(posts, list)
+        self.assertEqual([post["id"] for post in posts], ["3", "4"])
+        self.assertEqual(result.result["provider_posts_returned"], 5)
+        self.assertEqual(result.result["billable_post_reads"], 5)
+        self.assertEqual(result.result["locally_filtered_posts"], 2)
+        self.assertEqual(result.result["locally_truncated_posts"], 1)
+
+    def test_zero_provider_results_still_reports_minimum_billable_read(self) -> None:
+        with patch.object(twitterapi_io, "_search", return_value={"tweets": []}):
+            result = twitterapi_io.BUNDLED_TOOL.execute(
+                "search_tweets", {"query": "Kern", "lookback_hours": 0}, api()
+            )
+
+        self.assertIsInstance(result, ActionExecuted)
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["provider_posts_returned"], 0)
+        self.assertEqual(result.result["billable_post_reads"], 1)
 
     def test_non_array_tweets_response_is_rejected(self) -> None:
         with patch.object(

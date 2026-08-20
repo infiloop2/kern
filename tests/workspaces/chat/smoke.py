@@ -32,6 +32,20 @@ AGENT_CHAT_THREADS: dict[str, dict[str, Any]] = {
 }
 
 
+DEMO_MODE = False
+
+
+def configure_mock(*, demo_mode: bool) -> None:
+    global DEMO_MODE
+    DEMO_MODE = demo_mode
+
+
+def _active_runtimes() -> list[str]:
+    # Hermes is deliberately left deactivated so the smoke covers the gated
+    # rendering for real; no journey selects it. Demo mode narrows further.
+    return ["codex"] if DEMO_MODE else ["claude_code", "codex"]
+
+
 def route_workspace_api(
     method: str,
     relative: str,
@@ -41,7 +55,10 @@ def route_workspace_api(
     host_api: HostApi,
 ) -> dict[str, Any]:
     if method == "GET" and relative == "session-options":
-        return {"session_options": public_session_options()}
+        return {
+            "session_options": public_session_options(),
+            "active_runtimes": _active_runtimes(),
+        }
     if method == "GET" and relative == "threads":
         archived = (query.get("archived") or ["false"])[0] == "true"
         return {"threads": _list_threads(host_api, archived=archived)}
@@ -202,6 +219,14 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.get_by_role("switch", name="Activity", exact=True)).to_be_visible()
     expect(frame.locator("#new-task-runtime")).to_have_value("claude_code")
     expect(frame.locator("#new-task-runtime")).to_be_enabled()
+    # A provider the operator has not activated stays visible but unusable.
+    hermes = frame.locator("#new-task-runtime option[value='hermes']")
+    expect(hermes).to_have_text("Hermes (not activated)")
+    if not hermes.evaluate("option => option.disabled"):
+        raise AssertionError("a deactivated runtime must not be selectable")
+    expect(
+        frame.locator("#new-task-runtime option[value='codex']")
+    ).to_have_text("Codex")
     frame.locator("#new-task-model").select_option("claude-fable-5")
     expect(frame.locator("#session-change-warning")).to_be_visible()
     expect(frame.locator("#session-change-warning")).to_contain_text(
@@ -640,27 +665,28 @@ def _load_older_history(frame: Any, *, expected_turns: int) -> None:
             """element => {
               const loader = element.closest("#history-loader");
               const before = loader.dataset.oldestSeq;
-              element.click();
               return new Promise((resolve, reject) => {
-                const finished = () => loader.hidden || loader.dataset.oldestSeq !== before;
-                if (finished()) {
-                  resolve();
-                  return;
-                }
-                const observer = new MutationObserver(() => {
+                const finished = () => loader.hidden || (
+                  loader.dataset.oldestSeq !== before && !element.disabled
+                );
+                const finish = () => {
                   if (!finished()) return;
                   clearTimeout(timer);
                   observer.disconnect();
                   resolve();
-                });
+                };
+                const observer = new MutationObserver(finish);
                 const timer = setTimeout(() => {
                   observer.disconnect();
                   reject(new Error("older history cursor did not advance"));
                 }, 5000);
                 observer.observe(loader, {
                   attributes: true,
-                  attributeFilter: ["hidden", "data-oldest-seq"],
+                  subtree: true,
+                  attributeFilter: ["hidden", "data-oldest-seq", "disabled"],
                 });
+                element.click();
+                finish();
               });
             }"""
         )

@@ -103,18 +103,45 @@ class InstagramDiscoveryToolTests(unittest.TestCase):
         self.assertEqual(result.result["next_cursor"], "2")
         self.assertTrue(result.result["has_more"])
 
+    def test_hashtag_accepts_only_documented_page_cursors(self) -> None:
+        with patch.object(
+            instagram_discovery, "json_request", return_value={"success": True, "posts": []}
+        ) as request:
+            result = InstagramDiscoveryTool().execute(
+                "search_hashtag", {"hashtag": "makeup", "cursor": "11"}, configured_api()
+            )
+        self.assertIsInstance(result, ActionExecuted)
+        self.assertIn("cursor=11", request.call_args.args[1])
+
+        for cursor in ("0", "12", "next", " 2"):
+            with self.subTest(cursor=cursor):
+                result = InstagramDiscoveryTool().execute(
+                    "search_hashtag", {"hashtag": "makeup", "cursor": cursor}, configured_api()
+                )
+                self.assertIsInstance(result, ActionFailed)
+
     def test_audio_lookup_validates_id_and_chains_cursor(self) -> None:
         seen = {}
 
         def fake_json_request(method: str, url: str, **kwargs: Any):
             seen["url"] = url
-            return {"success": True, "reels": [reel()]}
+            return {"success": True, "reels": [reel()], "cursor": "1234567890"}
 
         with patch.object(instagram_discovery, "json_request", fake_json_request):
             result = InstagramDiscoveryTool().execute("get_reels_by_audio", {"audio_id": "1392969992841787", "cursor": "next"}, configured_api())
         self.assertIsInstance(result, ActionExecuted)
         self.assertIn("audio_id=1392969992841787", seen["url"])
         self.assertIn("cursor=next", seen["url"])
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["next_cursor"], "1234567890")
+        with patch.object(instagram_discovery, "json_request", fake_json_request):
+            next_page = InstagramDiscoveryTool().execute(
+                "get_reels_by_audio",
+                {"audio_id": "1392969992841787", "cursor": "1234567890"},
+                configured_api(),
+            )
+        self.assertIsInstance(next_page, ActionExecuted)
+        self.assertIn("cursor=1234567890", seen["url"])
         self.assertIsInstance(InstagramDiscoveryTool().execute("get_reels_by_audio", {"audio_id": "bad"}, configured_api()), ActionFailed)
 
     def test_details_requests_trim_without_permanent_media(self) -> None:
@@ -218,12 +245,14 @@ class InstagramDiscoveryToolTests(unittest.TestCase):
         for action, tool_input in (
             ("search_reels", {}),
             ("search_reels", {"query": "x", "page": "0"}),
+            ("search_reels", {"query": "x", "page": "12"}),
             ("search_reels", {"query": "x" * 501}),
             ("search_reels", {"query": "x", "page": 1.5}),
             ("search_hashtag", {"hashtag": "two tags"}),
             ("search_hashtag", {"hashtag": "#" + "x" * 101}),
             ("search_hashtag", {"hashtag": "x", "reels_only": "yes"}),
-            ("search_hashtag", {"hashtag": "x", "cursor": "x" * 1001}),
+            ("search_hashtag", {"hashtag": "x", "cursor": "12"}),
+            ("get_reels_by_audio", {"audio_id": "1392969992841787", "cursor": "x" * 1001}),
             ("get_reel_details", {"url": "https://instagram.com/reel/" + "x" * 2050}),
             ("get_reel_details", {"url": "https://instagram.com/reel/../accounts/login/"}),
             ("get_reel_details", {"url": "https://user@instagram.com/reel/ABC123/"}),

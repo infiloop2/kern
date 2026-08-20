@@ -888,6 +888,10 @@ def route(
         return current_agent_accounts()
     if method == "POST" and path == "/v1/agent-runtime/refresh":
         return refresh_agent_runtime_accounts(body)
+    if path == "/v1/workspace/getting-started" or path.startswith("/v1/workspace/getting-started/"):
+        if not is_operator:
+            raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
+        return workspace_proxy.route_request(method, path, query, body)
     if path == "/v1/workspace/chat" or path.startswith("/v1/workspace/chat/"):
         if not is_operator:
             raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
@@ -2681,6 +2685,7 @@ def _public_thread(
     last_used_at: str | None = None,
 ) -> dict[str, Any]:
     config = state.thread_session_config(thread_id)
+    latest_event_seq, latest_message_seq = state.latest_thread_event_seqs(thread_id)
     if last_used_at is None:
         last_used_at = config.get("last_used_at") if config else None
     status = str(config.get("status") if config else "idle")
@@ -2693,7 +2698,8 @@ def _public_thread(
         "effort": effort,
         "last_used_at": str(last_used_at or ""),
         "status": status or "idle",
-        "latest_event_seq": state.latest_agent_event_seq(thread_id),
+        "latest_event_seq": latest_event_seq,
+        "latest_message_seq": latest_message_seq,
     }
 
 

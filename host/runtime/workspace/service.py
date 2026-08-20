@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 from host.constants import LOOPBACK, WORKSPACE_AGENT_SOCKET_PATH, WORKSPACE_PORT
 from host.runtime.core import host_errors
-from host.runtime.workspace import agent_api, memory, schedules
+from host.runtime.workspace import agent_api, getting_started, memory, schedules
 from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.web_apps import backend as web_apps
@@ -67,6 +67,14 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/schedules" or parsed.path.startswith("/schedules/"):
                 body = self._read_body(agent_api.MAX_REQUEST_BODY_BYTES)
                 response = schedules.route_browser(
+                    method, parsed.path, body, parse_qs(parsed.query, keep_blank_values=True)
+                )
+            elif (
+                parsed.path == "/getting-started"
+                or parsed.path.startswith("/getting-started/")
+            ):
+                body = self._read_body(agent_api.MAX_REQUEST_BODY_BYTES)
+                response = getting_started.route_browser(
                     method, parsed.path, body, parse_qs(parsed.query, keep_blank_values=True)
                 )
             else:

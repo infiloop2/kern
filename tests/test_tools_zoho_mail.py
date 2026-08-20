@@ -532,6 +532,15 @@ class ZohoMailToolTests(unittest.TestCase):
         self.assertTrue(result.reconnect_required)
         self.assertIsNone(api.credentials.load())
 
+    def test_missing_scope_requires_reconnect(self) -> None:
+        api = connected_api()
+        assert api.credentials.record is not None
+        api.credentials.record["account"]["scopes"] = ["ZohoMail.accounts.READ"]
+        result = ZohoMailTool().execute("list_folders", {}, api)
+        assert isinstance(result, ActionFailed)
+        self.assertTrue(result.reconnect_required)
+        self.assertIsNone(api.credentials.load())
+
     def test_provider_unauthorized_requires_reconnect(self) -> None:
         with patch.object(zoho_mail, "json_request", side_effect=WebRequestError("failed", status=401)):
             result = ZohoMailTool().execute("list_folders", {}, connected_api())

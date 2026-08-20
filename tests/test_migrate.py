@@ -136,6 +136,7 @@ class MigrateRunnerTests(unittest.TestCase):
             {
                 "agent_events_message_search_idx",
                 "agent_events_message_time_idx",
+                "agent_events_thread_message_seq_idx",
             },
             event_indexes,
         )
@@ -171,6 +172,21 @@ class MigrateRunnerTests(unittest.TestCase):
                 " ('app_agent_chat', 'app_personal_web_app_builder')"
             )
             self.assertEqual(cur.fetchall(), [])
+
+    def test_onboarding_dismissal_admits_a_single_row(self) -> None:
+        self.assertEqual(migrate.up(target=41, quiet=True), list(range(1, 42)))
+        with db.transaction() as cur:
+            # A host that has never dismissed the checklist starts with no row,
+            # and the singleton key admits only one.
+            cur.execute("SELECT count(*) FROM workspace_onboarding_dismissal")
+            self.assertEqual(cur.fetchone()[0], 0)
+            for _ in range(2):
+                cur.execute(
+                    "INSERT INTO workspace_onboarding_dismissal (singleton)"
+                    " VALUES (TRUE) ON CONFLICT (singleton) DO NOTHING"
+                )
+            cur.execute("SELECT count(*) FROM workspace_onboarding_dismissal")
+            self.assertEqual(cur.fetchone()[0], 1)
 
     def test_agent_history_counters_seed_retained_state_and_roll_back_cleanly(self) -> None:
         self.assertEqual(migrate.up(target=29, quiet=True), list(range(1, 30)))
@@ -797,7 +813,7 @@ class MigrateRunnerTests(unittest.TestCase):
                     )
                 self.assertEqual(
                     migrate.up(quiet=True),
-                    [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+                    list(range(26, 42)),
                 )
                 with db.transaction() as cur:
                     # Migration 0026 removed the old ledger; every later
@@ -810,7 +826,7 @@ class MigrateRunnerTests(unittest.TestCase):
                         [(int(version), str(name)) for version, name in cur.fetchall()],
                         [
                             (version, migrations[version].name)
-                            for version in range(1, 40)
+                            for version in range(1, 42)
                         ],
                     )
                     cur.execute(

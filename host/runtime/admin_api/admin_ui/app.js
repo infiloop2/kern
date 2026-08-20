@@ -9,8 +9,11 @@ import {
 import { $, notice, runtimeLabel } from "./helpers.js";
 import {
   collapseRuntimeOverview, completeClaudeLogin, refreshHealth, refreshProviderAccounts,
-  refreshProviderUsage, rebootHost, startLogin, toggleRuntimeOverview,
+  refreshProviderUsage, rebootHost, runtimeRecords, startLogin, toggleRuntimeOverview,
 } from "./health.js";
+import {
+  dismissGettingStarted, refreshGettingStarted, STARTER_PROMPTS,
+} from "./getting_started.js";
 import {
   downloadViewedFile, ensureFilesLoaded, goToFilePath, loadParentDirectory,
   openAgentPath, openLinkedAgentFile,
@@ -170,7 +173,10 @@ function loadWorkspaceLastSeen() {
 let workspaceLastSeen = loadWorkspaceLastSeen();
 
 function workspaceItemMarker(kind, item) {
-  const marker = { activity: Math.max(0, Number(item.latest_event_seq) || 0) };
+  // Keep the persisted `activity` field for compatibility with existing
+  // last-seen data, but advance it only for conversation messages. Agent
+  // reasoning, tool calls, and other activity must not create an unread dot.
+  const marker = { activity: Math.max(0, Number(item.latest_message_seq) || 0) };
   if (kind === "apps") marker.revision = Math.max(0, Number(item.revision) || 0);
   return marker;
 }
@@ -790,6 +796,7 @@ async function tick() {
   await refreshOrSkip(refreshHealth);
   await refreshOrSkip(refreshProviderAccounts);
   await refreshOrSkip(refreshWorkspaceNavigation);
+  await refreshOrSkip(() => refreshGettingStarted());
   for (const refresh of tabRefreshers[activeTab]?.tick || []) await refreshOrSkip(refresh);
 }
 
@@ -1139,14 +1146,14 @@ async function findChatNavItem(threadId) {
   return null;
 }
 
-async function openWorkspaceNewChat(updateHistory = true) {
+async function openWorkspaceNewChat(updateHistory = true, prompt = "") {
   const actionSequence = ++workspaceNavigationActionSequence;
   await initializeWorkspaces();
   if (actionSequence !== workspaceNavigationActionSequence) return false;
   chatNavArchived = false;
   if (!showTab("workspace-chat", actionSequence)) return false;
   if (updateHistory) navigateWorkspaceRoute("chat");
-  window.KernChat.newThread();
+  window.KernChat.newThread(prompt);
   await refreshWorkspaceNavigation();
   return true;
 }
@@ -1166,7 +1173,6 @@ async function openWorkspaceChat(threadId, updateHistory = true) {
   if (updateHistory) navigateWorkspaceRoute("chat", threadId);
   try {
     await window.KernChat.openThread(found.item);
-    markWorkspaceSeen("chat", found.item);
   } catch (error) {
     if (actionSequence === workspaceNavigationActionSequence) throw error;
   }
@@ -1291,6 +1297,12 @@ document.addEventListener("click", event => {
     "close-mobile-nav": () => setMobileNavOpen(false, true),
     "new-chat": async () => {
       await openWorkspaceNewChat();
+    },
+    "getting-started-prompt": async () => {
+      await openWorkspaceNewChat(true, STARTER_PROMPTS[button.dataset.step] || "");
+    },
+    "dismiss-getting-started": async () => {
+      await dismissGettingStarted();
     },
     "new-web-app": async () => {
       const actionSequence = ++workspaceNavigationActionSequence;

@@ -41,6 +41,7 @@ from host.tools.shared.oauth2 import (
     access_token_is_fresh,
     clear_if_still_loaded,
     now,
+    require_scopes,
     save_if_still_connected,
     signed_state,
     verify_state,
@@ -734,6 +735,7 @@ class ZohoMailCredentialStore:
         existing = api.credentials.load()
         if existing is None:
             raise IntegrationReconnectRequired(ZOHO_RECONNECT_MESSAGE)
+        require_scopes(api, existing, REQUIRED_ZOHO_SCOPES, reconnect_message=ZOHO_RECONNECT_MESSAGE)
         data_center = existing["metadata"].get("data_center")
         if not isinstance(data_center, str) or data_center not in ZOHO_DATA_CENTERS:
             clear_if_still_loaded(api, existing)
@@ -892,7 +894,9 @@ def _search_messages(access_token: str, data_center: str, tool_input: JSONObject
     search_key = tool_input.get("search_key")
     if not isinstance(search_key, str) or not search_key.strip():
         raise ToolInputValidationError("Zoho Mail search requires tool_input.search_key.")
-    guarded = api.outbound.guard_request_parameter_string(search_key.strip(), allow_identifiers=True)
+    guarded = api.outbound.guard_request_parameter_string(
+        search_key.strip(), allow_identifiers=True
+    )
     start, limit = _paging(tool_input)
     response = _api_request(
         access_token,

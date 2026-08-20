@@ -50,6 +50,9 @@ let showingArchivedThreads = false;
 let showingActivity = false;
 let activityToggleSequence = 0;
 let sessionOptions = {};
+let activeRuntimes = null;
+// Captured on first render, before any "(not activated)" suffix is applied.
+const RUNTIME_OPTION_LABELS = new Map();
 let pendingAttachments = [];
 let attachmentActivity = null;
 let sendingMessage = false;
@@ -228,14 +231,33 @@ async function refresh() {
   const sequence = ++refreshSequence;
   const archivedView = showingArchivedThreads;
   try {
-    if (!Object.keys(sessionOptions).length) {
-      const optionResponse = await api("GET", "/session-options");
-      if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
-      if (!optionResponse.session_options || typeof optionResponse.session_options !== "object") {
-        throw new Error("Agent Chat returned invalid session options");
-      }
-      sessionOptions = optionResponse.session_options;
+    // Re-read every refresh: connecting a provider from Home must reach an
+    // already-mounted composer without a full page reload. The option matrix
+    // itself is static, so only a change in activation is re-rendered, leaving
+    // any model or effort the operator picked in the meantime alone.
+    const firstLoad = !Object.keys(sessionOptions).length;
+    const optionResponse = await api("GET", "/session-options");
+    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
+    if (!optionResponse.session_options || typeof optionResponse.session_options !== "object") {
+      throw new Error("Agent Chat returned invalid session options");
+    }
+    sessionOptions = optionResponse.session_options;
+    const nextActive = Array.isArray(optionResponse.active_runtimes)
+      ? optionResponse.active_runtimes
+      : null;
+    if (firstLoad) {
+      activeRuntimes = nextActive;
       setSessionOptions(selectedThreadModel, selectedThreadEffort);
+    } else if (JSON.stringify(nextActive) !== JSON.stringify(activeRuntimes)) {
+      activeRuntimes = nextActive;
+      if (applyRuntimeAvailability()) {
+        // Availability moved us to a different runtime, so the model and
+        // effort now belong to the runtime we left. Rebuild them rather than
+        // letting a mismatched pair through to session validation.
+        setSessionOptions();
+      } else {
+        updateComposerActions();
+      }
     }
     // A successful /threads already proves the backend is up; when it is down
     // the proxy's own 502 ("workspaces backend unavailable") surfaces as the error.
@@ -269,7 +291,7 @@ async function refresh() {
       if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
       const visibleThread = threads.find(thread => thread.thread_id === refreshedThreadId);
       if (rendered && selectedThreadId === refreshedThreadId && visibleThread) {
-        window.KernHost.markWorkspaceSeen("chat", visibleThread);
+        markSelectedThreadSeen(visibleThread);
       }
     }
     if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
@@ -429,7 +451,62 @@ function clearActivityAnchorSpace() {
   $("thread-detail").style.removeProperty("--activity-anchor-space");
 }
 
+// Two different questions. Null active runtimes means the host could not say,
+// so neither gate applies: an unknown status must never hide a usable provider
+// or block sending.
+
+// Can it be shown as the selection? A thread keeps its recorded runtime here
+// even after deactivation, so the composer still shows what it actually ran
+// with instead of silently rewriting history.
+function runtimeSelectable(runtime) {
+  if (!Array.isArray(activeRuntimes)) return true;
+  if (selectedThreadId !== null && runtime === selectedThreadRuntime) return true;
+  return activeRuntimes.includes(runtime);
+}
+
+// Can the host actually run it? A deactivated runtime is refused on admission,
+// so a recorded one gets no exemption here: displaying it is honest, offering
+// to send on it is not.
+function runtimeRunnable(runtime) {
+  if (!Array.isArray(activeRuntimes)) return true;
+  return activeRuntimes.includes(runtime);
+}
+
+function applyRuntimeAvailability() {
+  const select = $("new-task-runtime");
+  for (const option of select.options) {
+    if (!RUNTIME_OPTION_LABELS.has(option.value)) {
+      RUNTIME_OPTION_LABELS.set(option.value, option.textContent);
+    }
+    const available = runtimeSelectable(option.value);
+    const label = RUNTIME_OPTION_LABELS.get(option.value);
+    option.disabled = !available;
+    option.textContent = available ? label : `${label} (not activated)`;
+  }
+  // The markup opens on the first runtime, and activation arrives later. A
+  // deactivated selection cannot have come from the operator, so move to one
+  // that works. When nothing is active there is nowhere to move to: keep the
+  // selection and let updateComposerActions() hold Send closed rather than
+  // pretending a deactivated runtime is usable.
+  if (selectedThreadId === null && !runtimeRunnable(select.value)) {
+    const usable = Object.keys(sessionOptions).find(runtimeRunnable);
+    if (usable) {
+      select.value = usable;
+      // The model and effort still belong to the runtime we just left, so the
+      // caller has to rebuild them before they can be sent.
+      return true;
+    }
+  }
+  return false;
+}
+
+function firstAvailableRuntime() {
+  const offered = Object.keys(sessionOptions);
+  return offered.find(runtimeRunnable) || offered[0] || "codex";
+}
+
 function setSessionOptions(preferredModel, preferredEffort) {
+  applyRuntimeAvailability();
   const runtime = $("new-task-runtime").value;
   const models = sessionOptions[runtime] || {};
   const modelValues = Object.keys(models);
@@ -494,7 +571,10 @@ function sessionConfigurationChanged() {
 }
 
 function updateComposerActions() {
-  const hasSessionOption = Boolean($("new-task-model").value && $("new-task-effort").value);
+  // A deactivated runtime cannot run the message, so sending it would only
+  // surface a host rejection after the fact.
+  const hasSessionOption = Boolean($("new-task-model").value && $("new-task-effort").value)
+    && runtimeRunnable($("new-task-runtime").value);
   const hasOversizedAttachment = pendingAttachments.some(attachment => attachment.size_bytes > ATTACHMENT_MAX_BYTES);
   const sessionLocked = sendingMessage || (
     selectedThreadId !== null && selectedThreadStatus === "running"
@@ -628,7 +708,22 @@ async function showThread(threadId, name, runtime, model, effort, status, archiv
   updateComposer();
   renderThreads();
   renderThreadHistory();
-  await refreshSelectedThread();
+  const rendered = await refreshSelectedThread();
+  if (rendered && selectedThreadId === threadId) {
+    markSelectedThreadSeen({ thread_id: threadId });
+  }
+}
+
+function markSelectedThreadSeen(thread) {
+  const acknowledgedMessageSeq = threadEvents.reduce((latest, event) => (
+    ["thread.message", "thread.memory_cleared"].includes(event.event_type)
+      ? Math.max(latest, Number(event.seq) || 0)
+      : latest
+  ), 0);
+  window.KernHost.markWorkspaceSeen("chat", {
+    ...thread,
+    latest_message_seq: acknowledgedMessageSeq,
+  });
 }
 
 async function refreshSelectedThread() {
@@ -1283,7 +1378,7 @@ function startNewThread() {
   // them would start the thread's session on a runtime and model the operator
   // never chose. The reset belongs here rather than on the in-panel button
   // because the host navigation starts threads through the same function.
-  $("new-task-runtime").value = Object.keys(sessionOptions)[0] || "codex";
+  $("new-task-runtime").value = firstAvailableRuntime();
   setSessionOptions();
   window.KernHost.navigateWorkspace("chat");
 }
@@ -1473,9 +1568,17 @@ renderThreadHistory();
 renderAttachments();
 setSidebarOpen(false);
 window.KernChat = {
-  newThread() {
+  newThread(prompt = "") {
     showingArchivedThreads = false;
     startNewThread();
+    // An unsent draft is cheap to lose and the starter prompt is what the
+    // operator just asked for, so replace it without interrupting them.
+    if (prompt && $("new-task").value !== prompt) {
+      $("new-task").value = prompt;
+      saveComposerDraft();
+      autosizeComposer();
+      updateComposerActions();
+    }
     $("new-task").focus();
   },
   openThread(thread) {

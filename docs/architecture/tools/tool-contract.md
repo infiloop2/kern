@@ -270,19 +270,36 @@ request values before building a request. It is deterministic and offline, and
 denies by raising `ValueError` with a descriptive, value-free message the tool
 surfaces verbatim so the agent can rephrase and retry.
 
+Every declared action input field must be classified explicitly in
+`tests/test_param_guard_coverage.py`: direct free text is guarded, structured
+values use a stricter enum/range/id/timestamp/cursor validator, and content
+that is expected to contain personal data may be exempt only when the action's
+manifest requires operator approval. The inventory permits no wildcard
+exemptions, so adding any action field requires a new review decision.
+
 ```python
 class Outbound(Protocol):
-    def guard_request_parameter_string(self, value: str, *, allow_identifiers: bool = False) -> str: ...
+    def guard_request_parameter_string(
+        self,
+        value: str,
+        *,
+        allow_identifiers: bool = False,
+        allow_machine_tokens: bool = False,
+    ) -> str: ...
 ```
 
 It denies secret/credential shapes, one-time codes, personal and financial
 identifiers, and encoded payloads, and returns the value unchanged on
 success. `allow_identifiers=True` skips only the personal-identifier rules
-(email, phone, card, SSN, digit runs, DOB, government id) for a query against
-an account the operator already connected (a mailbox search), where a
-personal identifier is legitimate search syntax (`from:alice@example.com`)
-and the destination already holds that data; secret/credential shapes and
-encoded payloads are still denied. A tool applies the guard to each
+(email, phone, card, SSN, digit runs, DOB, government id) for a field whose
+validated grammar requires identifiers, such as mailbox search syntax
+(`from:alice@example.com`) or a separately validated numeric or hexadecimal
+provider token; secret/credential shapes and encoded payloads are still
+denied. `allow_machine_tokens=True` skips only the
+generic unbroken-token and random-looking-token rules for a provider-issued
+opaque token; explicit secret, credential, and identifier rules still apply.
+Both flags default to false and have the same meaning on tool and managed
+network-integration call sites. A tool applies the guard to each
 decoded semantic value it controls; the host runs the same rules over managed
 network-integration request URLs. The rules, the data classes each covers, and
 the trade-offs are specified in
@@ -450,6 +467,19 @@ The connect param/result shapes are a uniform host contract for all OAuth tools;
 `ToolManifest` does not declare per-tool connect parameter schemas. Token refresh
 happens inside the tool during action execution; expired or revoked credentials
 surface as `ActionFailed(reconnect_required=True)`.
+
+`account["scopes"]` records what the **provider reported granting** at connect —
+not what the package requested — so it stays a truthful snapshot when the
+operator approves less, or more, than was asked for. A package that requires a
+scope checks the stored snapshot against its required set before every use of
+the token (`shared/oauth2.py`'s `require_scopes`), clears the credential, and
+raises `IntegrationReconnectRequired`. That is what makes adding a required
+scope safe to deploy: existing connections were granted the old set, and the
+shortfall becomes a reconnect prompt on the next call instead of an opaque
+provider 403 — or, where a provider never re-reports scopes on refresh, no
+signal at all. Only a shortfall forces a reconnect; a grant wider than the
+requirement stays usable, and narrowing a package's scopes does not disturb
+connections that still hold the older, broader grant.
 
 ## Rules
 

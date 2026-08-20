@@ -37,6 +37,9 @@ WORKSPACE_ADMIN_SOCKET = Path(
     os.environ.get("KERN_WORKSPACE_ADMIN_SOCKET", WORKSPACE_ADMIN_SOCKET_PATH)
 )
 WORKSPACE_ALLOWED_ADMIN_ROUTES = (
+    # Read-only runtime activation, so a workspace can offer only the providers
+    # the operator has actually turned on.
+    ("GET", "/v1/agent-runtime/status"),
     ("GET", "/v1/threads"),
     ("GET", "/v1/threads/:thread_id"),
     ("POST", "/v1/threads/:thread_id/messages"),
