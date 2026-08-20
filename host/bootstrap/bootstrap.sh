@@ -33,13 +33,6 @@ PGDATA_DIR="/mnt/kern-admin/postgres/${PG_MAJOR}/main"
 PROXY_STATE_DIR=/mnt/kern-admin/proxy-state
 AGENT_MOUNT=/mnt/kern-agent
 AGENT_HOME_PATH=/mnt/kern-agent/agent-home
-# Keep one runaway agent from consuming the replaceable root filesystem. These
-# are 1 KiB quota blocks; the durable agent volume is a separate filesystem and
-# is intentionally outside this budget.
-AGENT_ROOT_SOFT_BLOCKS=1835008
-AGENT_ROOT_HARD_BLOCKS=2097152
-AGENT_ROOT_SOFT_INODES=180000
-AGENT_ROOT_HARD_INODES=200000
 
 # Read one value out of the JSON payload staged by the deploy command.
 payload_value() {
@@ -439,7 +432,7 @@ systemctl stop apt-daily.service apt-daily-upgrade.service
 # Node.js (and npm) come from the official tarball below, not apt: the Ubuntu
 # npm package pulls in hundreds of node-* dependencies.
 apt_get update
-apt_get install -y ca-certificates curl gh git jq nftables openssl python3 python3-venv quota sudo unattended-upgrades xz-utils
+apt_get install -y ca-certificates curl gh git jq nftables openssl python3 python3-venv sudo unattended-upgrades xz-utils
 
 # PostgreSQL for admin state. postgresql-common is installed first so its
 # default-cluster creation can be disabled: the data directory must live on
@@ -859,50 +852,6 @@ if [ ! -f /swapfile ]; then
   swapon /swapfile
   echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
-}
-
-# The agent normally writes scratch data to its durable-volume TMPDIR, but it
-# can still address world-writable root paths such as /tmp and /var/tmp
-# directly. An ext4 user quota is the filesystem-enforced backstop: it covers
-# every kern-agent-owned block and inode on root, including deleted-open files,
-# without reducing the capacity of /mnt/kern-agent.
-configure_agent_root_quota() {
-python3 - <<'PY'
-from pathlib import Path
-
-path = Path("/etc/fstab")
-lines = path.read_text().splitlines()
-root_rows = 0
-for index, line in enumerate(lines):
-    fields = line.split()
-    if len(fields) < 4 or fields[0].startswith("#") or fields[1] != "/":
-        continue
-    if fields[2] != "ext4":
-        raise SystemExit(f"root filesystem must be ext4 for agent quota, got {fields[2]}")
-    root_rows += 1
-    options = fields[3].split(",")
-    if "usrquota" not in options:
-        options.append("usrquota")
-        fields[3] = ",".join(options)
-        lines[index] = "\t".join(fields)
-if root_rows != 1:
-    raise SystemExit(f"expected one root filesystem in /etc/fstab, found {root_rows}")
-path.write_text("\n".join(lines) + "\n")
-PY
-
-mount -o remount,usrquota /
-# Rebuild usage while no agent runtime can be active on the replacement root.
-# quotaoff fails harmlessly on the first deploy, before quotas have been enabled.
-quotaoff -u / >/dev/null 2>&1 || true
-if [ -f /aquota.user ]; then
-  quotacheck -um /
-else
-  quotacheck -cum /
-fi
-quotaon -u /
-setquota -u kern-agent \
-  "$AGENT_ROOT_SOFT_BLOCKS" "$AGENT_ROOT_HARD_BLOCKS" \
-  "$AGENT_ROOT_SOFT_INODES" "$AGENT_ROOT_HARD_INODES" /
 }
 
 # Persistent proxy CA. The proxy user owns the private key after ownership is
@@ -1480,7 +1429,6 @@ main() {
   configure_cloudflared
   write_codex_policy
   harden_base_os
-  configure_agent_root_quota
   setup_proxy_ca
   install_sudo_helpers
   apply_durable_ownership

@@ -21,8 +21,6 @@ This is not a claim that service users cannot write anywhere under `/`: normal
 Unix-writable temporary locations such as `/tmp`, `/var/tmp`, and `/dev/shm`
 may still be writable, and each service has its own mounted state/home
 directory below. Those writable locations are not trusted code or policy inputs.
-Bootstrap enables an ext4 user quota on root that caps all `kern-agent`-owned
-root data at 2 GiB and 200,000 inodes, including deleted files that remain open.
 
 | Path | Access | Contents |
 | --- | --- | --- |
@@ -92,8 +90,8 @@ as `/tmp`, `/var/tmp`, and `/dev/shm` if the base OS exposes them with the usual
 world-writable sticky permissions. `/tmp` and `/var/tmp` live on the
 replaceable root volume; `/dev/shm` is a separate bounded tmpfs. None is treated
 as Kern state or preserved as part of the agent-volume contract, and none
-should contain secrets or important workspace data. The root user quota bounds
-direct writes that bypass `TMPDIR`. The agent cannot write root-owned code,
+should contain secrets or important workspace data. The agent cannot write
+root-owned code,
 service files, admin state, proxy state, global CLI installs, or the proxy
 CA/private-key material without a local privilege escalation.
 
