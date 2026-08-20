@@ -27,15 +27,23 @@ case "${1:-}" in
 esac
 shift
 
-# Keep every Claude Code invocation, including the periodic `/usage` probe,
-# from emitting nonessential background traffic. The umbrella flag suppresses
-# registry and update checks; the dedicated flags make the telemetry and error
-# reporting intent explicit across Claude Code releases.
+# Keep agent and auth invocations from emitting nonessential background
+# traffic. Current Claude Code builds exit successfully but omit the Fable row
+# from `/usage` when DISABLE_TELEMETRY is set, including through the umbrella
+# flag. Preserve the opt-outs that do not alter usage for this one
+# host-owned maintenance probe, while leaving agent/auth privacy unchanged.
 claude_environment=(
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
   DISABLE_TELEMETRY=1
   DISABLE_ERROR_REPORTING=1
 )
+if [ "${1:-}" = "-p" ] && [ "${2:-}" = "/usage" ]; then
+  claude_environment=(
+    DISABLE_AUTOUPDATER=1
+    DISABLE_FEEDBACK_COMMAND=1
+    DISABLE_ERROR_REPORTING=1
+  )
+fi
 
 # The transient scope puts the runtime and everything it spawns into the
 # resource-limited kern_agent.slice instead of the admin API's service
@@ -63,6 +71,7 @@ exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   --property=BindsTo=kern-admin-api.service \
   /usr/sbin/runuser -u kern-agent -- env \
   HOME=/mnt/kern-agent/agent-home \
+  TMPDIR=/mnt/kern-agent/agent-home/.tmp \
   CLAUDE_CONFIG_DIR=/mnt/kern-agent/agent-home/.claude \
   HTTP_PROXY=http://127.0.0.1:@PROXY_PORT@ \
   HTTPS_PROXY=http://127.0.0.1:@PROXY_PORT@ \

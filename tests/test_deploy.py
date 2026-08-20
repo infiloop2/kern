@@ -1679,6 +1679,7 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap.index("create_main_cluster = false"),
             bootstrap.index('apt_get install -y "postgresql-${PG_MAJOR}"'),
         )
+
         self.assertIn('runuser -u postgres -- "$PG_BIN/initdb" -D "$PGDATA_DIR"', bootstrap)
         # Unix-socket only, peer auth: no TCP listener, admin and superuser
         # roles only, and an explicit reject for everyone else (the agent user
@@ -1820,6 +1821,21 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap.index('cat > "$PGDATA_DIR/postgresql.conf"'),
         )
 
+    def test_rendered_bootstrap_caps_agent_writes_to_root(self) -> None:
+        bootstrap = render._render_bootstrap()
+
+        self.assertIn("python3-venv quota sudo", bootstrap)
+        self.assertIn("mount -o remount,usrquota /", bootstrap)
+        self.assertIn("quotacheck -cum /", bootstrap)
+        self.assertIn("quotaon -u /", bootstrap)
+        self.assertIn("setquota -u kern-agent", bootstrap)
+        self.assertIn("AGENT_ROOT_HARD_BLOCKS=2097152", bootstrap)
+        self.assertIn("AGENT_ROOT_HARD_INODES=200000", bootstrap)
+        self.assertLess(
+            bootstrap.index("\n  configure_agent_root_quota\n"),
+            bootstrap.index("\n  start_services\n"),
+        )
+
     def test_bootstrap_renders_shared_port_constants(self) -> None:
         from host.constants import PROXY_PORT
 
@@ -1852,6 +1868,19 @@ class DeployUnitTests(unittest.TestCase):
                     "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
                     launcher,
                 )
+                self.assertIn(
+                    "TMPDIR=/mnt/kern-agent/agent-home/.tmp",
+                    launcher,
+                )
+
+    def test_agent_scratch_is_reaped_after_abrupt_runtime_exit(self) -> None:
+        bootstrap = render._render_bootstrap()
+        self.assertIn(
+            "d /mnt/kern-agent/agent-home/.tmp 0700 kern-agent kern-agent 1d -",
+            bootstrap,
+        )
+        self.assertIn("systemd-tmpfiles --create --clean", bootstrap)
+        self.assertIn("systemd-tmpfiles-clean.timer", bootstrap)
 
     def test_rendered_helper_scripts_have_valid_shell_syntax(self) -> None:
         for name in (
@@ -1995,14 +2024,17 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("hello", on.stdout)
         self.assertIn("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", on.stdout)
 
-        # Host-owned maintenance needs the same background-traffic suppression
-        # as agent turns; the pinned Claude Code still returns its usage windows.
+        # Telemetry opt-out also disables the feature flag that renders the
+        # Fable usage window. Keep the other maintenance opt-outs, but exempt
+        # this host-owned probe from that display-altering flag.
         usage = forwarded("web-search=off", "-p", "/usage", "--output-format", "json")
         self.assertEqual(usage.returncode, 0)
         self.assertIn("/usage", usage.stdout)
         self.assertIn("WebSearch", usage.stdout)
-        self.assertIn("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", usage.stdout)
-        self.assertIn("DISABLE_TELEMETRY=1", usage.stdout)
+        self.assertNotIn("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", usage.stdout)
+        self.assertNotIn("DISABLE_TELEMETRY=1", usage.stdout)
+        self.assertIn("DISABLE_AUTOUPDATER=1", usage.stdout)
+        self.assertIn("DISABLE_FEEDBACK_COMMAND=1", usage.stdout)
         self.assertIn("DISABLE_ERROR_REPORTING=1", usage.stdout)
 
         missing = forwarded("auth", "login")

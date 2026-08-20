@@ -1073,6 +1073,29 @@ body.viewport-panel-open main { min-height: 0; }
 
 .stat-meters { grid-template-columns: repeat(auto-fit, minmax(11.5rem, 1fr)); }
 
+.health-issues {
+  background: color-mix(in srgb, var(--danger-soft) 48%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 34%, var(--border));
+  border-radius: var(--radius-sm);
+  margin-top: 0.6rem;
+  padding: 0.62rem 0.75rem;
+}
+
+.health-issues-title {
+  color: var(--danger);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.health-issues ul { display: grid; gap: 0.55rem; list-style: none; margin: 0.5rem 0 0; padding: 0; }
+.health-issue { display: grid; gap: 0.12rem; }
+.health-issue + .health-issue { border-top: 1px solid var(--border); padding-top: 0.55rem; }
+.health-issue-summary { font-size: 0.8rem; font-weight: 650; }
+.health-issue-detail, .health-issue-next { color: var(--text-dim); font-size: 0.74rem; line-height: 1.4; }
+.health-issue-next strong { color: var(--text); font-weight: 600; }
+
 .stat-history {
   border-top: 1px solid var(--border);
   margin-top: 0.8rem;

@@ -27,6 +27,7 @@ exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   --property=BindsTo=kern-admin-api.service \
   /usr/sbin/runuser -u kern-agent -- env \
   HOME=/mnt/kern-agent/agent-home \
+  TMPDIR=/mnt/kern-agent/agent-home/.tmp \
   HTTP_PROXY=http://127.0.0.1:@PROXY_PORT@ \
   HTTPS_PROXY=http://127.0.0.1:@PROXY_PORT@ \
   ALL_PROXY=http://127.0.0.1:@PROXY_PORT@ \

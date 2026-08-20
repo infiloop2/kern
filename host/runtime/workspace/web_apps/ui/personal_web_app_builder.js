@@ -2266,6 +2266,14 @@ function setRuntimeOptions(preferredRuntime = null) {
   if (runtimes.includes(current)) $("runtime").value = current;
 }
 
+function defaultSessionConfig() {
+  const runtime = Object.keys(sessionOptions)[0] || "";
+  const models = sessionOptions[runtime] || {};
+  const model = Object.keys(models)[0] || "";
+  const effort = (models[model] || [])[0] || "";
+  return { agent_runtime: runtime, model, effort };
+}
+
 function syncAgentSettings(task) {
   const next = task ? {
     agent_runtime: String(task.agent_runtime || ""),
@@ -2276,8 +2284,14 @@ function syncAgentSettings(task) {
   if (key === establishedSessionKey) return;
   establishedSession = next;
   establishedSessionKey = key;
-  setRuntimeOptions(next?.agent_runtime || null);
-  setSessionOptions(next?.model || null, next?.effort || null);
+  // An app with no session is unconfigured, and opens on the first offered
+  // configuration the way Agent Chat opens a new thread. Leaving the
+  // selectors as they stand would carry the previously opened app's runtime
+  // and model into this one, so a first message sent without visiting the
+  // settings would start a session the operator never chose.
+  const opening = next || defaultSessionConfig();
+  setRuntimeOptions(opening.agent_runtime || null);
+  setSessionOptions(opening.model || null, opening.effort || null);
 }
 
 function syncWorkspaceControls() {
