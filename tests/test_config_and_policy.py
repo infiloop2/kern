@@ -18,7 +18,7 @@ from host.config import (
     NetworkControls,
     parse_network_controls,
 )
-from host.cli.lifecycle_aws import _subnet_has_public_ipv4_route
+from host.cli.aws_resources import _subnet_has_public_ipv4_route
 from host.network_integrations.claude import guard as claude_guard
 from host.network_integrations.github import guard as github_guard
 from host.network_integrations.openai import guard as openai_guard
@@ -1768,7 +1768,7 @@ class DeployNetworkTests(unittest.TestCase):
             }
         ]
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
+        with patch("host.cli.aws_resources._aws", side_effect=responses):
             self.assertTrue(_subnet_has_public_ipv4_route({}, "vpc-1", "subnet-1"))
 
     def test_subnet_rejects_nat_default_route(self) -> None:
@@ -1788,7 +1788,7 @@ class DeployNetworkTests(unittest.TestCase):
             }
         ]
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
+        with patch("host.cli.aws_resources._aws", side_effect=responses):
             self.assertFalse(_subnet_has_public_ipv4_route({}, "vpc-1", "subnet-1"))
 
 

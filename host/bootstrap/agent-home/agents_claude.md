@@ -144,12 +144,36 @@ resource and retry. Paths are object keys and non-negative array indexes,
 10 MiB total data. Individual agent requests remain capped at 256 KiB, so grow
 large documents through targeted operations.
 
+Use collections for repeated records that the UI must filter or page without
+loading the whole App document:
+
+- `GET /agent/apps/{app_id}/collections` lists collection names, row counts,
+  byte sizes, and the App's current `revision`.
+- `POST /agent/apps/{app_id}/collections/leads/query` accepts optional
+  `filters` (up to 8 `eq`, `ne`, `exists`, or `missing` operations on top-level
+  fields), `ids`, one `sort`, `limit` (1–100), and `offset`. It returns matching
+  rows, `total`, and `next_offset`.
+- `POST /agent/apps/{app_id}/collections/leads/actions` with
+  `{"expected_revision":3,"operations":[{"action":"upsert","id":"lead-1","value":{"status":"new"}},{"action":"delete","id":"lead-2"}]}`
+  applies up to 100 row operations atomically. It advances the same App
+  revision used by UI and document writes; on 409, read the relevant state
+  and retry.
+
+Collection names and row ids are stable identifiers. Collection changes are
+part of the App's one combined revision, and retained recovery points include
+a complete copy of all collection rows. An App may retain 64 collections,
+100,000 rows, and 50 MiB of collection data; one row is capped at 128 KiB.
+Keep small configuration and cohesive state in the App document, and put
+queryable repeated records in collections.
+
 Generated Apps normally receive the full data document once when their worker
 loads. For large datasets, register
 `app.onLoad(async () => { ... }, {data: "targeted"})` and use
 `await app.read(["path", 0])`; targeted mode does not load the full document
 and intentionally makes `app.data()` unavailable. Mutation acknowledgements
-do not return the full document in either mode.
+do not return the full document in either mode. Generated Apps can call
+`await app.query("leads", request)` with the same collection query body; this
+loads only the requested page.
 
 An agent write may return 423 when the user has temporarily locked agent
 updates while using the App. Do not keep retrying immediately or attempt a
@@ -168,14 +192,14 @@ Use `data-action="name"` on controls and `data-field="name"` on inputs. Put
 `data-drop-value="target-id"`; the handler receives `draggedValue`.
 
 The frozen `app` global provides `app.onLoad(handler, options)`, `app.on(action,
-handler)`, `app.data()`, `app.read(path)`, `app.render(html, css)`, `app.set`,
-`app.delete`, `app.append`, `app.askAgent(message)`, and
+handler)`, `app.data()`, `app.read(path)`, `app.query(collection, request)`,
+`app.render(html, css)`, `app.set`, `app.delete`, `app.append`, `app.askAgent(message)`, and
 `app.notify(message, level)`. Always register `app.onLoad`. Use `app.data()` in
 the default compatibility mode or `app.read(path)` in targeted mode. In
 targeted mode `set` and `append` resolve to the submitted value and `delete`
 resolves to `null`; read again when the resulting stored branch is needed. A
 worker turn is terminated after three seconds; durable state belongs in the
-JSON document, never worker memory.
+JSON document or a collection, never worker memory.
 
 When working in an `app-*` thread, communicate primarily by changing the App's
 interface or data. Do not narrate routine implementation work in chat; send a
@@ -227,7 +251,7 @@ clear:
 - `DELETE /agent/memory/pages/{page_id}?expected_revision=N` deletes a page.
 
 Page ids are lowercase slugs up to 64 characters, descriptions are one line up
-to 100 characters, and content is up to 1,000 characters. Store only durable,
+to 100 characters, and content is up to 2,000 characters. Store only durable,
 reusable context. A 409 means another writer changed the page; re-read and
 retry deliberately. Link related pages with `[[page-id]]`.
 
@@ -248,6 +272,8 @@ host thread; it does not resume the thread that created the schedule.
   `agent_runtime`, `model`, and `effort`. Interval schedules also require
   `interval_minutes` (5–10,080); daily schedules require `daily_time` as
   `HH:MM` UTC.
+
+Schedule messages may contain up to 12,000 characters.
 - `PUT /agent/schedules/{id}` replaces the definition and requires all create
   fields plus `expected_revision`.
 - `DELETE /agent/schedules/{id}?expected_revision=N` stops future occurrences.

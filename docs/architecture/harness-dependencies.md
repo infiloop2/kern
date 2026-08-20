@@ -279,12 +279,13 @@ to re-enable the tool. Non-agent maintenance calls (auth, usage) run no model
 turn, so they pass `web-search=off` and keep the deny-by-default posture.
 `WebFetch`
 and `Bash` stay enabled — their egress is client-side and already gated by the
-domain allow-list. The launcher also sets
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (telemetry/feedback/auto-update
-suppression; it does not affect WebSearch/WebFetch) for every invocation except
-the host-owned `/usage` probe. Claude Code `2.1.220` classifies its account-limit
-fetch as nonessential, so the probe must omit this environment variable or it
-exits successfully without returning any usage windows.
+domain allow-list. For every invocation, including the host-owned `/usage`
+probe, the launcher sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
+`DISABLE_TELEMETRY=1`, and `DISABLE_ERROR_REPORTING=1`. The umbrella flag
+suppresses registry, feedback, and auto-update traffic; the dedicated flags
+make telemetry and error-reporting suppression explicit across Claude Code
+releases. The pinned Claude Code `2.1.220` still returns its usage windows with
+all three flags set. None of these flags affects WebSearch or WebFetch.
 
 The network proxy is the ultimate layer and enforces the same toggle
 independently: the Claude integration guard on `api.anthropic.com` always

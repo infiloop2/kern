@@ -34,6 +34,20 @@ ACTION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 GUIDE_IMAGE_RE = re.compile(r"^/guide-assets/[a-z0-9][a-z0-9._-]*\.png$")
 
 
+def _validate_closed_input_schema(value: object, *, action: str, path: str = "input_schema") -> None:
+    """Reject every open object schema, including objects nested in arrays or unions."""
+    if isinstance(value, dict):
+        if (value.get("type") == "object" or "properties" in value) and value.get("additionalProperties") is not False:
+            raise ValueError(
+                f"ActionSpec.input_schema object at {path} must set additionalProperties to false for {action}."
+            )
+        for key, child in value.items():
+            _validate_closed_input_schema(child, action=action, path=f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _validate_closed_input_schema(child, action=action, path=f"{path}[{index}]")
+
+
 @dataclass(frozen=True)
 class ActionSpec:
     """One callable action exposed by a tool.
@@ -180,6 +194,9 @@ class ToolManifest:
                 raise ValueError(f"ActionSpec.data_policy must be non-empty for {self.tool_id}:{spec.id}.")
             if spec.approval not in ("direct", "operator"):
                 raise ValueError(f"ActionSpec.approval must be direct or operator for {self.tool_id}:{spec.id}.")
+            if spec.input_schema.get("type") != "object":
+                raise ValueError(f"ActionSpec.input_schema must be an object schema for {self.tool_id}:{spec.id}.")
+            _validate_closed_input_schema(spec.input_schema, action=f"{self.tool_id}:{spec.id}")
             seen_actions.add(spec.id)
         for index, protection in enumerate(self.protections):
             if not protection.strip():

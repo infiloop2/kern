@@ -24,6 +24,47 @@ class ToolInputValidationError(ValueError):
         self.message = message
 
 
+def decoded_url_component_values(value: str, *, plus: bool) -> tuple[str, ...]:
+    """Return every relevant nested-decoding view of one URL component.
+
+    Query parsing applies form-style plus conversion at its outer layer, while
+    application code may decode nested values again. Inspect percent-only and
+    form-style interpretations so neither encoded pluses nor spaces hide data.
+    """
+    if not value:
+        return ()
+    roots = [urllib.parse.unquote(value, errors="replace")]
+    if plus:
+        form_root = urllib.parse.unquote_plus(value, errors="replace")
+        if form_root not in roots:
+            roots.append(form_root)
+    values: list[str] = []
+    for root in roots:
+        decoded = root
+        for _ in range(len(value) + 1):
+            if decoded not in values:
+                values.append(decoded)
+            if plus:
+                form_value = urllib.parse.unquote_plus(decoded, errors="replace")
+                if form_value not in values:
+                    values.append(form_value)
+            next_value = urllib.parse.unquote(decoded, errors="replace")
+            if next_value == decoded:
+                break
+            decoded = next_value
+    return tuple(values)
+
+
+def guard_url_parameter_string(url: str, api: "HostAPI") -> str:
+    """Guard a wire URL and every nested-decoding view of its path and query."""
+    guarded_url = api.outbound.guard_request_parameter_string(url)
+    parsed = urllib.parse.urlsplit(guarded_url)
+    for component, plus in ((parsed.path, False), (parsed.query, True)):
+        for decoded in decoded_url_component_values(component, plus=plus):
+            api.outbound.guard_request_parameter_string(decoded)
+    return guarded_url
+
+
 def schema(properties: JSONObject, required: list[str] | None = None) -> JSONObject:
     output: JSONObject = {"type": "object", "properties": properties, "additionalProperties": False}
     if required:

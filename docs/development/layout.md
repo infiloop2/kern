@@ -35,18 +35,18 @@ host/
   config.py                 # lifecycle input and network-policy validation
   constants.py              # shared ports, socket paths, and pinned service account ids
 tests/
-  smoke/                    # fresh live AWS host checks
+  smoke/                    # fresh live AWS and local Lima host checks
   stage/                    # persistent, credentialed live AWS checks
   smoke-ui/                 # deterministic local admin UI mock and browser smoke
 docs/                       # API, architecture, development, and commit-scoped audits
-.github/                    # no-network CI and admin-triggered live AWS workflows
+.github/                    # no-network CI plus main/admin-gated live host smoke workflows
 ```
 
 Important source areas and the context that runs them:
 
 | Source | Runs as | Responsibility |
 | --- | --- | --- |
-| `host/cli/` | Operator machine | Validates lifecycle input; provisions, replaces, recovers, starts, or stops AWS resources; renders and runs bootstrap. |
+| `host/cli/` | Operator machine | Parses and dispatches lifecycle commands; isolated AWS and Lima modules own provider resources, while shared helpers render and run bootstrap. `operation_lock.py` supplies the ephemeral same-user guard for both providers. |
 | `host/config.py` | Operator machine and host services | Validates lifecycle input and the stored/runtime network policy. |
 | `host/bootstrap/user_data.sh` | root through EC2 user data | Creates the operator account and installs only the single-use deploy SSH key. |
 | `host/bootstrap/bootstrap.sh` | root through lifecycle SSH | Runs the ordered provisioning phases: mounts volumes, installs pinned dependencies, creates fixed users, configures PostgreSQL/nftables/systemd, applies migrations, writes trusted host files, and ends by running `verify_deploy`. |

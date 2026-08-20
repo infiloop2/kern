@@ -181,6 +181,7 @@ id needed by the next action.
 | Brave Search | `search_web` once | None | One Brave Search request. |
 | Gmail | `search_messages`, `list_labels`, and `list_drafts`; conditional `read_message` and `read_thread`; denied send, message-change, and label proposals; approved draft create and delete | One temporary draft, deleted in the same check | Three to five reads and two writes against the connected account; denied proposals make no write. |
 | Google Calendar | `read_events`; approved event create; local approval-status check; approved event delete | One temporary event, deleted in the same check | One read and two writes against the connected account. |
+| Google Search Console | `list_properties`, one-row `query_search_analytics`, `list_sitemaps`, and `inspect_url`; denied `submit_sitemap` proposal | None | Four bounded reads against the connected account; the denied proposal does not submit a sitemap. |
 | Interactive Brokers | `get_positions`, `get_account_summary`, and one-day `get_trades` | None | Three read actions; no orders or market-data subscriptions. |
 | Instagram | `get_profile`, one-item `get_recent_media`, and `get_publishing_limit` | None | Three bounded Meta reads; no Reel is staged or published. |
 | Instagram Discovery | One-item `search_reels`, `get_trending_reels`, and `search_hashtag`; conditional one-item `get_reels_by_audio` and `get_reel_details` | None | Three fixed ScrapeCreators credits, up to five when both dependent reads run. |
@@ -190,6 +191,7 @@ id needed by the next action.
 | Polymarket | `list_markets`, `list_events`, `search`, `get_market`, `get_order_book`, and `price_history` | None | Six public read requests; no trading or authenticated spend. |
 | Runway | `get_task` for a deliberately missing task id | None | One authenticated lookup and zero generation credits. |
 | X | Minimum-10 `search_tweets`, one global trend, one personalized trend set; conditional `read_tweet` and maximum-5 `user_tweets` | None | Search is billed for up to 10 returned posts, plus up to one post read and five user posts; trend endpoint charges follow the connected X plan. Posting is intentionally absent; agents provide official X reply-intent links for operator review instead. |
+| TwitterAPI.io | `search_tweets` once, capped at 20 returned posts | None | One advanced-search request; metered usage follows the configured TwitterAPI.io plan. |
 
 Codex and Claude Code each make one short `list_bundled_tools` agent call when
 their provider is available. That catalog call is local and has no third-party

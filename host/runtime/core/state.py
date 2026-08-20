@@ -424,7 +424,10 @@ def page_thread_summaries(
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     with db.transaction() as cur:
         cur.execute(
-            "SELECT thread_id, agent_runtime, model, effort, last_used_at, run_status"
+            "SELECT thread_id, agent_runtime, model, effort, last_used_at, run_status,"
+            " COALESCE((SELECT seq FROM agent_events"
+            " WHERE agent_events.thread_id = thread_sessions.thread_id"
+            " ORDER BY seq DESC LIMIT 1), 0)"
             f" FROM thread_sessions{where}"
             " ORDER BY COALESCE(last_used_at, '') DESC, thread_id DESC LIMIT %s",
             (*params, limit),
@@ -437,9 +440,30 @@ def page_thread_summaries(
                 "effort": effort,
                 "last_used_at": last_used_at or "",
                 "status": str(run_status),
+                "latest_event_seq": int(latest_event_seq),
             }
-            for thread_id, agent_runtime, model, effort, last_used_at, run_status in cur.fetchall()
+            for (
+                thread_id,
+                agent_runtime,
+                model,
+                effort,
+                last_used_at,
+                run_status,
+                latest_event_seq,
+            ) in cur.fetchall()
         ]
+
+
+def latest_agent_event_seq(thread_id: str) -> int:
+    """Newest retained event sequence for one thread, or zero before activity."""
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT seq FROM agent_events WHERE thread_id = %s"
+            " ORDER BY seq DESC LIMIT 1",
+            (thread_id,),
+        )
+        row = cur.fetchone()
+    return int(row[0]) if row is not None else 0
 
 
 def recover_interrupted_thread_runs(cur: Any) -> list[tuple[str, int]]:

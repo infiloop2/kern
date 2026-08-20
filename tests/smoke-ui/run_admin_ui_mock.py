@@ -249,6 +249,14 @@ class MockState:
         self.next_tool_event_seq += 1
 
     def public_thread(self, thread: dict[str, Any]) -> dict[str, Any]:
+        latest_event_seq = max(
+            (
+                int(event["seq"])
+                for event in self.agent_events
+                if event.get("thread_id") == thread["thread_id"]
+            ),
+            default=0,
+        )
         return {
             "thread_id": thread["thread_id"],
             "agent_runtime": thread["agent_runtime"],
@@ -256,6 +264,7 @@ class MockState:
             "effort": thread["effort"],
             "last_used_at": thread["last_used_at"],
             "status": "running" if thread.get("_running") else "idle",
+            "latest_event_seq": latest_event_seq,
         }
 
     def runtime_status(self, runtime: str) -> str:

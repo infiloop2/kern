@@ -208,6 +208,7 @@ class ToolRegistryTests(unittest.TestCase):
                 "brave_search",
                 "gmail",
                 "google_calendar",
+                "google_search_console",
                 "ibkr",
                 "instagram",
                 "instagram_discovery",
@@ -233,6 +234,11 @@ class ToolRegistryTests(unittest.TestCase):
                             self.fail(f"{tool_id}.{action.id}.{name} must be a schema object")
                         self.assertTrue(str(schema.get("description", "")).strip())
 
+    # Tools whose destination is chosen per call (an agent-named public
+    # website) have no fixed third party whose privacy policy could be
+    # linked; their data-summary cards state destination-dependence instead.
+    NO_FIXED_PROVIDER_TOOL_IDS = frozenset({"web_fetch"})
+
     def test_bundled_tools_have_complete_operator_guides(self) -> None:
         for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
             manifest = tool.manifest
@@ -244,14 +250,15 @@ class ToolRegistryTests(unittest.TestCase):
                 self.assertEqual(manifest.data_summary.cards[1].title, "Where it can go")
                 self.assertTrue(all(step.title and step.description for step in manifest.setup_steps))
                 self.assertTrue(all(card.title and (card.description or card.points) for card in manifest.data_summary.cards))
-                self.assertTrue(
-                    any(
-                        "privacy" in f"{link.label}".lower() or "policy" in f"{link.label}".lower()
-                        for card in manifest.data_summary.cards
-                        for link in card.links
-                    ),
-                    f"{tool_id} must link an authoritative privacy policy",
-                )
+                if tool_id not in self.NO_FIXED_PROVIDER_TOOL_IDS:
+                    self.assertTrue(
+                        any(
+                            "privacy" in f"{link.label}".lower() or "policy" in f"{link.label}".lower()
+                            for card in manifest.data_summary.cards
+                            for link in card.links
+                        ),
+                        f"{tool_id} must link an authoritative privacy policy",
+                    )
 
     def test_tool_package_directory_requires_an_init_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -313,8 +320,14 @@ class ToolRegistryTests(unittest.TestCase):
                 connection="enable_only",
                 data_summary=FAKE_DATA_SUMMARY,
                 actions=(
-                    ActionSpec(id="same", description="One.", data_policy="Test.", input_schema={}),
-                    ActionSpec(id="same", description="Two.", data_policy="Test.", input_schema={}),
+                    ActionSpec(
+                        id="same", description="One.", data_policy="Test.",
+                        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                    ),
+                    ActionSpec(
+                        id="same", description="Two.", data_policy="Test.",
+                        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                    ),
                 ),
             )
 

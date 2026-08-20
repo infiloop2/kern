@@ -19,10 +19,12 @@ from unittest.mock import patch
 
 from host.bootstrap import render
 from host.config import ConfigError, build_input_config, build_operator_connections
+from host.cli import aws_checks, aws_resources
 from host.cli import lifecycle as deploy
 from host.cli import lifecycle_aws
 from host.cli import power
 from host.runtime.core import db
+from host.version import repo_version
 
 
 
@@ -53,6 +55,13 @@ def sample_input_config():  # type: ignore[no-untyped-def]
 
 
 SAMPLE_ADMIN_PASSWORD_SHA256 = "f" * 64
+SAMPLE_AWS_STORAGE = {
+    "resolver": "aws",
+    "resolver_input": {
+        "admin": {"volume_id": "vol-admin"},
+        "agent": {"volume_id": "vol-agent"},
+    },
+}
 
 
 def _fake_deploy_key(workdir: object) -> Path:
@@ -63,6 +72,54 @@ def _fake_deploy_key(workdir: object) -> Path:
 
 
 class DeployUnitTests(unittest.TestCase):
+    def test_aws_lifecycle_normalizes_agent_name_before_locking(self) -> None:
+        command = deploy.LifecycleCommand(mode="upgrade", agent_name=" kern-test ", provider="aws")
+        with patch.dict(os.environ, {"AWS_REGION": "us-east-1"}, clear=False), patch(
+            "host.cli.lifecycle_aws.OperationLock"
+        ) as operation_lock, patch(
+            "host.cli.lifecycle_aws._main_for_lifecycle_locked", return_value=0
+        ) as run_locked:
+            self.assertEqual(lifecycle_aws.main_for_lifecycle(command), 0)
+        operation_lock.assert_called_once_with("aws", "kern-test")
+        self.assertEqual(run_locked.call_args.args[1].agent_name, "kern-test")
+
+    def test_aws_power_normalizes_agent_name_before_locking(self) -> None:
+        with patch.dict(os.environ, {"AWS_REGION": "us-east-1"}, clear=False), patch(
+            "host.cli.power_aws.OperationLock"
+        ) as operation_lock, patch(
+            "host.cli.power_aws._main_for_power_locked", return_value=0
+        ) as run_locked:
+            from host.cli import power_aws
+
+            self.assertEqual(power_aws.main_for_power("stop", " kern-test "), 0)
+        operation_lock.assert_called_once_with("aws", "kern-test")
+        self.assertEqual(run_locked.call_args.args[1].agent_name, "kern-test")
+
+    def test_aws_lifecycle_os_error_uses_diagnostic_contract(self) -> None:
+        command = deploy.LifecycleCommand(mode="upgrade", agent_name="kern-test", provider="aws")
+        with patch.dict(os.environ, {"AWS_REGION": "us-east-1"}, clear=False), patch(
+            "host.cli.lifecycle_aws._main_for_lifecycle_locked",
+            side_effect=FileNotFoundError("aws vanished"),
+        ), patch("sys.stdout", _StringOutput()) as stdout, patch(
+            "sys.stderr", _StringOutput()
+        ) as stderr:
+            self.assertEqual(lifecycle_aws.main_for_lifecycle(command), 1)
+        self.assertEqual(stdout.value, "")
+        self.assertIn("upgrade command failed: aws vanished", stderr.value)
+
+    def test_aws_power_os_error_uses_diagnostic_contract(self) -> None:
+        from host.cli import power_aws
+
+        with patch.dict(os.environ, {"AWS_REGION": "us-east-1"}, clear=False), patch(
+            "host.cli.power_aws._main_for_power_locked",
+            side_effect=FileNotFoundError("aws vanished"),
+        ), patch("sys.stdout", _StringOutput()) as stdout, patch(
+            "sys.stderr", _StringOutput()
+        ) as stderr:
+            self.assertEqual(power_aws.main_for_power("start", "kern-test"), 1)
+        self.assertEqual(stdout.value, "")
+        self.assertIn("start command failed: aws vanished", stderr.value)
+
     def test_aws_env_uses_standard_credentials_and_pins_region(self) -> None:
         config = sample_input_config()
         env_values = {
@@ -71,7 +128,7 @@ class DeployUnitTests(unittest.TestCase):
             "AWS_SESSION_TOKEN": "sts-token",
         }
         with patch.dict(os.environ, env_values, clear=False):
-            env = lifecycle_aws._aws_env(config)
+            env = aws_resources._aws_env(config)
         self.assertEqual(env["AWS_ACCESS_KEY_ID"], "access")
         self.assertEqual(env["AWS_SECRET_ACCESS_KEY"], "secret")
         # A session token is used exactly when set; a stale one next to fresh
@@ -85,7 +142,7 @@ class DeployUnitTests(unittest.TestCase):
         with patch.dict(os.environ, {"AWS_SECRET_ACCESS_KEY": "secret"}, clear=False):
             os.environ.pop("AWS_ACCESS_KEY_ID", None)
             with self.assertRaisesRegex(ConfigError, "AWS_ACCESS_KEY_ID is not set"):
-                lifecycle_aws._aws_env(config)
+                aws_resources._aws_env(config)
 
     def test_build_input_config_validates_name_and_region(self) -> None:
         config = build_input_config(" kern-test ", "us-east-1")
@@ -131,8 +188,8 @@ class DeployUnitTests(unittest.TestCase):
             {"RouteTables": [{"Routes": [{"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-1", "State": "active"}]}]},
         ]
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
-            self.assertEqual(deploy._default_network(config, {}), ("vpc-1", "subnet-public", "us-east-1b"))
+        with patch("host.cli.aws_resources._aws", side_effect=responses):
+            self.assertEqual(aws_resources._default_network(config, {}), ("vpc-1", "subnet-public", "us-east-1b"))
 
     def test_default_network_rejects_default_vpc_without_public_subnet(self) -> None:
         config = sample_input_config()
@@ -142,9 +199,9 @@ class DeployUnitTests(unittest.TestCase):
             {"RouteTables": [{"Routes": [{"DestinationCidrBlock": "0.0.0.0/0", "NatGatewayId": "nat-1", "State": "active"}]}]},
         ]
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
+        with patch("host.cli.aws_resources._aws", side_effect=responses):
             with self.assertRaisesRegex(ConfigError, "internet gateway"):
-                deploy._default_network(config, {})
+                aws_resources._default_network(config, {})
 
     def test_default_network_can_prefer_existing_volume_availability_zone(self) -> None:
         config = sample_input_config()
@@ -159,9 +216,9 @@ class DeployUnitTests(unittest.TestCase):
             {"RouteTables": [{"Routes": [{"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-1", "State": "active"}]}]},
         ]
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
+        with patch("host.cli.aws_resources._aws", side_effect=responses):
             self.assertEqual(
-                deploy._default_network(config, {}, preferred_availability_zone="us-east-1b"),
+                aws_resources._default_network(config, {}, preferred_availability_zone="us-east-1b"),
                 ("vpc-1", "subnet-b", "us-east-1b"),
             )
 
@@ -179,9 +236,9 @@ class DeployUnitTests(unittest.TestCase):
                 return {"SecurityGroups": [{"IpPermissions": [], "IpPermissionsEgress": []}]}
             return {}
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
+        with patch("host.cli.aws_resources._aws", side_effect=fake_aws):
             self.assertEqual(
-                lifecycle_aws._ensure_security_group(config, {}, "vpc-1", ssh_ingress=True, cloudflare_egress=True),
+                aws_resources._ensure_security_group(config, {}, "vpc-1", ssh_ingress=True, cloudflare_egress=True),
                 "sg-1",
             )
 
@@ -237,8 +294,8 @@ class DeployUnitTests(unittest.TestCase):
                 }
             return {}
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
-            deploy._close_security_group_ssh_ingress({}, "sg-1")
+        with patch("host.cli.aws_resources._aws", side_effect=fake_aws):
+            aws_resources._close_security_group_ssh_ingress({}, "sg-1")
 
         revoke = next(call for call in calls if call[:2] == ("ec2", "revoke-security-group-ingress"))
         revoked_permissions = json.loads(revoke[revoke.index("--ip-permissions") + 1])
@@ -268,21 +325,21 @@ class DeployUnitTests(unittest.TestCase):
                             os.environ,
                             {**SAMPLE_AWS_ENV, "KERN_CLOUDFLARE_TUNNEL_TOKEN": "token-value"},
                         ), \
-                                patch("host.cli.lifecycle._existing_storage_volume_availability_zone", return_value=None), \
-                                patch("host.cli.lifecycle._find_existing_instances", return_value=[]), \
-                                patch("host.cli.lifecycle._existing_storage_roles", return_value=set()), \
-                                patch("host.cli.lifecycle._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
-                                patch("host.cli.lifecycle._generate_deploy_key", side_effect=_fake_deploy_key), \
-                                patch("host.cli.lifecycle._launch_instance", return_value=("i-123", "sg-1")) as launch_instance, \
+                                patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", return_value=None), \
+                                patch("host.cli.lifecycle_aws._find_existing_instances", return_value=[]), \
+                                patch("host.cli.lifecycle_aws._existing_storage_roles", return_value=set()), \
+                                patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
+                                patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=_fake_deploy_key), \
+                                patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")) as launch_instance, \
                                 patch(
-                                    "host.cli.lifecycle._wait_for_instance",
+                                    "host.cli.lifecycle_aws._wait_for_instance",
                                     return_value={"PublicDnsName": "ec2.example", "Placement": {"AvailabilityZone": "us-east-1a"}},
                                 ), \
-                                patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
-                                patch("host.cli.lifecycle._attach_storage_volumes"), \
-                                patch("host.cli.lifecycle._provision_over_ssh"), \
-                                patch("host.cli.lifecycle._close_security_group_ssh_ingress") as ssh_ingress, \
-                                patch("host.cli.lifecycle_aws._aws", return_value={}), \
+                                patch("host.cli.lifecycle_aws._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
+                                patch("host.cli.lifecycle_aws._attach_storage_volumes"), \
+                                patch("host.cli.lifecycle_aws._provision_over_ssh"), \
+                                patch("host.cli.lifecycle_aws._close_security_group_ssh_ingress") as ssh_ingress, \
+                                patch("host.cli.aws_resources._aws", return_value={}), \
                                 patch("sys.stderr", _StringOutput()), \
                                 patch("sys.stdout", _StringOutput()):
                             self.assertEqual(
@@ -315,8 +372,8 @@ class DeployUnitTests(unittest.TestCase):
             calls.append(args)
             return {"Reservations": [{"Instances": [{"InstanceId": "i-owned"}]}]}
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
-            self.assertEqual(deploy._find_existing_instances(config, {}), ["i-owned"])
+        with patch("host.cli.aws_resources._aws", side_effect=fake_aws):
+            self.assertEqual(aws_resources._find_existing_instances(config, {}), ["i-owned"])
 
         filters = calls[0][calls[0].index("--filters") + 1:]
         self.assertIn("Name=tag:kern-host-agent-name,Values=kern-test", filters)
@@ -332,9 +389,9 @@ class DeployUnitTests(unittest.TestCase):
                 return {"SecurityGroups": [{"IpPermissions": [], "IpPermissionsEgress": []}]}
             return {}
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
+        with patch("host.cli.aws_resources._aws", side_effect=fake_aws):
             with self.assertRaisesRegex(ConfigError, "not tagged as a Kern resource"):
-                lifecycle_aws._ensure_security_group(config, {}, "vpc-1", ssh_ingress=True, cloudflare_egress=True)
+                aws_resources._ensure_security_group(config, {}, "vpc-1", ssh_ingress=True, cloudflare_egress=True)
 
     def test_iam_policies_restrict_kern_resource_access(self) -> None:
         policy = json.loads(Path("iam_policy.json").read_text())
@@ -478,15 +535,15 @@ class DeployUnitTests(unittest.TestCase):
                 raise AssertionError(f"unexpected tag spec: {tag_spec}")
             return {}
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
+        with patch("host.cli.aws_resources._aws", side_effect=fake_aws):
             created_out: list[str] = []
-            volumes = deploy._ensure_storage_volumes(
+            volumes = aws_resources._ensure_storage_volumes(
                 config,
                 {},
                 availability_zone="us-east-1a",
                 created_storage_volumes=created_out,
             )
-            deploy._attach_storage_volumes({}, instance_id="i-123", volumes=volumes)
+            aws_resources._attach_storage_volumes({}, instance_id="i-123", volumes=volumes)
 
         self.assertEqual(volumes, {"admin": "vol-admin", "agent": "vol-agent"})
         self.assertEqual(created_out, ["vol-admin", "vol-agent"])
@@ -529,8 +586,8 @@ class DeployUnitTests(unittest.TestCase):
             return {}
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
-                instance_id, _group = deploy._launch_instance(
+            with patch("host.cli.aws_resources._aws", side_effect=fake_aws):
+                instance_id, _group = aws_resources._launch_instance(
                     config,
                     "#!/usr/bin/env bash\n",
                     Path(tmp),
@@ -551,14 +608,14 @@ class DeployUnitTests(unittest.TestCase):
         config = sample_input_config()
 
         with patch(
-            "host.cli.lifecycle_aws._aws",
+            "host.cli.aws_resources._aws",
             return_value={"Volumes": [{"VolumeId": "vol-admin", "State": "in-use", "AvailabilityZone": "us-east-1a"}]},
         ):
             with self.assertRaisesRegex(ConfigError, "is in-use"):
-                lifecycle_aws._find_available_storage_volume(config, {}, "admin", "us-east-1a")
+                aws_resources._find_available_storage_volume(config, {}, "admin", "us-east-1a")
 
         with patch(
-            "host.cli.lifecycle_aws._aws",
+            "host.cli.aws_resources._aws",
             return_value={
                 "Volumes": [
                     {"VolumeId": "vol-admin-a", "State": "available", "AvailabilityZone": "us-east-1a"},
@@ -567,7 +624,7 @@ class DeployUnitTests(unittest.TestCase):
             },
         ):
             with self.assertRaisesRegex(ConfigError, "multiple Kern admin volumes"):
-                lifecycle_aws._find_available_storage_volume(config, {}, "admin", "us-east-1a")
+                aws_resources._find_available_storage_volume(config, {}, "admin", "us-east-1a")
 
     def test_existing_storage_volumes_are_preserved_before_instance_termination(self) -> None:
         config = sample_input_config()
@@ -599,8 +656,8 @@ class DeployUnitTests(unittest.TestCase):
                 }
             return {}
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
-            deploy._preserve_existing_storage_volumes_on_instance_termination(config, {}, ["i-old"])
+        with patch("host.cli.aws_resources._aws", side_effect=fake_aws):
+            aws_resources._preserve_existing_storage_volumes_on_instance_termination(config, {}, ["i-old"])
 
         preserve_calls = [call for call in calls if call[:2] == ("ec2", "modify-instance-attribute")]
         self.assertEqual(len(preserve_calls), 2)
@@ -628,8 +685,8 @@ class DeployUnitTests(unittest.TestCase):
                 return {}
             raise AssertionError(f"unexpected AWS call: {args}")
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws):
-            volume_id = lifecycle_aws._find_available_storage_volume(
+        with patch("host.cli.aws_resources._aws", side_effect=fake_aws):
+            volume_id = aws_resources._find_available_storage_volume(
                 config,
                 {},
                 "admin",
@@ -647,16 +704,16 @@ class DeployUnitTests(unittest.TestCase):
             {"Volumes": [{"VolumeId": "vol-admin", "State": "available", "AvailabilityZone": "us-east-1a"}]},
             {"Volumes": [{"VolumeId": "vol-agent", "State": "available", "AvailabilityZone": "us-east-1a"}]},
         ]
-        with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
-            self.assertEqual(deploy._existing_storage_volume_availability_zone(config, {}), "us-east-1a")
+        with patch("host.cli.aws_resources._aws", side_effect=responses):
+            self.assertEqual(aws_resources._existing_storage_volume_availability_zone(config, {}), "us-east-1a")
 
         responses = [
             {"Volumes": [{"VolumeId": "vol-admin", "State": "available", "AvailabilityZone": "us-east-1a"}]},
             {"Volumes": [{"VolumeId": "vol-agent", "State": "available", "AvailabilityZone": "us-east-1b"}]},
         ]
-        with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
+        with patch("host.cli.aws_resources._aws", side_effect=responses):
             with self.assertRaisesRegex(ConfigError, "split across availability zones"):
-                deploy._existing_storage_volume_availability_zone(config, {})
+                aws_resources._existing_storage_volume_availability_zone(config, {})
 
     def test_main_validates_storage_volumes_before_terminating_existing_host(self) -> None:
         calls: list[str] = []
@@ -666,22 +723,22 @@ class DeployUnitTests(unittest.TestCase):
             os.chdir(tmp)
             try:
                 with patch.dict(os.environ, dict(SAMPLE_AWS_ENV)), \
-                        patch("host.cli.lifecycle._find_existing_instances", side_effect=lambda *_args: calls.append("find_instances") or ["i-old"]), \
-                        patch("host.cli.lifecycle._existing_storage_volume_availability_zone", side_effect=lambda *_args: calls.append("validate_storage") or "us-east-1a"), \
-                        patch("host.cli.lifecycle._existing_storage_roles", return_value={"admin", "agent"}), \
-                        patch("host.cli.lifecycle._default_network", side_effect=lambda *_args, **_kwargs: calls.append("preflight_network") or ("vpc-1", "subnet-1", "us-east-1a")), \
-                        patch("host.cli.lifecycle._terminate_instances", side_effect=lambda *_args: calls.append("terminate")), \
-                        patch("host.cli.lifecycle._generate_deploy_key", side_effect=_fake_deploy_key), \
-                        patch("host.cli.lifecycle._launch_instance", return_value=("i-123", "sg-1")) as launch_instance, \
+                        patch("host.cli.lifecycle_aws._find_existing_instances", side_effect=lambda *_args: calls.append("find_instances") or ["i-old"]), \
+                        patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", side_effect=lambda *_args: calls.append("validate_storage") or "us-east-1a"), \
+                        patch("host.cli.lifecycle_aws._existing_storage_roles", return_value={"admin", "agent"}), \
+                        patch("host.cli.lifecycle_aws._default_network", side_effect=lambda *_args, **_kwargs: calls.append("preflight_network") or ("vpc-1", "subnet-1", "us-east-1a")), \
+                        patch("host.cli.lifecycle_aws._terminate_instances", side_effect=lambda *_args: calls.append("terminate")), \
+                        patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=_fake_deploy_key), \
+                        patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")) as launch_instance, \
                         patch(
-                            "host.cli.lifecycle._wait_for_instance",
+                            "host.cli.lifecycle_aws._wait_for_instance",
                             return_value={"PublicDnsName": "ec2.example", "Placement": {"AvailabilityZone": "us-east-1a"}},
                         ), \
-                        patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
-                        patch("host.cli.lifecycle._attach_storage_volumes"), \
-                        patch("host.cli.lifecycle._provision_over_ssh"), \
-                        patch("host.cli.lifecycle._close_security_group_ssh_ingress"), \
-                        patch("host.cli.lifecycle_aws._aws", return_value={}), \
+                        patch("host.cli.lifecycle_aws._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
+                        patch("host.cli.lifecycle_aws._attach_storage_volumes"), \
+                        patch("host.cli.lifecycle_aws._provision_over_ssh"), \
+                        patch("host.cli.lifecycle_aws._close_security_group_ssh_ingress"), \
+                        patch("host.cli.aws_resources._aws", return_value={}), \
                         patch("sys.stdout", _StringOutput()):
                     self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "kern-test"]), 0)
             finally:
@@ -700,17 +757,17 @@ class DeployUnitTests(unittest.TestCase):
             os.chdir(tmp)
             try:
                 with patch.dict(os.environ, dict(SAMPLE_AWS_ENV)), \
-                        patch("host.cli.lifecycle._find_existing_instances", side_effect=lambda *_args: calls.append("find_instances") or ["i-old"]), \
-                        patch("host.cli.lifecycle._existing_storage_volume_availability_zone", side_effect=lambda *_args: calls.append("validate_storage") or "us-east-1a"), \
-                        patch("host.cli.lifecycle._existing_storage_roles", return_value={"admin", "agent"}), \
-                        patch("host.cli.lifecycle._check_existing_version_hints"), \
+                        patch("host.cli.lifecycle_aws._find_existing_instances", side_effect=lambda *_args: calls.append("find_instances") or ["i-old"]), \
+                        patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", side_effect=lambda *_args: calls.append("validate_storage") or "us-east-1a"), \
+                        patch("host.cli.lifecycle_aws._existing_storage_roles", return_value={"admin", "agent"}), \
+                        patch("host.cli.lifecycle_aws._check_existing_version_hints"), \
                         patch(
-                            "host.cli.lifecycle._default_network",
+                            "host.cli.lifecycle_aws._default_network",
                             side_effect=lambda *_args, **_kwargs: calls.append("preflight_network")
                             or (_ for _ in ()).throw(ConfigError("AWS default VPC has no public subnet in us-east-1a")),
                         ), \
-                        patch("host.cli.lifecycle._terminate_instances", side_effect=lambda *_args: calls.append("terminate")), \
-                        patch("host.cli.lifecycle._launch_instance", side_effect=AssertionError("_launch_instance should not run")), \
+                        patch("host.cli.lifecycle_aws._terminate_instances", side_effect=lambda *_args: calls.append("terminate")), \
+                        patch("host.cli.lifecycle_aws._launch_instance", side_effect=AssertionError("_launch_instance should not run")), \
                         patch("sys.stdout", _StringOutput()), \
                         patch("sys.stderr", _StringOutput()):
                     self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "kern-test"]), 2)
@@ -745,9 +802,9 @@ class DeployUnitTests(unittest.TestCase):
                         }]
                     }]
                 }
-                with patch("host.cli.lifecycle_aws._aws", return_value=response):
+                with patch("host.cli.aws_resources._aws", return_value=response):
                     with self.assertRaisesRegex(ConfigError, message):
-                        deploy._check_existing_version_hints(command, config, {}, ["i-tagged"], "0.6.0")
+                        aws_checks._check_existing_version_hints(command, config, {}, ["i-tagged"], "0.6.0")
 
     def test_version_tag_guard_rejects_invalid_tags_before_replacement(self) -> None:
         config = sample_input_config()
@@ -760,9 +817,9 @@ class DeployUnitTests(unittest.TestCase):
                 }]
             }]
         }
-        with patch("host.cli.lifecycle_aws._aws", return_value=response):
+        with patch("host.cli.aws_resources._aws", return_value=response):
             with self.assertRaisesRegex(ConfigError, "invalid kern-host-version tag"):
-                deploy._check_existing_version_hints(command, config, {}, ["i-invalid"], "0.1.0")
+                aws_checks._check_existing_version_hints(command, config, {}, ["i-invalid"], "0.1.0")
 
     def test_reconfigure_passes_admin_password_hash_and_operator_connections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -770,22 +827,22 @@ class DeployUnitTests(unittest.TestCase):
             os.chdir(tmp)
             try:
                 with patch.dict(os.environ, dict(SAMPLE_AWS_ENV)), \
-                        patch("host.cli.lifecycle._find_existing_instances", return_value=["i-old"]), \
-                        patch("host.cli.lifecycle._existing_storage_volume_availability_zone", return_value="us-east-1a"), \
-                        patch("host.cli.lifecycle._existing_storage_roles", return_value={"admin", "agent"}), \
-                        patch("host.cli.lifecycle._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
-                        patch("host.cli.lifecycle._terminate_instances"), \
-                        patch("host.cli.lifecycle._generate_deploy_key", side_effect=_fake_deploy_key), \
-                        patch("host.cli.lifecycle._launch_instance", return_value=("i-123", "sg-1")) as launch_instance, \
+                        patch("host.cli.lifecycle_aws._find_existing_instances", return_value=["i-old"]), \
+                        patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", return_value="us-east-1a"), \
+                        patch("host.cli.lifecycle_aws._existing_storage_roles", return_value={"admin", "agent"}), \
+                        patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
+                        patch("host.cli.lifecycle_aws._terminate_instances"), \
+                        patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=_fake_deploy_key), \
+                        patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")) as launch_instance, \
                         patch(
-                            "host.cli.lifecycle._wait_for_instance",
+                            "host.cli.lifecycle_aws._wait_for_instance",
                             return_value={"PublicDnsName": "ec2.example", "Placement": {"AvailabilityZone": "us-east-1a"}},
                         ), \
-                        patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
-                        patch("host.cli.lifecycle._attach_storage_volumes"), \
-                        patch("host.cli.lifecycle._provision_over_ssh") as provision, \
-                        patch("host.cli.lifecycle._close_security_group_ssh_ingress"), \
-                        patch("host.cli.lifecycle_aws._aws", return_value={}), \
+                        patch("host.cli.lifecycle_aws._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
+                        patch("host.cli.lifecycle_aws._attach_storage_volumes"), \
+                        patch("host.cli.lifecycle_aws._provision_over_ssh") as provision, \
+                        patch("host.cli.lifecycle_aws._close_security_group_ssh_ingress"), \
+                        patch("host.cli.aws_resources._aws", return_value={}), \
                         patch("builtins.input", side_effect=AssertionError("input should not be called")), \
                         patch("sys.stderr", _StringOutput()), \
                         patch("sys.stdout", _StringOutput()) as stdout:
@@ -912,8 +969,8 @@ class DeployUnitTests(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, dict(SAMPLE_AWS_ENV)),
-                patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws),
-                patch("host.cli.power._aws", side_effect=fake_aws),
+                patch("host.cli.aws_resources._aws", side_effect=fake_aws),
+                patch("host.cli.power_aws._aws", side_effect=fake_aws),
                 patch("sys.stdout", _StringOutput()) as stdout,
             ):
                 self.assertEqual(
@@ -962,8 +1019,8 @@ class DeployUnitTests(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, dict(SAMPLE_AWS_ENV)),
-                patch("host.cli.lifecycle_aws._aws", side_effect=fake_aws),
-                patch("host.cli.power._aws", side_effect=fake_aws),
+                patch("host.cli.aws_resources._aws", side_effect=fake_aws),
+                patch("host.cli.power_aws._aws", side_effect=fake_aws),
                 patch("sys.stdout", _StringOutput()) as stdout,
             ):
                 self.assertEqual(
@@ -992,22 +1049,22 @@ class DeployUnitTests(unittest.TestCase):
             os.chdir(tmp)
             try:
                 with patch.dict(os.environ, dict(SAMPLE_AWS_ENV)), \
-                        patch("host.cli.lifecycle._find_existing_instances", return_value=["i-old"]), \
-                        patch("host.cli.lifecycle._existing_storage_volume_availability_zone", return_value="us-east-1a"), \
-                        patch("host.cli.lifecycle._existing_storage_roles", return_value={"admin", "agent"}), \
-                        patch("host.cli.lifecycle._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
-                        patch("host.cli.lifecycle._terminate_instances"), \
-                        patch("host.cli.lifecycle._generate_deploy_key", side_effect=_fake_deploy_key), \
-                        patch("host.cli.lifecycle._launch_instance", return_value=("i-123", "sg-1")), \
+                        patch("host.cli.lifecycle_aws._find_existing_instances", return_value=["i-old"]), \
+                        patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", return_value="us-east-1a"), \
+                        patch("host.cli.lifecycle_aws._existing_storage_roles", return_value={"admin", "agent"}), \
+                        patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
+                        patch("host.cli.lifecycle_aws._terminate_instances"), \
+                        patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=_fake_deploy_key), \
+                        patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")), \
                         patch(
-                            "host.cli.lifecycle._wait_for_instance",
+                            "host.cli.lifecycle_aws._wait_for_instance",
                             return_value={"PublicDnsName": "ec2.example", "Placement": {"AvailabilityZone": "us-east-1a"}},
                         ), \
-                        patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
-                        patch("host.cli.lifecycle._attach_storage_volumes"), \
-                        patch("host.cli.lifecycle._provision_over_ssh"), \
-                        patch("host.cli.lifecycle._close_security_group_ssh_ingress"), \
-                        patch("host.cli.lifecycle_aws._aws", return_value={}), \
+                        patch("host.cli.lifecycle_aws._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
+                        patch("host.cli.lifecycle_aws._attach_storage_volumes"), \
+                        patch("host.cli.lifecycle_aws._provision_over_ssh"), \
+                        patch("host.cli.lifecycle_aws._close_security_group_ssh_ingress"), \
+                        patch("host.cli.aws_resources._aws", return_value={}), \
                         patch("sys.stderr", _StringOutput()), \
                         patch("sys.stdout", _StringOutput()) as stdout:
                     self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "kern-test"]), 0)
@@ -1018,10 +1075,58 @@ class DeployUnitTests(unittest.TestCase):
             # nothing secret appears.
             upgrade_result = json.loads(stdout.value)
             self.assertEqual(upgrade_result["agent_name"], "kern-test")
-            self.assertEqual(upgrade_result["version"], deploy.repo_version())
+            self.assertEqual(upgrade_result["version"], repo_version())
             self.assertNotIn("admin_password", upgrade_result)
             self.assertNotIn("operator_connections", upgrade_result)
             self.assertEqual(os.listdir(tmp), [])
+
+    def test_provisioning_timeout_returns_controlled_failure(self) -> None:
+        # A bounded SSH transfer or bootstrap that expires must exit through
+        # the normal diagnostic/return-code contract, not a traceback.
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                with patch.dict(os.environ, dict(SAMPLE_AWS_ENV)), \
+                        patch("host.cli.lifecycle_aws._find_existing_instances", return_value=[]), \
+                        patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", return_value=None), \
+                        patch("host.cli.lifecycle_aws._existing_storage_roles", return_value=set()), \
+                        patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
+                        patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=_fake_deploy_key), \
+                        patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")), \
+                        patch(
+                            "host.cli.lifecycle_aws._wait_for_instance",
+                            return_value={"PublicDnsName": "ec2.example", "Placement": {"AvailabilityZone": "us-east-1a"}},
+                        ), \
+                        patch("host.cli.lifecycle_aws._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
+                        patch("host.cli.lifecycle_aws._attach_storage_volumes"), \
+                        patch(
+                            "host.cli.lifecycle_aws._provision_over_ssh",
+                            side_effect=subprocess.TimeoutExpired(["scp"], timeout=600),
+                        ), \
+                        patch("host.cli.lifecycle_aws._terminate_instances") as terminate, \
+                        patch("host.cli.aws_resources._aws", return_value={}), \
+                        patch("sys.stdout", _StringOutput()) as stdout, \
+                        patch("sys.stderr", _StringOutput()) as stderr:
+                    self.assertEqual(
+                        deploy.main_for_mode(
+                            "deploy",
+                            [
+                                "--agent-name",
+                                "kern-test",
+                                "--operator-ssh-public-key",
+                                SAMPLE_SSH_PUBLIC_KEY,
+                                "--admin-password-sha256",
+                                SAMPLE_ADMIN_PASSWORD_SHA256,
+                            ],
+                        ),
+                        1,
+                    )
+            finally:
+                os.chdir(cwd)
+        terminate.assert_called_once()
+        self.assertEqual(stdout.value, "")
+        self.assertIn("deploy command failed", stderr.value)
 
     def test_failed_deploy_reports_created_data_volumes_without_deleting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1033,21 +1138,21 @@ class DeployUnitTests(unittest.TestCase):
                     return {"admin": "vol-admin", "agent": "vol-agent"}
 
                 with patch.dict(os.environ, dict(SAMPLE_AWS_ENV)), \
-                        patch("host.cli.lifecycle._find_existing_instances", return_value=[]), \
-                        patch("host.cli.lifecycle._existing_storage_volume_availability_zone", return_value=None), \
-                        patch("host.cli.lifecycle._existing_storage_roles", return_value=set()), \
-                        patch("host.cli.lifecycle._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
-                        patch("host.cli.lifecycle._generate_deploy_key", side_effect=_fake_deploy_key), \
-                        patch("host.cli.lifecycle._launch_instance", return_value=("i-123", "sg-1")), \
+                        patch("host.cli.lifecycle_aws._find_existing_instances", return_value=[]), \
+                        patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", return_value=None), \
+                        patch("host.cli.lifecycle_aws._existing_storage_roles", return_value=set()), \
+                        patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
+                        patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=_fake_deploy_key), \
+                        patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")), \
                         patch(
-                            "host.cli.lifecycle._wait_for_instance",
+                            "host.cli.lifecycle_aws._wait_for_instance",
                             return_value={"PublicDnsName": "ec2.example", "Placement": {"AvailabilityZone": "us-east-1a"}},
                         ), \
-                        patch("host.cli.lifecycle._ensure_storage_volumes", side_effect=fake_ensure_storage), \
-                        patch("host.cli.lifecycle._attach_storage_volumes"), \
-                        patch("host.cli.lifecycle._provision_over_ssh", side_effect=ConfigError("bootstrap failed")), \
-                        patch("host.cli.lifecycle._terminate_instances") as terminate, \
-                        patch("host.cli.lifecycle_aws._aws", return_value={}), \
+                        patch("host.cli.lifecycle_aws._ensure_storage_volumes", side_effect=fake_ensure_storage), \
+                        patch("host.cli.lifecycle_aws._attach_storage_volumes"), \
+                        patch("host.cli.lifecycle_aws._provision_over_ssh", side_effect=ConfigError("bootstrap failed")), \
+                        patch("host.cli.lifecycle_aws._terminate_instances") as terminate, \
+                        patch("host.cli.aws_resources._aws", return_value={}), \
                         patch("sys.stdout", _StringOutput()), \
                         patch("sys.stderr", _StringOutput()) as stderr:
                     self.assertEqual(
@@ -1077,25 +1182,25 @@ class DeployUnitTests(unittest.TestCase):
         config = sample_input_config()
         command = deploy.LifecycleCommand(mode="deploy", agent_name="kern-test")
         with self.assertRaisesRegex(ConfigError, "no existing Kern instance"):
-            deploy._validate_command_preflight(command, config, ["i-old"], set())
+            aws_checks._validate_command_preflight(command, config, ["i-old"], set())
         with self.assertRaisesRegex(ConfigError, "no existing Kern data volumes"):
-            deploy._validate_command_preflight(command, config, [], {"admin"})
+            aws_checks._validate_command_preflight(command, config, [], {"admin"})
         with self.assertRaisesRegex(ConfigError, "previous first-time deploy failed"):
-            deploy._validate_command_preflight(command, config, [], {"admin", "agent"})
+            aws_checks._validate_command_preflight(command, config, [], {"admin", "agent"})
 
     def test_preflight_reconfigure_requires_existing_instance(self) -> None:
         config = sample_input_config()
         command = deploy.LifecycleCommand(mode="reconfigure", agent_name="kern-test")
         with self.assertRaisesRegex(ConfigError, "reconfigure requires an existing Kern instance"):
-            deploy._validate_command_preflight(command, config, [], {"admin", "agent"})
-        deploy._validate_command_preflight(command, config, ["i-old"], {"admin", "agent"})
+            aws_checks._validate_command_preflight(command, config, [], {"admin", "agent"})
+        aws_checks._validate_command_preflight(command, config, ["i-old"], {"admin", "agent"})
 
     def test_ssh_user_data_stages_payload_and_deploy_key(self) -> None:
         payload = render._bootstrap_payload(
-            sample_input_config(),
+            "kern-test",
             SAMPLE_ADMIN_PASSWORD_SHA256,
             build_operator_connections(SAMPLE_SSH_PUBLIC_KEY, None, None),
-            {"admin": "vol-admin", "agent": "vol-agent"},
+            SAMPLE_AWS_STORAGE,
             mode="deploy",
             target_version="0.35.0",
         )
@@ -1136,12 +1241,11 @@ class DeployUnitTests(unittest.TestCase):
                 self.assertIn(message, stderr.value)
 
     def test_render_github_user_data_embeds_payload_and_pin(self) -> None:
-        config = sample_input_config()
         payload = render._bootstrap_payload(
-            config,
+            "kern-test",
             SAMPLE_ADMIN_PASSWORD_SHA256,
             build_operator_connections(SAMPLE_SSH_PUBLIC_KEY, None, None),
-            {"admin": "vol-admin", "agent": "vol-agent"},
+            SAMPLE_AWS_STORAGE,
             mode="deploy",
             target_version="0.35.0",
         )
@@ -1189,22 +1293,22 @@ class DeployUnitTests(unittest.TestCase):
             os.chdir(tmp)
             try:
                 with patch.dict(os.environ, dict(SAMPLE_AWS_ENV)), \
-                        patch("host.cli.lifecycle._find_existing_instances", return_value=[]), \
-                        patch("host.cli.lifecycle._existing_storage_volume_availability_zone", return_value=None), \
-                        patch("host.cli.lifecycle._existing_storage_roles", return_value=set()), \
-                        patch("host.cli.lifecycle._resolve_github_pin", return_value=("c" * 40, "0.35.0")), \
-                        patch("host.cli.lifecycle._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
-                        patch("host.cli.lifecycle._generate_deploy_key", side_effect=AssertionError("no deploy key in the GitHub delivery")), \
-                        patch("host.cli.lifecycle._launch_instance", return_value=("i-123", "sg-1")) as launch_instance, \
+                        patch("host.cli.lifecycle_aws._find_existing_instances", return_value=[]), \
+                        patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", return_value=None), \
+                        patch("host.cli.lifecycle_aws._existing_storage_roles", return_value=set()), \
+                        patch("host.cli.lifecycle_aws._resolve_github_pin", return_value=("c" * 40, "0.35.0")), \
+                        patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
+                        patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=AssertionError("no deploy key in the GitHub delivery")), \
+                        patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")) as launch_instance, \
                         patch(
-                            "host.cli.lifecycle._wait_for_instance",
+                            "host.cli.lifecycle_aws._wait_for_instance",
                             return_value={"PublicDnsName": "ec2.example", "Placement": {"AvailabilityZone": "us-east-1a"}},
                         ), \
-                        patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
-                        patch("host.cli.lifecycle._attach_storage_volumes") as attach_volumes, \
-                        patch("host.cli.lifecycle._provision_over_ssh", side_effect=AssertionError("no SSH in the GitHub delivery")), \
-                        patch("host.cli.lifecycle._close_security_group_ssh_ingress", side_effect=AssertionError("access is final at launch")), \
-                        patch("host.cli.lifecycle_aws._aws", return_value={}), \
+                        patch("host.cli.lifecycle_aws._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}), \
+                        patch("host.cli.lifecycle_aws._attach_storage_volumes") as attach_volumes, \
+                        patch("host.cli.lifecycle_aws._provision_over_ssh", side_effect=AssertionError("no SSH in the GitHub delivery")), \
+                        patch("host.cli.lifecycle_aws._close_security_group_ssh_ingress", side_effect=AssertionError("access is final at launch")), \
+                        patch("host.cli.aws_resources._aws", return_value={}), \
                         patch("sys.stderr", _StringOutput()), \
                         patch("sys.stdout", _StringOutput()) as stdout:
                     self.assertEqual(
@@ -1236,7 +1340,7 @@ class DeployUnitTests(unittest.TestCase):
             embedded = next(line for line in user_data.splitlines() if line.startswith("{"))
             payload = json.loads(embedded)
             self.assertEqual(payload["operation"]["mode"], "deploy")
-            self.assertEqual(payload["storage_volumes"], {"admin": "vol-admin", "agent": "vol-agent"})
+            self.assertEqual(payload["storage"], SAMPLE_AWS_STORAGE)
             self.assertEqual(payload["runtime_config"]["admin_password_sha256"], SAMPLE_ADMIN_PASSWORD_SHA256)
             result = json.loads(stdout.value)
             self.assertEqual(result["github_source"], "infiloop2/kern@" + "c" * 40)
@@ -1255,25 +1359,25 @@ class DeployUnitTests(unittest.TestCase):
                     try:
                         with contextlib.ExitStack() as stack:
                             stack.enter_context(patch.dict(os.environ, dict(SAMPLE_AWS_ENV)))
-                            stack.enter_context(patch("host.cli.lifecycle._find_existing_instances", return_value=["i-old"]))
-                            stack.enter_context(patch("host.cli.lifecycle._existing_storage_volume_availability_zone", return_value="us-east-1a"))
-                            stack.enter_context(patch("host.cli.lifecycle._existing_storage_roles", return_value={"admin", "agent"}))
-                            stack.enter_context(patch("host.cli.lifecycle._resolve_github_pin", return_value=("d" * 40, "0.35.0")))
-                            stack.enter_context(patch("host.cli.lifecycle._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")))
-                            stack.enter_context(patch("host.cli.lifecycle._security_group_access_state", return_value=captured))
-                            stack.enter_context(patch("host.cli.lifecycle._terminate_instances"))
-                            launch_instance = stack.enter_context(patch("host.cli.lifecycle._launch_instance", return_value=("i-123", "sg-1")))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._find_existing_instances", return_value=["i-old"]))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", return_value="us-east-1a"))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._existing_storage_roles", return_value={"admin", "agent"}))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._resolve_github_pin", return_value=("d" * 40, "0.35.0")))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._security_group_access_state", return_value=captured))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._terminate_instances"))
+                            launch_instance = stack.enter_context(patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")))
                             stack.enter_context(
                                 patch(
-                                    "host.cli.lifecycle._wait_for_instance",
+                                    "host.cli.lifecycle_aws._wait_for_instance",
                                     return_value={"PublicDnsName": "ec2.example", "Placement": {"AvailabilityZone": "us-east-1a"}},
                                 )
                             )
-                            stack.enter_context(patch("host.cli.lifecycle._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}))
-                            stack.enter_context(patch("host.cli.lifecycle._attach_storage_volumes"))
-                            stack.enter_context(patch("host.cli.lifecycle._provision_over_ssh", side_effect=AssertionError("no SSH in the GitHub delivery")))
-                            stack.enter_context(patch("host.cli.lifecycle._close_security_group_ssh_ingress", side_effect=AssertionError("access is final at launch")))
-                            stack.enter_context(patch("host.cli.lifecycle_aws._aws", return_value={}))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._attach_storage_volumes"))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._provision_over_ssh", side_effect=AssertionError("no SSH in the GitHub delivery")))
+                            stack.enter_context(patch("host.cli.lifecycle_aws._close_security_group_ssh_ingress", side_effect=AssertionError("access is final at launch")))
+                            stack.enter_context(patch("host.cli.aws_resources._aws", return_value={}))
                             stack.enter_context(patch("sys.stdout", _StringOutput()))
                             self.assertEqual(
                                 deploy.main_for_mode(
@@ -1306,11 +1410,11 @@ class DeployUnitTests(unittest.TestCase):
         sha = "e" * 40
 
         # Pinned sha: the fetched version is shown and confirmed.
-        with patch("host.cli.lifecycle.urllib.request.urlopen", return_value=_FakeResponse(b"0.36.0\n")) as urlopen, \
-                patch("host.cli.lifecycle.repo_version", return_value="0.36.0"), \
+        with patch("host.cli.lifecycle_aws.urllib.request.urlopen", return_value=_FakeResponse(b"0.36.0\n")) as urlopen, \
+                patch("host.cli.lifecycle_aws.repo_version", return_value="0.36.0"), \
                 patch("builtins.input", return_value="y"), \
                 patch("sys.stderr", _StringOutput()) as stderr:
-            self.assertEqual(deploy._resolve_github_pin(sha), (sha, "0.36.0"))
+            self.assertEqual(lifecycle_aws._resolve_github_pin(sha), (sha, "0.36.0"))
         self.assertIn("raw.githubusercontent.com/infiloop2/kern/" + sha, urlopen.call_args.args[0])
         self.assertIn("Proceed with Kern 0.36.0?", stderr.value)
 
@@ -1324,53 +1428,53 @@ class DeployUnitTests(unittest.TestCase):
             self.assertIn("raw.githubusercontent.com/infiloop2/kern/" + sha, url)
             return _FakeResponse(b"0.36.0\n")
 
-        with patch("host.cli.lifecycle.urllib.request.urlopen", side_effect=fake_urlopen), \
-                patch("host.cli.lifecycle.repo_version", return_value="0.36.0"), \
+        with patch("host.cli.lifecycle_aws.urllib.request.urlopen", side_effect=fake_urlopen), \
+                patch("host.cli.lifecycle_aws.repo_version", return_value="0.36.0"), \
                 patch("builtins.input", return_value="y"), \
                 patch("sys.stderr", _StringOutput()):
-            self.assertEqual(deploy._resolve_github_pin(""), (sha, "0.36.0"))
+            self.assertEqual(lifecycle_aws._resolve_github_pin(""), (sha, "0.36.0"))
 
         # Decline aborts before anything is touched.
-        with patch("host.cli.lifecycle.urllib.request.urlopen", return_value=_FakeResponse(b"0.36.0\n")), \
-                patch("host.cli.lifecycle.repo_version", return_value="0.36.0"), \
+        with patch("host.cli.lifecycle_aws.urllib.request.urlopen", return_value=_FakeResponse(b"0.36.0\n")), \
+                patch("host.cli.lifecycle_aws.repo_version", return_value="0.36.0"), \
                 patch("builtins.input", return_value="n"), \
                 patch("sys.stderr", _StringOutput()):
             with self.assertRaisesRegex(ConfigError, "aborted"):
-                deploy._resolve_github_pin(sha)
+                lifecycle_aws._resolve_github_pin(sha)
 
         # No terminal points at piping the confirmation.
-        with patch("host.cli.lifecycle.urllib.request.urlopen", return_value=_FakeResponse(b"0.36.0\n")), \
-                patch("host.cli.lifecycle.repo_version", return_value="0.36.0"), \
+        with patch("host.cli.lifecycle_aws.urllib.request.urlopen", return_value=_FakeResponse(b"0.36.0\n")), \
+                patch("host.cli.lifecycle_aws.repo_version", return_value="0.36.0"), \
                 patch("builtins.input", side_effect=EOFError()), \
                 patch("sys.stderr", _StringOutput()):
             with self.assertRaisesRegex(ConfigError, "pipe 'y' into stdin"):
-                deploy._resolve_github_pin(sha)
+                lifecycle_aws._resolve_github_pin(sha)
 
         # A pin whose VERSION differs from this CLI's fails before anything
         # is touched: the user data rendered here and the bootstrap fetched
         # on the instance must come from one version. Deploying older code
         # means running that commit's own CLI.
-        with patch("host.cli.lifecycle.urllib.request.urlopen", return_value=_FakeResponse(b"0.34.0\n")), \
-                patch("host.cli.lifecycle.repo_version", return_value="0.36.0"):
+        with patch("host.cli.lifecycle_aws.urllib.request.urlopen", return_value=_FakeResponse(b"0.34.0\n")), \
+                patch("host.cli.lifecycle_aws.repo_version", return_value="0.36.0"):
             with self.assertRaisesRegex(ConfigError, "deploy with its CLI"):
-                deploy._resolve_github_pin(sha)
+                lifecycle_aws._resolve_github_pin(sha)
 
         # GitHub failures and garbage content fail closed.
-        with patch("host.cli.lifecycle.urllib.request.urlopen", side_effect=OSError("no network")):
+        with patch("host.cli.lifecycle_aws.urllib.request.urlopen", side_effect=OSError("no network")):
             with self.assertRaisesRegex(ConfigError, "could not read the pinned commit's VERSION"):
-                deploy._resolve_github_pin(sha)
-        with patch("host.cli.lifecycle.urllib.request.urlopen", side_effect=OSError("no network")):
+                lifecycle_aws._resolve_github_pin(sha)
+        with patch("host.cli.lifecycle_aws.urllib.request.urlopen", side_effect=OSError("no network")):
             with self.assertRaisesRegex(ConfigError, "could not read the latest main commit"):
-                deploy._resolve_github_pin("")
-        with patch("host.cli.lifecycle.urllib.request.urlopen", return_value=_FakeResponse(b"<html>404</html>")):
+                lifecycle_aws._resolve_github_pin("")
+        with patch("host.cli.lifecycle_aws.urllib.request.urlopen", return_value=_FakeResponse(b"<html>404</html>")):
             with self.assertRaisesRegex(ConfigError, "invalid VERSION"):
-                deploy._resolve_github_pin(sha)
+                lifecycle_aws._resolve_github_pin(sha)
 
     def test_security_group_access_state_reads_converged_rules(self) -> None:
         config = sample_input_config()
 
-        with patch("host.cli.lifecycle_aws._aws", return_value={"SecurityGroups": []}):
-            self.assertIsNone(deploy._security_group_access_state(config, {}, "vpc-1"))
+        with patch("host.cli.aws_resources._aws", return_value={"SecurityGroups": []}):
+            self.assertIsNone(aws_resources._security_group_access_state(config, {}, "vpc-1"))
 
         group = {
             "SecurityGroups": [
@@ -1385,8 +1489,8 @@ class DeployUnitTests(unittest.TestCase):
                 }
             ]
         }
-        with patch("host.cli.lifecycle_aws._aws", return_value=group):
-            self.assertEqual(deploy._security_group_access_state(config, {}, "vpc-1"), (True, False))
+        with patch("host.cli.aws_resources._aws", return_value=group):
+            self.assertEqual(aws_resources._security_group_access_state(config, {}, "vpc-1"), (True, False))
 
     def test_self_provision_enforces_version_pin_and_runs_bootstrap(self) -> None:
         from host.bootstrap import self_provision
@@ -1672,6 +1776,11 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap.index("systemctl enable --now kern-postgres.service"),
             bootstrap.index(migrate_up),
         )
+        main_sequence = bootstrap.split("main() {", 1)[1]
+        self.assertLess(
+            main_sequence.index("sanitize_durable_paths"),
+            main_sequence.index("setup_postgres"),
+        )
         self.assertLess(
             bootstrap.index(migrate_up),
             bootstrap.index("python3 -m host.runtime.deploy.write_config"),
@@ -1690,8 +1799,13 @@ class DeployUnitTests(unittest.TestCase):
         )
         self.assertLess(
             bootstrap.index("rm -f /tmp/kern_payload.json /tmp/kern_effective_config.json"),
-            bootstrap.index("KERN_TARGET_VERSION"),
+            bootstrap.index('KERN_TARGET_VERSION="$target_version" python3'),
         )
+        self.assertNotIn("'agent_name': os.environ", bootstrap)
+        finalize = bootstrap[
+            bootstrap.index("finalize_deploy() {") : bootstrap.index("\n}\n\nmain() {")
+        ]
+        self.assertNotIn("pathlib.Path('/tmp/kern_payload.json').read_text()", finalize)
         # No database driver anywhere: the runtime speaks the wire protocol
         # itself (host/runtime/core/pgclient.py).
         self.assertNotIn("psycopg2", bootstrap)
@@ -1871,6 +1985,8 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("--unit kern-agent-thread-sample_app__ws-3", off.stdout)
         self.assertNotIn("--thread-scope", off.stdout)
         self.assertIn("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", off.stdout)
+        self.assertIn("DISABLE_TELEMETRY=1", off.stdout)
+        self.assertIn("DISABLE_ERROR_REPORTING=1", off.stdout)
 
         on = forwarded("web-search=on", "-p", "hello")
         self.assertEqual(on.returncode, 0)
@@ -1879,14 +1995,15 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("hello", on.stdout)
         self.assertIn("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", on.stdout)
 
-        # Pinned Claude Code hides every account-limit window when this flag
-        # is set. /usage is host-owned maintenance, so it alone runs without
-        # the suppression while retaining the WebSearch deny.
+        # Host-owned maintenance needs the same background-traffic suppression
+        # as agent turns; the pinned Claude Code still returns its usage windows.
         usage = forwarded("web-search=off", "-p", "/usage", "--output-format", "json")
         self.assertEqual(usage.returncode, 0)
         self.assertIn("/usage", usage.stdout)
         self.assertIn("WebSearch", usage.stdout)
-        self.assertNotIn("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", usage.stdout)
+        self.assertIn("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", usage.stdout)
+        self.assertIn("DISABLE_TELEMETRY=1", usage.stdout)
+        self.assertIn("DISABLE_ERROR_REPORTING=1", usage.stdout)
 
         missing = forwarded("auth", "login")
         self.assertNotEqual(missing.returncode, 0)
@@ -2095,16 +2212,15 @@ class DeployUnitTests(unittest.TestCase):
         return namespace
 
     def test_bootstrap_payload_omits_runtime_network_policy(self) -> None:
-        config = sample_input_config()
-        payload = deploy._bootstrap_payload(
-            config,
+        payload = render._bootstrap_payload(
+            "kern-test",
             SAMPLE_ADMIN_PASSWORD_SHA256,
             build_operator_connections(SAMPLE_SSH_PUBLIC_KEY, None, None),
-            {"admin": "vol-admin", "agent": "vol-agent"},
+            SAMPLE_AWS_STORAGE,
             mode="deploy",
             target_version="0.1.0",
         )
-        self.assertEqual(payload["storage_volumes"], {"admin": "vol-admin", "agent": "vol-agent"})
+        self.assertEqual(payload["storage"], SAMPLE_AWS_STORAGE)
         self.assertEqual(payload["operation"], {"mode": "deploy", "target_version": "0.1.0", "allow_upgrade": False})
         self.assertEqual(payload["runtime_config"]["agent_name"], "kern-test")
         self.assertEqual(payload["runtime_config"]["admin_password_sha256"], SAMPLE_ADMIN_PASSWORD_SHA256)
@@ -2115,12 +2231,11 @@ class DeployUnitTests(unittest.TestCase):
         self.assertNotIn("network_controls", payload)
 
     def test_upgrade_bootstrap_payload_omits_replacement_operator_connections(self) -> None:
-        config = sample_input_config()
-        payload = deploy._bootstrap_payload(
-            config,
+        payload = render._bootstrap_payload(
+            "kern-test",
             None,
             None,
-            {"admin": "vol-admin", "agent": "vol-agent"},
+            SAMPLE_AWS_STORAGE,
             mode="upgrade",
             target_version="0.1.0",
         )
@@ -2155,6 +2270,94 @@ class DeployUnitTests(unittest.TestCase):
         self.assertNotIn("host/cli", names)
         self.assertFalse(any(name.startswith("host/cli/") for name in names))
         self.assertFalse(any("__pycache__" in name for name in names))
+
+
+class RunBootstrapDeadlineTests(unittest.TestCase):
+    def test_hung_bootstrap_is_terminated_at_the_deadline(self) -> None:
+        # A remote hang with a live SSH connection produces no output and no
+        # exit; the deadline must terminate it so the caller's lock release
+        # and failure cleanup can run.
+        from host.cli import lifecycle_bootstrap
+
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, write_fd)
+        stdout = os.fdopen(read_fd, "rb")
+        self.addCleanup(stdout.close)
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdout = stdout
+                self.actions: list[str] = []
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.actions.append("wait")
+                return 0
+
+            def terminate(self) -> None:
+                self.actions.append("terminate")
+
+            def kill(self) -> None:
+                self.actions.append("kill")
+
+        fake = FakeProcess()
+        with patch.object(lifecycle_bootstrap.subprocess, "Popen", return_value=fake), \
+                patch.object(lifecycle_bootstrap, "BOOTSTRAP_TIMEOUT_SECONDS", 0.2), \
+                patch("sys.stderr", _StringOutput()):
+            with self.assertRaises(ConfigError) as ctx:
+                lifecycle_bootstrap._run_bootstrap(["ssh"], "kern-operator@host")
+        self.assertIn("did not finish", str(ctx.exception))
+        self.assertIn("terminate", fake.actions)
+
+    def test_hanging_ssh_probe_is_bounded_and_retried(self) -> None:
+        # A daemon that accepts the connection but never answers must not
+        # stall readiness polling; each probe is bounded and retried.
+        from host.cli import lifecycle_bootstrap
+
+        with patch.object(
+            lifecycle_bootstrap.subprocess,
+            "run",
+            side_effect=[
+                subprocess.TimeoutExpired(["ssh"], timeout=1),
+                subprocess.CompletedProcess(["ssh"], 0),
+            ],
+        ) as run:
+            lifecycle_bootstrap._wait_for_ssh(["ssh"], "kern-operator@host")
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertLessEqual(
+                call.kwargs["timeout"], lifecycle_bootstrap.SSH_PROBE_TIMEOUT_SECONDS
+            )
+
+    def test_ssh_wait_enforces_one_overall_deadline(self) -> None:
+        # Hanging probes may not multiply the advertised wait: the overall
+        # monotonic deadline governs, however each attempt spends its time.
+        from host.cli import lifecycle_bootstrap
+
+        with patch.object(lifecycle_bootstrap, "SSH_WAIT_ATTEMPTS", 0), \
+                patch.object(lifecycle_bootstrap.subprocess, "run") as run:
+            with self.assertRaises(ConfigError) as ctx:
+                lifecycle_bootstrap._wait_for_ssh(["ssh"], "kern-operator@host")
+        run.assert_not_called()
+        self.assertIn("could not reach", str(ctx.exception))
+
+    def test_archive_transfer_is_bounded(self) -> None:
+        from host.cli import lifecycle_bootstrap
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            with patch.object(lifecycle_bootstrap, "_write_runtime_code_archive"), \
+                    patch.object(lifecycle_bootstrap, "_wait_for_ssh"), \
+                    patch.object(lifecycle_bootstrap, "_run_bootstrap"), \
+                    patch.object(lifecycle_bootstrap.subprocess, "run") as run, \
+                    patch("sys.stderr", _StringOutput()):
+                lifecycle_bootstrap._provision_over_ssh(
+                    "127.0.0.1", workdir / "deploy_key", workdir, port=60022
+                )
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][0], "scp")
+        self.assertEqual(
+            run.call_args.kwargs["timeout"], lifecycle_bootstrap.SCP_TIMEOUT_SECONDS
+        )
 
 
 class FakeCliIntegrationTests(unittest.TestCase):
@@ -2207,14 +2410,14 @@ class FakeCliIntegrationTests(unittest.TestCase):
             self.assertEqual(result["ssh_user"], "kern-operator")
             self.assertEqual(result["admin_volume_id"], "vol-admin")
             self.assertEqual(result["agent_volume_id"], "vol-agent")
-            self.assertEqual(result["version"], deploy.repo_version())
+            self.assertEqual(result["version"], repo_version())
             self.assertEqual(result["operator_connections"], [{"mode": "ssh"}])
 
             calls = [json.loads(line) for line in log_path.read_text().splitlines()]
             run_call = next(call for call in calls if call[1:3] == ["ec2", "run-instances"])
             self.assertIn("--associate-public-ip-address", run_call)
             self.assertIn("subnet-public", run_call)
-            self.assertTrue(any(f"Key=kern-host-version,Value={deploy.repo_version()}" in str(item) for item in run_call))
+            self.assertTrue(any(f"Key=kern-host-version,Value={repo_version()}" in str(item) for item in run_call))
             # User data is passed as fileb:// so the AWS CLI base64-encodes the raw
             # bytes (a raw string would be base64-decoded under cli_binary_format=base64
             # and corrupt the cloud-init script). Content is covered by the render test.
@@ -2351,8 +2554,8 @@ class DeployNetworkTests(unittest.TestCase):
             }
         ]
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
-            self.assertTrue(lifecycle_aws._subnet_has_public_ipv4_route({}, "vpc-1", "subnet-1"))
+        with patch("host.cli.aws_resources._aws", side_effect=responses):
+            self.assertTrue(aws_resources._subnet_has_public_ipv4_route({}, "vpc-1", "subnet-1"))
 
     def test_subnet_rejects_nat_default_route(self) -> None:
         responses = [
@@ -2371,8 +2574,8 @@ class DeployNetworkTests(unittest.TestCase):
             }
         ]
 
-        with patch("host.cli.lifecycle_aws._aws", side_effect=responses):
-            self.assertFalse(lifecycle_aws._subnet_has_public_ipv4_route({}, "vpc-1", "subnet-1"))
+        with patch("host.cli.aws_resources._aws", side_effect=responses):
+            self.assertFalse(aws_resources._subnet_has_public_ipv4_route({}, "vpc-1", "subnet-1"))
 
 
 if __name__ == "__main__":

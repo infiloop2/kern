@@ -301,12 +301,10 @@ def google_oauth_setup_steps(
     enable_api_step: SetupStep,
     scopes_step: SetupStep,
     connect_step_description: str,
+    include_images: bool = True,
 ) -> tuple[SetupStep, ...]:
-    """The shared Google Cloud OAuth setup guide: the Gmail and Google Calendar
-    tools walk the operator through the same console flow, differing only in
-    which API is enabled, which scopes are declared, and the two descriptions
-    that name the tool."""
-    return (
+    """Build the shared Google Cloud OAuth setup flow for bundled tools."""
+    steps = (
         SetupStep(
             title="Create or select a Google Cloud project",
             description=project_step_description,
@@ -337,6 +335,19 @@ def google_oauth_setup_steps(
             description=connect_step_description,
             show_config=True,
         ),
+    )
+    if include_images:
+        return steps
+    return tuple(
+        SetupStep(
+            title=step.title,
+            description=step.description,
+            link_url=step.link_url,
+            link_label=step.link_label,
+            show_callback=step.show_callback,
+            show_config=step.show_config,
+        )
+        for step in steps
     )
 
 

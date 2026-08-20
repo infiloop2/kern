@@ -345,6 +345,15 @@ class XToolUserLookupTests(unittest.TestCase):
     """lookup_user exists so an agent can turn a handle into the numeric id a
     direct-message link needs. It reads; it never sends."""
 
+    def test_profile_lookup_data_summary_discloses_public_counts(self) -> None:
+        first_card = twitter.MANIFEST.data_summary.cards[0]
+        profile_point = next(
+            point for point in first_card.points if point.label == "Profile lookups"
+        )
+        self.assertIn("follower", profile_point.text)
+        self.assertIn("following", profile_point.text)
+        self.assertIn("post counts", profile_point.text)
+
     def test_lookup_resolves_a_handle_to_the_id_a_dm_link_needs(self) -> None:
         calls: list[tuple[str, str]] = []
 
@@ -358,6 +367,32 @@ class XToolUserLookupTests(unittest.TestCase):
         self.assertEqual(result.result["user"], {"id": "222", "username": "recipient", "name": "Recipient"})
         self.assertEqual([method for method, _ in calls], ["GET"])
         self.assertIn("/users/by/username/recipient", calls[0][1])
+
+    def test_lookup_returns_public_counts_when_the_provider_sends_them(self) -> None:
+        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            self.assertIn("public_metrics", url)
+            return {
+                "data": {
+                    "id": "222",
+                    "name": "Recipient",
+                    "username": "recipient",
+                    "public_metrics": {
+                        "followers_count": 57,
+                        "following_count": 61,
+                        "tweet_count": 340,
+                        "listed_count": "not-an-int",
+                    },
+                }
+            }
+
+        with patch.object(twitter, "json_request", fake_json_request):
+            result = XTool().execute("lookup_user", {"username": "recipient"}, connected_api())
+        assert isinstance(result, ActionExecuted)
+        user = result.result["user"]
+        self.assertEqual(user["followers_count"], 57)
+        self.assertEqual(user["following_count"], 61)
+        self.assertEqual(user["tweet_count"], 340)
+        self.assertNotIn("listed_count", user)
 
     def test_lookup_by_id_verifies_the_provider_echoed_the_same_id(self) -> None:
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:

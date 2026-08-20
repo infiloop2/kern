@@ -172,6 +172,14 @@ def desktop_smoke(page: Any) -> None:
     page.evaluate("window.KernChat.refresh()")
     expect(frame.locator(".thread-title")).to_have_text("New thread")
     expect(page).to_have_url(re.compile(r"#chat/new$"))
+    page.locator('[data-action="show-chat-archive"]').click()
+    archived_nav = page.locator(
+        "#chat-nav-items [data-action='open-chat'][data-item-id='website-redesign']"
+    )
+    expect(archived_nav).to_be_visible()
+    expect(archived_nav.locator(".workspace-nav-unseen")).to_have_count(0)
+    page.locator('[data-action="show-chat-archive"]').click()
+    expect(archived_nav).to_have_count(0)
     page.evaluate(
         """() => window.KernHost.api(
           "POST",

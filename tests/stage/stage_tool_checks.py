@@ -325,10 +325,12 @@ class StageToolChecks:
             "brave_search": self._check_brave_live,
             "gmail": self._check_gmail_live,
             "google_calendar": self._check_calendar_live,
+            "google_search_console": self._check_search_console_live,
             "instagram_discovery": self._check_instagram_discovery_live,
             "polymarket": self._check_polymarket_live,
             "reddit": self._check_reddit_live,
             "twitter": self._check_twitter_live,
+            "twitterapi_io": self._check_twitterapi_io_live,
             "openai_images": self._check_openai_images_live,
             "runway": self._check_runway_live,
             "seedance": self._check_seedance_live,
@@ -361,6 +363,7 @@ class StageToolChecks:
                 "linkedin_discovery": (
                     ("search_posts", {"query": "Kern", "limit": "1"}),
                 ),
+                "web_fetch": (("fetch_page", {"url": "https://example.com/"}),),
             }[tool_id]
         for action_id, arguments in calls:
             self._successful_tool_call(f"{tool_id}_{action_id}", arguments)
@@ -486,6 +489,10 @@ class StageToolChecks:
 
     def _check_zoho_mail_live(self) -> str:
         folders_result = self._successful_tool_call("zoho_mail_list_folders", {})
+        senders_result = self._successful_tool_call("zoho_mail_list_senders", {})
+        senders = senders_result.get("from_addresses")
+        if not isinstance(senders, list) or not senders or not all(isinstance(item, str) for item in senders):
+            raise AssertionError(f"Zoho Mail returned invalid sender addresses: {senders_result}")
         self._successful_tool_call(
             "zoho_mail_search_messages", {"search_key": "entire:Kern", "limit": "1"}
         )
@@ -530,7 +537,7 @@ class StageToolChecks:
                 "blocks": [{"type": "paragraph", "text": "Stage proposal; never sent."}],
             },
         )
-        return f"{read_count} bounded mailbox read(s) completed; send proposal denied"
+        return f"{read_count} bounded mailbox read(s) and {len(senders)} sender address(es); send proposal denied"
 
     def _check_calendar_live(self) -> str:
         self._successful_tool_call("google_calendar_read_events", {})
@@ -563,6 +570,56 @@ class StageToolChecks:
         if cleanup_decision["approval"]["status"] != "executed":
             raise AssertionError(f"approved calendar delete did not execute: {cleanup_decision}")
         return "event read plus approval round trip created and deleted one event"
+
+    def _check_search_console_live(self) -> str:
+        properties_result = self._successful_tool_call(
+            "google_search_console_list_properties", {}
+        )
+        properties = properties_result.get("properties")
+        writable = next(
+            (
+                item
+                for item in properties
+                if isinstance(item, dict)
+                and item.get("permission_level") in {"siteOwner", "siteFullUser"}
+            ),
+            {},
+        ) if isinstance(properties, list) else {}
+        site_url = writable.get("site_url")
+        if not isinstance(site_url, str) or not site_url:
+            raise AssertionError(
+                "Search Console list_properties returned no owner/full-user property: "
+                f"{properties_result}"
+            )
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        self._successful_tool_call(
+            "google_search_console_query_search_analytics",
+            {
+                "site_url": site_url,
+                "start_date": today,
+                "end_date": today,
+                "row_limit": "1",
+            },
+        )
+        self._successful_tool_call(
+            "google_search_console_list_sitemaps", {"site_url": site_url}
+        )
+        if site_url.startswith("sc-domain:"):
+            domain = site_url.removeprefix("sc-domain:")
+            inspection_url = f"https://{domain}/"
+        else:
+            inspection_url = site_url
+        self._successful_tool_call(
+            "google_search_console_inspect_url",
+            {"site_url": site_url, "inspection_url": inspection_url},
+        )
+        sitemap_url = inspection_url.rstrip("/") + "/sitemap.xml"
+        self._queue_and_deny(
+            "google_search_console",
+            "google_search_console_submit_sitemap",
+            {"site_url": site_url, "sitemap_url": sitemap_url},
+        )
+        return "property, analytics, sitemap, and indexed-URL reads completed; sitemap proposal denied"
 
     def _check_instagram_discovery_live(self) -> str:
         # The trending feed is the reliable, always-populated read, and every
@@ -677,6 +734,17 @@ class StageToolChecks:
             f"search, global/personal trends, {derived} result-derived read(s), "
             "and no API publishing surface"
         )
+
+    def _check_twitterapi_io_live(self) -> str:
+        result = self._successful_tool_call(
+            "twitterapi_io_search_tweets",
+            {"query": "Kern", "query_type": "Latest"},
+        )
+        posts = result.get("posts")
+        count = len(posts) if isinstance(posts, list) else 0
+        if count > 20:
+            raise AssertionError(f"TwitterAPI.io returned more than 20 posts: {count}")
+        return f"one guarded single-page public-post search returned {count} post(s)"
 
     def _check_reddit_live(self) -> str:
         self._successful_tool_call("reddit_get_profile", {})

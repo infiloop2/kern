@@ -1,0 +1,157 @@
+"""AWS start/stop adapter for an existing Kern EC2 host."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from typing import Any
+
+from host.config import ConfigError, InputConfig, build_input_config
+from host.constants import ADMIN_API_PORT
+from host.cli.aws_resources import (
+    _aws,
+    _aws_env,
+    _existing_storage_roles,
+    _find_existing_instances,
+    _find_storage_volume,
+)
+from host.cli.aws_checks import _require_preserved_storage_roles
+from host.cli.lifecycle_constants import SSH_USER
+from host.cli.operation_lock import OperationLock
+
+
+def main_for_power(mode: str, agent_name: str) -> int:
+    try:
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        if not region:
+            raise ConfigError("set AWS_REGION to the agent's AWS region")
+        config = build_input_config(agent_name, region)
+        with OperationLock("aws", config.agent_name):
+            return _main_for_power_locked(mode, config)
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"{mode} command failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _main_for_power_locked(mode: str, config: InputConfig) -> int:
+    try:
+        env = _aws_env(config)
+        instance_id = _single_existing_instance(config, env)
+        _require_preserved_storage(config, env)
+        initial = _describe_instance(env, instance_id)
+        initial_state = _state(initial)
+        if mode == "start":
+            final = _start_instance(env, instance_id, initial_state)
+        else:
+            final = _stop_instance(env, instance_id, initial_state)
+        # stdout carries only this result JSON.
+        print(
+            json.dumps(
+                _result(config, env, final, mode=mode, initial_state=initial_state),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else exc.stderr
+        print(f"{mode} command failed: {stderr or exc}", file=sys.stderr)
+        return 1
+
+
+def _single_existing_instance(config: InputConfig, env: dict[str, str]) -> str:
+    instances = _find_existing_instances(config, env)
+    if len(instances) != 1:
+        found = ", ".join(instances) or "none"
+        raise ConfigError(f"power operation requires exactly one existing Kern instance; found {found}")
+    return instances[0]
+
+
+def _require_preserved_storage(config: InputConfig, env: dict[str, str]) -> None:
+    _require_preserved_storage_roles("power operation", config.agent_name, _existing_storage_roles(config, env))
+
+
+def _describe_instance(env: dict[str, str], instance_id: str) -> dict[str, Any]:
+    response = _aws(env, "ec2", "describe-instances", "--instance-ids", instance_id)
+    return response["Reservations"][0]["Instances"][0]
+
+
+def _state(instance: dict[str, Any]) -> str:
+    state = instance.get("State", {}).get("Name")
+    if not isinstance(state, str) or not state:
+        raise ConfigError("Kern instance response is missing state")
+    return state
+
+
+def _start_instance(env: dict[str, str], instance_id: str, state: str) -> dict[str, Any]:
+    if state == "stopping":
+        _aws(env, "ec2", "wait", "instance-stopped", "--instance-ids", instance_id)
+        state = "stopped"
+    if state == "stopped":
+        _aws(env, "ec2", "start-instances", "--instance-ids", instance_id)
+    if state in {"pending", "stopped", "running"}:
+        _aws(env, "ec2", "wait", "instance-running", "--instance-ids", instance_id)
+        instance = _describe_instance(env, instance_id)
+        if _state(instance) != "running":
+            raise ConfigError(f"Kern instance {instance_id} did not reach running state")
+        if not instance.get("PublicDnsName"):
+            raise ConfigError(f"Kern instance {instance_id} has no public DNS after start")
+        return instance
+    raise ConfigError(f"cannot start Kern instance {instance_id} from state {state}")
+
+
+def _stop_instance(env: dict[str, str], instance_id: str, state: str) -> dict[str, Any]:
+    if state == "pending":
+        _aws(env, "ec2", "wait", "instance-running", "--instance-ids", instance_id)
+        state = "running"
+    if state == "running":
+        _aws(env, "ec2", "stop-instances", "--instance-ids", instance_id)
+    if state in {"running", "stopping", "stopped"}:
+        _aws(env, "ec2", "wait", "instance-stopped", "--instance-ids", instance_id)
+        instance = _describe_instance(env, instance_id)
+        if _state(instance) != "stopped":
+            raise ConfigError(f"Kern instance {instance_id} did not reach stopped state")
+        return instance
+    raise ConfigError(f"cannot stop Kern instance {instance_id} from state {state}")
+
+
+def _result(
+    config: InputConfig,
+    env: dict[str, str],
+    instance: dict[str, Any],
+    *,
+    mode: str,
+    initial_state: str,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "agent_name": config.agent_name,
+        "provider": "aws",
+        "instance_id": instance["InstanceId"],
+        "region": config.aws_region,
+        "state": _state(instance),
+        "initial_state": initial_state,
+        "operation": mode,
+        "ssh_user": SSH_USER,
+        "admin_ui_local_url": f"http://127.0.0.1:{ADMIN_API_PORT}",
+    }
+    public_dns = instance.get("PublicDnsName")
+    if isinstance(public_dns, str) and public_dns:
+        result["public_dns"] = public_dns
+    public_ip = instance.get("PublicIpAddress")
+    if isinstance(public_ip, str) and public_ip:
+        result["public_ip"] = public_ip
+    admin_volume = _find_storage_volume(config, env, "admin")
+    agent_volume = _find_storage_volume(config, env, "agent")
+    if admin_volume is not None:
+        result["admin_volume_id"] = admin_volume["VolumeId"]
+    if agent_volume is not None:
+        result["agent_volume_id"] = agent_volume["VolumeId"]
+    return result

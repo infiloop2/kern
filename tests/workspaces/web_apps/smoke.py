@@ -339,6 +339,10 @@ def _app_summary(workspace: dict[str, Any]) -> dict[str, Any]:
         "created_at": workspace["created_at"],
         "updated_at": workspace["app"]["updated_at"],
         "last_used_at": max(workspace["app"]["updated_at"], workspace["last_used_at"]),
+        "latest_event_seq": max(
+            (int(event["seq"]) for event in workspace["events"]),
+            default=0,
+        ),
         "session": copy.deepcopy(workspace["session"]),
         "status": _workspace_status(workspace),
         "archived": bool(workspace["archived"]),
@@ -1040,7 +1044,22 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#runtime")).to_be_disabled()
     expect(frame.locator("#latest-agent-card")).to_be_visible()
     expect(frame.locator("#latest-agent-message")).to_have_text(INTERIM_AGENT_MESSAGE)
-    expect(frame.locator("#chat-history")).to_have_count(0)
+    frame.get_by_role("button", name="Show chat history", exact=True).click()
+    expect(frame.locator("#chat-history")).to_be_visible()
+    expect(frame.locator("#chat-history-list")).to_contain_text(
+        "Build a small weekly focus dashboard."
+    )
+    expect(frame.locator("#chat-history-list")).to_contain_text(INTERIM_AGENT_MESSAGE)
+    expect(frame.locator("#chat-history-list")).not_to_contain_text(
+        "Inspecting app workspace"
+    )
+    # History does not duplicate completed output in the compact status card,
+    # but a running turn keeps its Stop affordance available.
+    expect(frame.locator("#latest-agent-message")).to_have_text("Agent is working")
+    expect(frame.locator("#stop-turn")).to_be_visible()
+    frame.get_by_role("button", name="Show app", exact=True).click()
+    expect(frame.locator("#chat-history")).to_be_hidden()
+    expect(frame.locator("#latest-agent-message")).to_have_text(INTERIM_AGENT_MESSAGE)
     send_box = frame.locator("#send-message").bounding_box()
     stop_box = frame.locator("#stop-turn").bounding_box()
     if not send_box or not stop_box:
@@ -1079,6 +1098,37 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#latest-agent-card")).to_be_visible()
     frame.get_by_role("button", name="Dismiss agent message", exact=True).click()
     expect(frame.locator("#latest-agent-card")).to_be_hidden()
+    # A revision written while the App is not visible gets the quiet host-nav
+    # marker. Opening the App renders that revision before clearing the mark.
+    current_revision = page.evaluate(
+        """appId => window.KernHost.api(
+          "GET",
+          `/v1/workspace/web-apps/apps/${encodeURIComponent(appId)}/state/ui`,
+        ).then(response => response.app.revision)""",
+        first_app,
+    )
+    expect(frame.locator("#revision-label")).to_have_count(0)
+    page.get_by_role("button", name="Home", exact=True).click()
+    page.evaluate(
+        """([appId, revision]) => window.KernHost.api(
+          "POST",
+          `/v1/workspace/web-apps/apps/${encodeURIComponent(appId)}/runtime/actions`,
+          {
+            action: "set",
+            expected_revision: revision,
+            path: ["indicator_probe"],
+            value: true,
+          },
+        )""",
+        [first_app, current_revision],
+    )
+    page.evaluate("window.KernHost.refreshNavigation()")
+    first_app_nav = page.locator(
+        f"#web-apps-nav-items [data-action='open-web-app'][data-item-id='{first_app}']"
+    )
+    expect(first_app_nav.locator(".workspace-nav-unseen")).to_be_visible()
+    first_app_nav.click()
+    expect(first_app_nav.locator(".workspace-nav-unseen")).to_have_count(0)
     _start_host_app(page)
     _open_host_app(page, "app-1")
     expect(frame.locator("#latest-agent-card")).to_be_hidden()

@@ -210,6 +210,17 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             memory.load_page("temporary", include_deleted=True)
 
     def test_memory_bounds_and_agent_history_boundary(self) -> None:
+        self.assertEqual(memory.MAX_CONTENT_CHARS, 2_000)
+        boundary = memory.save_page(
+            "boundary",
+            {
+                "description": "Maximum-size memory page",
+                "content": "x" * memory.MAX_CONTENT_CHARS,
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        self.assertEqual(len(boundary["content"]), memory.MAX_CONTENT_CHARS)
         with self.assertRaises(WorkspaceError):
             memory.route_agent(
                 "PUT",
@@ -222,7 +233,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 "large",
                 {
                     "description": "d",
-                    "content": "x" * 1001,
+                    "content": "x" * (memory.MAX_CONTENT_CHARS + 1),
                     "expected_revision": 0,
                 },
                 actor="agent",
@@ -504,6 +515,32 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         self.assertNotIn(
             "message", schedules.list_schedules({})["schedules"][0]
         )
+
+    def test_schedule_message_limit_accepts_twelve_thousand_characters(self) -> None:
+        self.assertEqual(schedules.MAX_MESSAGE_CHARS, 12_000)
+        schedule = schedules.create_schedule(
+            {
+                "name": "Maximum-size prompt",
+                "message": "x" * schedules.MAX_MESSAGE_CHARS,
+                "cadence": "interval",
+                "interval_minutes": 60,
+                **SESSION,
+            },
+            actor="agent",
+        )
+        self.assertEqual(len(schedule["message"]), schedules.MAX_MESSAGE_CHARS)
+        with self.assertRaises(WorkspaceError) as too_long:
+            schedules.create_schedule(
+                {
+                    "name": "Oversized prompt",
+                    "message": "x" * (schedules.MAX_MESSAGE_CHARS + 1),
+                    "cadence": "interval",
+                    "interval_minutes": 60,
+                    **SESSION,
+                },
+                actor="agent",
+            )
+        self.assertEqual(too_long.exception.status, HTTPStatus.BAD_REQUEST)
 
     def test_concurrent_schedule_creates_respect_the_global_quota(self) -> None:
         def create(name: str) -> str:
@@ -1120,6 +1157,17 @@ class WorkspaceIdentityTests(unittest.TestCase):
         settings = json.loads(settings_path.read_text())
         self.assertIs(settings["autoMemoryEnabled"], False)
         self.assertEqual(settings["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
+
+    def test_managed_claude_settings_disable_background_execution(self) -> None:
+        settings_path = (
+            Path(__file__).parents[1]
+            / "host/bootstrap/agent-home/.claude/settings.json"
+        )
+        settings = json.loads(settings_path.read_text())
+        self.assertIs(settings["disableAgentView"], True)
+        self.assertEqual(
+            settings["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1"
+        )
 
     def test_identity_comes_from_the_peer_cgroup_and_is_not_caller_supplied(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

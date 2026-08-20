@@ -547,6 +547,27 @@ def desktop_smoke(page, url: str) -> None:
         raise AssertionError(f"Home sidebar could not scroll to its lower controls: {sidebar_scroll}")
     if original_viewport:
         page.set_viewport_size(original_viewport)
+    # Last-seen markers survive reloads, announce fresh activity, and clear
+    # only after the selected thread has rendered its current event stream.
+    page.evaluate(
+        """() => {
+          const key = "kern.workspace-last-seen.v2";
+          const state = JSON.parse(localStorage.getItem(key));
+          state.chat["thread-1"] = { activity: 0 };
+          localStorage.setItem(key, JSON.stringify(state));
+        }"""
+    )
+    page.reload(wait_until="domcontentloaded")
+    thread_one_nav = page.locator(
+        "#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']"
+    )
+    expect(thread_one_nav.locator(".workspace-nav-unseen")).to_be_visible()
+    expect(thread_one_nav).to_have_attribute("title", re.compile(r"New activity$"))
+    thread_one_nav.click()
+    expect(thread_one_nav.locator(".workspace-nav-unseen")).to_have_count(0)
+    page.get_by_role("button", name="Home", exact=True).click()
+    page.reload(wait_until="domcontentloaded")
+    expect(thread_one_nav.locator(".workspace-nav-unseen")).to_have_count(0)
     page.get_by_role("button", name="New chat", exact=True).click()
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
     expect(page.locator("#panel-workspace-chat").locator(".chat-app")).to_be_visible()
@@ -840,6 +861,17 @@ def desktop_smoke(page, url: str) -> None:
     expect(gmail_guide.locator(":scope > .guide-section").nth(1).locator(":scope > p")).to_have_count(0)
     expect(gmail_guide).to_contain_text("send_email")
     expect(gmail_guide).to_contain_text("approval required")
+    send_email = gmail_guide.locator(".guide-capability", has_text="send_email")
+    expect(send_email.locator(".guide-action-contract > summary")).to_have_text(
+        "Parameters: 3 inputs · 1 declared output"
+    )
+    send_email.locator(".guide-action-contract > summary").click()
+    expect(send_email.locator(".guide-action-parameters").first).to_contain_text("blocks")
+    expect(send_email.locator(".guide-action-parameters").first).to_contain_text("array of object or object")
+    expect(send_email.locator(".guide-action-parameters").first).to_contain_text("required")
+    expect(send_email.locator(".guide-action-parameters").last).to_contain_text("status")
+    expect(send_email).to_contain_text("permits additional output fields")
+    expect(send_email.locator(".guide-action-json")).to_have_count(0)
     expect(gmail_guide).to_contain_text("GOOGLE_OAUTH_CLIENT_ID")
     expect(gmail_guide).to_contain_text(f"{url.rstrip('/')}/oauth/callback")
     # The callback URI and config keys render inside the setup step that needs them.
@@ -903,6 +935,7 @@ def desktop_smoke(page, url: str) -> None:
         "Brave Search",
         "Gmail",
         "Google Calendar",
+        "Google Search Console",
         "Custom Domain Access",
     ):
         guide_id = {
@@ -910,6 +943,7 @@ def desktop_smoke(page, url: str) -> None:
             "Python packages": "python_packages", "NPM Packages": "npm_packages",
             "Brave Search": "tool:brave_search", "Gmail": "tool:gmail",
             "Google Calendar": "tool:google_calendar", "Custom Domain Access": "custom_domain",
+            "Google Search Console": "tool:google_search_console",
         }[guide_label]
         open_home_integration(page, guide_id)
         current_guide = page.locator(".connection-guide-entry")

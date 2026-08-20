@@ -33,6 +33,7 @@ GUARDED_FIELDS = {
     ("apify", "search_businesses", "location"),
     ("apify", "search_businesses", "query"),
     ("brave_search", "search_web", "query"),
+    ("google_search_console", "inspect_url", "inspection_url"),
     ("instagram_discovery", "search_reels", "query"),
     ("instagram_discovery", "search_hashtag", "hashtag"),
     ("linkedin_discovery", "search_posts", "query"),
@@ -48,6 +49,8 @@ GUARDED_FIELDS = {
     ("reddit", "search_posts", "query"),
     ("reddit", "search_posts", "subreddit"),
     ("twitter", "search_tweets", "query"),
+    ("web_fetch", "fetch_page", "url"),
+    ("twitterapi_io", "search_tweets", "query"),
     ("zoho_mail", "search_messages", "search_key"),
 }
 
@@ -104,6 +107,20 @@ EXEMPT_FIELDS = {
     ("google_calendar", "event_change", "description"): APPROVAL_GATED,
     ("google_calendar", "event_change", "location"): APPROVAL_GATED,
     ("google_calendar", "event_change", "time_zone"): APPROVAL_GATED,
+    ("google_search_console", "query_search_analytics", "site_url"): TYPED,
+    ("google_search_console", "query_search_analytics", "start_date"): TYPED,
+    ("google_search_console", "query_search_analytics", "end_date"): TYPED,
+    ("google_search_console", "query_search_analytics", "dimensions"): TYPED,
+    ("google_search_console", "query_search_analytics", "search_type"): TYPED,
+    ("google_search_console", "query_search_analytics", "aggregation_type"): TYPED,
+    ("google_search_console", "query_search_analytics", "data_state"): TYPED,
+    ("google_search_console", "query_search_analytics", "row_limit"): TYPED,
+    ("google_search_console", "query_search_analytics", "start_row"): TYPED,
+    ("google_search_console", "list_sitemaps", "site_url"): TYPED,
+    ("google_search_console", "inspect_url", "site_url"): TYPED,
+    ("google_search_console", "inspect_url", "language_code"): TYPED,
+    ("google_search_console", "submit_sitemap", "site_url"): TYPED,
+    ("google_search_console", "submit_sitemap", "sitemap_url"): APPROVAL_GATED,
     ("ibkr", "*", "*"): TYPED,
     ("instagram", "*", "*"): APPROVAL_GATED,
     ("instagram_discovery", "search_reels", "page"): TYPED,
@@ -179,6 +196,7 @@ EXEMPT_FIELDS = {
     ("twitter", "get_trends", "*"): TYPED,
     ("twitter", "get_personalized_trends", "*"): TYPED,
     ("twitter", "lookup_user", "*"): TYPED,
+    ("twitterapi_io", "search_tweets", "query_type"): TYPED,
     ("zoho_mail", "search_messages", "start"): TYPED,
     ("zoho_mail", "search_messages", "limit"): TYPED,
     ("zoho_mail", "list_messages", "*"): TYPED,
@@ -297,6 +315,35 @@ class BehavioralDenialTest(unittest.TestCase):
         )
         self.assert_denied(result, "credential")
 
+    def test_search_console_inspection_url_denied(self) -> None:
+        from host.tools import google_search_console
+        from test_tools_google_search_console import connected_api
+
+        with patch.object(
+            google_search_console,
+            "_properties",
+            return_value=[{"site_url": "https://example.com/", "permission_level": "siteOwner"}],
+        ):
+            result = google_search_console.BUNDLED_TOOL.execute(
+                "inspect_url",
+                {
+                    "site_url": "https://example.com/",
+                    "inspection_url": "https://example.com/?token=AKIAIOSFODNN7EXAMPLE",
+                },
+                connected_api(),
+            )
+        self.assert_denied(result, "credential")
+
+    def test_web_fetch_url_denied(self) -> None:
+        from host.tools.web_fetch import BUNDLED_TOOL
+
+        result = BUNDLED_TOOL.execute(
+            "fetch_page",
+            {"url": "https://example.com/lookup?q=AKIAIOSFODNN7EXAMPLE"},
+            FakeHostAPI(),
+        )
+        self.assert_denied(result, "credential")
+
     def test_zoho_mail_search_query_denied(self) -> None:
         from host.tools.zoho_mail import BUNDLED_TOOL
         from test_tools_zoho_mail import connected_api
@@ -390,6 +437,15 @@ class BehavioralDenialTest(unittest.TestCase):
 
         with self.assertRaises(ParamGuardDenied):
             twitter._search_tweets("token", {"query": "call +1 415 555 2671"}, FakeHostAPI())
+
+    def test_twitterapi_io_search_query_denied(self) -> None:
+        from host.tools import twitterapi_io
+
+        with self.assertRaises(ParamGuardDenied):
+            twitterapi_io._search_parameters(
+                {"query": "call +1 415 555 2671"},
+                FakeHostAPI(),
+            )
 
     def test_reddit_search_query_denied(self) -> None:
         from host.tools import reddit

@@ -1,624 +1,366 @@
-"""AWS resource operations for Kern host lifecycle commands."""
+"""AWS lifecycle adapter for deploy, upgrade, recover, and reconfigure.
+
+Provisioning artifacts (payload, bootstrap script, runtime code archive) are
+rendered by ``host.bootstrap.render`` and delivered one of two ways:
+
+1. **SSH delivery** (default): EC2 user data creates the
+   ``kern-operator`` account with a single-use deploy key and stages the
+   provisioning payload, then the CLI copies the local checkout's runtime code
+   archive to the instance over SSH, where the same
+   ``host.bootstrap.self_provision`` entry the GitHub delivery uses renders
+   and runs bootstrap to completion. Bootstrap removes the
+   deploy key when it finishes; the CLI's only step after bootstrap is
+   closing the provisioning SSH ingress when the operator endpoints do not
+   keep it. This delivery ships whatever is in the local checkout, so it also
+   serves development against unpublished code.
+2. **GitHub delivery** (``--bootstrap-from-github COMMIT_SHA``): EC2 user
+   data carries the provisioning payload and a fetch script; the instance
+   fetches the pinned commit of the fixed public repository
+   (``host.constants.PUBLIC_GITHUB_REPOSITORY``) and runs the same bootstrap
+   on itself (``host.bootstrap.self_provision``). The CLI first reads the
+   pinned commit's ``VERSION`` from GitHub, requires it to equal the local
+   CLI's version (the user data rendered here and the bootstrap fetched there
+   provision one host, so both must come from one version; deploying older
+   code means running that commit's own CLI), and asks for confirmation
+   before proceeding (non-interactive callers pipe the confirmation into
+   stdin). Any GitHub failure, version mismatch, or declined confirmation
+   aborts before anything in AWS is touched. No deploy key
+   exists and the CLI returns once the instance is launched with its volumes
+   attached; bootstrap outcome is observable through the operator endpoints
+   coming up.
+
+Security-group access is derived the same way on both deliveries, before
+launch: deploy and reconfigure derive it from the input operator connections,
+and upgrade and recover reapply the previous converged security-group state.
+The GitHub delivery launches with that state and never changes it; the SSH
+delivery additionally opens SSH at launch for the deploy key.
+
+The CLI never handles the admin password. Deploy and reconfigure require
+``--admin-password-sha256`` with the SHA-256 hex digest of the operator's
+chosen password; the host stores only that hash, so neither the CLI process,
+its result files, nor anything on the instance ever contains the cleartext.
+"""
 
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
-from typing import Any
+import sys
+import tempfile
+import urllib.request
 
-from host.config import ConfigError, InputConfig
-from host.cli.lifecycle_constants import (
-    ADMIN_VOLUME_DEVICE,
-    ADMIN_VOLUME_SIZE_GB,
-    AGENT_VOLUME_DEVICE,
-    AGENT_VOLUME_SIZE_GB,
-    INSTANCE_TAG_KEY,
-    INSTANCE_TYPE,
-    OWNER_TAG_KEY,
-    ROOT_VOLUME_SIZE_GB,
-    SSH_INGRESS,
-    VERSION_TAG_KEY,
-    VOLUME_ROLE_TAG_KEY,
+from host.bootstrap.render import (
+    _bootstrap_payload,
+    _render_github_user_data,
+    _render_ssh_user_data,
 )
+from host.config import (
+    ConfigError,
+    InputConfig,
+    RuntimeOperatorConnection,
+    build_input_config,
+    build_operator_connections,
+    public_operator_connections,
+)
+from host.constants import ADMIN_API_PORT, OPERATOR_TUNNEL_TOKEN_ENV_NAME, PUBLIC_GITHUB_REPOSITORY
+from host.cli.aws_resources import (
+    _attach_storage_volumes,
+    _aws_env,
+    _close_security_group_ssh_ingress,
+    _default_network,
+    _ensure_storage_volumes,
+    _existing_storage_roles,
+    _existing_storage_volume_availability_zone,
+    _find_existing_instances,
+    _launch_instance,
+    _preserve_existing_storage_volumes_on_instance_termination,
+    _security_group_access_state,
+    _terminate_instances,
+    _wait_for_instance,
+)
+from host.cli.lifecycle_bootstrap import _generate_deploy_key, _provision_over_ssh
+from host.cli.aws_checks import _check_existing_version_hints, _validate_command_preflight
+from host.cli.lifecycle_constants import SSH_USER
 from host.cli.lifecycle_logging import _log
-
-CLOUDFLARE_TUNNEL_EGRESS = (
-    {"IpProtocol": "tcp", "FromPort": 7844, "ToPort": 7844, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
-    {"IpProtocol": "udp", "FromPort": 7844, "ToPort": 7844, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
-)
+from host.cli.lifecycle_types import LifecycleCommand
+from host.cli.operation_lock import OperationLock
+from host.version import parse_version, repo_version
 
 
-def _aws_env(config: InputConfig) -> dict[str, str]:
-    """Environment for aws CLI subprocesses: standard AWS credential
-    variables, with the region pinned to the agent's region.
-
-    AWS_SESSION_TOKEN is used exactly when set. A stale token left over next
-    to fresh static keys fails closed at AWS with an authentication error;
-    unset it for static-key runs.
-    """
-    if not os.environ.get("AWS_ACCESS_KEY_ID"):
-        raise ConfigError("environment variable AWS_ACCESS_KEY_ID is not set")
-    if not os.environ.get("AWS_SECRET_ACCESS_KEY"):
-        raise ConfigError("environment variable AWS_SECRET_ACCESS_KEY is not set")
-    env = os.environ.copy()
-    env["AWS_REGION"] = config.aws_region
-    env["AWS_DEFAULT_REGION"] = config.aws_region
-    return env
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
-def _aws(env: dict[str, str], *args: str) -> Any:
-    proc = subprocess.run(
-        ["aws", *args],
-        check=True,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    text = proc.stdout.strip()
-    return json.loads(text) if text else None
+def main_for_lifecycle(command: LifecycleCommand) -> int:
+    try:
+        config = build_input_config(command.agent_name, _aws_region_from_env())
+        with OperationLock("aws", config.agent_name):
+            return _main_for_lifecycle_locked(command, config)
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"{command.mode} command failed: {exc}", file=sys.stderr)
+        return 1
 
 
-def _find_existing_instances(config: InputConfig, env: dict[str, str]) -> list[str]:
-    response = _aws(
-        env,
-        "ec2",
-        "describe-instances",
-        "--filters",
-        f"Name=tag:{INSTANCE_TAG_KEY},Values={config.agent_name}",
-        f"Name=tag:{OWNER_TAG_KEY},Values=true",
-        "Name=instance-state-name,Values=pending,running,stopping,stopped",
-    )
-    ids: list[str] = []
-    for reservation in response.get("Reservations", []):
-        for instance in reservation.get("Instances", []):
-            ids.append(instance["InstanceId"])
-    return ids
-
-
-def _existing_storage_roles(config: InputConfig, env: dict[str, str]) -> set[str]:
-    roles: set[str] = set()
-    for role in ("admin", "agent"):
-        if _find_storage_volume(config, env, role) is not None:
-            roles.add(role)
-    return roles
-
-
-def _terminate_instances(instance_ids: list[str], env: dict[str, str]) -> None:
-    _aws(env, "ec2", "terminate-instances", "--instance-ids", *instance_ids)
-    _aws(env, "ec2", "wait", "instance-terminated", "--instance-ids", *instance_ids)
-
-
-def _launch_instance(
-    config: InputConfig,
-    user_data: str,
-    workdir: Path,
-    env: dict[str, str],
-    *,
-    target_version: str,
-    network: tuple[str, str, str],
-    ssh_ingress: bool,
-    cloudflare_egress: bool,
-) -> tuple[str, str]:
-    vpc_id, subnet_id, _availability_zone = network
-    _log(f"using vpc {vpc_id}, public subnet {subnet_id}")
-    security_group_id = _ensure_security_group(
-        config,
-        env,
-        vpc_id,
-        ssh_ingress=ssh_ingress,
-        cloudflare_egress=cloudflare_egress,
-    )
-    ami_id = _ubuntu_ami(env)
-    _log(f"using Ubuntu AMI {ami_id}, instance type {INSTANCE_TYPE}")
-    # Pass user data via fileb:// rather than a raw string. The AWS CLI v2 default
-    # cli_binary_format is "base64", so a raw --user-data string would be decoded
-    # as base64 (corrupting the script and breaking cloud-init). fileb:// reads the
-    # bytes as-is and base64-encodes them for EC2 regardless of that setting.
-    user_data_path = workdir / "user_data.sh"
-    user_data_path.touch(mode=0o600)
-    user_data_path.chmod(0o600)  # the GitHub delivery embeds the provisioning payload
-    user_data_path.write_text(user_data)
-    response = _aws(env,
-        "ec2",
-        "run-instances",
-        "--image-id",
-        ami_id,
-        "--instance-type",
-        INSTANCE_TYPE,
-        "--subnet-id",
-        subnet_id,
-        "--security-group-ids",
-        security_group_id,
-        "--associate-public-ip-address",
-        # Instances are cattle: the root volume is disposable by contract and
-        # the durable data volumes survive termination, so an OS-initiated
-        # shutdown terminates the instance. This lets a detached (GitHub
-        # delivery) provisioning failure clean up its own instance, and the
-        # stop command still parks compute through the EC2 API, which this
-        # attribute does not affect.
-        "--instance-initiated-shutdown-behavior",
-        "terminate",
-        "--metadata-options",
-        "HttpTokens=required,HttpEndpoint=enabled",
-        "--block-device-mappings",
-        json.dumps(
-            [
-                {
-                    "DeviceName": "/dev/sda1",
-                    "Ebs": {
-                        "VolumeSize": ROOT_VOLUME_SIZE_GB,
-                        "VolumeType": "gp3",
-                        "DeleteOnTermination": True,
-                    },
-                }
-            ]
-        ),
-        "--user-data",
-        f"fileb://{user_data_path}",
-        "--tag-specifications",
-        _tag_spec("instance", config.agent_name, target_version=target_version),
-        _tag_spec("volume", config.agent_name),
-    )
-    return response["Instances"][0]["InstanceId"], security_group_id
-
-
-def _ensure_storage_volumes(
-    config: InputConfig,
-    env: dict[str, str],
-    *,
-    availability_zone: str,
-    wait_for_detach: bool = False,
-    created_storage_volumes: list[str] | None = None,
-) -> dict[str, str]:
-    """Find or create the admin and agent volumes in the availability zone.
-
-    Volumes exist before the instance launches so the GitHub delivery can
-    embed their ids in the provisioning payload; attachment happens after the
-    instance reaches ``running``.
-    """
-    volumes: dict[str, str] = {}
-    for role, size_gb in (
-        ("admin", ADMIN_VOLUME_SIZE_GB),
-        ("agent", AGENT_VOLUME_SIZE_GB),
-    ):
-        existing = _find_available_storage_volume(
-            config,
-            env,
-            role,
-            availability_zone,
-            wait_for_detach=wait_for_detach,
-        )
-        if existing is None:
-            volume_id = _create_storage_volume(config, env, role, size_gb, availability_zone)
-            if created_storage_volumes is not None:
-                created_storage_volumes.append(volume_id)
+def _main_for_lifecycle_locked(command: LifecycleCommand, config: InputConfig) -> int:
+    try:
+        github_commit_sha = command.github_commit_sha
+        if github_commit_sha is not None:
+            # The pinned commit is the code that will run, so its VERSION is
+            # the operation's target; the local checkout only orchestrates.
+            github_commit_sha, target_version = _resolve_github_pin(github_commit_sha)
         else:
-            volume_id = existing
-            _log(f"reusing {role} storage volume {volume_id}")
-        volumes[role] = volume_id
-    return volumes
-
-
-def _attach_storage_volumes(env: dict[str, str], *, instance_id: str, volumes: dict[str, str]) -> None:
-    for role, device in (("admin", ADMIN_VOLUME_DEVICE), ("agent", AGENT_VOLUME_DEVICE)):
-        _attach_volume(env, instance_id=instance_id, volume_id=volumes[role], device=device)
-
-
-def _existing_storage_volume_availability_zone(config: InputConfig, env: dict[str, str]) -> str | None:
-    availability_zones = set()
-    for role in ("admin", "agent"):
-        volume = _find_storage_volume(config, env, role)
-        if volume is not None:
-            availability_zone = volume.get("AvailabilityZone")
-            if isinstance(availability_zone, str) and availability_zone:
-                availability_zones.add(availability_zone)
-    if len(availability_zones) > 1:
-        raise ConfigError(
-            f"Kern storage volumes for {config.agent_name} are split across availability zones: "
-            f"{', '.join(sorted(availability_zones))}"
-        )
-    return next(iter(availability_zones), None)
-
-
-def _find_storage_volume(config: InputConfig, env: dict[str, str], role: str) -> dict[str, Any] | None:
-    response = _aws(
-        env,
-        "ec2",
-        "describe-volumes",
-        "--filters",
-        f"Name=tag:{INSTANCE_TAG_KEY},Values={config.agent_name}",
-        f"Name=tag:{OWNER_TAG_KEY},Values=true",
-        f"Name=tag:{VOLUME_ROLE_TAG_KEY},Values={role}",
-    )
-    volumes = [volume for volume in response.get("Volumes", []) if volume.get("State") != "deleted"]
-    if not volumes:
-        return None
-    if len(volumes) > 1:
-        volume_ids = ", ".join(sorted(volume["VolumeId"] for volume in volumes))
-        raise ConfigError(f"multiple Kern {role} volumes found for {config.agent_name}: {volume_ids}")
-    return volumes[0]
-
-
-def _find_available_storage_volume(
-    config: InputConfig,
-    env: dict[str, str],
-    role: str,
-    availability_zone: str,
-    *,
-    wait_for_detach: bool = False,
-) -> str | None:
-    volume = _find_storage_volume(config, env, role)
-    if volume is None:
-        return None
-    state = volume.get("State")
-    if state != "available" and wait_for_detach:
-        volume_id = volume["VolumeId"]
-        _log(f"waiting for preserved {role} volume {volume_id} to detach")
-        _aws(env, "ec2", "wait", "volume-available", "--volume-ids", volume_id)
-        volume = _find_storage_volume(config, env, role)
-        if volume is None:
-            raise ConfigError(
-                f"Kern {role} volume {volume_id} for {config.agent_name} disappeared while waiting to detach"
+            target_version = repo_version()
+        admin_password_sha256 = command.admin_password_sha256
+        replacement_operator_connections: tuple[RuntimeOperatorConnection, ...] | None = None
+        if command.mode in {"deploy", "reconfigure"}:
+            replacement_operator_connections = build_operator_connections(
+                command.operator_ssh_public_key,
+                command.operator_cloudflare_hostname,
+                os.environ.get(OPERATOR_TUNNEL_TOKEN_ENV_NAME)
+                if command.operator_cloudflare_hostname is not None
+                else None,
             )
-        state = volume.get("State")
-    if state != "available":
-        raise ConfigError(
-            f"Kern {role} volume {volume['VolumeId']} for {config.agent_name} is {state}; "
-            "detach it or wait for the previous instance to terminate before redeploying"
+        aws_env = _aws_env(config)
+        _log(
+            f"region {config.aws_region}; preparing {command.mode} for "
+            f"'{config.agent_name}' at Kern {target_version}"
         )
-    volume_availability_zone = volume.get("AvailabilityZone")
-    if volume_availability_zone != availability_zone:
-        raise ConfigError(
-            f"Kern {role} volume {volume['VolumeId']} is in {volume_availability_zone}, "
-            f"but the replacement instance is in {availability_zone}"
+        preferred_availability_zone = _existing_storage_volume_availability_zone(config, aws_env)
+        existing = _find_existing_instances(config, aws_env)
+        storage_roles = _existing_storage_roles(config, aws_env)
+        _validate_command_preflight(command, config, existing, storage_roles)
+        _check_existing_version_hints(command, config, aws_env, existing, target_version)
+
+        network = _default_network(
+            config,
+            aws_env,
+            preferred_availability_zone=preferred_availability_zone,
         )
-    return volume["VolumeId"]
-
-
-def _create_storage_volume(
-    config: InputConfig,
-    env: dict[str, str],
-    role: str,
-    size_gb: int,
-    availability_zone: str,
-) -> str:
-    _log(f"creating {role} storage volume ({size_gb} GiB gp3) in {availability_zone}")
-    response = _aws(
-        env,
-        "ec2",
-        "create-volume",
-        "--availability-zone",
-        availability_zone,
-        "--size",
-        str(size_gb),
-        "--volume-type",
-        "gp3",
-        "--encrypted",
-        "--tag-specifications",
-        _volume_tag_spec(config.agent_name, role),
-    )
-    volume_id = response["VolumeId"]
-    _aws(env, "ec2", "wait", "volume-available", "--volume-ids", volume_id)
-    return volume_id
-
-
-def _attach_volume(env: dict[str, str], *, instance_id: str, volume_id: str, device: str) -> None:
-    _log(f"attaching storage volume {volume_id} as {device}")
-    _aws(
-        env,
-        "ec2",
-        "attach-volume",
-        "--instance-id",
-        instance_id,
-        "--volume-id",
-        volume_id,
-        "--device",
-        device,
-    )
-    _aws(env, "ec2", "wait", "volume-in-use", "--volume-ids", volume_id)
-    _preserve_attached_volume_on_instance_termination(env, instance_id=instance_id, device=device)
-
-
-def _preserve_existing_storage_volumes_on_instance_termination(
-    config: InputConfig,
-    env: dict[str, str],
-    instance_ids: list[str],
-) -> None:
-    storage_volume_ids = set()
-    for role in ("admin", "agent"):
-        volume = _find_storage_volume(config, env, role)
-        if volume is not None:
-            storage_volume_ids.add(volume["VolumeId"])
-    if not storage_volume_ids:
-        return
-    response = _aws(env, "ec2", "describe-instances", "--instance-ids", *instance_ids)
-    for reservation in response.get("Reservations", []):
-        for instance in reservation.get("Instances", []):
-            instance_id = instance["InstanceId"]
-            for mapping in instance.get("BlockDeviceMappings", []):
-                ebs = mapping.get("Ebs", {})
-                volume_id = ebs.get("VolumeId")
-                device = mapping.get("DeviceName")
-                if volume_id in storage_volume_ids and isinstance(device, str) and device:
-                    _preserve_attached_volume_on_instance_termination(env, instance_id=instance_id, device=device)
-
-
-def _preserve_attached_volume_on_instance_termination(env: dict[str, str], *, instance_id: str, device: str) -> None:
-    _aws(
-        env,
-        "ec2",
-        "modify-instance-attribute",
-        "--instance-id",
-        instance_id,
-        "--block-device-mappings",
-        json.dumps(
-            [
-                {
-                    "DeviceName": device,
-                    "Ebs": {
-                        "DeleteOnTermination": False,
+        vpc_id, _subnet_id, availability_zone = network
+        ssh_ingress, cloudflare_egress = _launch_access_state(
+            config, aws_env, vpc_id, replacement_operator_connections
+        )
+        if existing:
+            _preserve_existing_storage_volumes_on_instance_termination(config, aws_env, existing)
+            _log(f"terminating existing instance(s): {', '.join(existing)}")
+            _terminate_instances(existing, aws_env)
+        created_storage_volumes: list[str] = []
+        instance_id: str | None = None
+        try:
+            storage_volumes = _ensure_storage_volumes(
+                config,
+                aws_env,
+                availability_zone=availability_zone,
+                wait_for_detach=bool(existing),
+                created_storage_volumes=created_storage_volumes,
+            )
+            with tempfile.TemporaryDirectory() as workdir_name:
+                workdir = Path(workdir_name)
+                # Both deliveries stage the same payload through user data;
+                # they differ only in code delivery.
+                payload = _bootstrap_payload(
+                    config.agent_name,
+                    admin_password_sha256,
+                    replacement_operator_connections,
+                    {
+                        "resolver": "aws",
+                        "resolver_input": {
+                            "admin": {"volume_id": storage_volumes["admin"]},
+                            "agent": {"volume_id": storage_volumes["agent"]},
+                        },
                     },
-                }
-            ]
-        ),
-    )
-
-
-def _default_network(
-    config: InputConfig,
-    env: dict[str, str],
-    *,
-    preferred_availability_zone: str | None = None,
-) -> tuple[str, str, str]:
-    vpcs = _aws(env, "ec2", "describe-vpcs", "--filters", "Name=is-default,Values=true")
-    if not vpcs.get("Vpcs"):
-        raise ConfigError("AWS account has no default VPC in the configured region")
-    vpc_id = vpcs["Vpcs"][0]["VpcId"]
-    subnets = _aws(env,
-        "ec2",
-        "describe-subnets",
-        "--filters",
-        f"Name=vpc-id,Values={vpc_id}",
-        "Name=default-for-az,Values=true",
-    )
-    if not subnets.get("Subnets"):
-        raise ConfigError("AWS default VPC has no default subnet")
-    candidate_subnets = sorted(subnets["Subnets"], key=lambda item: item["SubnetId"])
-    if preferred_availability_zone is not None:
-        candidate_subnets = [
-            subnet
-            for subnet in candidate_subnets
-            if subnet.get("AvailabilityZone") == preferred_availability_zone
-        ]
-        if not candidate_subnets:
-            raise ConfigError(
-                f"AWS default VPC has no default subnet in {preferred_availability_zone} "
-                "for the existing Kern storage volumes"
+                    mode=command.mode,
+                    target_version=target_version,
+                    allow_upgrade=command.allow_upgrade,
+                    reset_admin_passkeys=command.reset_admin_passkeys,
+                )
+                deploy_key: Path | None = None
+                if github_commit_sha is not None:
+                    user_data = _render_github_user_data(payload, github_commit_sha)
+                else:
+                    deploy_key = _generate_deploy_key(workdir)
+                    user_data = _render_ssh_user_data(
+                        payload, deploy_key.with_suffix(".pub").read_text().strip()
+                    )
+                _log("launching EC2 instance")
+                instance_id, security_group_id = _launch_instance(
+                    config,
+                    user_data,
+                    workdir,
+                    aws_env,
+                    target_version=target_version,
+                    network=network,
+                    ssh_ingress=ssh_ingress or deploy_key is not None,
+                    cloudflare_egress=cloudflare_egress,
+                )
+                _log(f"launched {instance_id}; waiting for it to reach 'running'")
+                instance = _wait_for_instance(instance_id, aws_env)
+                public_dns = instance["PublicDnsName"]
+                _log(f"instance running at {public_dns}")
+                _attach_storage_volumes(aws_env, instance_id=instance_id, volumes=storage_volumes)
+                if deploy_key is not None:
+                    _provision_over_ssh(public_dns, deploy_key, workdir)
+                    # The one step after bootstrap: the deploy key needed SSH
+                    # open during provisioning; close it when the operator
+                    # endpoints do not keep it.
+                    if not ssh_ingress:
+                        _close_security_group_ssh_ingress(aws_env, security_group_id)
+                    _log("provisioning complete")
+                else:
+                    _log(
+                        "instance launched with volumes attached; bootstrap continues on the host "
+                        "from the pinned commit. Operator endpoints come up when it succeeds."
+                    )
+        except BaseException:
+            # A failure here can leave a running instance with temporary
+            # provisioning access still open. Tear it down so a retry starts
+            # clean and nothing is exposed. The same invariant holds on the
+            # GitHub delivery after the CLI returns: a host-side provisioning
+            # failure shuts the instance down, which terminates it.
+            if instance_id is not None:
+                _log(f"provisioning failed; terminating {instance_id} to avoid a half-provisioned, exposed host")
+                try:
+                    _terminate_instances([instance_id], aws_env)
+                except Exception as cleanup_exc:  # noqa: BLE001 — best-effort cleanup
+                    _log(f"warning: could not terminate {instance_id}: {cleanup_exc}")
+            if created_storage_volumes:
+                _log(
+                    "provisioning failed after creating data volume(s) "
+                    f"{', '.join(created_storage_volumes)}; leaving them in place. "
+                    "A later deploy retry will refuse existing data volumes. If this was a failed first install "
+                    "and those volumes contain no initialized Kern state, delete the tagged volumes before "
+                    "retrying deploy."
+                )
+            raise
+        result = {
+            "agent_name": config.agent_name,
+            "provider": "aws",
+            "instance_id": instance_id,
+            "region": config.aws_region,
+            "public_dns": public_dns,
+            "ssh_user": SSH_USER,
+            "admin_ui_local_url": f"http://127.0.0.1:{ADMIN_API_PORT}",
+            "admin_volume_id": storage_volumes["admin"],
+            "agent_volume_id": storage_volumes["agent"],
+            "version": target_version,
+        }
+        if github_commit_sha is not None:
+            result["github_source"] = f"{PUBLIC_GITHUB_REPOSITORY}@{github_commit_sha}"
+        if replacement_operator_connections is not None:
+            result["operator_connections"] = public_operator_connections(
+                [connection.to_json() for connection in replacement_operator_connections]
             )
-    public_subnets = [
-        subnet
-        for subnet in candidate_subnets
-        if _subnet_has_public_ipv4_route(env, vpc_id, subnet["SubnetId"])
-    ]
-    if not public_subnets:
-        raise ConfigError(
-            "AWS default VPC has no default subnet with an active 0.0.0.0/0 route to an internet gateway"
-        )
-    subnet = public_subnets[0]
-    availability_zone = subnet.get("AvailabilityZone")
-    if not isinstance(availability_zone, str) or not availability_zone:
-        raise ConfigError(f"AWS default subnet {subnet['SubnetId']} reports no availability zone")
-    return vpc_id, subnet["SubnetId"], availability_zone
+        # stdout carries only this result JSON; all progress went to stderr.
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else exc.stderr
+        print(f"deploy command failed: {stderr or exc}", file=sys.stderr)
+        return 1
 
 
-def _subnet_has_public_ipv4_route(env: dict[str, str], vpc_id: str, subnet_id: str) -> bool:
-    route_tables = _aws(env,
-        "ec2",
-        "describe-route-tables",
-        "--filters",
-        f"Name=association.subnet-id,Values={subnet_id}",
-    ).get("RouteTables", [])
-    if not route_tables:
-        route_tables = _aws(env,
-            "ec2",
-            "describe-route-tables",
-            "--filters",
-            f"Name=vpc-id,Values={vpc_id}",
-            "Name=association.main,Values=true",
-        ).get("RouteTables", [])
-    for route_table in route_tables:
-        for route in route_table.get("Routes", []):
-            if route.get("DestinationCidrBlock") != "0.0.0.0/0":
-                continue
-            if route.get("State") != "active":
-                continue
-            gateway_id = route.get("GatewayId", "")
-            if gateway_id.startswith("igw-"):
-                return True
-    return False
-
-
-def _ensure_security_group(
+def _launch_access_state(
     config: InputConfig,
     env: dict[str, str],
     vpc_id: str,
-    *,
-    ssh_ingress: bool,
-    cloudflare_egress: bool,
-) -> str:
-    """Converge the agent security group to the requested launch access state.
+    replacement_operator_connections: tuple[RuntimeOperatorConnection, ...] | None,
+) -> tuple[bool, bool]:
+    """Decide the desired final (ssh_ingress, cloudflare_egress) state.
 
-    Both deliveries pass the derived final state; the SSH delivery
-    additionally keeps SSH ingress open at launch for the single-use deploy
-    key and closes it after bootstrap when the derived state says so.
+    One derivation serves both deliveries: deploy and reconfigure derive it
+    from the input operator connections; upgrade and recover reapply the
+    previous converged security-group state, because their operator
+    connections are preserved on the admin volume and unchanged by the
+    operation. The SSH delivery additionally opens SSH at launch for the
+    single-use deploy key and closes it after bootstrap when this state says
+    so; the GitHub delivery launches with this state directly.
     """
-    name = f"kern-host-{config.agent_name}"
-    groups = _aws(env,
-        "ec2",
-        "describe-security-groups",
-        "--filters",
-        f"Name=group-name,Values={name}",
-        f"Name=vpc-id,Values={vpc_id}",
-    ).get("SecurityGroups", [])
-    if groups:
-        group_id = groups[0]["GroupId"]
-        tags = {tag.get("Key"): tag.get("Value") for tag in groups[0].get("Tags", [])}
-        if tags.get(OWNER_TAG_KEY) == "true" and tags.get(INSTANCE_TAG_KEY) == config.agent_name:
-            _log(f"warning: reusing existing security group {group_id} named {name}")
-        else:
-            raise ConfigError(
-                f"existing security group {group_id} named {name} is not tagged as a Kern resource; "
-                "rename or delete it before deploying"
-            )
-    else:
-        created = _aws(env,
-            "ec2",
-            "create-security-group",
-            "--group-name",
-            name,
-            "--description",
-            f"Kern {config.agent_name}",
-            "--vpc-id",
-            vpc_id,
-            "--tag-specifications",
-            _tag_spec("security-group", config.agent_name),
+    if replacement_operator_connections is not None:
+        return (
+            any(connection.mode == "ssh" for connection in replacement_operator_connections),
+            any(connection.mode == "cloudflare_tunnel" for connection in replacement_operator_connections),
         )
-        group_id = created["GroupId"]
-    _reset_security_group_rules(env, group_id)
-    if ssh_ingress:
-        _aws(env, "ec2", "authorize-security-group-ingress", "--group-id", group_id, "--ip-permissions", json.dumps([SSH_INGRESS]))
-    # Egress is pinned to HTTP, HTTPS, and NTP: bootstrap downloads and all
-    # proxied agent traffic use 80/443, timesync uses UDP 123, and DNS to the
-    # VPC resolver bypasses security groups. The Cloudflare Tunnel connector
-    # allowance (7844) is added only when requested.
-    for egress in (
-        {"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
-        {"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
-        {"IpProtocol": "udp", "FromPort": 123, "ToPort": 123, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
-        *(CLOUDFLARE_TUNNEL_EGRESS if cloudflare_egress else ()),
-    ):
-        _aws(env, "ec2", "authorize-security-group-egress", "--group-id", group_id, "--ip-permissions", json.dumps([egress]))
-    return group_id
-
-
-def _security_group_access_state(
-    config: InputConfig, env: dict[str, str], vpc_id: str
-) -> tuple[bool, bool] | None:
-    """Read (ssh_ingress, cloudflare_egress) from the agent's existing
-    security group, or None when the group does not exist. The previous
-    deploy or reconfigure converged these rules to the stored operator
-    connections, so on the GitHub delivery upgrade and recover reapply them
-    at launch."""
-    name = f"kern-host-{config.agent_name}"
-    groups = _aws(env,
-        "ec2",
-        "describe-security-groups",
-        "--filters",
-        f"Name=group-name,Values={name}",
-        f"Name=vpc-id,Values={vpc_id}",
-    ).get("SecurityGroups", [])
-    if not groups:
-        return None
-    group = groups[0]
-    ssh_ingress = any(
-        _same_permission_shape(permission, SSH_INGRESS)
-        for permission in group.get("IpPermissions", [])
+    captured = _security_group_access_state(config, env, vpc_id)
+    if captured is not None:
+        return captured
+    _log(
+        "no existing security group records the operator access state; launching with SSH "
+        "ingress closed and the Cloudflare connector egress open"
     )
-    cloudflare_egress = any(
-        _same_permission_shape(permission, egress)
-        for permission in group.get("IpPermissionsEgress", [])
-        for egress in CLOUDFLARE_TUNNEL_EGRESS
-    )
-    return ssh_ingress, cloudflare_egress
+    return False, True
 
 
-def _close_security_group_ssh_ingress(env: dict[str, str], group_id: str) -> None:
-    group = _aws(env, "ec2", "describe-security-groups", "--group-ids", group_id)["SecurityGroups"][0]
-    matching = [
-        permission
-        for permission in group.get("IpPermissions", [])
-        if permission.get("IpProtocol") == SSH_INGRESS["IpProtocol"]
-        and permission.get("FromPort") == SSH_INGRESS["FromPort"]
-        and permission.get("ToPort") == SSH_INGRESS["ToPort"]
-    ]
-    if matching:
-        _aws(
-            env,
-            "ec2",
-            "revoke-security-group-ingress",
-            "--group-id",
-            group_id,
-            "--ip-permissions",
-            json.dumps(matching),
+def _resolve_github_pin(commit_sha: str) -> tuple[str, str]:
+    """Resolve the pinned commit and its VERSION from the public repository,
+    returning (commit_sha, target_version) after the operator confirms.
+
+    An empty commit_sha pins the latest main commit. Fails closed before
+    anything in AWS is touched: on any GitHub read failure, on a pinned
+    VERSION that differs from this CLI's, and on a declined or impossible
+    confirmation. Non-interactive callers pipe the confirmation into stdin.
+    The host-side gate in self_provision then re-checks the fetched checkout
+    against this version authoritatively.
+    """
+    if not commit_sha:
+        head_url = f"https://api.github.com/repos/{PUBLIC_GITHUB_REPOSITORY}/commits/main"
+        request = urllib.request.Request(
+            head_url,
+            headers={"User-Agent": "kern-cli", "Accept": "application/vnd.github+json"},
         )
-
-
-def _same_permission_shape(permission: dict[str, Any], expected: dict[str, Any]) -> bool:
-    return (
-        permission.get("IpProtocol") == expected["IpProtocol"]
-        and permission.get("FromPort") == expected["FromPort"]
-        and permission.get("ToPort") == expected["ToPort"]
-    )
-
-
-def _reset_security_group_rules(env: dict[str, str], group_id: str) -> None:
-    group = _aws(env, "ec2", "describe-security-groups", "--group-ids", group_id)["SecurityGroups"][0]
-    if group.get("IpPermissions"):
-        _aws(env,
-            "ec2",
-            "revoke-security-group-ingress",
-            "--group-id",
-            group_id,
-            "--ip-permissions",
-            json.dumps(group["IpPermissions"]),
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                head = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            raise ConfigError(f"could not read the latest main commit from {head_url}: {exc}") from exc
+        head_sha = head.get("sha") if isinstance(head, dict) else None
+        if not isinstance(head_sha, str) or not _COMMIT_SHA_RE.fullmatch(head_sha):
+            raise ConfigError(f"{head_url} returned an invalid head commit")
+        commit_sha = head_sha
+        _log(f"latest {PUBLIC_GITHUB_REPOSITORY} main commit is {commit_sha}")
+    url = f"https://raw.githubusercontent.com/{PUBLIC_GITHUB_REPOSITORY}/{commit_sha}/VERSION"
+    try:
+        with urllib.request.urlopen(url, timeout=20) as response:
+            pinned_version = response.read().decode("utf-8").strip()
+    except Exception as exc:
+        raise ConfigError(f"could not read the pinned commit's VERSION from {url}: {exc}") from exc
+    try:
+        parse_version(pinned_version)
+    except ValueError as exc:
+        raise ConfigError(f"pinned commit has an invalid VERSION {pinned_version!r}") from exc
+    # The user data this CLI renders and the bootstrap the instance fetches
+    # from the pinned commit provision the same host; requiring one version
+    # for both keeps every deploy a combination that was actually tested
+    # together. To deploy older code, run that commit's own CLI.
+    cli_version = repo_version()
+    if pinned_version != cli_version:
+        raise ConfigError(
+            f"pinned commit is Kern {pinned_version}, but this CLI is Kern {cli_version}; "
+            "a deploy's user data and bootstrap must come from one version, so check out "
+            "the pinned commit and deploy with its CLI"
         )
-    if group.get("IpPermissionsEgress"):
-        _aws(env,
-            "ec2",
-            "revoke-security-group-egress",
-            "--group-id",
-            group_id,
-            "--ip-permissions",
-            json.dumps(group["IpPermissionsEgress"]),
-        )
+    _log(f"pinned commit {commit_sha} deploys Kern {pinned_version} from {PUBLIC_GITHUB_REPOSITORY}")
+    try:
+        print(f"Proceed with Kern {pinned_version}? [y/N]: ", end="", file=sys.stderr, flush=True)
+        answer = input()
+    except EOFError as exc:
+        raise ConfigError(
+            "no terminal to confirm the fetched version; pipe 'y' into stdin to confirm"
+        ) from exc
+    if answer.strip().lower() not in {"y", "yes"}:
+        raise ConfigError("aborted at version confirmation")
+    return commit_sha, pinned_version
 
 
-def _ubuntu_ami(env: dict[str, str]) -> str:
-    response = _aws(env,
-        "ssm",
-        "get-parameter",
-        "--name",
-        "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id",
-    )
-    return response["Parameter"]["Value"]
-
-
-def _tag_spec(resource_type: str, agent_name: str, *, target_version: str | None = None) -> str:
-    tags = [
-        f"{{Key={INSTANCE_TAG_KEY},Value={agent_name}}}",
-        f"{{Key={OWNER_TAG_KEY},Value=true}}",
-        f"{{Key=Name,Value=kern-host-{agent_name}}}",
-    ]
-    if resource_type == "instance" and target_version is not None:
-        tags.append(f"{{Key={VERSION_TAG_KEY},Value={target_version}}}")
-    return f"ResourceType={resource_type},Tags=[{','.join(tags)}]"
-
-
-def _volume_tag_spec(agent_name: str, role: str) -> str:
-    return (
-        "ResourceType=volume,Tags=["
-        f"{{Key={INSTANCE_TAG_KEY},Value={agent_name}}},"
-        f"{{Key={OWNER_TAG_KEY},Value=true}},"
-        f"{{Key={VOLUME_ROLE_TAG_KEY},Value={role}}},"
-        f"{{Key=Name,Value=kern-host-{agent_name}-{role}}}"
-        "]"
-    )
-
-
-def _wait_for_instance(instance_id: str, env: dict[str, str]) -> dict[str, Any]:
-    _aws(env, "ec2", "wait", "instance-running", "--instance-ids", instance_id)
-    response = _aws(env, "ec2", "describe-instances", "--instance-ids", instance_id)
-    return response["Reservations"][0]["Instances"][0]
+def _aws_region_from_env() -> str:
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        raise ConfigError("set AWS_REGION to the agent's AWS region")
+    return region

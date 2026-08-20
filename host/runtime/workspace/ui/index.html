@@ -39,7 +39,7 @@
         <div class="form-grid">
           <label><span>Page ID</span><input id="memory-page-id" maxlength="64" pattern="[a-z0-9][a-z0-9-]*" required><small id="memory-page-id-help"></small></label>
           <label class="wide"><span>When to use this page</span><input id="memory-description" maxlength="100" required></label>
-          <label class="wide"><span>Content</span><textarea id="memory-content" maxlength="1000" rows="12"></textarea></label>
+          <label class="wide"><span>Content</span><textarea id="memory-content" maxlength="2000" rows="12"></textarea></label>
         </div>
         <div class="resource-meta" id="memory-meta"></div>
         <div id="memory-link-graph" class="link-grid">
@@ -61,7 +61,7 @@
       <form id="schedule-form" class="resource-form" hidden>
         <div class="form-grid">
           <label class="wide"><span>Name</span><input id="schedule-name" maxlength="100" required></label>
-          <label class="wide"><span id="schedule-message-label">Message</span><textarea id="schedule-message" maxlength="4000" rows="7" required></textarea></label>
+          <label class="wide"><span id="schedule-message-label">Message</span><textarea id="schedule-message" maxlength="12000" rows="7" required></textarea></label>
           <label><span>Agent</span><select id="schedule-runtime"></select></label>
           <label><span>Model</span><select id="schedule-model"></select></label>
           <label><span>Level</span><select id="schedule-effort"></select></label>

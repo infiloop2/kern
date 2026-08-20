@@ -496,6 +496,7 @@ class AgentChatBackendTests(unittest.TestCase):
                     "model": "gpt-5.6-sol",
                     "effort": "high",
                     "last_used_at": "2026-07-17T10:00:00Z",
+                    "latest_event_seq": 12,
                     "status": "running",
                 },
                 {
@@ -545,6 +546,7 @@ class AgentChatBackendTests(unittest.TestCase):
         first = response["threads"][0]
         self.assertEqual(first["status"], "running")
         self.assertEqual(first["name"], "Customer launch")
+        self.assertEqual(first["latest_event_seq"], 12)
         self.assertFalse(first["archived"])
         self.assertEqual(response["threads"][1]["status"], "idle")
 

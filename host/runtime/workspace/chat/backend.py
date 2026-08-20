@@ -249,6 +249,7 @@ def _chat_thread_summary(
         "effort": effort,
         "archived": archived,
         "last_used_at": str(summary.get("last_used_at") or ""),
+        "latest_event_seq": max(0, int(summary.get("latest_event_seq") or 0)),
         "status": status,
     }
 

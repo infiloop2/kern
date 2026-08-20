@@ -161,11 +161,12 @@ def save_attested_claude_account(account_id: str, **extra: Any) -> None:
     )
 
 
-def _without_last_used_at(response: dict[str, Any]) -> dict[str, Any]:
-    """A thread response with the wall-clock field dropped, so two responses
-    can be compared for equality without racing a second boundary."""
+def _without_thread_activity_markers(response: dict[str, Any]) -> dict[str, Any]:
+    """A thread response without fields that advance on every accepted send."""
     thread = {
-        key: value for key, value in response["thread"].items() if key != "last_used_at"
+        key: value
+        for key, value in response["thread"].items()
+        if key not in {"last_used_at", "latest_event_seq"}
     }
     return {**response, "thread": thread}
 
@@ -356,6 +357,50 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("create: (...args) => afterInitialization(createApp, ...args)", web_apps)
         self.assertIn("open: (...args) => afterInitialization(showApp, ...args)", web_apps)
         self.assertNotIn("initialize();\n})();", web_apps)
+
+    def test_workspace_navigation_tracks_seen_chat_activity_and_app_revisions(self) -> None:
+        root = Path(__file__).parents[1]
+        app = (root / "host/runtime/admin_api/admin_ui/app.js").read_text()
+        admin_css = (root / "host/runtime/admin_api/admin_ui/admin_ui.css").read_text()
+        chat = (root / "host/runtime/workspace/chat/ui/agent_chat.js").read_text()
+        web_apps = (
+            root / "host/runtime/workspace/web_apps/ui/personal_web_app_builder.js"
+        ).read_text()
+
+        self.assertIn('const WORKSPACE_LAST_SEEN_KEY = "kern.workspace-last-seen.v2";', app)
+        self.assertIn(
+            'initializeWorkspaceLastSeen("chat", chatNavItems, chatNavArchived);',
+            app,
+        )
+        self.assertIn(
+            'initializeWorkspaceLastSeen("apps", webAppNavItems, webAppsNavArchived);',
+            app,
+        )
+        initialize_seen = app.split("function initializeWorkspaceLastSeen", 1)[1].split(
+            "function initializeArchivedWorkspaceLastSeen", 1
+        )[0]
+        self.assertIn("workspaceLastSeen.active[kind]", initialize_seen)
+        self.assertNotIn("chatNavArchived || webAppsNavArchived", initialize_seen)
+        mark_seen = app.split("function markWorkspaceSeen", 1)[1].split(
+            'window.addEventListener("storage"', 1
+        )[0]
+        self.assertNotIn("workspaceLastSeen.active", mark_seen)
+        self.assertIn("Number(item.latest_event_seq)", app)
+        self.assertIn("current.activity > (Number(seen.activity) || 0)", app)
+        self.assertIn("current.revision > (Number(seen.revision) || 0)", app)
+        self.assertIn("mergeWorkspaceLastSeen(loadWorkspaceLastSeen(), workspaceLastSeen)", app)
+        self.assertIn('initializeArchivedWorkspaceLastSeen("chat", chatNavItems, chatNavArchived)', app)
+        self.assertIn('initializeArchivedWorkspaceLastSeen("apps", webAppNavItems, webAppsNavArchived)', app)
+        self.assertIn('dot.setAttribute("aria-label", "New activity")', app)
+        self.assertIn("document.visibilityState !== \"visible\"", app)
+        self.assertIn('window.KernHost.markWorkspaceSeen("chat", visibleThread)', chat)
+        self.assertIn("const refreshedThreadId = selectedThreadId;", chat)
+        self.assertIn("if (rendered && selectedThreadId === refreshedThreadId && visibleThread)", chat)
+        self.assertIn('window.KernHost.markWorkspaceSeen("apps", {', web_apps)
+        self.assertIn("Number(listed?.latest_event_seq) || 0", web_apps)
+        self.assertIn("renderedEventSeq", web_apps)
+        self.assertIn("revision: renderedRevision", web_apps)
+        self.assertIn(".workspace-nav-unseen {", admin_css)
 
     def test_admin_passkey_ui_keeps_password_as_factor_one(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
@@ -551,6 +596,13 @@ class AdminUiStaticTests(unittest.TestCase):
             self.assertIn(required_text, catalog)
         self.assertIn("query parameters", catalog)
         self.assertIn("renderDataSummary", guide)
+        self.assertIn("action.input_schema || {}", guide)
+        self.assertIn("action.output_schema || {}", guide)
+        self.assertIn("The manifest permits additional output fields beyond those listed.", guide)
+        self.assertNotIn("Complete JSON schemas", guide)
+        self.assertNotIn('.guide-capability:has(> .guide-action-contract[open])', (
+            runtime / "admin_ui" / "admin_ui.css"
+        ).read_text())
         self.assertNotIn("renderDataFlows", guide)
         self.assertIn("What happens to your data", guide)
         self.assertIn("Technical notes", guide)
@@ -799,6 +851,10 @@ class AdminUiStaticTests(unittest.TestCase):
             self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
             self.assertEqual(int.from_bytes(data[16:20], "big"), size)
             self.assertEqual(int.from_bytes(data[20:24], "big"), size)
+            # Installed-app surfaces choose their own icon mask. Keeping the
+            # source PNGs opaque prevents a white page background from showing
+            # through the artwork's rounded corners.
+            self.assertEqual(data[25], 2)
         self.assertNotIn("animation: panel-in", css)
         self.assertIn("position: fixed", css)
         self.assertNotIn('id="tab-processes"', html)
@@ -2687,10 +2743,16 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
 
         self.assertEqual(first["status"], "accepted")
-        # Both steers return the same response apart from last_used_at, which
-        # each send rewrites from the wall clock: comparing the whole payload
-        # fails whenever the two requests straddle a second boundary.
-        self.assertEqual(_without_last_used_at(first), _without_last_used_at(repeated))
+        # Both steers return the same response apart from the wall clock and
+        # strictly increasing event sequence advanced by each accepted send.
+        self.assertEqual(
+            _without_thread_activity_markers(first),
+            _without_thread_activity_markers(repeated),
+        )
+        self.assertGreater(
+            repeated["thread"]["latest_event_seq"],
+            first["thread"]["latest_event_seq"],
+        )
         for response in (first, repeated):
             self.assertRegex(
                 response["thread"]["last_used_at"],
@@ -3969,7 +4031,15 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(body["threads"][2]["last_used_at"], "2026-06-08T00:00:03Z")
         self.assertEqual(
             set(body["threads"][0]),
-            {"thread_id", "agent_runtime", "model", "effort", "last_used_at", "status"},
+            {
+                "thread_id",
+                "agent_runtime",
+                "model",
+                "effort",
+                "last_used_at",
+                "status",
+                "latest_event_seq",
+            },
         )
 
     def test_thread_list_is_bounded_and_pages_with_an_opaque_cursor(self) -> None:
@@ -4039,6 +4109,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "effort": "high",
                 "last_used_at": "2026-06-08T00:00:03Z",
                 "status": "idle",
+                "latest_event_seq": 0,
             },
         )
 

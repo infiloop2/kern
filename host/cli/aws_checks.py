@@ -1,9 +1,9 @@
-"""Preflight and version validation for host lifecycle commands."""
+"""AWS resource and version-hint preflight for host lifecycle commands."""
 
 from __future__ import annotations
 
-from host.cli import lifecycle_aws
-from host.cli.lifecycle_constants import VERSION_TAG_KEY
+from host.cli import aws_resources
+from host.cli.aws_constants import VERSION_TAG_KEY
 from host.cli.lifecycle_logging import _log
 from host.config import ConfigError, InputConfig
 from host.cli.lifecycle_types import LifecycleCommand
@@ -64,7 +64,7 @@ def _check_existing_version_hints(
 ) -> None:
     if not instance_ids:
         return
-    response = lifecycle_aws._aws(env, "ec2", "describe-instances", "--instance-ids", *instance_ids)
+    response = aws_resources._aws(env, "ec2", "describe-instances", "--instance-ids", *instance_ids)
     hints: dict[str, str] = {}
     for reservation in response.get("Reservations", []):
         for instance in reservation.get("Instances", []):

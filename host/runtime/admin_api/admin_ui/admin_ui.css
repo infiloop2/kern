@@ -757,14 +757,18 @@ button.workspace-nav-item {
   color: var(--text-dim); display: flex; flex-direction: column; gap: 0.15rem; min-width: 0;
   font-size: 0.78rem; padding: 0.4rem 0.5rem; text-align: left;
 }
-.workspace-nav-primary { align-items: center; display: flex; gap: 0.45rem; min-width: 0; }
-.workspace-nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-nav-primary { align-items: center; display: flex; gap: 0.45rem; min-width: 0; width: 100%; }
+.workspace-nav-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-nav-meta {
   color: var(--text-dim); font-size: 0.63rem; line-height: 1.25; opacity: 0.72;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 button.workspace-nav-item:hover { background: var(--surface-2); color: var(--text); }
 .workspace-nav-running { animation: pulse 1.4s ease infinite; background: var(--warn); border-radius: 50%; flex: 0 0 auto; height: 7px; width: 7px; }
+.workspace-nav-unseen {
+  background: var(--accent); border-radius: 50%; box-shadow: 0 0 0 3px rgba(69, 214, 196, 0.1);
+  flex: 0 0 auto; height: 6px; margin-left: auto; width: 6px;
+}
 button.workspace-nav-row-action {
   background: transparent; border: 0; border-radius: 7px; color: var(--text-dim);
   height: 1.75rem; padding: 0; width: 1.75rem;
@@ -962,6 +966,8 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .gmail-yellow, .calendar-yellow { fill: #fbbc04; }
 .gmail-green, .calendar-green { fill: #34a853; }
 .integration-logo-tool-google_calendar { background: #fff; }
+.integration-logo-tool-google_search_console { background: #fff; }
+.integration-logo-tool-google_search_console svg { height: 2.25rem; width: 2.25rem; }
 .integration-logo-tool-ibkr { background: #fff; color: #d9272e; }
 .integration-logo-tool-instagram, .integration-logo-tool-instagram_discovery { background: radial-gradient(circle at 32% 105%, #ffd600 0 18%, #ff7a00 34%, #ff0169 57%, #d300c5 75%, #7638fa 100%); }
 .integration-logo-tool-linkedin, .integration-logo-tool-linkedin_discovery { --logo-badge: #0a66c2; background: #0a66c2; }
@@ -971,6 +977,8 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-tool-runway { background: #f4f4f2; color: #111; }
 .integration-logo-word-runway { font-family: Georgia, serif; font-size: 1.8rem; font-weight: 500; }
 .integration-logo-tool-twitter { background: #050505; }
+.integration-logo-tool-web_fetch { background: #0f766e; }
+.integration-logo-tool-twitterapi_io { background: #253342; }
 .integration-logo-tool-zoho_mail { background: #fff; color: #1665d8; }
 .integration-logo-word-zoho { font-family: Arial, sans-serif; font-size: 0.82rem; letter-spacing: -0.06em; }
 .integration-logo-custom_domain { background: var(--accent-soft); border-color: rgba(69, 214, 196, 0.35); color: var(--accent); }
@@ -1789,6 +1797,35 @@ button.integration-chevron {
 .guide-capability .muted { font-size: 0.75rem; }
 
 .guide-capability a { color: var(--accent); display: inline-block; font-size: 0.78rem; margin-top: 0.35rem; }
+
+.guide-action-contract { border-top: 1px solid var(--border); margin-top: 0.65rem; padding-top: 0.55rem; }
+
+.guide-action-contract > summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.guide-action-contract-body { display: grid; gap: 0.7rem; margin-top: 0.65rem; }
+
+.guide-action-parameters { min-width: 0; }
+
+.guide-action-parameters h5 { font-size: 0.75rem; margin: 0 0 0.3rem; }
+
+.guide-action-parameters table { table-layout: fixed; }
+
+.guide-action-parameters td { font-size: 0.76rem; }
+
+.guide-action-parameters th:first-child, .guide-action-parameters td:first-child { width: 34%; }
+
+.guide-action-parameters td { overflow-wrap: anywhere; }
+
+.guide-parameter-spec { display: grid; gap: 0.2rem; }
+
+.guide-parameter-spec > span { color: var(--text); font-size: 0.72rem; }
+
+.guide-parameter-spec p { color: var(--text-dim); font-size: 0.74rem; margin: 0; }
 
 .guide-policy-points { display: grid; gap: 0.55rem; margin-top: 0.2rem; }
 

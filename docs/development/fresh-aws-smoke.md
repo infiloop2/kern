@@ -99,24 +99,26 @@ Actions. Add these repository secrets:
 | `KERN_SMOKE_AWS_ACCESS_KEY_ID` | Access key id for the smoke IAM user. |
 | `KERN_SMOKE_AWS_SECRET_ACCESS_KEY` | Secret access key for the smoke IAM user. |
 
-A repository admin can run it manually with `workflow_dispatch` by selecting a
-branch or tag in the GitHub Run workflow UI. Anyone can request a pull request
-smoke by commenting exactly this on the pull request:
+A push to `main` runs the smoke automatically. A repository admin can also run
+it manually with `workflow_dispatch` by selecting a branch or tag in the GitHub
+Run workflow UI, or request a pull request smoke by commenting either exact
+command on the pull request:
 
 ```text
 /smoke
+smoke
 ```
 
 The workflow first runs an `authorize` job that checks out trusted workflow
-actions from `main`. Manual dispatches verify the triggering actor is a
-repository admin. Comment-triggered runs do not require admin permission, but
-they still reject fork PR heads before exposing AWS secrets. The authorize job
-also rejects the request immediately if another `kern-smoke` run is
-already queued or in progress, with a failing `kern-smoke` status telling
-the requester to wait for the previous smoke to complete. The shared live AWS
-rate limit rejects the eleventh authorized run started within a rolling
-one-hour window. The smoke job also has a same-group concurrency guard as a
-race-condition backstop so two fresh smoke jobs cannot run at the same time.
+actions from `main`. Manual dispatches and comment-triggered runs verify that
+the triggering actor is a repository admin, and comment-triggered runs reject
+fork PR heads before exposing AWS secrets. Pushes to `main` need no separate
+authorization. Every trigger rejects immediately if another `kern-smoke` run
+is already queued or running, while the smoke job's singleton concurrency group
+closes the race between simultaneous authorization checks. The authorize job
+reports the active run and asks the operator to retry after it completes. The
+shared live AWS rate limit applies to every trigger and rejects the eleventh
+authorized run started within a rolling one-hour window.
 Comment-triggered runs execute from the default-branch workflow, so the workflow
 also writes a `kern-smoke` commit status on the resolved pull request head
 SHA. That status is what makes the smoke result visible in the pull request

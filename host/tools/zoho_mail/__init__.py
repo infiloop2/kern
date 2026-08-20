@@ -235,6 +235,18 @@ MANIFEST = ToolManifest(
             output_schema=ZOHO_OUTPUT_SCHEMA,
         ),
         ActionSpec(
+            id="list_senders",
+            description=(
+                "List the connected mailbox's default sender and verified sender aliases accepted by send_email."
+            ),
+            data_policy=(
+                "Read-only. Sends no agent-supplied values to Zoho. The connected mailbox's default sender and "
+                "verified sender aliases enter active model context. Runs directly with no approval."
+            ),
+            input_schema=_schema({}),
+            output_schema=ZOHO_OUTPUT_SCHEMA,
+        ),
+        ActionSpec(
             id="list_messages",
             description="List recent messages in one Zoho Mail folder by folder id.",
             data_policy=(
@@ -414,6 +426,7 @@ MANIFEST = ToolManifest(
         )
     ),
     agent_notes=(
+        "Use list_senders to discover the current default sender and verified aliases before setting from_address. "
         "Use list_folders before list_messages. read_message needs both folder_id and message_id from a list or search result. "
         "search_messages accepts Zoho syntax such as sender:alice@example.com::has:attachment. Sending defaults to safe HTML "
         "rendered from paragraph, heading, list, rich-text, link, and divider blocks; set mail_format to plaintext when needed. "
@@ -564,6 +577,18 @@ def _account_addresses(record: JSONObject) -> set[str]:
                 if isinstance(value, str) and EMAIL_RE.fullmatch(value.strip()):
                     addresses.add(value.strip().lower())
     return addresses
+
+
+def _sender_result(account: ConnectionAccount, record: JSONObject) -> JSONObject:
+    default_address = account["label"].lower()
+    addresses = sorted(_account_addresses(record) - {default_address})
+    addresses.insert(0, default_address)
+    return {
+        "status": "success_executed",
+        "message": f"Zoho Mail returned {len(addresses)} verified sender address(es).",
+        "default_from_address": default_address,
+        "from_addresses": cast(list[JSONValue], addresses),
+    }
 
 
 def _account_from_record(record: JSONObject, scopes: list[str]) -> ConnectionAccount:
@@ -1220,6 +1245,11 @@ class ZohoMailTool:
                 return ActionExecuted(_search_messages(access_token, data_center, tool_input, api))
             if action == "list_folders":
                 return ActionExecuted(_list_folders(access_token, data_center, tool_input, api))
+            if action == "list_senders":
+                if tool_input:
+                    raise ToolInputValidationError("Zoho Mail list_senders takes no input.")
+                account, account_record = ZOHO_CREDENTIALS.refresh_account(api, access_token, data_center)
+                return ActionExecuted(_sender_result(account, account_record))
             if action == "list_messages":
                 return ActionExecuted(_list_messages(access_token, data_center, tool_input, api))
             if action == "read_message":

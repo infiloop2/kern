@@ -117,6 +117,7 @@ let mobileNavOpen = false;
 let uploadPickerOpen = false;
 let nextUploadSelectionId = 1;
 const APP_UPLOAD_SELECTION_LIMIT = 10;
+const WORKSPACE_LAST_SEEN_KEY = "kern.workspace-last-seen.v2";
 const pendingAppUploads = new Map();
 let chatNavArchived = false;
 let webAppsNavArchived = false;
@@ -129,6 +130,159 @@ const workspacePendingMutations = new Set();
 const workspaceMounts = new Map();
 let workspaceInitialization = null;
 window.KernWorkspaceRoots = {};
+
+function emptyWorkspaceLastSeen() {
+  return {
+    active: { chat: false, apps: false },
+    archived: { chat: false, apps: false },
+    chat: {},
+    apps: {},
+  };
+}
+
+function parseWorkspaceLastSeen(value) {
+  if (!value) return emptyWorkspaceLastSeen();
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object") return emptyWorkspaceLastSeen();
+    return {
+      active: {
+        chat: parsed.active?.chat === true,
+        apps: parsed.active?.apps === true,
+      },
+      archived: {
+        chat: parsed.archived?.chat === true,
+        apps: parsed.archived?.apps === true,
+      },
+      chat: parsed.chat && typeof parsed.chat === "object" ? parsed.chat : {},
+      apps: parsed.apps && typeof parsed.apps === "object" ? parsed.apps : {},
+    };
+  } catch (_error) {
+    return emptyWorkspaceLastSeen();
+  }
+}
+
+function loadWorkspaceLastSeen() {
+  try { return parseWorkspaceLastSeen(localStorage.getItem(WORKSPACE_LAST_SEEN_KEY)); }
+  catch (_error) { return emptyWorkspaceLastSeen(); }
+}
+
+let workspaceLastSeen = loadWorkspaceLastSeen();
+
+function workspaceItemMarker(kind, item) {
+  const marker = { activity: Math.max(0, Number(item.latest_event_seq) || 0) };
+  if (kind === "apps") marker.revision = Math.max(0, Number(item.revision) || 0);
+  return marker;
+}
+
+function workspaceItemId(kind, item) {
+  return kind === "chat" ? item.thread_id : item.app_id;
+}
+
+function mergeWorkspaceMarkers(kind, left = {}, right = {}) {
+  if (!left || typeof left !== "object") left = {};
+  if (!right || typeof right !== "object") right = {};
+  const merged = {
+    activity: Math.max(Number(left.activity) || 0, Number(right.activity) || 0),
+  };
+  if (kind === "apps") {
+    merged.revision = Math.max(Number(left.revision) || 0, Number(right.revision) || 0);
+  }
+  return merged;
+}
+
+function mergeWorkspaceLastSeen(left, right) {
+  const merged = emptyWorkspaceLastSeen();
+  for (const kind of ["chat", "apps"]) {
+    merged.active[kind] = left.active[kind] || right.active[kind];
+    merged.archived[kind] = left.archived[kind] || right.archived[kind];
+    for (const itemId of new Set([...Object.keys(left[kind]), ...Object.keys(right[kind])])) {
+      merged[kind][itemId] = mergeWorkspaceMarkers(kind, left[kind][itemId], right[kind][itemId]);
+    }
+  }
+  return merged;
+}
+
+function saveWorkspaceLastSeen() {
+  try {
+    // A storage event can arrive after another tab has already advanced a
+    // different item. Re-read and merge immediately before the whole-map write
+    // so this tab never knowingly replaces that newer marker with its snapshot.
+    workspaceLastSeen = mergeWorkspaceLastSeen(loadWorkspaceLastSeen(), workspaceLastSeen);
+    localStorage.setItem(WORKSPACE_LAST_SEEN_KEY, JSON.stringify(workspaceLastSeen));
+  }
+  catch (_error) { /* The markers remain valid for this page load. */ }
+}
+
+function initializeWorkspaceLastSeen(kind, items, archived) {
+  if (archived || workspaceLastSeen.active[kind]) return;
+  for (const item of items) {
+    const itemId = workspaceItemId(kind, item);
+    workspaceLastSeen[kind][itemId] = mergeWorkspaceMarkers(
+      kind,
+      workspaceLastSeen[kind][itemId],
+      workspaceItemMarker(kind, item),
+    );
+  }
+  workspaceLastSeen.active[kind] = true;
+  saveWorkspaceLastSeen();
+}
+
+function initializeArchivedWorkspaceLastSeen(kind, items, archived) {
+  if (!archived || workspaceLastSeen.archived[kind]) return;
+  for (const item of items) {
+    const itemId = workspaceItemId(kind, item);
+    workspaceLastSeen[kind][itemId] = mergeWorkspaceMarkers(
+      kind,
+      workspaceLastSeen[kind][itemId],
+      workspaceItemMarker(kind, item),
+    );
+  }
+  workspaceLastSeen.archived[kind] = true;
+  saveWorkspaceLastSeen();
+}
+
+function workspaceItemHasChanges(kind, item, archived) {
+  if (!(archived ? workspaceLastSeen.archived[kind] : workspaceLastSeen.active[kind])) {
+    return false;
+  }
+  const seen = workspaceLastSeen[kind][workspaceItemId(kind, item)];
+  if (!seen || typeof seen !== "object") return true;
+  const current = workspaceItemMarker(kind, item);
+  return current.activity > (Number(seen.activity) || 0)
+    || (kind === "apps" && current.revision > (Number(seen.revision) || 0));
+}
+
+function markWorkspaceSeen(kind, item) {
+  if (!item || !["chat", "apps"].includes(kind) || document.visibilityState !== "visible") return;
+  const itemId = workspaceItemId(kind, item);
+  const route = workspaceRouteFromLocation();
+  const expectedTab = kind === "chat" ? "workspace-chat" : "workspace-web-apps";
+  if (!itemId || activeTab !== expectedTab || route?.itemId !== itemId) return;
+  const current = workspaceItemMarker(kind, item);
+  const seen = workspaceLastSeen[kind][itemId] || {};
+  const next = {
+    activity: Math.max(current.activity, Number(seen.activity) || 0),
+  };
+  if (kind === "apps") {
+    next.revision = Math.max(current.revision, Number(seen.revision) || 0);
+  }
+  if (JSON.stringify(next) === JSON.stringify(seen)) return;
+  workspaceLastSeen[kind][itemId] = next;
+  saveWorkspaceLastSeen();
+  renderWorkspaceNavigation();
+}
+
+window.addEventListener("storage", event => {
+  if (event.key !== WORKSPACE_LAST_SEEN_KEY) return;
+  if (event.newValue === null) workspaceLastSeen = emptyWorkspaceLastSeen();
+  else {
+    const incoming = parseWorkspaceLastSeen(event.newValue);
+    workspaceLastSeen = mergeWorkspaceLastSeen(workspaceLastSeen, incoming);
+    if (JSON.stringify(workspaceLastSeen) !== JSON.stringify(incoming)) saveWorkspaceLastSeen();
+  }
+  renderWorkspaceNavigation();
+});
 
 function showLoginError(message) {
   const element = $("login-error");
@@ -736,6 +890,7 @@ window.KernHost = {
   refreshNavigation() {
     return refreshWorkspaceNavigation();
   },
+  markWorkspaceSeen,
   navigateWorkspace(resource, itemId = null, replace = false) {
     if (navigateWorkspaceRoute(resource, itemId, replace)) {
       workspaceNavigationActionSequence += 1;
@@ -861,6 +1016,10 @@ async function refreshWorkspaceNavigation() {
   ) return;
   chatNavItems = chat.threads || [];
   webAppNavItems = webApps.apps || [];
+  initializeWorkspaceLastSeen("chat", chatNavItems, chatNavArchived);
+  initializeWorkspaceLastSeen("apps", webAppNavItems, webAppsNavArchived);
+  initializeArchivedWorkspaceLastSeen("chat", chatNavItems, chatNavArchived);
+  initializeArchivedWorkspaceLastSeen("apps", webAppNavItems, webAppsNavArchived);
   renderWorkspaceNavigation();
 }
 
@@ -922,6 +1081,18 @@ function renderWorkspaceRows(containerId, items, action, archived) {
     label.className = "workspace-nav-label";
     label.textContent = item.name || itemId;
     primary.append(label);
+    const hasChanges = workspaceItemHasChanges(
+      kind === "chat" ? "chat" : "apps",
+      item,
+      archived,
+    );
+    if (hasChanges) {
+      const dot = document.createElement("span");
+      dot.className = "workspace-nav-unseen";
+      dot.setAttribute("role", "img");
+      dot.setAttribute("aria-label", "New activity");
+      primary.append(dot);
+    }
     button.append(primary);
     if (kind === "chat") {
       const settings = [runtimeLabel(item.agent_runtime), item.model, item.effort]
@@ -931,9 +1102,10 @@ function renderWorkspaceRows(containerId, items, action, archived) {
       meta.className = "workspace-nav-meta";
       meta.textContent = settings;
       button.append(meta);
-      button.title = settings ? `${item.name || itemId}\n${settings}` : item.name || itemId;
+      const detail = settings ? `${item.name || itemId}\n${settings}` : item.name || itemId;
+      button.title = hasChanges ? `${detail}\nNew activity` : detail;
     } else {
-      button.title = item.name || itemId;
+      button.title = hasChanges ? `${item.name || itemId}\nNew activity` : item.name || itemId;
     }
     row.append(button);
     if (archived) {
@@ -994,6 +1166,7 @@ async function openWorkspaceChat(threadId, updateHistory = true) {
   if (updateHistory) navigateWorkspaceRoute("chat", threadId);
   try {
     await window.KernChat.openThread(found.item);
+    markWorkspaceSeen("chat", found.item);
   } catch (error) {
     if (actionSequence === workspaceNavigationActionSequence) throw error;
   }
@@ -1033,6 +1206,7 @@ async function openWorkspaceWebApp(appId, updateHistory = true) {
   if (updateHistory) navigateWorkspaceRoute("apps", appId);
   try {
     await window.KernWebApps.open(found.item, webAppsNavArchived, false);
+    markWorkspaceSeen("apps", found.item);
   } catch (error) {
     if (actionSequence === workspaceNavigationActionSequence) throw error;
   }
