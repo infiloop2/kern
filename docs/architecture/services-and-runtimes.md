@@ -72,10 +72,7 @@ keeps 1G of the 6G swapfile available to host services (systemd 249 offers no
 percentage form for swap, and bootstrap owns the swapfile size). `TasksMax=4096`
 bounds agent threads and processes so a fork bomb cannot exhaust kernel PIDs,
 which would otherwise block the admin API from spawning helpers at all. Each
-launcher points `TMPDIR` at the separate agent volume, while an ext4 user quota
-hard-caps direct `kern-agent` writes to the root filesystem at 2 GiB and 200,000
-inodes. This covers `/tmp`, `/var/tmp`, and any other root-backed writable path;
-the cgroup controls alone do not account for filesystem capacity. Each
+launcher points `TMPDIR` at the separate agent volume. Each
 scope is `BindsTo=kern-admin-api.service`: leaving the admin API's
 cgroup must not decouple lifecycles, so when the admin service stops,
 restarts, or crashes, systemd stops the scopes too and no orphaned runtime

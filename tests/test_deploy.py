@@ -1821,20 +1821,15 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap.index('cat > "$PGDATA_DIR/postgresql.conf"'),
         )
 
-    def test_rendered_bootstrap_caps_agent_writes_to_root(self) -> None:
+    def test_rendered_bootstrap_does_not_require_root_quota_support(self) -> None:
         bootstrap = render._render_bootstrap()
 
-        self.assertIn("python3-venv quota sudo", bootstrap)
-        self.assertIn("mount -o remount,usrquota /", bootstrap)
-        self.assertIn("quotacheck -cum /", bootstrap)
-        self.assertIn("quotaon -u /", bootstrap)
-        self.assertIn("setquota -u kern-agent", bootstrap)
-        self.assertIn("AGENT_ROOT_HARD_BLOCKS=2097152", bootstrap)
-        self.assertIn("AGENT_ROOT_HARD_INODES=200000", bootstrap)
-        self.assertLess(
-            bootstrap.index("\n  configure_agent_root_quota\n"),
-            bootstrap.index("\n  start_services\n"),
-        )
+        self.assertNotIn("python3-venv quota sudo", bootstrap)
+        self.assertNotIn("mount -o remount,usrquota /", bootstrap)
+        self.assertNotIn("quotacheck", bootstrap)
+        self.assertNotIn("quotaon", bootstrap)
+        self.assertNotIn("setquota", bootstrap)
+        self.assertNotIn("configure_agent_root_quota", bootstrap)
 
     def test_bootstrap_renders_shared_port_constants(self) -> None:
         from host.constants import PROXY_PORT
