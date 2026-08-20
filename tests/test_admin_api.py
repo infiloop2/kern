@@ -2086,10 +2086,21 @@ class AdminApiIntegrationTests(unittest.TestCase):
     def raw_request(self, request: bytes) -> bytes:
         return raw_admin_request(self.admin_socket_path, request)
 
-    def health(self, proxy_alive: bool = True, version: dict[str, str] | None = None):
+    def health(
+        self,
+        proxy_alive: bool = True,
+        version: dict[str, str | None] | None = None,
+        host: dict[str, object] | None = None,
+    ):
         reported_version = version or {"status": "ok", "runtime": "0.2.0", "state": "0.2.0"}
+        reported_host = host or {
+            "cpu": {},
+            "memory": {},
+            "filesystem": {"mounts": {}},
+            "swap": {},
+        }
         with (
-            patch("host.runtime.admin_api.service.host_metrics", return_value={"cpu": {}, "memory": {}, "filesystem": {}, "swap": {}}),
+            patch("host.runtime.admin_api.service.host_metrics", return_value=reported_host),
             patch("host.runtime.admin_api.service.proxy_alive", return_value=proxy_alive),
             patch("host.runtime.admin_api.service.version_status", return_value=reported_version),
             patch(
@@ -2125,6 +2136,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(body["agent_name"], "kern-test")
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["issues"], [])
         self.assertEqual(self.runtime(body)["status"], "active")
         self.assertEqual(self.runtime(body, "claude_code")["status"], "deactivated")
         self.assertEqual(body["network_controls"]["status"], "active")
@@ -3012,6 +3025,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, body = self.health(proxy_alive=False)
         self.assertEqual(body["network_controls"]["status"], "error")
         self.assertEqual(body["status"], "degraded")
+        self.assertEqual(body["issues"], [{
+            "kind": "network_controls",
+            "summary": "Network controls are unavailable",
+            "detail": "The network policy is active, but the enforcing proxy is not accepting connections.",
+            "next_step": "Stop starting agents and use the operator plane to recover or upgrade the host.",
+        }])
 
     def test_health_is_degraded_when_runtime_and_state_versions_differ(self) -> None:
         _, body = self.health(
@@ -3019,6 +3038,82 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(body["version"]["status"], "mismatch")
         self.assertEqual(body["status"], "degraded")
+        self.assertEqual(body["issues"], [{
+            "kind": "version",
+            "summary": "Host versions do not match",
+            "detail": "Runtime 1.8.0; durable state 1.7.0.",
+            "next_step": "Run a Kern upgrade or recovery from the operator plane.",
+        }])
+
+    def test_health_identifies_an_unavailable_version_file(self) -> None:
+        cases = (
+            (
+                {"status": "error", "runtime": None, "state": "1.8.0"},
+                "Unavailable or invalid: running root version (/opt/kern-host/VERSION).",
+            ),
+            (
+                {"status": "error", "runtime": "1.8.0", "state": None},
+                "Unavailable or invalid: durable-state version "
+                "(/mnt/kern-admin/admin-state/version.json).",
+            ),
+        )
+        for version, detail in cases:
+            with self.subTest(version=version):
+                _, body = self.health(version=version)
+
+                self.assertEqual(body["status"], "degraded")
+                self.assertEqual(body["issues"], [{
+                    "kind": "version",
+                    "summary": "Host version information is unavailable",
+                    "detail": detail,
+                    "next_step": (
+                        "Run a Kern recovery from the operator plane to restore the version metadata."
+                    ),
+                }])
+
+    def test_health_explains_runtime_errors_and_the_next_step(self) -> None:
+        set_runtime_statuses(codex="active", claude_code="error")
+        orchestrator._RUNTIME_STATUSES["claude_code"]["error_message"] = (
+            "Claude authentication probe timed out after 30 seconds"
+        )
+
+        _, body = self.health()
+
+        self.assertEqual(body["status"], "degraded")
+        self.assertEqual(body["issues"], [{
+            "kind": "agent_runtime",
+            "summary": "Claude Code is unavailable",
+            "detail": "Claude authentication probe timed out after 30 seconds",
+            "next_step": (
+                "Open Home > Integrations > Claude Code, refresh its status, "
+                "and reconnect or revalidate the account if the error continues."
+            ),
+        }])
+
+    def test_health_is_degraded_when_root_volume_is_nearly_full(self) -> None:
+        _, body = self.health(
+            host={
+                "cpu": {},
+                "memory": {},
+                "filesystem": {
+                    "mounts": {
+                        "root": {"used_bytes": 15, "total_bytes": 16},
+                    }
+                },
+                "swap": {},
+            }
+        )
+
+        self.assertEqual(body["status"], "degraded")
+        self.assertEqual(body["issues"], [{
+            "kind": "root_filesystem",
+            "summary": "Root volume is nearly full",
+            "detail": "The root filesystem is 93.8% full.",
+            "next_step": (
+                "Stop agent work, inspect /tmp and /var/tmp, and remove unneeded temporary "
+                "files; redeploy if free space does not recover."
+            ),
+        }])
 
     def test_health_never_spawns_codex(self) -> None:
         # The health/status path must read cached state only — a hanging Codex

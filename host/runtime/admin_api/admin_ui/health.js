@@ -81,6 +81,21 @@ function historyStat(label, value, description) {
     </div>`;
 }
 
+function renderHealthIssues(issues) {
+  if (!Array.isArray(issues) || issues.length === 0) return "";
+  const rows = issues.map(issue => `
+    <li class="health-issue">
+      <div class="health-issue-summary">${esc(issue?.summary || "Host health issue")}</div>
+      <div class="health-issue-detail">${esc(issue?.detail || "No additional detail was reported.")}</div>
+      <div class="health-issue-next"><strong>Next:</strong> ${esc(issue?.next_step || "Review the affected host component.")}</div>
+    </li>`).join("");
+  return `
+    <section class="health-issues" aria-label="Why host health is degraded">
+      <div class="health-issues-title">Needs attention</div>
+      <ul>${rows}</ul>
+    </section>`;
+}
+
 export async function refreshHealth() {
   const health = await api("GET", "/v1/health");
   $("agent-name").textContent = health.agent_name ? `Host: ${health.agent_name}` : "";
@@ -97,9 +112,11 @@ export async function refreshHealth() {
       ${statTile("Network controls", badge(health.network_controls.status))}
       ${statTile("Version", renderVersion(health.version), "stat-wide version-tile")}
     </div>
+    ${renderHealthIssues(health.issues)}
     <div class="stat-grid stat-meters">
       ${meterTile("CPU", `<span class="metric-main">${esc(host.cpu.usage_percent)}%</span>`, Number(host.cpu.usage_percent) || 0)}
       ${memorySwapTile(host.memory, host.swap)}
+      ${filesystemMountTile("Root volume", mounts.root)}
       ${filesystemMountTile("Admin volume", mounts.admin)}
       ${filesystemMountTile("Agent volume", mounts.agent)}
     </div>

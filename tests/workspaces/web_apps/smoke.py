@@ -1129,7 +1129,20 @@ def desktop_smoke(page: Any) -> None:
     expect(first_app_nav.locator(".workspace-nav-unseen")).to_be_visible()
     first_app_nav.click()
     expect(first_app_nav.locator(".workspace-nav-unseen")).to_have_count(0)
+    # Agent settings belong to the app that recorded them. A new app has no
+    # session, so it opens on the first offered configuration rather than
+    # inheriting whatever the previously opened app was set to.
+    frame.locator("#settings-open").click()
+    frame.locator("#runtime").select_option("claude_code")
+    frame.locator("#model").select_option("claude-fable-5")
+    frame.locator("#effort").select_option("ultracode")
     _start_host_app(page)
+    frame.locator("#settings-open").click()
+    expect(frame.locator("#runtime")).to_have_value("codex")
+    expect(frame.locator("#model")).to_have_value("gpt-5.6-terra")
+    expect(frame.locator("#effort")).to_have_value("high")
+    frame.locator("#settings-open").click()
+    expect(frame.locator("#settings-popover")).to_be_hidden()
     _open_host_app(page, "app-1")
     expect(frame.locator("#latest-agent-card")).to_be_hidden()
     # A fresh Web Apps mount suppresses retained agent output even when

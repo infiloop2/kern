@@ -1278,6 +1278,13 @@ function clearSelectedThread() {
 function startNewThread() {
   showingArchivedThreads = false;
   clearSelectedThread();
+  // A new thread is unconfigured, so its composer opens on the first offered
+  // configuration. Leaving the selectors as the previously opened thread left
+  // them would start the thread's session on a runtime and model the operator
+  // never chose. The reset belongs here rather than on the in-panel button
+  // because the host navigation starts threads through the same function.
+  $("new-task-runtime").value = Object.keys(sessionOptions)[0] || "codex";
+  setSessionOptions();
   window.KernHost.navigateWorkspace("chat");
 }
 
@@ -1374,8 +1381,6 @@ chatRoot.addEventListener("click", event => {
 
 $("new-thread").addEventListener("click", () => {
   setSidebarOpen(false);
-  $("new-task-runtime").value = "codex";
-  setSessionOptions();
   startNewThread();
   $("new-task").focus();
 });

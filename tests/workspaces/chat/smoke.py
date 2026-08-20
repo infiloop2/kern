@@ -466,6 +466,22 @@ def desktop_smoke(page: Any) -> None:
     _toggle_host_chat_archive(page)
     expect(page.locator("#chat-nav-items")).to_contain_text(generated_thread)
     _open_host_thread(page, generated_thread)
+    # A new thread opens on the first offered configuration, however it was
+    # started. The thread open here runs gpt-5.6-luna at max, and neither its
+    # model nor its effort may carry into a thread started from the host
+    # navigation, which reaches the composer through a different control than
+    # the in-frame button.
+    expect(frame.locator("#new-task-model")).to_have_value("gpt-5.6-luna")
+    expect(frame.locator("#new-task-effort")).to_have_value("max")
+    _start_host_chat(page)
+    expect(frame.locator("#new-task-runtime")).to_have_value("codex")
+    expect(frame.locator("#new-task-model")).to_have_value("gpt-5.6-terra")
+    expect(frame.locator("#new-task-effort")).to_have_value("high")
+    # Claude Code offers Opus first, so switching runtimes lands there.
+    frame.locator("#new-task-runtime").select_option("claude_code")
+    expect(frame.locator("#new-task-model")).to_have_value("claude-opus-5")
+    expect(frame.locator("#new-task-effort")).to_have_value("high")
+    _open_host_thread(page, generated_thread)
     _assert_single_scroll(page, frame, "Chat workspace (desktop)")
 
 

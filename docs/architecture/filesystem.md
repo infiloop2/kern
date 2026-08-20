@@ -21,6 +21,8 @@ This is not a claim that service users cannot write anywhere under `/`: normal
 Unix-writable temporary locations such as `/tmp`, `/var/tmp`, and `/dev/shm`
 may still be writable, and each service has its own mounted state/home
 directory below. Those writable locations are not trusted code or policy inputs.
+Bootstrap enables an ext4 user quota on root that caps all `kern-agent`-owned
+root data at 2 GiB and 200,000 inodes, including deleted files that remain open.
 
 | Path | Access | Contents |
 | --- | --- | --- |
@@ -78,21 +80,25 @@ The agent volume is mounted at `/mnt/kern-agent`, with the agent home at
 `/mnt/kern-agent/agent-home`. It is preserved across redeploys. This is
 the agent user's only durable writable storage: runtime auth, session files,
 workspace state, and user-installed non-root tools should land here because the
-runtime helpers set `HOME` and the working directory to this path. Bootstrap
+runtime helpers set `HOME` and the working directory to this path. They also set
+`TMPDIR` to the private `.tmp/` directory on this volume, so ordinary build and
+test scratch data does not consume root. Bootstrap
 also maintains a few root-owned, readable, immutable runtime files here:
 `AGENTS.md`, `CLAUDE.md`, `.codex/config.toml`, and `.claude/settings.json`.
 
 That does not mean the agent has literally no other writable path. As a normal
 unprivileged Linux user it can still write to standard ephemeral locations such
 as `/tmp`, `/var/tmp`, and `/dev/shm` if the base OS exposes them with the usual
-world-writable sticky permissions. Those paths live on the replaceable root
-volume, are not treated as Kern state, are not preserved as part of the
-agent volume contract, and should not contain secrets or important workspace
-data. The agent cannot write root-owned code, service files, admin state, proxy
-state, global CLI installs, or the proxy CA/private-key material without a local
-privilege escalation.
+world-writable sticky permissions. `/tmp` and `/var/tmp` live on the
+replaceable root volume; `/dev/shm` is a separate bounded tmpfs. None is treated
+as Kern state or preserved as part of the agent-volume contract, and none
+should contain secrets or important workspace data. The root user quota bounds
+direct writes that bypass `TMPDIR`. The agent cannot write root-owned code,
+service files, admin state, proxy state, global CLI installs, or the proxy
+CA/private-key material without a local privilege escalation.
 
 | Path | Access | Contents |
 | --- | --- | --- |
 | `/mnt/kern-agent/agent-home/` | agent writable, with selected immutable root-owned files | Agent runtime auth, provider session files, CLI caches, workspace data, and the small bootstrap-managed instruction/config files installed after symlink slots are sanitized. |
+| `/mnt/kern-agent/agent-home/.tmp/` | agent only | Default `TMPDIR` for agent turns and script schedules. Processes remove their own scratch normally; the host reaps abandoned entries after one day to cover abrupt kills and crashes. |
 | `/mnt/kern-agent/agent-home/user-files/` | agent writable | Durable operator uploads. Stored names begin with a UTC upload timestamp; uploads publish atomically and are not pruned automatically. |

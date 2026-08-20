@@ -130,6 +130,7 @@ Response:
 ```json
 {
   "status": "ok",
+  "issues": [],
   "agent_name": "kern-dev-agent",
   "agent_runtime": {
     "runtimes": [
@@ -198,7 +199,12 @@ Response fields:
 
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
-| `status` | enum | `ok`, `degraded` | Overall host health. `ok` means the admin service, agent runtime supervisor, and network controls are reachable. `degraded` means the admin service is responding but at least one component is not healthy. |
+| `status` | enum | `ok`, `degraded` | Overall host health. `ok` means the agent runtimes, network controls, versions, and root-volume capacity are healthy. `degraded` means the admin service is responding but at least one issue is present. |
+| `issues` | array |  | Actionable reasons for a degraded status; empty when status is `ok`. |
+| `issues[].kind` | enum | `agent_runtime`, `network_controls`, `version`, `root_filesystem` | Component that caused the degraded status. |
+| `issues[].summary` | string |  | Short operator-facing reason. |
+| `issues[].detail` | string |  | Specific status or error detail. |
+| `issues[].next_step` | string |  | Recommended operator action. |
 | `agent_name` | string |  | Host name from the input config. |
 | `agent_runtime.runtimes` | array |  | Status records for every supported runtime. |
 | `agent_runtime.runtimes[].type` | enum | `codex`, `claude_code`, `hermes` | Agent runtime type. |

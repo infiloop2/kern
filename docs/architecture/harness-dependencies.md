@@ -279,13 +279,15 @@ to re-enable the tool. Non-agent maintenance calls (auth, usage) run no model
 turn, so they pass `web-search=off` and keep the deny-by-default posture.
 `WebFetch`
 and `Bash` stay enabled — their egress is client-side and already gated by the
-domain allow-list. For every invocation, including the host-owned `/usage`
-probe, the launcher sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
-`DISABLE_TELEMETRY=1`, and `DISABLE_ERROR_REPORTING=1`. The umbrella flag
-suppresses registry, feedback, and auto-update traffic; the dedicated flags
-make telemetry and error-reporting suppression explicit across Claude Code
-releases. The pinned Claude Code `2.1.220` still returns its usage windows with
-all three flags set. None of these flags affects WebSearch or WebFetch.
+domain allow-list. Agent and authentication invocations set
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `DISABLE_TELEMETRY=1`, and
+`DISABLE_ERROR_REPORTING=1`. The umbrella flag suppresses registry, feedback,
+and auto-update traffic; the dedicated flags make telemetry and error-reporting
+suppression explicit across Claude Code releases. The host-owned `/usage`
+probe instead sets `DISABLE_AUTOUPDATER=1`, `DISABLE_FEEDBACK_COMMAND=1`, and
+`DISABLE_ERROR_REPORTING=1`: current Claude Code builds omit the Fable window
+when either telemetry flag is present. None of these flags affects WebSearch or
+WebFetch.
 
 The network proxy is the ultimate layer and enforces the same toggle
 independently: the Claude integration guard on `api.anthropic.com` always
@@ -501,6 +503,15 @@ reset in any other timezone label drops only that window's `resets_at`. A line
 that does not match contributes nothing, and the snapshot keeps whatever did
 parse. When no usage window parses, `claude_usage` is absent; Kern never
 presents percentages from an older provider read as the current snapshot.
+
+Current Claude Code builds stop rendering the model-scoped Fable row when
+either `DISABLE_TELEMETRY` or its umbrella
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` makes `/usage` exit successfully
+with only the session and all-models rows. The launcher therefore exempts only
+the host-owned `/usage` maintenance probe from those two variables while still
+setting `DISABLE_AUTOUPDATER`, `DISABLE_FEEDBACK_COMMAND`, and
+`DISABLE_ERROR_REPORTING`. Agent turns and authentication processes retain the
+full nonessential-traffic and telemetry opt-outs.
 
 Kern therefore cannot recreate Claude Code auth files from admin state.
 Doing that would require storing refresh/access tokens or equivalent provider

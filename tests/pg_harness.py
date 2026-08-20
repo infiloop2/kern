@@ -6,7 +6,9 @@ Unix socket only, in a temp directory, no network — applies the repo's schema
 migrations once, and exports the ``KERN_DB_*`` environment so the
 runtime code under test connects to it. ``reset_database()`` truncates all
 tables between tests, which is much faster than a cluster or database per
-test.
+test. A failed setup is cleaned immediately and disables further setup attempts
+in that process, so one infrastructure failure cannot allocate a cluster per
+later test.
 
 The server binaries come from PATH, from the newest ``/usr/lib/postgresql/*``
 install, or from ``KERN_TEST_PG_BIN``. If the binaries are unavailable
@@ -97,23 +99,60 @@ def ensure_database() -> None:
     socket_dir = Path(tempfile.mkdtemp(prefix="tcpg.", dir="/tmp"))
 
     def cleanup() -> None:
-        subprocess.run(
-            [str(pg_bin / "pg_ctl"), "-D", str(data_dir), "stop", "-m", "immediate"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        try:
+            subprocess.run(
+                [str(pg_bin / "pg_ctl"), "-D", str(data_dir), "stop", "-m", "immediate"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            pass
         shutil.rmtree(data_dir.parent, ignore_errors=True)
         shutil.rmtree(socket_dir, ignore_errors=True)
 
     atexit.register(cleanup)
-    env = _subprocess_env(data_dir.parent)
-    subprocess.run(
-        [str(pg_bin / "initdb"), "-D", str(data_dir), "-U", "postgres", "-A", "trust", "-E", "UTF8"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        check=True,
-        env=env,
+
+    def abort_setup() -> None:
+        global _SKIP_REASON
+        cleanup()
+        atexit.unregister(cleanup)
+        _SKIP_REASON = (
+            "scratch PostgreSQL setup already failed in this test process; "
+            "see the first setup error"
+        )
+
+    try:
+        env = _subprocess_env(data_dir.parent)
+    except BaseException:
+        abort_setup()
+        raise
+
+    def run_setup(command: list[str]) -> None:
+        try:
+            subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=True,
+                env=env,
+            )
+        except BaseException:
+            abort_setup()
+            raise
+
+    run_setup(
+        [
+            str(pg_bin / "initdb"),
+            "-D",
+            str(data_dir),
+            "-U",
+            "postgres",
+            "-A",
+            "trust",
+            "-E",
+            "UTF8",
+        ]
     )
     # Durability off: the cluster is thrown away with the process, and the
     # test suite hits the disk hard without this.
@@ -121,7 +160,7 @@ def ensure_database() -> None:
         f"-c listen_addresses='' -c unix_socket_directories='{socket_dir}'"
         " -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
     )
-    subprocess.run(
+    run_setup(
         [
             str(pg_bin / "pg_ctl"),
             "-D",
@@ -132,10 +171,6 @@ def ensure_database() -> None:
             options,
             "start",
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        check=True,
-        env=env,
     )
     os.environ["KERN_DB_SOCKET_DIR"] = str(socket_dir)
     os.environ["KERN_DB_NAME"] = "kern_test"
@@ -150,24 +185,18 @@ def ensure_database() -> None:
         "kern-agent-network",
         "kern-workspace",
     ):
-        subprocess.run(
-            [str(pg_bin / "createuser"), "-h", str(socket_dir), "-U", "postgres", role],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            check=True,
-            env=env,
-        )
-    subprocess.run(
-        [str(pg_bin / "createdb"), "-h", str(socket_dir), "-U", "postgres", "kern_test"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        check=True,
-        env=env,
+        run_setup([str(pg_bin / "createuser"), "-h", str(socket_dir), "-U", "postgres", role])
+    run_setup(
+        [str(pg_bin / "createdb"), "-h", str(socket_dir), "-U", "postgres", "kern_test"]
     )
 
     from host.runtime.deploy import migrate
 
-    migrate.up(quiet=True)
+    try:
+        migrate.up(quiet=True)
+    except BaseException:
+        abort_setup()
+        raise
     _STARTED = True
 
 
