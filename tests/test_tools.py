@@ -312,6 +312,45 @@ class ToolTests(unittest.TestCase):
                 ),
             )
 
+    def test_tool_manifest_rejects_open_input_object_schemas(self) -> None:
+        def manifest(input_schema: JSONObject) -> ToolManifest:
+            return ToolManifest(
+                tool_id="closed_inputs",
+                display_name="Closed inputs",
+                description="Reject open input objects.",
+                connection="enable_only",
+                data_summary=EXAMPLE_DATA_SUMMARY,
+                actions=(ActionSpec("read", "Read.", "Reads data.", input_schema),),
+            )
+
+        for schema in (
+            {"type": "object", "properties": {}},
+            {"type": "object", "properties": {}, "additionalProperties": True},
+            {
+                "type": "object",
+                "properties": {
+                    "nested": {"type": "object", "properties": {}},
+                },
+                "additionalProperties": False,
+            },
+        ):
+            with self.subTest(schema=schema):
+                with self.assertRaisesRegex(ValueError, "additionalProperties to false"):
+                    manifest(schema)
+
+        closed = manifest({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+            "additionalProperties": False,
+        })
+        self.assertEqual(closed.actions[0].id, "read")
+
     def test_bundled_manifests_declare_sensitive_action_controls(self) -> None:
         brave_search_action = brave_search.MANIFEST.action("search_web")
         gmail_read_action = gmail.MANIFEST.action("read_message")

@@ -12,6 +12,7 @@ return this shape:
 ```json
 {
   "agent_name": "kern-dev-agent",
+  "provider": "aws",
   "instance_id": "i-0123456789abcdef0",
   "region": "us-east-1",
   "public_dns": "ec2-203-0-113-10.compute-1.amazonaws.com",
@@ -29,13 +30,36 @@ return this shape:
 
 | Field | Presence | Behavior |
 | --- | --- | --- |
-| `agent_name`, `instance_id`, `region` | Always | Input host name and the created/replacement EC2 instance identity. |
+| `agent_name`, `provider`, `instance_id`, `region` | Always | Input host name, the infrastructure provider, and the created/replacement EC2 instance identity. |
 | `public_dns` | Always | EC2 public DNS name used for SSH access when an SSH endpoint is configured. |
 | `ssh_user` | Always | `kern-operator`. |
 | `admin_ui_local_url` | Always | Local URL after forwarding the admin port: `http://127.0.0.1:7443`. |
 | `admin_volume_id`, `agent_volume_id` | Always | Durable EBS volume ids attached to the host. |
 | `version` | Always | Target `VERSION` installed by this provisioning command. |
 | `operator_connections` | `deploy`, `reconfigure` | Public summary of the replacement endpoint list. Tunnel tokens and SSH key material are omitted. Upgrade/recover preserve the stored list and omit this field. |
+
+With `--provider lima`, the provisioning result is provider-neutral instead of
+carrying EC2 fields:
+
+```json
+{
+  "agent_name": "kern-dev-agent",
+  "provider": "lima",
+  "host": {"id": "kern-kern-dev-agent-1cd2c967356040ec4a3bd5fd", "state": "running"},
+  "storage": {
+    "admin": {"id": "kern-kern-dev-agent-1cd2c967356040ec4a3bd5fd-admin"},
+    "agent": {"id": "kern-kern-dev-agent-1cd2c967356040ec4a3bd5fd-agent"}
+  },
+  "ssh": {"host": "127.0.0.1", "port": 60022, "user": "kern-operator"},
+  "admin_ui_local_url": "http://127.0.0.1:7443",
+  "version": "x.y.z"
+}
+```
+
+`host.id` is the Lima instance name, `storage.*.id` are the durable Lima disk
+names, and `ssh` is the loopback management endpoint (Lima allocates the
+port). Lima power results use the same shape plus `operation` and
+`initial_state`, and omit `version` exactly as AWS power results do.
 
 No result carries the admin password. Deploy and reconfigure accept only
 `--admin-password-sha256` (the SHA-256 hex digest of the operator's chosen

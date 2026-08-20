@@ -193,6 +193,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ),
     ),
     "brave_search": (("search_web", {"query": "Kern"}),),
+    "web_fetch": (("fetch_page", {"url": "https://example.com/"}),),
     "gmail": (
         ("search_messages", {}),
         ("read_message", {"message_id": "smoke-message"}),
@@ -228,6 +229,32 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
                 "summary": "Kern smoke",
                 "start_time": "2099-01-01T00:00:00+00:00",
                 "end_time": "2099-01-01T01:00:00+00:00",
+            },
+        ),
+    ),
+    "google_search_console": (
+        ("list_properties", {}),
+        (
+            "query_search_analytics",
+            {
+                "site_url": "https://example.com/",
+                "start_date": "2099-01-01",
+                "end_date": "2099-01-02",
+            },
+        ),
+        ("list_sitemaps", {"site_url": "https://example.com/"}),
+        (
+            "inspect_url",
+            {
+                "site_url": "https://example.com/",
+                "inspection_url": "https://example.com/",
+            },
+        ),
+        (
+            "submit_sitemap",
+            {
+                "site_url": "https://example.com/",
+                "sitemap_url": "https://example.com/sitemap.xml",
             },
         ),
     ),
@@ -300,9 +327,13 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("get_personalized_trends", {}),
         ("lookup_user", {"username": "kern"}),
     ),
+    "twitterapi_io": (
+        ("search_tweets", {"query": "Kern", "query_type": "Latest"}),
+    ),
     "zoho_mail": (
         ("search_messages", {"search_key": "entire:Kern", "limit": "1"}),
         ("list_folders", {}),
+        ("list_senders", {}),
         ("list_messages", {"folder_id": "1", "limit": "1"}),
         ("read_message", {"folder_id": "1", "message_id": "1"}),
         (
@@ -342,29 +373,7 @@ def main(argv: list[str] | None = None) -> int:
         smoke.prepare()
         smoke.deploy()
         smoke.open_tunnel()
-        smoke.check_health()
-        smoke.check_host_config_schema()
-        smoke.check_agent_home_guidance()
-        smoke.check_ui_page()
-        smoke.check_admin_auth()
-        smoke.check_workspace_backends_without_providers()
-        smoke.check_initial_disabled_provider_deploy()
-        smoke.check_network_policy()
-        smoke.check_policy_validation_and_concurrency()
-        smoke.check_turn_admission_contract()
-        smoke.check_admin_concurrency()
-        smoke.check_state_transactions()
-        smoke.check_event_pagination()
-        smoke.check_enforcement()
-        smoke.check_github_read_paths()
-        smoke.check_package_client_headers()
-        smoke.check_proxy_edge_cases()
-        smoke.check_proxy_concurrency()
-        smoke.check_pre_login_provider_guards()
-        smoke.check_precredential_bedrock_harness_launchers()
-        smoke.check_installed_agent_script_launcher()
-        smoke.check_tools_surface()
-        smoke.check_network_event_prune_race()
+        smoke.check_credential_free_host_surface()
         print(f"\n{smoke.passed}/{smoke.total} checks passed")
         return 0 if smoke.passed == smoke.total else 1
     except Exception as exc:  # noqa: BLE001 - report, then always tear down in finally
@@ -380,9 +389,9 @@ class AwsSmoke:
     # sets a per-run prefix that api_thread_id applies to every thread route.
     thread_prefix = "thread-"
 
-    def __init__(self) -> None:
+    def __init__(self, workdir: Path | None = None) -> None:
         self.agent_runtime = "codex"
-        self.workdir = Path(tempfile.mkdtemp(prefix="smoke-aws-"))
+        self.workdir = workdir or Path(tempfile.mkdtemp(prefix="smoke-aws-"))
         self.control_socket = self.workdir / "ssh-control"
         self.ssh_key: str | None = None
         self.public_key: str | None = None
@@ -396,6 +405,15 @@ class AwsSmoke:
     @property
     def managed_domains(self) -> tuple[str, ...]:
         return SMOKE_MANAGED_DOMAINS
+
+    @property
+    def expected_agent_name(self) -> str:
+        """Agent identity expected in the installed host configuration.
+
+        Provider-neutral live-host checks are also exercised by the Lima
+        smoke, whose per-run identity is intentionally unique.
+        """
+        return SMOKE_AGENT_NAME
 
     def api_thread_id(self, thread_id: str) -> str:
         """The host-side thread id for a harness thread name."""
@@ -496,6 +514,40 @@ class AwsSmoke:
         policy["network_integrations"]["python_packages"] = {"enabled": True}
         policy["network_integrations"]["npm_packages"] = {"enabled": True}
         return policy
+
+    def check_credential_free_host_surface(self) -> None:
+        """Exercise the live host without external account credentials.
+
+        The Lima smoke reuses this provider-neutral contract after booting its
+        own guest, so additions here cover both real deployment providers.
+        """
+        checks = (
+            self.check_health,
+            self.check_host_config_schema,
+            self.check_agent_home_guidance,
+            self.check_ui_page,
+            self.check_admin_auth,
+            self.check_workspace_backends_without_providers,
+            self.check_initial_disabled_provider_deploy,
+            self.check_network_policy,
+            self.check_policy_validation_and_concurrency,
+            self.check_turn_admission_contract,
+            self.check_admin_concurrency,
+            self.check_state_transactions,
+            self.check_event_pagination,
+            self.check_enforcement,
+            self.check_github_read_paths,
+            self.check_package_client_headers,
+            self.check_proxy_edge_cases,
+            self.check_proxy_concurrency,
+            self.check_pre_login_provider_guards,
+            self.check_precredential_bedrock_harness_launchers,
+            self.check_installed_agent_script_launcher,
+            self.check_tools_surface,
+            self.check_network_event_prune_race,
+        )
+        for check in checks:
+            check()
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -741,7 +793,7 @@ class AwsSmoke:
             " 'hostname', o.hostname, 'tunnel_token', o.tunnel_token)) ORDER BY o.mode)"
             " FROM operator_connections o), '[]'::json))::text FROM config c\""
         ))
-        if config.get("agent_name") != SMOKE_AGENT_NAME:
+        if config.get("agent_name") != self.expected_agent_name:
             raise AssertionError(f"host config has wrong agent_name: {config}")
         if not config.get("admin_password_sha256"):
             raise AssertionError(f"host config missing password hash: {config}")
@@ -2181,7 +2233,9 @@ class AwsSmoke:
             ("raw listed file", f"{curl} https://raw.githubusercontent.com/infiloop2/kern/HEAD/README.md", read_ok),
             ("raw foreign file", f"{curl} https://raw.githubusercontent.com/torvalds/linux/HEAD/README", read_ok),
             ("codeload listed tarball", f"{curl} https://codeload.github.com/infiloop2/kern/tar.gz/HEAD", read_ok),
-            ("codeload foreign tarball", f"{curl} https://codeload.github.com/torvalds/linux/tar.gz/HEAD", read_ok),
+            # Keep this a guard check, not a bandwidth test: the Linux kernel
+            # tarball can exceed the smoke's fixed request deadline.
+            ("codeload foreign tarball", f"{curl} https://codeload.github.com/octocat/Hello-World/tar.gz/HEAD", read_ok),
             ("github.com web read", f"{curl} https://github.com/torvalds/linux", read_ok),
             # The API tarball endpoint 302s to codeload; following the
             # redirect exercises both domains in one read chain.
@@ -3173,7 +3227,9 @@ class AwsSmoke:
                 }
                 name = f"{tool_id}_{action_id}"
                 response, parsed = shim_bundled_call(tool_id, action_id, arguments)
-                if tool_id == "polymarket":
+                # Polymarket and Web Fetch need no credential or config, so
+                # they must execute on the fresh host rather than fail closed.
+                if tool_id in ("polymarket", "web_fetch"):
                     if response.get("isError") or not isinstance(parsed, dict) or parsed.get("status") != "success_executed":
                         raise AssertionError(f"credential-free {name} failed: {response} {parsed}")
                     public_results[action_id] = parsed

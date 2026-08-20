@@ -408,6 +408,74 @@ class MigrateRunnerTests(unittest.TestCase):
             )
             self.assertEqual(cur.fetchone(), (None, None, False))
 
+    def test_workspace_resource_limit_migration_expands_and_restores_bounds(self) -> None:
+        self.assertEqual(migrate.up(target=37, quiet=True), list(range(1, 38)))
+        self.assertEqual(migrate.up(target=38, quiet=True), [38])
+
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO memory_pages"
+                " (page_id, description, content, created_by, updated_by, created_at, updated_at)"
+                " VALUES ('boundary', 'Boundary page', %s, 'user', 'user',"
+                " '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z')",
+                ("m" * 2000,),
+            )
+            cur.execute(
+                "INSERT INTO memory_page_revisions"
+                " (page_id, revision, description, content, deleted, actor, created_at)"
+                " VALUES ('boundary', 1, 'Boundary page', %s, FALSE, 'user',"
+                " '2026-08-18T00:00:00Z')",
+                ("r" * 2000,),
+            )
+            cur.execute(
+                "INSERT INTO schedules"
+                " (name, message, cadence, interval_minutes, agent_runtime, model, effort,"
+                " next_run_at, created_at, updated_at)"
+                " VALUES ('Boundary schedule', %s, 'interval', 60, 'codex',"
+                " 'gpt-5.6-terra', 'high', '2026-08-18T01:00:00Z',"
+                " '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z') RETURNING id",
+                ("s" * 12000,),
+            )
+            schedule_id = int(cur.fetchone()[0])
+            cur.execute(
+                "INSERT INTO schedule_revisions"
+                " (schedule_id, revision, name, message, cadence, interval_minutes,"
+                " agent_runtime, model, effort, deleted, actor, created_at)"
+                " VALUES (%s, 1, 'Boundary schedule', %s, 'interval', 60, 'codex',"
+                " 'gpt-5.6-terra', 'high', FALSE, 'user', '2026-08-18T00:00:00Z')",
+                (schedule_id, "v" * 12000),
+            )
+            cur.execute(
+                "INSERT INTO schedule_runs"
+                " (schedule_id, thread_id, message, agent_runtime, model, effort,"
+                " status, scheduled_for)"
+                " VALUES (%s, %s, %s, 'codex', 'gpt-5.6-terra', 'high',"
+                " 'succeeded', '2026-08-18T01:00:00Z')",
+                (schedule_id, f"schedule-{schedule_id}-run-1", "u" * 12000),
+            )
+
+        self.assertEqual(migrate.down(target=37, quiet=True), [38])
+        with db.transaction() as cur:
+            cur.execute("SELECT char_length(content) FROM memory_pages WHERE page_id = 'boundary'")
+            self.assertEqual(cur.fetchone(), (1000,))
+            cur.execute(
+                "SELECT char_length(content) FROM memory_page_revisions"
+                " WHERE page_id = 'boundary'"
+            )
+            self.assertEqual(cur.fetchone(), (1000,))
+            cur.execute("SELECT char_length(message) FROM schedules WHERE id = %s", (schedule_id,))
+            self.assertEqual(cur.fetchone(), (4000,))
+            cur.execute(
+                "SELECT char_length(message) FROM schedule_revisions WHERE schedule_id = %s",
+                (schedule_id,),
+            )
+            self.assertEqual(cur.fetchone(), (4000,))
+            cur.execute(
+                "SELECT char_length(message) FROM schedule_runs WHERE schedule_id = %s",
+                (schedule_id,),
+            )
+            self.assertEqual(cur.fetchone(), (4000,))
+
     def test_github_actions_blob_migration_removes_overlapping_custom_domains(self) -> None:
         self.assertEqual(migrate.up(target=2, quiet=True), [1, 2])
         removed = (
@@ -729,7 +797,7 @@ class MigrateRunnerTests(unittest.TestCase):
                     )
                 self.assertEqual(
                     migrate.up(quiet=True),
-                    [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37],
+                    [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
                 )
                 with db.transaction() as cur:
                     # Migration 0026 removed the old ledger; every later
@@ -742,7 +810,7 @@ class MigrateRunnerTests(unittest.TestCase):
                         [(int(version), str(name)) for version, name in cur.fetchall()],
                         [
                             (version, migrations[version].name)
-                            for version in range(1, 38)
+                            for version in range(1, 40)
                         ],
                     )
                     cur.execute(

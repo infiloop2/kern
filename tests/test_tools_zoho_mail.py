@@ -77,7 +77,7 @@ class ZohoMailToolTests(unittest.TestCase):
         self.assertEqual(tool.manifest.connection, "oauth")
         self.assertEqual(
             [action.id for action in tool.manifest.actions],
-            ["search_messages", "list_folders", "list_messages", "read_message", "send_email"],
+            ["search_messages", "list_folders", "list_senders", "list_messages", "read_message", "send_email"],
         )
         send = tool.manifest.action("send_email")
         assert send is not None
@@ -146,6 +146,43 @@ class ZohoMailToolTests(unittest.TestCase):
             "type": "Inbox",
             "imap_access": True,
         })
+
+    def test_list_senders_returns_live_verified_addresses_with_default_first(self) -> None:
+        account = dict(ACCOUNT)
+        account["emailAddress"] = cast(list[JSONValue], [
+            *cast(list[JSONValue], ACCOUNT["emailAddress"]),
+            {"mailId": "pending@example.com", "isAlias": True, "isConfirmed": False},
+            {"mailId": "receive-only@example.com", "isAlias": True, "isConfirmed": True},
+        ])
+        account["sendMailDetails"] = cast(list[JSONValue], [
+            *cast(list[JSONValue], ACCOUNT["sendMailDetails"]),
+            {"fromAddress": "disabled@example.com", "status": False},
+            {"fromAddress": "send-only@example.com", "status": True},
+        ])
+        with patch.object(
+            zoho_mail,
+            "json_request",
+            return_value=success(cast(list[JSONValue], [cast(JSONObject, account)])),
+        ):
+            result = ZohoMailTool().execute("list_senders", {}, connected_api())
+
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["default_from_address"], "owner@example.com")
+        self.assertEqual(result.result["from_addresses"], [
+            "owner@example.com",
+            "alias@example.com",
+            "receive-only@example.com",
+            "send-only@example.com",
+        ])
+        self.assertNotIn("pending@example.com", result.result["from_addresses"])
+        self.assertNotIn("disabled@example.com", result.result["from_addresses"])
+
+    def test_list_senders_validates_empty_input_before_request(self) -> None:
+        with patch.object(zoho_mail, "json_request") as request:
+            result = ZohoMailTool().execute("list_senders", {"unexpected": "value"}, connected_api())
+        assert isinstance(result, ActionFailed)
+        self.assertIn("takes no input", result.error)
+        request.assert_not_called()
 
     def test_search_guards_query_and_caps_provider_results(self) -> None:
         urls: list[str] = []
@@ -516,6 +553,17 @@ class ZohoMailToolTests(unittest.TestCase):
             spec = zoho_mail.MANIFEST.action(action)
             assert spec is not None
             self.assertEqual(tools_host.validate_against_schema(result.result, spec.output_schema, path="result"), "")
+
+        with patch.object(
+            zoho_mail,
+            "json_request",
+            return_value=success(cast(list[JSONValue], [ACCOUNT])),
+        ):
+            result = ZohoMailTool().execute("list_senders", {}, connected_api())
+        assert isinstance(result, ActionExecuted)
+        spec = zoho_mail.MANIFEST.action("list_senders")
+        assert spec is not None
+        self.assertEqual(tools_host.validate_against_schema(result.result, spec.output_schema, path="result"), "")
 
 
 class ZohoMailCredentialFlowTests(unittest.TestCase):

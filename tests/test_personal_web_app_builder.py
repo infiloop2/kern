@@ -24,6 +24,29 @@ MIGRATIONS_DIR = REPO_ROOT / "host" / "migrations"
 
 
 class AgenticWebAppContractTests(unittest.TestCase):
+    def test_app_summary_forwards_the_latest_host_event_sequence(self) -> None:
+        summary = backend._web_app_summary(
+            (
+                "app-1",
+                "Release notes",
+                3,
+                "2026-08-18T10:00:00Z",
+                "2026-08-18T10:01:00Z",
+                False,
+                False,
+            ),
+            {
+                "status": "idle",
+                "agent_runtime": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "high",
+                "last_used_at": "2026-08-18T10:02:00Z",
+                "latest_event_seq": 42,
+            },
+        )
+
+        self.assertEqual(summary["latest_event_seq"], 42)
+
     def test_fixed_workspace_identity(self) -> None:
         self.assertFalse((APP_DIR / "agent.md").exists())
 
@@ -42,6 +65,14 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('JSON.parse(JSON.stringify(message.value))', source)
         self.assertEqual(source.count("Object.defineProperty(parent, leaf"), 2)
 
+    def test_capability_worker_supports_collection_queries(self) -> None:
+        source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
+        self.assertIn("query(collection, request) { return query(collection, request); }", source)
+        self.assertIn('type: "collection-query"', source)
+        self.assertIn("/runtime/collections/${encodeURIComponent(message.collection)}/query", source)
+        self.assertIn('message.type === "collection-query-result"', source)
+        self.assertIn("response.collection.revision !== run.revision", source)
+
     def test_ui_is_an_app_first_canvas_with_one_command_surface(self) -> None:
         index = (APP_DIR / "ui" / "index.html").read_text()
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
@@ -49,17 +80,18 @@ class AgenticWebAppContractTests(unittest.TestCase):
         for element_id in (
             'id="app-view"', 'id="app-update-veil"', 'id="archived-app-veil"',
             'id="app-refresh"', 'id="settings-open"', 'id="recovery-open"',
-            'id="lock-agent-updates"',
+            'id="lock-agent-updates"', 'id="history-toggle"',
             'id="latest-agent-card"', 'id="latest-agent-message"',
             'id="agent-command-surface"', 'id="rename-app"',
             'id="app-history-list"', 'id="recovery-drawer"',
+            'id="chat-history"', 'id="chat-history-scroll"',
+            'id="chat-history-list"', 'id="chat-history-more"',
             'id="stop-turn"',
             'id="attach-file"', 'id="attachments"',
             'id="agent-settings-idle-note"', 'id="agent-session-change-warning"',
         ):
             self.assertIn(element_id, index)
         self.assertNotIn('id="admin-overlay"', index)
-        self.assertNotIn('id="chat-history"', index)
         self.assertNotIn('id="chat-drawer"', index)
         self.assertNotIn('id="sidebar-open"', index)
         self.assertNotIn('id="open-chat"', index)
@@ -68,6 +100,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertNotIn('id="chat-status"', index)
         self.assertNotIn('id="composer-running"', index)
         self.assertLess(index.index('id="chat-composer"'), index.index('id="latest-agent-card"'))
+        self.assertLess(index.index('id="chat-composer"'), index.index('id="chat-history"'))
+        self.assertNotIn('id="revision-label"', index)
         self.assertIn(
             ".agent-settings.active-locked:hover #agent-settings-idle-note",
             css,
@@ -98,6 +132,26 @@ class AgenticWebAppContractTests(unittest.TestCase):
         )
         self.assertIn("[User-uploaded file: ${attachment.file.path}]", source)
         self.assertIn('query.push("activity=false")', source)
+        self.assertIn("function renderConversationHistory", source)
+        self.assertIn("function loadOlderConversationEvents", source)
+        self.assertIn("message.textContent = entry.message", source)
+        self.assertIn("historyRenderedAppId !== selectedAppId", source)
+        self.assertIn("entryKey !== historyRenderedEntryKey", source)
+        self.assertIn('scrollTop <= 80', source)
+        self.assertIn("button.app-toolbar-button.history-toggle.active", css)
+        command_surface = css.split(".agent-command-surface {", 1)[1].split("}", 1)[0]
+        self.assertIn("z-index: 13", command_surface)
+        load_older = source.split("async function loadOlderConversationEvents", 1)[1].split(
+            "\nfunction setHistoryMode", 1
+        )[0]
+        self.assertLess(
+            load_older.index("const response = await api("),
+            load_older.index("const previousHeight = scroll.scrollHeight"),
+        )
+        self.assertIn(
+            "scroll.scrollTop = previousTop + scroll.scrollHeight - previousHeight",
+            load_older,
+        )
         self.assertIn("KernRichText.compactActivityEvents(ordered)", source)
         self.assertIn("refreshSequence !== appsRefreshSequence", source)
         self.assertIn("let appSelectionSequence = 0;", source)
@@ -154,11 +208,12 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('event.target.closest("button[data-kern-copy-href]")', source)
         self.assertIn('showRuntimeStatus("Link copied", "success")', source)
 
-    def test_frame_does_not_render_a_conversation_transcript(self) -> None:
+    def test_frame_renders_recorded_messages_without_rewriting_them(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
         self.assertNotIn("[Workspace context]", source)
         self.assertNotIn("displayedUserMessage", source)
-        self.assertNotIn('id="chat-history"', (APP_DIR / "ui" / "index.html").read_text())
+        self.assertIn('id="chat-history"', (APP_DIR / "ui" / "index.html").read_text())
+        self.assertIn("message.textContent = entry.message", source)
         self.assertNotIn("Requested by user:", source)
 
     def test_generated_worker_is_pinned_to_its_workspace(self) -> None:
@@ -311,6 +366,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
         ).read_text()
         self.assertIn('data-memory-scope="swarm"', markup)
         self.assertIn('data-memory-scope="individual"', markup)
+        self.assertIn('id="memory-content" maxlength="2000"', markup)
+        self.assertIn('id="schedule-message" maxlength="12000"', markup)
         self.assertIn('params.set("scope", state.memoryScope)', source)
         self.assertIn('state.memoryScope === "individual"', source)
 
@@ -329,6 +386,10 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("first request in each agent\nexecution", instructions)
         self.assertIn("search swarm memory", instructions)
         self.assertIn("Global schedules", instructions)
+        self.assertIn("content is up to 2,000 characters", instructions)
+        self.assertIn(
+            "Schedule messages may contain up to 12,000 characters", instructions
+        )
         self.assertIn("GET /agent/identity", instructions)
         self.assertIn("search_conversation_history", instructions)
         self.assertIn("read_thread_history", instructions)
@@ -342,6 +403,9 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('"action":"publish_ui","expected_revision"', instructions)
         self.assertIn('"action":"set","expected_revision"', instructions)
         self.assertIn('"action":"batch","expected_revision"', instructions)
+        self.assertIn("/agent/apps/{app_id}/collections/leads/query", instructions)
+        self.assertIn("/agent/apps/{app_id}/collections/leads/actions", instructions)
+        self.assertIn('app.query("leads", request)', instructions)
         self.assertIn("communicate primarily by changing the App", instructions)
         self.assertIn("/agent/apps/{app_id}/state/data/read", instructions)
         self.assertIn("/agent/apps/{app_id}/state/data/shape", instructions)
@@ -378,9 +442,79 @@ class AgenticWebAppContractTests(unittest.TestCase):
         unified = (MIGRATIONS_DIR / "0028_unified_web_app_revisions.sql").read_text()
         self.assertIn("CREATE TABLE web_app_revisions", unified)
         self.assertIn("DROP TABLE web_app_history", unified)
+        collections = (MIGRATIONS_DIR / "0039_web_app_collections.sql").read_text()
+        self.assertIn("CREATE TABLE web_app_collection_state", collections)
+        self.assertIn("CREATE TABLE web_app_collection_rows", collections)
+        self.assertIn("value_json JSONB", collections)
+        self.assertIn("ADD COLUMN collections_json TEXT", collections)
+        self.assertNotIn("revision BIGINT NOT NULL DEFAULT 0", collections)
 
 
 class AgentActionValidationTests(unittest.TestCase):
+    def test_collection_restore_uses_multi_row_inserts(self) -> None:
+        cur = MagicMock()
+        snapshot = json.dumps(
+            {
+                "leads": {
+                    "lead-1": {"status": "new"},
+                    "lead-2": {"status": "qualified"},
+                }
+            }
+        )
+        backend._restore_collection_snapshot(cur, "app-1", snapshot, "now")
+
+        inserts = [
+            item
+            for item in cur.execute.call_args_list
+            if item.args[0].startswith("INSERT INTO web_app_collection_rows")
+        ]
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0].args[0].count("(%s, %s, %s, %s, %s, %s)"), 2)
+        self.assertEqual(len(inserts[0].args[1]), 12)
+
+    def test_collection_action_validation_is_bounded(self) -> None:
+        with (
+            patch.object(backend, "_require_web_app"),
+            self.assertRaises(backend.WorkspaceError) as empty,
+        ):
+            backend.apply_collection_actions(
+                "app-1", "leads", {"expected_revision": 0, "operations": []}
+            )
+        self.assertEqual(empty.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
+
+        too_large = {"body": "x" * backend.MAX_COLLECTION_ROW_BYTES}
+        with (
+            patch.object(backend, "_require_web_app"),
+            self.assertRaises(backend.WorkspaceError) as large,
+        ):
+            backend.apply_collection_actions(
+                "app-1",
+                "leads",
+                {
+                    "expected_revision": 0,
+                    "operations": [
+                        {"action": "upsert", "id": "lead-1", "value": too_large}
+                    ],
+                },
+            )
+        self.assertEqual(large.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+
+    def test_collection_query_validation_has_a_small_filter_language(self) -> None:
+        with (
+            patch.object(backend, "_require_web_app"),
+            self.assertRaises(backend.WorkspaceError) as invalid,
+        ):
+            backend.query_collection(
+                "app-1",
+                "leads",
+                {"filters": [{"field": "score", "op": "sql", "value": "DROP"}]},
+            )
+        self.assertEqual(invalid.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
+
+        with self.assertRaises(backend.WorkspaceError) as unicode_error:
+            backend._validated_collection_row({"name": "\ud800"})
+        self.assertEqual(unicode_error.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
+
     def test_whole_document_replaces_are_gone(self) -> None:
         for action in ("replace_app", "replace_data"):
             with self.subTest(action=action), self.assertRaises(backend.WorkspaceError) as error:
@@ -544,6 +678,21 @@ class BrowserRoutingTests(unittest.TestCase):
         load_ui.assert_called_once_with("app-2")
         read.assert_called_once_with("app-2", {"path": ["rows"]})
 
+    def test_browser_can_query_a_generated_app_collection(self) -> None:
+        result = {"name": "leads", "rows": [], "total": 0}
+        with patch.object(
+            backend, "query_collection", return_value=result
+        ) as query:
+            self.assertEqual(
+                backend.route_browser(
+                    "POST",
+                    "/apps/app-2/runtime/collections/leads/query",
+                    {"limit": 25},
+                ),
+                {"collection": result},
+            )
+        query.assert_called_once_with("app-2", "leads", {"limit": 25})
+
     def test_message_routes_use_the_same_context_only_delivery(self) -> None:
         with (
             patch.object(backend, "_workspace_lock", return_value=MagicMock()),
@@ -696,6 +845,40 @@ class BrowserRoutingTests(unittest.TestCase):
         load_ui.assert_called_once_with("app-9")
         load_data.assert_called_once_with("app-9")
         read.assert_called_once_with("app-9", {"path": ["items"]})
+
+    def test_agent_collection_routes_dispatch_reads_and_locked_writes(self) -> None:
+        listing = {"revision": 2, "items": []}
+        query_result = {"revision": 2, "rows": []}
+        action_result = {"ok": True, "revision": 3}
+        action = {"expected_revision": 2, "operations": [{"action": "delete", "id": "x"}]}
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "list_collections", return_value=listing) as list_all,
+            patch.object(backend, "query_collection", return_value=query_result) as query,
+            patch.object(backend, "_workspace_lock", return_value=MagicMock()),
+            patch.object(backend, "_require_agent_writable_web_app") as writable,
+            patch.object(backend, "apply_collection_actions", return_value=action_result) as apply,
+        ):
+            self.assertEqual(
+                backend.route_agent("GET", "/agent/apps/app-9/collections", None),
+                {"collections": listing},
+            )
+            self.assertEqual(
+                backend.route_agent(
+                    "POST", "/agent/apps/app-9/collections/leads/query", {"limit": 10}
+                ),
+                {"collection": query_result},
+            )
+            self.assertEqual(
+                backend.route_agent(
+                    "POST", "/agent/apps/app-9/collections/leads/actions", action
+                ),
+                action_result,
+            )
+        list_all.assert_called_once_with("app-9")
+        query.assert_called_once_with("app-9", "leads", {"limit": 10})
+        writable.assert_called_once_with("app-9")
+        apply.assert_called_once_with("app-9", "leads", action)
 
     def test_data_path_read_returns_only_the_requested_branch(self) -> None:
         with patch.object(
@@ -1746,6 +1929,142 @@ class AgenticWebAppDbTests(unittest.TestCase):
         self.assertEqual(state["revision"], 1)
         self.assertEqual(state["data"], {"count": 1, "label": "kept"})
 
+    def test_collections_query_rows_at_the_shared_app_revision(self) -> None:
+        backend.create_web_app()
+        self.assertEqual(backend.list_collections("app-1")["revision"], 0)
+        changed = backend.apply_collection_actions(
+            "app-1",
+            "leads",
+            {
+                "expected_revision": 0,
+                "operations": [
+                    {
+                        "action": "upsert",
+                        "id": "lead-1",
+                        "value": {
+                            "name": "One",
+                            "score": 80,
+                            "status": "qualified",
+                            "lead-status": "ready",
+                            "2026": True,
+                            "şehir": "İstanbul",
+                        },
+                    },
+                    {
+                        "action": "upsert",
+                        "id": "lead-2",
+                        "value": {"name": "Two", "score": 95},
+                    },
+                    {
+                        "action": "upsert",
+                        "id": "lead-3",
+                        "value": {
+                            "name": "Three",
+                            "score": 70,
+                            "status": "qualified",
+                            "profile": {"name": "A", "extra": True},
+                            "tags": ["one", "two"],
+                        },
+                    },
+                ],
+            },
+        )
+        self.assertEqual(changed["revision"], 1)
+        page = backend.query_collection(
+            "app-1",
+            "leads",
+            {
+                "filters": [{"field": "status", "op": "eq", "value": "qualified"}],
+                "sort": {"field": "score", "direction": "desc"},
+                "limit": 1,
+                "offset": 0,
+            },
+        )
+        self.assertEqual(page["revision"], 1)
+        self.assertEqual(page["total"], 2)
+        self.assertEqual(page["rows"][0]["id"], "lead-1")
+        self.assertEqual(page["next_offset"], 1)
+        for field, value in (
+            ("lead-status", "ready"),
+            ("2026", True),
+            ("şehir", "İstanbul"),
+        ):
+            with self.subTest(field=field):
+                result = backend.query_collection(
+                    "app-1",
+                    "leads",
+                    {"filters": [{"field": field, "op": "eq", "value": value}]},
+                )
+                self.assertEqual(result["total"], 1)
+                self.assertEqual(result["rows"][0]["id"], "lead-1")
+        second = backend.query_collection(
+            "app-1", "leads", {"ids": ["lead-2", "lead-3"], "limit": 10}
+        )
+        self.assertEqual({row["id"] for row in second["rows"]}, {"lead-2", "lead-3"})
+        self.assertEqual(
+            backend.query_collection(
+                "app-1",
+                "leads",
+                {"filters": [{"field": "profile", "op": "eq", "value": {"name": "A"}}]},
+            )["total"],
+            0,
+        )
+        self.assertEqual(
+            backend.query_collection(
+                "app-1",
+                "leads",
+                {"filters": [{"field": "tags", "op": "eq", "value": ["one"]}]},
+            )["total"],
+            0,
+        )
+        summary = backend.list_collections("app-1")
+        self.assertEqual(summary["rows"], 3)
+        self.assertEqual(summary["items"][0]["name"], "leads")
+        self.assertEqual(summary["items"][0]["rows"], 3)
+        self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 1)
+        newest = backend.list_revisions("app-1", {})["revisions"][0]
+        self.assertEqual(newest["revision"], 1)
+        self.assertEqual(newest["kind"], "collection")
+
+    def test_collection_batch_is_atomic_and_uses_the_app_revision(self) -> None:
+        backend.create_web_app()
+        backend.apply_collection_actions(
+            "app-1",
+            "leads",
+            {
+                "expected_revision": 0,
+                "operations": [
+                    {"action": "upsert", "id": "lead-1", "value": {"status": "new"}}
+                ],
+            },
+        )
+        with self.assertRaises(backend.WorkspaceError) as stale:
+            backend.apply_collection_actions(
+                "app-1",
+                "leads",
+                {
+                    "expected_revision": 0,
+                    "operations": [
+                        {"action": "delete", "id": "lead-1"},
+                        {"action": "upsert", "id": "lead-2", "value": {}},
+                    ],
+                },
+            )
+        self.assertEqual(stale.exception.status, HTTPStatus.CONFLICT)
+        rows = backend.query_collection("app-1", "leads", {})["rows"]
+        self.assertEqual([row["id"] for row in rows], ["lead-1"])
+        with self.assertRaises(backend.WorkspaceError) as stale_document:
+            backend.apply_agent_action(
+                {
+                    "action": "set",
+                    "expected_revision": 0,
+                    "path": ["status"],
+                    "value": "done",
+                },
+                "app-1",
+            )
+        self.assertEqual(stale_document.exception.status, HTTPStatus.CONFLICT)
+
     def test_agent_update_lock_persists_and_only_blocks_agent_writes(self) -> None:
         backend.create_web_app()
         locked = backend.set_agent_updates_locked("app-1", {"locked": True})
@@ -1887,7 +2206,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
         revisions = backend.list_revisions("app-1", {})["revisions"]
         self.assertEqual([item["revision"] for item in revisions], [1, 0])
 
-    def test_restore_recovers_interface_and_data_as_a_forward_revision(self) -> None:
+    def test_restore_recovers_interface_data_and_collections_as_a_forward_revision(self) -> None:
         backend.create_web_app()
         backend.apply_agent_action(
             {
@@ -1902,10 +2221,24 @@ class AgenticWebAppDbTests(unittest.TestCase):
             },
             "app-1",
         )
+        backend.apply_collection_actions(
+            "app-1",
+            "leads",
+            {
+                "expected_revision": 1,
+                "operations": [
+                    {
+                        "action": "upsert",
+                        "id": "lead-1",
+                        "value": {"status": "saved"},
+                    }
+                ],
+            },
+        )
         backend.apply_agent_action(
             {
                 "action": "publish_ui",
-                "expected_revision": 1,
+                "expected_revision": 2,
                 "html": "<main>New</main>",
                 "css": "",
                 "javascript": "",
@@ -1915,10 +2248,46 @@ class AgenticWebAppDbTests(unittest.TestCase):
             },
             "app-1",
         )
-        restored = backend.restore_revision("app-1", 1)["app"]
-        self.assertEqual(restored["revision"], 3)
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT collections_json FROM web_app_revisions"
+                " WHERE app_id = 'app-1' AND revision = 3"
+            )
+            snapshot_row = cur.fetchone()
+        assert snapshot_row is not None
+        self.assertEqual(
+            json.loads(snapshot_row[0]),
+            {"leads": {"lead-1": {"status": "saved"}}},
+        )
+        backend.apply_collection_actions(
+            "app-1",
+            "leads",
+            {
+                "expected_revision": 3,
+                "operations": [
+                    {
+                        "action": "upsert",
+                        "id": "lead-1",
+                        "value": {"status": "changed"},
+                    },
+                    {
+                        "action": "upsert",
+                        "id": "lead-2",
+                        "value": {"status": "new"},
+                    },
+                ],
+            },
+        )
+        restored = backend.restore_revision("app-1", 2)["app"]
+        self.assertEqual(restored["revision"], 5)
         self.assertEqual(restored["html"], "<main>Saved</main>")
         self.assertEqual(restored["data"], {"count": 2})
+        collection = backend.query_collection("app-1", "leads", {})
+        self.assertEqual(collection["revision"], 5)
+        self.assertEqual(
+            collection["rows"],
+            [{"id": "lead-1", "value": {"status": "saved"}}],
+        )
         newest = backend.list_revisions("app-1", {})["revisions"][0]
         self.assertEqual(newest["kind"], "restore")
-        self.assertEqual(newest["restored_from"], 1)
+        self.assertEqual(newest["restored_from"], 2)

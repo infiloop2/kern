@@ -22,6 +22,7 @@ const INTEGRATION_LOGOS = {
   "tool:brave_search": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2.2" d="m16 3 10 4.2-1 14.2L16 28l-9-6.6L6 7.2 16 3Z"/><path fill="currentColor" d="M11 8.8h7c4 0 5.2 5 2.1 6.5 3.8 1.3 2.5 7.7-2 7.7H11V8.8Zm4 3v2.4h2.7c1.6 0 1.6-2.4 0-2.4H15Zm0 5.2v3h3c1.9 0 1.9-3 0-3h-3Z"/></svg>`,
   "tool:gmail": `<svg viewBox="0 0 32 32"><path class="gmail-blue" d="M4 10v15h5V14.3Z"/><path class="gmail-red" d="M4 10 8 7l8 6.2L24 7l4 3v15h-5V14.2L16 20 9 14.3V25H4Z"/><path class="gmail-yellow" d="m24 7 4 3-5 4.2V8Z"/><path class="gmail-green" d="M23 14.2 28 10v15h-5Z"/></svg>`,
   "tool:google_calendar": `<svg viewBox="0 0 32 32"><path class="calendar-blue" d="M6 5h20v22H6z"/><path class="calendar-green" d="M6 5h14v7H6z"/><path class="calendar-yellow" d="M6 12h7v15H6z"/><path class="calendar-red" d="M20 5h6v7h-6z"/><path fill="#fff" d="M13 14h6.3c3.1 0 4.7 1.6 4.7 3.7 0 1.5-.9 2.7-2.3 3.1v.1c1.7.3 2.7 1.5 2.7 3.2 0 .5-.1 1-.2 1.4H20c.2-.4.3-.8.3-1.3 0-1.3-.9-2.1-2.5-2.1h-1.5v-2.7h1.4c1.4 0 2.2-.7 2.2-1.8 0-1-.8-1.7-2.1-1.7H13V14Z"/></svg>`,
+  "tool:google_search_console": `<svg viewBox="0 0 32 32"><path fill="#4285f4" d="M5 5h5v22H5z"/><path fill="#34a853" d="M12 17h5v10h-5z"/><path fill="#fbbc04" d="M19 12h5v15h-5z"/><path fill="#ea4335" d="M26 8h2v19h-2z"/><path fill="none" stroke="#4285f4" stroke-width="2.4" stroke-linecap="round" d="m8 15 6-5 5 3 7-8"/></svg>`,
   "tool:ibkr": `<svg viewBox="0 0 775 1511"><path fill="currentColor" d="M.3 1510.2V775.3l668 734.9Z"/><circle cx="574.2" cy="954.4" r="200.2" fill="currentColor"/><path fill="currentColor" d="M668.3.4.3 1510.2V775.3Z"/></svg>`,
   "tool:instagram": `<svg viewBox="0 0 448 512"><path fill="currentColor" d="M224.3 141a115 115 0 1 0-.6 230 115 115 0 1 0 .6-230Zm-.6 40.4a74.6 74.6 0 1 1 .6 149.2 74.6 74.6 0 1 1-.6-149.2Zm93.4-45.1a26.8 26.8 0 1 1 53.6 0 26.8 26.8 0 1 1-53.6 0Zm129.7 27.2c-1.7-35.9-9.9-67.7-36.2-93.9-26.2-26.2-58-34.4-93.9-36.2-37-2.1-147.9-2.1-184.9 0-35.8 1.7-67.6 9.9-93.9 36.1S3.5 127.5 1.7 163.4c-2.1 37-2.1 147.9 0 184.9 1.7 35.9 9.9 67.7 36.2 93.9s58 34.4 93.9 36.2c37 2.1 147.9 2.1 184.9 0 35.9-1.7 67.7-9.9 93.9-36.2 26.2-26.2 34.4-58 36.2-93.9 2.1-37 2.1-147.8 0-184.8ZM399 388c-7.8 19.6-22.9 34.7-42.6 42.6-29.5 11.7-99.5 9-132.1 9s-102.7 2.6-132.1-9c-19.6-7.8-34.7-22.9-42.6-42.6-11.7-29.5-9-99.5-9-132.1s-2.6-102.7 9-132.1c7.8-19.6 22.9-34.7 42.6-42.6 29.5-11.7 99.5-9 132.1-9s102.7-2.6 132.1 9c19.6 7.8 34.7 22.9 42.6 42.6 11.7 29.5 9 99.5 9 132.1s2.7 102.7-9 132.1Z"/></svg>`,
   "tool:instagram_discovery": `<svg viewBox="0 0 32 32"><rect x="4" y="4" width="20" height="20" rx="6" fill="none" stroke="currentColor" stroke-width="2.4"/><circle cx="14" cy="14" r="4.5" fill="none" stroke="currentColor" stroke-width="2.4"/><circle cx="21" cy="7.8" r="1.4" fill="currentColor"/><circle cx="23.5" cy="23.5" r="4.5" fill="#111722" stroke="#fff" stroke-width="2"/><path d="m27 27 3 3" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>`,
@@ -32,6 +33,8 @@ const INTEGRATION_LOGOS = {
   "tool:runway": `<span class="integration-logo-word integration-logo-word-runway">R</span>`,
   "tool:seedance": `<svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="11" fill="none" stroke="currentColor" stroke-width="2.2"/><path fill="currentColor" d="M13 10.5 22 16l-9 5.5v-11Z"/></svg>`,
   "tool:twitter": `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M18.2 2h3.7l-8.1 9.3L23.3 22h-7.5l-5.9-7.7L3.2 22H-.5l8.7-9.9L-.9 2h7.7l5.3 7 6.1-7Zm-1.3 18.1h2L5.7 3.8H3.5l13.4 16.3Z"/></svg>`,
+  "tool:web_fetch": `<svg viewBox="0 0 32 32"><circle cx="14" cy="16" r="10" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 16h20M14 6c3 2.8 4.5 6.1 4.5 10S17 23.2 14 26M14 6c-3 2.8-4.5 6.1-4.5 10S11 23.2 14 26M20 8h7v7M27 8l-8 8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/></svg>`,
+  "tool:twitterapi_io": `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M18.2 2h3.7l-8.1 9.3L23.3 22h-7.5l-5.9-7.7L3.2 22H-.5l8.7-9.9L-.9 2h7.7l5.3 7 6.1-7Zm-1.3 18.1h2L5.7 3.8H3.5l13.4 16.3Z"/></svg>`,
   "tool:zoho_mail": `<span class="integration-logo-word integration-logo-word-zoho">Zoho</span>`,
   custom_domain: `<svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="11" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M5 16h22M16 5c3.3 3.1 5 6.8 5 11s-1.7 7.9-5 11M16 5c-3.3 3.1-5 6.8-5 11s1.7 7.9 5 11" fill="none" stroke="currentColor" stroke-width="2"/></svg>`,
 };
@@ -124,6 +127,8 @@ function toolGuide(tool) {
       codeName: true,
       description: action.description,
       approval: action.approval,
+      inputSchema: action.input_schema || {},
+      outputSchema: action.output_schema || {},
     })),
     dataSummary: {
       items: tool.data_summary.cards.map(card => ({
@@ -323,8 +328,63 @@ function renderCapability(capability) {
     <div class="guide-capability">
       <div class="guide-capability-head"><h4>${capability.codeName ? `<code>${esc(capability.name)}</code>` : esc(capability.name)}</h4>${approval}</div>
       <p>${esc(capability.description)}</p>
+      ${renderActionContract(capability)}
       ${capability.linkUrl ? `<a href="${esc(capability.linkUrl)}" target="_blank" rel="noopener noreferrer">${esc(capability.linkLabel)}</a>` : ""}
     </div>`;
+}
+
+function schemaProperties(schema) {
+  if (!schema || typeof schema !== "object" || !schema.properties || typeof schema.properties !== "object") return [];
+  return Object.entries(schema.properties);
+}
+
+function schemaTypeLabel(schema) {
+  if (!schema || typeof schema !== "object") return "unspecified";
+  let label = Array.isArray(schema.type) ? schema.type.join(" or ") : (schema.type || "unspecified");
+  if (label === "array") {
+    const itemSchema = schema.items && typeof schema.items === "object" ? schema.items : {};
+    if (Array.isArray(itemSchema.oneOf)) {
+      label = `array of ${itemSchema.oneOf.map(schemaTypeLabel).join(" or ")}`;
+    } else {
+      label = `array of ${schemaTypeLabel(itemSchema)}`;
+    }
+  }
+  if (Array.isArray(schema.enum)) label += ` · ${schema.enum.map(value => JSON.stringify(value)).join(" | ")}`;
+  if (Number.isInteger(schema.minItems)) label += ` · min ${schema.minItems}`;
+  if (Number.isInteger(schema.maxItems)) label += ` · max ${schema.maxItems}`;
+  return label;
+}
+
+function renderParameterTable(title, schema, emptyLabel) {
+  const properties = schemaProperties(schema);
+  const required = new Set(Array.isArray(schema?.required) ? schema.required : []);
+  return `<section class="guide-action-parameters">
+    <h5>${esc(title)}</h5>
+    ${properties.length ? `<div class="table-scroll"><table>
+      <thead><tr><th>Parameter</th><th>Specification</th></tr></thead>
+      <tbody>${properties.map(([name, parameter]) => `<tr>
+        <td><code>${esc(name)}</code></td>
+        <td><div class="guide-parameter-spec">
+          <span><code>${esc(schemaTypeLabel(parameter))}</code> · ${required.has(name) ? "required" : "optional"}</span>
+          <p>${esc(parameter && parameter.description ? parameter.description : "No description declared.")}</p>
+        </div></td>
+      </tr>`).join("")}</tbody>
+    </table></div>` : `<p class="muted">${esc(emptyLabel)}</p>`}
+    ${schema && schema.additionalProperties !== false ? '<p class="muted">The manifest permits additional output fields beyond those listed.</p>' : ""}
+  </section>`;
+}
+
+function renderActionContract(capability) {
+  if (!capability.codeName || !capability.inputSchema || !capability.outputSchema) return "";
+  const inputCount = schemaProperties(capability.inputSchema).length;
+  const outputCount = schemaProperties(capability.outputSchema).length;
+  return `<details class="guide-action-contract">
+    <summary>Parameters: ${inputCount} ${inputCount === 1 ? "input" : "inputs"} · ${outputCount} declared ${outputCount === 1 ? "output" : "outputs"}</summary>
+    <div class="guide-action-contract-body">
+      ${renderParameterTable("Input parameters", capability.inputSchema, "No input parameters.")}
+      ${renderParameterTable("Declared output fields", capability.outputSchema, "No structured output fields are declared.")}
+    </div>
+  </details>`;
 }
 
 function renderDataSummary(summary) {

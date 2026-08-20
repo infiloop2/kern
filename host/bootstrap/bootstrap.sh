@@ -50,38 +50,40 @@ print(value)
 PY
 }
 
-# EBS device names requested in the EC2 API are not stable inside Nitro guests;
-# resolve by EBS volume id and mount by UUID.
-resolve_ebs_device() {
-  local volume_id="$1"
-  local normalized="${volume_id//-/}"
-  local candidates=(
-    "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${normalized}"
-    "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${volume_id}"
-  )
-  local attempt candidate
-  for attempt in $(seq 1 30); do
-    for candidate in "${candidates[@]}"; do
-      if [ -e "$candidate" ]; then
-        readlink -f "$candidate"
-        return 0
-      fi
-    done
-    sleep 1
-  done
-  echo "could not find attached EBS volume device for ${volume_id}" >&2
-  return 1
-}
+# Provider adapters resolve their attached storage to two device roles before
+# this shared bootstrap formats or mounts anything.
+resolve_storage_devices() (
+  resolver_root="$(mktemp -d)"
+  trap 'rm -rf -- "$resolver_root"' EXIT
+  tar -xzf /tmp/kern-host-code.tar.gz -C "$resolver_root" \
+    host/__init__.py \
+    host/bootstrap
+  PYTHONPATH="$resolver_root" python3 -m host.bootstrap.storage_resolver
+)
 
-# Format a new EBS volume exactly once, then mount it through /etc/fstab.
+# Format a new durable device exactly once, then mount it through /etc/fstab.
+# Mounting by filesystem UUID keeps later guest boots independent of device
+# ordering on every provider.
 prepare_volume() {
-  local volume_id="$1"
+  local device="$1"
   local mount_point="$2"
   local label="$3"
-  local device uuid
-  device="$(resolve_ebs_device "$volume_id")"
+  local allow_format="$4"
+  local existing_label uuid
   if ! blkid "$device" >/dev/null 2>&1; then
+    if [ "$allow_format" != yes ]; then
+      echo "preserved device ${device} has no filesystem; refusing to format it during replacement" >&2
+      return 1
+    fi
     mkfs.ext4 -F -L "$label" "$device"
+  else
+    # A role hint on the filesystem itself: refuse a device whose existing
+    # label belongs to another role or another system entirely.
+    existing_label="$(blkid -s LABEL -o value "$device" 2>/dev/null || true)"
+    if [ -n "$existing_label" ] && [ "$existing_label" != "$label" ]; then
+      echo "device ${device} has filesystem label ${existing_label}, expected ${label}; refusing to mount" >&2
+      return 1
+    fi
   fi
   uuid="$(blkid -s UUID -o value "$device")"
   mkdir -p "$mount_point"
@@ -92,16 +94,34 @@ prepare_volume() {
 }
 
 # Mount durable admin and agent volumes before creating service users; their
-# home directories live on those volumes.
+# home directories live on those volumes. Provider adapters return exactly two
+# device paths; this bootstrap knows only their admin and agent roles.
 mount_durable_volumes() {
-admin_volume_id="$(payload_value storage_volumes.admin)"
-agent_volume_id="$(payload_value storage_volumes.agent)"
-prepare_volume "$admin_volume_id" "$ADMIN_MOUNT" KERN_ADMIN
-prepare_volume "$agent_volume_id" "$AGENT_MOUNT" KERN_AGENT
+operation_mode="$(payload_value operation.mode)"
+resolver_output="$(mktemp)"
+if ! resolve_storage_devices > "$resolver_output"; then
+  rm -f "$resolver_output"
+  return 1
+fi
+mapfile -t role_devices < "$resolver_output"
+rm -f "$resolver_output"
+if [ "${#role_devices[@]}" -ne 2 ] || [ "${role_devices[0]}" = "${role_devices[1]}" ]; then
+  echo "storage resolver did not return two distinct role devices" >&2
+  exit 1
+fi
+admin_device="${role_devices[0]}"
+agent_device="${role_devices[1]}"
+if [ "$operation_mode" = deploy ]; then
+  prepare_volume "$admin_device" "$ADMIN_MOUNT" KERN_ADMIN yes
+  prepare_volume "$agent_device" "$AGENT_MOUNT" KERN_AGENT yes
+else
+  prepare_volume "$admin_device" "$ADMIN_MOUNT" KERN_ADMIN no
+  prepare_volume "$agent_device" "$AGENT_MOUNT" KERN_AGENT no
+fi
 }
 
-# Stable IDs keep durable EBS file owners meaningful across root-volume
-# replacement. If an image already uses one of these IDs, fail instead of
+# Stable IDs keep durable filesystem owners meaningful across disposable
+# compute replacement. If an image already uses one of these IDs, fail instead of
 # silently assigning preserved data to the wrong service account.
 ensure_group() {
   local name="$1"

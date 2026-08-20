@@ -538,6 +538,9 @@ Thread endpoints:
 Operator and peer-authenticated Workspace-service callers use the same thread
 id contract. The three prefixes identify the product thread kind; they do not
 convey authority or prevent operator inspection and recovery.
+Thread summaries include `latest_event_seq`, the newest retained event sequence
+for that thread (or `0` before any activity), so clients can detect changes
+without relying on the whole-second `last_used_at` timestamp.
 
 Stop has no mailbox or deferred delivery. The HTTP request synchronizes
 directly with steering and provider event writes, commits `thread.stopped`,

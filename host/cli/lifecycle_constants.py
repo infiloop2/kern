@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-INSTANCE_TAG_KEY = "kern-host-agent-name"
-OWNER_TAG_KEY = "kern-host"
-VOLUME_ROLE_TAG_KEY = "kern-host-volume-role"
-VERSION_TAG_KEY = "kern-host-version"
 SSH_USER = "kern-operator"
-INSTANCE_TYPE = "t3.small"
 ROOT_VOLUME_SIZE_GB = 16
 # Default durable admin storage. Audit logs have count and field-size bounds;
 # health reports actual usage so operators can expand storage before it fills.
 ADMIN_VOLUME_SIZE_GB = 16
 AGENT_VOLUME_SIZE_GB = 16
-ADMIN_VOLUME_DEVICE = "/dev/sdf"
-AGENT_VOLUME_DEVICE = "/dev/sdg"
 SSH_WAIT_ATTEMPTS = 60
 SSH_WAIT_SECONDS = 10
-SSH_INGRESS = {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}
+# Hard deadline for the remote bootstrap run. Bootstrap normally takes
+# several minutes; a hang past this bound is terminated so the calling
+# operation can release its lock and run its failure cleanup.
+BOOTSTRAP_TIMEOUT_SECONDS = 3600
+# Per-attempt bound on one SSH readiness probe: connection setup is bounded
+# by ConnectTimeout, this bounds a daemon that accepts but never answers.
+SSH_PROBE_TIMEOUT_SECONDS = 60
+# Bound on copying the runtime code archive to the host.
+SCP_TIMEOUT_SECONDS = 600

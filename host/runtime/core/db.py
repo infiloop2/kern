@@ -12,7 +12,7 @@ grants narrow each non-owner role. No role exists for the agent user,
 The admin role owns every table; the proxy writes network events and
 held pushes; the tools role writes tool credentials, approvals, and events;
 the network-introspection role reads its narrow policy view; and the Workspace role
-has DML-only access to five named tables in `public`. MVCC transactions,
+has DML-only access to its named tables in `public`. MVCC transactions,
 constraints, and conditional updates carry cross-process correctness. Schema
 migrations serialize under an advisory lock.
 

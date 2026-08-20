@@ -286,6 +286,41 @@ import tests.stage.stage_aws
                 stage._check_brave_live()
         self.assertEqual(call.call_count, 1)
 
+    def test_search_console_stage_selects_a_writable_property(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        calls: list[tuple[str, dict]] = []
+
+        def responder(name: str, arguments: dict) -> dict:
+            calls.append((name, arguments))
+            if name == "google_search_console_list_properties":
+                return {
+                    "properties": [
+                        {
+                            "site_url": "https://restricted.example/",
+                            "permission_level": "siteRestrictedUser",
+                        },
+                        {
+                            "site_url": "https://writable.example/",
+                            "permission_level": "siteFullUser",
+                        },
+                    ]
+                }
+            return {}
+
+        with (
+            patch.object(stage, "_successful_tool_call", side_effect=responder),
+            patch.object(stage, "_queue_and_deny") as queue,
+        ):
+            detail = stage._check_search_console_live()
+
+        self.assertIn("sitemap proposal denied", detail)
+        for name, arguments in calls[1:]:
+            with self.subTest(name=name):
+                self.assertEqual(arguments["site_url"], "https://writable.example/")
+        self.assertEqual(
+            queue.call_args.args[2]["site_url"], "https://writable.example/"
+        )
+
     def test_instagram_stage_prefers_trending_reel_for_dependent_reads(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
         calls: list[tuple[str, dict]] = []

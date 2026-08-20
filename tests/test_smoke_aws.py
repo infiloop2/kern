@@ -776,3 +776,9 @@ class WorkflowSmokeTests(unittest.TestCase):
         self.assertIn("Fresh AWS smoke is already running; wait for the previous smoke to complete.", smoke)
         self.assertIn("for status in queued in_progress", smoke)
         self.assertIn("group: kern-smoke", smoke)
+
+    def test_superseded_lima_smoke_does_not_overwrite_active_status(self) -> None:
+        smoke = Path(".github/workflows/test-lima-host.yml").read_text()
+
+        self.assertIn("needs.smoke.result != 'cancelled'", smoke)
+        self.assertNotIn("Fresh Lima smoke was cancelled.", smoke)

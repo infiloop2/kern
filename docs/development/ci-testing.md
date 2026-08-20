@@ -5,12 +5,17 @@
 | Static type checks | `python3 -m mypy --config-file mypy.ini` and `python3 -m pyright --project pyrightconfig.json` | No | No | No |
 | Unit tests | `./tests/scripts/test` | No | No | No |
 | Admin UI mock smoke | `python3 tests/smoke-ui/admin_ui_smoke.py --port 3100` | No | No | No |
+| Real Lima host smoke | `python3 tests/smoke/smoke_lima.py` | Yes | No | No |
 
 Run the static type checks and unit tests on every change; the admin UI mock
 smoke runs in CI and is also useful locally while editing the files under
-`host/runtime/admin_api/admin_ui/`. Live AWS checks are covered separately in
-[Fresh AWS smoke](fresh-aws-smoke.md) and
-[Persistent AWS stage](persistent-aws-stage.md).
+`host/runtime/admin_api/admin_ui/`. The automatic
+[Fresh Lima smoke](fresh-lima-smoke.md) boots a real local host on every push
+to `main` and when a repository admin requests it for a pull request. It runs
+the fresh AWS smoke's complete credential-free live-host contract alongside
+Lima-specific definition, lifecycle, disk, replacement, and recovery checks.
+Live AWS checks are covered separately in
+[Fresh AWS smoke](fresh-aws-smoke.md) and [Persistent AWS stage](persistent-aws-stage.md).
 
 ## Static type checks (run on every change, and in CI)
 
@@ -59,10 +64,14 @@ steps inside it with `--network none`, all capabilities dropped,
 (`.github/ci/run-in-sandbox.sh`). The workflow token is read-only and the
 checkout does not persist credentials.
 
-Consequently **CI can never reach the internet or any account**. The admin UI
-mock smoke is safe to run there because it uses only localhost and in-memory
-mock data. The live AWS smoke and stage workflows run separately and only after
-a repository admin starts them.
+Consequently the **unit-test job** can never reach the internet or any account.
+The admin UI mock smoke is safe there because it uses only localhost and
+in-memory mock data. A separate read-only-token job runs the real Lima smoke
+with network access and KVM but receives no provider or repository-write
+credential. The real Lima and AWS smokes run automatically for trusted `main`
+code; pull request runs require an explicit repository-admin request. The live
+AWS stage workflows run separately and only after a repository admin starts
+them.
 
 ## Admin UI mock smoke (`tests/smoke-ui/`)
 

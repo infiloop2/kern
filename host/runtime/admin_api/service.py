@@ -2582,6 +2582,7 @@ def _public_thread(
         "effort": effort,
         "last_used_at": str(last_used_at or ""),
         "status": status or "idle",
+        "latest_event_seq": state.latest_agent_event_seq(thread_id),
     }
 
 

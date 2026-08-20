@@ -22,3 +22,7 @@ class LifecycleCommand:
     operator_cloudflare_hostname: str | None = None
     # Root recovery switch. Only reconfigure may remove durable passkeys.
     reset_admin_passkeys: bool = False
+    # Infrastructure provider: "aws" (default, EC2/EBS) or "lima" (a local
+    # VM on the operator's machine). Only the provider selection point and
+    # provider modules branch on this.
+    provider: str = "aws"

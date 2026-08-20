@@ -10,6 +10,7 @@ so operators and contributors can jump to the trust boundary they need.
 | --- | --- |
 | [Architecture diagram](diagram.md) | One-page host capability map covering operator access, service users, storage, and egress boundaries. |
 | [Deployment and upgrades](deployment.md) | EC2 provisioning, upgrade/recovery behavior, drive lifecycle, and secret handling. |
+| [Host provider and local Lima design](host-provider-design.md) | The provider boundary, lifecycle state machine, and the implemented local Lima provider that runs the same Kern guest runtime on the operator's machine ([operator setup](../../README.md#quick-start-run-kern-on-your-computer)). |
 | [Admin state storage and migrations](admin-state-storage.md) | The local Postgres database: schema, access control, and schema migrations. |
 | [Host diagnostics](host-diagnostics.md) | Best-effort structured service errors and contained warnings, PostgreSQL retention, and the read-only operator panel. |
 | [Control planes](control-planes.md) | Operator-plane and admin-plane responsibilities and authority. |

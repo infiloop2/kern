@@ -15,7 +15,7 @@ from pathlib import Path
 import tarfile
 from typing import Any
 
-from host.config import InputConfig, RuntimeOperatorConnection
+from host.config import RuntimeOperatorConnection
 from host.constants import (
     ADMIN_API_PORT,
     AGENT_PREVIEW_PORT_BASE,
@@ -35,10 +35,10 @@ def _load_template(name: str) -> str:
 
 
 def _bootstrap_payload(
-    config: InputConfig,
+    agent_name: str,
     admin_password_sha256: str | None,
     replacement_operator_connections: tuple[RuntimeOperatorConnection, ...] | None = None,
-    storage_volumes: dict[str, str] | None = None,
+    storage: dict[str, Any] | None = None,
     *,
     mode: str,
     target_version: str,
@@ -46,7 +46,7 @@ def _bootstrap_payload(
     reset_admin_passkeys: bool = False,
 ) -> dict[str, Any]:
     runtime_config: dict[str, Any] = {
-        "agent_name": config.agent_name,
+        "agent_name": agent_name,
     }
     if replacement_operator_connections is not None:
         runtime_config["operator_connections"] = [
@@ -61,10 +61,14 @@ def _bootstrap_payload(
     }
     if reset_admin_passkeys:
         operation["reset_admin_passkeys"] = True
+    # The provider-neutral storage handoff: an operator-side provider found
+    # the persistent resources, and the named guest-side resolver maps them to
+    # Linux block devices during bootstrap (see
+    # docs/architecture/host-provider-design.md).
     return {
         "operation": operation,
         "runtime_config": runtime_config,
-        "storage_volumes": storage_volumes or {},
+        "storage": storage or {},
     }
 
 

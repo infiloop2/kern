@@ -263,7 +263,15 @@ async function refresh() {
     window.dispatchEvent(new CustomEvent("kern-chat-updated", {
       detail: { threads, archived: showingArchivedThreads },
     }));
-    if (selectedThreadId) await refreshSelectedThread();
+    if (selectedThreadId) {
+      const refreshedThreadId = selectedThreadId;
+      const rendered = await refreshSelectedThread();
+      if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
+      const visibleThread = threads.find(thread => thread.thread_id === refreshedThreadId);
+      if (rendered && selectedThreadId === refreshedThreadId && visibleThread) {
+        window.KernHost.markWorkspaceSeen("chat", visibleThread);
+      }
+    }
     if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
     clearDeferredRefreshError();
     setStatus("", "refresh");
@@ -626,16 +634,17 @@ async function showThread(threadId, name, runtime, model, effort, status, archiv
 async function refreshSelectedThread() {
   if (!selectedThreadId) {
     renderThreadHistory();
-    return;
+    return false;
   }
   // Capture the id: a thread switch mid-flight must not let a stale response
   // land in the newly selected thread's state.
   const threadId = selectedThreadId;
   const sequence = ++selectedRefreshSequence;
   await refreshThreadEvents(threadId, sequence);
-  if (threadId !== selectedThreadId || sequence !== selectedRefreshSequence) return;
+  if (threadId !== selectedThreadId || sequence !== selectedRefreshSequence) return false;
   updateComposer();
   renderThreadHistory();
+  return true;
 }
 
 function saveSelectedThreadView() {

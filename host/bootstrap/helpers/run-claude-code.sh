@@ -27,15 +27,15 @@ case "${1:-}" in
 esac
 shift
 
-# Claude Code 2.1.220 classifies the account-limit fetch behind `/usage` as
-# nonessential traffic. Suppressing that traffic makes the command exit zero
-# while omitting every usage window, which leaves the admin UI with no fresh
-# snapshot. Keep telemetry/feedback/auto-update suppression for agent and auth
-# processes, but let this one host-owned maintenance command fetch its data.
-claude_environment=(CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1)
-if [ "${1:-}" = "-p" ] && [ "${2:-}" = "/usage" ]; then
-  claude_environment=()
-fi
+# Keep every Claude Code invocation, including the periodic `/usage` probe,
+# from emitting nonessential background traffic. The umbrella flag suppresses
+# registry and update checks; the dedicated flags make the telemetry and error
+# reporting intent explicit across Claude Code releases.
+claude_environment=(
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+  DISABLE_TELEMETRY=1
+  DISABLE_ERROR_REPORTING=1
+)
 
 # The transient scope puts the runtime and everything it spawns into the
 # resource-limited kern_agent.slice instead of the admin API's service

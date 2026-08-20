@@ -1,0 +1,175 @@
+name: test-lima-host
+
+on:
+  workflow_dispatch:
+  issue_comment:
+    types:
+      - created
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  authorize:
+    name: Authorize Lima smoke
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request &&
+        (github.event.comment.body == '/lima-smoke' || github.event.comment.body == 'lima-smoke'))
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Checkout trusted workflow actions
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Authorize repo admin
+        if: ${{ github.event_name != 'push' }}
+        uses: ./.github/actions/authorize-repo-admin
+
+      - name: Resolve safe ref
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "issue_comment" ]]; then
+            pr="$(curl -fsS \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${{ github.api_url }}/repos/${REPO}/pulls/${ISSUE_NUMBER}")"
+            head_repo="$(jq -r .head.repo.full_name <<<"${pr}")"
+            if [[ "${head_repo}" != "${REPO}" ]]; then
+              echo "Refusing to run the networked Lima smoke against fork PR code from ${head_repo}." >&2
+              exit 1
+            fi
+            ref="$(jq -r .head.sha <<<"${pr}")"
+          else
+            ref="${EVENT_SHA}"
+          fi
+          echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
+          echo "Testing ref ${ref}"
+
+      - name: Mark smoke pending
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ steps.resolve.outputs.ref }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -n \
+            --arg state pending \
+            --arg context lima-smoke \
+            --arg description "Fresh Lima smoke is running." \
+            --arg target_url "${TARGET_URL}" \
+            '{state: $state, context: $context, description: $description, target_url: $target_url}')"
+          curl -fsS \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${{ github.api_url }}/repos/${REPO}/statuses/${REF}" \
+            -d "${payload}" >/dev/null
+
+  smoke:
+    needs: authorize
+    name: Run Lima host end-to-end smoke
+    if: ${{ needs.authorize.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: read
+      contents: read
+    concurrency:
+      group: test-lima-host-${{ needs.authorize.outputs.ref }}
+      cancel-in-progress: true
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.ref }}
+          persist-credentials: false
+
+      # Lima's own pinned action installs QEMU, makes /dev/kvm available to
+      # the runner user, downloads the attested release, and installs limactl.
+      - name: Install Lima and QEMU
+        uses: lima-vm/lima-actions/setup@1be8c646a08d3a8c1186531108508cde33394b52  # v1
+        with:
+          version: v2.1.1
+          ssh: false
+
+      - name: Verify hardware virtualization
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          test -r /dev/kvm
+          test -w /dev/kvm
+          limactl --version
+          qemu-system-x86_64 --version | head -1
+
+      - name: Run real Lima host lifecycle
+        shell: bash
+        run: python3 tests/smoke/smoke_lima.py
+
+  report:
+    needs:
+      - authorize
+      - smoke
+    name: Report Lima smoke result
+    # A newer run for the same SHA cancels the older smoke. Only the newer run
+    # may replace its pending status; otherwise the canceled run can race the
+    # active run and overwrite that shared status context with an error.
+    if: ${{ always() && needs.authorize.result == 'success' && needs.smoke.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Mark smoke result
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ needs.authorize.outputs.ref }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ needs.smoke.result }}
+        run: |
+          set -euo pipefail
+          case "${JOB_STATUS}" in
+            success)
+              state=success
+              description="Fresh Lima smoke passed."
+              ;;
+            *)
+              state=failure
+              description="Fresh Lima smoke failed."
+              ;;
+          esac
+          payload="$(jq -n \
+            --arg state "${state}" \
+            --arg context lima-smoke \
+            --arg description "${description}" \
+            --arg target_url "${TARGET_URL}" \
+            '{state: $state, context: $context, description: $description, target_url: $target_url}')"
+          curl -fsS \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${{ github.api_url }}/repos/${REPO}/statuses/${REF}" \
+            -d "${payload}" >/dev/null

@@ -148,13 +148,13 @@ MANIFEST = ToolManifest(
             output_schema=X_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="lookup_user",
-            description="Resolve one public X user to their permanent numeric id, handle, and display name. Provide exactly one username or user_id. This reads a profile, not its posts; use user_tweets for those.",
+            description="Resolve one public X user to their permanent numeric id, handle, display name, and public follower/following/post counts. Provide exactly one username or user_id. This reads a profile, not its posts; use user_tweets for those.",
             data_policy=(
                 "Read-only. Sends only the supplied username or user id to the X API "
                 "authenticated as the connected account and returns that user's public id, "
-                "handle, and display name. Each call is billed to the deployment's X API "
-                "pay-per-use credits. The result enters active model context. Runs directly "
-                "with no approval."
+                "handle, display name, and public profile counts. Each call is billed to the "
+                "deployment's X API pay-per-use credits. The result enters active model "
+                "context. Runs directly with no approval."
             ),
             input_schema=_schema(
                 {
@@ -217,7 +217,7 @@ MANIFEST = ToolManifest(
                 points=(
                     DataSummaryPoint(label="Reads", text="Search queries, post ids, usernames, trend locations, and paging values go to X directly. Query text is received and logged like any other request, so it is itself data sent to X. The search query first passes the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent."),
                     DataSummaryPoint(label="Reply and message drafts", text="Kern never sends a reply or direct message through the API. An agent may put a numeric post or user id and a percent-encoded draft in an official x.com reply-intent or message-compose link; X receives the draft only when you open that link in your browser."),
-                    DataSummaryPoint(label="Profile lookups", text="A handle or user id you ask the agent to resolve goes to X and returns that account's public id, handle, and display name. This is the same public lookup the X website performs and sends no message text."),
+                    DataSummaryPoint(label="Profile lookups", text="A handle or user id you ask the agent to resolve goes to X and returns that account's public id, handle, display name, and public follower, following, and post counts. This is the same public lookup the X website performs and sends no message text."),
                 ),
             ),
             DataSummaryCard(
@@ -753,7 +753,7 @@ def _lookup_user(access_token: str, tool_input: JSONObject) -> JSONObject:
         if not isinstance(raw_user_id, str) or not USER_ID_RE.fullmatch(str(raw_user_id).strip()):
             raise ToolInputValidationError("X tool_input.user_id must be a numeric user id string.")
         requested_id = str(raw_user_id).strip()
-    params = encode_query({"user.fields": "id,name,username"})
+    params = encode_query({"user.fields": "id,name,username,public_metrics"})
     if isinstance(username, str):
         response = _api_get(
             access_token,
@@ -781,14 +781,21 @@ def _lookup_user(access_token: str, tool_input: JSONObject) -> JSONObject:
         or not USERNAME_RE.fullmatch(resolved_username)
     ):
         raise ToolInputValidationError("The X user was not found.")
+    user: JSONObject = {
+        "id": resolved_id,
+        "username": resolved_username,
+        "name": clip_text(str(data.get("name") or ""), 120),
+    }
+    public_metrics = data.get("public_metrics")
+    if isinstance(public_metrics, dict):
+        for field in ("followers_count", "following_count", "tweet_count"):
+            count = public_metrics.get(field)
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                user[field] = count
     return {
         "status": "success_executed",
         "message": f"Resolved @{resolved_username} to X user id {resolved_id}.",
-        "user": {
-            "id": resolved_id,
-            "username": resolved_username,
-            "name": clip_text(str(data.get("name") or ""), 120),
-        },
+        "user": user,
     }
 
 

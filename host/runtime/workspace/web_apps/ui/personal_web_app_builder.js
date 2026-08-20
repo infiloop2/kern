@@ -76,6 +76,10 @@ let runtimeStatusSequence = 0;
 let dismissedAgentMessageKey = null;
 let transientAgentStatus = null;
 let renameAppReturnFocus = null;
+let historyMode = false;
+let historyLoadingOlder = false;
+let historyRenderedAppId = null;
+let historyRenderedEntryKey = "";
 
 const webAppsRoot = window.KernWorkspaceRoots["web-apps"];
 const $ = id => webAppsRoot.querySelector(`#${CSS.escape(id)}`);
@@ -260,6 +264,16 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
     pending.set(id, { resolve, reject });
     send({ type: "data-read", request_id: id, path: clone(path) });
   });
+  const query = (collection, request = {}) => new Promise((resolve, reject) => {
+    const id = `query-${++requestId}`;
+    pending.set(id, { resolve, reject });
+    send({
+      type: "collection-query",
+      request_id: id,
+      collection,
+      query: clone(request),
+    });
+  });
   const applyMutation = (root, action, path, value) => {
     const updated = clone(root);
     let parent = updated;
@@ -294,6 +308,7 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
       return clone(durableData);
     },
     read(path) { return read(path); },
+    query(collection, request) { return query(collection, request); },
     render(html, css = "") {
       if (typeof html !== "string" || typeof css !== "string") {
         throw new TypeError("render content must be strings");
@@ -351,6 +366,14 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
       pending.delete(message.request_id);
       if (message.ok) waiter.resolve(clone(message.value));
       else waiter.reject(new Error("Data read failed"));
+      return;
+    }
+    if (message.type === "collection-query-result") {
+      const waiter = pending.get(message.request_id);
+      if (!waiter) return;
+      pending.delete(message.request_id);
+      if (message.ok) waiter.resolve(clone(message.collection));
+      else waiter.reject(new Error("Collection query failed"));
       return;
     }
     if (message.type === "event") {
@@ -1291,6 +1314,7 @@ async function handleWorkerMessage(run, message) {
   }
   if (message.type === "data-action") await handleWorkerDataAction(run, message);
   if (message.type === "data-read") await handleWorkerDataRead(run, message);
+  if (message.type === "collection-query") await handleWorkerCollectionQuery(run, message);
 }
 
 function applyLocalDataAction(data, message) {
@@ -1343,6 +1367,52 @@ async function handleWorkerDataRead(run, message) {
   } catch (_error) {
     if (workerRun !== run) return;
     run.worker.postMessage({ type: "read-result", request_id: message.request_id, ok: false });
+  }
+}
+
+async function handleWorkerCollectionQuery(run, message) {
+  if (
+    !["initializing", "event"].includes(run.state)
+    || typeof message.request_id !== "string"
+    || !/^query-[1-9][0-9]{0,8}$/.test(message.request_id)
+    || typeof message.collection !== "string"
+    || !/^[a-z][a-z0-9_-]{0,63}$/.test(message.collection)
+    || !message.query || typeof message.query !== "object" || Array.isArray(message.query)
+    || jsonByteLength(message.query) < 0
+    || jsonByteLength(message.query) > MAX_DATA_VALUE_BYTES
+  ) {
+    run.finish("error");
+    return;
+  }
+  try {
+    const response = await api(
+      "POST",
+      `/apps/${encodeURIComponent(run.appId)}/runtime/collections/${encodeURIComponent(message.collection)}/query`,
+      message.query,
+    );
+    if (workerRun !== run || selectedAppId !== run.appId) return;
+    if (!response.collection || response.collection.revision !== run.revision) {
+      run.worker.postMessage({
+        type: "collection-query-result",
+        request_id: message.request_id,
+        ok: false,
+      });
+      await refreshSelectedApp(run.appId);
+      return;
+    }
+    run.worker.postMessage({
+      type: "collection-query-result",
+      request_id: message.request_id,
+      ok: true,
+      collection: response.collection,
+    });
+  } catch (_error) {
+    if (workerRun !== run) return;
+    run.worker.postMessage({
+      type: "collection-query-result",
+      request_id: message.request_id,
+      ok: false,
+    });
   }
 }
 
@@ -1404,6 +1474,7 @@ async function handleWorkerDataAction(run, message) {
     // canvas is already authoritative and stays interactive.
     pendingApp = null;
     syncAppRefreshButton();
+    markSelectedAppSeen();
     run.mutationPending = false;
     run.worker.postMessage({
       type: "data-result",
@@ -1846,6 +1917,11 @@ function renderChat() {
   if (running && (!latest || latest.key === dismissedAgentMessageKey)) {
     latest = { key: "running", kind: "agent", message: "Agent is working" };
   }
+  if (historyMode) {
+    latest = running
+      ? { key: "running", kind: "agent", message: "Agent is working" }
+      : null;
+  }
   const card = $("latest-agent-card");
   if (!latest || latest.key === dismissedAgentMessageKey) {
     card.hidden = true;
@@ -1858,6 +1934,7 @@ function renderChat() {
   }
   $("stop-turn").hidden = !running;
   $("latest-agent-dismiss").hidden = running;
+  renderConversationHistory();
   syncAgentSettings(snapshot.session);
 }
 
@@ -1891,6 +1968,108 @@ function conversationEntries() {
     }
   }
   return entries;
+}
+
+function renderConversationHistory(forceBottom = false) {
+  const scroll = $("chat-history-scroll");
+  const list = $("chat-history-list");
+  const appChanged = historyRenderedAppId !== selectedAppId;
+  const wasNearBottom = appChanged || (
+    scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48
+  );
+  const entries = conversationEntries();
+  const entryKey = entries.map(entry => entry.key).join("\0");
+  if (appChanged || entryKey !== historyRenderedEntryKey) {
+    const nodes = entries.map(entry => {
+      const item = document.createElement("article");
+      item.className = `chat-history-entry ${entry.kind}`;
+      const author = document.createElement("strong");
+      author.className = "chat-history-author";
+      author.textContent = entry.kind === "user"
+        ? "You"
+        : entry.kind === "agent"
+          ? "Agent"
+          : "System";
+      const message = document.createElement("div");
+      message.className = "chat-history-message";
+      // Thread messages are intentionally shown exactly as recorded. This keeps
+      // host-added Web App context visible instead of silently rewriting history.
+      message.textContent = entry.message;
+      item.append(author, message);
+      return item;
+    });
+    list.replaceChildren(...nodes);
+    historyRenderedAppId = selectedAppId;
+    historyRenderedEntryKey = entryKey;
+  }
+  $("chat-history-empty").hidden = entries.length !== 0;
+  const pageState = activeConversationEventPage();
+  const more = $("chat-history-more");
+  more.hidden = !pageState.hasOlder;
+  more.disabled = historyLoadingOlder;
+  more.textContent = historyLoadingOlder
+    ? "Loading earlier messages…"
+    : "Load earlier messages";
+  if (historyMode && (forceBottom || appChanged || wasNearBottom)) {
+    scroll.scrollTop = scroll.scrollHeight;
+  }
+}
+
+async function loadOlderConversationEvents() {
+  const pageState = activeConversationEventPage();
+  if (
+    historyLoadingOlder || !historyMode || !selectedAppId
+    || !pageState.hasOlder || pageState.oldestSeq === null
+  ) return;
+  const appId = selectedAppId;
+  const scroll = $("chat-history-scroll");
+  historyLoadingOlder = true;
+  renderConversationHistory();
+  try {
+    const response = await api(
+      "GET",
+      conversationEventsPath(appId, pageState, "before", pageState.oldestSeq),
+    );
+    if (
+      selectedAppId !== appId
+      || activeConversationEventPage() !== pageState
+      || !historyMode
+    ) return;
+    const events = response.events || [];
+    const older = events.filter(event => event.seq < pageState.oldestSeq);
+    const previousHeight = scroll.scrollHeight;
+    const previousTop = scroll.scrollTop;
+    if (older.length) {
+      mergeConversationEvents(older);
+      pageState.oldestSeq = older[0].seq;
+    }
+    pageState.hasOlder = events.length === CONVERSATION_EVENTS_PAGE;
+    renderConversationHistory();
+    scroll.scrollTop = previousTop + scroll.scrollHeight - previousHeight;
+  } catch (error) {
+    if (selectedAppId === appId) {
+      showRuntimeStatus(error.message || "Could not load earlier messages", "error");
+    }
+  } finally {
+    historyLoadingOlder = false;
+    if (selectedAppId === appId && historyMode) renderConversationHistory();
+  }
+}
+
+function setHistoryMode(open) {
+  historyMode = Boolean(open && selectedAppId);
+  const toggle = $("history-toggle");
+  toggle.classList.toggle("active", historyMode);
+  toggle.setAttribute("aria-pressed", String(historyMode));
+  toggle.setAttribute("aria-label", historyMode ? "Show app" : "Show chat history");
+  toggle.title = historyMode ? "Show app" : "Show chat history";
+  toggle.querySelector("span").textContent = historyMode ? "App" : "History";
+  $("chat-history").hidden = !historyMode;
+  if (historyMode) {
+    closeAdmin();
+    renderConversationHistory(true);
+  }
+  renderChat();
 }
 
 function mergeConversationEvents(events) {
@@ -2104,12 +2283,21 @@ function syncAgentSettings(task) {
 function syncWorkspaceControls() {
   const hasApp = selectedAppId !== null;
   const readOnly = hasApp && selectedAppOutsideActiveIndex;
+  if (!hasApp) historyMode = false;
   $("app-title").textContent = selectedAppName || "";
   $("app-view-toolbar").hidden = !hasApp;
   $("agent-command-surface").hidden = !hasApp || readOnly;
   $("chat-composer").hidden = !hasApp || readOnly;
   $("rename-app").disabled = !hasApp || readOnly;
   $("settings-open").disabled = !hasApp || readOnly;
+  const historyToggle = $("history-toggle");
+  historyToggle.disabled = !hasApp;
+  historyToggle.classList.toggle("active", historyMode);
+  historyToggle.setAttribute("aria-pressed", String(historyMode));
+  historyToggle.setAttribute("aria-label", historyMode ? "Show app" : "Show chat history");
+  historyToggle.title = historyMode ? "Show app" : "Show chat history";
+  historyToggle.querySelector("span").textContent = historyMode ? "App" : "History";
+  $("chat-history").hidden = !historyMode;
   const lockButton = $("lock-agent-updates");
   lockButton.disabled = !hasApp || readOnly || agentUpdateLockBusy;
   lockButton.classList.toggle("active", selectedAgentUpdatesLocked);
@@ -2131,7 +2319,6 @@ function syncWorkspaceControls() {
       ? "Stop the agent before archiving this app"
       : "Archive app";
   $("archived-app-veil").hidden = !readOnly;
-  if (!hasApp) $("revision-label").textContent = "";
   syncAppRefreshButton();
   setSessionOptions();
   syncCanvasState();
@@ -2179,7 +2366,6 @@ function applyAppVersion(app) {
   pendingApp = null;
   renderedRevision = app.revision;
   if (hasBundle) {
-    $("revision-label").textContent = `Revision ${app.revision}`;
     if (changed) {
       try { renderGenerated(app.html, app.css); }
       catch (_error) {
@@ -2192,7 +2378,6 @@ function applyAppVersion(app) {
     }
     if (changed) runCapabilityWorker();
   } else {
-    $("revision-label").textContent = "Empty app";
     clearGenerated();
   }
   syncAppRefreshButton();
@@ -2202,6 +2387,22 @@ function applyAppVersion(app) {
 function applyPendingAppVersion() {
   if (!pendingApp) return;
   applyAppVersion(pendingApp);
+  markSelectedAppSeen();
+}
+
+function markSelectedAppSeen() {
+  if (!selectedAppId || renderedRevision < 0) return;
+  const listed = apps.find(app => app.app_id === selectedAppId);
+  const renderedEventSeq = Number(activeConversationEventPage().newestSeq) || 0;
+  window.KernHost.markWorkspaceSeen("apps", {
+    app_id: selectedAppId,
+    last_used_at: listed?.last_used_at || snapshot.app?.updated_at || "",
+    latest_event_seq: Math.max(
+      Number(listed?.latest_event_seq) || 0,
+      renderedEventSeq,
+    ),
+    revision: renderedRevision,
+  });
 }
 
 function saveSelectedConversationView() {
@@ -2350,6 +2551,7 @@ async function refreshSelectedApp(appId = selectedAppId) {
   syncAgentSettings(snapshot.session);
   syncWorkspaceControls();
   armCapabilityWorker();
+  markSelectedAppSeen();
 }
 
 async function refresh() {
@@ -2566,6 +2768,15 @@ $("rename-app-form").addEventListener("submit", event => {
   });
 });
 $("lock-agent-updates").addEventListener("click", () => toggleAgentUpdateLock().catch(error => showRuntimeStatus(error.message, "error")));
+$("history-toggle").addEventListener("click", () => setHistoryMode(!historyMode));
+$("chat-history-more").addEventListener("click", () => {
+  void loadOlderConversationEvents();
+});
+$("chat-history-scroll").addEventListener("scroll", () => {
+  if ($("chat-history-scroll").scrollTop <= 80) {
+    void loadOlderConversationEvents();
+  }
+});
 $("archive-app").addEventListener("click", () => archiveSelectedApp().catch(error => showRuntimeStatus(error.message, "error")));
 $("app-refresh").addEventListener("click", applyPendingAppVersion);
 $("settings-open").addEventListener("click", () => {

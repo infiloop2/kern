@@ -182,6 +182,13 @@ unclassified field. The categories:
 third-party destinations:
 
 - public search, discovery, and scraper queries;
+- the Web Fetch page URL (`web_fetch`) — the one agent-authored value of an
+  anonymous public-page GET. Common analytics/click-tracking parameters are
+  removed first, and both the wire URL and its fully percent-decoded path and
+  query are guarded so encoding cannot hide a sensitive value. Redirect
+  targets are provider-echoed and repeat the structural public-URL checks,
+  tracking-parameter removal, public-address vetting, and shared request
+  deadline rather than the agent-input guard;
 - generation and speech prompts, and external media URLs supplied to a generation tool that the provider then fetches (Runway image_url / video_url, Seedance image_url);
 - slugs and hashtags (after their stricter grammar checks);
 - package-registry names and query values on the agent network path
