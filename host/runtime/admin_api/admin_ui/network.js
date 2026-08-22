@@ -9,8 +9,9 @@ import { MANAGED_INTEGRATIONS } from "./integration_catalog.js";
 
 const GITHUB_REPO_INPUT_RE = /^([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)\/([a-z0-9._-]{1,100})$/;
 // The AI Inference group in render order.
-const INFERENCE_INTEGRATIONS = ["openai", "claude", "bedrock"];
+const INFERENCE_INTEGRATIONS = ["openai", "claude", "xai", "bedrock"];
 const BEDROCK_INTEGRATION = "bedrock";
+const XAI_INTEGRATION = "xai";
 // Must match SUPPORTED_REGIONS in host/network_integrations/bedrock/manifest.py.
 const BEDROCK_REGIONS = ["us-east-1", "us-east-2", "us-west-2"];
 
@@ -203,30 +204,16 @@ function integrationDetailsHtml(name, enabled) {
       </div>`;
     return accountCard;
   }
-  if (name === "openai" || name === "claude") {
+  if (name === "openai" || name === "claude" || name === "xai") {
     const accountCard = `
       <div class="detail-card">
         <div class="detail-card-head"><h3>Account</h3></div>
         <div class="integration-account" data-provider="${esc(name)}"></div>
         <div class="provider-oauth" data-provider-oauth="${esc(name)}"></div>
       </div>`;
-    if (name === "claude" && enabled) {
-      const webSearch = objectValue(objectValue(activeNetworkPolicy.network_integrations).claude).web_search === true;
-      return `${accountCard}
-      <div class="detail-card">
-        <div class="detail-card-head">
-          <h3>Web search</h3>
-          <span class="seg">
-            <button data-action="enable-claude-web-search"${webSearch ? " disabled" : ""}>Enable</button>
-            <button data-action="disable-claude-web-search"${webSearch ? "" : " disabled"}>Disable</button>
-          </span>
-        </div>
-        <p class="muted">Anthropic's server-side web search runs off-box: the query and surrounding context go to Anthropic and its search partners.</p>
-        <span class="muted">${webSearch
-          ? "Enabled — Claude Code can run server-side web searches."
-          : "Disabled — the network proxy blocks web search."}</span>
-      </div>`;
-    }
+    // Claude offers a web-search toggle; xAI deliberately does not, because
+    // Grok's server-side search has no shape this host can allow.
+    if (name === "claude" && enabled) return `${accountCard}${webSearchCard(name)}`;
     return accountCard;
   }
   if (name === "github") {
@@ -273,10 +260,17 @@ export function renderIntegrationAccounts() {
       ? (account.arn || account.account_id)
       : (account.email || account.account_id);
     const linked = provider === BEDROCK_INTEGRATION ? bedrockCredentialMetadata.connected : Boolean(identity);
+    const codingDataSummary = provider === XAI_INTEGRATION
+      && typeof account.coding_data_retention_opt_out === "boolean"
+      ? ` &middot; coding-data opt-out ${account.coding_data_retention_opt_out ? "active" : "inactive"}`
+      : "";
+    const zdrSummary = provider === XAI_INTEGRATION && typeof account.zdr_enabled === "boolean"
+      ? ` &middot; ZDR ${account.zdr_enabled ? "active" : "inactive"}`
+      : "";
     const summary = !enabled && !linked && provider !== BEDROCK_INTEGRATION
       ? ""
       : record.status === "active" && identity
-        ? `Connected account: <span class="connection-identity">${esc(identity)}</span> &middot; only this account is allowed through the proxy.`
+        ? `Connected account: <span class="connection-identity">${esc(identity)}</span> &middot; only this account is allowed through the proxy${codingDataSummary}${zdrSummary}.`
         : identity
           ? `Linked account: <span class="connection-identity">${esc(identity)}</span> &middot; ${provider === BEDROCK_INTEGRATION ? "enable Bedrock to activate Hermes." : "sign in again to reconnect it."}`
           : provider === BEDROCK_INTEGRATION && bedrockCredentialMetadata.connected
@@ -489,13 +483,41 @@ export async function connectBedrockCredentials(name) {
   } catch (error) { policyMessage(name, error.message, true); }
 }
 
-export async function setClaudeWebSearch(webSearch) {
-  await publishPolicy("claude", policy => {
+// Server-side web search is one operator decision with the same shape for
+// every provider that offers it: off by default, and enforced at the proxy
+// rather than trusted to the harness. Only the off-box disclosure differs.
+const WEB_SEARCH_DISCLOSURE = {
+  claude: {
+    offBox: "Anthropic's server-side web search runs off-box: the query and surrounding context go to Anthropic and its search partners.",
+    enabled: "Enabled — Claude Code can run server-side web searches.",
+  },
+};
+
+function webSearchCard(provider) {
+  const webSearch = objectValue(objectValue(activeNetworkPolicy.network_integrations)[provider]).web_search === true;
+  const copy = WEB_SEARCH_DISCLOSURE[provider];
+  return `
+      <div class="detail-card">
+        <div class="detail-card-head">
+          <h3>Web search</h3>
+          <span class="seg">
+            <button data-action="enable-web-search" data-provider="${esc(provider)}"${webSearch ? " disabled" : ""}>Enable</button>
+            <button data-action="disable-web-search" data-provider="${esc(provider)}"${webSearch ? "" : " disabled"}>Disable</button>
+          </span>
+        </div>
+        <p class="muted">${esc(copy.offBox)}</p>
+        <span class="muted">${webSearch ? esc(copy.enabled) : "Disabled — Kern rejects requests that declare server-side web search before they reach the provider. Normal inference remains available."}</span>
+      </div>`;
+}
+
+export async function setProviderWebSearch(provider, webSearch) {
+  const label = MANAGED_INTEGRATIONS[provider].label;
+  await publishPolicy(provider, policy => {
     const managed = policy.network_integrations;
-    const value = { ...objectValue(managed.claude), "enabled": true };
+    const value = { ...objectValue(managed[provider]), "enabled": true };
     if (webSearch) value.web_search = true; else delete value.web_search;
-    managed.claude = value;
-  }, `Claude web search ${webSearch ? "enabled" : "disabled"}.`);
+    managed[provider] = value;
+  }, `${label} web search ${webSearch ? "enabled" : "disabled"}.`);
 }
 
 function githubRepositories(policy) {

@@ -26,6 +26,7 @@ The categories are:
 | `counters` | fixed | Internal named counters only. |
 | `thread_sessions` | retention | Event-referenced sessions are bounded by retained events; unreferenced sessions retain the newest 100,000 per runtime. |
 | `agent_events` | retention | Newest 10,000,000 rows, with at most 499 rows of amortization slack; message text is length-bounded. |
+| `conversation_message_embeddings` | retention | Derived vectors only within the newest 250,000 `agent_events` sequence window, with at most 5,000 events of amortization slack; rows also cascade with source events. |
 | `oauth_logins` | fixed | At most one row for each supported OAuth runtime. |
 | `provider_accounts` | fixed | At most one row for each supported provider. |
 | `network_events` | retention | Newest 1,000,000 rows, with at most 499 rows of amortization slack. |
@@ -55,8 +56,10 @@ The categories are:
 | `admin_passkeys` | fixed | Exactly zero or one administrator passkey; reset precedes replacement. |
 | `chat_threads` | quota | At most 10,000 durable Chat thread records; no age-based deletion. |
 | `web_apps` | quota | At most 100 durable Web Apps; no age-based deletion. |
-| `memory_pages` | quota | At most 1,000 retained pages; deleted pages are removed after 90 days. |
+| `memory_pages` | quota | At most 10,000 retained pages; deleted pages are removed after 90 days. |
 | `memory_page_revisions` | retention | Newest 100 revisions per retained page; cascades with its page. |
+| `memory_page_embeddings` | quota | At most one current derived vector per retained page and model; soft deletion removes it and page deletion also cascades. |
+| `memory_page_links` | quota | At most 100 current outgoing links per retained swarm page; source-page deletion cascades. |
 | `schedules` | quota | At most 100 retained schedules; deleted schedules are removed after 90 days once runs are gone. |
 | `schedule_revisions` | retention | Newest 100 revisions per retained schedule; cascades with its schedule. |
 | `schedule_runs` | retention | Active run plus terminal runs newer than 90 days, capped to newest 1,000 per schedule. |

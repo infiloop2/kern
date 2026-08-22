@@ -24,7 +24,7 @@ from host.tools.ibkr import IBKRTool, _signed_big_endian
 from host.tools.shared.rsa_pkcs1 import load_rsa_private_key
 from host.tools.shared.web import WebRequestError
 
-from test_tools import FakeHostAPI
+from test_tools import FakeHostAPI, assert_matches_output_schema
 from test_tools_rsa_pkcs1 import PKCS1_PEM, PKCS8_PEM, encrypt_pkcs1_v1_5
 
 # 2**127 - 1 is prime; small enough for fast tests, real enough for the math.
@@ -223,6 +223,40 @@ class IBKRToolTests(unittest.TestCase):
         self.assertEqual([account["account_id"] for account in accounts], ["U1234567", "U7654321"])
         self.assertEqual(accounts[0]["title"], "Alice")
         self.assertEqual(accounts[0]["currency"], "USD")
+
+    def test_every_direct_result_matches_its_declared_output_schema(self) -> None:
+        routes: JSONObject = {
+            "/portfolio/accounts": {
+                "items": [
+                    {"accountId": "U1234567", "accountTitle": "Alice", "currency": "USD", "type": "INDIVIDUAL"},
+                    # A sparse entry exercises the empty-string substitution.
+                    {"accountId": "U7654321"},
+                ]
+            },
+            "/portfolio/U1234567/positions/0": {
+                "items": [{"ticker": "MSFT", "position": 10, "mktPrice": 500.1, "contractDesc": "MSFT"}]
+            },
+            "/portfolio/U1234567/summary": {
+                "netliquidation": {"amount": 125000.5, "currency": "USD"},
+                # A figure with no number must still validate: amount is nullable.
+                "buyingpower": {"currency": "USD"},
+            },
+            "/iserver/auth/ssodh/init": {"authenticated": True, "competing": False, "connected": True},
+            "/iserver/accounts": {"accounts": ["U1234567"], "selectedAccount": "U1234567"},
+            "/iserver/account/trades": {
+                "items": [{"execution_id": "e-1", "symbol": "MSFT", "size": 10, "price": "500.10", "account": "U1234567"}]
+            },
+        }
+        for action, tool_input in (
+            ("get_accounts", {}),
+            ("get_positions", {"account_id": "U1234567"}),
+            ("get_account_summary", {"account_id": "U1234567"}),
+            ("get_trades", {"account_id": "U1234567"}),
+        ):
+            server = FakeIBKRServer(dict(routes))
+            with self.subTest(action=action), patch.object(ibkr, "json_request", server.json_request):
+                result = IBKRTool().execute(action, tool_input, configured_api())
+            assert_matches_output_schema(self, ibkr.MANIFEST, action, result)
 
     def test_get_accounts_rejects_unsupported_input(self) -> None:
         result = IBKRTool().execute("get_accounts", {"account_id": "U1234567"}, configured_api())

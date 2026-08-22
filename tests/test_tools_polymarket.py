@@ -6,6 +6,7 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
+from host.runtime.tools import tools_host
 from host.tools.json_types import JSONObject
 from host.tools.results import ActionExecuted, ActionFailed
 from host.tools import polymarket
@@ -257,6 +258,46 @@ class PolymarketToolTests(unittest.TestCase):
             result = PolymarketTool().execute("list_markets", {}, FakeHostAPI())
         assert isinstance(result, ActionFailed)
         self.assertEqual(result.error, "Polymarket API rate limit was reached.")
+
+    def test_every_result_satisfies_declared_output_schema(self) -> None:
+        event_response: JSONObject = {
+            "items": [
+                {
+                    "id": "77",
+                    "title": "Weather",
+                    "slug": "weather",
+                    "description": "Umbrella event.",
+                    "volume24hr": 42.0,
+                    "liquidity": 7.5,
+                    "endDate": "2026-08-01T00:00:00Z",
+                    "markets": [MARKET_RECORD],
+                }
+            ]
+        }
+        cases: tuple[tuple[str, JSONObject, JSONObject], ...] = (
+            ("list_markets", {}, {"items": [MARKET_RECORD]}),
+            ("list_events", {}, event_response),
+            ("search", {"query": "rain"}, {"events": event_response["items"]}),
+            ("get_market", {"slug": "will-it-rain-nyc"}, {"items": [MARKET_RECORD]}),
+            ("get_order_book", {"token_id": "1234"}, {"bids": [{"price": "0.3", "size": "10"}], "mid": "0.35"}),
+            ("price_history", {"token_id": "1234"}, {"history": {"1234": [{"t": 1, "p": 0.5}]}}),
+        )
+        for action, tool_input, provider_response in cases:
+            with self.subTest(action=action), patch.object(polymarket, "json_request", return_value=provider_response):
+                result = PolymarketTool().execute(action, tool_input, FakeHostAPI())
+            assert isinstance(result, ActionExecuted)
+            spec = PolymarketTool().manifest.action(action)
+            assert spec is not None
+            self.assertEqual(tools_host.validate_against_schema(result.result, spec.output_schema, path="result"), "")
+
+    def test_missing_market_reports_null_rather_than_an_empty_object(self) -> None:
+        with patch.object(polymarket, "json_request", return_value={"items": []}):
+            result = PolymarketTool().execute("get_market", {"slug": "nope"}, FakeHostAPI())
+        assert isinstance(result, ActionExecuted)
+        self.assertIsNone(result.result["market"])
+        spec = PolymarketTool().manifest.action("get_market")
+        assert spec is not None
+        self.assertEqual(tools_host.validate_against_schema(result.result, spec.output_schema, path="result"), "")
 
     def test_unsupported_action_and_no_approvals(self) -> None:
         tool = PolymarketTool()

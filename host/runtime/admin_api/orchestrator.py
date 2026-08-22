@@ -34,10 +34,9 @@ How the synchronization fits together:
   all run inside mutations, so whichever of a refresh and a reset commits
   second sees the other's state — a stale probe result can never re-approve
   an account (or republish a pin for one) that a concurrent reset just
-  cleared. Claude identity is additionally server-attested: whenever the
-  probed token hash differs from the anchored one, the account uuid comes
-  from api.anthropic.com for that token (via the root helper), so
-  agent-writable metadata is never what gets anchored.
+  cleared. Claude and Grok identities are additionally server-attested through
+  their root account helpers, so agent-writable metadata is never what gets
+  shown or pinned.
 - A user thread is busy while it has a ``_LIVE`` entry. Its private execution
   phase is ``STARTING``, ``RUNNING``, ``FINISHING``, or ``CLOSED``. Admission
   publishes the entry after its database commit and the owning execution
@@ -62,7 +61,7 @@ from functools import partial
 from http import HTTPStatus
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from host.config import AGENT_RUNTIMES
 from host.runtime.core import host_errors, network_policy, state
@@ -73,6 +72,7 @@ from host.runtime.admin_api import (
     codex_app_server,
     github_credential,
     github_repo_audit,
+    grok_agent,
     hermes_agent,
     script_runner,
 )
@@ -80,9 +80,11 @@ from host.runtime.admin_api.errors import ApiError
 from host.runtime.core.state import (
     read_claude_account,
     read_openai_account,
+    read_xai_account,
     save_bedrock_account,
     save_claude_account,
     save_openai_account,
+    save_xai_account,
     utc_now,
 )
 
@@ -100,24 +102,99 @@ CLAUDE_LIVE_PROBE_RETRY_SECONDS = 240
 _MANAGED_PROVIDER_BY_RUNTIME = {
     "codex": "openai",
     "claude_code": "claude",
+    "grok": "xai",
     "hermes": "bedrock",
 }
 CLAUDE_IDENTITY_ATTESTATION = "anthropic_oauth_profile"
 OPENAI_OPERATOR_APPROVAL = "codex_device_login"
+XAI_OPERATOR_APPROVAL = "grok_device_login"
 RUNTIME_LABELS = {
     "codex": "Codex",
     "claude_code": "Claude Code",
+    "grok": "Grok",
     "hermes": "Hermes",
     "script": "Script",
 }
-OAUTH_RUNTIMES = ("codex", "claude_code")
+OAUTH_RUNTIMES = ("codex", "claude_code", "grok")
+# oauth_logins rows key on the provider spelling, not the runtime type.
+_OAUTH_KEY_BY_RUNTIME = {
+    "codex": "codex",
+    "claude_code": "claude",
+    "grok": "grok",
+}
+DEACTIVATED_REASON = "agent runtime deactivated because its managed network provider is disabled"
+
+
+class _TokenAnchoredProvider(NamedTuple):
+    """One runtime with a direct account-id anchor and proxy pin.
+
+    Codex and Grok share the same stored shape and direct per-request proxy
+    comparison. Grok additionally attests its current token before returning
+    active metadata; Claude's opaque-token attestation owns its whole anchor
+    lifecycle, so it keeps a separate orchestration path.
+    """
+
+    approval: str
+    read_account: Callable[..., dict[str, Any]]
+    save_account: Callable[..., None]
+    save_proxy_account_id: Callable[..., None]
+    usage_key: str
+    # The account id captured when the operator's login completed, or None
+    # while it has not. Raises ``error`` when the completion carried no usable
+    # id, which fails the capture closed.
+    read_completed_login_account_id: Callable[[str], str | None]
+    clear_live_validation: Callable[[], None]
+    close_completed_login_server: Callable[[str], None]
+    error: type[Exception]
+
+
+# The adapter entries below are deliberately written as lambdas rather than as
+# direct function references: a reference captured here would bind the adapter
+# function once, at import, so anything that later replaces the module
+# attribute — including the tests that stand in for a provider CLI — would be
+# silently ignored. The lambdas resolve through the module on every call.
+_TOKEN_ANCHORED: dict[str, _TokenAnchoredProvider] = {
+    "codex": _TokenAnchoredProvider(
+        approval=OPENAI_OPERATOR_APPROVAL,
+        read_account=lambda cur=None: read_openai_account(cur),
+        save_account=lambda account, cur=None: save_openai_account(account, cur),
+        save_proxy_account_id=lambda account_id, cur=None: state.save_proxy_openai_account_id(
+            account_id, cur
+        ),
+        usage_key="codex_usage",
+        read_completed_login_account_id=(
+            lambda login_id: codex_app_server.read_completed_device_login_account_id(login_id)
+        ),
+        clear_live_validation=lambda: codex_app_server.clear_live_validation_failure(),
+        close_completed_login_server=(
+            lambda login_id: codex_app_server.close_completed_login_server(login_id)
+        ),
+        error=codex_app_server.CodexAppServerError,
+    ),
+    "grok": _TokenAnchoredProvider(
+        approval=XAI_OPERATOR_APPROVAL,
+        read_account=lambda cur=None: read_xai_account(cur),
+        save_account=lambda account, cur=None: save_xai_account(account, cur),
+        save_proxy_account_id=lambda account_id, cur=None: state.save_proxy_xai_account_id(
+            account_id, cur
+        ),
+        usage_key="grok_usage",
+        read_completed_login_account_id=(
+            lambda login_id: grok_agent.read_completed_login_account_id(login_id)
+        ),
+        clear_live_validation=lambda: grok_agent.clear_live_validation_failure(),
+        close_completed_login_server=(
+            lambda login_id: grok_agent.close_completed_login_server(login_id)
+        ),
+        error=grok_agent.GrokAgentError,
+    ),
+}
 # Runtimes with no managed provider connection to enable, log in to, or probe.
 # They are available whenever the host is.
 UNMANAGED_RUNTIMES = ("script",)
 # Runtimes that map one turn to one process and expose no mid-turn channel, so
 # a second message must wait for the turn instead of steering it.
 NON_STEERABLE_RUNTIMES = ("hermes", "script")
-DEACTIVATED_REASON = "agent runtime deactivated because its managed network provider is disabled"
 
 
 class ExecutionPhase(str, Enum):
@@ -250,8 +327,10 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
     if not runtime_network_enabled(runtime_type):
         return _mark_runtime_deactivated(runtime_type)
     provider = _provider_module(runtime_type)
+    if runtime_type == "grok":
+        _prepare_grok_provider_probe()
     try:
-        if runtime_type == "codex" and force_provider_probe:
+        if runtime_type in _TOKEN_ANCHORED and force_provider_probe:
             status, error_message, account = provider.account_status(force_provider_probe=True)
         else:
             status, error_message, account = provider.account_status()
@@ -265,10 +344,10 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
     if runtime_type == "claude_code" and status == "active" and isinstance(account, dict):
         status, error_message, account = _live_claude_status(account, force_probe=force_provider_probe)
     # The status poll is the sole reader of the parked login server, so it has
-    # now recorded any completed-login notification. Capture the first trusted
-    # anchor here, in the same refresh, so this refresh's commit publishes the
-    # proxy pin the moment the login lands instead of a poll cycle later.
-    _capture_completed_codex_login(runtime_type)
+    # now recorded any completed login. Capture the first trusted anchor here,
+    # in the same refresh, so this refresh's commit publishes the proxy pin the
+    # moment the login lands instead of a poll cycle later.
+    _capture_completed_token_login(runtime_type)
     account_value = _active_account_value(runtime_type, status, account)
     attested: dict[str, Any] | None = None
     attest_error: str | None = None
@@ -276,7 +355,7 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
         attested, attest_error = _claude_attestation(account_value)
     deactivated = False
     became_nonactive = False
-    codex_login_to_close: str | None = None
+    login_to_close: str | None = None
     after_commit: list[Callable[[], None]] = []
     with state.mutation(after_commit=after_commit) as cur:
         if not runtime_network_enabled(runtime_type):
@@ -305,26 +384,46 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
                 partial(_set_runtime_status, runtime_type, status, cached_error)
             )
             became_nonactive = previous == "active" and status != "active"
+            anchored = _TOKEN_ANCHORED.get(runtime_type)
+            if anchored is not None:
+                oauth_key = _OAUTH_KEY_BY_RUNTIME[runtime_type]
+                completed_login = state.oauth_login(oauth_key, cur)
+                # Grok's parked authenticate request can complete and bind the
+                # first trusted anchor even when the following entitlement or
+                # billing probe fails. That operator login is still spent: if
+                # it remains in the database, Start login returns the completed
+                # row forever instead of minting a retry. Codex completion is
+                # discovered through a different path, so retain its existing
+                # active-only cleanup rule.
+                grok_login_completed = (
+                    runtime_type == "grok"
+                    and completed_login is not None
+                    and _string_field(completed_login, "status") == "completed"
+                )
+                if status == "active" or grok_login_completed:
+                    login_to_close = (
+                        _string_field(completed_login, "login_id")
+                        if completed_login
+                        else None
+                    )
+                    state.set_oauth_login(cur, oauth_key, None)
             if status == "active":
-                # The device code is spent (or moot) once the account is active.
-                # Without this, a later session expiry would resurface the stale
-                # record instead of letting the operator start a fresh login.
-                if runtime_type == "codex":
-                    completed_login = state.oauth_login("codex", cur)
-                    codex_login_to_close = _string_field(completed_login, "login_id") if completed_login else None
-                if runtime_type == "claude_code":
+                # The login record is spent (or moot) once the account is
+                # active. Without this, a later session expiry would resurface
+                # the stale record instead of letting the operator start a
+                # fresh login.
+                if anchored is not None:
+                    _stamp_usage_checked_at(account_value, anchored.usage_key, utc_now())
+                    anchored.save_account(account_value, cur)
+                elif runtime_type == "claude_code":
                     state.set_oauth_login(cur, "claude", None)
                     save_claude_account(account_value, cur)
-                elif runtime_type == "hermes" or runtime_type in UNMANAGED_RUNTIMES:
+                else:
                     # The Bedrock account row is written once at credential
                     # submission and only cleared by a disconnect, and an
                     # unmanaged runtime has no account at all; the status
                     # refresh has nothing to store for either.
                     pass
-                else:
-                    state.set_oauth_login(cur, "codex", None)
-                    _stamp_usage_checked_at(account_value, "codex_usage", utc_now())
-                    save_openai_account(account_value, cur)
             if runtime_type in OAUTH_RUNTIMES:
                 _sync_runtime_proxy_pin_in(cur, runtime_type, account_value if status == "active" else None)
             if runtime_type in OAUTH_RUNTIMES and previous == "awaiting_login" and status == "active":
@@ -347,60 +446,92 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
             else f"{label} runtime became {status}"
         )
         _stop_runtime_processes(runtime_type, reason)
+    # The login flow (first login or reauth) has landed, so its parked login
+    # server is done. Close the one for this login id, scoped so a login started
+    # meanwhile survives. A completed Grok login is retired even when its
+    # post-login provider probe failed; the immutable account anchor captured
+    # from that exact flow remains available for the retry.
+    anchored = _TOKEN_ANCHORED.get(runtime_type)
+    if anchored is not None and login_to_close:
+        anchored.close_completed_login_server(login_to_close)
     if status == "active":
-        # The login flow (first login or reauth) has landed, so its parked
-        # device-login server is done. Close the one for this login id, scoped so
-        # a login started meanwhile survives, or later status checks would keep
-        # polling the leftover login process instead of short-lived servers.
-        if codex_login_to_close:
-            codex_app_server.close_completed_login_server(codex_login_to_close)
         if runtime_type == "claude_code":
             _backfill_claude_usage(account_value)
     return status
 
 
-def _capture_completed_codex_login(runtime_type: str) -> None:
-    """Persist the first trusted OpenAI anchor once the login has completed.
+def _capture_completed_token_login(runtime_type: str) -> None:
+    """Record completion and persist the first trusted token-account anchor.
 
     Runs right after the status poll, which is the sole reader of the parked
-    device-code app-server and has therefore recorded the successful
-    account/login/completed notification. A stored OAuth row means the operator
-    saw a device code, not that the login completed, so capture still requires
-    that completion for the exact login id; the account id itself is read from
-    the provider-signed login tokens promptly after completion (see
-    read_completed_device_login_account_id). The surrounding refresh publishes
-    the proxy pin when it commits, right after this capture.
+    login server and has therefore recorded the provider's completion. A stored
+    OAuth row means the operator saw a device code or login URL, not that the
+    login completed, so capture still requires that completion for the exact
+    login id; the account id itself is read from the provider-signed login
+    tokens promptly after completion. The surrounding refresh publishes the
+    proxy pin when it commits, right after this capture.
     """
-    if runtime_type != "codex":
+    anchored = _TOKEN_ANCHORED.get(runtime_type)
+    if anchored is None:
         return
-    if _trusted_openai_account_id(read_openai_account()):
-        return  # anchor already established; nothing to capture
-    login = _current_oauth_login("codex")
+    oauth_key = _OAUTH_KEY_BY_RUNTIME[runtime_type]
+    stored_login = state.oauth_login(oauth_key)
+    stored_login_id = _string_field(stored_login, "login_id") if stored_login else None
+    stored_expiry = stored_login.get("expires_at") if stored_login else None
+    was_expired = isinstance(stored_expiry, str) and stored_expiry <= utc_now()
+    login = _current_oauth_login(oauth_key)
     login_id = _string_field(login, "login_id") if login else None
     if not login_id:
+        # Scope the close to the exact expired approval. A new device flow may
+        # start immediately after the old row is deleted; never let expiry
+        # cleanup reap that replacement.
+        if was_expired and stored_login_id:
+            anchored.close_completed_login_server(stored_login_id)
         return
+    account_id: str | None = None
+    if runtime_type == "grok":
+        try:
+            account_id = anchored.read_completed_login_account_id(login_id)
+        except anchored.error:
+            with state.mutation() as cur:
+                current = _current_oauth_login(oauth_key, cur)
+                if current is not None and _string_field(current, "login_id") == login_id:
+                    state.set_oauth_login(cur, oauth_key, None)
+            anchored.close_completed_login_server(login_id)
+            return
     try:
-        account_id = codex_app_server.read_completed_device_login_account_id(login_id)
-    except codex_app_server.CodexAppServerError:
+        if account_id is None:
+            account_id = anchored.read_completed_login_account_id(login_id)
+    except anchored.error:
         # A helper hiccup must not fail the refresh; the poller already
         # classified the runtime state and the next refresh retries the capture.
         return
     if account_id:
-        _capture_completed_codex_oauth_login(login_id, account_id)
+        _capture_completed_token_oauth_login(runtime_type, login_id, account_id)
 
 
-def _capture_completed_codex_oauth_login(login_id: str, account_id: str) -> bool:
-    """Persist the first OpenAI anchor only for the completed device-code flow."""
+def _prepare_grok_provider_probe() -> None:
+    """Capture a completed login before its derived status pin is read."""
+    grok_agent.collect_login_completion()
+    _capture_completed_token_login("grok")
+
+
+def _capture_completed_token_oauth_login(runtime_type: str, login_id: str, account_id: str) -> bool:
+    """Mark the exact login complete and persist its first account anchor."""
+    anchored = _TOKEN_ANCHORED[runtime_type]
+    oauth_key = _OAUTH_KEY_BY_RUNTIME[runtime_type]
     with state.mutation() as cur:
-        trusted_account_id = _trusted_openai_account_id(read_openai_account(cur))
-        if trusted_account_id:
-            return trusted_account_id == account_id
-        login = _current_oauth_login("codex", cur)
+        login = _current_oauth_login(oauth_key, cur)
         current_login_id = _string_field(login, "login_id") if login else None
         if login is None or current_login_id != login_id:
             return False
-        state.set_oauth_login(cur, "codex", login | {"status": "completed"})
-        save_openai_account(_with_openai_operator_approval({"account_id": account_id}), cur)
+        state.set_oauth_login(cur, oauth_key, login | {"status": "completed"})
+        trusted_account_id = _trusted_token_account_id(anchored, anchored.read_account(cur))
+        if trusted_account_id:
+            return trusted_account_id == account_id
+        anchored.save_account(
+            _with_operator_approval(anchored, {"account_id": account_id}), cur
+        )
         return True
 
 
@@ -672,38 +803,53 @@ def _trusted_active_account(
     The anchor is the stored account id: first captured only while an operator
     OAuth login is in flight, immutable afterwards until an operator reset
     clears it. OpenAI's anchor is additionally enforced per request by the
-    proxy header guard. Claude's identity is server-attested: the anchor is
-    the account uuid api.anthropic.com reports for the token itself, checked
-    whenever the token changes, so agent-writable metadata is never trusted.
+    proxy header guard. Claude and Grok identities are server-attested for each
+    new token, so agent-writable metadata is never trusted as the displayed or
+    pinned identity.
     """
     if not account:
         raise ProviderAccountTrustError(f"{runtime_type} reported active without account metadata")
     if runtime_type == "claude_code":
         return _trusted_claude_account(cur, account, attested, attest_error)
-    return _trusted_openai_account(cur, account)
+    return _trusted_token_account(cur, runtime_type, account)
 
 
-def _trusted_openai_account(cur: Any, account: dict[str, Any]) -> dict[str, Any]:
+# The provider name shown to the operator when their linked account is the
+# problem. It names the account they would go and fix, not the runtime.
+_ACCOUNT_PROVIDER_LABELS = {"codex": "OpenAI", "grok": "xAI"}
+
+
+def _trusted_token_account(cur: Any, runtime_type: str, account: dict[str, Any]) -> dict[str, Any]:
+    anchored = _TOKEN_ANCHORED[runtime_type]
+    label = _ACCOUNT_PROVIDER_LABELS[runtime_type]
     account_id = _string_field(account, "account_id")
     if not account_id:
-        raise ProviderAccountTrustError("OpenAI account id is not available")
-    trusted_account_id = _trusted_openai_account_id(read_openai_account(cur))
+        raise ProviderAccountTrustError(f"{label} account id is not available")
+    trusted_account_id = _trusted_token_account_id(anchored, anchored.read_account(cur))
     if trusted_account_id:
         if account_id != trusted_account_id:
-            raise ProviderAccountTrustError("OpenAI account changed; reset the linked account under Home > Integrations in the admin UI")
-        return _with_openai_operator_approval(account)
-    raise ProviderAccountNotApproved("OpenAI account is not operator-approved; start OAuth login from the admin UI")
+            raise ProviderAccountTrustError(
+                f"{label} account changed; reset the linked account under Home > Integrations in the admin UI"
+            )
+        return _with_operator_approval(anchored, account)
+    raise ProviderAccountNotApproved(
+        f"{label} account is not operator-approved; start OAuth login from the admin UI"
+    )
 
 
-def _trusted_openai_account_id(account: dict[str, Any]) -> str | None:
-    if _string_field(account, "operator_approval") != OPENAI_OPERATOR_APPROVAL:
+def _trusted_token_account_id(
+    anchored: _TokenAnchoredProvider, account: dict[str, Any]
+) -> str | None:
+    if _string_field(account, "operator_approval") != anchored.approval:
         return None
     return _string_field(account, "account_id")
 
 
-def _with_openai_operator_approval(account: dict[str, Any]) -> dict[str, Any]:
+def _with_operator_approval(
+    anchored: _TokenAnchoredProvider, account: dict[str, Any]
+) -> dict[str, Any]:
     approved = dict(account)
-    approved["operator_approval"] = OPENAI_OPERATOR_APPROVAL
+    approved["operator_approval"] = anchored.approval
     return approved
 
 
@@ -771,7 +917,7 @@ def _claude_anchor_is_server_attested(account: dict[str, Any]) -> bool:
 def _trusted_claude_account_id(account: dict[str, Any]) -> str | None:
     """The Claude anchor id, or None when the row is not a trusted anchor.
 
-    Mirrors _trusted_openai_account_id: the operator-approval marker is the
+    Mirrors _trusted_token_account_id: the operator-approval marker is the
     server attestation, so a row without it is not an anchor and re-captures
     through a fresh operator login."""
     if not _claude_anchor_is_server_attested(account):
@@ -819,7 +965,7 @@ def _sync_runtime_proxy_pin_in(cur: Any, runtime_type: str, account: dict[str, A
     if runtime_type == "claude_code":
         state.save_proxy_claude_account_id(account_id, cur)
         return
-    state.save_proxy_openai_account_id(account_id, cur)
+    _TOKEN_ANCHORED[runtime_type].save_proxy_account_id(account_id, cur)
 
 
 def _string_field(value: dict[str, Any], key: str) -> str | None:
@@ -851,6 +997,11 @@ def _mark_runtime_deactivated_in(
     previous = runtime_status(runtime_type)
     after_commit.append(partial(_set_runtime_status, runtime_type, "deactivated"))
     _clear_oauth_login_in(cur, runtime_type)
+    # Once the OAuth row commits away, any pending provider login has no
+    # approval record and no useful future. Reap it after commit from every
+    # deactivation path, including a policy change that races a provider probe.
+    # Grok would otherwise keep polling in its named scope after xAI is off.
+    after_commit.append(partial(_close_login_flow, runtime_type))
     if runtime_type in OAUTH_RUNTIMES:
         _sync_runtime_proxy_pin_in(cur, runtime_type, None)
     if previous != "deactivated":
@@ -865,9 +1016,10 @@ def _mark_runtime_deactivated_in(
 def _clear_oauth_login_in(cur: Any, runtime_type: str) -> None:
     # Hermes has no OAuth flow (its credential lives encrypted
     # in the database), so there is no login record to clear for them.
-    if runtime_type == "hermes":
+    oauth_key = _OAUTH_KEY_BY_RUNTIME.get(runtime_type)
+    if oauth_key is None:
         return
-    state.set_oauth_login(cur, "claude" if runtime_type == "claude_code" else "codex", None)
+    state.set_oauth_login(cur, oauth_key, None)
 
 
 def reconcile_runtime_status_after_policy_change() -> None:
@@ -883,7 +1035,7 @@ def reconcile_runtime_status_after_policy_change() -> None:
     CLI checks.
     """
     enabled: list[str] = []
-    for runtime_type in ("codex", "claude_code", "hermes"):
+    for runtime_type in ("codex", "claude_code", "grok", "hermes"):
         if not runtime_network_enabled(runtime_type):
             _mark_runtime_deactivated(runtime_type)
         else:
@@ -925,7 +1077,7 @@ def reset_linked_account(runtime_type: str) -> None:
     if runtime_type == "claude_code":
         _CLAUDE_LIVE_PROBE = None
     else:
-        codex_app_server.clear_live_validation_failure()
+        _TOKEN_ANCHORED[runtime_type].clear_live_validation()
     _close_login_flow(runtime_type)
     _stop_runtime_processes(runtime_type, "linked provider account was reset by the operator")
 
@@ -939,7 +1091,7 @@ def _reset_linked_account_in_state(runtime_type: str) -> None:
         if runtime_type == "claude_code":
             save_claude_account(None, cur)
         else:
-            save_openai_account(None, cur)
+            _TOKEN_ANCHORED[runtime_type].save_account(None, cur)
         _sync_runtime_proxy_pin_in(cur, runtime_type, None)
         state.append_agent_event(cur, "agent_runtime.linked_account_reset", None, {"agent_runtime": runtime_type})
 
@@ -973,6 +1125,8 @@ def _close_login_flow(runtime_type: str) -> None:
     try:
         if runtime_type == "codex":
             codex_app_server.close_login_server()
+        elif runtime_type == "grok":
+            grok_agent.close_login_server()
         elif runtime_type == "claude_code":
             claude_code.close_login_process()
         # Hermes has no login process to close.
@@ -1008,7 +1162,7 @@ def runtime_status_loop() -> None:
     # of that: its status comes from a constant, so a poll would re-publish an
     # unchangeable value and open an empty transaction to do it.
     # ``start_background_loops`` publishes those runtimes once instead.
-    refresh_targets = ("codex", "claude_code", "hermes")
+    refresh_targets = ("codex", "claude_code", "grok", "hermes")
     next_check_at = {runtime_type: 0.0 for runtime_type in refresh_targets}
     while True:
         now = time.monotonic()
@@ -1207,7 +1361,13 @@ def steer_live_turn(thread_id: str, runtime_type: str, message: str) -> bool:
                 # Preserve that completion fence as a retryable phase instead
                 # of recording a false terminal provider error.
                 raise _retryable_phase_error(ExecutionPhase.FINISHING)
-            except (codex_app_server.CodexAppServerError, claude_code.ClaudeCodeError) as exc:
+            except grok_agent.GrokTurnFinishing:
+                raise _retryable_phase_error(ExecutionPhase.FINISHING)
+            except (
+                codex_app_server.CodexAppServerError,
+                claude_code.ClaudeCodeError,
+                grok_agent.GrokAgentError,
+            ) as exc:
                 # Once the adapter has declared RUNNING, "not ready" is no
                 # longer a transient phase. It is a provider/transport failure
                 # and owns the normal durable error -> FINISHING path.
@@ -1479,14 +1639,37 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
                     turn.provider_session_id = None
                 return
         else:
-            new_provider_session_id, _output = provider.run_turn(
-                server,
-                input_message,
-                provider_session_id,
-                turn.model,
-                turn.effort,
-                on_agent_message,
-            )
+            try:
+                new_provider_session_id, _output = provider.run_turn(
+                    server,
+                    input_message,
+                    provider_session_id,
+                    turn.model,
+                    turn.effort,
+                    on_agent_message,
+                )
+            except grok_agent.GrokSessionNotFoundError as exc:
+                if runtime_type != "grok" or not provider_session_id:
+                    raise
+                with turn.delivery_lock:
+                    if turn.phase != ExecutionPhase.RUNNING:
+                        return
+                    after_commit = []
+                    with state.mutation(after_commit=after_commit) as cur:
+                        state.clear_thread_provider_session(
+                            cur,
+                            thread_id,
+                            turn.run_number,
+                            provider_session_id,
+                        )
+                        _record_turn_finished(
+                            cur,
+                            after_commit,
+                            turn,
+                            error_message=str(exc),
+                        )
+                    turn.provider_session_id = None
+                return
         _finish_turn(turn, provider_session_id=new_provider_session_id)
     except Exception as exc:
         # The callback is the primary persistence path. The attribute is only
@@ -1637,6 +1820,8 @@ def _finish_turn(
 def _provider_module(runtime_type: str | None = None) -> Any:
     if runtime_type == "claude_code":
         return claude_code
+    if runtime_type == "grok":
+        return grok_agent
     if runtime_type == "hermes":
         return hermes_agent
     if runtime_type == "script":
@@ -1661,6 +1846,12 @@ def _new_agent_server(
         )
     if runtime_type == "hermes":
         return hermes_agent.HermesSession(
+            thread_id=thread_id,
+            on_ready=on_ready,
+            on_session_id=on_session_id,
+        )
+    if runtime_type == "grok":
+        return grok_agent.GrokAcpServer(
             thread_id=thread_id,
             on_ready=on_ready,
             on_session_id=on_session_id,

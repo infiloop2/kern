@@ -73,7 +73,16 @@ class NetworkIntrospectionTests(unittest.TestCase):
         }
         self.assertEqual(
             sorted(by_id),
-            ["bedrock", "claude", "custom", "github", "npm_packages", "openai", "python_packages"],
+            [
+                "bedrock",
+                "claude",
+                "custom",
+                "github",
+                "npm_packages",
+                "openai",
+                "python_packages",
+                "xai",
+            ],
         )
         self.assertTrue(by_id["github"]["enabled"])
         self.assertEqual(

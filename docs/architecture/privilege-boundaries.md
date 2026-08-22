@@ -7,8 +7,9 @@
 | `kern-tools` | Runs the bundled tool packages in the dedicated tools service; owns the agent-facing tools socket. | No sudo. Postgres role scoped to the five tool tables plus read access to `secret_keys`. DNS and outbound HTTPS (443) for tool third-party APIs; explicitly blocked from the loopback admin listener. |
 | `kern-agent-network` | Runs the network-introspection service and owns its agent-facing socket. | No sudo, secrets, or egress. Postgres role has SELECT-only access to network policy and decision-log tables. |
 | `kern-proxy` | Runs the policy proxy; owns proxy TLS and Git quarantine files. | No sudo. A narrow Postgres role reads enforcement inputs and the working token/key, inserts network and pending-push records, and prunes network events. Only nftables-approved DNS and TCP 80/443 egress; explicitly blocked from the loopback admin listener. |
-| `kern-agent` | Runs Codex, Claude Code, and Hermes runtime processes. | None. No sudo, no database role, no direct network off the host. Its only loopback egress is the policy-proxy port and its own preview range `8000-8015` (its own HTTP servers). That range is default-deny — only the agent and the operator's SSH forward are allowed, both directions dropped for everyone else — so no other principal reaches a preview server or answers a connection the agent opened. See [agent-preview-ports.md](agent-preview-ports.md). |
+| `kern-agent` | Runs Codex, Claude Code, Grok, and Hermes runtime processes. | None. No sudo, no database role, no direct network off the host. Its only loopback egress is the policy-proxy port and its own preview range `8000-8015` (its own HTTP servers). That range is default-deny — only the agent and the operator's SSH forward are allowed, both directions dropped for everyone else — so no other principal reaches a preview server or answers a connection the agent opened. See [agent-preview-ports.md](agent-preview-ports.md). |
 | `kern-workspace` | Runs Chat, Web Apps, global Memory/Schedules, and the agent-facing Workspace API socket. | No sudo, secrets, or egress. Its database role has DML only on eight Workspace tables and five sequences in `public`, with no DDL or access to other admin state. It may answer the admin-only loopback port and call allowlisted host thread routes over the peer-authenticated admin socket. |
+| `kern-embedding` | Runs the socket-activated local ONNX text encoder. | No sudo, database role, secrets, home, or network namespace. It reads only the root-owned model/runtime and accepts bounded requests from `kern-admin` and `kern-workspace` through a mode-`0660` systemd socket. |
 | `cloudflared` | Runs the optional Cloudflare Tunnel connector. | No sudo, no database role. Only nftables-approved DNS, TCP 443, and TCP/UDP 7844 egress; one of the four trusted uids allowed to connect to the loopback admin listener. |
 | `postgres` | Runs the admin-state Postgres. | Database superuser over the local socket; no sudo, no network egress. |
 
@@ -17,8 +18,8 @@ The service accounts use fixed numeric IDs: `kern-admin` is
 `cloudflared` is `47744`, `postgres` is `47745` (created by bootstrap
 before the PostgreSQL packages would assign a dynamic id),
 `kern-tools` is `47746`, `kern-agent-network` is `47748`, the Workspace
-admin-socket group is `47749`, and
-`kern-workspace` is `47750`. Stable IDs keep durable root-volume and
+admin-socket group is `47749`, `kern-workspace` is `47750`, and
+`kern-embedding` is `47751`. Stable IDs keep durable root-volume and
 Postgres ownership valid when `/etc/passwd` is replaced. Bootstrap deletes the
 retired dynamic app accounts; their UID range had no durable filesystem
 ownership and is not reserved.

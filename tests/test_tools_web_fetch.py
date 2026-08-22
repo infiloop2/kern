@@ -11,7 +11,7 @@ from unittest.mock import patch
 from host.tools import web_fetch
 from host.tools.web_fetch import BUNDLED_TOOL
 from host.tools.results import ActionExecuted, ActionFailed
-from test_tools import FakeHostAPI
+from test_tools import FakeHostAPI, assert_matches_output_schema
 
 HTML_PAGE = (
     b"<html><head><title>Example Title</title><style>body{color:red}</style>"
@@ -80,9 +80,8 @@ class WebFetchFetchTests(unittest.TestCase):
     def test_returns_html_response_text_as_is(self) -> None:
         with patch.object(web_fetch, "_fetch_once", return_value=_response()) as fetch:
             result = self.execute()
-        self.assertIsInstance(result, ActionExecuted)
+        assert_matches_output_schema(self, web_fetch.MANIFEST, "fetch_page", result)
         assert isinstance(result, ActionExecuted)
-        self.assertEqual(result.result["status"], "success_executed")
         self.assertEqual(result.result["url"], "https://example.com/article")
         self.assertEqual(result.result["content_type"], "text/html")
         self.assertEqual(result.result["truncated"], False)

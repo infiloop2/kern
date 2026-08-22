@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from host.runtime.tools.tools_host import BUNDLED_TOOLS, validate_against_schema
-from tests.smoke.smoke_aws import SMOKE_RUNTIMES, SMOKE_TOOL_CALLS, AwsSmoke
+from tests.smoke.smoke_aws import OFFERED_RUNTIMES, SMOKE_RUNTIMES, SMOKE_TOOL_CALLS, AwsSmoke
 from tests.stage.stage_aws import STAGE_SUITE_CHOICES, StageAwsSmoke, _required_env_path
 from tests.stage.stage_integration_checks import ALL_RUNTIMES_SUITE
 from tests.stage.stage_support import (
@@ -59,7 +59,8 @@ class AwsSmokeTeardownTests(unittest.TestCase):
         schedules_base = "/v1/workspace/schedules"
         schedule_created = False
         workspace_session_options = {
-            runtime: {f"{runtime}-model": ["high"]} for runtime in SMOKE_RUNTIMES
+            runtime: {f"{runtime}-model": ["high"]}
+            for runtime in OFFERED_RUNTIMES
         }
         schedule_session_options = {
             **workspace_session_options,
@@ -533,6 +534,7 @@ class StageAwsSmokeTests(unittest.TestCase):
     def test_stage_suite_runtimes_scope_each_suite(self) -> None:
         self.assertEqual(StageAwsSmoke.suite_runtimes("codex"), ("codex",))
         self.assertEqual(StageAwsSmoke.suite_runtimes("claude"), ("claude_code",))
+        self.assertEqual(StageAwsSmoke.suite_runtimes("grok"), ("grok",))
         self.assertEqual(StageAwsSmoke.suite_runtimes("hermes"), ("hermes",))
         self.assertEqual(StageAwsSmoke.suite_runtimes("github"), ())
         self.assertEqual(StageAwsSmoke.suite_runtimes("brave_search"), ())
@@ -540,11 +542,11 @@ class StageAwsSmokeTests(unittest.TestCase):
         self.assertEqual(StageAwsSmoke.suite_runtimes("google_calendar"), ())
         self.assertEqual(
             StageAwsSmoke.suite_runtimes("all"),
-            ("codex", "claude_code", "hermes"),
+            ("codex", "claude_code", "grok", "hermes"),
         )
         self.assertEqual(
             StageAwsSmoke.suite_runtimes(ALL_RUNTIMES_SUITE),
-            ("codex", "claude_code", "hermes"),
+            ("codex", "claude_code", "grok", "hermes"),
         )
         self.assertIn(ALL_RUNTIMES_SUITE, STAGE_SUITE_CHOICES)
         self.assertNotIn(ALL_RUNTIMES_SUITE, TOOL_SUITES)
@@ -699,9 +701,11 @@ class StageAwsSmokeTests(unittest.TestCase):
             ssh_key.write_text("private key")
             smoke = StageAwsSmoke(result_path, ssh_key)
         smoke.stage_github_repositories = [{"owner": "sandbox-owner", "repo": "sandbox"}]
-        repos = smoke.enforcement_policy()["network_integrations"]["github"]["write_repositories"]
+        integrations = smoke.enforcement_policy()["network_integrations"]
+        repos = integrations["github"]["write_repositories"]
         self.assertEqual(repos[0], {"owner": "sandbox-owner", "repo": "sandbox"})
         self.assertIn({"owner": "infiloop2", "repo": "kern"}, repos)
+        self.assertEqual(integrations["xai"], {"enabled": True})
 
 
 class WorkflowSmokeTests(unittest.TestCase):
@@ -736,7 +740,7 @@ class WorkflowSmokeTests(unittest.TestCase):
 
     def test_stage_workflow_exposes_only_enable_only_tool_secrets(self) -> None:
         stage = Path(".github/workflows/kern-stage.yml").read_text()
-        for option in ("all", *TOOL_SUITES, "claude", "codex", "github"):
+        for option in ("all", *TOOL_SUITES, "claude", "codex", "grok", "github"):
             self.assertIn(f"- {option}", stage)
         self.assertIn("--suite", stage)
         self.assertIn("--summary-file stage-integration-summary.md", stage)

@@ -13,7 +13,7 @@ from host.tools.apify import ApifyTool
 from host.tools.results import ActionExecuted, ActionFailed
 from host.tools.shared.web import WebRequestError
 
-from test_tools import FakeHostAPI
+from test_tools import FakeHostAPI, assert_matches_output_schema
 
 
 PLACE_ID = "ChIJN1t_tDeuEmsRUsoyG83frY4"
@@ -87,6 +87,17 @@ class ApifyToolTests(unittest.TestCase):
         self.assertIn("cannot choose or run another Actor", combined)
         self.assertIn("does not grant", combined)
         self.assertIn("permission", combined)
+
+    def test_every_direct_result_matches_its_declared_output_schema(self) -> None:
+        for action, tool_input in (
+            ("search_businesses", {"query": "bakery", "location": "London, United Kingdom"}),
+            ("get_business_details", {"place_id": PLACE_ID}),
+        ):
+            with self.subTest(action=action), patch.object(
+                apify, "request_bytes", lambda *a, **k: json.dumps([business()]).encode()
+            ):
+                result = ApifyTool().execute(action, tool_input, configured_api())
+            assert_matches_output_schema(self, apify.MANIFEST, action, result)
 
     def test_search_uses_fixed_actor_header_caps_and_guarded_input(self) -> None:
         seen: dict[str, Any] = {}

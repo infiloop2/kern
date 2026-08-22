@@ -1,6 +1,6 @@
 # Runtime Harness Dependencies
 
-Kern treats Codex, Claude Code, and Hermes as external runtime
+Kern treats Codex, Claude Code, Grok, and Hermes as external runtime
 harnesses. The host owns process supervision, thread and turn state, network policy, and privilege
 boundaries, but it depends on specific CLI protocols, auth files, and network
 request shapes from those harnesses. This document lists the expectations that
@@ -12,6 +12,7 @@ can break when a harness package is upgraded.
 | --- | --- | --- | --- | --- |
 | Codex | `@openai/codex` | `0.144.0` | `codex` | `host/runtime/admin_api/codex_app_server.py` |
 | Claude Code | `@anthropic-ai/claude-code` | `2.1.220` | `claude_code` | `host/runtime/admin_api/claude_code.py` |
+| Grok Build | `@xai-official/grok` | `1.0.5` | `grok` | `host/runtime/admin_api/grok_agent.py` |
 | Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/admin_api/hermes_agent.py` |
 
 The `script` runtime (`host/runtime/admin_api/script_runner.py`) is on that

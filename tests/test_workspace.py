@@ -8,16 +8,180 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from host.constants import SERVICE_ACCOUNTS
-from host.runtime.workspace import getting_started, service
+from host.runtime.workspace import getting_started, memory, service
 from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.web_apps import backend as web_apps
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_memory_hybrid_cursor_retries_during_model_failure(self) -> None:
+        rows = [
+            (
+                f"page-{index}",
+                f"Page {index}",
+                "content",
+                1,
+                None,
+                "agent",
+                "2026-07-01T00:00:00Z",
+                "2026-07-01T00:00:00Z",
+            )
+            for index in range(3)
+        ]
+
+        def lexical(
+            _needle: str,
+            limit: int,
+            offset: int,
+            *,
+            scope: str,
+        ) -> list[tuple[object, ...]]:
+            self.assertEqual(scope, "swarm")
+            return rows[offset : offset + limit]
+
+        with (
+            patch.object(memory, "_search_pages_exact", return_value=[]),
+            patch.object(memory, "_search_pages_lexical", side_effect=lexical) as search,
+            patch.object(
+                memory, "_search_pages_semantic", return_value=[]
+            ) as semantic_search,
+            patch.object(memory, "_search_pages_graph", return_value=[]),
+            patch.object(
+                memory,
+                "_current_page_rows",
+                side_effect=lambda page_ids, *, scope: [
+                    row for row in rows if str(row[0]) in set(page_ids)
+                ],
+            ),
+            patch.object(memory, "_record_memory_top_hit") as record_top_hit,
+            patch.object(
+                memory.embedding_client,
+                "embed_texts",
+                side_effect=[
+                    [[0.0] * 384],
+                    memory.embedding_client.EmbeddingError("offline"),
+                    [[0.0] * 384],
+                ],
+            ),
+        ):
+            first = memory.route_agent(
+                "GET", "/agent/memory/search", None, {"q": ["page"], "limit": ["1"]}
+            )
+            with self.assertRaises(memory.WorkspaceError) as unavailable:
+                memory.route_agent(
+                    "GET",
+                    "/agent/memory/search",
+                    None,
+                    {
+                        "q": ["page"],
+                        "limit": ["1"],
+                        "cursor": [first["next_cursor"]],
+                    },
+                )
+            resumed = memory.route_agent(
+                "GET",
+                "/agent/memory/search",
+                None,
+                {
+                    "q": ["page"],
+                    "limit": ["1"],
+                    "cursor": [first["next_cursor"]],
+                },
+            )
+
+        self.assertEqual(first["pages"][0]["page_id"], "page-0")
+        self.assertEqual(unavailable.exception.status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(resumed["search_mode"], "hybrid")
+        self.assertEqual(resumed["pages"][0]["page_id"], "page-1")
+        record_top_hit.assert_called_once_with("page-0")
+        self.assertEqual([call.args[2] for call in search.call_args_list], [0, 0, 0])
+        self.assertEqual(semantic_search.call_count, 2)
+
+    def test_agent_memory_search_rejects_pre_snapshot_offset_cursor(self) -> None:
+        with self.assertRaises(memory.WorkspaceError) as raised:
+            memory.route_agent(
+                "GET",
+                "/agent/memory/search",
+                None,
+                {"q": ["valid query"], "cursor": [memory._encode_offset_cursor(1)]},
+            )
+
+        self.assertEqual(raised.exception.status, HTTPStatus.BAD_REQUEST)
+
+    def test_fallback_memory_cursor_keeps_lexical_ranking_after_recovery(self) -> None:
+        fingerprint = memory._memory_search_fingerprint("valid query", "swarm")
+        cursor = memory._encode_semantic_offset_cursor(
+            1, "fallback", fingerprint, memory._memory_search_generation()
+        )
+        with (
+            patch.object(memory, "_search_pages_exact", return_value=[]),
+            patch.object(memory, "_search_pages_lexical", return_value=[]),
+            patch.object(memory, "_lexical_page_id_tail", return_value=[]),
+            patch.object(memory, "_search_pages_graph", return_value=[]),
+            patch.object(memory, "_memory_search_fallback", return_value={"pages": []}),
+            patch.object(memory.embedding_client, "embed_texts") as embed,
+        ):
+            response = memory.search_swarm_pages(
+                {"q": ["valid query"], "cursor": [cursor]}
+            )
+
+        self.assertEqual(response["search_mode"], "lexical_fallback")
+        embed.assert_not_called()
+
+    def test_hybrid_memory_cursor_expires_when_candidates_change(self) -> None:
+        fingerprint = memory._memory_search_fingerprint("valid query", "swarm")
+        generation = memory._memory_search_generation()
+        cursor = memory._encode_semantic_offset_cursor(
+            1, "hybrid", fingerprint, generation
+        )
+        memory._advance_memory_search_generation()
+
+        with self.assertRaises(memory.WorkspaceError) as raised:
+            memory.search_swarm_pages(
+                {"q": ["valid query"], "cursor": [cursor]}
+            )
+
+        self.assertEqual(raised.exception.status, HTTPStatus.CONFLICT)
+
+    def test_hybrid_memory_cursor_is_bound_to_its_query(self) -> None:
+        fingerprint = memory._memory_search_fingerprint("valid query", "swarm")
+        cursor = memory._encode_semantic_offset_cursor(
+            1, "hybrid", fingerprint, memory._memory_search_generation()
+        )
+
+        with self.assertRaises(memory.WorkspaceError) as raised:
+            memory.search_swarm_pages(
+                {"q": ["different query"], "cursor": [cursor]}
+            )
+
+        self.assertEqual(raised.exception.status, HTTPStatus.BAD_REQUEST)
+
+    def test_agent_memory_search_rejects_malformed_input_before_database_work(self) -> None:
+        for query in ({"q": ["   "]}, {"q": ["bad\x00query"]}, {"q": ["x" * 201]}):
+            with self.subTest(query=query), self.assertRaises(memory.WorkspaceError):
+                memory.route_agent("GET", "/agent/memory/search", None, query)
+
+        with self.assertRaises(memory.WorkspaceError):
+            memory.route_agent(
+                "GET",
+                "/agent/memory/search",
+                None,
+                {"q": ["valid query"], "cursor": ["!" * 513]},
+            )
+        oversized_snapshot = memory._encode_cursor(str(memory.MAX_PAGES + 1))
+        with self.assertRaises(memory.WorkspaceError):
+            memory.route_agent(
+                "GET",
+                "/agent/memory/search",
+                None,
+                {"q": ["valid query"], "cursor": [oversized_snapshot]},
+            )
+
     def test_one_fixed_service_identity_and_direct_product_ids(self) -> None:
         self.assertIsNotNone(chat.THREAD_ID_RE.fullmatch("thread-1"))
         self.assertIsNotNone(web_apps.APP_ID_RE.fullmatch("app-1"))
         self.assertEqual(SERVICE_ACCOUNTS["kern-workspace"], 47750)
+        self.assertEqual(SERVICE_ACCOUNTS["kern-embedding"], 47751)
         self.assertNotIn("kern-agent-workspace", SERVICE_ACCOUNTS)
         self.assertFalse(any(name.startswith("kern-app-") for name in SERVICE_ACCOUNTS))
 
@@ -181,6 +345,7 @@ class WorkspaceTests(unittest.TestCase):
                 "tcp-bind",
                 "agent-bind",
                 "workspace-agent-api",
+                "workspace-memory-embedding-index",
                 "workspace-scheduler",
                 "workspace-maintenance",
                 "tcp-serve",

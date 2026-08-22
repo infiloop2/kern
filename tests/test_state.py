@@ -27,11 +27,13 @@ from host.runtime.core.state import (
     read_openai_account,
     read_proxy_claude_account_id,
     read_proxy_openai_account_id,
+    read_proxy_xai_account_id,
     save_config,
     save_claude_account,
     save_openai_account,
     save_proxy_claude_account_id,
     save_proxy_openai_account_id,
+    save_proxy_xai_account_id,
 )
 
 
@@ -53,6 +55,7 @@ def seed_thread(
 class StateStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
+        state.conversation_embedding_work.clear()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.env_patch = patch.dict("os.environ", {"KERN_STATE_DIR": self.temp_dir.name})
@@ -810,6 +813,164 @@ class StateStorageTests(unittest.TestCase):
         self.assertNotIn(hostile, search_sql)
         self.assertEqual(parameters[0], hostile)
 
+    def test_conversation_semantic_index_covers_every_host_thread(self) -> None:
+        with state.mutation() as cur:
+            first = state.append_agent_event(
+                cur,
+                "thread.message",
+                "app-1",
+                {"message": "authentication callback", "source": "agent"},
+            )
+            second = state.append_agent_event(
+                cur,
+                "thread.message",
+                "schedule-daily",
+                {"message": "sign in failure", "source": "user"},
+            )
+
+        pending = state.unembedded_thread_messages(10)
+        self.assertEqual([seq for seq, _message in pending], [second, first])
+        first_vector = [1.0] + [0.0] * 383
+        second_vector = [0.9, 0.1] + [0.0] * 382
+        state.store_thread_message_embeddings(
+            "test-model",
+            [(first, first_vector), (second, second_vector)],
+        )
+        self.assertEqual(state.unembedded_thread_messages(10), [])
+        frozen = state.thread_messages_by_seqs(
+            (second, first),
+            from_timestamp=None,
+            to_timestamp=None,
+            thread_id=None,
+            sources=("user", "agent"),
+            max_seq=second,
+        )
+        self.assertEqual([row["seq"] for row in frozen], [second, first])
+        snapshot = state.conversation_search_snapshot()
+        self.assertEqual(snapshot[:3], (first, second, first))
+        self.assertEqual(snapshot[3], 1)
+
+        matches = state.search_thread_messages_semantic(
+            first_vector,
+            "test-model",
+            from_timestamp=None,
+            to_timestamp=None,
+            thread_id=None,
+            sources=("user", "agent"),
+            limit=10,
+            minimum_similarity=0.5,
+        )
+        self.assertEqual([row["seq"] for row in matches], [first, second])
+        self.assertEqual(
+            [row["thread_id"] for row in matches], ["app-1", "schedule-daily"]
+        )
+        snapshot_matches = state.search_thread_messages_semantic(
+            first_vector,
+            "test-model",
+            from_timestamp=None,
+            to_timestamp=None,
+            thread_id=None,
+            sources=("user", "agent"),
+            limit=10,
+            minimum_similarity=0.5,
+            max_seq=first,
+        )
+        self.assertEqual([row["seq"] for row in snapshot_matches], [first])
+        before_commit_matches = state.search_thread_messages_semantic(
+            first_vector,
+            "test-model",
+            from_timestamp=None,
+            to_timestamp=None,
+            thread_id=None,
+            sources=("user", "agent"),
+            limit=10,
+            minimum_similarity=0.5,
+            max_embedding_generation=0,
+        )
+        self.assertEqual(before_commit_matches, [])
+
+        with state.mutation() as cur:
+            cur.execute("DELETE FROM agent_events WHERE seq = %s", (first,))
+            cur.execute(
+                "SELECT event_seq FROM conversation_message_embeddings ORDER BY event_seq"
+            )
+            self.assertEqual(cur.fetchall(), [(second,)])
+
+    def test_conversation_embedding_queue_bounds_rejected_messages(self) -> None:
+        with state.mutation() as cur:
+            seq = state.append_agent_event(
+                cur,
+                "thread.message",
+                "thread-1",
+                {"message": "cannot encode this", "source": "user"},
+            )
+
+        self.assertTrue(state.conversation_embedding_work.is_set())
+        for _ in range(state.CONVERSATION_EMBEDDING_MAX_ATTEMPTS - 1):
+            self.assertEqual(state.unembedded_thread_messages(10), [(seq, "cannot encode this")])
+            state.record_embedding_attempts([seq])
+        self.assertEqual(state.unembedded_thread_messages(10), [(seq, "cannot encode this")])
+        state.record_embedding_attempts([seq])
+        self.assertEqual(state.unembedded_thread_messages(10), [])
+
+    def test_conversation_embeddings_are_bounded_to_recent_message_quota(self) -> None:
+        first_seqs: list[int] = []
+        with state.mutation() as cur:
+            for index in range(6):
+                first_seqs.append(state.append_agent_event(
+                    cur,
+                    "thread.message",
+                    "thread-1",
+                    {"message": f"message {index}", "source": "user"},
+                ))
+                # Activity volume must not consume the semantic-message quota.
+                state.append_agent_event(
+                    cur,
+                    "thread.activity",
+                    "thread-1",
+                    {"activity": {"type": "tool", "index": index}},
+                )
+
+        vector = [1.0] + [0.0] * 383
+        with (
+            patch.object(state, "CONVERSATION_EMBEDDING_MESSAGE_LIMIT", 3),
+            patch.object(state, "CONVERSATION_EMBEDDING_PRUNE_EVERY_BATCHES", 1),
+        ):
+            pending = state.unembedded_thread_messages(10)
+            self.assertEqual(
+                [seq for seq, _message in pending],
+                list(reversed(first_seqs)),
+            )
+            state.store_thread_message_embeddings(
+                "test-model",
+                [(seq, vector) for seq, _message in pending],
+            )
+            second_seqs: list[int] = []
+            with state.mutation() as cur:
+                for index in range(6, 9):
+                    second_seqs.append(state.append_agent_event(
+                        cur,
+                        "thread.message",
+                        "thread-1",
+                        {"message": f"message {index}", "source": "user"},
+                    ))
+            pending = state.unembedded_thread_messages(10)
+            self.assertEqual(
+                [seq for seq, _message in pending],
+                list(reversed(second_seqs)),
+            )
+            state.store_thread_message_embeddings(
+                "test-model",
+                [(seq, vector) for seq, _message in pending],
+            )
+
+        with state.mutation() as cur:
+            cur.execute(
+                "SELECT event_seq FROM conversation_message_embeddings"
+                " ORDER BY event_seq"
+            )
+            self.assertEqual(cur.fetchall(), [(seq,) for seq in second_seqs])
+
     def test_thread_events_around_requires_an_anchor_in_the_thread(self) -> None:
         with state.mutation() as cur:
             seqs = [
@@ -974,8 +1135,10 @@ class StateStorageTests(unittest.TestCase):
     def test_proxy_pins_and_network_policy_live_in_the_database(self) -> None:
         save_proxy_openai_account_id("acct_pin")
         save_proxy_claude_account_id("claude_pin")
+        save_proxy_xai_account_id("xai_pin")
         self.assertEqual(read_proxy_openai_account_id(), "acct_pin")
         self.assertEqual(read_proxy_claude_account_id(), "claude_pin")
+        self.assertEqual(read_proxy_xai_account_id(), "xai_pin")
         self.assertIsNone(state.network_policy_record())
         state.save_network_policy({"network_integrations": {}}, "2026-06-08T00:00:00Z")
         record = state.network_policy_record()
@@ -1035,6 +1198,27 @@ class StateStorageTests(unittest.TestCase):
         record = state.network_policy_record()
         assert record is not None
         self.assertNotIn("web_search", record["controls"]["network_integrations"]["claude"])
+
+    def test_network_policy_round_trips_xai_enablement(self) -> None:
+        # The xAI integration stores nothing but its presence in
+        # managed_integrations: it has no options, so there is no settings row
+        # to keep in step and nothing an option could be dropped from.
+        controls = {"network_integrations": {"xai": {"enabled": True}}}
+        state.save_network_policy(controls, "2026-06-08T00:00:00Z")
+        record = state.network_policy_record()
+        assert record is not None
+        self.assertEqual(record["controls"], controls)
+        state.save_network_policy({"network_integrations": {}}, "2026-06-08T00:00:01Z")
+        record = state.network_policy_record()
+        assert record is not None
+        self.assertNotIn("xai", record["controls"]["network_integrations"])
+
+    def test_no_xai_settings_table_exists(self) -> None:
+        # Claude's toggle needs a settings row; xAI has no options, so the
+        # table would only be an unused surface granted to the proxy roles.
+        with db.transaction() as cur:
+            cur.execute("SELECT to_regclass('public.xai_settings')")
+            self.assertIsNone(cur.fetchone()[0])
 
     def test_agent_network_role_cannot_read_bedrock_connection(self) -> None:
         with db.transaction() as cur:
@@ -1389,17 +1573,19 @@ class StateStorageTests(unittest.TestCase):
         self.assertEqual(load_config(), {"agent_name": "two"})
 
     def test_host_runtime_has_no_third_party_imports(self) -> None:
-        # The runtime is standard library only — the admin-state database is
-        # spoken to by the in-repo protocol client, not a driver. This walks
-        # every host/ module and rejects any import outside the stdlib, the
-        # host package itself, and the in-repo tools package (which is
-        # likewise pinned to the stdlib by test_tools), so a dependency
-        # cannot sneak back in.
+        # The host runtime is standard library only except for the isolated
+        # embedding process, whose dedicated venv contains FastEmbed. The
+        # admin-state database is spoken to by the in-repo protocol client,
+        # not a driver. Walk every host/ module so another dependency cannot
+        # sneak back in.
         import ast
         import sys
 
         repo_root = Path(__file__).resolve().parents[1]
         allowed_roots = set(sys.stdlib_module_names) | {"host", "tools"}
+        isolated_dependencies = {
+            (Path("host/runtime/embeddings/service.py"), "fastembed")
+        }
         offenders: list[str] = []
         for path in sorted((repo_root / "host").rglob("*.py")):
             tree = ast.parse(path.read_text(), filename=str(path))
@@ -1411,7 +1597,11 @@ class StateStorageTests(unittest.TestCase):
                 else:
                     continue
                 for root in roots:
-                    if root not in allowed_roots:
+                    relative_path = path.relative_to(repo_root)
+                    if (
+                        root not in allowed_roots
+                        and (relative_path, root) not in isolated_dependencies
+                    ):
                         offenders.append(f"{path.relative_to(repo_root)}: {root}")
         self.assertEqual(offenders, [])
 

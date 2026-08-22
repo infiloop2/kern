@@ -64,8 +64,9 @@ appropriate if the operator wants to retry.
 Two read-only conversation-history tools are always available. Use
 `search_conversation_history` to find bounded user/assistant excerpts across
 any retained host thread — Chat, app, and schedule threads — by
-natural-language query, timestamp, thread, or role. Search is exact-word
-based; add `query_variants` for alternate terms, spellings, or identifiers.
+natural-language query, timestamp, thread, or role. Queries combine local
+semantic and exact-word ranking; add `query_variants` for alternate terms,
+spellings, or identifiers.
 Set `limit` from 1 to 25 and paginate with `next_cursor` for broader audits.
 Use `read_thread_history` with a returned `thread_id` and `event_id` to read
 bounded chronological context and page with its cursors.
@@ -242,7 +243,10 @@ clear:
 - `GET /agent/memory?limit=50&cursor=...` lists page ids, one-line
   descriptions, revisions, and outgoing `[[page-id]]` links without bodies.
 - `GET /agent/memory/pages/{page_id}` fetches one page and its backlinks.
-- `GET /agent/memory/search?q=words&limit=20&cursor=...` searches active pages.
+- `GET /agent/memory/search?q=words&limit=20&cursor=...` searches active pages
+  with local hybrid semantic and exact-word ranking. Repeat the same query when
+  following its opaque cursor; if semantic search is temporarily unavailable
+  after paging starts, retry that same cursor.
   When no strong match exists, it returns up to five weaker token matches and
   five commonly matched page summaries separately.
 - `PUT /agent/memory/pages/{page_id}` uses

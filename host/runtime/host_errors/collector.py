@@ -42,6 +42,7 @@ def allowed_units() -> frozenset[str]:
         "kern-agent-network.service",
         "kern-admin-api.service",
         "kern-workspace.service",
+        "kern-embedding.service",
         "kern-host-errors.service",
         "kern-cloudflared.service",
     }

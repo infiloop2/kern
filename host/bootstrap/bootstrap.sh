@@ -8,7 +8,28 @@ cd /
 NODE_VERSION=22.12.0
 CODEX_CLI_VERSION=0.144.0
 CLAUDE_CODE_VERSION=2.1.220
+# Grok Build, xAI's coding agent. The npm package is a JS trampoline plus a
+# per-platform optional dependency carrying a brotli-compressed binary; see
+# docs/architecture/xai-integration.md for the upgrade review checklist.
+GROK_CLI_VERSION=1.0.5
 HERMES_AGENT_VERSION=0.18.2
+FASTEMBED_VERSION=0.8.0
+PGVECTOR_DEB_VERSION=0.8.6-1.pgdg22.04+1
+PGVECTOR_DEB_SHA256_AMD64=a6021797a2363c134abc12282440d49d09f7f729798d56e51e8b1e92b368416f
+PGVECTOR_DEB_SHA256_ARM64=c4f0ef61a366a42e6a3663d2a84edbeea6c11a13b76c304e6fc2ae22c6ded920
+# The embedding model ships as a Kern release asset rather than a HuggingFace
+# download. Upstream is Qdrant/bge-small-en-v1.5-onnx-Q at revision
+# 52398278842ec682c6f32300af41344b1c0b0bb2, an int8-quantized ONNX conversion
+# of BAAI/bge-small-en-v1.5. Refreshing the model is a deliberate, reviewed
+# change: cut a new release tag and move these digests in the same commit.
+EMBEDDING_MODEL_TAG=model-bge-small-en-v1.5-onnx-Q-1
+EMBEDDING_MODEL_DIR=/usr/local/share/kern-embedding-models/bge-small-en-v1.5-onnx-Q
+EMBEDDING_MODEL_SHA256="\
+51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431  model_optimized.onnx
+d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  tokenizer.json
+0b29c7bfc889e53b36d9dd3e686dd4300f6525110eaa98c76a5dafceb2029f53  tokenizer_config.json
+13582bcf2effc85b7bf3d3f5532e686bc1c9ce86bb009d10f0ec33cbe92299dd  config.json
+5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a  special_tokens_map.json"
 # hermes-agent requires Python 3.11-3.13; the base image ships 3.10, so uv
 # provisions a standalone interpreter for its dedicated venv.
 UV_VERSION=0.9.26
@@ -33,6 +54,7 @@ PGDATA_DIR="/mnt/kern-admin/postgres/${PG_MAJOR}/main"
 PROXY_STATE_DIR=/mnt/kern-admin/proxy-state
 AGENT_MOUNT=/mnt/kern-agent
 AGENT_HOME_PATH=/mnt/kern-agent/agent-home
+VENDOR_SOURCE_DIR=/opt/kern-host/host/bootstrap/vendor
 
 # Read one value out of the JSON payload staged by the deploy command.
 payload_value() {
@@ -182,6 +204,7 @@ ensure_group kern-tools "$KERN_TOOLS_GID"
 ensure_group kern-agent-network "$KERN_AGENT_NETWORK_GID"
 ensure_group kern-workspace-api "$KERN_WORKSPACE_API_GID"
 ensure_group kern-workspace "$KERN_WORKSPACE_GID"
+ensure_group kern-embedding "$KERN_EMBEDDING_GID"
 ensure_user kern-admin "$KERN_ADMIN_UID" kern-admin /mnt/kern-admin/admin-home
 ensure_user kern-proxy "$KERN_PROXY_UID" kern-proxy /mnt/kern-admin/proxy-state
 ensure_user kern-agent "$KERN_AGENT_UID" kern-agent /mnt/kern-agent/agent-home
@@ -193,6 +216,7 @@ ensure_user kern-tools "$KERN_TOOLS_UID" kern-tools /nonexistent
 # filesystem state or egress.
 ensure_user kern-agent-network "$KERN_AGENT_NETWORK_UID" kern-agent-network /nonexistent
 ensure_user kern-workspace "$KERN_WORKSPACE_UID" kern-workspace /nonexistent
+ensure_user kern-embedding "$KERN_EMBEDDING_UID" kern-embedding /nonexistent
 ensure_group_member kern-admin kern-workspace-api
 ensure_group_member kern-workspace kern-workspace-api
 # The postgres account is created here, before the postgresql packages would
@@ -416,6 +440,51 @@ apt_get() {
   apt-get -q -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::Languages=none "$@"
 }
 
+# Install pgvector from the two architecture-specific packages committed with
+# this pinned Kern revision. Keeping the small runtime packages in-tree removes
+# the rolling PGDG repository and signing-key export from the fresh-deploy
+# critical path while preserving exact, reproducible bytes. Building the same
+# extension from source pulled roughly 165 MiB of compiler/LLVM archives and
+# installed 812 MiB temporarily on every deployment.
+install_pgvector_package() {
+local pg_arch pgvector_deb pgvector_digest pgvector_extract pgvector_share
+local -a pgvector_sql
+pg_arch="$(dpkg --print-architecture)"
+case "$pg_arch" in
+  amd64) pgvector_digest="$PGVECTOR_DEB_SHA256_AMD64" ;;
+  arm64) pgvector_digest="$PGVECTOR_DEB_SHA256_ARM64" ;;
+  *) echo "unsupported pgvector architecture: $pg_arch" >&2; return 1 ;;
+esac
+pgvector_deb="${VENDOR_SOURCE_DIR}/pgvector/postgresql-${PG_MAJOR}-pgvector_${PGVECTOR_DEB_VERSION}_${pg_arch}.deb"
+test -f "$pgvector_deb"
+echo "${pgvector_digest}  ${pgvector_deb}" | sha256sum --check --status
+test "$(dpkg-deb --field "$pgvector_deb" Package)" = "postgresql-${PG_MAJOR}-pgvector"
+test "$(dpkg-deb --field "$pgvector_deb" Version)" = "$PGVECTOR_DEB_VERSION"
+test "$(dpkg-deb --field "$pgvector_deb" Architecture)" = "$pg_arch"
+
+# PGDG packages LLVM bitcode and consequently declares a Breaks relationship
+# with Ubuntu's postgresql-14-jit-llvm provider. Kern does not need extension
+# bitcode. Extract only pgvector's runtime library and extension SQL/control
+# files, leaving Ubuntu's PostgreSQL package and dpkg state untouched.
+pgvector_extract="$(mktemp -d /tmp/kern-pgvector-extract.XXXXXX)"
+dpkg-deb --extract "$pgvector_deb" "$pgvector_extract"
+pgvector_share="$pgvector_extract/usr/share/postgresql/${PG_MAJOR}/extension"
+test -f "$pgvector_extract/usr/lib/postgresql/${PG_MAJOR}/lib/vector.so"
+test -f "$pgvector_share/vector.control"
+shopt -s nullglob
+pgvector_sql=("$pgvector_share"/vector--*.sql)
+shopt -u nullglob
+test "${#pgvector_sql[@]}" -gt 0
+install -o root -g root -m 0644 \
+  "$pgvector_extract/usr/lib/postgresql/${PG_MAJOR}/lib/vector.so" \
+  "/usr/lib/postgresql/${PG_MAJOR}/lib/vector.so"
+install -o root -g root -m 0644 "$pgvector_share/vector.control" \
+  "/usr/share/postgresql/${PG_MAJOR}/extension/vector.control"
+install -o root -g root -m 0644 "${pgvector_sql[@]}" \
+  "/usr/share/postgresql/${PG_MAJOR}/extension/"
+rm -rf "$pgvector_extract"
+}
+
 # Base OS packages.
 install_system_packages() {
 echo "== installing system packages =="
@@ -440,6 +509,10 @@ apt_get install -y ca-certificates curl gh git jq nftables openssl python3 pytho
 apt_get install -y postgresql-common
 sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf
 apt_get install -y "postgresql-${PG_MAJOR}"
+# pgvector keeps semantic-search vectors in the existing durable Postgres
+# database. Install the pinned, repository-signed binary without retaining a
+# third-party apt source on the deployed host.
+install_pgvector_package
 # The packaged umbrella unit only manages clusters registered with the Debian
 # tooling; the Kern cluster runs under its own unit below.
 systemctl disable --now postgresql.service >/dev/null 2>&1 || true
@@ -593,6 +666,11 @@ SQL
 if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'kern_admin'" | grep -q 1; then
   runuser -u postgres -- createdb --owner=kern-admin kern_admin
 fi
+# pgvector is an untrusted PostgreSQL extension and therefore must be installed
+# by the database superuser. Migrations run afterward as the non-superuser
+# kern-admin owner and create only Kern's derived-vector table and indexes.
+runuser -u postgres -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet \
+  -c "CREATE EXTENSION IF NOT EXISTS vector;"
 migrate_legacy_app_identities
 runuser -u postgres -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet \
   -c "REVOKE ALL ON DATABASE kern_admin FROM PUBLIC;" \
@@ -724,6 +802,33 @@ echo "== installing Codex CLI =="
 npm install -g --no-fund --no-audit --loglevel=error "@openai/codex@${CODEX_CLI_VERSION}"
 echo "== installing Claude Code CLI =="
 npm install -g --no-fund --no-audit --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+echo "== installing Grok CLI =="
+# The npm package is a Node trampoline plus a brotli-compressed per-platform
+# binary. Left to itself the trampoline decompresses that binary into
+# $GROK_HOME/bin on first run and execs it from there — inside the agent's own
+# home, where the agent could replace the very binary the launcher runs. It
+# would also rewrite $GROK_HOME/config.toml on install.
+#
+# So the payload is decompressed here instead, to a root-owned path, and that
+# is what run-grok execs. It matches how the Codex and Claude Code CLIs sit
+# (root-owned under /usr/local, agent-readable, agent-unwritable), and it is
+# what makes the version pin and the launcher's flags hold at runtime rather
+# than depending on the agent leaving its own home alone. The trampoline's
+# /usr/local/bin/grok symlink is replaced, so there is exactly one grok on the
+# box and no PATH lookup can reach an agent-writable one.
+npm install -g --no-fund --no-audit --loglevel=error "@xai-official/grok@${GROK_CLI_VERSION}"
+grok_payload="/usr/local/lib/node_modules/@xai-official/grok/node_modules/@xai-official/grok-linux-${node_arch}/bin/grok.br"
+if [ ! -f "$grok_payload" ]; then
+  echo "missing Grok binary payload at ${grok_payload}" >&2
+  exit 1
+fi
+rm -f /usr/local/bin/grok
+node -e '
+const fs = require("fs"), zlib = require("zlib");
+fs.writeFileSync(process.argv[2], zlib.brotliDecompressSync(fs.readFileSync(process.argv[1])));
+' "$grok_payload" /usr/local/bin/grok
+chown root:root /usr/local/bin/grok
+chmod 0755 /usr/local/bin/grok
 echo "== installing Hermes agent =="
 case "$arch" in
   amd64) uv_arch=x86_64-unknown-linux-gnu ;;
@@ -743,6 +848,57 @@ uv venv --python "${HERMES_PYTHON_VERSION}" /usr/local/lib/hermes-venv
 uv pip install --python /usr/local/lib/hermes-venv/bin/python \
   "hermes-agent[bedrock,mcp]==${HERMES_AGENT_VERSION}"
 chmod -R a+rX /usr/local/lib/hermes-python /usr/local/lib/hermes-venv
+
+# The local conversation-and-memory search encoder has its own dependency environment;
+# the host runtime remains standard-library-only. Install the pinned compact
+# model while bootstrap still has network access. The runtime service is
+# PrivateNetwork=yes and reads the installed files directly.
+#
+# The model is fetched from Kern's own public release, not from HuggingFace.
+# fastembed resolves its download revision with model_info(repo).sha at call
+# time and exposes no revision argument, so letting it download would take
+# whatever the upstream repository's main branch pointed at during this deploy,
+# unpinned and unchecksummed. Serving the artifact from the release Kern is
+# already fetched from keeps the deploy on one trusted, pinned channel and
+# removes huggingface.co from the critical path.
+uv venv --python /usr/bin/python3 /usr/local/lib/kern-embedding-venv
+uv pip install --python /usr/local/lib/kern-embedding-venv/bin/python \
+  "fastembed==${FASTEMBED_VERSION}"
+install -d -o root -g root -m 0755 /usr/local/share/kern-embedding-models
+install -d -o root -g root -m 0755 "$EMBEDDING_MODEL_DIR"
+embedding_model_base="https://github.com/@GITHUB_REPOSITORY@/releases/download/${EMBEDDING_MODEL_TAG}"
+while read -r _digest embedding_model_file; do
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+    -o "${EMBEDDING_MODEL_DIR}/${embedding_model_file}" \
+    "${embedding_model_base}/${embedding_model_file}"
+done <<< "$EMBEDDING_MODEL_SHA256"
+# Verify against the digests pinned in this script, never against a checksum
+# file served alongside the assets: anything able to replace an asset could
+# replace that file too. A moved or re-cut release tag therefore fails loudly
+# here instead of installing a different model.
+(
+  cd "$EMBEDDING_MODEL_DIR"
+  printf '%s\n' "$EMBEDDING_MODEL_SHA256" | sha256sum --check --status
+)
+EMBEDDING_MODEL_DIR="$EMBEDDING_MODEL_DIR" \
+  /usr/local/lib/kern-embedding-venv/bin/python - <<'PY'
+import os
+
+from fastembed import TextEmbedding
+
+# specific_model_path short-circuits fastembed's cache and HuggingFace lookup
+# entirely and loads this directory as-is, so the installed layout is a flat
+# directory rather than a reconstructed hub cache.
+model = TextEmbedding(
+    model_name="BAAI/bge-small-en-v1.5",
+    specific_model_path=os.environ["EMBEDDING_MODEL_DIR"],
+    threads=1,
+)
+vectors = list(model.query_embed(["Kern local embedding readiness check"]))
+if len(vectors) != 1 or len(vectors[0]) != 384:
+    raise SystemExit("local embedding model returned an unexpected shape")
+PY
+chmod -R a+rX /usr/local/lib/kern-embedding-venv /usr/local/share/kern-embedding-models
 # npm inherits the script's umask 077, which would leave the CLI root-only;
 # the agent user must be able to run it.
 chmod -R a+rX /usr/local/lib/node_modules
@@ -837,6 +993,65 @@ EOF
 chmod 644 /etc/codex/managed_config.toml
 }
 
+# Grok layers config lowest-to-highest as: /etc/grok/managed_config.toml,
+# $GROK_HOME/managed_config.toml, $GROK_HOME/config.toml,
+# $GROK_HOME/requirements.toml, then /etc/grok/requirements.toml. The last is
+# root-owned and wins outright, so it is where host policy goes: the agent owns
+# its GROK_HOME and can rewrite every layer below it.
+#
+# This layer is defence in depth, not the enforcement. The network proxy
+# authoritatively decides server-side tool use by inspecting every request
+# body, whether or not the CLI honours the settings here. What this file owns
+# is the matching client posture
+# that never varies: no product telemetry, no trace/research uploads, no
+# self-update, and no inheriting another runtime's MCP servers. The account-
+# backed "Coding data, retention, and training" choice is not a config.toml
+# setting; Grok exposes that separately through /privacy and /settings.
+write_grok_policy() {
+mkdir -p /etc/grok
+chmod 755 /etc/grok
+# compat.claude and compat.cursor matter specifically on this host: Grok scans
+# ~/.claude.json, ~/.cursor/mcp.json and project .mcp.json for MCP servers by
+# default, and the agent home has a .claude directory belonging to another
+# runtime. Left on, Grok would inherit whatever MCP servers that runtime was
+# configured with.
+cat > /etc/grok/requirements.toml <<'EOF'
+[features]
+telemetry = false
+auto_update = false
+plugins = false
+marketplace = false
+
+[telemetry]
+trace_upload = false
+
+[compat.claude]
+mcps = false
+
+[compat.cursor]
+mcps = false
+
+[cli]
+use_leader = false
+
+# --disable-web-search removes Grok's client web_search and web_fetch tools,
+# but Grok 1.0.5 separately injects the hosted x_search capability whenever
+# its model advertises backend search. Keep every hosted search out of the
+# request; the proxy still denies one if a changed client sends it anyway.
+[model."grok-4.6"]
+supports_backend_search = false
+
+# The only MCP server Grok may inherit is Kern's bundled-tools shim. Keeping
+# it in the root-owned highest-precedence layer prevents the agent-owned Grok,
+# Claude and Cursor config files from replacing this host boundary.
+[mcp_servers.kern]
+command = "/usr/bin/python3"
+args = ["-m", "host.runtime.agent_shim.mcp_shim"]
+env = { PYTHONPATH = "/opt/kern-host" }
+EOF
+chmod 644 /etc/grok/requirements.toml
+}
+
 harden_base_os() {
 # Reduce the root-daemon attack surface reachable by the agent. snapd ships in
 # the base image but is unused here, and its socket is world-accessible; stop
@@ -880,6 +1095,8 @@ HELPER_NAMES=(
   read-codex-account-id
   run-claude-code
   read-claude-account
+  run-grok
+  read-grok-account
   run-hermes
   run-agent-script
   stop-agent-thread
@@ -943,6 +1160,7 @@ apply_durable_ownership() {
     "$AGENT_HOME_PATH/.tmp" \
     "$AGENT_HOME_PATH/.codex" \
     "$AGENT_HOME_PATH/.claude" \
+    "$AGENT_HOME_PATH/.grok" \
     "$AGENT_HOME_PATH/.hermes"
   # Agent processes normally remove their own temporary trees. Cover abrupt
   # kills and host crashes as well: the standard daily tmpfiles timer removes
@@ -994,7 +1212,7 @@ cat > /etc/sudoers.d/kern-host <<'SUDOERS'
 # structurally never receives them. Hermes signs with a fixed routing identity
 # and the proxy re-signs.
 Defaults!/usr/local/lib/kern-host/read-aws-account env_keep += "KERN_BEDROCK_AWS_ACCESS_KEY_ID KERN_BEDROCK_AWS_SECRET_ACCESS_KEY"
-kern-admin ALL=(root) NOPASSWD: /usr/local/lib/kern-host/reboot-host, /usr/local/lib/kern-host/run-codex-app-server, /usr/local/lib/kern-host/read-codex-account-id, /usr/local/lib/kern-host/run-claude-code, /usr/local/lib/kern-host/read-claude-account, /usr/local/lib/kern-host/run-hermes, /usr/local/lib/kern-host/run-agent-script, /usr/local/lib/kern-host/stop-agent-thread, /usr/local/lib/kern-host/read-aws-account, /usr/local/lib/kern-host/clear-agent-auth, /usr/local/lib/kern-host/read-agent-file, /usr/local/lib/kern-host/upload-agent-file, /usr/local/lib/kern-host/check-for-upgrade, /usr/local/lib/kern-host/mint-github-app-token, /usr/local/lib/kern-host/audit-github-repo, /usr/local/lib/kern-host/approve-github-push
+kern-admin ALL=(root) NOPASSWD: /usr/local/lib/kern-host/reboot-host, /usr/local/lib/kern-host/run-codex-app-server, /usr/local/lib/kern-host/read-codex-account-id, /usr/local/lib/kern-host/run-claude-code, /usr/local/lib/kern-host/read-claude-account, /usr/local/lib/kern-host/run-grok, /usr/local/lib/kern-host/read-grok-account, /usr/local/lib/kern-host/run-hermes, /usr/local/lib/kern-host/run-agent-script, /usr/local/lib/kern-host/stop-agent-thread, /usr/local/lib/kern-host/read-aws-account, /usr/local/lib/kern-host/clear-agent-auth, /usr/local/lib/kern-host/read-agent-file, /usr/local/lib/kern-host/upload-agent-file, /usr/local/lib/kern-host/check-for-upgrade, /usr/local/lib/kern-host/mint-github-app-token, /usr/local/lib/kern-host/audit-github-repo, /usr/local/lib/kern-host/approve-github-push
 SUDOERS
 chmod 440 /etc/sudoers.d/kern-host
   # A malformed sudoers drop-in would otherwise surface only when the admin
@@ -1007,7 +1225,16 @@ chmod 440 /etc/sudoers.d/kern-host
 assert_agent_clis() {
 runuser -u kern-agent -- test -x /usr/local/bin/codex
 runuser -u kern-agent -- test -x /usr/local/bin/claude
+runuser -u kern-agent -- test -x /usr/local/bin/grok
 runuser -u kern-agent -- test -x /usr/local/lib/hermes-venv/bin/python
+# Assert the decompressed binary is the pinned one and that the agent can run
+# it. A non-root writer here would mean the install above fell back to the
+# trampoline's agent-home path, which is exactly what it must not do.
+test "$(stat -c '%U:%a' /usr/local/bin/grok)" = "root:755"
+runuser -u kern-agent -- env \
+  HOME="$AGENT_HOME_PATH" \
+  GROK_HOME="$AGENT_HOME_PATH/.grok" \
+  /usr/local/bin/grok --version | grep -qF "$GROK_CLI_VERSION"
 }
 
 # Host firewall. Root, the dedicated proxy user, and the optional cloudflared
@@ -1211,8 +1438,8 @@ UNIT
 cat > /etc/systemd/system/kern-admin-api.service <<'UNIT'
 [Unit]
 Description=Kern Admin API
-After=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service
-Wants=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service
+After=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-embedding.socket
+Wants=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-embedding.socket
 StartLimitIntervalSec=0
 
 [Service]
@@ -1240,6 +1467,50 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 
+cat > /etc/systemd/system/kern-embedding.socket <<'UNIT'
+[Unit]
+Description=Kern Local Embedding Socket
+
+[Socket]
+ListenStream=/run/kern-embedding.sock
+SocketUser=kern-embedding
+SocketGroup=kern-workspace-api
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
+UNIT
+
+cat > /etc/systemd/system/kern-embedding.service <<'UNIT'
+[Unit]
+Description=Kern Local Embedding Service
+Requires=kern-embedding.socket
+After=kern-embedding.socket
+
+[Service]
+User=kern-embedding
+Group=kern-embedding
+Slice=kern_workspace.slice
+Environment=PYTHONPATH=/opt/kern-host
+Environment=KERN_EMBEDDING_MODEL_DIR=/usr/local/share/kern-embedding-models/bge-small-en-v1.5-onnx-Q
+Environment=HF_HUB_OFFLINE=1
+Environment=OMP_NUM_THREADS=1
+ExecStart=/usr/local/lib/kern-embedding-venv/bin/python -m host.runtime.embeddings.service
+ExecStopPost=/usr/bin/env PYTHONPATH=/opt/kern-host /usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-embedding
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+Nice=10
+CPUWeight=25
+IOWeight=25
+MemoryMax=1G
+TasksMax=64
+
+UNIT
+
 cat > /etc/systemd/system/kern-host-errors.service <<'UNIT'
 [Unit]
 Description=Kern Host Diagnostics Journal Collector
@@ -1264,8 +1535,8 @@ UNIT
 cat > /etc/systemd/system/kern-workspace.service <<'UNIT'
 [Unit]
 Description=Kern Workspace
-After=network-online.target kern-admin-api.service kern-postgres.service
-Wants=network-online.target kern-admin-api.service kern-postgres.service
+After=network-online.target kern-admin-api.service kern-postgres.service kern-embedding.socket
+Wants=network-online.target kern-admin-api.service kern-postgres.service kern-embedding.socket
 StartLimitIntervalSec=0
 
 [Service]
@@ -1312,6 +1583,7 @@ systemctl enable --now kern-network-proxy.service
 systemctl enable --now kern-host-errors.service
 systemctl enable --now kern-tools.service
 systemctl enable --now kern-agent-network.service
+systemctl enable --now kern-embedding.socket
 systemctl enable --now kern-admin-api.service
 systemctl enable kern-workspace.service
 systemctl start kern-workspace.service
@@ -1428,6 +1700,7 @@ main() {
   install_agent_clis
   configure_cloudflared
   write_codex_policy
+  write_grok_policy
   harden_base_os
   setup_proxy_ca
   install_sudo_helpers

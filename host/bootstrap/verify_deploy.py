@@ -37,6 +37,7 @@ from typing import Any, Callable
 
 from host.constants import (
     ADMIN_API_PORT,
+    EMBEDDING_SOCKET_PATH,
     WORKSPACE_AGENT_SOCKET_PATH,
     AGENT_NETWORK_SOCKET_PATH,
     WORKSPACE_ADMIN_SOCKET_PATH,
@@ -62,6 +63,7 @@ CORE_UNITS = (
     "kern-host-errors.service",
     "kern-admin-api.service",
     "kern-workspace.service",
+    "kern-embedding.socket",
 )
 
 MANAGED_AGENT_FILES = (
@@ -85,6 +87,7 @@ PATH_FACTS: tuple[PathFact, ...] = (
     ("/mnt/kern-agent/agent-home", "kern-agent", "kern-agent", 0o700, True),
     ("/mnt/kern-agent/agent-home/.codex", "kern-agent", "kern-agent", 0o700, True),
     ("/mnt/kern-agent/agent-home/.claude", "kern-agent", "kern-agent", 0o700, True),
+    ("/mnt/kern-agent/agent-home/.grok", "kern-agent", "kern-agent", 0o700, True),
     ("/mnt/kern-agent/agent-home/.hermes", "kern-agent", "kern-agent", 0o700, True),
     ("/mnt/kern-admin/proxy-state", "kern-proxy", "kern-proxy", 0o700, True),
     (
@@ -119,10 +122,20 @@ PATH_FACTS: tuple[PathFact, ...] = (
     ("/opt/kern-host", "root", "root", 0o755, True),
     ("/opt/kern-host/VERSION", "root", "root", 0o644, False),
     ("/usr/local/lib/kern-host", "root", "root", 0o755, True),
+    ("/usr/local/lib/kern-embedding-venv", "root", "root", 0o755, True),
+    ("/usr/local/share/kern-embedding-models", "root", "root", 0o755, True),
+    (
+        "/usr/local/share/kern-embedding-models/bge-small-en-v1.5-onnx-Q/model_optimized.onnx",
+        "root",
+        "root",
+        0o644,
+        False,
+    ),
     ("/usr/local/bin/gh", "root", "root", 0o755, False),
     ("/etc/sudoers.d/kern-host", "root", "root", 0o440, False),
     ("/etc/codex/requirements.toml", "root", "root", 0o644, False),
     ("/etc/codex/managed_config.toml", "root", "root", 0o644, False),
+    ("/etc/grok/requirements.toml", "root", "root", 0o644, False),
     ("/mnt/kern-agent/agent-home/AGENTS.md", "root", "root", 0o644, False),
     ("/mnt/kern-agent/agent-home/CLAUDE.md", "root", "root", 0o644, False),
     ("/mnt/kern-agent/agent-home/.codex/config.toml", "root", "root", 0o644, False),
@@ -142,6 +155,7 @@ SOCKET_OWNERS = {
     WORKSPACE_AGENT_SOCKET_PATH: "kern-workspace",
     AGENT_NETWORK_SOCKET_PATH: "kern-agent-network",
     WORKSPACE_ADMIN_SOCKET_PATH: "kern-admin",
+    EMBEDDING_SOCKET_PATH: "kern-embedding",
     POSTGRES_SOCKET: "postgres",
 }
 
@@ -342,6 +356,7 @@ def enforced_probes() -> list[Probe]:
         ("kern-agent", EXTERNAL_PROBE_HOST, 53, "blocked", "agent direct DNS"),
         ("kern-admin", EXTERNAL_PROBE_HOST, 443, "blocked", "admin service egress"),
         ("kern-workspace", EXTERNAL_PROBE_HOST, 443, "blocked", "Workspace service egress"),
+        ("kern-embedding", EXTERNAL_PROBE_HOST, 443, "blocked", "embedding service egress"),
         ("kern-admin", "127.0.0.1", WORKSPACE_PORT, "reachable", "admin to Workspace service"),
         ("kern-agent-network", EXTERNAL_PROBE_HOST, 443, "blocked", "agent-network egress"),
         (

@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -38,6 +39,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import secrets
 import socket
 import subprocess
 import threading
@@ -53,8 +55,9 @@ from host.session_options import session_config_error
 # workspace_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
 # object and reads its attributes only at request time, never during import.
-from host.runtime.admin_api import admin_auth, admin_passkeys, agent_activity, workspace_api as workspace_admin_api, workspace_proxy, bedrock_credentials, claude_code, codex_app_server, github_credential, github_repo_audit, orchestrator, tools_client as tools_admin_api, upgrade_check
+from host.runtime.admin_api import admin_auth, admin_passkeys, agent_activity, workspace_api as workspace_admin_api, workspace_proxy, bedrock_credentials, claude_code, codex_app_server, github_credential, github_repo_audit, grok_agent, orchestrator, tools_client as tools_admin_api, upgrade_check
 from host.runtime.core import host_errors, network_policy, pgclient, state
+from host.runtime.embeddings import client as embedding_client
 from host.runtime.tools import tools_host
 from host.runtime.admin_api.orchestrator import agent_runtime_status
 from host.runtime.core.state import (
@@ -62,6 +65,7 @@ from host.runtime.core.state import (
     page_agent_events_before,
     read_claude_account,
     read_openai_account,
+    read_xai_account,
     utc_now,
 )
 from host.version import version_status
@@ -216,10 +220,25 @@ CONVERSATION_READ_LIMIT = 50
 CONVERSATION_QUERY_BYTES = 512
 CONVERSATION_VARIANT_BYTES = 256
 CONVERSATION_VARIANT_LIMIT = 8
-CONVERSATION_CURSOR_BYTES = 512
+# Relevance cursors freeze up to 200 semantic event ids so later pages never
+# rerun an approximate HNSW scan against a physically changing graph.
+CONVERSATION_CURSOR_BYTES = 8192
 CONVERSATION_MESSAGE_BYTES = 16 * 1024
 CONVERSATION_RESPONSE_BYTES = 256 * 1024
 CONVERSATION_EVENT_TYPES = ("thread.message", "thread.activity")
+CONVERSATION_SEMANTIC_CANDIDATES = 200
+# Relevance cursors are short-lived capabilities owned by this admin API
+# process.  Signing snapshot cursors prevents a caller from replacing the
+# frozen semantic candidate ids with arbitrary messages that happen to satisfy
+# the same public filters.  A service restart deliberately invalidates an
+# in-progress relevance cursor; the caller can simply restart the search.
+_CONVERSATION_CURSOR_SIGNING_KEY = secrets.token_bytes(32)
+# Writers wake the indexer directly, so this is only a backstop for work that
+# somehow reached the queue without signalling (a restart mid-backlog, or a
+# migration seeding the table under a running service).
+CONVERSATION_EMBEDDING_IDLE_SECONDS = 30
+# Bounds how long an interactive search can queue behind one indexing batch.
+CONVERSATION_EMBEDDING_BATCH_BYTES = 32 * 1024
 HISTORY_PROVENANCE = "retained_conversation_history"
 HISTORY_TRUST = "untrusted"
 HISTORY_INSTRUCTION_AUTHORITY = "none"
@@ -920,6 +939,11 @@ def route(
             return current_claude_oauth_login()
     if path == "/v1/agent-runtime/claude-oauth-login/complete" and method == "POST":
         return complete_claude_oauth_login(body)
+    if path == "/v1/agent-runtime/grok-oauth-login":
+        if method == "POST":
+            return start_grok_oauth_login()
+        if method == "GET":
+            return current_grok_oauth_login()
     if path == "/v1/agent-runtime/bedrock-credentials":
         if method == "GET":
             return current_bedrock_credentials()
@@ -1557,6 +1581,70 @@ def maintenance_loop() -> None:
         time.sleep(MAINTENANCE_INTERVAL_SECONDS)
 
 
+def embedding_index_loop() -> None:
+    """Incrementally encode queued messages outside request transactions."""
+    while True:
+        try:
+            # Clear before claiming, so work queued between the claim and the
+            # wait still wakes this thread rather than waiting out the backstop.
+            state.conversation_embedding_work.clear()
+            pending = state.unembedded_thread_messages(embedding_client.MAX_TEXTS)
+            if not pending:
+                state.conversation_embedding_work.wait(
+                    CONVERSATION_EMBEDDING_IDLE_SECONDS
+                )
+                continue
+            pending = _bounded_embedding_batch(pending)
+            # Clip by UTF-8 bytes, the bound embed_texts actually validates.
+            # The JSON-escaped helper is for the event bridge; using it here
+            # would spend roughly three bytes of budget per non-ASCII byte and
+            # drop the tail of a valid message out of the index.
+            texts = [
+                agent_activity.clip_text(message, embedding_client.MAX_TEXT_BYTES)
+                for _seq, message in pending
+            ]
+            try:
+                vectors = embedding_client.embed_texts(texts, kind="passage")
+            except embedding_client.EmbeddingError as exc:
+                if exc.batch_rejected:
+                    # Only a request-validation failure says anything about the
+                    # texts. Service availability and response-shape failures
+                    # must not consume their retry budget.
+                    state.record_embedding_attempts([seq for seq, _ in pending])
+                raise
+            state.store_thread_message_embeddings(
+                embedding_client.MODEL_NAME,
+                [(pending[index][0], vector) for index, vector in enumerate(vectors)],
+            )
+            time.sleep(0.25)
+        except Exception as exc:
+            host_errors.report_unexpected("admin_api.embedding_index", exc)
+            time.sleep(30)
+
+
+def _bounded_embedding_batch(
+    pending: list[tuple[int, str]],
+) -> list[tuple[int, str]]:
+    """Trim a claim to a bounded number of bytes.
+
+    The embedding service handles one request at a time, so an in-flight batch
+    is exactly how long an interactive search can be stuck behind indexing.
+    Capping total bytes keeps that wait bounded and predictable instead of
+    letting it scale with whatever eight messages happened to be queued.
+    """
+    bounded: list[tuple[int, str]] = []
+    budget = CONVERSATION_EMBEDDING_BATCH_BYTES
+    for seq, message in pending:
+        size = min(len(message.encode()), embedding_client.MAX_TEXT_BYTES)
+        if bounded and size > budget:
+            break
+        bounded.append((seq, message))
+        budget -= size
+        if budget <= 0:
+            break
+    return bounded
+
+
 def _mint_codex_login() -> tuple[dict[str, str], dict[str, str]]:
     login = codex_app_server.start_device_login()
     response = {
@@ -1578,6 +1666,43 @@ def _mint_claude_login() -> tuple[dict[str, str], dict[str, str]]:
     return response, response
 
 
+def _mint_grok_login() -> tuple[dict[str, str], dict[str, str]]:
+    """Start the Grok device login.
+
+    This is the Codex shape, not the Claude one: xAI shows the operator a code
+    in their browser and polls for approval itself, so there is no completion
+    endpoint to call back into. The status poller observes the resolved
+    ``authenticate`` on the parked server and captures the anchor from there.
+    The code is embedded in the verification URL's query string rather than
+    returned as a field, and the adapter lifts it out.
+    """
+    try:
+        login = grok_agent.start_device_login()
+    except grok_agent.GrokLoginAlreadyAuthenticated:
+        # A browser flow may have written the credential just before its
+        # parked completion server was lost. Grok then has no anchor to trust,
+        # but refuses to issue another URL while that credential remains.
+        # Clear it through the same root helper as an operator reset and retry
+        # once, so every accepted anchor still comes from a fresh browser flow.
+        account = state.read_xai_account()
+        if account.get("operator_approval") == orchestrator.XAI_OPERATOR_APPROVAL:
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "Disconnect the linked Grok account before signing in again",
+            )
+        _clear_local_agent_auth("grok")
+        login = grok_agent.start_device_login()
+    response = {
+        "status": "awaiting_login",
+        "device_code": login.user_code or "",
+        "login_url": login.login_url,
+        "expires_at": _minutes_from_now(10),
+    }
+    # login_id is persisted but never returned: it is what scopes the anchor
+    # capture and the parked-server close to this exact login.
+    return response, response | {"login_id": login.login_id}
+
+
 class _OAuthLoginFlow(NamedTuple):
     """One runtime's login flow: the codex and claude endpoints are the same
     machine, differing only in these fields. mint returns (public response,
@@ -1593,6 +1718,9 @@ class _OAuthLoginFlow(NamedTuple):
     response_keys: tuple[str, ...]
     mint: Callable[[], tuple[dict[str, str], dict[str, str]]]
     close: Callable[[], None]
+    # Whether a persisted row still has the process that can complete it, for
+    # flows where one is required. None means the row stands on its own.
+    parked: Callable[[], bool] | None = None
 
 
 _OAUTH_LOGIN_FLOWS = {
@@ -1613,6 +1741,16 @@ _OAUTH_LOGIN_FLOWS = {
         response_keys=("status", "login_url", "expires_at"),
         mint=_mint_claude_login,
         close=lambda: claude_code.close_login_process(),
+    ),
+    "grok": _OAuthLoginFlow(
+        runtime_type="grok",
+        oauth_key="grok",
+        display="Grok",
+        provider="xAI",
+        response_keys=("status", "device_code", "login_url", "expires_at"),
+        mint=_mint_grok_login,
+        close=lambda: grok_agent.close_login_server(),
+        parked=lambda: grok_agent.login_server_parked(),
     ),
 }
 
@@ -1636,6 +1774,15 @@ def _start_oauth_login(flow: _OAuthLoginFlow) -> dict[str, str]:
     try:
         _require_oauth_login_available(flow)
         oauth = state.oauth_login(flow.oauth_key)
+        if oauth and flow.parked is not None and not flow.parked():
+            # The row outlived the process that can complete it. Grok's device
+            # flow is driven by the CLI holding the long-running authenticate
+            # request, and an admin API restart stops that scope through
+            # BindsTo, so returning the row would hand the operator a code
+            # nobody is exchanging until it expires. Drop it and mint again.
+            with state.mutation() as cur:
+                state.set_oauth_login(cur, flow.oauth_key, None)
+            oauth = None
         if oauth:
             return {key: oauth[key] for key in flow.response_keys}
         response, persisted = flow.mint()
@@ -1657,6 +1804,11 @@ def _start_oauth_login(flow: _OAuthLoginFlow) -> dict[str, str]:
 def _current_oauth_login_response(flow: _OAuthLoginFlow) -> dict[str, str]:
     _require_oauth_login_available(flow)
     oauth = state.oauth_login(flow.oauth_key)
+    # A row whose driving process is gone is not a login in progress. Report it
+    # as absent rather than handing back a code nobody is exchanging; the row
+    # itself is cleared by the next start, which is the mutating path.
+    if oauth and flow.parked is not None and not flow.parked():
+        oauth = None
     if not oauth:
         raise ApiError(HTTPStatus.NOT_FOUND, f"{flow.display} OAuth login has not been started")
     return {key: oauth[key] for key in flow.response_keys}
@@ -1676,6 +1828,14 @@ def start_claude_oauth_login() -> dict[str, str]:
 
 def current_claude_oauth_login() -> dict[str, str]:
     return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["claude_code"])
+
+
+def start_grok_oauth_login() -> dict[str, str]:
+    return _start_oauth_login(_OAUTH_LOGIN_FLOWS["grok"])
+
+
+def current_grok_oauth_login() -> dict[str, str]:
+    return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["grok"])
 
 
 def complete_claude_oauth_login(body: Any) -> dict[str, str]:
@@ -1808,8 +1968,13 @@ def reset_linked_account(body: Any) -> dict[str, str]:
     return {"status": "accepted"}
 
 
+# The clear-agent-auth helper is named for the provider whose files it
+# removes, not for the runtime that uses them.
+_AGENT_AUTH_HELPER_RUNTIMES = {"codex": "codex", "claude_code": "claude", "grok": "grok"}
+
+
 def _clear_local_agent_auth(runtime_type: str) -> None:
-    helper_runtime = "claude" if runtime_type == "claude_code" else "codex"
+    helper_runtime = _AGENT_AUTH_HELPER_RUNTIMES[runtime_type]
     try:
         proc = _run_root_helper(
             [*AGENT_AUTH_CLEAR_HELPER_COMMAND, helper_runtime], AGENT_AUTH_CLEAR_HELPER_TIMEOUT_SECONDS
@@ -1829,8 +1994,8 @@ def _clear_local_agent_auth(runtime_type: str) -> None:
         raise ApiError(HTTPStatus.CONFLICT, message)
 
 
-AGENT_RUNTIME_TYPES = ("codex", "claude_code", "hermes")
-OAUTH_RUNTIME_TYPES = ("codex", "claude_code")
+AGENT_RUNTIME_TYPES = ("codex", "claude_code", "grok", "hermes")
+OAUTH_RUNTIME_TYPES = ("codex", "claude_code", "grok")
 
 
 def current_agent_accounts() -> dict[str, Any]:
@@ -1839,6 +2004,7 @@ def current_agent_accounts() -> dict[str, Any]:
         "accounts": [
             _current_agent_account(statuses, "codex"),
             _current_agent_account(statuses, "claude_code"),
+            _current_agent_account(statuses, "grok"),
             _current_bedrock_account(statuses),
         ]
     }
@@ -1873,6 +2039,11 @@ def _current_agent_account(statuses: dict[str, dict[str, Any]], runtime_type: st
         response = {"agent_runtime": "claude_code", "provider": "claude", "status": status}
         account = read_claude_account()
         if account.get("identity_attestation") != orchestrator.CLAUDE_IDENTITY_ATTESTATION:
+            account = {}
+    elif runtime_type == "grok":
+        response = {"agent_runtime": "grok", "provider": "xai", "status": status}
+        account = read_xai_account()
+        if account.get("operator_approval") != orchestrator.XAI_OPERATOR_APPROVAL:
             account = {}
     else:
         response = {"agent_runtime": "codex", "provider": "openai", "status": status}
@@ -1959,6 +2130,7 @@ def _bedrock_live_usage() -> dict[str, Any]:
 _RUNTIME_USAGE_KEYS = {
     "codex": "codex_usage",
     "claude_code": "claude_usage",
+    "grok": "grok_usage",
 }
 
 # Serialize sends for one thread from the first live-turn check through
@@ -1980,6 +2152,10 @@ def _account_response_metadata(account: dict[str, Any], runtime_type: str) -> di
         value = account.get(key)
         if isinstance(value, str) and value:
             response[key] = value
+    if runtime_type == "grok":
+        for key in ("coding_data_retention_opt_out", "zdr_enabled"):
+            if isinstance(account.get(key), bool):
+                response[key] = account[key]
     usage_key = _RUNTIME_USAGE_KEYS.get(runtime_type)
     if usage_key is None:
         return response
@@ -2288,12 +2464,36 @@ def _encode_conversation_search_cursor(
     fingerprint: str,
     relevance: bool,
     value: dict[str, Any],
+    *,
+    mode: str | None = None,
+    min_seq: int | None = None,
+    max_seq: int | None = None,
+    embedding_min_seq: int | None = None,
+    embedding_generation: int | None = None,
+    semantic_seqs: tuple[int, ...] | None = None,
 ) -> str:
-    fields = (
-        [fingerprint, "rank", value.get("rank"), value.get("seq")]
-        if relevance
-        else [fingerprint, "time", value.get("timestamp"), value.get("seq")]
-    )
+    cursor_mode = mode or ("rank" if relevance else "time")
+    if relevance:
+        fields = [fingerprint, cursor_mode, value.get("rank"), value.get("seq")]
+        snapshot = [
+            min_seq,
+            max_seq,
+            embedding_min_seq,
+            embedding_generation,
+            None if semantic_seqs is None else list(semantic_seqs),
+        ]
+        if all(item is not None for item in snapshot):
+            fields.extend(snapshot)
+            signature = hmac.new(
+                _CONVERSATION_CURSOR_SIGNING_KEY,
+                json.dumps(fields, separators=(",", ":")).encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            fields.append(signature)
+        elif cursor_mode != "rank":
+            raise ValueError("relevance cursor requires a complete snapshot")
+    else:
+        fields = [fingerprint, "time", value.get("timestamp"), value.get("seq")]
     raw = json.dumps(fields, separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
@@ -2302,7 +2502,16 @@ def _decode_conversation_search_cursor(
     value: Any,
     fingerprint: str,
     relevance: bool,
-) -> tuple[float, int] | tuple[str, int] | None:
+) -> tuple[
+    str,
+    float | int | str,
+    int,
+    int | None,
+    int | None,
+    int | None,
+    int | None,
+    tuple[int, ...] | None,
+] | None:
     if value is None:
         return None
     try:
@@ -2315,12 +2524,24 @@ def _decode_conversation_search_cursor(
         decoded = json.loads(
             base64.b64decode(padded, altchars=b"-_", validate=True)
         )
-        if not isinstance(decoded, list) or len(decoded) != 4:
+        if not isinstance(decoded, list) or len(decoded) not in {4, 10}:
             raise ValueError
-        cursor_fingerprint, mode, position, seq = decoded
+        if len(decoded) == 10:
+            signature = decoded.pop()
+            if not isinstance(signature, str) or not hmac.compare_digest(
+                signature,
+                hmac.new(
+                    _CONVERSATION_CURSOR_SIGNING_KEY,
+                    json.dumps(decoded, separators=(",", ":")).encode(),
+                    hashlib.sha256,
+                ).hexdigest(),
+            ):
+                raise ValueError
+        cursor_fingerprint, mode, position, seq = decoded[:4]
+        valid_modes = {"rank", "hybrid", "fallback", "lexical"} if relevance else {"time"}
         if (
             cursor_fingerprint != fingerprint
-            or mode != ("rank" if relevance else "time")
+            or mode not in valid_modes
             or not isinstance(seq, int)
             or isinstance(seq, bool)
             or seq < 1
@@ -2328,6 +2549,85 @@ def _decode_conversation_search_cursor(
         ):
             raise ValueError
         if relevance:
+            if len(decoded) == 4:
+                # Cursors issued before snapshot fields existed were plain
+                # lexical rank cursors. Preserve that compatibility without
+                # pretending they are stable hybrid positions.
+                if mode != "rank":
+                    raise ValueError
+                snapshot: tuple[
+                    int | None,
+                    int | None,
+                    int | None,
+                    int | None,
+                    tuple[int, ...] | None,
+                ] = (
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            else:
+                (
+                    min_seq,
+                    max_seq,
+                    embedding_min_seq,
+                    embedding_generation,
+                    encoded_semantic_seqs,
+                ) = decoded[4:]
+                if (
+                    not isinstance(min_seq, int)
+                    or isinstance(min_seq, bool)
+                    or min_seq < 0
+                    or not isinstance(max_seq, int)
+                    or isinstance(max_seq, bool)
+                    or max_seq < min_seq
+                    or max_seq > POSTGRES_BIGINT_MAX
+                    or not isinstance(embedding_min_seq, int)
+                    or isinstance(embedding_min_seq, bool)
+                    or embedding_min_seq < 0
+                    or embedding_min_seq > max_seq
+                    or not isinstance(embedding_generation, int)
+                    or isinstance(embedding_generation, bool)
+                    or embedding_generation < 0
+                    or embedding_generation > POSTGRES_BIGINT_MAX
+                    or not isinstance(encoded_semantic_seqs, list)
+                    or len(encoded_semantic_seqs) > CONVERSATION_SEMANTIC_CANDIDATES
+                    or any(
+                        not isinstance(candidate, int)
+                        or isinstance(candidate, bool)
+                        or candidate < 1
+                        or candidate > max_seq
+                        for candidate in encoded_semantic_seqs
+                    )
+                    or len(set(encoded_semantic_seqs)) != len(encoded_semantic_seqs)
+                ):
+                    raise ValueError
+                snapshot = (
+                    min_seq,
+                    max_seq,
+                    embedding_min_seq,
+                    embedding_generation,
+                    tuple(encoded_semantic_seqs),
+                )
+            if mode in {"hybrid", "fallback"}:
+                if (
+                    not isinstance(position, int)
+                    or isinstance(position, bool)
+                    or not 0 <= position <= CONVERSATION_SEMANTIC_CANDIDATES * 2
+                ):
+                    raise ValueError
+                return (
+                    mode,
+                    position,
+                    seq,
+                    snapshot[0],
+                    snapshot[1],
+                    snapshot[2],
+                    snapshot[3],
+                    snapshot[4],
+                )
             if (
                 not isinstance(position, (int, float))
                 or isinstance(position, bool)
@@ -2339,19 +2639,80 @@ def _decode_conversation_search_cursor(
                 raise ValueError from exc
             if not math.isfinite(rank) or rank < 0:
                 raise ValueError
-            return rank, seq
+            # ``rank`` is the pre-hybrid cursor mode. It must continue as plain
+            # lexical pagination: that client has not consumed a fused prefix,
+            # so excluding today's semantic candidates would silently skip
+            # results it has never seen.
+            return (
+                mode,
+                rank,
+                seq,
+                snapshot[0],
+                snapshot[1],
+                snapshot[2],
+                snapshot[3],
+                snapshot[4],
+            )
         if not isinstance(position, str) or UTC_TIMESTAMP_RE.fullmatch(position) is None:
             raise ValueError
         try:
             datetime.strptime(position, "%Y-%m-%dT%H:%M:%SZ")
         except ValueError as exc:
             raise ValueError from exc
-        return position, seq
+        return "time", position, seq, None, None, None, None, None
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ApiError(
             HTTPStatus.BAD_REQUEST,
             "cursor is invalid or belongs to different search filters",
         ) from exc
+
+
+def _require_conversation_search_snapshot(
+    expected_event_min_seq: int,
+    expected_embedding_min_seq: int,
+) -> None:
+    event_min_seq, embedding_min_seq = state.conversation_search_retention()
+    source_expired = expected_event_min_seq > 0 and event_min_seq != expected_event_min_seq
+    vectors_expired = expected_embedding_min_seq > 0 and (
+        embedding_min_seq == 0 or embedding_min_seq > expected_embedding_min_seq
+    )
+    if source_expired or vectors_expired:
+        raise ApiError(
+            HTTPStatus.CONFLICT,
+            "conversation search cursor snapshot expired; restart the search",
+        )
+
+
+def _frozen_conversation_semantic_rows(
+    semantic_seqs: tuple[int, ...],
+    *,
+    from_timestamp: str | None,
+    to_timestamp: str | None,
+    thread_id: str | None,
+    sources: tuple[str, ...],
+    min_seq: int,
+    max_seq: int,
+    embedding_min_seq: int,
+) -> list[dict[str, Any]]:
+    """Resolve cursor ids only when every id still satisfies its search."""
+    rows = state.thread_messages_by_seqs(
+        semantic_seqs,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        thread_id=thread_id,
+        sources=sources,
+        max_seq=max_seq,
+    )
+    if len(rows) != len(semantic_seqs):
+        # Prefer the specific expiry response when retention advanced during
+        # this lookup; otherwise the cursor was altered or never belonged to
+        # these fingerprinted filters.
+        _require_conversation_search_snapshot(min_seq, embedding_min_seq)
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "cursor is invalid or belongs to different search filters",
+        )
+    return rows
 
 
 def search_conversation_history(body: Any) -> dict[str, Any]:
@@ -2427,20 +2788,185 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
     fingerprint = _conversation_search_fingerprint(
         queries, from_timestamp, to_timestamp, thread_id, roles
     )
-    before = _decode_conversation_search_cursor(
+    decoded_cursor = _decode_conversation_search_cursor(
         body.get("cursor"), fingerprint, bool(queries)
     )
-
-    try:
-        rows = state.search_thread_messages(
-            tuple(queries),
-            from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
-            thread_id=thread_id,
-            sources=tuple("user" if role == "user" else "agent" for role in roles),
-            limit=limit + 1,
-            before=before,
+    cursor_mode = decoded_cursor[0] if decoded_cursor is not None else None
+    snapshot_min_seq: int | None = None
+    snapshot_max_seq: int | None = None
+    snapshot_embedding_min_seq: int | None = None
+    snapshot_embedding_generation: int | None = None
+    snapshot_semantic_seqs: tuple[int, ...] | None = None
+    hybrid_offset = 0
+    before: tuple[float, int] | tuple[str, int] | None = None
+    if decoded_cursor is not None:
+        (
+            _mode,
+            position,
+            seq,
+            snapshot_min_seq,
+            snapshot_max_seq,
+            snapshot_embedding_min_seq,
+            snapshot_embedding_generation,
+            snapshot_semantic_seqs,
+        ) = decoded_cursor
+        if cursor_mode in {"hybrid", "fallback"}:
+            if not isinstance(position, int) or isinstance(position, bool):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "cursor is invalid")
+            hybrid_offset = position
+        elif queries:
+            if not isinstance(position, float):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "cursor is invalid")
+            before = (position, seq)
+        else:
+            if not isinstance(position, str):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "cursor is invalid")
+            before = (position, seq)
+    if queries and decoded_cursor is None:
+        (
+            snapshot_min_seq,
+            snapshot_max_seq,
+            snapshot_embedding_min_seq,
+            snapshot_embedding_generation,
+        ) = state.conversation_search_snapshot()
+    if queries and snapshot_min_seq is not None:
+        assert snapshot_embedding_min_seq is not None
+        _require_conversation_search_snapshot(
+            snapshot_min_seq,
+            snapshot_embedding_min_seq,
         )
+    search_mode = "lexical" if queries else "timestamp"
+    continuation_mode: str | None = None
+    lexical_tail: dict[str, Any] | None = None
+    lexical_tail_mode = "lexical"
+    try:
+        sources = tuple("user" if role == "user" else "agent" for role in roles)
+        if queries and cursor_mode not in {"rank", "lexical"}:
+            lexical_rows = state.search_thread_messages(
+                tuple(queries),
+                from_timestamp=from_timestamp,
+                to_timestamp=to_timestamp,
+                thread_id=thread_id,
+                sources=sources,
+                limit=CONVERSATION_SEMANTIC_CANDIDATES + 1,
+                before=None,
+                max_seq=snapshot_max_seq,
+            )
+            # The extra row distinguishes a result set that ends exactly at the
+            # candidate window from one with more matches below it, so a lexical
+            # continuation is only advertised when a tail really exists.
+            if len(lexical_rows) > CONVERSATION_SEMANTIC_CANDIDATES:
+                lexical_rows = lexical_rows[:CONVERSATION_SEMANTIC_CANDIDATES]
+                last_lexical = lexical_rows[-1]
+                lexical_tail = {
+                    "rank": last_lexical["search_rank"],
+                    "seq": last_lexical["seq"],
+                }
+            if cursor_mode == "fallback":
+                # A fallback cursor owns a lexical-only positional offset.
+                # Keep that ordering stable even if inference has recovered;
+                # switching it to fused ranking would skip or repeat hits.
+                rows = _hybrid_conversation_rows(lexical_rows, [])[hybrid_offset:]
+                search_mode = "lexical_fallback"
+                continuation_mode = "fallback"
+                lexical_tail_mode = "rank"
+            elif cursor_mode == "hybrid":
+                # The first page froze the ordered HNSW candidate ids. Fetch
+                # their immutable source rows instead of rerunning an
+                # approximate scan whose graph may have changed meanwhile.
+                assert snapshot_semantic_seqs is not None
+                assert snapshot_min_seq is not None
+                assert snapshot_max_seq is not None
+                assert snapshot_embedding_min_seq is not None
+                semantic_rows = _frozen_conversation_semantic_rows(
+                    snapshot_semantic_seqs,
+                    from_timestamp=from_timestamp,
+                    to_timestamp=to_timestamp,
+                    thread_id=thread_id,
+                    sources=sources,
+                    min_seq=snapshot_min_seq,
+                    max_seq=snapshot_max_seq,
+                    embedding_min_seq=snapshot_embedding_min_seq,
+                )
+                rows = _hybrid_conversation_rows(
+                    lexical_rows,
+                    semantic_rows,
+                )[hybrid_offset:]
+                search_mode = "hybrid"
+                continuation_mode = "hybrid"
+            else:
+                try:
+                    query_embedding = embedding_client.embed_texts(
+                        [query or queries[0]], kind="query"
+                    )[0]
+                    semantic_rows = state.search_thread_messages_semantic(
+                        query_embedding,
+                        embedding_client.MODEL_NAME,
+                        from_timestamp=from_timestamp,
+                        to_timestamp=to_timestamp,
+                        thread_id=thread_id,
+                        sources=sources,
+                        limit=CONVERSATION_SEMANTIC_CANDIDATES,
+                        minimum_similarity=embedding_client.MINIMUM_SIMILARITY,
+                        max_seq=snapshot_max_seq,
+                        max_embedding_generation=snapshot_embedding_generation,
+                    )
+                    snapshot_semantic_seqs = tuple(
+                        int(row["seq"]) for row in semantic_rows
+                    )
+                    rows = _hybrid_conversation_rows(
+                        lexical_rows,
+                        semantic_rows,
+                    )[hybrid_offset:]
+                    search_mode = "hybrid"
+                    continuation_mode = "hybrid"
+                except (embedding_client.EmbeddingError, pgclient.Error, OSError) as exc:
+                    if not isinstance(exc, embedding_client.EmbeddingError):
+                        host_errors.report_unexpected("admin_api.embedding_search", exc)
+                    snapshot_semantic_seqs = ()
+                    rows = _hybrid_conversation_rows(lexical_rows, [])[hybrid_offset:]
+                    search_mode = "lexical_fallback"
+                    continuation_mode = "fallback"
+                    # A fallback prefix contains only lexical candidates, so
+                    # its tail must not exclude semantic candidates.
+                    lexical_tail_mode = "rank"
+        else:
+            # A lexical continuation walks below the fused window, where the
+            # semantic candidates already returned on the hybrid pages appear
+            # again at their own lexical rank. Exclude the candidate ids frozen
+            # by the first page so the walk yields each hit once without
+            # rerunning inference or HNSW.
+            exclude_seqs: tuple[int, ...] = ()
+            if queries and cursor_mode == "lexical":
+                assert snapshot_semantic_seqs is not None
+                assert snapshot_min_seq is not None
+                assert snapshot_max_seq is not None
+                assert snapshot_embedding_min_seq is not None
+                _frozen_conversation_semantic_rows(
+                    snapshot_semantic_seqs,
+                    from_timestamp=from_timestamp,
+                    to_timestamp=to_timestamp,
+                    thread_id=thread_id,
+                    sources=sources,
+                    min_seq=snapshot_min_seq,
+                    max_seq=snapshot_max_seq,
+                    embedding_min_seq=snapshot_embedding_min_seq,
+                )
+                exclude_seqs = snapshot_semantic_seqs
+            rows = state.search_thread_messages(
+                tuple(queries),
+                from_timestamp=from_timestamp,
+                to_timestamp=to_timestamp,
+                thread_id=thread_id,
+                sources=sources,
+                limit=limit + 1,
+                before=before,
+                max_seq=snapshot_max_seq,
+                exclude_seqs=exclude_seqs,
+            )
+            continuation_mode = (
+                "rank" if cursor_mode == "rank" else "lexical"
+            ) if queries else None
     except pgclient.Error as exc:
         if exc.sqlstate == "57014":
             raise ApiError(
@@ -2448,6 +2974,12 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                 "conversation search exceeded its work limit; narrow the query or time range",
             ) from exc
         raise
+    if queries and snapshot_min_seq is not None:
+        assert snapshot_embedding_min_seq is not None
+        _require_conversation_search_snapshot(
+            snapshot_min_seq,
+            snapshot_embedding_min_seq,
+        )
     page = rows[:limit]
     matches = []
     for row in page:
@@ -2469,19 +3001,70 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
         "trust": HISTORY_TRUST,
         "instruction_authority": HISTORY_INSTRUCTION_AUTHORITY,
         "matches": matches,
+        "search_mode": search_mode,
         "next_cursor": None,
     }
     if len(rows) > limit and page:
         last = page[-1]
         next_value = (
-            {"rank": last["search_rank"], "seq": last["seq"]}
+            {
+                "rank": (
+                    hybrid_offset + limit
+                    if continuation_mode in {"hybrid", "fallback"}
+                    else last["search_rank"]
+                ),
+                "seq": last["seq"],
+            }
             if queries
             else {"timestamp": last["timestamp"], "seq": last["seq"]}
         )
         response["next_cursor"] = _encode_conversation_search_cursor(
-            fingerprint, bool(queries), next_value
+            fingerprint,
+            bool(queries),
+            next_value,
+            mode=continuation_mode,
+            min_seq=snapshot_min_seq,
+            max_seq=snapshot_max_seq,
+            embedding_min_seq=snapshot_embedding_min_seq,
+            embedding_generation=snapshot_embedding_generation,
+            semantic_seqs=snapshot_semantic_seqs,
+        )
+    elif lexical_tail is not None and page:
+        response["next_cursor"] = _encode_conversation_search_cursor(
+            fingerprint,
+            True,
+            lexical_tail,
+            mode=lexical_tail_mode,
+            min_seq=snapshot_min_seq,
+            max_seq=snapshot_max_seq,
+            embedding_min_seq=snapshot_embedding_min_seq,
+            embedding_generation=snapshot_embedding_generation,
+            semantic_seqs=snapshot_semantic_seqs,
         )
     return response
+
+
+def _hybrid_conversation_rows(
+    lexical_rows: list[dict[str, Any]],
+    semantic_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fuse bounded candidate sets while favoring exact lexical evidence."""
+    by_seq: dict[int, dict[str, Any]] = {}
+    scores: dict[int, float] = {}
+    for rank, row in enumerate(lexical_rows, start=1):
+        seq = int(row["seq"])
+        by_seq[seq] = row
+        scores[seq] = scores.get(seq, 0.0) + 2.0 / (60 + rank)
+    for rank, row in enumerate(semantic_rows, start=1):
+        seq = int(row["seq"])
+        by_seq.setdefault(seq, row)
+        scores[seq] = scores.get(seq, 0.0) + 1.0 / (60 + rank)
+    ranked = [dict(row, search_rank=scores[seq]) for seq, row in by_seq.items()]
+    ranked.sort(
+        key=lambda row: (float(row["search_rank"]), int(row["seq"])),
+        reverse=True,
+    )
+    return ranked
 
 
 def read_conversation_history(body: Any) -> dict[str, Any]:
@@ -3328,6 +3911,7 @@ def main() -> int:
     # admin service only forwards operator operations to it.
     orchestrator.start_background_loops()
     threading.Thread(target=maintenance_loop, daemon=True).start()
+    threading.Thread(target=embedding_index_loop, daemon=True).start()
     threading.Thread(target=upgrade_check.poll, daemon=True).start()
     threading.Thread(target=workspace_httpd.serve_forever, daemon=True).start()
     try:

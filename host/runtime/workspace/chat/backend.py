@@ -24,7 +24,7 @@ from host.session_options import public_session_options, recorded_session_config
 
 
 MAX_REQUEST_BODY_BYTES = 128 * 1024
-RUNTIME_OPTIONS = {"codex", "claude_code", "hermes"}
+RUNTIME_OPTIONS = {"codex", "claude_code", "grok", "hermes"}
 THREAD_ID_RE = re.compile(r"thread-([1-9][0-9]*)")
 # Keep each proxy response comfortably below the fixed 1 MiB bridge cap.
 # Six 120 KiB event text budgets leave more than 300 KiB for JSON envelopes

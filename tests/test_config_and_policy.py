@@ -134,6 +134,32 @@ class ConfigTests(unittest.TestCase):
             parse_network_controls(
                 {"network_integrations": {"claude": {"enabled": False, "web_search": True}}})
 
+    def test_xai_carries_enablement_and_nothing_else(self) -> None:
+        # The xAI integration has no options: every Grok server-side tool is
+        # denied, so enablement is the whole of its configuration.
+        parsed = parse_network_controls({"network_integrations": {"xai": {"enabled": True}}})
+        self.assertEqual(parsed.to_json()["network_integrations"]["xai"], {"enabled": True})
+
+    def test_xai_rejects_a_web_search_option(self) -> None:
+        # Grok's web search is not offered, so a policy asking for it is a
+        # mistake to surface rather than a setting to ignore.
+        with self.assertRaisesRegex(ConfigError, r"web_search"):
+            parse_network_controls(
+                {"network_integrations": {"xai": {"enabled": True, "web_search": True}}})
+
+    def test_xai_apexes_are_reserved_from_custom_domains(self) -> None:
+        # A custom rule must never be broader than the managed guard, including
+        # for the metered API host the xAI integration deliberately keeps closed.
+        for domain in ("x.ai", "api.x.ai", "grok.com", "cli-chat-proxy.grok.com", "*.grok.com"):
+            with self.assertRaisesRegex(ConfigError, r"owned by the xai integration"):
+                parse_network_controls(
+                    {
+                        "network_integrations": {
+                            "custom": {"domains": {domain: {"allow_http_methods": ["GET"]}}}
+                        }
+                    }
+                )
+
     def test_bedrock_policy_contains_only_enablement(self) -> None:
         enabled = parse_network_controls(
             {"network_integrations": {"bedrock": {"enabled": True}}}

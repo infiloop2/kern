@@ -55,7 +55,7 @@ integration.
 
 | Field | Required | Type | Behavior |
 | --- | --- | --- | --- |
-| `network_integrations` | No | object | Integration configs keyed by integration id. Known ids are `openai`, `claude`, `bedrock`, `github`, `python_packages`, `npm_packages`, and `custom`. The provider integrations take an `enabled` boolean; `custom` has no `enabled` field and is enabled exactly while its `domains` map is non-empty (passing `enabled` to `custom` is rejected). A missing key or `enabled: false` disables a provider; a disabled integration carries no other state, and serialization omits it entirely. |
+| `network_integrations` | No | object | Integration configs keyed by integration id. Known ids are `openai`, `claude`, `xai`, `bedrock`, `github`, `python_packages`, `npm_packages`, and `custom`. The provider integrations take an `enabled` boolean; `custom` has no `enabled` field and is enabled exactly while its `domains` map is non-empty (passing `enabled` to `custom` is rejected). A missing key or `enabled: false` disables a provider; a disabled integration carries no other state, and serialization omits it entirely. |
 | `network_integrations.custom.domains` | No | object | Map of operator-defined domain rules. Keys are exact domains or wildcard suffix domains. Wildcards must start with `*.`, such as `*.example.com`; `*` matches any non-empty hostname prefix ending at that dot. Embedded globs and regex keys are not supported. Domains owned by a provider integration are always rejected here. The custom integration is enabled exactly while this map is non-empty. |
 
 Integration entries are stored exactly as configured. The host parses each
@@ -94,6 +94,7 @@ Every domain owned by a provider integration is reserved: it is rejected in
 `network_integrations.custom.domains` whether or not the integration is
 enabled, so a custom rule can never be broader than the integration's guard. The reserved suffixes are
 `openai.com`, `chatgpt.com`, `anthropic.com`, `claude.ai`, `claude.com`,
+`x.ai`, `grok.com`,
 `bedrock-runtime.us-east-1.amazonaws.com`,
 `bedrock-runtime.us-east-2.amazonaws.com`,
 `bedrock-runtime.us-west-2.amazonaws.com`,
@@ -157,6 +158,96 @@ account metadata plus a SHA-256 hash of the OAuth access token, and denies
 `api.anthropic.com` data-plane requests until the presented bearer token
 matches that stored hash. The unauthenticated `/api/hello` readiness probe
 remains available for Claude Code startup.
+
+## xAI Integration
+
+When `network_integrations.xai.enabled` is `true`, the Grok Build CLI can reach
+xAI after its OAuth login. The xAI integration directly enforces:
+
+```json
+{
+  "auth.x.ai": {
+    "allow_http_methods": ["GET", "POST"]
+  },
+  "cli-chat-proxy.grok.com": {
+    "allow_http_methods": ["GET", "POST"]
+  }
+}
+```
+
+The managed bundle opens exactly two hosts under the reserved `x.ai` and
+`grok.com` apexes. `auth.x.ai` is the OAuth issuer — discovery, device code,
+authorize, and token exchange — and is unpinned by construction, because it is
+the endpoint that establishes which account exists and it carries no model
+traffic. `cli-chat-proxy.grok.com` is the subscription data plane: inference,
+model catalog, remote settings, billing, and trace upload all live under that
+one host.
+
+Everything else beneath those apexes is denied by the route table. Two
+denials are deliberate rather than incidental:
+
+- `api.x.ai` is the metered developer API. It bills per token against a
+  console.x.ai credit balance instead of the operator's Grok subscription, so
+  opening it would let a misconfigured runtime silently spend money.
+- `code.grok.com` is a second session and workspace sync surface. Closing it is
+  not on its own what keeps conversation state local; the chat proxy's own
+  session routes are, through the path allowlist above.
+
+Every data-plane request must carry exactly one `Authorization: Bearer` token
+whose JWT claims the pinned account under `sub` (personal login) or
+`principal_id` (team login). Requests are denied until the pinned account id is
+available.
+
+### Server-side tools
+
+Grok's hosted tools are declared as entries in a request's `tools` array,
+alongside the client-executed `function` tools the CLI runs locally on this
+host. xAI's documented server-side set is web search, X search, and code
+execution.
+
+**Every one of them is denied, and the integration has no options.** A config
+naming `web_search` for xAI is rejected at parse time rather than accepted and
+ignored.
+
+Web search is denied rather than offered because Grok's has no narrow form. It
+searches *and browses live pages* as one capability, and xAI's servers do the
+fetching — so an allowed search could retrieve a model-chosen URL, carrying
+arbitrary agent-chosen data in its parameters, without any request to that
+domain crossing this host's network policy. There is no cache-backed mode (as OpenAI has) and no per-sub-operation
+control to allow instead. The full reasoning, including the sub-operations a
+search performs and why none of them is separately deniable, is in [The xAI
+integration](../architecture/xai-integration.md#grok-web-search).
+
+Denied hosted tools:
+
+- **Web search** (`web_search`) — denied with its own reason code,
+  `xai_web_search_denied`, so an agent reads "this host does not offer it"
+  rather than "unrecognised tool". Both of xAI's ways of asking for one are
+  covered: a `tools` entry, and a `search_parameters` object that is not an
+  explicit `mode: "off"`.
+- **X search** (`x_search`) — a separate corpus (posts, users, threads) reached
+  on the same terms.
+- **Code execution** (`code_execution`, `code_interpreter`) — runs code on xAI
+  infrastructure. The agent has a local shell on this host, so nothing is lost.
+- **Collections search** (`file_search`, `collections_search`) — searches
+  xAI-hosted document collections, which this host never populates.
+- **Hosted browsing and media generation** (`browser`, `computer_use`,
+  `image_generation`, `video_generation`).
+- **Remote MCP servers** — they make xAI call an external server with request
+  data.
+
+Two of those are spelled differently on the wire and in xAI's SDK
+(`code_interpreter`/`code_execution`, `file_search`/`collections_search`); both
+spellings are denied.
+
+Anything else appearing in a `tools` array that is not a client-executed
+`function` is denied too. That is what keeps a hosted tool xAI ships later from
+being forwarded unreviewed: the denial follows from *where* the entry appears,
+not from it already being on a list. Replay history items — `web_search_call`,
+`x_search_call`, `code_interpreter_call`, `file_search_call`, `mcp_call`,
+`mcp_list_tools` — describe earlier calls rather than declaring new ones, and
+they and their whole subtrees are skipped so ordinary follow-up turns are not
+denied.
 
 ## AWS Bedrock Integration
 

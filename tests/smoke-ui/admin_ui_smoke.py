@@ -29,9 +29,26 @@ IPHONE_USER_AGENT = (
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 "
     "Mobile/15E148 Safari/604.1"
 )
-STATIC_HOME_INTEGRATION_IDS = frozenset(
-    {"openai", "claude", "bedrock", "github", "python_packages", "npm_packages", "custom_domain"}
+# Derived from the catalog the Home page actually renders, not restated here.
+# The bundled-tool half below has always been derived; leaving the managed half
+# hardcoded meant every new integration silently failed this smoke on a count
+# rather than on anything about the integration. Parsing the top-level keys
+# keeps the assertion exactly as strong and self-maintaining.
+_CATALOG_SOURCE = (
+    REPO_ROOT / "host/runtime/admin_api/admin_ui/integration_catalog.js"
+).read_text()
+_MANAGED_CATALOG_BLOCK = _CATALOG_SOURCE.split("export const MANAGED_INTEGRATIONS = {", 1)[1].split("\n};", 1)[0]
+MANAGED_INTEGRATION_IDS = frozenset(
+    re.findall(r"^  ([a-z][a-z0-9_]*): \{$", _MANAGED_CATALOG_BLOCK, re.MULTILINE)
 )
+# A silent parse failure would weaken the count into a tautology, so fail loudly
+# on the shape instead.
+assert {"openai", "claude", "bedrock"} <= MANAGED_INTEGRATION_IDS, (
+    f"could not parse MANAGED_INTEGRATIONS keys: {sorted(MANAGED_INTEGRATION_IDS)}"
+)
+# `custom_domain` is the Home card for operator-defined domains; it comes from
+# CUSTOM_DOMAIN_GUIDE rather than the managed catalog.
+STATIC_HOME_INTEGRATION_IDS = MANAGED_INTEGRATION_IDS | {"custom_domain"}
 BUNDLED_TOOL_IDS = frozenset(
     path.parent.name
     for path in (REPO_ROOT / "host/tools").glob("*/__init__.py")
@@ -473,6 +490,13 @@ def open_home_integration(page, guide_id: str) -> None:
     expect(page.locator("#integration-detail-title")).not_to_have_text("Integration")
 
 
+def gmail_capability(guide, action_id: str):
+    """One action card, addressed by its heading rather than any text in it."""
+    return guide.locator(".guide-capability").filter(
+        has=guide.page.locator(".guide-capability-head code", has_text=re.compile(rf"^{action_id}$"))
+    )
+
+
 def desktop_smoke(page, url: str) -> None:
     from playwright.sync_api import expect
 
@@ -576,6 +600,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#panel-home")).to_be_visible()
     expect(page.locator("#runtime-overview")).to_contain_text("Codex")
     expect(page.locator("#runtime-overview")).to_contain_text("Claude Code")
+    expect(page.locator("#runtime-overview")).to_contain_text("Grok")
     expect(page.locator("#runtime-overview")).to_contain_text("Hermes")
     expect(page.locator("#runtime-overview")).to_contain_text("deactivated")
     expect(page.locator("#runtime-overview").get_by_label("Refresh provider status and usage")).to_be_visible()
@@ -588,6 +613,13 @@ def desktop_smoke(page, url: str) -> None:
     # Bedrock billing is reconciliation metadata in the provider details, not
     # a primary toolbar value.
     expect(page.locator("#runtime-overview .usage-ring.unavailable")).to_have_count(4)
+    # Grok has no ring at all: xAI publishes no pool figure for a subscription
+    # account, so its box carries a neutral note rather than an empty ring that
+    # would imply a number is coming.
+    expect(page.locator("#runtime-overview .usage-note")).to_have_count(1)
+    expect(page.locator("#runtime-overview .usage-note")).to_have_attribute(
+        "title", "usage monitoring is not available for Grok"
+    )
     expect(page.locator("#runtime-overview .runtime-summary-bedrock")).to_have_count(1)
     expect(page.locator("#runtime-overview")).to_contain_text("--")
     assert_runtime_usage_type(page, minimum_number_px=8)
@@ -596,6 +628,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#panel-home").get_by_text("Provider usage")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Codex login")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Claude login")).to_have_count(0)
+    expect(page.get_by_role("button", name="Start Grok login")).to_have_count(0)
     page.locator("#runtime-overview .runtime-summary", has_text="Codex").click()
     expect(page.locator("#panel-network")).to_be_visible()
     disabled_openai_row = page.locator(".integration-row[data-integration]", has_text="OpenAI")
@@ -862,17 +895,37 @@ def desktop_smoke(page, url: str) -> None:
     expect(gmail_guide.locator(":scope > .guide-section").nth(1).locator(":scope > p")).to_have_count(0)
     expect(gmail_guide).to_contain_text("send_email")
     expect(gmail_guide).to_contain_text("approval required")
-    send_email = gmail_guide.locator(".guide-capability", has_text="send_email")
+    # An approval-gated action returns a message, not data fields, so it
+    # declares no outputs and the guide says why.
+    # Filter on the action's own heading: an action's description may name
+    # another action, which a plain has_text match would also pick up.
+    send_email = gmail_capability(gmail_guide, "send_email")
     expect(send_email.locator(".guide-action-contract > summary")).to_have_text(
-        "Parameters: 3 inputs · 1 declared output"
+        "Parameters: 3 inputs · 0 declared outputs"
     )
     send_email.locator(".guide-action-contract > summary").click()
     expect(send_email.locator(".guide-action-parameters").first).to_contain_text("blocks")
     expect(send_email.locator(".guide-action-parameters").first).to_contain_text("array of object or object")
     expect(send_email.locator(".guide-action-parameters").first).to_contain_text("required")
-    expect(send_email.locator(".guide-action-parameters").last).to_contain_text("status")
-    expect(send_email).to_contain_text("permits additional output fields")
+    expect(send_email.locator(".guide-action-parameters").last).to_contain_text(
+        "This action queues an approval; the outcome is a message, not data fields."
+    )
+    expect(send_email).not_to_contain_text("permits additional output fields")
     expect(send_email.locator(".guide-action-json")).to_have_count(0)
+    # A read describes what comes back, field by field, for the operator.
+    search_messages = gmail_capability(gmail_guide, "search_messages")
+    expect(search_messages.locator(".guide-action-contract > summary")).to_have_text(
+        "Parameters: 3 inputs · 3 declared outputs"
+    )
+    search_messages.locator(".guide-action-contract > summary").click()
+    expect(search_messages.locator(".guide-action-parameters").last).to_contain_text("messages")
+    expect(search_messages.locator(".guide-action-parameters").last).to_contain_text(
+        "matching messages, newest first"
+    )
+    # Collapse it again: the scroll-reset check below reads this page's height,
+    # so this assertion must not leave the guide taller than it found it.
+    search_messages.locator(".guide-action-contract > summary").click()
+    expect(search_messages.locator(".guide-action-parameters").first).to_be_hidden()
     expect(gmail_guide).to_contain_text("GOOGLE_OAUTH_CLIENT_ID")
     expect(gmail_guide).to_contain_text(f"{url.rstrip('/')}/oauth/callback")
     # The callback URI and config keys render inside the setup step that needs them.
@@ -908,6 +961,20 @@ def desktop_smoke(page, url: str) -> None:
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     if page.evaluate("window.scrollY") <= 0:
         raise AssertionError("integration guide did not provide a scrollable detail page")
+    # `html` scrolls smoothly, and the click below targets an element at the
+    # top of a page just sent to the bottom, so the driver scrolls it back into
+    # view first. Both are animations. Clicking mid-flight leaves one still
+    # running across the panel's own reset, which is what makes the offset this
+    # asserts on arbitrary. Settle first so the assertion measures the panel
+    # rather than the tail of a scroll.
+    page.wait_for_function(
+        "() => {"
+        "  const y = window.scrollY;"
+        "  if (window.__kernLastScrollY === y) return true;"
+        "  window.__kernLastScrollY = y;"
+        "  return false;"
+        "}"
+    )
     page.locator("#runtime-overview .runtime-summary[data-provider='openai']").click()
     expect(page.locator("#integration-detail-title")).to_have_text("OpenAI")
     detail_scroll_y = page.evaluate("window.scrollY")
@@ -953,6 +1020,13 @@ def desktop_smoke(page, url: str) -> None:
     open_home_integration(page, "npm_packages")
     expect(page.locator("[data-guide-section='npm_packages']")).not_to_contain_text("Review packages before use")
     expect(page.locator(".connection-guide-entry")).to_have_count(1)
+    open_home_integration(page, "xai")
+    xai_guide = page.locator("[data-guide-section='xai']")
+    expect(xai_guide.locator(".guide-policy-point a[href='https://console.x.ai/']")).to_have_count(1)
+    expect(xai_guide.locator(".guide-policy-point a[href='https://grok.com/?_s=data']")).to_have_count(1)
+    expect(xai_guide.locator(".guide-policy-point a[href='https://x.com/settings/grok_settings']")).to_have_count(1)
+    expect(xai_guide).to_contain_text("coding-data opt-out active")
+    expect(xai_guide).to_contain_text("API inputs and outputs are not used for training")
     open_home_integration(page, "github")
     github_row = page.locator(".integration-row[data-integration='github']")
     # Credentials can be staged before the integration is enabled.
@@ -1356,6 +1430,15 @@ def tools_smoke(page, url: str) -> None:
         expect(guide).to_be_visible()
         expect(guide.get_by_role("heading", name="What happens to your data", exact=True)).to_have_count(1)
         expect(guide.locator(".guide-data-summary article")).to_have_count(4)
+        if tool_id == "instagram":
+            # A field the provider may withhold is declared as a union, and the
+            # operator must read it as one rather than as "unspecified".
+            profile = page.locator(f"[data-guide-section='tool:{tool_id}'] .guide-capability").filter(
+                has=page.locator(".guide-capability-head code", has_text=re.compile(r"^get_profile$"))
+            )
+            profile.locator(".guide-action-contract > summary").click()
+            expect(profile.locator(".guide-action-parameters").last).to_contain_text("integer or null")
+            profile.locator(".guide-action-contract > summary").click()
 
     open_home_integration(page, "tool:gmail")
     gmail_row = page.locator("#tools [data-tool-row='gmail']")

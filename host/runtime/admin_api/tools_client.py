@@ -150,6 +150,7 @@ def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> 
                 "approval": spec.approval,
                 "input_schema": spec.input_schema,
                 "output_schema": spec.output_schema,
+                "returns_asset": spec.returns_asset,
             }
             for spec in manifest.actions
         ],

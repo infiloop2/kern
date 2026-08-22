@@ -1,8 +1,11 @@
 # Code Layout
 
-The production Python runtime uses only the standard library. PostgreSQL is
-reached through the in-repo wire client rather than a third-party driver, and a
-unit test rejects non-standard-library runtime imports.
+The host control-plane Python runtime uses only the standard library.
+PostgreSQL is reached through the in-repo wire client rather than a third-party
+driver, and a unit test rejects non-standard-library control-plane imports. The
+isolated `kern-embedding` service is the deliberate exception: its dedicated
+venv contains pinned FastEmbed/ONNX dependencies and cannot access the network
+or database.
 
 ```text
 host/
@@ -24,6 +27,7 @@ host/
     agent_network/          # kern-agent-network: read-only introspection socket
     workspace/             # kern-workspace: Chat, Web Apps, global resources,
                             # agent API socket
+    embeddings/            # kern-embedding service + bounded stdlib clients
     agent_shim/             # kern-agent: stdio MCP shim, client-side only
     core/                   # shared socketless libraries: db, pgclient, state,
                             # secretbox, network_policy

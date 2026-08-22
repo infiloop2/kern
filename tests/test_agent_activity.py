@@ -44,6 +44,7 @@ class AgentActivityTests(unittest.TestCase):
             "title": "Run\0tests",
             "output": "one\udfff",
             "append_output": True,
+            "append_detail": True,
         })
 
         self.assertIsNotNone(normalized)
@@ -51,6 +52,7 @@ class AgentActivityTests(unittest.TestCase):
         self.assertEqual(normalized["title"], r"Run\0tests")
         self.assertEqual(normalized["output"], "one?")
         self.assertIs(normalized["append_output"], True)
+        self.assertIs(normalized["append_detail"], True)
 
     def test_activity_record_boundary_skips_malformed_provider_data(self) -> None:
         valid = {

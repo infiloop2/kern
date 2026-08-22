@@ -197,7 +197,7 @@ and show up in the same agent slice.
 
 - Every message names a client-chosen `thread_id` beginning with `app-`,
   `thread-`, or `schedule-`. The first message also
-  names an `agent_runtime` (`codex`, `claude_code`, or `hermes`) and one
+  names an `agent_runtime` (`codex`, `claude_code`, `grok`, or `hermes`) and one
   allowed model/effort pair, which binds all four values and starts a runtime
   conversation. Later messages
   may omit the runtime, model, and effort; the host loads the thread's fixed
@@ -212,7 +212,7 @@ and show up in the same agent slice.
   is rejected with `429` rather than queued).
 - Each turn gets its own runtime process, spawned through the sudo
   helper and closed when the turn ends. Codex turns resume their provider
-  thread by id on a fresh app-server; Claude Code and Hermes processes resume
+  thread by id on a fresh app-server; Claude Code, Grok, and Hermes processes resume
   by session id.
 - Codex receives the selected model on thread
   start/resume and the selected model and effort on every turn; it uses

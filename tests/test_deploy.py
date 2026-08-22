@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import copy
 from collections.abc import Iterator
 import errno
+import hashlib
 import io
 import json
 import os
@@ -1575,6 +1577,7 @@ class DeployUnitTests(unittest.TestCase):
     def test_rendered_bootstrap_contains_privilege_boundary(self) -> None:
         bootstrap = render._render_bootstrap()
         self.assertIn("KERN_WORKSPACE_UID=47750", bootstrap)
+        self.assertIn("KERN_EMBEDDING_UID=47751", bootstrap)
         self.assertNotIn("migrate_legacy_agent_workspace_identity", bootstrap)
         self.assertNotIn("retire_legacy_app_platform_identities", bootstrap)
         postgres_setup = bootstrap.split("setup_postgres() {", 1)[1].split(
@@ -1597,6 +1600,7 @@ class DeployUnitTests(unittest.TestCase):
                 bootstrap,
             )
         self.assertIn('ensure_user kern-workspace "$KERN_WORKSPACE_UID"', bootstrap)
+        self.assertIn('ensure_user kern-embedding "$KERN_EMBEDDING_UID"', bootstrap)
         self.assertIn("kern-workspace.service", bootstrap)
         self.assertIn("User=kern-workspace", bootstrap)
         self.assertIn("Slice=kern_workspace.slice", bootstrap)
@@ -1626,9 +1630,41 @@ class DeployUnitTests(unittest.TestCase):
         self.assertNotIn("kern-agent-workspace", bootstrap)
         self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.workspace.service", bootstrap)
         self.assertIn("RuntimeDirectory=kern-workspace", bootstrap)
+        self.assertIn("fastembed==${FASTEMBED_VERSION}", bootstrap)
+        self.assertIn("specific_model_path=os.environ[", bootstrap)
+        self.assertNotIn("KERN_EMBEDDING_CACHE_DIR", bootstrap)
+        self.assertIn("PGVECTOR_DEB_VERSION=0.8.6-1.pgdg22.04+1", bootstrap)
+        self.assertIn("VENDOR_SOURCE_DIR=/opt/kern-host/host/bootstrap/vendor", bootstrap)
+        self.assertNotIn("PGDG_KEY_SHA256", bootstrap)
+        self.assertNotIn("apt.postgresql.org", bootstrap)
+        self.assertNotIn("ACCC4CF8", bootstrap)
+        self.assertIn('dpkg-deb --extract "$pgvector_deb" "$pgvector_extract"', bootstrap)
+        self.assertIn('"/usr/lib/postgresql/${PG_MAJOR}/lib/vector.so"', bootstrap)
+        self.assertIn('"/usr/share/postgresql/${PG_MAJOR}/extension/vector.control"', bootstrap)
+        self.assertNotIn('dpkg --install "$pgvector_deb"', bootstrap)
+        self.assertNotIn('apt_get install -y --no-install-recommends "$pgvector_deb"', bootstrap)
+        self.assertNotIn("postgresql-server-dev-${PG_MAJOR}", bootstrap)
+        self.assertNotIn("make -C /tmp/pgvector", bootstrap)
+        self.assertIn("ListenStream=/run/kern-embedding.sock", bootstrap)
+        self.assertIn("SocketGroup=kern-workspace-api", bootstrap)
+        self.assertIn("SocketMode=0660", bootstrap)
+        self.assertIn("User=kern-embedding", bootstrap)
+        self.assertIn("PrivateNetwork=yes", bootstrap)
+        self.assertIn("MemoryMax=1G", bootstrap)
+        self.assertIn("Nice=10", bootstrap)
+        self.assertIn("CPUWeight=25", bootstrap)
+        self.assertIn("IOWeight=25", bootstrap)
+        self.assertIn('runuser -u postgres -- psql -d kern_admin', bootstrap)
+        self.assertIn('CREATE EXTENSION IF NOT EXISTS vector;', bootstrap)
+        migration = (
+            Path(__file__).resolve().parent.parent
+            / "host/migrations/0042_conversation_and_memory_embeddings.sql"
+        ).read_text()
+        self.assertNotIn("CREATE EXTENSION", migration)
         start_services = bootstrap.split("start_services() {", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("systemctl enable kern-workspace.service", start_services)
         self.assertIn("systemctl start kern-workspace.service", start_services)
+        self.assertIn("systemctl enable --now kern-embedding.socket", start_services)
         self.assertIn("RuntimeDirectory=kern-admin-api", bootstrap)
         self.assertIn("LimitNOFILE=8192", bootstrap)
         self.assertIn('oif lo tcp dport 8000-8015 meta skuid "kern-agent" accept', bootstrap)
@@ -1637,6 +1673,115 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("tcp dport 22 accept", bootstrap)
         self.assertIn("python3 -m host.runtime.deploy.write_config", bootstrap)
         self.assertNotIn("/var/lib/kern-host", bootstrap)
+
+    def test_vendored_pgvector_matches_bootstrap_pins(self) -> None:
+        """Both host architectures install exact packages tied to PG_MAJOR."""
+        root = Path(__file__).resolve().parent.parent
+        vendor = root / "host/bootstrap/vendor/pgvector"
+        bootstrap = render._render_bootstrap()
+        major_match = re.search(r"^PG_MAJOR=(\S+)$", bootstrap, re.MULTILINE)
+        version_match = re.search(
+            r"^PGVECTOR_DEB_VERSION=(\S+)$", bootstrap, re.MULTILINE
+        )
+        self.assertIsNotNone(major_match)
+        self.assertIsNotNone(version_match)
+        major = major_match.group(1)
+        version = version_match.group(1)
+        expected = {
+            "amd64": "a6021797a2363c134abc12282440d49d09f7f729798d56e51e8b1e92b368416f",
+            "arm64": "c4f0ef61a366a42e6a3663d2a84edbeea6c11a13b76c304e6fc2ae22c6ded920",
+        }
+        expected_names = {
+            f"postgresql-{major}-pgvector_{version}_{arch}.deb" for arch in expected
+        }
+        self.assertEqual({path.name for path in vendor.iterdir()}, expected_names)
+        for arch, digest in expected.items():
+            package = vendor / f"postgresql-{major}-pgvector_{version}_{arch}.deb"
+            self.assertEqual(hashlib.sha256(package.read_bytes()).hexdigest(), digest)
+            shell_name = arch.upper()
+            self.assertIn(f"PGVECTOR_DEB_SHA256_{shell_name}={digest}", bootstrap)
+
+        # A future PostgreSQL-major or package-version bump must refresh both
+        # filenames and digests in the same reviewed change.
+        self.assertIn(
+            'postgresql-${PG_MAJOR}-pgvector_${PGVECTOR_DEB_VERSION}_${pg_arch}.deb',
+            bootstrap,
+        )
+
+    def test_embedding_model_is_pinned_to_a_kern_release_asset(self) -> None:
+        """The model installs from Kern's own release, by digest, not from HuggingFace.
+
+        fastembed resolves its download revision with ``model_info(repo).sha``
+        and takes no ``revision`` argument, so a bootstrap that let it download
+        would install whatever upstream's default branch pointed at that day.
+        """
+        bootstrap = render._render_bootstrap()
+
+        # Every file the runtime loads is pinned, and the digest block is the
+        # single source of both the filenames and their expected content.
+        digests = re.search(
+            r'^EMBEDDING_MODEL_SHA256="\\\n(.*?)"$',
+            bootstrap,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(digests, "EMBEDDING_MODEL_SHA256 block is missing")
+        pinned = dict(
+            reversed(line.split(maxsplit=1))
+            for line in digests.group(1).splitlines()
+            if line.strip()
+        )
+        self.assertEqual(
+            set(pinned),
+            {
+                "model_optimized.onnx",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "config.json",
+                "special_tokens_map.json",
+            },
+        )
+        for name, digest in pinned.items():
+            self.assertRegex(digest, r"^[0-9a-f]{64}$", name)
+
+        # The asset is served from the same public repository the host already
+        # fetches its own code from, so this adds no new trust domain.
+        self.assertIn(
+            'embedding_model_base="https://github.com/infiloop2/kern/releases/download/'
+            '${EMBEDDING_MODEL_TAG}"',
+            bootstrap,
+        )
+        self.assertNotIn("@GITHUB_REPOSITORY@", bootstrap)
+        self.assertIn("EMBEDDING_MODEL_TAG=model-bge-small-en-v1.5-onnx-Q-1", bootstrap)
+
+        # Verification uses the digests pinned above, never a checksum file
+        # served next to the assets, which anything able to replace an asset
+        # could replace too.
+        self.assertIn(
+            'printf \'%s\\n\' "$EMBEDDING_MODEL_SHA256" | sha256sum --check --status',
+            bootstrap,
+        )
+        self.assertNotIn("SHA256SUMS", bootstrap)
+
+        # No HuggingFace on the fresh-deploy critical path. Comments may still
+        # explain why it was removed, so only executable lines are checked.
+        executable = "\n".join(
+            line for line in bootstrap.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertNotIn("huggingface.co", executable)
+        self.assertNotIn("cache_dir=", executable)
+
+    def test_embedding_model_dir_agrees_with_the_runtime_service(self) -> None:
+        """Bootstrap installs to the directory the service loads from."""
+        from host.runtime.embeddings import service as embedding_service
+
+        bootstrap = render._render_bootstrap()
+        model_dir = re.search(r"^EMBEDDING_MODEL_DIR=(\S+)$", bootstrap, re.MULTILINE)
+        self.assertIsNotNone(model_dir, "EMBEDDING_MODEL_DIR is missing")
+        self.assertEqual(str(embedding_service.MODEL_DIR), model_dir.group(1))
+        self.assertIn(
+            f"Environment=KERN_EMBEDDING_MODEL_DIR={model_dir.group(1)}",
+            bootstrap,
+        )
 
 
 
@@ -1665,6 +1810,38 @@ class DeployUnitTests(unittest.TestCase):
         # The sudoers drop-in is validated at write time, not at first use.
         self.assertIn("visudo -c -q -f /etc/sudoers.d/kern-host", bootstrap)
         self.assertTrue(bootstrap.rstrip().endswith("\nmain"))
+
+    def test_rendered_bootstrap_reads_the_nested_grok_platform_payload(self) -> None:
+        bootstrap = render._render_bootstrap()
+
+        self.assertIn(
+            'grok_payload="/usr/local/lib/node_modules/@xai-official/grok/'
+            'node_modules/@xai-official/grok-linux-${node_arch}/bin/grok.br"',
+            bootstrap,
+        )
+        self.assertNotIn(
+            'grok_payload="/usr/local/lib/node_modules/@xai-official/'
+            'grok-linux-${node_arch}/bin/grok.br"',
+            bootstrap,
+        )
+
+    def test_rendered_bootstrap_pins_grok_telemetry_and_trace_upload_off(self) -> None:
+        bootstrap = render._render_bootstrap()
+        grok_policy = bootstrap.split(
+            "cat > /etc/grok/requirements.toml <<'EOF'", 1
+        )[1].split("\nEOF", 1)[0]
+
+        self.assertIn("[features]\ntelemetry = false", grok_policy)
+        self.assertIn("[telemetry]\ntrace_upload = false", grok_policy)
+        self.assertIn(
+            '[model."grok-4.6"]\nsupports_backend_search = false',
+            grok_policy,
+        )
+        self.assertIn(
+            '[mcp_servers.kern]\ncommand = "/usr/bin/python3"\n'
+            'args = ["-m", "host.runtime.agent_shim.mcp_shim"]',
+            grok_policy,
+        )
 
     def test_rendered_bootstrap_provisions_admin_state_postgres(self) -> None:
         bootstrap = render._render_bootstrap()
@@ -1847,12 +2024,14 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn(f"HTTPS_PROXY=http://127.0.0.1:{PROXY_PORT}", helper)
 
     def test_agent_launchers_expose_the_proxy_ca_to_python_package_clients(self) -> None:
-        for name in (
-            "run-codex-app-server",
-            "run-claude-code",
-            "run-hermes",
-            "run-agent-script",
-        ):
+        # Every launcher, enumerated from disk: run-grok was added to the tree
+        # without being added to this list, and silently missed the per-scope
+        # limits and TMPDIR the others carry.
+        launchers = sorted(
+            path.stem for path in Path("host/bootstrap/helpers").glob("run-*.sh")
+        )
+        self.assertIn("run-grok", launchers)
+        for name in launchers:
             with self.subTest(name=name):
                 launcher = Path(f"host/bootstrap/helpers/{name}.sh").read_text()
                 self.assertIn(
@@ -1902,6 +2081,8 @@ class DeployUnitTests(unittest.TestCase):
             "read-codex-account-id",
             "run-claude-code",
             "read-claude-account",
+            "run-grok",
+            "read-grok-account",
             "clear-agent-auth",
             "read-agent-file",
             "upload-agent-file",
@@ -1916,6 +2097,219 @@ class DeployUnitTests(unittest.TestCase):
                 script_path = handle.name
             self.addCleanup(lambda path=script_path: Path(path).unlink(missing_ok=True))
             subprocess.run(["bash", "-n", script_path], check=True)
+
+    def test_grok_launcher_forces_the_headless_device_login_flow(self) -> None:
+        launcher = Path("host/bootstrap/helpers/run-grok.sh").read_text()
+        # Grok 1.0.5 otherwise advertises its loopback OAuth callback through
+        # ACP, which no browser can reach on a remote Kern host.
+        self.assertIn("GROK_LOGIN_DEVICE_FLOW=1", launcher)
+
+    def test_read_grok_account_selects_identity_by_signed_principal_type(self) -> None:
+        helper = Path("host/bootstrap/helpers/read-grok-account.sh").read_text()
+        python = helper.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+        def segment(value: dict[str, str]) -> str:
+            return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+
+        def read_account(claims: dict[str, str], session: dict[str, str]):
+            token = ".".join((segment({"alg": "RS256"}), segment(claims), "c2ln"))
+            with tempfile.TemporaryDirectory() as grok_home:
+                auth = {
+                    "https://auth.x.ai::client": {
+                        "oidc_issuer": "https://auth.x.ai",
+                        "key": token,
+                    }
+                    | session
+                }
+                Path(grok_home, "auth.json").write_text(json.dumps(auth))
+                result = subprocess.run(
+                    [sys.executable, "-c", python],
+                    env=os.environ | {"GROK_HOME": grok_home},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            return result
+
+        team = read_account(
+            {
+                "sub": "user-subject",
+                "principal_id": "team-principal",
+                "principal_type": "Team",
+            },
+            {"user_id": "user-subject", "principal_id": "team-principal"},
+        )
+        self.assertEqual(team.returncode, 0, team.stderr)
+        self.assertEqual(json.loads(team.stdout)["account_id"], "team-principal")
+
+        personal = read_account(
+            {
+                "sub": "personal-user",
+                "principal_id": "personal-user",
+                "principal_type": "User",
+            },
+            {"user_id": "personal-user", "principal_id": "personal-user"},
+        )
+        self.assertEqual(personal.returncode, 0, personal.stderr)
+        self.assertEqual(json.loads(personal.stdout)["account_id"], "personal-user")
+
+        ambiguous = read_account(
+            {"sub": "one", "principal_id": "two"},
+            {"user_id": "one", "principal_id": "two"},
+        )
+        self.assertEqual(ambiguous.returncode, 1)
+        self.assertIn("no unambiguous account claim", ambiguous.stderr)
+
+    def test_read_grok_account_reads_only_the_one_authenticated_session(self) -> None:
+        # auth.json is agent-writable. Prepending another xAI session would make
+        # it ambiguous which credential Grok uses. One session is the only
+        # state that identifies a token unambiguously.
+        helper = Path("host/bootstrap/helpers/read-grok-account.sh").read_text()
+        python = helper.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+        def segment(value: dict[str, str]) -> str:
+            return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+
+        def token(claims: dict[str, str]) -> str:
+            return ".".join((segment({"alg": "RS256"}), segment(claims), "c2ln"))
+
+        def run(auth: dict) -> subprocess.CompletedProcess:
+            with tempfile.TemporaryDirectory() as grok_home:
+                Path(grok_home, "auth.json").write_text(json.dumps(auth))
+                return subprocess.run(
+                    [sys.executable, "-c", python],
+                    env=os.environ | {"GROK_HOME": grok_home},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+        genuine = {
+            "oidc_issuer": "https://auth.x.ai",
+            "key": token({"sub": "acct-1", "principal_type": "User", "email": "real@example.com"}),
+        }
+        forged = {
+            "oidc_issuer": "https://auth.x.ai",
+            "key": token({"sub": "acct-1", "principal_type": "User", "email": "forged@example.com"}),
+        }
+
+        # A second xAI session is an inconsistent file, not a preference order.
+        both = run({"forged::client": forged, "https://auth.x.ai::client": genuine})
+        self.assertEqual(both.returncode, 1)
+        self.assertIn("more than one xAI session", both.stderr)
+
+        # An issuer-less object is not a candidate at all, so the genuine
+        # session is still the one read.
+        issuerless = run({
+            "forged::client": {k: v for k, v in forged.items() if k != "oidc_issuer"},
+            "https://auth.x.ai::client": genuine,
+        })
+        self.assertEqual(issuerless.returncode, 0, issuerless.stderr)
+        self.assertEqual(json.loads(issuerless.stdout)["account_id"], "acct-1")
+
+    def test_read_grok_account_attests_against_the_provider(self) -> None:
+        # Attestation exists because decoding a claim proves nothing about a
+        # token. It runs as root, since the agent uid reaches only the proxy
+        # (whose guard would reject the very token being attested) and the
+        # admin uid has no egress. The helper returns the hash of the exact
+        # token it sends, and the admin caller accepts the identity only when
+        # that hash matches the token it observed before this request.
+        helper = Path("host/bootstrap/helpers/read-grok-account.sh").read_text()
+        self.assertIn("--attest", helper)
+        self.assertNotIn("EXPECTED_TOKEN_SHA256", helper)
+        # Root, not runuser: the attest branch must not drop privileges.
+        attest = helper.split('if [[ "${mode}" == "attest" ]]; then', 1)[1].split("\nfi", 1)[0]
+        self.assertNotIn("runuser", attest)
+        self.assertIn("exec /usr/bin/python3", attest)
+
+        python = helper.split("<<'ATTEST'\n", 1)[1].rsplit("\nATTEST", 1)[0]
+
+        def segment(value: dict[str, str]) -> str:
+            return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+
+        token = ".".join((segment({"alg": "RS256"}), segment({"sub": "acct-1"}), "c2ln"))
+        def run(profile: dict[str, str]) -> subprocess.CompletedProcess:
+            stub = (
+                "import json, urllib.request, io\n"
+                "class _R(io.BytesIO):\n"
+                "    def __enter__(self): return self\n"
+                "    def __exit__(self, *a): return False\n"
+                "urllib.request.urlopen = lambda req, timeout=None: "
+                f"_R({json.dumps(json.dumps(profile))}.encode())\n"
+            )
+            with tempfile.TemporaryDirectory() as home:
+                grok_home = Path(home, ".grok")
+                grok_home.mkdir()
+                Path(grok_home, "auth.json").write_text(json.dumps({
+                    "https://auth.x.ai::client": {
+                        "oidc_issuer": "https://auth.x.ai",
+                        "key": token,
+                    }
+                }))
+                return subprocess.run(
+                    [sys.executable, "-c", stub + python],
+                    env=os.environ | {"GROK_HOME": str(grok_home)},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+        personal_profile = {
+            "principalType": "User",
+            "userId": "acct-1",
+            "email": "attested@example.com",
+        }
+        attested = run(personal_profile)
+        self.assertEqual(attested.returncode, 0, attested.stderr)
+        value = json.loads(attested.stdout)
+        # The identity is the provider's answer, not anything read out of the
+        # file, and it carries the hash it was bound to.
+        self.assertEqual(value["account_id"], "acct-1")
+        self.assertEqual(value["email"], "attested@example.com")
+        self.assertEqual(
+            value["access_token_sha256"], hashlib.sha256(token.encode()).hexdigest()
+        )
+
+        team = run(
+            {
+                "principalType": "Team",
+                "principalId": "team-1",
+                "email": "team@example.com",
+            },
+        )
+        self.assertEqual(team.returncode, 0, team.stderr)
+        self.assertEqual(json.loads(team.stdout)["account_id"], "team-1")
+
+    def test_read_grok_account_rejects_special_auth_files(self) -> None:
+        helper = Path("host/bootstrap/helpers/read-grok-account.sh").read_text()
+        python = helper.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+        with tempfile.TemporaryDirectory() as grok_home:
+            auth_path = Path(grok_home, "auth.json")
+            auth_path.symlink_to("/dev/zero")
+            symlink = subprocess.run(
+                [sys.executable, "-c", python],
+                env=os.environ | {"GROK_HOME": grok_home},
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+            self.assertEqual(symlink.returncode, 1)
+            self.assertIn("could not read the Grok auth file", symlink.stderr)
+
+            auth_path.unlink()
+            os.mkfifo(auth_path)
+            fifo = subprocess.run(
+                [sys.executable, "-c", python],
+                env=os.environ | {"GROK_HOME": grok_home},
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+            self.assertEqual(fifo.returncode, 1)
+            self.assertIn("not a regular file", fifo.stderr)
 
     def test_run_hermes_uses_bootstrap_config_and_passes_the_runtime_region(self) -> None:
         launcher = Path("host/bootstrap/helpers/run-hermes.sh").read_text()
@@ -2303,6 +2697,16 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("VERSION", names)
         self.assertIn("host/bootstrap/agent-home/agents_claude.md", names)
         self.assertIn("host/runtime/root_helpers/upload_agent_file.py", names)
+        self.assertIn(
+            "host/bootstrap/vendor/pgvector/"
+            "postgresql-14-pgvector_0.8.6-1.pgdg22.04+1_amd64.deb",
+            names,
+        )
+        self.assertIn(
+            "host/bootstrap/vendor/pgvector/"
+            "postgresql-14-pgvector_0.8.6-1.pgdg22.04+1_arm64.deb",
+            names,
+        )
         self.assertNotIn("host/bootstrap/agent-home/AGENTS.md", names)
         self.assertNotIn("host/bootstrap/agent-home/CLAUDE.md", names)
         self.assertIn("host/bootstrap/agent-home/.codex/config.toml", names)

@@ -189,6 +189,7 @@ def _render_bootstrap() -> str:
         .replace("@ADMIN_PORT@", str(ADMIN_API_PORT))
         .replace("@WORKSPACE_PORT@", str(WORKSPACE_PORT))
         .replace("@PROXY_PORT@", str(PROXY_PORT))
+        .replace("@GITHUB_REPOSITORY@", PUBLIC_GITHUB_REPOSITORY)
         .replace("@AGENT_PREVIEW_NFTABLES_RULES@", _agent_preview_nftables_rules())
         .replace("@SERVICE_ACCOUNT_CONSTANTS@", _service_account_constants())
     )

@@ -51,6 +51,8 @@
 | Network-introspection socket handler threads | agent-network service | One per local request, bounded by a concurrency cap; calls perform read-only policy or denial queries. |
 | Workspace agent socket handler threads | Workspace service | Peer-authenticated before allocation, with separate connection and active-call caps; calls use bounded explicit Workspace routes. |
 | Maintenance thread | admin API | Periodically prunes bounded state and event history. |
+| Embedding index thread | admin API | Sends bounded missing-message batches to the local encoder and commits derived vectors between inference calls. |
+| Embedding request loop | embedding service | Handles one bounded query or passage batch at a time; systemd activates it on demand and it exits after five idle minutes. The unit runs one inference thread at nice level 10 with `CPUWeight=25`, `IOWeight=25`, `MemoryMax=1G`, and `TasksMax=64`, so indexing yields to the Workspace and host control plane under contention. |
 | Journal follower | host-diagnostics collector | Follows new trusted-unit `KERN_HOST_DIAGNOSTIC=1` records without a replay cursor. |
 | Runtime status poller | admin API/orchestrator | Rechecks provider health, including Hermes's Bedrock connection. |
 | Turn threads | admin API/orchestrator | One daemon thread per admitted turn; at most ten turns run per runtime, and a message past that cap is rejected rather than queued. Each turn spawns and closes its own runtime process. |

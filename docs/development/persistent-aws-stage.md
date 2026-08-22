@@ -3,8 +3,8 @@
 Stage is the long-lived environment for login-dependent checks. The workflow
 upgrades or recreates one fixed host, `kern-stage` in `us-east-1`, using a
 stable admin password and a persistent operator SSH endpoint. The admin and
-agent data volumes are preserved, so Codex and Claude OAuth sessions and the
-validated AWS Bedrock credential survive across upgrades.
+agent data volumes are preserved, so Codex, Claude, and Grok OAuth sessions and
+the validated AWS Bedrock credential survive across upgrades.
 
 The stage workflow uses the lifecycle commands in this order:
 
@@ -29,9 +29,9 @@ workflow passes the generated stage SSH key path through `--ssh-key-env
 KERN_STAGE_SSH_KEY`.
 
 The stage test takes a `--suite` argument selecting which checks run: `claude`,
-`codex`, `hermes`, or `github` run that integration's checks plus the shared preamble,
-`all_runtimes` runs the Codex, Claude Code, and Hermes runtime checks together
-in one invocation (so the operator does not run three separate commands), every
+`codex`, `grok`, `hermes`, or `github` run that integration's checks plus the shared preamble,
+`all_runtimes` runs the Codex, Claude Code, Grok, and Hermes runtime checks together
+in one invocation (so the operator does not run four separate commands), every
 bundled tool id runs that one tool's live check, and `all` (the default) runs
 the complete integration matrix. Every run performs its credential preflight
 before any integration test. A focused suite fails when its selected
@@ -42,7 +42,7 @@ skipped, then runs every available integration independently, so a missing
 secret, unconfigured OAuth account, expired provider session, or failed live
 integration cannot hide the results for the rest.
 
-The preflight checks live Codex, Claude Code, and Hermes runtime status, GitHub's
+The preflight checks live Codex, Claude Code, Grok, and Hermes provider status, GitHub's
 credential validation plus its sandbox write repository, and every bundled
 tool's enablement, config, and OAuth connection state. A tool credential that
 looks configured but is rejected by its first provider request is reclassified
@@ -73,38 +73,46 @@ suite.
 
 The `all` suite covers the runtime checks omitted from fresh smoke: Codex
 account guards and real web-search turn traffic, Claude bearer-token guards and
-real turn traffic, Hermes credential-boundary checks and real Bedrock
+real turn traffic, Grok live auth/entitlement/billing, account/token binding,
+route isolation, malformed payload handling, hosted-tool/Web-search policy,
+and real ACP turn traffic, Hermes credential-boundary checks and real Bedrock
 Converse traffic, mixed Codex/Claude concurrency, steering, stop and thread
 survival, persisted thread recall, Bedrock disable/re-enable behavior,
 runtime deactivation behavior, host reboot
 recovery, the network event prune race, the live bundled-tool checks against
 real third-party APIs (see below), and the GitHub write
-end-to-end. Cross-runtime checks run when all three runtimes pass. A
+end-to-end. Cross-runtime checks run when all four runtimes pass. A
 single-runtime suite runs only that runtime's guard, turn,
-steering, and stop checks; `all_runtimes` runs those same checks for all three
+steering, and stop checks; `all_runtimes` runs those same checks for all four
 runtimes in one invocation (without the tool, GitHub, or cross-runtime
-matrix); `github` runs only the GitHub write end-to-end; and
+matrix). The focused `grok` suite exercises the live provider probe, full proxy
+boundary matrix, ACP new/resume turns, activity, bundled MCP catalog, steering,
+and stop recovery without logging the account out.
+`github` runs only the GitHub write end-to-end; and
 a bundled tool id runs only that tool's live provider check.
 
 When any runtime passes, the stable-app check creates a uniquely searchable
 real Chat conversation, reads it through the deployed
 `search_conversation_history` and `read_thread_history` MCP tools, verifies the
-untrusted provenance metadata and retained user/assistant messages, clears the
-thread's working memory, and proves both the visible boundary and earlier
-history survive. The same check then generates and persists a minimal Web App.
+untrusted provenance metadata and retained user/assistant messages, and waits
+for a no-shared-terms paraphrase to retrieve the user message through the real
+asynchronous vector index. It then clears the thread's working memory and
+proves both the visible boundary and earlier history survive. The same check
+generates and persists a minimal Web App.
 
 The live concurrency scenario uses three Codex and three Claude turns as a
 bounded integration check. Provider-neutral orchestrator tests prove the full
-ten-turn cap for Codex, Claude Code, and Hermes without adding paid provider
+ten-turn cap for Codex, Claude Code, Grok, and Hermes without adding paid provider
 turns merely to repeat the admission invariant.
 
 All agent turns use the least expensive exposed options: Codex uses
-`gpt-5.6-luna` with `high` effort, and Claude Code uses `sonnet` with `high`
-effort; Hermes uses `qwen.qwen3-coder-next` with `high` effort.
+`gpt-5.6-luna` with `high` effort, Claude Code uses `sonnet` with `high`
+effort, Grok uses `grok-4.6` with `high` effort, and Hermes uses
+`qwen.qwen3-coder-next` with `high` effort.
 This includes concurrency,
 steering, recovery, and the MCP catalog check. Every runtime asks its agent to
 call `list_bundled_tools` and verify the dynamically discovered catalog:
-Codex and Claude Code reach the shim through their own MCP clients, Hermes
+Codex, Claude Code, and Grok reach the shim through their own MCP clients, Hermes
 through its MCP client wired by the managed config.
 
 ## Harness layout and failure diagnostics
@@ -215,7 +223,7 @@ setup itself makes only an STS call, never a paid model invocation.
 
 ## One-time AWS and GitHub setup for stage
 
-Besides the AWS/IAM setup below, the stage host needs Codex and Claude OAuth
+Besides the AWS/IAM setup below, the stage host needs Codex, Claude, and Grok OAuth
 logins completed once through its admin UI (these cannot be automated). GitHub
 is configured from the `STAGE_GITHUB_*` repository secrets instead (see the
 secrets table below), so it needs no admin-UI setup; if those secrets are absent
@@ -312,12 +320,12 @@ mainline migration path.
 
 The `workflow_dispatch` form takes a **suite** input (`all`, `all_runtimes`,
 each bundled tool
-id, `claude`, `codex`, `hermes`, or `github`; default `all`) that maps to the test's
+id, `claude`, `codex`, `grok`, `hermes`, or `github`; default `all`) that maps to the test's
 `--suite` argument. Use a single-provider suite to exercise or debug just that
 integration, for example `github` once the GitHub credential and sandbox write
-repo are configured, `brave_search` once its key secret is set, or `codex`/`claude`
+repo are configured, `brave_search` once its key secret is set, or `codex`/`claude`/`grok`
 while GitHub is still being set up. Use `hermes` to isolate the Bedrock harness,
-or `all_runtimes` to exercise all three provider runtimes in one run without
+or `all_runtimes` to exercise all four provider runtimes in one run without
 the tool and GitHub matrix.
 Each suite still runs its scoped
 configuration preflight first. The GitHub Actions summary ends with one row per
@@ -337,7 +345,7 @@ the test failed. The preserved admin and agent EBS volumes remain for the next
 stage operation.
 
 On the first run, or after an OAuth provider session expires, `all` reports and skips
-that provider. A focused `codex` or `claude` run fails. To restore OAuth coverage,
+that provider. A focused `codex`, `claude`, or `grok` run fails. To restore OAuth coverage,
 open a local SSH tunnel to the stage admin UI, log in with
 `KERN_STAGE_ADMIN_PASSWORD`, complete the provider OAuth flow, then rerun
 the workflow. If the stage workflow has already stopped the instance, run
@@ -345,6 +353,19 @@ the workflow. If the stage workflow has already stopped the instance, run
 target exists. That workflow can only be dispatched by a repository admin from
 `main`; it starts the existing tagged `kern-stage` EC2 instance and
 prints the SSH tunnel command.
+
+For the first Grok validation after this integration reaches `main`, run the
+stage workflow once (an unavailable Grok row may be skipped), then use the
+stage-start workflow and its printed SSH tunnel to open the admin UI. Enable
+xAI, complete the Grok device login once, and dispatch the focused `grok`
+suite. The suite preserves that login: it does not call reset or logout. It
+forces the real ACP auth, subscription-entitlement, and billing probes; checks
+the pinned CLI installation and account metadata; drives missing, foreign, and
+duplicate identity credentials; denies storage, session, workspace, traversal,
+developer-API, and cloud-session routes; rejects malformed and compressed
+payloads; and covers Web search off/on plus X search, code execution, remote
+MCP, news, unknown, and untyped hosted-tool cases. It restores Web search to
+off in a `finally` block even when an assertion fails.
 
 If the Bedrock credential is missing or no longer passes STS validation,
 `all` skips Hermes and the focused suite fails. Restore it by setting both

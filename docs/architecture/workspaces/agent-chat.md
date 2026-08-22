@@ -37,8 +37,12 @@ operations.
 Agents can search retained messages and read bounded pages from any host thread through
 the typed `search_conversation_history` and `read_thread_history` MCP tools.
 Those read-only calls use the peer-authenticated Workspace agent socket. Search
-uses the host-owned full-text and timestamp indexes without filtering through
-Chat's product index. Activity is excluded by default and,
+uses host-owned full-text, local vector, and timestamp indexes. A compact ONNX
+model runs behind a network-isolated, socket-activated service and pgvector
+stores derived message vectors; reciprocal-rank fusion favors exact lexical
+evidence while adding conceptual matches. Lexical search remains available
+during backfill or model failure. Search covers any retained host thread without
+filtering through Chat's product index. Activity is excluded by default and,
 when requested, is reduced to bounded normalized summaries. Historical content
 is returned as untrusted data, never as a command protocol.
 

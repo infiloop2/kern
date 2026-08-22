@@ -137,9 +137,17 @@ class MigrateRunnerTests(unittest.TestCase):
                 "agent_events_message_search_idx",
                 "agent_events_message_time_idx",
                 "agent_events_thread_message_seq_idx",
+                "agent_events_message_seq_idx",
             },
             event_indexes,
         )
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO oauth_logins"
+                " (runtime, status, login_url, expires_at, device_code, login_id)"
+                " VALUES ('grok', 'awaiting_login', 'https://accounts.x.ai/device',"
+                " '2099-01-01T00:00:00Z', 'CODE', 'login-1')"
+            )
         reverted = migrate.down(target=13, quiet=True)
         with db.transaction() as cur:
             cur.execute(
@@ -492,6 +500,48 @@ class MigrateRunnerTests(unittest.TestCase):
             )
             self.assertEqual(cur.fetchone(), (4000,))
 
+    def test_xai_migration_removes_custom_rules_for_the_newly_owned_apexes(self) -> None:
+        # Reserving an apex makes any stored custom rule beneath it invalid at
+        # parse time, and the proxy answers a policy it cannot parse by denying
+        # every request. An upgraded host carrying such a rule would therefore
+        # lose all agent egress, not just xAI traffic, so the migration clears
+        # them as part of taking ownership.
+        xai_version = next(
+            item.version for item in migrate.load_migrations()
+            if item.name == "xai_integration"
+        )
+        self.assertEqual(
+            migrate.up(target=xai_version - 1, quiet=True),
+            list(range(1, xai_version)),
+        )
+        removed = (
+            "x.ai",
+            "api.x.ai",
+            "grok.com",
+            "cli-chat-proxy.grok.com",
+            "*.x.ai",
+            "*.grok.com",
+            "*.ai",
+            "*.com",
+        )
+        retained = ("example.com", "*.example.com", "notx.ai", "mygrok.com")
+        with db.transaction() as cur:
+            for domain in removed + retained:
+                cur.execute("INSERT INTO allowed_domains (domain) VALUES (%s)", (domain,))
+                cur.execute(
+                    "INSERT INTO domain_methods (domain, position, method)"
+                    " VALUES (%s, 0, 'GET')",
+                    (domain,),
+                )
+
+        self.assertEqual(migrate.up(target=xai_version, quiet=True), [xai_version])
+        with db.transaction() as cur:
+            cur.execute("SELECT domain FROM allowed_domains ORDER BY domain")
+            self.assertEqual([domain for (domain,) in cur.fetchall()], sorted(retained))
+            # The cascade takes each deleted domain's method rows with it.
+            cur.execute("SELECT domain FROM domain_methods ORDER BY domain")
+            self.assertEqual([domain for (domain,) in cur.fetchall()], sorted(retained))
+
     def test_github_actions_blob_migration_removes_overlapping_custom_domains(self) -> None:
         self.assertEqual(migrate.up(target=2, quiet=True), [1, 2])
         removed = (
@@ -731,6 +781,11 @@ class MigrateRunnerTests(unittest.TestCase):
 
     def test_every_partial_workspace_history_upgrades_and_repeat_adoption_is_a_noop(self) -> None:
         migrations = {item.version: item for item in migrate.load_migrations()}
+        # Derived, not hard-coded: this asserts that consolidation leaves the
+        # ledger complete, which is a statement about every migration on disk
+        # rather than about whichever one happened to be last when it was
+        # written. Adding a migration must not edit this test.
+        latest = max(migrations)
         histories = {
             "chat": (
                 "agent_chat",
@@ -813,7 +868,7 @@ class MigrateRunnerTests(unittest.TestCase):
                     )
                 self.assertEqual(
                     migrate.up(quiet=True),
-                    list(range(26, 42)),
+                    list(range(26, latest + 1)),
                 )
                 with db.transaction() as cur:
                     # Migration 0026 removed the old ledger; every later
@@ -826,7 +881,7 @@ class MigrateRunnerTests(unittest.TestCase):
                         [(int(version), str(name)) for version, name in cur.fetchall()],
                         [
                             (version, migrations[version].name)
-                            for version in range(1, 42)
+                            for version in range(1, latest + 1)
                         ],
                     )
                     cur.execute(

@@ -2,20 +2,20 @@
 set -euo pipefail
 
 if [[ "$#" -ne 1 ]]; then
-  echo "usage: clear-agent-auth <codex|claude>" >&2
+  echo "usage: clear-agent-auth <codex|claude|grok>" >&2
   exit 2
 fi
 
 runtime="$1"
 case "${runtime}" in
-  codex|claude) ;;
+  codex|claude|grok) ;;
   *)
-    echo "usage: clear-agent-auth <codex|claude>" >&2
+    echo "usage: clear-agent-auth <codex|claude|grok>" >&2
     exit 2
     ;;
 esac
 
-exec /usr/sbin/runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home CLAUDE_CONFIG_DIR=/mnt/kern-agent/agent-home/.claude /usr/bin/python3 - "${runtime}" <<'PY'
+exec /usr/sbin/runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home CLAUDE_CONFIG_DIR=/mnt/kern-agent/agent-home/.claude GROK_HOME=/mnt/kern-agent/agent-home/.grok /usr/bin/python3 - "${runtime}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -24,9 +24,18 @@ import sys
 runtime = sys.argv[1]
 home = Path.home()
 claude_config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(home / ".claude")))
+grok_home = Path(os.environ.get("GROK_HOME", str(home / ".grok")))
 
 if runtime == "codex":
     paths = [home / ".codex" / "auth.json"]
+elif runtime == "grok":
+    # mcp_credentials.json holds OAuth tokens Grok obtained for MCP servers on
+    # the agent's behalf. They are not the provider login, but they are agent
+    # credentials minted under it, so an operator reset clears them too.
+    paths = [
+        grok_home / "auth.json",
+        grok_home / "mcp_credentials.json",
+    ]
 else:
     paths = [
         claude_config_dir / ".credentials.json",

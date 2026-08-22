@@ -15,7 +15,7 @@ from host.tools.seedance import SeedanceTool
 from host.tools.shared import media as shared_media
 from host.tools.shared.web import UnmappedProviderError, WebRequestError
 
-from test_tools import FakeHostAPI
+from test_tools import FakeHostAPI, assert_matches_output_schema
 
 
 def api_with_key() -> FakeHostAPI:
@@ -79,6 +79,7 @@ class SeedanceToolTests(unittest.TestCase):
             result = SeedanceTool().execute(
                 "generate_video", {"prompt": "a fox runs on a beach"}, api_with_key()
             )
+        assert_matches_output_schema(self, seedance.MANIFEST, "generate_video", result)
         assert isinstance(result, ActionExecuted)
         self.assertEqual(result.result["task_id"], "cgt-20260809-abc")
         self.assertEqual(result.result["task_status"], "queued")
@@ -256,6 +257,7 @@ class SeedanceToolTests(unittest.TestCase):
                 seedance, "json_request", return_value=dict(response)
             ):
                 result = SeedanceTool().execute("get_task", {"task_id": "cgt-1"}, api_with_key())
+            assert_matches_output_schema(self, seedance.MANIFEST, "get_task", result)
             assert isinstance(result, ActionExecuted)
             self.assertEqual(result.result["task_status"], expected_status)
             if expected_url:

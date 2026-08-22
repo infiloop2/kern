@@ -11,7 +11,7 @@ from host.tools.linkedin_discovery import LinkedInDiscoveryTool
 from host.tools.results import ActionExecuted, ActionFailed
 from host.tools.shared.web import WebRequestError
 
-from test_tools import FakeHostAPI
+from test_tools import FakeHostAPI, assert_matches_output_schema
 
 
 def configured_api() -> FakeHostAPI:
@@ -61,6 +61,7 @@ class LinkedInDiscoveryToolTests(unittest.TestCase):
 
         with patch.object(linkedin_discovery, "json_request", fake_json_request):
             result = LinkedInDiscoveryTool().execute("search_posts", {"query": "AI agents", "limit": "5", "page": "2"}, configured_api())
+        assert_matches_output_schema(self, linkedin_discovery.MANIFEST, "search_posts", result)
         assert isinstance(result, ActionExecuted)
         self.assertEqual(seen["method"], "POST")
         self.assertEqual(seen["url"], "https://google.serper.dev/search")

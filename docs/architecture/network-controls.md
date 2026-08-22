@@ -219,6 +219,18 @@ schema creation and narrow grants. The GitHub push gate uses this pattern for
 `pending_pushes` and quarantined payloads. Integrations do not run migrations
 or gain an independent database identity.
 
+### The xAI integration and Grok runtime
+
+The `xai` integration is the enforcement layer for the Grok Build runtime:
+registered, guarded, and tested, with no data-plane request allowed until a
+Grok login publishes an account pin. The proxy binds each Bearer token's
+account claim directly to that pin. Its route table is itself a security
+boundary, keeping the metered `api.x.ai` and the session-sync `code.grok.com`
+closed beneath owned apexes.
+
+Full detail, including the server-side tool decisions and why web search is not
+offered: [The xAI integration](xai-integration.md).
+
 ### One provider for Hermes infrastructure
 
 Managed apex claims are disjoint because the proxy resolves each host to one

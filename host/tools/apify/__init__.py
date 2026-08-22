@@ -25,6 +25,7 @@ from host.tools.manifest import (
 )
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.tools.shared.inputs import bounded_int, clip_text
+from host.tools.shared import outputs
 from host.tools.shared.web import (
     UnmappedProviderError,
     WebRequestError,
@@ -65,94 +66,95 @@ MINIMUM_RATINGS = {
     "4.5": "fourAndHalf",
 }
 
+# Every normalized field _summary and _details produce. Numbers arrive as
+# rendered decimal strings ("4.5", "128"), so they are declared as the strings
+# they are rather than as the numbers they describe.
 SUMMARY_PROPERTIES: JSONObject = {
-    "place_id": {"type": "string"},
-    "name": {"type": "string"},
-    "description": {"type": "string"},
-    "category": {"type": "string"},
-    "categories": {"type": "array", "items": {"type": "string"}},
-    "address": {"type": "string"},
-    "neighborhood": {"type": "string"},
-    "city": {"type": "string"},
-    "postal_code": {"type": "string"},
-    "country_code": {"type": "string"},
-    "latitude": {"type": "string"},
-    "longitude": {"type": "string"},
-    "phone": {"type": "string"},
-    "website": {"type": "string"},
-    "google_maps_url": {"type": "string"},
-    "rating": {"type": "string"},
-    "review_count": {"type": "string"},
-    "image_count": {"type": "string"},
-    "temporarily_closed": {"type": "boolean"},
-    "permanently_closed": {"type": "boolean"},
+    "place_id": outputs.text("Google Maps place id; pass to get_business_details. Empty when the Actor returned a malformed id."),
+    "name": outputs.text("Business name, up to 300 characters."),
+    "description": outputs.text("Google Maps listing description, up to 1000 characters."),
+    "category": outputs.text("Primary Google Maps category."),
+    "categories": outputs.array_of({"type": "string"}, "Up to 12 categories the listing claims, including the primary one."),
+    "address": outputs.text("Full street address as Google Maps renders it."),
+    "neighborhood": outputs.text("Neighborhood name, empty when Google Maps has none."),
+    "city": outputs.text("City or locality."),
+    "postal_code": outputs.text("Postal code."),
+    "country_code": outputs.text("ISO country code."),
+    "latitude": outputs.text("Decimal latitude as a string, \"0\" when unavailable."),
+    "longitude": outputs.text("Decimal longitude as a string, \"0\" when unavailable."),
+    "phone": outputs.text("Public phone number in the listing, empty when absent."),
+    "website": outputs.text("Public https website from the listing, empty when absent or not public."),
+    "google_maps_url": outputs.text("Google Maps link built from place_id, empty when the id is missing."),
+    "rating": outputs.text("Average review score 1-5 as a string, \"0\" when unrated."),
+    "review_count": outputs.text("Number of Google reviews as a string."),
+    "image_count": outputs.text("Number of listing images as a string."),
+    "temporarily_closed": outputs.boolean("Google Maps marks the business temporarily closed."),
+    "permanently_closed": outputs.boolean("Google Maps marks the business permanently closed."),
 }
 
-SEARCH_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status", "message", "businesses"],
-    "properties": {
-        "status": {"type": "string"},
-        "message": {"type": "string"},
-        "businesses": {
-            "type": "array",
-            "items": {"type": "object", "properties": SUMMARY_PROPERTIES},
-        },
+SEARCH_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many bounded business results Apify returned."),
+        "businesses": outputs.array_of(
+            outputs.obj(SUMMARY_PROPERTIES),
+            "At most the requested limit, trimmed further if the normalized payload would exceed the host cap.",
+        ),
     },
-}
+    ["message", "businesses"],
+)
 
 DETAIL_PROPERTIES: JSONObject = {
     **SUMMARY_PROPERTIES,
-    "opening_hours": {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {"day": {"type": "string"}, "hours": {"type": "string"}},
-        },
-    },
-    "images": {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "author_name": {"type": "string"},
-                "author_url": {"type": "string"},
-                "uploaded_at": {"type": "string"},
-            },
-        },
-    },
-    "reviews": {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "stars": {"type": "string"},
-                "published_at": {"type": "string"},
-                "likes": {"type": "string"},
-                "owner_response": {"type": "string"},
-            },
-        },
-    },
-    "additional_info": {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {"label": {"type": "string"}, "value": {"type": "string"}},
-        },
-    },
+    "opening_hours": outputs.array_of(
+        outputs.obj(
+            {
+                "day": outputs.text("Day name as Google Maps localizes it."),
+                "hours": outputs.text("Opening hours for that day, or a closed marker."),
+            }
+        ),
+        "Up to 14 day entries; empty when the listing publishes no hours.",
+    ),
+    "images": outputs.array_of(
+        outputs.obj(
+            {
+                "url": outputs.text("Google-hosted image URL."),
+                "author_name": outputs.text("Uploader name Google attributes the image to, empty when absent."),
+                "author_url": outputs.text("Google profile URL for the uploader, empty when absent."),
+                "uploaded_at": outputs.text("Upload timestamp Google reports, empty when absent."),
+            }
+        ),
+        "Up to max_images deduplicated images with their source attribution.",
+    ),
+    "reviews": outputs.array_of(
+        outputs.obj(
+            {
+                "text": outputs.text("Review body, up to 1200 characters; reviews without text are dropped."),
+                "stars": outputs.text("Review score 1-5 as a string."),
+                "published_at": outputs.text("Publication timestamp Google reports."),
+                "likes": outputs.text("Helpful-vote count as a string."),
+                "owner_response": outputs.text("The owner's public reply, empty when there is none."),
+            }
+        ),
+        "Up to max_reviews reviews. Reviewer identities are never requested.",
+    ),
+    "additional_info": outputs.array_of(
+        outputs.obj(
+            {
+                "label": outputs.text("Attribute group, e.g. Accessibility or Service options."),
+                "value": outputs.text("Flattened attributes in that group, e.g. \"Wheelchair accessible: yes\"."),
+            }
+        ),
+        "Service attributes Google Maps lists for the business.",
+    ),
 }
 
-DETAIL_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status", "message", "business"],
-    "properties": {
-        "status": {"type": "string"},
-        "message": {"type": "string"},
-        "business": {"type": "object", "properties": DETAIL_PROPERTIES},
+DETAIL_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that one business profile was retrieved."),
+        "business": outputs.obj(DETAIL_PROPERTIES, description="One business, trimmed from the end if it would exceed the host payload cap."),
     },
-}
+    ["message", "business"],
+)
 
 MANIFEST = ToolManifest(
     tool_id="apify",
@@ -760,8 +762,7 @@ class ApifyTool(Tool):
                 businesses = _bounded_businesses(businesses)
                 return ActionExecuted(
                     {
-                        "status": "success_executed",
-                        "message": f"Apify returned {len(businesses)} bounded public business result(s).",
+                                                "message": f"Apify returned {len(businesses)} bounded public business result(s).",
                         "businesses": cast(list[JSONValue], businesses),
                     }
                 )
@@ -781,8 +782,7 @@ class ApifyTool(Tool):
                     return ActionFailed("Apify returned no valid business for that place_id.")
                 return ActionExecuted(
                     {
-                        "status": "success_executed",
-                        "message": "Retrieved one bounded public business profile through Apify.",
+                                                "message": "Retrieved one bounded public business profile through Apify.",
                         "business": business,
                     }
                 )

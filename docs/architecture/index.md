@@ -1,6 +1,6 @@
 # Architecture
 
-Kern runs Codex, Claude Code, and Hermes runtimes on an AWS EC2 instance behind
+Kern runs Codex, Claude Code, Grok, and Hermes runtimes on an AWS EC2 instance behind
 fail-closed network controls. The architecture docs are split by responsibility
 so operators and contributors can jump to the trust boundary they need.
 
@@ -18,13 +18,14 @@ so operators and contributors can jump to the trust boundary they need.
 | [Filesystem layout](filesystem.md) | Trusted root paths, durable volumes, and per-service ownership. |
 | [Services and runtimes](services-and-runtimes.md) | systemd units, process inventory, threads, Codex, and Claude runtime model. |
 | [Agent provider lifecycle](agent-provider-lifecycle.md) | Runtime status lifecycle, refresh triggers, live credential validation, account anchoring, proxy pinning, and operator recovery. |
-| [Runtime harness dependencies](harness-dependencies.md) | Codex and Claude Code interfaces, auth files, request shapes, and upgrade review points. |
+| [Runtime harness dependencies](harness-dependencies.md) | Codex, Claude Code, Grok, and Hermes interfaces, auth files, request shapes, and upgrade review points. |
 | [Admin API architecture](admin-api.md) | Local API security, turn orchestration, and maintenance. |
 | [Chat and Web Apps workspaces](workspaces/workspaces.md) | The fixed Workspace service, UI mounting, schemas, migration, and generated-code sandbox. |
 | [Chat workspace](workspaces/agent-chat.md) | Thread index, event views, composer, and archive behavior. |
 | [Web Apps workspace](workspaces/personal-web-app-builder.md) | Isolated agent-generated workspaces and preview capabilities. |
 | [Workspace agent API](workspaces/workspace-agent-api.md) | Peer-authenticated agent calls through the main Workspace service; Web Apps are its current agent-callable resource. |
 | [Network controls](network-controls.md) | nftables, typed integration guards (AI providers, GitHub, packages, custom domains), agent introspection, and fail-closed behavior. |
+| [The xAI integration](xai-integration.md) | Everything about Grok Build access: hosts opened and deliberately closed, bearer-token account pinning, why every server-side tool is denied and web search is not offered at all, stored state, admin UI, and ACP runtime. |
 | [GitHub write-path controls](github-write-path-controls.md) | The implemented `.github` push-inspection, quarantine, approval, replay, and failure model. |
 | [Tools](tools/README.md) | Bundled tool framework: the host-neutral tool contract, this host's integration, approvals, and the bundled tool packages. |
 | [Local sockets](local-sockets.md) | Peer-credentialed Unix-domain sockets (tools, Workspace agent/admin, network introspection, Postgres) and their trust boundaries. |
@@ -33,9 +34,9 @@ so operators and contributors can jump to the trust boundary they need.
 
 ## Overview
 
-Kern runs Codex, Claude Code, and Hermes runtimes on an AWS EC2 instance behind
+Kern runs Codex, Claude Code, Grok, and Hermes runtimes on an AWS EC2 instance behind
 fail-closed network controls. Each thread chooses its runtime harness, such as
-Codex or Claude Code. The host is long-lived in normal operation; the EC2
+Codex, Claude Code, or Grok. The host is long-lived in normal operation; the EC2
 instance and its root EBS volume carry the
 `kern-host-agent-name=<agent_name>` tag so that deploy can find,
 terminate, and recreate them when the operator upgrades or recovers the host.

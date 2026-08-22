@@ -387,6 +387,11 @@ def execute_action(
             context={"tool_id": tool_id, "action_id": action},
         )
         result = ActionFailed("Tool call failed.")
+    kind_error = _result_kind_error(spec, result)
+    if kind_error:
+        result_json = _result_kind_mismatch(tool_id, action, kind_error)
+        _audit(tool_id, action, result_json, arguments=audit_arguments)
+        return result_json
     if isinstance(result, StreamingAsset):
         return StreamingAction(result, tool_id, action, audit_arguments)
     result_json = _result_json(result)
@@ -444,9 +449,11 @@ def _execute_approved(
             context={"tool_id": tool_id, "action_id": action},
         )
         result = ActionFailed("Tool call failed.")
-    if isinstance(result, ActionPendingApproval):
-        # The contract forbids this; treat it as a failed execution.
-        result = ActionFailed("Tool returned a pending result for an approved action.")
+    if not isinstance(result, (ApprovalExecuted, ActionFailed)):
+        # An approved action's outcome is one user-visible message. Any other
+        # result kind is drift, and it must still reach a terminal state rather
+        # than leaving the approval stuck in "approved".
+        result = _approved_result_kind_failure(tool_id, action, result)
     result_json = _result_json(result)
     _audit(
         tool_id,
@@ -476,6 +483,52 @@ def _result_json(result: Any) -> dict[str, Any]:
         "error": result.error,
         "reconnect_required": result.reconnect_required,
     }
+
+
+def _approved_result_kind_failure(tool_id: str, action: str, result: Any) -> ActionFailed:
+    error = (
+        f"{tool_id}.{action} returned {type(result).__name__} for an approved action, "
+        "which reports one user-visible message."
+    )
+    host_errors.report_warning(
+        "tools.result_kind",
+        RuntimeError(error),
+        context={"tool_id": tool_id, "action_id": action},
+    )
+    return ActionFailed(error)
+
+
+def _result_kind_error(spec: ActionSpec, result: Any) -> str:
+    """Name the drift when a result contradicts the manifest's declared kind.
+
+    The manifest states which of the three result kinds an action produces, and
+    describe_tool, the admin API, and output validation all publish that
+    statement. A failure is always allowed: any action can fail.
+    """
+    if isinstance(result, ActionFailed):
+        return ""
+    if spec.approval == "operator":
+        expected: type | tuple[type, ...] = ActionPendingApproval
+        described = "queues an approval"
+    elif spec.returns_asset:
+        expected = StreamingAsset
+        described = "returns a file"
+    else:
+        expected = ActionExecuted
+        described = "returns a JSON result"
+    if isinstance(result, expected):
+        return ""
+    return f"is declared as an action that {described} but returned {type(result).__name__}"
+
+
+def _result_kind_mismatch(tool_id: str, action: str, what: str) -> dict[str, Any]:
+    error = f"{tool_id}.{action} {what}."
+    host_errors.report_warning(
+        "tools.result_kind",
+        RuntimeError(error),
+        context={"tool_id": tool_id, "action_id": action},
+    )
+    return {"status": "failed", "error": error, "reconnect_required": False}
 
 
 def _validate_output(tool_id: str, action: str, spec: ActionSpec, result_json: dict[str, Any]) -> dict[str, Any]:
@@ -578,6 +631,12 @@ _SCHEMA_KEYS_BY_TYPE: dict[str, frozenset[str]] = {
     "array": frozenset({"items", "minItems", "maxItems"}),
     "string": frozenset(),
     "boolean": frozenset(),
+    # Results carry counts, prices, and absent values. Without these three a
+    # manifest could not describe its own numeric or nullable fields, so the
+    # only declarable shape was an open object and outputs went undescribed.
+    "integer": frozenset(),
+    "number": frozenset(),
+    "null": frozenset(),
 }
 
 
@@ -610,7 +669,7 @@ def unsupported_schema_error(
         return ""
     if "enum" in schema:
         enum = schema["enum"]
-        if not isinstance(enum, list) or not enum or not all(isinstance(item, (str, int, bool)) for item in enum):
+        if not isinstance(enum, list) or not enum or not all(isinstance(item, (str, int, float, bool)) for item in enum):
             return f"{path}.enum must be a non-empty array of scalars."
     schema_type = schema.get("type")
     if not schema and not allow_empty:
@@ -719,8 +778,16 @@ def validate_against_schema(value: Any, schema: Any, path: str = "input") -> str
         return ""
     if schema_type == "string" and not isinstance(value, str):
         return f"{path} must be a string."
+    # bool is a subclass of int in Python, so both numeric checks exclude it
+    # explicitly: True is not a count.
     if schema_type == "boolean" and not isinstance(value, bool):
         return f"{path} must be a boolean."
+    if schema_type == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
+        return f"{path} must be an integer."
+    if schema_type == "number" and (isinstance(value, bool) or not isinstance(value, (int, float))):
+        return f"{path} must be a number."
+    if schema_type == "null" and value is not None:
+        return f"{path} must be null."
     return ""
 
 

@@ -13,6 +13,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from host.param_guard import OutboundGuardService
+from host.runtime.tools import tools_host
 from host.tools.host_api import ApprovalRecord, AssetMetadata
 from host.tools.json_types import JSONObject
 from host.tools.manifest import (
@@ -193,6 +194,24 @@ def google_userinfo(sub: str = "google-sub-1", email: str = "user@example.com") 
     return {"email": email, "email_verified": True, "sub": sub}
 
 
+def assert_matches_output_schema(
+    test: unittest.TestCase, manifest: ToolManifest, action: str, result: object
+) -> None:
+    """Hold one real result to the schema its manifest declares.
+
+    The host rejects a direct result that does not match, turning it into a
+    failed call, so every tool asserts this over its own fake provider
+    responses: an output schema that drifts from the code breaks the action.
+    """
+    spec = manifest.action(action)
+    assert spec is not None, action
+    test.assertIsInstance(result, ActionExecuted)
+    assert isinstance(result, ActionExecuted)
+    test.assertEqual(
+        tools_host.validate_against_schema(result.result, spec.output_schema, path="result"), ""
+    )
+
+
 class ToolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.urlopen_guard = patch(
@@ -312,15 +331,17 @@ class ToolTests(unittest.TestCase):
                 ),
             )
 
-    def test_tool_manifest_rejects_open_input_object_schemas(self) -> None:
-        def manifest(input_schema: JSONObject) -> ToolManifest:
+    def test_tool_manifest_rejects_open_object_schemas_on_input_and_output(self) -> None:
+        closed_object: JSONObject = {"type": "object", "properties": {}, "additionalProperties": False}
+
+        def manifest(input_schema: JSONObject, output_schema: JSONObject | None = None) -> ToolManifest:
             return ToolManifest(
                 tool_id="closed_inputs",
                 display_name="Closed inputs",
-                description="Reject open input objects.",
+                description="Reject open input and output objects.",
                 connection="enable_only",
                 data_summary=EXAMPLE_DATA_SUMMARY,
-                actions=(ActionSpec("read", "Read.", "Reads data.", input_schema),),
+                actions=(ActionSpec("read", "Read.", "Reads data.", input_schema, output_schema or closed_object),),
             )
 
         for schema in (
@@ -334,11 +355,14 @@ class ToolTests(unittest.TestCase):
                 "additionalProperties": False,
             },
         ):
-            with self.subTest(schema=schema):
+            with self.subTest(input_schema=schema):
                 with self.assertRaisesRegex(ValueError, "additionalProperties to false"):
                     manifest(schema)
+            with self.subTest(output_schema=schema):
+                with self.assertRaisesRegex(ValueError, "additionalProperties to false"):
+                    manifest(closed_object, schema)
 
-        closed = manifest({
+        nested_closed: JSONObject = {
             "type": "object",
             "properties": {
                 "nested": {
@@ -348,8 +372,44 @@ class ToolTests(unittest.TestCase):
                 },
             },
             "additionalProperties": False,
-        })
+        }
+        closed = manifest(nested_closed, nested_closed)
         self.assertEqual(closed.actions[0].id, "read")
+
+    def test_tool_manifest_pins_output_schema_to_the_result_the_action_returns(self) -> None:
+        closed_object: JSONObject = {"type": "object", "properties": {}, "additionalProperties": False}
+
+        def manifest(**action: object) -> ToolManifest:
+            return ToolManifest(
+                tool_id="result_kinds",
+                display_name="Result kinds",
+                description="One declared result kind per action.",
+                connection="enable_only",
+                data_summary=EXAMPLE_DATA_SUMMARY,
+                actions=(
+                    ActionSpec(
+                        id="run",
+                        description="Run.",
+                        data_policy="Runs.",
+                        input_schema=closed_object,
+                        **cast(Any, action),
+                    ),
+                ),
+            )
+
+        # A direct action's JSON result must be described.
+        with self.assertRaisesRegex(ValueError, "must be an object schema for direct action"):
+            manifest()
+        # The two result kinds that carry no JSON must not describe one.
+        with self.assertRaisesRegex(ValueError, "must be empty for approval-gated action"):
+            manifest(output_schema=closed_object, approval="operator")
+        with self.assertRaisesRegex(ValueError, "must be empty for asset-returning action"):
+            manifest(output_schema=closed_object, returns_asset=True)
+        with self.assertRaisesRegex(ValueError, "returns_asset cannot be set on approval-gated action"):
+            manifest(approval="operator", returns_asset=True)
+        self.assertEqual(manifest(output_schema=closed_object).actions[0].output_schema, closed_object)
+        self.assertEqual(manifest(returns_asset=True).actions[0].output_schema, {})
+        self.assertEqual(manifest(approval="operator").actions[0].approval, "operator")
 
     def test_bundled_manifests_declare_sensitive_action_controls(self) -> None:
         brave_search_action = brave_search.MANIFEST.action("search_web")
@@ -411,7 +471,7 @@ class ToolTests(unittest.TestCase):
         with patch.object(brave_search, "_post_brave_context", side_effect=fake_post):
             result = BraveSearchTool().execute("search_web", {"query": "latest docs"}, api)
 
-        self.assertIsInstance(result, ActionExecuted)
+        assert_matches_output_schema(self, brave_search.MANIFEST, "search_web", result)
         executed = result
         self.assertEqual(captured_payloads[0]["q"], "latest docs")
         self.assertEqual(executed.result["message"], "Brave Search returned 1 grounding result(s).")
@@ -630,6 +690,75 @@ class ToolTests(unittest.TestCase):
         self.assertEqual([call["operation"] for call in calls], ["users.messages.list", "users.messages.get"])
         self.assertEqual(executed.result["messages"][0]["subject"], "Hello")
 
+    def test_gmail_direct_results_match_their_declared_output_schemas(self) -> None:
+        api = connected_google_api(gmail.MANIFEST.tool_id, gmail.REQUIRED_GMAIL_SCOPES)
+        message: JSONObject = {
+            "id": "18c2f0d1a2b3c4d5",
+            "threadId": "1234abcd5678ef90",
+            "snippet": "Hello snippet",
+            "historyId": "99",
+            "internalDate": "1735689600000",
+            "sizeEstimate": 4096,
+            "labelIds": ["INBOX", "UNREAD"],
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "From", "value": "Alice <alice@example.com>"},
+                    {"name": "To", "value": "bob@example.com"},
+                    {"name": "Subject", "value": "Hello"},
+                    {"name": "Date", "value": "Mon, 1 Jan 2024 00:00:00 +0000"},
+                ],
+                "body": {"data": base64.urlsafe_b64encode(b"body text").decode()},
+                "parts": [
+                    {
+                        "mimeType": "application/pdf",
+                        "filename": "invoice.pdf",
+                        "headers": [{"name": "Content-Disposition", "value": "attachment"}],
+                        "body": {"attachmentId": "att-1", "size": 1024},
+                    }
+                ],
+            },
+        }
+
+        def fake_gmail_request(access_token: str, request: JSONObject) -> JSONObject:
+            del access_token
+            operation = request["operation"]
+            if operation == "users.messages.list":
+                return {"messages": [{"id": "18c2f0d1a2b3c4d5"}]}
+            if operation in ("users.messages.get", "users.drafts.get"):
+                return {"message": message, **message} if operation == "users.drafts.get" else message
+            if operation == "users.threads.get":
+                return {"id": "1234abcd5678ef90", "historyId": "99", "messages": [message]}
+            if operation == "users.labels.list":
+                return {
+                    "labels": [
+                        {"id": "INBOX", "name": "Inbox", "type": "system"},
+                        # Gmail's color object is taken by name, so a provider
+                        # extra inside it cannot reach the result.
+                        {"id": "L1", "name": "Receipts", "type": "user",
+                         "color": {"backgroundColor": "#3c78d8", "textColor": "#ffffff", "extra": "x"}},
+                    ],
+                    "nextPageToken": "page-2",
+                }
+            if operation == "users.drafts.list":
+                return {"drafts": [{"id": "r1234567890123456"}]}
+            raise AssertionError(f"unexpected Gmail operation: {operation}")
+
+        for action, tool_input in (
+            ("search_messages", {"query": "from:alice@example.com"}),
+            ("read_message", {"message_id": "18c2f0d1a2b3c4d5"}),
+            ("read_thread", {"thread_id": "1234abcd5678ef90"}),
+            ("list_labels", {}),
+            ("list_drafts", {}),
+        ):
+            with (
+                self.subTest(action=action),
+                patch.object(gmail_api, "execute_gmail_api_request", side_effect=fake_gmail_request),
+                patch.object(gmail, "execute_gmail_api_request", side_effect=fake_gmail_request),
+            ):
+                result = GmailTool().execute(action, tool_input, api)
+            assert_matches_output_schema(self, gmail.MANIFEST, action, result)
+
     def test_gmail_search_query_denies_secrets_but_allows_addresses(self) -> None:
         # Connected-account query: a mailbox search legitimately carries
         # addresses (from:alice@example.com passes, exercised above), but a
@@ -746,7 +875,7 @@ class ToolTests(unittest.TestCase):
                 api,
             )
 
-        self.assertIsInstance(result, ActionExecuted)
+        assert_matches_output_schema(self, google_calendar.MANIFEST, "read_events", result)
         self.assertEqual(calls[0][0], "GET")
         self.assertIn("/calendars/primary/events?", calls[0][1])
         # The time range on the wire is a parsed-and-reserialized timestamp,
@@ -768,6 +897,7 @@ class ToolTests(unittest.TestCase):
         with patch.object(google_calendar, "google_json_request", return_value={"items": provider_events}):
             result = GoogleCalendarTool().execute("read_events", {}, api)
 
+        assert_matches_output_schema(self, google_calendar.MANIFEST, "read_events", result)
         assert isinstance(result, ActionExecuted)
         events = result.result["events"]
         assert isinstance(events, list)

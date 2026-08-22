@@ -12,7 +12,7 @@ from host.tools import linkedin
 from host.tools.linkedin import LinkedInTool
 from host.tools.shared.web import WebRequestError
 
-from test_tools import FakeHostAPI, FRESH_EXPIRES_AT
+from test_tools import FakeHostAPI, FRESH_EXPIRES_AT, assert_matches_output_schema
 
 USERINFO: JSONObject = {
     "sub": "AbC123",
@@ -64,6 +64,7 @@ class LinkedInToolTests(unittest.TestCase):
 
         with patch.object(linkedin, "json_request", fake_json_request):
             result = LinkedInTool().execute("get_profile", {}, connected_api())
+        assert_matches_output_schema(self, linkedin.MANIFEST, "get_profile", result)
         assert isinstance(result, ActionExecuted)
         self.assertEqual(result.result["member_id"], "AbC123")
         self.assertEqual(result.result["email"], "claw@example.com")

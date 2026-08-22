@@ -2282,7 +2282,7 @@ function runtimeRunnable(runtime) {
 }
 
 function setRuntimeOptions(preferredRuntime = null) {
-  const labels = { codex: "Codex", claude_code: "Claude Code", hermes: "Hermes" };
+  const labels = { codex: "Codex", claude_code: "Claude Code", grok: "Grok", hermes: "Hermes" };
   const current = preferredRuntime || $("runtime").value;
   const runtimes = Object.keys(sessionOptions);
   if (current && !runtimes.includes(current)) runtimes.push(current);

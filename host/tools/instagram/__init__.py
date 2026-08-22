@@ -28,6 +28,7 @@ from host.tools.tool import (
     OAuthStartConnectResult,
 )
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI
+from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
@@ -71,12 +72,49 @@ IG_READ_POLICY = (
 )
 
 
-IG_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
-}
+# Counts are null rather than 0 when Instagram omits them: an account whose
+# owner hid its like counts is not an account with zero likes.
+GET_PROFILE_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the profile was loaded."),
+        "user_id": outputs.text("Instagram user id of the connected account."),
+        "username": outputs.text("Handle of the connected account, without the @."),
+        "account_type": outputs.text("Account kind, e.g. BUSINESS or MEDIA_CREATOR."),
+        "followers_count": outputs.nullable({"type": "integer"}, "Followers, null when Instagram does not report it."),
+        "media_count": outputs.nullable({"type": "integer"}, "Posts published, null when Instagram does not report it."),
+    },
+    ["message", "user_id", "username", "account_type", "followers_count", "media_count"],
+)
+GET_RECENT_MEDIA_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many recent posts were returned."),
+        "media": outputs.array_of(
+            outputs.obj(
+                {
+                    "id": outputs.text("Instagram media id."),
+                    "media_type": outputs.text("IMAGE, VIDEO, or CAROUSEL_ALBUM."),
+                    "product_type": outputs.text("Surface the post was published to, e.g. REELS or FEED."),
+                    "caption": outputs.text("Caption, clipped to 300 characters."),
+                    "permalink": outputs.text("Public instagram.com link to the post."),
+                    "timestamp": outputs.text("ISO 8601 publication time."),
+                    "like_count": outputs.nullable({"type": "integer"}, "Likes, null when Instagram does not report them."),
+                    "comments_count": outputs.nullable({"type": "integer"}, "Comments, null when Instagram does not report them."),
+                },
+                ["id", "media_type", "product_type", "caption", "permalink", "timestamp", "like_count", "comments_count"],
+            ),
+            "Up to the requested limit of recent posts, newest first.",
+        ),
+    },
+    ["message", "media"],
+)
+GET_PUBLISHING_LIMIT_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the quota was loaded."),
+        "quota_usage": outputs.nullable({"type": "integer"}, "API-published posts in the last 24 hours, null when Instagram does not report it."),
+        "quota_total": outputs.nullable({"type": "integer"}, "The rolling 24-hour cap, normally 100; null when Instagram does not report it."),
+    },
+    ["message", "quota_usage", "quota_total"],
+)
 
 
 MANIFEST = ToolManifest(
@@ -89,7 +127,7 @@ MANIFEST = ToolManifest(
             description="Read only the connected professional Instagram account's user id, username, account type, follower count, and media count. This cannot inspect another account.",
             data_policy=IG_READ_POLICY,
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-            output_schema=IG_OUTPUT_SCHEMA,
+            output_schema=GET_PROFILE_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_recent_media",
             description="Read up to 25 recent posts from the connected account with captions, permalinks, timestamps, and like/comment counts. This measures that account's own performance; it is not public-post, hashtag, audio, or global trend discovery.",
@@ -99,13 +137,13 @@ MANIFEST = ToolManifest(
                 "properties": {"limit": {"type": "string", "description": "1-25 (default 10)."}},
                 "additionalProperties": False,
             },
-            output_schema=IG_OUTPUT_SCHEMA,
+            output_schema=GET_RECENT_MEDIA_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_publishing_limit",
             description="Read how many API-published posts the connected account has used from Instagram's 100-post rolling 24-hour publishing quota. This is quota status, not media analytics.",
             data_policy=IG_READ_POLICY,
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-            output_schema=IG_OUTPUT_SCHEMA,
+            output_schema=GET_PUBLISHING_LIMIT_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="post_reel",
             description="Queue approval to publish one Reel to the connected Instagram account using a video from the agent workspace. Nothing reaches Instagram before approval; this action does not discover media.",
@@ -126,7 +164,6 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=IG_OUTPUT_SCHEMA,
             approval="operator",
         ),
     ),
@@ -507,8 +544,7 @@ IG_CREDENTIALS = InstagramCredentialStore()
 
 def _profile_result(me: JSONObject) -> JSONObject:
     return {
-        "status": "success_executed",
-        "message": "Instagram profile loaded.",
+                "message": "Instagram profile loaded.",
         "user_id": str(me.get("user_id") or me.get("id") or ""),
         "username": str(me.get("username") or ""),
         "account_type": str(me.get("account_type") or ""),
@@ -550,8 +586,7 @@ def _recent_media(access_token: str, tool_input: JSONObject) -> JSONObject:
             }
         )
     return {
-        "status": "success_executed",
-        "message": f"Instagram returned {len(media)} recent post(s).",
+                "message": f"Instagram returned {len(media)} recent post(s).",
         "media": media,
     }
 
@@ -569,8 +604,7 @@ def _publishing_limit(access_token: str, user_id: str) -> JSONObject:
     config = record.get("config")
     quota_total = config.get("quota_total") if isinstance(config, dict) else None
     return {
-        "status": "success_executed",
-        "message": "Instagram publishing quota loaded.",
+                "message": "Instagram publishing quota loaded.",
         "quota_usage": record.get("quota_usage") if isinstance(record.get("quota_usage"), int) else None,
         "quota_total": quota_total if isinstance(quota_total, int) else None,
     }

@@ -188,7 +188,7 @@ MANIFEST = ToolManifest(
             },
             # The whole result is one binary file, so there is no JSON result to
             # describe: the host returns the streamed asset instead.
-            output_schema={},
+            returns_asset=True,
         ),
     ),
     config=(

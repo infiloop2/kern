@@ -11,6 +11,7 @@ from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
+from host.tools.shared import outputs
 from host.tools.shared.inputs import bounded_int as _bounded_int, clip as _text
 from host.tools.shared.web import UnmappedProviderError, WebRequestError, json_request, known_provider_transport_error, unmapped_provider_error
 from host.tools.tool import Tool
@@ -20,31 +21,28 @@ MAX_QUERY_CHARS = 300
 MAX_RESULTS = 10
 MAX_PAGE = 10
 
-RESULT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status", "message", "query", "results"],
-    "properties": {
-        "status": {"type": "string"},
-        "message": {"type": "string"},
-        "query": {"type": "string"},
-        "page": {"type": "string"},
-        "results": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["title", "url", "snippet"],
-                "properties": {
-                    "position": {"type": "string"},
-                    "title": {"type": "string"},
-                    "url": {"type": "string"},
-                    "snippet": {"type": "string"},
-                    "date": {"type": "string"},
-                    "source": {"type": "string"},
+RESULT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many indexed public post results were found."),
+        "query": outputs.text("The topic searched, without the site: restriction Kern adds."),
+        "page": outputs.text("The result page returned, as a decimal string."),
+        "results": outputs.array_of(
+            outputs.obj(
+                {
+                    "position": outputs.text("Rank on this page as a decimal string, starting at 1."),
+                    "title": outputs.text("Google's title for the post page."),
+                    "url": outputs.text("Public linkedin.com/posts URL."),
+                    "snippet": outputs.text("Google's extract of the post text, up to 1500 characters."),
+                    "date": outputs.text("Recency string Google reports, e.g. \"2 days ago\"; empty when absent."),
+                    "source": outputs.text("Source label Google reports, empty when absent."),
                 },
-            },
-        },
+                ["position", "title", "url", "snippet", "date", "source"],
+            ),
+            f"Up to {MAX_RESULTS} deduplicated post results, in Google's ranking order.",
+        ),
     },
-}
+    ["message", "query", "page", "results"],
+)
 
 MANIFEST = ToolManifest(
     tool_id="linkedin_discovery",
@@ -282,8 +280,7 @@ class LinkedInDiscoveryTool(Tool):
             results = _organic_results(response, limit=limit)
             return ActionExecuted(
                 {
-                    "status": "success_executed",
-                    "message": f"Found {len(results)} indexed public LinkedIn post result(s).",
+                                        "message": f"Found {len(results)} indexed public LinkedIn post result(s).",
                     "query": query,
                     "page": str(page),
                     "results": cast(list[JSONValue], results),

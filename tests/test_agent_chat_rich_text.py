@@ -141,6 +141,45 @@ class AgentChatRichTextTests(unittest.TestCase):
         self.assertIn('data-fallback-path="/reports/run"', numeric_name)
 
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
+    def test_appended_details_accumulate_while_plain_details_replace(self) -> None:
+        # Streamed reasoning carries one chunk per event so the stored trace
+        # stays linear; the live card has to put them back together. The
+        # completed record sends the whole trace without the marker and
+        # replaces, so the two paths must not double it up.
+        renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
+        script = (
+            f"const rich = require({json.dumps(str(renderer))});"
+            "const event = (seq, phase, detail, append_detail=false) => ({"
+            "seq, thread_id: 'thread-1', event_type: 'thread.activity', payload: {activity: {"
+            "activity_id: 'reasoning', kind: 'reasoning', phase, title: 'Reasoning',"
+            "detail, append_detail}}});"
+            "const streamed = rich.compactActivityEvents(["
+            "event(1, 'started', 'Think'), event(2, 'started', ' harder', true)]);"
+            "const finished = rich.compactActivityEvents(["
+            "event(1, 'started', 'Think'), event(2, 'started', ' harder', true),"
+            "event(3, 'completed', 'Think harder')]);"
+            "process.stdout.write(JSON.stringify({"
+            "streamedLength: streamed.length,"
+            "streamed: streamed[0].payload.activity.detail,"
+            "finished: finished[0].payload.activity.detail,"
+            "phase: finished[0].payload.activity.phase"
+            "}));"
+        )
+        compared = json.loads(subprocess.run(
+            ["node", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout)
+
+        self.assertEqual(compared, {
+            "streamedLength": 1,
+            "streamed": "Think harder",
+            "finished": "Think harder",
+            "phase": "completed",
+        })
+
+    @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_activity_deltas_compact_to_one_bounded_snapshot(self) -> None:
         renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
         script = (

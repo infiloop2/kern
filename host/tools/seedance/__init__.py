@@ -36,6 +36,7 @@ from host.tools.results import (
     StreamingAsset,
 )
 from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, provider_fetched_https_url
 from host.tools.shared.media import open_downloaded_video
 from host.tools.shared.web import (
@@ -131,12 +132,33 @@ SEEDANCE_SAVE_VIDEO_POLICY = (
     "bridge into a host-generated path under /tool_assets in the agent workspace."
 )
 
-SEEDANCE_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
-}
+# Generation is asynchronous: generate_video returns a task id and get_task
+# reports progress, so the video URL exists only once a poll finds the task
+# succeeded.
+GENERATE_VIDEO_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the task was created and what to poll."),
+        "task_id": outputs.text("ModelArk task id; pass to get_task and save_video."),
+        "task_status": outputs.text("Always queued for a task this call just created."),
+        "model": outputs.text("ModelArk model the task runs on."),
+        "output_kind": outputs.text("Always video for this tool."),
+    },
+    ["message", "task_id", "task_status", "model", "output_kind"],
+)
+GET_TASK_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("What the task is doing and what to do next."),
+        "task_id": outputs.text("The task that was polled."),
+        "task_status": {
+            "type": "string",
+            "enum": [*sorted(TASK_STATUSES), "unknown"],
+            "description": "ModelArk's lifecycle status, narrowed to the documented set; unknown when it sent something else.",
+        },
+        "video_url": outputs.text("Temporary ModelArk video URL, present only once the task has succeeded with output. Valid about 24 hours."),
+        "billed_tokens": outputs.integer("Tokens ModelArk billed for the task, absent until it reports usage."),
+    },
+    ["message", "task_id", "task_status"],
+)
 
 
 MANIFEST = ToolManifest(
@@ -185,7 +207,7 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=SEEDANCE_OUTPUT_SCHEMA,
+            output_schema=GENERATE_VIDEO_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="get_task",
@@ -203,7 +225,7 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=SEEDANCE_OUTPUT_SCHEMA,
+            output_schema=GET_TASK_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="save_video",
@@ -221,7 +243,7 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=SEEDANCE_OUTPUT_SCHEMA,
+            returns_asset=True,
         ),
     ),
     config=(
@@ -549,8 +571,7 @@ def _task_result(response: JSONObject, task_id: str) -> JSONObject:
     # of it, for the same reason the status is narrowed above.
     status = _task_status(response)
     result: JSONObject = {
-        "status": "success_executed",
-        "task_id": task_id,
+                "task_id": task_id,
         "task_status": status,
     }
     tokens = _billed_tokens(response)
@@ -725,8 +746,7 @@ class SeedanceTool:
                     return ActionFailed("ModelArk API returned no task id.")
                 return ActionExecuted(
                     {
-                        "status": "success_executed",
-                        "message": "Seedance task created. Poll get_task until it succeeds.",
+                                                "message": "Seedance task created. Poll get_task until it succeeds.",
                         "task_id": task_id,
                         "task_status": "queued",
                         "model": MODEL_ID,

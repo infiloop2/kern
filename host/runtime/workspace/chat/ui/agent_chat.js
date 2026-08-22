@@ -92,7 +92,7 @@ let renameThreadReturnFocus = null;
 const chatRoot = window.KernWorkspaceRoots.chat;
 const $ = id => chatRoot.querySelector(`#${CSS.escape(id)}`);
 const composerDrafts = loadComposerDrafts();
-const runtimeLabel = runtime => runtime === "claude_code" ? "Claude Code" : runtime === "codex" ? "Codex" : runtime === "hermes" ? "Hermes" : runtime;
+const runtimeLabel = runtime => runtime === "claude_code" ? "Claude Code" : runtime === "codex" ? "Codex" : runtime === "grok" ? "Grok" : runtime === "hermes" ? "Hermes" : runtime;
 const optionLabel = value => value.split(/[-_]/).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 // Claude Code model ids carry the provider prefix ("claude-opus-5"); the
 // runtime name already says Claude Code, so the pill reads "Opus 5".

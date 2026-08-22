@@ -14,10 +14,14 @@ from host.network_integrations.registry import NETWORK_INTEGRATIONS, managed_dom
 
 AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 EXACT_DOMAIN_RE = re.compile(r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
-# Every runtime a thread can run on. The first three are model runtimes backed
-# by a managed provider connection; "script" runs a static bash script from the
-# agent home and has no provider to connect, so it is always available.
-AGENT_RUNTIMES = {"codex", "claude_code", "hermes", "script"}
+# Every runtime the host knows. The model runtimes are backed by a managed
+# provider connection; "script" runs a static bash script from the agent home
+# and has no provider to connect, so it is always available.
+#
+# Membership here means the host manages the runtime. What an interactive
+# thread may select is the narrower model matrix in `host/session_options.py`;
+# script remains schedule-only there.
+AGENT_RUNTIMES = {"codex", "claude_code", "grok", "hermes", "script"}
 
 
 class ConfigError(ValueError):

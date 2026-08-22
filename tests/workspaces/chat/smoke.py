@@ -42,8 +42,10 @@ def configure_mock(*, demo_mode: bool) -> None:
 
 def _active_runtimes() -> list[str]:
     # Hermes is deliberately left deactivated so the smoke covers the gated
-    # rendering for real; no journey selects it. Demo mode narrows further.
-    return ["codex"] if DEMO_MODE else ["claude_code", "codex"]
+    # rendering for real; no journey selects it. Grok is active because a
+    # journey does select it, and the composer disables options for runtimes
+    # this list omits. Demo mode narrows further.
+    return ["codex"] if DEMO_MODE else ["claude_code", "codex", "grok"]
 
 
 def route_workspace_api(
@@ -383,6 +385,11 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#attachments")).not_to_contain_text("notes.txt")
     assert upload_requests == [], "selecting and removing attachments must not upload them before Send"
     frame.locator("#new-task").fill("agent workspace smoke task")
+    frame.locator("#new-task-runtime").select_option("grok")
+    expect(frame.locator("#new-task-model")).to_have_value("grok-4.6")
+    expect(frame.locator("#new-task-model option")).to_have_count(1)
+    expect(frame.locator("#new-task-effort option")).to_have_count(2)
+    expect(frame.locator("#new-task-effort")).to_contain_text("Xhigh")
     frame.locator("#new-task-runtime").select_option("codex")
     expect(frame.locator("#new-task-model option")).to_have_count(3)
     frame.locator("#new-task-model").select_option("gpt-5.6-luna")

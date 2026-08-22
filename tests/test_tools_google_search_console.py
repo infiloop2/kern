@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from host.tools import google_search_console as search_console
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
-from test_tools import FakeHostAPI, connected_google_api, google_userinfo
+from test_tools import FakeHostAPI, assert_matches_output_schema, connected_google_api, google_userinfo
 
 
 SITE = "https://example.com/"
@@ -94,6 +94,58 @@ class GoogleSearchConsoleToolTests(unittest.TestCase):
             {"site_url": SITE, "permission_level": "siteOwner"},
             {"site_url": DOMAIN_SITE, "permission_level": "siteFullUser"},
         ])
+
+    def test_every_direct_result_matches_its_declared_output_schema(self) -> None:
+        by_path: dict[str, dict[str, Any]] = {
+            "searchAnalytics/query": {
+                "responseAggregationType": "byProperty",
+                "rows": [{"keys": ["kern"], "clicks": 5, "impressions": 100, "ctr": 0.05, "position": 3.5}],
+                "metadata": {"first_incomplete_date": "2026-08-19"},
+            },
+            "sitemaps": {
+                "sitemap": [{
+                    "path": "https://example.com/sitemap.xml",
+                    "type": "sitemap",
+                    "lastSubmitted": "2026-08-01T00:00:00Z",
+                    "warnings": "2",
+                    "errors": 0,
+                    "contents": [{"type": "web", "submitted": "10", "indexed": "4"}],
+                }]
+            },
+            "urlInspection": {
+                "inspectionResult": {
+                    "inspectionResultLink": "https://search.google.com/search-console/inspect?x=1",
+                    "indexStatusResult": {"verdict": "PASS", "sitemap": ["https://example.com/sitemap.xml"]},
+                    "mobileUsabilityResult": {"verdict": "PASS", "issues": [{"issueType": "SMALL_FONT", "severity": "WARNING", "message": "Text too small"}]},
+                    "richResultsResult": {"verdict": "PARTIAL", "detectedItems": [{
+                        "richResultType": "Product",
+                        "items": [{"name": "Kern", "issues": [{"issueMessage": "Missing price", "severity": "WARNING"}]}],
+                    }]},
+                }
+            },
+        }
+
+        def fake_request(method: str, url: str, access_token: str, **kwargs: Any) -> dict[str, Any]:
+            del method, access_token, kwargs
+            if url.endswith("/sites"):
+                return PROPERTY_RESPONSE
+            for marker, response in by_path.items():
+                if marker in url:
+                    return response
+            raise AssertionError(url)
+
+        cases: tuple[tuple[str, dict[str, Any]], ...] = (
+            ("list_properties", {}),
+            ("query_search_analytics", {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07"}),
+            ("list_sitemaps", {"site_url": SITE}),
+            ("inspect_url", {"site_url": SITE, "inspection_url": "https://example.com/page"}),
+        )
+        for action, tool_input in cases:
+            with self.subTest(action=action), patch.object(
+                search_console, "google_json_request", side_effect=fake_request
+            ):
+                result = search_console.BUNDLED_TOOL.execute(action, tool_input, connected_api())
+            assert_matches_output_schema(self, search_console.MANIFEST, action, result)
 
     def test_analytics_rechecks_property_and_sends_only_typed_options(self) -> None:
         calls: list[tuple[str, str, dict[str, Any]]] = []
