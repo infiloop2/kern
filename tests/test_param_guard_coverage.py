@@ -207,6 +207,8 @@ EXEMPT_FIELDS = {
     ("seedance", "get_task", "task_id"): TYPED,
     ("seedance", "save_video", "task_id"): TYPED,
     ("twitter", "search_tweets", "max_results"): TYPED,
+    ("twitter", "search_tweets", "start_time"): TYPED,
+    ("twitter", "search_tweets", "since_id"): TYPED,
     ("twitter", "read_tweet", "tweet_id"): TYPED,
     ("twitter", "user_tweets", "username"): TYPED,
     ("twitter", "user_tweets", "user_id"): TYPED,

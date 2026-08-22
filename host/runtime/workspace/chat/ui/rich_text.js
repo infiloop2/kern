@@ -178,6 +178,15 @@
       } else if (Object.prototype.hasOwnProperty.call(current, "output")) {
         output = clipUtf8(current.output);
       }
+      // A streamed detail carries only its own chunk, so the accumulated text
+      // lives here rather than in every stored event. Without this the live
+      // card would show the newest fragment alone, usually mid-sentence.
+      let detail = previous.detail;
+      if (current.append_detail) {
+        detail = clipUtf8(`${previous.detail || ""}${current.detail || ""}`);
+      } else if (Object.prototype.hasOwnProperty.call(current, "detail")) {
+        detail = clipUtf8(current.detail);
+      }
       compacted[existingIndex] = {
         ...event,
         // The snapshot is rendered where the activity first appeared. Keep
@@ -192,6 +201,7 @@
             title: genericUpdate && previous.title ? previous.title : current.title,
             kind: genericUpdate && previous.kind ? previous.kind : current.kind,
             ...(output === undefined ? {} : { output }),
+            ...(detail === undefined ? {} : { detail }),
           },
         },
       };

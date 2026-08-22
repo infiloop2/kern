@@ -3,6 +3,8 @@ manifest schema validation, and the single-use approval lifecycle."""
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+import io
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -33,16 +35,22 @@ from host.tools import (
     OAuthCompleteConnectResult,
     OAuthStartConnectParams,
     OAuthStartConnectResult,
+    OpenedStreamingAsset,
     StoredCredential,
+    StreamingAsset,
     ToolManifest,
 )
 from host.tools.shared.web import ProviderWarning, UnmappedProviderError
 
 FAKE_OUTPUT_SCHEMA: JSONObject = {
     "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
+    "required": ["text"],
+    "properties": {
+        "text": {"type": "string"},
+        "token": {"type": "string"},
+        "message": {"type": "string"},
+    },
+    "additionalProperties": False,
 }
 
 FAKE_DATA_SUMMARY = DataSummary(
@@ -139,7 +147,7 @@ class FakeTool:
 
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
         if action == "read_note":
-            return ActionExecuted({"status": "success_executed", "text": self._note_text(api), "token": api.config["FAKE_NOTES_TOKEN"]})
+            return ActionExecuted({"text": self._note_text(api), "token": api.config["FAKE_NOTES_TOKEN"]})
         if action == "crash_note":
             raise RuntimeError("unexpected tool crash")
         record = api.approvals.request(
@@ -185,6 +193,55 @@ class BadOutputTool:
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
         del action, tool_input, api
         return ActionExecuted({"message": "missing status"})
+
+    def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
+        del approval, api
+        return ActionFailed("Not used.")
+
+
+def _fake_asset() -> StreamingAsset:
+    return StreamingAsset(lambda: nullcontext(
+        OpenedStreamingAsset(
+            filename="x.bin", media_type="application/octet-stream", size_bytes=1, source=io.BytesIO(b"x")
+        )
+    ))
+
+
+class WrongResultKindTool:
+    """A tool whose returned result contradicts its declared result kind."""
+
+    def __init__(self, *, declared: str, returned: ActionResult) -> None:
+        self._declared = declared
+        self._returned = returned
+
+    @property
+    def manifest(self) -> ToolManifest:
+        return ToolManifest(
+            tool_id="wrong_kind_tool",
+            display_name="Wrong Kind Tool",
+            description="Test-only mismatched result tool.",
+            connection="enable_only",
+            data_summary=FAKE_DATA_SUMMARY,
+            actions=(
+                ActionSpec(
+                    id="run",
+                    description="Return the result kind the manifest does not declare.",
+                    data_policy="Test data.",
+                    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                    output_schema=FAKE_OUTPUT_SCHEMA if self._declared == "json" else {},
+                    approval="operator" if self._declared == "approval" else "direct",
+                    returns_asset=self._declared == "asset",
+                ),
+            ),
+        )
+
+    @property
+    def credentials(self) -> None:
+        return None
+
+    def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
+        del action, tool_input, api
+        return self._returned
 
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
         del approval, api
@@ -323,10 +380,12 @@ class ToolRegistryTests(unittest.TestCase):
                     ActionSpec(
                         id="same", description="One.", data_policy="Test.",
                         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                        output_schema=FAKE_OUTPUT_SCHEMA,
                     ),
                     ActionSpec(
                         id="same", description="Two.", data_policy="Test.",
                         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                        output_schema=FAKE_OUTPUT_SCHEMA,
                     ),
                 ),
             )
@@ -414,7 +473,7 @@ class ExecuteActionTests(ToolsHostTestCase):
     def test_read_action_executes_with_configured_values(self) -> None:
         self.prepare_fake_tool()
         result = tools_host.execute_action("fake_notes", "read_note", {})
-        self.assertEqual(result, {"status": "executed", "result": {"status": "success_executed", "text": "", "token": "token-1"}})
+        self.assertEqual(result, {"status": "executed", "result": {"text": "", "token": "token-1"}})
         events = state.page_tool_events_before(None)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["tool_id"], "fake_notes")
@@ -540,6 +599,39 @@ class ExecuteActionTests(ToolsHostTestCase):
         self.assertNotIn("reply blocked", result["error"])
         self.assertIn("reply blocked", report.call_args.kwargs["context"]["provider_response"])
 
+    def test_returned_result_kind_must_match_the_declared_one(self) -> None:
+        # The declaration is what describe_tool and the admin API publish, so a
+        # tool that returns another result kind fails its own call rather than
+        # handing the agent a shape nothing described.
+        executed = ActionExecuted({"text": "note"})
+        pending = ActionPendingApproval("approval_1.token", "Do the thing.")
+        for declared, returned, expected in (
+            ("json", _fake_asset(), "returns a JSON result but returned StreamingAsset"),
+            ("json", pending, "returns a JSON result but returned ActionPendingApproval"),
+            ("asset", executed, "returns a file but returned ActionExecuted"),
+            ("asset", pending, "returns a file but returned ActionPendingApproval"),
+            ("approval", executed, "queues an approval but returned ActionExecuted"),
+            ("approval", _fake_asset(), "queues an approval but returned StreamingAsset"),
+        ):
+            with self.subTest(declared=declared, returned=type(returned).__name__):
+                tool = WrongResultKindTool(declared=declared, returned=returned)
+                with patch.dict(tools_host.BUNDLED_TOOLS, {"wrong_kind_tool": tool}):
+                    with state.mutation() as cur:
+                        state.set_tool_enabled(cur, "wrong_kind_tool", True)
+                    result = tools_host.execute_action("wrong_kind_tool", "run", {})
+                self.assertEqual(result["status"], "failed")
+                self.assertIn(expected, result["error"])
+                self.assertEqual(state.page_tool_events_before(None)[0]["outcome"], "failed")
+        # A failure is always allowed, whatever kind the action declares.
+        for declared in ("json", "asset", "approval"):
+            with self.subTest(declared=declared, returned="ActionFailed"):
+                tool = WrongResultKindTool(declared=declared, returned=ActionFailed("provider down"))
+                with patch.dict(tools_host.BUNDLED_TOOLS, {"wrong_kind_tool": tool}):
+                    with state.mutation() as cur:
+                        state.set_tool_enabled(cur, "wrong_kind_tool", True)
+                    result = tools_host.execute_action("wrong_kind_tool", "run", {})
+                self.assertEqual(result["error"], "provider down")
+
     def test_executed_output_must_match_manifest_output_schema(self) -> None:
         with patch.dict(tools_host.BUNDLED_TOOLS, {"bad_output_tool": BadOutputTool()}):
             with state.mutation() as cur:
@@ -554,6 +646,23 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
     def queue_write(self, text: str) -> str:
         self.prepare_fake_tool()
         return tools_host.execute_action("fake_notes", "write_note", {"text": text})["approval_id"]
+
+    def test_approved_execution_must_report_one_message(self) -> None:
+        # execute_approved reports a user-visible message or a failure. Any
+        # other result kind is drift, and the approval must still reach a
+        # terminal state rather than sticking in "approved".
+        for returned, expected in (
+            (ActionExecuted({"text": "note"}), "returned ActionExecuted for an approved action"),
+            (_fake_asset(), "returned StreamingAsset for an approved action"),
+            (ActionPendingApproval("approval_2.token", "again"), "returned ActionPendingApproval for an approved action"),
+        ):
+            with self.subTest(returned=type(returned).__name__):
+                approval_id = self.queue_write("hello")
+                with patch.object(FakeTool, "execute_approved", return_value=returned):
+                    decision = tools_host.decide_approval(approval_id, "approve")
+                self.assertEqual(decision["approval"]["status"], "failed")
+                self.assertIn(expected, decision["result"]["error"])
+                self.assertIn(expected, state.tool_approval(approval_id)["result"])
 
     def test_approve_executes_once_and_records_the_outcome(self) -> None:
         approval_id = self.queue_write("hello")
@@ -709,7 +818,9 @@ class SchemaDeclarationTests(unittest.TestCase):
                 "mode": {"enum": ["a", "b"]},
                 "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 50},
                 "flag": {"type": "boolean"},
-                "shape": {"oneOf": [{"type": "string"}, {"type": "boolean"}]},
+                "count": {"type": "integer", "description": "how many"},
+                "score": {"type": "number"},
+                "shape": {"oneOf": [{"type": "string"}, {"type": "null"}]},
             },
             "required": ["to"],
             "additionalProperties": False,
@@ -720,12 +831,40 @@ class SchemaDeclarationTests(unittest.TestCase):
         self.assertEqual(tools_host.unsupported_schema_error({}, allow_empty=True), "")
         self.assertNotEqual(tools_host.unsupported_schema_error({}), "")
 
+    def test_numeric_and_null_values_are_enforced_not_merely_declared(self) -> None:
+        # A result carrying counts and absent values is why the subset has
+        # these types at all, so each must actually reject the wrong value.
+        schema = {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer"},
+                "score": {"type": "number"},
+                "missing": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+            },
+            "additionalProperties": False,
+        }
+        self.assertEqual(tools_host.unsupported_schema_error(schema), "")
+        for value in ({"count": 3}, {"score": 1.5}, {"score": 2}, {"missing": None}, {"missing": "x"}):
+            with self.subTest(value=value):
+                self.assertEqual(tools_host.validate_against_schema(value, schema, path="result"), "")
+        # True is not a count, and a float is not an integer.
+        for value, expected in (
+            ({"count": True}, "result.count must be an integer."),
+            ({"count": 1.5}, "result.count must be an integer."),
+            ({"score": "3"}, "result.score must be a number."),
+            ({"score": True}, "result.score must be a number."),
+            ({"missing": 3}, "result.missing matches none of the allowed shapes."),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(tools_host.validate_against_schema(value, schema, path="result"), expected)
+
     def test_out_of_subset_declarations_are_rejected(self) -> None:
         # Every shape the call-time validator would silently skip must fail at
         # declaration, so declaration and enforcement cannot drift.
         cases = [
-            {"type": "integer"},
-            {"type": "number"},
+            {"type": "integer", "minimum": 0},
+            {"type": "number", "exclusiveMinimum": 0},
+            {"type": "null", "enum": [None]},
             {"type": "string", "minLength": 3},
             {"type": "string", "pattern": "^x"},
             {"type": "array"},
@@ -757,7 +896,12 @@ class SchemaDeclarationTests(unittest.TestCase):
                     id="run",
                     description="Uses a keyword the validator does not enforce.",
                     data_policy="Test data.",
-                    input_schema={"type": "object", "properties": {"n": {"type": "integer"}}, "additionalProperties": False},
+                    input_schema={
+                        "type": "object",
+                        "properties": {"n": {"type": "integer", "minimum": 0}},
+                        "additionalProperties": False,
+                    },
+                    output_schema=FAKE_OUTPUT_SCHEMA,
                 ),
             ),
         )

@@ -17,6 +17,7 @@ from host.tools.manifest import (
     ToolManifest,
 )
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
+from host.tools.shared import outputs
 from host.tools.host_api import HostAPI
 from host.tools.shared.web import UnmappedProviderError, WebRequestError, json_request, known_provider_transport_error, unmapped_provider_error
 from host.tools.tool import Tool
@@ -84,26 +85,23 @@ MANIFEST = ToolManifest(
                 "properties": {"query": {"type": "string", "description": "Public-web search text; supports Brave operators such as site:, quotes, and exclusions."}},
                 "additionalProperties": False,
             },
-            output_schema={
-                "type": "object",
-                "required": ["status"],
-                "properties": {
-                    "status": {"type": "string"},
-                    "message": {"type": "string"},
-                    "query": {"type": "string"},
-                    "results": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": {"type": "string"},
-                                "url": {"type": "string"},
-                                "snippets": {"type": "array", "items": {"type": "string"}},
-                            },
-                        },
-                    },
+            output_schema=outputs.obj(
+                {
+                    "message": outputs.text("How many grounding results Brave returned."),
+                    "query": outputs.text("The query text as sent to Brave, after shortening."),
+                    "results": outputs.array_of(
+                        outputs.obj(
+                            {
+                                "title": outputs.text("Page title, empty when Brave returns only a URL."),
+                                "url": outputs.text("Public https result URL, empty when Brave returns only a title."),
+                                "snippets": outputs.array_of({"type": "string"}, "Extracted passages Brave considers relevant to the query."),
+                            }
+                        ),
+                        "At most 10 results, in Brave's ranking order.",
+                    ),
                 },
-            },
+                ["message", "query", "results"],
+            ),
         ),
     ),
     config=(ConfigRequirement(key="BRAVE_SEARCH_API_KEY", description="Brave Search API subscription key for the hosting deployment."),),
@@ -252,8 +250,7 @@ class BraveSearchTool(Tool):
             raw_response = _post_brave_context(api_key, request_payload)
             results = _grounding_results(raw_response)
             result: JSONObject = {
-                "status": "success_executed",
-                "message": f"Brave Search returned {len(results)} grounding result(s).",
+                                "message": f"Brave Search returned {len(results)} grounding result(s).",
                 "query": request_payload["q"],
                 "results": cast(list[JSONValue], results),
             }

@@ -37,11 +37,17 @@ from host.param_guard import (
 )
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.shared.google import GoogleCredentialStore, IntegrationReconnectRequired, google_oauth_setup_steps
+from host.tools.shared import outputs
 from host.tools.shared.inputs import clip_text, schema as _schema
 from host.tools.shared.web import UnmappedProviderError
 
 from .api import (
+    GMAIL_ATTACHMENT_MAX_RESULTS,
     GMAIL_DRAFT_ATTACHMENT_UNSUPPORTED_MESSAGE,
+    GMAIL_LABEL_ID_MAX_RESULTS,
+    GMAIL_LABEL_LIST_MAX_RESULTS,
+    GMAIL_READ_MAX_RESULTS,
+    GMAIL_READABLE_BODY_MAX_CHARS,
     ToolInputValidationError,
     execute_gmail_api_request,
     gmail_draft_preview,
@@ -127,12 +133,183 @@ GMAIL_LABEL_BACKGROUND_COLORS = {
 GMAIL_LABEL_TEXT_COLORS = {"black": "#000000", "white": "#ffffff"}
 
 
-GMAIL_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
+# Gmail omits a field rather than sending an empty one, so almost everything
+# below is optional: present when Gmail had it, absent when it did not. The
+# truncation fields appear only when a bound actually clipped something, which
+# is how the agent tells "nothing more" from "more, not shown".
+_LABEL_ID_FIELDS: JSONObject = {
+    "labelIds": outputs.array_of({"type": "string"}, f"Up to {GMAIL_LABEL_ID_MAX_RESULTS} label ids applied to the message."),
+    "labelIdsLimit": outputs.integer("The label-id cap, present only when it clipped the list."),
+    "labelIdsOriginalCount": outputs.integer("How many label ids the message actually has."),
+    "labelIdsOmittedCount": outputs.integer("How many label ids were left out."),
+    "labelIdsTruncated": outputs.boolean("Present and true when label ids were clipped."),
 }
+_BODY_FIELDS: JSONObject = {
+    "body": outputs.text(f"Plain-text body, up to {GMAIL_READABLE_BODY_MAX_CHARS} characters."),
+    "bodyLimit": outputs.integer("The body character cap, present only when it clipped the text."),
+    "bodyOriginalLength": outputs.integer("Length of the untruncated body in characters."),
+    "bodyTruncated": outputs.boolean("Present and true when the body was clipped."),
+    "bodySource": outputs.text("Which MIME part the body came from, e.g. text/plain."),
+    "bodyNote": outputs.text("Why the body is partial or missing, e.g. HTML-only mail."),
+}
+_ATTACHMENT_FIELDS: JSONObject = {
+    "attachments": outputs.array_of(
+        outputs.obj(
+            {
+                "filename": outputs.text("Attachment filename, or \"(unnamed attachment)\"."),
+                "mimeType": outputs.text("MIME type Gmail reports for the part."),
+                "attachmentId": outputs.text("Gmail attachment id, absent when the part carries none."),
+                "unnamed": outputs.boolean("Present and true when Gmail supplied no filename."),
+                "size": outputs.integer("Attachment size in bytes, absent when Gmail omits it."),
+            },
+            ["filename", "mimeType"],
+        ),
+        f"Up to {GMAIL_ATTACHMENT_MAX_RESULTS} attachments; absent when the message has none.",
+    ),
+    "attachmentsLimit": outputs.integer("The attachment cap, present only when it clipped the list."),
+    "attachmentsOriginalCount": outputs.integer("How many attachments the message actually has."),
+    "attachmentsOmittedCount": outputs.integer("How many attachments were left out."),
+    "attachmentsTruncated": outputs.boolean("Present and true when attachments were clipped."),
+}
+_HEADER_FIELDS: JSONObject = {
+    "from": outputs.text("From header, absent when Gmail returns none."),
+    "to": outputs.text("To header, absent when Gmail returns none."),
+    "cc": outputs.text("Cc header, absent when Gmail returns none."),
+    "bcc": outputs.text("Bcc header, absent when Gmail returns none."),
+    "subject": outputs.text("Subject header, absent when Gmail returns none."),
+    "date": outputs.text("Date header as Gmail formats it."),
+}
+MESSAGE_ENTRY_SCHEMA: JSONObject = outputs.obj(
+    {
+        "id": outputs.text("Gmail message id; pass to read_message or message_action."),
+        "threadId": outputs.text("Id of the thread this message belongs to; pass to read_thread."),
+        "snippet": outputs.text("Gmail's short preview of the message."),
+        "historyId": outputs.text("Mailbox history id at the time of the read."),
+        "internalDate": outputs.text("Receipt time in epoch milliseconds, as a string."),
+        "sizeEstimate": outputs.integer("Approximate message size in bytes."),
+        **_LABEL_ID_FIELDS,
+        **_HEADER_FIELDS,
+    }
+)
+READABLE_MESSAGE_SCHEMA: JSONObject = outputs.obj(
+    {**cast(JSONObject, MESSAGE_ENTRY_SCHEMA["properties"]), **_BODY_FIELDS, **_ATTACHMENT_FIELDS}
+)
+DRAFT_PREVIEW_SCHEMA: JSONObject = outputs.obj(
+    {
+        "draftId": outputs.text("Draft id; pass to draft_action to update, send, or delete it."),
+        "messageId": outputs.text("Id of the draft's underlying message."),
+        "threadId": outputs.text("Thread the draft replies to, empty for a new draft."),
+        "snippet": outputs.text("Gmail's short preview of the draft."),
+        "subject": outputs.text('Subject header, or "(no subject)".'),
+        "inReplyTo": outputs.text("In-Reply-To header, empty for a new draft."),
+        "references": outputs.text("References header, empty for a new draft."),
+        "replyTo": outputs.text("Reply-To header, empty when unset."),
+        **_HEADER_FIELDS,
+        **_BODY_FIELDS,
+        **_ATTACHMENT_FIELDS,
+    },
+    ["draftId", "messageId", "threadId", "snippet", "subject", "from", "to", "cc", "bcc", "date", "inReplyTo", "references", "replyTo"],
+)
+
+SEARCH_MESSAGES_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the search ran."),
+        "query": outputs.text("The Gmail query actually searched, empty when none was given."),
+        "messages": outputs.array_of(
+            outputs.obj(
+                {
+                    "id": outputs.text("Gmail message id; pass to read_message."),
+                    "threadId": outputs.text("Id of the thread this message belongs to."),
+                    "date": outputs.text("Date header as Gmail formats it."),
+                    "from": outputs.text("From header."),
+                    "subject": outputs.text("Subject header."),
+                    "snippet": outputs.text("Gmail's short preview of the message."),
+                },
+                ["id", "threadId", "date", "from", "subject", "snippet"],
+            ),
+            f"Up to {GMAIL_READ_MAX_RESULTS} matching messages, newest first.",
+        ),
+    },
+    ["message", "query", "messages"],
+)
+READ_MESSAGE_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the message was loaded."),
+        "gmailMessage": READABLE_MESSAGE_SCHEMA,
+    },
+    ["message", "gmailMessage"],
+)
+READ_THREAD_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the thread was loaded."),
+        "thread": outputs.obj(
+            {
+                "id": outputs.text("Gmail thread id."),
+                "historyId": outputs.text("Mailbox history id at the time of the read."),
+                "messages": outputs.array_of(
+                    MESSAGE_ENTRY_SCHEMA,
+                    f"Up to {GMAIL_THREAD_MESSAGE_INDEX_MAX_RESULTS} messages with headers only; call read_message for a body.",
+                ),
+                "messageIndexTruncated": outputs.boolean("Present and true when the thread has more messages than were listed."),
+                "messageIndexLimit": outputs.integer("The per-thread message cap, present only when it clipped the list."),
+                "messageIndexOriginalCount": outputs.integer("How many messages the thread actually has."),
+                "messageIndexOmittedCount": outputs.integer("How many messages were left out."),
+            },
+            ["id", "historyId", "messages"],
+        ),
+    },
+    ["message", "thread"],
+)
+LIST_LABELS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that labels were loaded."),
+        "labels": outputs.obj(
+            {
+                "labels": outputs.array_of(
+                    outputs.obj(
+                        {
+                            "id": outputs.text("Label id; pass to message_action or label_action."),
+                            "name": outputs.text("Display name, falling back to the id."),
+                            "type": outputs.text("system for Gmail's built-in labels, user for your own."),
+                            "color": outputs.obj(
+                                {
+                                    "backgroundColor": outputs.text("Background hex color, e.g. #3c78d8."),
+                                    "textColor": outputs.text("Text hex color, e.g. #ffffff."),
+                                },
+                                description="Present only for labels that carry a color.",
+                            ),
+                        },
+                        ["id", "name", "type"],
+                    ),
+                    f"Up to {GMAIL_LABEL_LIST_MAX_RESULTS} labels.",
+                ),
+                "labelCount": outputs.integer("How many labels the mailbox has, before any cap."),
+                "nextPageToken": outputs.text("Gmail's cursor, present only when it returned one."),
+                "labelsTruncated": outputs.boolean("Present and true when the label list was clipped."),
+                "labelLimit": outputs.integer("The label cap, present only when it clipped the list."),
+                "labelOmittedCount": outputs.integer("How many labels were left out."),
+            },
+            ["labels", "labelCount"],
+        ),
+    },
+    ["message", "labels"],
+)
+LIST_DRAFTS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that drafts were loaded."),
+        "drafts": outputs.obj(
+            {
+                "drafts": outputs.array_of(
+                    DRAFT_PREVIEW_SCHEMA,
+                    f"Up to {DEFAULT_DRAFT_PAGE_LIMIT} drafts, each with its headers and body.",
+                ),
+                "nextPageToken": outputs.text("Cursor for the next page; pass back as page_token. Absent on the last page, and omitted when the cursor would not survive re-validation."),
+            },
+            ["drafts"],
+        ),
+    },
+    ["message", "drafts"],
+)
 GMAIL_DIRECT_ACTIONS = frozenset({"search_messages", "read_message", "read_thread", "list_labels", "list_drafts"})
 
 
@@ -230,32 +407,31 @@ MANIFEST = ToolManifest(
             description="Search messages with a Gmail query string.",
             data_policy=GMAIL_SEARCH_POLICY,
             input_schema=_schema({"query": {"type": "string", "description": "Optional Gmail search syntax, e.g. from:alice@example.com is:unread."}, "start_time": {"type": "string", "description": "Optional inclusive lower bound as ISO 8601 or YYYY-MM-DD; naive values are UTC."}, "end_time": {"type": "string", "description": "Optional exclusive upper bound as ISO 8601 or YYYY-MM-DD; must be after start_time."}}),
-            output_schema=GMAIL_OUTPUT_SCHEMA,
+            output_schema=SEARCH_MESSAGES_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="read_message",
             description="Read one message by id.",
             data_policy=GMAIL_READ_MESSAGE_POLICY,
             input_schema=_schema({"message_id": {"type": "string", "description": "Gmail message id returned by search_messages, read_thread, or list_drafts."}}, ["message_id"]),
-            output_schema=GMAIL_OUTPUT_SCHEMA,
+            output_schema=READ_MESSAGE_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="read_thread",
             description="Read a conversation thread by id.",
             data_policy=GMAIL_READ_THREAD_POLICY,
             input_schema=_schema({"thread_id": {"type": "string", "description": "Gmail thread id returned by message or search results."}}, ["thread_id"]),
-            output_schema=GMAIL_OUTPUT_SCHEMA,
+            output_schema=READ_THREAD_OUTPUT_SCHEMA,
         ),
-        ActionSpec(id="list_labels", description="List the account's labels.", data_policy=GMAIL_LIST_LABELS_POLICY, input_schema=_schema({}), output_schema=GMAIL_OUTPUT_SCHEMA),
+        ActionSpec(id="list_labels", description="List the account's labels.", data_policy=GMAIL_LIST_LABELS_POLICY, input_schema=_schema({}), output_schema=LIST_LABELS_OUTPUT_SCHEMA),
         ActionSpec(id="list_drafts",
             description="List current drafts, each with its headers and body content.",
             data_policy=GMAIL_LIST_DRAFTS_POLICY,
             input_schema=_schema({"query": {"type": "string", "description": "Optional Gmail query used to filter drafts."}, "page_token": {"type": "string", "description": "Opaque nextPageToken from a prior list_drafts result."}, "include_spam_trash": {"type": "boolean", "description": "Include drafts associated with spam or trash (default false)."}}),
-            output_schema=GMAIL_OUTPUT_SCHEMA,
+            output_schema=LIST_DRAFTS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="send_email",
             description="Queue approval to send an email (to, subject, body blocks).",
             data_policy=GMAIL_SEND_POLICY,
             input_schema=_schema({"to": {"type": "string", "description": "Recipient address or comma-separated recipient addresses."}, "subject": {"type": "string", "description": "Email subject."}, "blocks": BODY_BLOCK_SCHEMA}, ["to", "subject", "blocks"]),
-            output_schema=GMAIL_OUTPUT_SCHEMA,
             approval="operator",
         ),
         ActionSpec(id="message_action",
@@ -269,7 +445,6 @@ MANIFEST = ToolManifest(
                 },
                 ["action", "message_ids"],
             ),
-            output_schema=GMAIL_OUTPUT_SCHEMA,
             approval="operator",
         ),
         ActionSpec(id="label_action",
@@ -285,7 +460,6 @@ MANIFEST = ToolManifest(
                 },
                 ["action"],
             ),
-            output_schema=GMAIL_OUTPUT_SCHEMA,
             approval="operator",
         ),
         ActionSpec(id="draft_action",
@@ -301,7 +475,6 @@ MANIFEST = ToolManifest(
                 },
                 ["action"],
             ),
-            output_schema=GMAIL_OUTPUT_SCHEMA,
             approval="operator",
         ),
     ),
@@ -1010,7 +1183,7 @@ def _execute_send_approval(access_token: str, google_email: str, proposal: JSONO
     if not draft:
         raise RuntimeError("Gmail approval payload is invalid.")
     request = gmail_operation_request("users.messages.send", {}, _gmail_raw_message_resource(google_email, draft))
-    return {"status": "success_executed", "response": execute_gmail_api_request(access_token, request), "message": "Gmail message sent after approval."}
+    return {"response": execute_gmail_api_request(access_token, request), "message": "Gmail message sent after approval."}
 
 
 def _verify_draft_matches_approval(access_token: str, draft_id: str, approved_draft: JSONObject) -> None:
@@ -1048,15 +1221,15 @@ def _execute_draft_approval(action_type: str, access_token: str, google_email: s
         # Surface the resulting draft id in the user-visible message so the agent
         # can reference the object it just created/updated.
         new_draft_id = string_value(response, ("id",)) or draft_id
-        return {"status": "success_executed", "response": response, "message": f"{verb} Gmail draft {new_draft_id}."}
+        return {"response": response, "message": f"{verb} Gmail draft {new_draft_id}."}
     if action_type == GMAIL_DRAFT_ACTION_TYPES_BY_TOOL_ACTION["send"]:
         _verify_draft_matches_approval(access_token, draft_id, json_object(proposal.get("currentDraft")))
         response = execute_gmail_api_request(access_token, gmail_operation_request("users.drafts.send", {}, {"id": draft_id}))
         sent_id = string_value(response, ("id",))
-        return {"status": "success_executed", "response": response, "message": f"Sent Gmail message {sent_id}." if sent_id else "Sent the Gmail draft."}
+        return {"response": response, "message": f"Sent Gmail message {sent_id}." if sent_id else "Sent the Gmail draft."}
     if action_type == GMAIL_DRAFT_ACTION_TYPES_BY_TOOL_ACTION["delete"]:
         _verify_draft_matches_approval(access_token, draft_id, json_object(proposal.get("currentDraft")))
-        return {"status": "success_executed", "response": execute_gmail_api_request(access_token, gmail_operation_request("users.drafts.delete", {"id": draft_id})), "message": f"Deleted Gmail draft {draft_id}."}
+        return {"response": execute_gmail_api_request(access_token, gmail_operation_request("users.drafts.delete", {"id": draft_id})), "message": f"Deleted Gmail draft {draft_id}."}
     raise RuntimeError("Gmail draft approval payload is invalid.")
 
 
@@ -1080,7 +1253,7 @@ def _execute_request_approval(access_token: str, proposal: JSONObject) -> JSONOb
     request = proposal.get("request")
     if not isinstance(request, dict):
         raise RuntimeError("Gmail approval payload is invalid.")
-    return {"status": "success_executed", "response": execute_gmail_api_request(access_token, cast(JSONObject, request)), "message": "Gmail action completed after approval."}
+    return {"response": execute_gmail_api_request(access_token, cast(JSONObject, request)), "message": "Gmail action completed after approval."}
 
 
 class GmailTool:
@@ -1141,13 +1314,13 @@ class GmailTool:
     def _execute_read(self, action: str, tool_input: JSONObject, access_token: str, api: HostAPI) -> JSONObject:
         if action == "search_messages":
             query_text = _gmail_search_query(tool_input, api)
-            return {"status": "success_executed", "message": "Gmail messages searched.", "query": query_text, "messages": cast(list[JSONValue], gmail_search_messages(access_token, query_text))}
+            return {"message": "Gmail messages searched.", "query": query_text, "messages": cast(list[JSONValue], gmail_search_messages(access_token, query_text))}
         if action == "read_message":
             if set(tool_input) - {"message_id"}:
                 raise ToolInputValidationError("Gmail read message only supports message_id.")
             message_id = _direct_provider_token(tool_input, "message_id", api)
             response = execute_gmail_api_request(access_token, gmail_operation_request("users.messages.get", {"id": message_id, "format": "full"}))
-            return {"status": "success_executed", "message": "Gmail message loaded.", "gmailMessage": gmail_readable_message(response)}
+            return {"message": "Gmail message loaded.", "gmailMessage": gmail_readable_message(response)}
         if action == "read_thread":
             thread_id = _direct_provider_token(tool_input, "thread_id", api)
             response = execute_gmail_api_request(access_token, gmail_operation_request("users.threads.get", {"id": thread_id, "format": "metadata", "metadataHeaders": ["From", "To", "Cc", "Bcc", "Subject", "Date"]}))
@@ -1167,10 +1340,10 @@ class GmailTool:
                 thread["messageIndexLimit"] = GMAIL_THREAD_MESSAGE_INDEX_MAX_RESULTS
                 thread["messageIndexOriginalCount"] = len(messages)
                 thread["messageIndexOmittedCount"] = len(messages) - GMAIL_THREAD_MESSAGE_INDEX_MAX_RESULTS
-            return {"status": "success_executed", "message": "Gmail thread message list loaded.", "thread": thread}
+            return {"message": "Gmail thread message list loaded.", "thread": thread}
         if action == "list_labels":
             response = execute_gmail_api_request(access_token, gmail_operation_request("users.labels.list", {}))
-            return {"status": "success_executed", "message": "Gmail labels loaded.", "labels": gmail_label_list_summary(response)}
+            return {"message": "Gmail labels loaded.", "labels": gmail_label_list_summary(response)}
         if action == "list_drafts":
             parameters = _draft_list_parameters(tool_input, api)
             response = execute_gmail_api_request(access_token, gmail_operation_request("users.drafts.list", parameters))
@@ -1193,7 +1366,7 @@ class GmailTool:
                     # Never return a cursor that the same action would reject
                     # when the agent submits it for the next page.
                     pass
-            return {"status": "success_executed", "message": "Gmail drafts loaded.", "drafts": normalized}
+            return {"message": "Gmail drafts loaded.", "drafts": normalized}
         raise ToolInputValidationError("Unsupported Gmail read action.")
 
     def _proposal(self, action: str, tool_input: JSONObject, api: HostAPI, access_token: str) -> tuple[JSONObject, str]:

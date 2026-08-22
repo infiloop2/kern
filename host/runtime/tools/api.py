@@ -214,7 +214,14 @@ def _list_bundled_tools(tool_input: Any) -> dict[str, Any]:
 
 
 def _describe_tool(tool_input: Any) -> dict[str, Any]:
-    """One bundled tool's actions with their full input schemas.
+    """One bundled tool's actions with their full input and output schemas.
+
+    The output schema is what the agent gets back, so it belongs next to the
+    input schema: it says which fields a result carries and what each means,
+    which is how the agent plans the call after this one without running the
+    action to find out. It is present only for actions that return a JSON
+    result; an approval-gated action and one that returns a file both carry no
+    output schema, which the approval field and the description already state.
 
     Agent guidance is not repeated here: agent_notes is one field per tool and
     the catalog already carried it."""
@@ -239,6 +246,7 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
                     "description": spec.description,
                     "approval": spec.approval,
                     "input_schema": spec.input_schema,
+                    **({"output_schema": spec.output_schema} if spec.output_schema else {}),
                 }
                 for spec in manifest.actions
             ],

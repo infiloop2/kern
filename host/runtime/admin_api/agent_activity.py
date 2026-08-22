@@ -116,4 +116,6 @@ def normalize_record(value: Any) -> dict[str, Any] | None:
     )
     if value.get("append_output") is True:
         normalized["append_output"] = True
+    if value.get("append_detail") is True:
+        normalized["append_detail"] = True
     return normalized

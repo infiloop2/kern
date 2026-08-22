@@ -25,7 +25,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from host.session_options import public_session_options
-from tests.smoke.smoke_aws import SMOKE_RUNTIMES
 from tests.stage.stage_bedrock_checks import StageBedrockChecks
 from tests.stage.stage_integration_checks import ALL_RUNTIMES_SUITE, StageIntegrationChecks
 from tests.stage.stage_tool_checks import StageToolChecks
@@ -46,8 +45,9 @@ from tests.stage.stage_support import (
 )
 
 # The operator-selectable suites: everything stage_support knows, plus the
-# all_runtimes convenience suite that runs the three runtime suites at once.
+# all_runtimes convenience suite that runs the four runtime suites at once.
 STAGE_SUITE_CHOICES = (STAGE_SUITES[0], ALL_RUNTIMES_SUITE, *STAGE_SUITES[1:])
+STAGE_CHAT_RUNTIMES = ("codex", "claude_code", "grok", "hermes")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,13 +73,13 @@ def main(argv: list[str] | None = None) -> int:
         choices=STAGE_SUITE_CHOICES,
         default="all",
         help=(
-            "Which test suite to run. 'claude', 'codex', 'hermes', or 'github' run that integration's "
-            "checks only (plus the shared preamble); 'all_runtimes' runs the Codex, Claude Code, AND "
+            "Which test suite to run. 'claude', 'codex', 'grok', 'hermes', or 'github' run that integration's "
+            "checks only (plus the shared preamble); 'all_runtimes' runs the Codex, Claude Code, Grok, and "
             "Hermes runtime checks in one invocation; each bundled tool id runs that tool's "
             "live check; 'all' (default) checks credentials for every integration first, "
             "skips unavailable integrations, and runs every available integration "
             "independently. A focused suite still fails when its required credential is absent "
-            "('all_runtimes' fails when any of the three runtimes is unavailable, but still runs "
+            "('all_runtimes' fails when any of the four runtimes is unavailable, but still runs "
             "the available ones)."
         ),
     )
@@ -100,6 +100,9 @@ def main(argv: list[str] | None = None) -> int:
         # secrets when present, so the GitHub checks need no manual operator
         # setup. A no-op when the secrets are absent or GitHub is out of scope.
         stage.autoconfigure_github(suite)
+        # xAI has no CI credential: enable its managed integration before
+        # preflight, then use the operator-completed login retained by stage.
+        stage.prepare_grok_integration(suite)
         stage.autoconfigure_tools(selected_tools)
         availability = stage.integration_availability(suite)
         unavailable = {name: reason for name, reason in availability.items() if reason is not None}
@@ -122,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             for integration, runtime in (
                 ("codex", "codex"),
                 ("claude", "claude_code"),
+                ("grok", "grok"),
                 ("hermes", "hermes"),
             )
             if availability.get(integration) is None and integration in availability
@@ -172,6 +176,23 @@ def main(argv: list[str] | None = None) -> int:
 
             if _record_check(report, "claude", check_claude, "guards, MCP catalog, turns, steering, and stop recovery"):
                 passed_runtimes.append("claude_code")
+        if availability.get("grok") is None and "grok" in availability:
+            def check_grok() -> None:
+                stage.agent_runtime = "grok"
+                stage.check_grok_connection_and_guards()
+                stage.check_grok_task()
+                stage.check_agent_mcp_catalog("grok")
+                stage.check_agent_workspace_mcp("grok")
+                stage.check_agent_steering()
+                stage.check_agent_kill_and_thread_survival()
+
+            if _record_check(
+                report,
+                "grok",
+                check_grok,
+                "auth, guards, ACP turns/resume, MCP catalog/Workspace identity, steering, and stop recovery",
+            ):
+                passed_runtimes.append("grok")
         if availability.get("hermes") is None and "hermes" in availability:
             def check_hermes() -> None:
                 stage.agent_runtime = "hermes"
@@ -230,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
         if suite == "all":
-            if passed_runtimes == list(SMOKE_RUNTIMES):
+            if passed_runtimes == list(STAGE_CHAT_RUNTIMES):
                 def check_cross_runtime() -> None:
                     stage.check_all_runtimes_active()
                     stage.check_agent_parallelism()
@@ -249,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
                     "Runtime interoperability",
                     "unavailable",
                     "skipped",
-                    "requires successful Codex, Claude Code, and Hermes integration checks",
+                    "requires successful Codex, Claude Code, Grok, and Hermes integration checks",
                 )
 
         if availability.get("github") is None and "github" in availability:
@@ -327,6 +348,9 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
 
     def enforcement_policy(self) -> dict:
         policy = super().enforcement_policy()
+        # Grok is an offered runtime; stage enables its provider while retaining
+        # the operator-completed subscription login on the persistent volume.
+        policy["network_integrations"]["xai"] = {"enabled": True}
         github = policy["network_integrations"]["github"]
         base_repos = [repo for repo in github["write_repositories"] if isinstance(repo, dict)]
         # Stage repositories (the CI-secret sandbox repo, or the operator's) go
@@ -664,6 +688,7 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
             f"{agent_base}/messages",
             {
                 "input_message": (
+                    "The emergency release reversal procedure is filed in the blue binder. "
                     f"Remember marker {history_probe}, then reply with exactly "
                     "STAGE_AGENT_CHAT_OK. Do not use tools."
                 ),
@@ -819,6 +844,34 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
         if match is None or not isinstance(match.get("event_id"), str):
             raise AssertionError(
                 f"conversation search did not find the unique retained user message: {search}"
+            )
+
+        semantic_query = "Where is the plan for undoing a failed production launch?"
+        semantic_deadline = time.time() + 90
+        semantic_search: dict = {}
+        while time.time() < semantic_deadline:
+            semantic_search = self._shim_tool_result(
+                "search_conversation_history",
+                {"query": semantic_query, "roles": ["user"], "limit": 5},
+            )
+            semantic_matches = semantic_search.get("matches")
+            semantic_match = next(
+                (
+                    item
+                    for item in semantic_matches
+                    if isinstance(item, dict)
+                    and item.get("thread_id") == thread_id
+                    and probe in str(item.get("excerpt") or "")
+                ),
+                None,
+            ) if isinstance(semantic_matches, list) else None
+            if semantic_search.get("search_mode") == "hybrid" and semantic_match is not None:
+                break
+            time.sleep(2)
+        else:
+            raise AssertionError(
+                "conversation semantic index did not retrieve the paraphrased retained "
+                f"message within 90s: {semantic_search}"
             )
 
         read_arguments = {
@@ -1026,17 +1079,19 @@ class StageAwsSmoke(StageToolChecks, StageBedrockChecks, StageIntegrationChecks)
     @staticmethod
     def suite_runtimes(suite: str) -> tuple[str, ...]:
         """Provider runtimes the selected suite exercises (and therefore needs
-        available). 'github' and tool suites need none; 'all' and
-        'all_runtimes' need all three."""
+        available). 'all_runtimes' covers all four thread-capable runtimes,
+        while 'github' and tool suites need none."""
         if suite == "codex":
             return ("codex",)
         if suite == "claude":
             return ("claude_code",)
         if suite == "hermes":
             return (suite,)
+        if suite == "grok":
+            return (suite,)
         if suite == "github" or suite in TOOL_SUITES:
             return ()
-        return SMOKE_RUNTIMES
+        return STAGE_CHAT_RUNTIMES
 
     def check_agent_file_explorer(self) -> None:
         self._step("agent file explorer API on real agent home")

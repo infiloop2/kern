@@ -49,6 +49,11 @@ DEFAULT_PROXY_STATE_DIR = Path("/mnt/kern-admin/proxy-state")
 #   (turn admission, steer delivery, stop, finish). Nothing enters mutation()
 #   while holding it — keep it that way, or the lock graph grows a cycle.
 _MUTATION_LOCK = threading.RLock()
+# Set by a transaction that enqueues embedding work. The indexer waits on this
+# instead of polling every five seconds. It is a plain wakeup, not a work count:
+# the queue table is the durable record, and the indexer also wakes on a slower
+# periodic backstop.
+conversation_embedding_work = threading.Event()
 # Conversation history gets a deeper retained window than the high-volume
 # network and tool audit logs. Each log prunes every PRUNE_EVERY appends so
 # the cost stays amortized.
@@ -56,6 +61,18 @@ AGENT_EVENT_LIMIT = 10_000_000
 NETWORK_EVENT_LIMIT = 1_000_000
 TOOL_EVENT_LIMIT = 1_000_000
 PRUNE_EVERY = 500
+# Vectors are substantially larger than their source rows and share the 16 GiB
+# admin volume with all PostgreSQL state. Keep a quota over conversation
+# messages themselves: high-volume activity/lifecycle events must not consume
+# semantic-history capacity.
+CONVERSATION_EMBEDDING_MESSAGE_LIMIT = 250_000
+# Computing the source-message floor walks one bounded partial index. Amortize
+# that work across embedding batches; at MAX_TEXTS=8 this permits at most 800
+# newly indexed messages beyond the target before the next trim.
+CONVERSATION_EMBEDDING_PRUNE_EVERY_BATCHES = 100
+# A message the encoder cannot handle is abandoned after this many tries rather
+# than reclaimed forever, which would stall every newer message behind it.
+CONVERSATION_EMBEDDING_MAX_ATTEMPTS = 5
 # Bound each stored message, not just the row count: a pathological multi-
 # megabyte streamed message would otherwise grow durable Postgres storage far
 # past the apparent AGENT_EVENT_LIMIT cap. The bound sits well above any normal
@@ -766,6 +783,15 @@ def read_claude_account(cur: Any = None) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def save_xai_account(account: dict[str, Any] | None, cur: Any = None) -> None:
+    _save_provider_account("xai", account or {}, cur)
+
+
+def read_xai_account(cur: Any = None) -> dict[str, Any]:
+    value = _read_provider_account("xai", cur)
+    return value if isinstance(value, dict) else {}
+
+
 def save_bedrock_account(account: dict[str, Any] | None, cur: Any = None) -> None:
     """Cache the AWS-attested identity for Hermes."""
     _save_provider_account("bedrock", account or {}, cur)
@@ -950,6 +976,20 @@ def append_agent_event(
         (utc_now(), event_type, thread_id, run_number, *values),
     )
     seq = int(cur.fetchone()[0])
+    if event_type == "thread.message" and payload.get("message") is not None:
+        # Enqueue in the same transaction that writes the event, so the indexer
+        # never has to rediscover outstanding work by scanning the retention
+        # window. Nothing is lost if this transaction rolls back.
+        cur.execute(
+            "INSERT INTO conversation_embedding_queue (event_seq) VALUES (%s)"
+            " ON CONFLICT DO NOTHING",
+            (seq,),
+        )
+        # This is only a latency hint; the queue is the durable source of truth
+        # and the indexer has a 30-second backstop. Waking before commit can
+        # cause one harmless empty claim, while plumbing callback state through
+        # every event-writing mutation would make this optimization invasive.
+        conversation_embedding_work.set()
     counter = None
     if event_type == "thread.activity":
         counter = _AGENT_HISTORY_COUNTERS["activities"]
@@ -1017,6 +1057,7 @@ def prune_event_logs(cur: Any) -> None:
         ("tool_events", TOOL_EVENT_LIMIT),
     ):
         _prune_events(cur, table, limit)
+    prune_conversation_embeddings(cur)
 
 
 def page_agent_events_before(
@@ -1170,15 +1211,26 @@ def search_thread_messages(
     sources: tuple[str, ...],
     limit: int,
     before: tuple[float, int] | tuple[str, int] | None,
+    max_seq: int | None = None,
+    exclude_seqs: tuple[int, ...] = (),
 ) -> list[dict[str, Any]]:
     """Search retained thread messages with indexed relevance or time paging.
 
     Natural-language variants are ORed into one ``tsquery``. The caller owns
     validation and cursor mode; this accessor keeps every filter parameterized
     and returns one extra row when asked so it never needs to count all hits.
+    ``exclude_seqs`` drops messages a caller has already delivered by another
+    ranking, so a bounded walk can span both without repeating a hit.
     """
     clauses = ["events.event_type = 'thread.message'", "events.message IS NOT NULL"]
     params: list[Any] = []
+    if exclude_seqs:
+        placeholders = ", ".join("%s" for _ in exclude_seqs)
+        clauses.append(f"events.seq NOT IN ({placeholders})")
+        params.extend(exclude_seqs)
+    if max_seq is not None:
+        clauses.append("events.seq <= %s")
+        params.append(max_seq)
     if thread_id is not None:
         clauses.append("events.thread_id = %s")
         params.append(thread_id)
@@ -1273,6 +1325,297 @@ def search_thread_messages(
             result_thread_id,
             source,
             search_rank,
+            excerpt,
+            excerpt_truncated,
+        ) in rows
+    ]
+
+
+def unembedded_thread_messages(limit: int) -> list[tuple[int, str]]:
+    """Claim the newest outstanding messages from the embedding queue.
+
+    Reads only queued work, so a caught-up indexer scans an empty table rather
+    than walking the whole retention window to prove there is nothing to do.
+    One message inference keeps rejecting must not wedge every newer message
+    behind it, so exhausted rows are removed from the queue.
+    """
+    with mutation() as cur:
+        cur.execute(
+            "SELECT queue.event_seq, events.message"
+            " FROM conversation_embedding_queue AS queue"
+            " JOIN agent_events AS events ON events.seq = queue.event_seq"
+            " WHERE events.message IS NOT NULL"
+            " ORDER BY queue.event_seq DESC LIMIT %s",
+            (limit,),
+        )
+        rows = cur.fetchall()
+    return [(int(seq), str(message)) for seq, message in rows]
+
+
+def conversation_search_snapshot() -> tuple[int, int, int, int]:
+    """Stable source/vector boundaries for one relevance-search walk."""
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT COALESCE(MIN(seq), 0), COALESCE(MAX(seq), 0),"
+            " COALESCE((SELECT MIN(event_seq)"
+            " FROM conversation_message_embeddings), 0), COALESCE(("
+            " SELECT embedding_generation FROM conversation_search_state"
+            " WHERE singleton = TRUE), 0)"
+            " FROM agent_events"
+        )
+        row = cur.fetchone()
+    if row is None:
+        return 0, 0, 0, 0
+    return int(row[0]), int(row[1]), int(row[2]), int(row[3])
+
+
+def conversation_search_retention() -> tuple[int, int]:
+    """Current source and vector floors used to expire positional cursors."""
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT COALESCE(MIN(seq), 0), COALESCE(("
+            " SELECT MIN(event_seq) FROM conversation_message_embeddings), 0)"
+            " FROM agent_events"
+        )
+        row = cur.fetchone()
+    return (int(row[0]), int(row[1])) if row is not None else (0, 0)
+
+
+def record_embedding_attempts(seqs: list[int]) -> None:
+    """Charge one failed attempt and drop rows that exhaust their retry budget."""
+    if not seqs:
+        return
+    placeholders = ", ".join("%s" for _ in seqs)
+    with mutation() as cur:
+        cur.execute(
+            "UPDATE conversation_embedding_queue"
+            " SET attempts = attempts + 1, last_attempt_at = clock_timestamp()"
+            f" WHERE event_seq IN ({placeholders})",
+            tuple(seqs),
+        )
+        cur.execute(
+            "DELETE FROM conversation_embedding_queue WHERE attempts >= %s",
+            (CONVERSATION_EMBEDDING_MAX_ATTEMPTS,),
+        )
+
+
+def store_thread_message_embeddings(
+    model: str,
+    rows: list[tuple[int, list[float]]],
+) -> None:
+    """Upsert one inference batch without keeping inference inside a DB transaction."""
+    if not rows:
+        return
+    event_seqs = [seq for seq, _embedding in rows]
+    placeholders = ", ".join("%s" for _ in event_seqs)
+    with mutation() as cur:
+        # The singleton-row update serializes batches. A search snapshot sees
+        # only a committed generation, so a batch that commits later cannot
+        # enter an in-progress fused result set.
+        cur.execute(
+            "INSERT INTO conversation_search_state"
+            " (singleton, embedding_generation) VALUES (TRUE, 1)"
+            " ON CONFLICT (singleton) DO UPDATE SET embedding_generation ="
+            " conversation_search_state.embedding_generation + 1"
+            " RETURNING embedding_generation"
+        )
+        generation_row = cur.fetchone()
+        if generation_row is None:
+            raise RuntimeError("conversation embedding generation was not returned")
+        embedding_generation = int(generation_row[0])
+        for seq, embedding in rows:
+            literal = "[" + ",".join(format(value, ".9g") for value in embedding) + "]"
+            cur.execute(
+                "INSERT INTO conversation_message_embeddings"
+                " (event_seq, model, embedding, embedding_generation)"
+                " SELECT seq, %s, %s::vector, %s FROM agent_events"
+                " WHERE seq = %s AND event_type = 'thread.message'"
+                " AND message IS NOT NULL"
+                " ON CONFLICT (event_seq) DO UPDATE SET"
+                " model = EXCLUDED.model, embedding = EXCLUDED.embedding,"
+                " embedding_generation = EXCLUDED.embedding_generation,"
+                " embedded_at = clock_timestamp()",
+                (model, literal, embedding_generation, seq),
+            )
+        # Drain what was just stored. A row whose event vanished mid-batch
+        # inserts nothing above, and dropping it here keeps the queue from
+        # retrying work that no longer has a source message.
+        cur.execute(
+            "DELETE FROM conversation_embedding_queue"
+            f" WHERE event_seq IN ({placeholders})",
+            tuple(event_seqs),
+        )
+        prune_conversation_embeddings(cur, embedding_generation)
+
+
+def prune_conversation_embeddings(
+    cur: Any,
+    embedding_generation: int | None = None,
+) -> int:
+    """Keep vectors/queued work for only the newest source-message quota."""
+    if (
+        embedding_generation is not None
+        and embedding_generation % CONVERSATION_EMBEDDING_PRUNE_EVERY_BATCHES != 0
+    ):
+        return 0
+    # OFFSET is backed by agent_events_message_seq_idx. The selected row is the
+    # first message outside the retained newest-N set; NULL means the source has
+    # not reached the quota yet.
+    floor_sql = (
+        "SELECT seq FROM agent_events"
+        " WHERE event_type = 'thread.message' AND message IS NOT NULL"
+        " ORDER BY seq DESC OFFSET %s LIMIT 1"
+    )
+    cur.execute(
+        "DELETE FROM conversation_message_embeddings WHERE event_seq <= ("
+        + floor_sql
+        + ")"
+        " RETURNING event_seq",
+        (CONVERSATION_EMBEDDING_MESSAGE_LIMIT,),
+    )
+    pruned = len(cur.fetchall())
+    # Drop queued work outside the same source-message quota. Without this, a
+    # long inference outage could leave obsolete backlog rows queued forever.
+    cur.execute(
+        "DELETE FROM conversation_embedding_queue WHERE event_seq <= ("
+        + floor_sql
+        + ")",
+        (CONVERSATION_EMBEDDING_MESSAGE_LIMIT,),
+    )
+    return pruned
+
+
+def thread_messages_by_seqs(
+    seqs: tuple[int, ...],
+    *,
+    from_timestamp: str | None,
+    to_timestamp: str | None,
+    thread_id: str | None,
+    sources: tuple[str, ...],
+    max_seq: int,
+) -> list[dict[str, Any]]:
+    """Fetch filtered source rows in a previously frozen semantic order."""
+    if not seqs or not sources:
+        return []
+    placeholders = ", ".join("%s" for _ in seqs)
+    source_placeholders = ", ".join("%s" for _ in sources)
+    clauses = [
+        "event_type = 'thread.message'",
+        "message IS NOT NULL",
+        f"seq IN ({placeholders})",
+        "seq <= %s",
+        f"source IN ({source_placeholders})",
+    ]
+    params: list[Any] = [*seqs, max_seq, *sources]
+    if thread_id is not None:
+        clauses.append("thread_id = %s")
+        params.append(thread_id)
+    if from_timestamp is not None:
+        clauses.append("created_at >= %s")
+        params.append(from_timestamp)
+    if to_timestamp is not None:
+        clauses.append("created_at < %s")
+        params.append(to_timestamp)
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT seq, created_at, thread_id, source,"
+            " LEFT(message, 4096), message <> LEFT(message, 4096)"
+            f" FROM agent_events WHERE {' AND '.join(clauses)}",
+            tuple(params),
+        )
+        rows = cur.fetchall()
+    by_seq = {
+        int(seq): {
+            "seq": int(seq),
+            "event_id": f"event_{seq}",
+            "timestamp": str(created_at),
+            "thread_id": str(thread_id),
+            "source": str(source),
+            "search_rank": 0.0,
+            "excerpt": str(excerpt),
+            "excerpt_truncated": bool(excerpt_truncated),
+        }
+        for seq, created_at, thread_id, source, excerpt, excerpt_truncated in rows
+    }
+    return [by_seq[seq] for seq in seqs if seq in by_seq]
+
+
+def search_thread_messages_semantic(
+    embedding: list[float],
+    model: str,
+    *,
+    from_timestamp: str | None,
+    to_timestamp: str | None,
+    thread_id: str | None,
+    sources: tuple[str, ...],
+    limit: int,
+    minimum_similarity: float,
+    max_seq: int | None = None,
+    max_embedding_generation: int | None = None,
+) -> list[dict[str, Any]]:
+    """Nearest indexed message vectors under the same filters as text search."""
+    clauses = ["embeddings.model = %s"]
+    params: list[Any] = [model]
+    if max_seq is not None:
+        clauses.append("events.seq <= %s")
+        params.append(max_seq)
+    if max_embedding_generation is not None:
+        clauses.append("embeddings.embedding_generation <= %s")
+        params.append(max_embedding_generation)
+    if thread_id is not None:
+        clauses.append("events.thread_id = %s")
+        params.append(thread_id)
+    if from_timestamp is not None:
+        clauses.append("events.created_at >= %s")
+        params.append(from_timestamp)
+    if to_timestamp is not None:
+        clauses.append("events.created_at < %s")
+        params.append(to_timestamp)
+    if not sources:
+        return []
+    placeholders = ", ".join(["%s"] * len(sources))
+    clauses.append(f"events.source IN ({placeholders})")
+    params.extend(sources)
+    literal = "[" + ",".join(format(value, ".9g") for value in embedding) + "]"
+    sql = (
+        "WITH query_embedding AS (SELECT %s::vector AS value),"
+        " nearest AS MATERIALIZED ("
+        " SELECT events.seq, events.created_at, events.thread_id, events.source,"
+        " 1 - (embeddings.embedding <=> query_embedding.value) AS similarity,"
+        " LEFT(events.message, 4096) AS excerpt,"
+        " events.message <> LEFT(events.message, 4096) AS excerpt_truncated"
+        " FROM conversation_message_embeddings AS embeddings"
+        " JOIN agent_events AS events ON events.seq = embeddings.event_seq"
+        " CROSS JOIN query_embedding"
+        f" WHERE {' AND '.join(clauses)}"
+        " ORDER BY embeddings.embedding <=> query_embedding.value, events.seq DESC"
+        " LIMIT %s"
+        ") SELECT seq, created_at, thread_id, source, similarity, excerpt, excerpt_truncated"
+        " FROM nearest WHERE similarity >= %s"
+        " ORDER BY similarity DESC, seq DESC"
+    )
+    with db.transaction() as cur:
+        cur.execute("SET LOCAL hnsw.ef_search = 100")
+        cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+        cur.execute(sql, (literal, *params, limit, minimum_similarity))
+        rows = cur.fetchall()
+    return [
+        {
+            "seq": int(seq),
+            "event_id": f"event_{seq}",
+            "timestamp": str(created_at),
+            "thread_id": str(result_thread_id),
+            "source": str(source),
+            "search_rank": float(similarity),
+            "excerpt": str(excerpt),
+            "excerpt_truncated": bool(excerpt_truncated),
+        }
+        for (
+            seq,
+            created_at,
+            result_thread_id,
+            source,
+            similarity,
             excerpt,
             excerpt_truncated,
         ) in rows
@@ -1569,6 +1912,22 @@ def save_proxy_claude_account_id(account_id: str | None, cur: Any = None) -> Non
 def read_proxy_claude_account_id() -> str | None:
     value = _read_proxy_pin("claude").get("account_id")
     return value if isinstance(value, str) and value else None
+
+
+def save_proxy_xai_account_id(account_id: str | None, cur: Any = None) -> None:
+    _save_proxy_account_id("xai", account_id, cur)
+
+
+def read_proxy_xai_account_id() -> str | None:
+    value = _read_proxy_pin("xai").get("account_id")
+    return value if isinstance(value, str) and value else None
+
+
+def read_proxy_xai_status_probe_account_id() -> str | None:
+    with db.transaction() as cur:
+        cur.execute("SELECT account_id FROM xai_status_probe_pin")
+        row = cur.fetchone()
+    return str(row[0]) if row and row[0] else None
 
 
 _bedrock_proxy_credential_cache: tuple[str, str, str, str] | None = None

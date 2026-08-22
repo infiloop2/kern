@@ -156,6 +156,12 @@ def main() -> int:
         daemon=True,
     )
     agent_thread.start()
+    memory_embedding_thread = threading.Thread(
+        target=memory.embedding_index_loop,
+        name="workspace-memory-embedding-index",
+        daemon=True,
+    )
+    memory_embedding_thread.start()
     scheduler = threading.Thread(
         target=schedules.scheduler_loop, name="workspace-scheduler", daemon=True
     )

@@ -219,6 +219,7 @@ function renderRuntimeOverview() {
   const boxes = [
     subscriptionSummary("codex"),
     subscriptionSummary("claude_code"),
+    grokSummary("grok"),
     bedrockSummary("hermes", bedrockAccount),
   ].join("");
   // The collapsed pill carries the one live signal worth reading at a glance —
@@ -294,6 +295,46 @@ function subscriptionSummary(runtime) {
         ${windows.fableWeekly ? usageRing(windows.fableWeekly.label, windows.fableWeekly) : ""}`;
   const usageSummaryText = `${usageSummary("5 hour", windows.fiveHour)}; ${usageSummary("weekly", windows.weekly)}${modelSummary}`;
   return runtimeSummaryCard(runtime, usageHtml, usageSummaryText);
+}
+
+// Grok draws one ring, not two: its subscription has a single billing period
+// rather than a rolling short window plus a weekly one. The percentage is
+// frequently absent — xAI omits it on a unified-billing subscription — and the
+// ring already renders an absent value as "--" / unavailable, which is the
+// honest reading. It is never substituted with zero.
+function grokSummary(runtime) {
+  const account = latestAccounts.find(entry => entry.agent_runtime === runtime) || {};
+  const usage = account.grok_usage || {};
+  const periods = {
+    daily: { label: "day", summary: "daily" },
+    weekly: { label: "wk", summary: "weekly" },
+    monthly: { label: "mo", summary: "monthly" },
+  };
+  const period = periods[usage.period_type] || periods.weekly;
+  const window = { usedPercent: usage.usage_percent, resetsAt: usage.resets_at };
+  if (window.usedPercent === undefined || window.usedPercent === null) {
+    // Not "unknown this poll" — xAI publishes no pool figure at all on a
+    // subscription account, so an empty ring would imply a number is coming.
+    // A neutral note says so once instead, and is deliberately not styled as a
+    // warning: nothing is wrong.
+    return runtimeSummaryCard(runtime, usageUnavailableNote(), UNAVAILABLE_USAGE_TEXT);
+  }
+  return runtimeSummaryCard(runtime, usageRing(period.label, window), usageSummary(period.summary, window));
+}
+
+const UNAVAILABLE_USAGE_TEXT = "usage monitoring is not available for Grok";
+
+// A muted glyph rather than a ring. Same footprint as a ring so the toolbar
+// height and alignment are unchanged.
+function usageUnavailableNote() {
+  return `
+    <span class="usage-note" role="img" tabindex="0" aria-label="${esc(UNAVAILABLE_USAGE_TEXT)}" title="${esc(UNAVAILABLE_USAGE_TEXT)}">
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <circle cx="10" cy="10" r="8.5"></circle>
+        <text x="10" y="10">i</text>
+      </svg>
+      <span class="usage-window">n/a</span>
+    </span>`;
 }
 
 // Hermes usage is pay-per-token, so the readout is a
@@ -411,9 +452,19 @@ function usageRing(label, window) {
     </span>`;
 }
 
+// The device-code runtimes: the provider shows the operator a code and polls
+// for approval itself, so the host has nothing to submit back. Claude is the
+// odd one out and keeps its own branch below.
+const DEVICE_LOGINS = {
+  codex: { provider: "openai", label: "Codex", path: "/v1/agent-runtime/codex-oauth-login" },
+  grok: { provider: "xai", label: "Grok", path: "/v1/agent-runtime/grok-oauth-login" },
+};
+
 async function showOauth(start, runtime) {
   if (runtime === "hermes") return; // no OAuth flow; credentials connect in the integration card
-  const provider = runtime === "claude_code" ? "claude" : "openai";
+  const device = DEVICE_LOGINS[runtime];
+  const provider = runtime === "claude_code" ? "claude" : device?.provider;
+  if (!provider) return;
   // The card target is re-queried after each await: the 5-second poll can
   // re-render the provider card while the request is in flight, and writing
   // into the detached old node would silently drop the login card.
@@ -430,11 +481,11 @@ async function showOauth(start, runtime) {
         <button class="primary sm" data-action="complete-claude-login">Submit code</button></div>`);
       return;
     }
-    const login = await api(start ? "POST" : "GET", "/v1/agent-runtime/codex-oauth-login");
+    const login = await api(start ? "POST" : "GET", device.path);
     const target = document.querySelector(`[data-provider-oauth="${provider}"]`);
     if (!target) return;
     setHtml(target, `<div class="oauth-card">
-      <span>Codex login: enter code <b>${esc(login.device_code)}</b> at
+      <span>${esc(device.label)} login: enter code <b>${esc(login.device_code)}</b> at
       <a href="${esc(login.login_url)}" target="_blank" rel="noopener noreferrer">${esc(login.login_url)}</a>
       <span class="muted">(expires ${esc(login.expires_at)})</span>
       <span class="muted">After approving in your browser, wait ~5 seconds for the status to update.</span></span></div>`);

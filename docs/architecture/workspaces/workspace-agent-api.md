@@ -23,7 +23,19 @@ POST /agent/conversation-history/search
 POST /agent/conversation-history/read
 ```
 
-Search returns bounded message excerpts and an opaque relevance/time cursor.
+Search returns bounded message excerpts, the active `search_mode`, and an opaque
+relevance/time cursor. Text queries automatically use local hybrid vector and
+full-text ranking; timestamp-only searches remain newest-first. The semantic
+index is derived asynchronously and lexical search remains the fallback.
+Conversation vectors cover only the newest 250,000 user/agent message rows;
+activity and lifecycle events do not consume the quota. Pruning is amortized
+across batches, allowing at most roughly 800 newly indexed messages of slack.
+Relevance cursors retain source-event/embedding cutoffs and the initial ordered
+semantic candidate ids, so later pages never rerun HNSW against a changing
+graph. They expire if
+source or vector retention advances. A new search may fall back to lexical
+ranking when the model is unavailable; once paging starts, its cursor keeps the
+ranking mode and frozen candidate set stable without requiring inference again.
 Read returns chronological, byte-bounded user/assistant messages and optional
 normalized activity summaries. It can open the latest page, page before or
 after an event cursor, or center context on a search hit. These routes can read
@@ -160,10 +172,18 @@ CRUD plus bounded recent failure summaries; the browser-only API exposes
 deleted resources, revision history, restoration, complete schedule run
 history, and retained host-thread events. Memory
 list/search responses are paginated and omit page bodies. Swarm page content
-may link to another swarm page as `[[page-id]]`; Kern derives links and
-backlinks without a separate graph store. Individual pages are excluded from
-all links and backlinks. Search uses PostgreSQL full-text ranking and does not
-send memory to an embedding service.
+may link to another swarm page as `[[page-id]]`; Kern maintains a derived link
+index without a separate graph database. Individual pages are excluded from
+all links and backlinks. Agent memory search combines exact page-id and
+description phrases, PostgreSQL full-text ranking, and local pgvector cosine
+ranking with bounded reciprocal-rank fusion. It then adds a low-weight,
+one-hop expansion over links and backlinks. Current pages are embedded
+asynchronously; lexical and weak/popular fallback remain available during
+backfill or model failure, and page content is never sent to a remote embedding
+provider. Search always returns current pages, so writes can still shift a
+best-effort cursor; however, a cursor keeps its initial hybrid or lexical-
+fallback ranking mode and asks the caller to retry if hybrid inference becomes
+unavailable instead of silently changing order.
 
 Schedule `PUT` replaces the complete definition. Runtime/model/effort values
 are stored as bounded strings and checked by the host only when a run starts;

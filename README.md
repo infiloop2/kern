@@ -507,11 +507,11 @@ curl -b cookies.txt -H "X-Kern-Csrf: 1" \
 ## Internals
 
 The host runs on an AWS EC2 instance or a local Lima VM. The admin API,
-network proxy, tools service, Workspace service, optional Cloudflare Tunnel
-connector, database, and agent runtime run as separate Linux users.
-Filesystem ownership, peer-authenticated local sockets, scoped database
-roles, and uid-based firewall rules keep the agent from getting direct
-network access or broad access to host state.
+network proxy, tools service, Workspace service, local embedding service,
+optional Cloudflare Tunnel connector, database, and agent runtime run as
+separate Linux users. Filesystem ownership, peer-authenticated local sockets,
+scoped database roles, and uid-based firewall rules keep the agent from
+getting direct network access or broad access to host state.
 
 For deeper details, see the
 [architecture documentation](docs/architecture/index.md).

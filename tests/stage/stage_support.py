@@ -18,14 +18,16 @@ STAGE_AGENT_NAME = "kern-stage"
 CHEAP_MODELS = {
     "codex": "gpt-5.6-luna",
     "claude_code": "claude-sonnet-5",
+    "grok": "grok-4.6",
     "hermes": "qwen.qwen3-coder-next",
 }
 CHEAP_EFFORT = "high"
 TOOL_SUITES = tuple(sorted(BUNDLED_TOOLS))
-STAGE_SUITES = ("all", *TOOL_SUITES, "claude", "codex", "hermes", "github")
+STAGE_SUITES = ("all", *TOOL_SUITES, "claude", "codex", "grok", "hermes", "github")
 RUNTIME_LABELS = {
     "codex": "Codex",
     "claude_code": "Claude Code",
+    "grok": "Grok",
     "hermes": "Hermes",
 }
 
@@ -36,6 +38,7 @@ CHECK_LABELS = {
     "claude": "Claude Code",
     "codex": "Codex",
     "github": "GitHub",
+    "grok": "Grok / xAI",
     "hermes": "Hermes",
     "bedrock": "AWS Bedrock",
     "runtime_interoperability": "Runtime interoperability",
@@ -189,7 +192,7 @@ def integration_label(integration: str) -> str:
 
 def selected_integrations(suite: str) -> tuple[str, ...]:
     if suite == "all":
-        return ("codex", "claude", "hermes", "github", *TOOL_SUITES)
+        return ("codex", "claude", "grok", "hermes", "github", *TOOL_SUITES)
     return (suite,)
 
 

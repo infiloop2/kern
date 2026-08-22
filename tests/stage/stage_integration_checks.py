@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import json
+from pathlib import Path
 import shlex
 import time
 from typing import TYPE_CHECKING
@@ -17,12 +20,12 @@ from tests.stage.stage_support import (
 )
 
 
-# The operator-facing suite that runs the Codex, Claude Code, and Hermes
-# runtime checks in one invocation (three focused suites otherwise). It is a
+# The operator-facing suite that runs all four chat runtimes in one invocation
+# (four focused suites otherwise). It is a
 # stage_aws CLI choice, not a stage_support suite: tool selection and
 # integration labels never see it.
 ALL_RUNTIMES_SUITE = "all_runtimes"
-RUNTIME_INTEGRATIONS = ("codex", "claude", "hermes")
+RUNTIME_INTEGRATIONS = ("codex", "claude", "grok", "hermes")
 
 
 class StageIntegrationChecks(AwsSmoke):
@@ -106,7 +109,7 @@ class StageIntegrationChecks(AwsSmoke):
         )
         for integration in selected:
             failures: list[str]
-            if integration in {"codex", "claude", "hermes"}:
+            if integration in {"codex", "claude", "grok", "hermes"}:
                 runtime = "claude_code" if integration == "claude" else integration
                 status = self._wait_for_runtime_status(
                     {"active", "awaiting_login", "deactivated", "error"},
@@ -198,7 +201,7 @@ class StageIntegrationChecks(AwsSmoke):
         print("  configuration snapshot:", flush=True)
         try:
             status = self._api("GET", "/v1/agent-runtime/status")
-            for runtime in SMOKE_RUNTIMES:
+            for runtime in (*SMOKE_RUNTIMES, "grok"):
                 try:
                     record = self.runtime_status_record(status, runtime)
                 except AssertionError:
@@ -254,6 +257,354 @@ class StageIntegrationChecks(AwsSmoke):
                 f"{runtime} runtime is {status}; manually open the stage admin UI, complete OAuth, then rerun stage"
             )
         print(f"    [provider status] runtime={runtime} status=active", flush=True)
+
+    def prepare_grok_integration(self, suite: str) -> None:
+        """Enable xAI before preflight without disturbing any other stage state.
+
+        Grok's credential is still an operator-completed device login stored on
+        the persistent volume. This only makes a first focused run settle at
+        ``awaiting_login`` (with useful setup guidance) rather than remaining
+        deactivated because an older stage policy predates the integration.
+        """
+        if suite not in {"all", ALL_RUNTIMES_SUITE, "grok"}:
+            return
+        controls = self._api("GET", "/v1/network/policy").get("network_controls") or {}
+        integrations = dict(controls.get("network_integrations") or {})
+        xai = integrations.get("xai")
+        if isinstance(xai, dict) and xai.get("enabled") is True:
+            return
+        integrations["xai"] = {"enabled": True}
+        controls["network_integrations"] = integrations
+        self._api("PUT", "/v1/network/policy", controls)
+        print("  [configured] xAI enabled; Grok web search is not offered", flush=True)
+
+    def check_grok_connection_and_guards(self) -> None:
+        """Exercise the live Grok connection and its complete proxy boundary.
+
+        The first half proves real ACP auth, entitlement, and billing. Synthetic
+        account-bound JWTs then drive every local proxy decision without
+        exposing the persistent OAuth token; the separate turn check exercises
+        real subscription inference through the runtime adapter.
+        """
+        self._step("Grok live connection, account binding, routes, and hosted-tool guards")
+        baseline_policy = self.enforcement_policy()
+        self._api("PUT", "/v1/network/policy", baseline_policy)
+        self.require_runtime_active("grok")
+
+        bootstrap = (Path(__file__).resolve().parents[2] / "host/bootstrap/bootstrap.sh").read_text(
+            encoding="utf-8"
+        )
+        version_line = next(
+            (line for line in bootstrap.splitlines() if line.startswith("GROK_CLI_VERSION=")),
+            "",
+        )
+        expected_version = version_line.partition("=")[2]
+        if not expected_version:
+            raise AssertionError("bootstrap does not declare GROK_CLI_VERSION")
+        cli_check = self._ssh_code(
+            "test \"$(stat -c '%U:%a' /usr/local/bin/grok)\" = root:755"
+            " && sudo -u kern-agent env HOME=/mnt/kern-agent/agent-home"
+            " GROK_HOME=/mnt/kern-agent/agent-home/.grok"
+            " /usr/local/bin/grok --version"
+            f" | grep -qF {shlex.quote(expected_version)}"
+            " && printf grok-cli-ok"
+        )
+        if cli_check != "grok-cli-ok":
+            raise AssertionError("the root-owned Grok CLI is missing, mutable, or not the pinned version")
+
+        for method in ("POST", "GET"):
+            code, _ = self._api_status(method, "/v1/agent-runtime/grok-oauth-login")
+            if code != 409:
+                raise AssertionError(
+                    f"{method} grok-oauth-login while active returned {code}, expected 409"
+                )
+
+        probe_baseline = max((event["seq"] for event in self._network_events()), default=0)
+        refreshed = self._api(
+            "POST", "/v1/agent-runtime/refresh", {"agent_runtime": "grok"}
+        )
+        account = next(
+            (
+                item
+                for item in refreshed.get("accounts", [])
+                if isinstance(item, dict) and item.get("agent_runtime") == "grok"
+            ),
+            {},
+        )
+        if (
+            account.get("status") != "active"
+            or account.get("provider") != "xai"
+            or not account.get("account_id")
+        ):
+            raise AssertionError(
+                "forced Grok provider probe did not return the approved active account: "
+                f"{self._account_shape(account)}"
+            )
+        self._assert_provider_metadata("grok", account)
+        account_id = str(account["account_id"])
+        probe_events = [
+            event
+            for event in self._network_events(since=probe_baseline)
+            if event.get("host") == "cli-chat-proxy.grok.com"
+        ]
+        decision_cursor = max(
+            [probe_baseline, *(int(event["seq"]) for event in probe_events)]
+        )
+        if not any(
+            event.get("decision") == "allowed" and event.get("path") == "/v1/user"
+            for event in probe_events
+        ):
+            raise AssertionError(f"forced Grok entitlement probe had no allowed /v1/user request: {probe_events}")
+        if not any(
+            event.get("decision") == "allowed" and event.get("path") == "/v1/billing"
+            for event in probe_events
+        ):
+            raise AssertionError(f"forced Grok usage probe had no allowed /v1/billing request: {probe_events}")
+        print(
+            "    [provider connection] runtime=grok auth=active entitlement=allowed "
+            "billing=allowed metadata=valid",
+            flush=True,
+        )
+
+        def encoded(value: dict[str, object]) -> str:
+            raw = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+            return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+        matching_claims = {
+            "sub": account_id,
+            "principal_id": account_id,
+            "principal_type": "User",
+        }
+        foreign_claims = {
+            "sub": account_id + "-foreign",
+            "principal_id": account_id + "-foreign",
+            "principal_type": "User",
+        }
+        matching_token = f"{encoded({'alg': 'RS256'})}.{encoded(matching_claims)}.stage"
+        foreign_token = f"{encoded({'alg': 'RS256'})}.{encoded(foreign_claims)}.stage"
+        matching_headers = [
+            ("Authorization", f"Bearer {matching_token}"),
+            ("Content-Type", "application/json"),
+        ]
+
+        def proxy_request(
+            *,
+            host: str = "cli-chat-proxy.grok.com",
+            path: str = "/v1/responses",
+            method: str = "POST",
+            headers: list[tuple[str, str]] | None = None,
+            body: str | None = "{}",
+        ) -> str:
+            header_args = " ".join(
+                f"-H {shlex.quote(f'{name}: {value}')}" for name, value in (headers or [])
+            )
+            data_arg = "" if body is None else f" --data-binary {shlex.quote(body)}"
+            proxy = f"http://127.0.0.1:{PROXY_PORT}"
+            return self._ssh_code(
+                f"sudo -u kern-agent env HTTPS_PROXY={proxy} "
+                f"curl -sS --path-as-is --max-time 20 -X {shlex.quote(method)} "
+                f"{header_args}{data_arg} {shlex.quote(f'https://{host}{path}')}"
+            )
+
+        # Start once, then advance after each request. Re-reading the complete
+        # retained audit log for every matrix row made this focused check
+        # quadratic in host age (about 17 minutes at 27,000 retained events).
+        def assert_decision(
+            label: str,
+            decision: str,
+            reason: str | None,
+            **request: object,
+        ) -> None:
+            nonlocal decision_cursor
+            host = str(request.get("host", "cli-chat-proxy.grok.com"))
+            path = str(request.get("path", "/v1/responses"))
+            method = str(request.get("method", "POST"))
+            # A disallowed host is rejected at CONNECT, before the proxy sees
+            # an inner HTTP method or path.
+            event_method = "CONNECT" if reason == "host_not_allowed" else method
+            event_path = "" if event_method == "CONNECT" else path
+            response = proxy_request(**request)  # type: ignore[arg-type]
+            events = [
+                event
+                for event in self._network_events(since=decision_cursor)
+                if event.get("host") == host
+                and event.get("path") == event_path
+                and event.get("method") == event_method
+            ]
+            decision_cursor = max(
+                [decision_cursor, *(int(event["seq"]) for event in events)]
+            )
+            matching = [event for event in events if event.get("decision") == decision]
+            if not matching:
+                raise AssertionError(f"{label} produced no {decision} proxy event: {events}")
+            observed_reason = matching[-1].get("reason_code")
+            if observed_reason != reason:
+                raise AssertionError(
+                    f"{label} recorded reason {observed_reason!r}, expected {reason!r}: {matching[-1]}"
+                )
+            # curl reports a rejected CONNECT on stderr without the proxy's
+            # reason body. The persisted event above is the exact-code proof.
+            if decision == "denied" and event_method != "CONNECT" and reason not in response:
+                raise AssertionError(f"{label} did not return {reason!r} to the client: {response!r}")
+
+        bearer_only = [("Authorization", f"Bearer {matching_token}"), ("Content-Type", "application/json")]
+        wrong_token = [
+            ("Authorization", f"Bearer {foreign_token}"),
+            ("Content-Type", "application/json"),
+        ]
+        duplicate_token = [
+            ("Authorization", f"Bearer {matching_token}"),
+            ("Authorization", f"Bearer {matching_token}"),
+            ("Content-Type", "application/json"),
+        ]
+
+        denial_cases: list[tuple[str, str, dict[str, object]]] = [
+            ("missing bearer", "xai_token_account_mismatch", {"headers": [("Content-Type", "application/json")]}),
+            ("foreign bearer", "xai_token_account_mismatch", {"headers": wrong_token}),
+            # The proxy rejects security-sensitive duplicate headers before a
+            # provider guard runs, so this correctly uses the global code.
+            ("duplicate bearer", "duplicate_header_denied", {"headers": duplicate_token}),
+            ("unsupported method", "network_policy_denied", {"headers": matching_headers, "method": "DELETE"}),
+            ("settings mutation", "network_policy_denied", {"headers": matching_headers, "path": "/v1/settings"}),
+            ("storage upload", "network_policy_denied", {"headers": matching_headers, "path": "/v1/storage/batch_upload"}),
+            ("session sync", "network_policy_denied", {"headers": matching_headers, "path": "/v1/sessions/register"}),
+            ("workspace sync", "network_policy_denied", {"headers": matching_headers, "path": "/v1/rest/workspaces"}),
+            ("path traversal", "network_policy_denied", {"headers": matching_headers, "path": "/v1/responses/../storage/batch_upload"}),
+            ("metered developer API", "host_not_allowed", {"headers": matching_headers, "host": "api.x.ai"}),
+            ("cloud session host", "host_not_allowed", {"headers": matching_headers, "host": "code.grok.com"}),
+            ("malformed JSON", "xai_body_not_json", {"headers": matching_headers, "body": "{not json"}),
+            ("undecodable body", "xai_body_undecodable", {"headers": matching_headers + [("Content-Encoding", "gzip")], "body": "not-gzip"}),
+            # Web search is denied with no policy that can turn it on. Both of
+            # xAI's ways of asking for one are covered, and the corpus named
+            # decides nothing because none is reachable.
+            ("Web search tool", "xai_web_search_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"web_search"}]}' }),
+            ("search parameters", "xai_web_search_denied", {"headers": matching_headers, "body": '{"search_parameters":{"mode":"on"}}'}),
+            ("web-source search parameters", "xai_web_search_denied", {"headers": matching_headers, "body": '{"search_parameters":{"mode":"auto","sources":[{"type":"web"}]}}'}),
+            ("news-source search parameters", "xai_web_search_denied", {"headers": matching_headers, "body": '{"search_parameters":{"mode":"on","sources":[{"type":"news"}]}}'}),
+            ("X search", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"x_search"}]}' }),
+            ("code execution", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"code_execution"}]}' }),
+            ("collections search", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"file_search"}]}' }),
+            ("remote MCP", "xai_remote_mcp_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"mcp","server_url":"https://example.com"}]}' }),
+            ("unknown hosted tool", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"future_hosted_thing"}]}' }),
+            ("untyped hosted tool", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"name":"future_hosted_thing"}]}' }),
+        ]
+        for label, reason, request in denial_cases:
+            assert_decision(label, "denied", reason, **request)
+
+        allowed_cases: list[tuple[str, dict[str, object]]] = [
+            (
+                "responses inference",
+                {"headers": bearer_only, "body": '{"model":"grok-code-fast-1","input":"stage"}'},
+            ),
+            (
+                "chat completions inference",
+                {
+                    "headers": bearer_only,
+                    "path": "/v1/chat/completions",
+                    "body": '{"model":"grok-code-fast-1","messages":[]}',
+                },
+            ),
+            # A follow-up turn replays what already ran. Its subtrees must not
+            # be read as fresh declarations, or multi-turn Grok breaks.
+            (
+                "replayed hosted-call history",
+                {
+                    "headers": matching_headers,
+                    "body": '{"input":[{"type":"web_search_call","action":{"type":"open_page",'
+                            '"url":"https://example.com"}},{"type":"mcp_list_tools",'
+                            '"tools":[{"name":"call_tool"}]}]}',
+                },
+            ),
+        ]
+        for label, request in allowed_cases:
+            assert_decision(label, "allowed", None, **request)
+
+        self.require_runtime_active("grok")
+        print(
+            f"    [provider guards] runtime=grok denial_cases={len(denial_cases)} "
+            f"allowed_cases={len(allowed_cases)} web_search=unavailable",
+            flush=True,
+        )
+        self._ok(
+            f"live auth, entitlement, and billing passed; {len(denial_cases)} fail-closed edge "
+            f"cases and {len(allowed_cases)} allowed payloads held; Web search is not offered"
+        )
+
+    def check_grok_task(self) -> None:
+        """Run and resume a real Grok ACP session through the admin API."""
+        self._step("Grok ACP turn, activity, and session resume")
+        self._api("PUT", "/v1/network/policy", self.enforcement_policy())
+        self.require_runtime_active("grok")
+        baseline_network = max(
+            (event["seq"] for event in self._network_events()), default=0
+        )
+        baseline = self._latest_thread_event_seq("grok-session")
+        started = self.send_message(
+            "grok-session",
+            (
+                "Use the terminal exactly once to run `printf GROK_ACTIVITY_OK`. "
+                "Then reply with exactly GROK_STAGE_OK and nothing else."
+            ),
+            runtime="grok",
+            model=CHEAP_MODELS["grok"],
+            effort=CHEAP_EFFORT,
+        )
+        thread = started.get("thread") or {}
+        if started.get("status") != "accepted" or (
+            thread.get("model"), thread.get("effort")
+        ) != (CHEAP_MODELS["grok"], CHEAP_EFFORT):
+            raise AssertionError(
+                f"Grok turn did not start with the selected session options: {started}"
+            )
+        done = self._wait_for_turn("grok-session", since=baseline, timeout=300)
+        if done.get("status") != "completed" or "GROK_STAGE_OK" not in str(
+            done.get("output_message") or ""
+        ).upper():
+            raise AssertionError(
+                f"Grok turn failed or returned unexpected output: {self._thread_failure_detail('grok-session')}"
+            )
+        activities = [
+            event
+            for event in self._thread_events("grok-session", since=baseline)
+            if event.get("event_type") == "thread.activity"
+        ]
+        if not activities:
+            raise AssertionError("Grok tool turn persisted no activity events")
+
+        follow_up_baseline = self._latest_thread_event_seq("grok-session")
+        follow_up = self.send_follow_up(
+            "grok-session",
+            "Reply with exactly the same uppercase token you returned in the previous turn.",
+        )
+        if follow_up.get("status") != "accepted":
+            raise AssertionError(f"Grok follow-up was not accepted: {follow_up}")
+        resumed = self._wait_for_turn(
+            "grok-session", since=follow_up_baseline, timeout=300
+        )
+        if resumed.get("status") != "completed" or "GROK_STAGE_OK" not in str(
+            resumed.get("output_message") or ""
+        ).upper():
+            raise AssertionError(
+                f"Grok resumed turn lost its session context: {resumed}"
+            )
+
+        provider_events = [
+            event
+            for event in self._network_events(since=baseline_network)
+            if event.get("host") == "cli-chat-proxy.grok.com"
+        ]
+        inference = [
+            event
+            for event in provider_events
+            if event.get("path") in {"/v1/responses", "/v1/chat/completions"}
+        ]
+        if not inference or any(event.get("decision") != "allowed" for event in inference):
+            raise AssertionError(
+                f"Grok turns had no clean allowed inference path: {provider_events}"
+            )
+        self._ok(
+            "real Grok turn completed with activity, resumed its ACP session, and inference stayed inside the xAI guard"
+        )
 
     def check_task(self) -> None:
         self._step("Codex account guard + real web-search turn")

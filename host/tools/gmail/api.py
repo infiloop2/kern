@@ -342,10 +342,16 @@ def add_label_id_fields(target: JSONObject, value: object) -> None:
 
 def gmail_message_index_entry(message: JSONObject) -> JSONObject:
     index_entry: JSONObject = {}
-    for field in ("id", "threadId", "snippet", "historyId", "internalDate", "sizeEstimate"):
+    # Gmail types these fields: identifiers and the two 64-bit counters are
+    # strings, and only sizeEstimate is a number. Copying each as its declared
+    # type is what lets the manifest state the shape of what comes back.
+    for field in ("id", "threadId", "snippet", "historyId", "internalDate"):
         value = message.get(field)
-        if isinstance(value, (str, int)) and not isinstance(value, bool):
+        if isinstance(value, str):
             index_entry[field] = value
+    size_estimate = message.get("sizeEstimate")
+    if isinstance(size_estimate, int) and not isinstance(size_estimate, bool):
+        index_entry["sizeEstimate"] = size_estimate
     add_label_id_fields(index_entry, message.get("labelIds"))
     for header_name, output_key in (
         ("From", "from"),
@@ -439,9 +445,15 @@ def gmail_label_summary(label: JSONObject, fallback_id: str = "") -> JSONObject:
         "name": string_value(label, ("name",)) or label_id,
         "type": string_value(label, ("type",)),
     }
+    # Gmail's color object holds exactly these two hex values. Take them by
+    # name rather than passing the provider's object through: an echoed body is
+    # a shape the manifest cannot describe and the agent cannot rely on.
     color = json_object(label.get("color"))
-    if color:
-        summary["color"] = color
+    named_color: JSONObject = {
+        key: color[key] for key in ("backgroundColor", "textColor") if isinstance(color.get(key), str)
+    }
+    if named_color:
+        summary["color"] = named_color
     return summary
 
 

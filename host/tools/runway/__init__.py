@@ -18,6 +18,7 @@ from host.tools.results import (
     StreamingAsset,
 )
 from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, provider_fetched_https_url
 from host.tools.shared.media import open_downloaded_video
 from host.tools.shared.web import (
@@ -140,12 +141,30 @@ RUNWAY_SAVE_VIDEO_POLICY = (
 )
 
 
-RUNWAY_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
-}
+# Runway generation is asynchronous: creating a task returns its id, and
+# get_task returns whatever Runway knows so far. The output URL appears only on
+# the poll that finds the task SUCCEEDED, under the key matching output_kind.
+TASK_CREATED_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the task was created, and which output_kind to poll with."),
+        "task_id": outputs.text("Runway task id; pass to get_task."),
+        "task_status": outputs.text("Always PENDING for a task this call just created."),
+        "model": outputs.text("Runway model the task runs on."),
+        "output_kind": outputs.text("video, image, or audio; pass the same value to get_task."),
+    },
+    ["message", "task_id", "task_status", "model", "output_kind"],
+)
+GET_TASK_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("What the task is doing and what to do next, including progress while it runs."),
+        "task_id": outputs.text("The task that was polled."),
+        "task_status": outputs.text("Runway's status: PENDING, RUNNING, THROTTLED, SUCCEEDED, FAILED, or CANCELLED. \"unknown\" when Runway sent no status."),
+        "video_url": outputs.text("Temporary video URL, present only on a SUCCEEDED video task."),
+        "image_url": outputs.text("Temporary image URL, present only on a SUCCEEDED image task."),
+        "audio_url": outputs.text("Temporary audio URL, present only on a SUCCEEDED audio task."),
+    },
+    ["message", "task_id", "task_status"],
+)
 
 
 MANIFEST = ToolManifest(
@@ -182,7 +201,7 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=RUNWAY_OUTPUT_SCHEMA,
+            output_schema=TASK_CREATED_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="edit_video",
@@ -205,7 +224,7 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=RUNWAY_OUTPUT_SCHEMA,
+            output_schema=TASK_CREATED_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="generate_image",
@@ -225,7 +244,7 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=RUNWAY_OUTPUT_SCHEMA,
+            output_schema=TASK_CREATED_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="generate_speech",
@@ -244,7 +263,7 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=RUNWAY_OUTPUT_SCHEMA,
+            output_schema=TASK_CREATED_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="get_task",
@@ -259,7 +278,7 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=RUNWAY_OUTPUT_SCHEMA,
+            output_schema=GET_TASK_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="save_video",
@@ -276,7 +295,7 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=RUNWAY_OUTPUT_SCHEMA,
+            returns_asset=True,
         ),
     ),
     config=(ConfigRequirement(key="RUNWAY_API_SECRET", description="Runway Developer API key (org-scoped) from the dev.runwayml.com dashboard."),),
@@ -624,8 +643,7 @@ def _task_result(response: JSONObject, output_kind: str = "video") -> JSONObject
     task_id = response.get("id")
     task_status = response.get("status")
     result: JSONObject = {
-        "status": "success_executed",
-        "task_id": task_id if isinstance(task_id, str) else "",
+                "task_id": task_id if isinstance(task_id, str) else "",
         "task_status": task_status if isinstance(task_status, str) else "unknown",
     }
     if task_status == "SUCCEEDED":
@@ -737,8 +755,7 @@ class RunwayTool:
             return ActionFailed("Runway API returned no task id.")
         return ActionExecuted(
             {
-                "status": "success_executed",
-                "message": f"Runway task created. Poll get_task with output_kind={output_kind} until it succeeds.",
+                                "message": f"Runway task created. Poll get_task with output_kind={output_kind} until it succeeds.",
                 "task_id": task_id,
                 "task_status": "PENDING",
                 "model": model,

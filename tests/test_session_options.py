@@ -28,6 +28,9 @@ class SessionOptionsTests(unittest.TestCase):
                     "claude-fable-5": ("high", "max", "ultracode"),
                     "claude-sonnet-5": ("high", "max", "ultracode"),
                 },
+                "grok": {
+                    "grok-4.6": ("xhigh", "high"),
+                },
                 "hermes": {
                     "deepseek.v3.2": ("high",),
                     "qwen.qwen3-coder-next": ("high",),
@@ -82,6 +85,8 @@ class SessionOptionsTests(unittest.TestCase):
         self.assertIsNotNone(session_config_error("unsupported", "deepseek.v3.2", "max"))
         self.assertIsNone(session_config_error("hermes", "deepseek.v3.2", "high"))
         self.assertIsNotNone(session_config_error("hermes", "deepseek.v3.2", "max"))
+        self.assertIsNone(session_config_error("grok", "grok-4.6", "xhigh"))
+        self.assertIsNotNone(session_config_error("grok", "grok-4.6", "max"))
 
     def test_rejects_the_superseded_claude_code_aliases(self) -> None:
         # The aliases are no longer offered, so they cannot start a thread or
@@ -118,6 +123,7 @@ class SessionOptionsTests(unittest.TestCase):
             options["claude_code"]["claude-fable-5"],
             ["high", "max", "ultracode"],
         )
+        self.assertEqual(options["grok"]["grok-4.6"], ["xhigh", "high"])
         options["codex"]["gpt-5.6-luna"].append("invalid")
         schedule_session_options()["script"]["bash"].append("invalid")
         self.assertEqual(SESSION_OPTIONS["codex"]["gpt-5.6-luna"], ("high", "max"))

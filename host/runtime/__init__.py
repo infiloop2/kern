@@ -10,6 +10,7 @@ socket.
 - ``tools``         kern-tools: agent-facing tools socket
 - ``agent_network`` kern-agent-network: read-only introspection socket
 - ``workspace``     kern-workspace: Chat, Web Apps, and the agent Workspace API
+- ``embeddings``    kern-embedding: isolated local ONNX inference + admin client
 - ``agent_shim``    kern-agent: MCP stdio shim, client-side only
 - ``core``          shared storage/state/policy libraries, no socket
 - ``deploy``        bootstrap-run CLIs (migrations, effective config)

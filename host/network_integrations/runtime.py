@@ -21,6 +21,7 @@ from host.network_integrations.npm_packages import guard as npm_guard
 from host.network_integrations.openai import guard as openai_guard
 from host.network_integrations.python_packages import guard as python_guard
 from host.network_integrations.registry import managed_domain_owner
+from host.network_integrations.xai import guard as xai_guard
 
 HostAllowed = Callable[[Any, str], bool]
 RequestDenied = Callable[
@@ -71,6 +72,10 @@ GUARDS: dict[str, IntegrationGuard] = {
     "claude": IntegrationGuard(
         host_allowed=claude_guard.host_allowed,
         request_denied=claude_guard.request_denied,
+    ),
+    "xai": IntegrationGuard(
+        host_allowed=xai_guard.host_allowed,
+        request_denied=xai_guard.request_denied,
     ),
     "bedrock": IntegrationGuard(
         host_allowed=bedrock_guard.host_allowed,

@@ -134,6 +134,7 @@ ACCESS_KEY_ENV = "AWS_ACCESS_KEY_ID"
 SECRET_KEY_ENV = "AWS_SECRET_ACCESS_KEY"
 
 HEALTH_TIMEOUT = 600  # bootstrap installs packages; allow time before the API answers
+DEPLOY_TIMEOUT = 1200  # tolerate a slow Ubuntu mirror, but bound deploys to 20 minutes
 MESSAGE_LIMIT = 50_000  # mirrors the admin API's message cap
 # Public thread events that explicitly settle running work. Successful
 # completion has no event and is observed through the thread's idle status.
@@ -145,12 +146,14 @@ TURN_TERMINAL_STATUSES = {
 THREAD_BUSY_MARKER = "agent is finishing"
 RUNTIME_INACTIVE_MARKER = "messages run only while it is active"
 SMOKE_RUNTIMES = ("codex", "claude_code", "hermes")
+OFFERED_RUNTIMES = ("codex", "claude_code", "grok", "hermes")
 SMOKE_OAUTH_RUNTIMES = ("codex", "claude_code")
 SMOKE_MANAGED_PROVIDERS = {"openai": True, "claude": True, "bedrock": True}
 SMOKE_BEDROCK_REGION = "us-east-1"
 SMOKE_RUNTIME_MODELS = {
     "codex": "gpt-5.6-terra",
     "claude_code": "claude-opus-5",
+    "grok": "grok-4.6",
     "hermes": "qwen.qwen3-coder-next",
 }
 SMOKE_BEDROCK_MODELS = (
@@ -528,6 +531,7 @@ class AwsSmoke:
             self.check_ui_page,
             self.check_admin_auth,
             self.check_workspace_backends_without_providers,
+            self.check_embedding_index_resource_load,
             self.check_initial_disabled_provider_deploy,
             self.check_network_policy,
             self.check_policy_validation_and_concurrency,
@@ -589,6 +593,7 @@ class AwsSmoke:
             check=True,
             stdout=subprocess.PIPE,
             text=True,
+            timeout=DEPLOY_TIMEOUT,
         )
         self.result = json.loads(proc.stdout)
         self.result["admin_password"] = admin_password
@@ -810,14 +815,18 @@ class AwsSmoke:
         ).split())
         if config_columns != {"singleton", "agent_name", "admin_password_sha256"}:
             raise AssertionError(f"config table has unexpected columns: {sorted(config_columns)}")
-        # Proxy account pins live in the proxy_provider_pins table now
-        # (missing rows are the no-pin default until a login lands).
-        pin_rows = self._ssh_code(
+        # Proxy account pins live in the proxy_provider_pins table. Clearing a
+        # pin upserts the row with a null account_id rather than deleting it,
+        # so a fresh host carries one row per provider whose runtime refresh
+        # has run. The property to hold is that none of them names an account
+        # before a login lands -- asserting which providers may have a row
+        # instead just goes stale the next time one is added.
+        pinned = self._ssh_code(
             "sudo -u postgres psql -tA -d kern_admin "
-            "-c \"SELECT provider FROM proxy_provider_pins WHERE provider NOT IN ('openai', 'claude')\""
+            "-c \"SELECT provider FROM proxy_provider_pins WHERE account_id IS NOT NULL\""
         ).strip()
-        if pin_rows:
-            raise AssertionError(f"unexpected proxy_provider_pins rows: {pin_rows}")
+        if pinned:
+            raise AssertionError(f"proxy_provider_pins names an account before any login: {pinned}")
         # Admin-side provider account records live in the database, in the
         # provider_accounts table (empty or explicit-null records until login).
         admin_accounts = self._ssh_code(
@@ -1346,7 +1355,7 @@ class AwsSmoke:
             options = self._api(
                 "GET", f"{base}/session-options"
             ).get("session_options")
-            if not isinstance(options, dict) or set(options) != set(SMOKE_RUNTIMES):
+            if not isinstance(options, dict) or set(options) != set(OFFERED_RUNTIMES):
                 raise AssertionError(
                     f"{base} returned invalid session options: {options}"
                 )
@@ -1458,7 +1467,7 @@ class AwsSmoke:
                 f"Workspace schedules returned invalid session options: {schedule_options}"
             )
         managed_schedule_options = {
-            runtime: schedule_options.get(runtime) for runtime in SMOKE_RUNTIMES
+            runtime: schedule_options.get(runtime) for runtime in OFFERED_RUNTIMES
         }
         if managed_schedule_options != workspace_options["/v1/workspace/chat"]:
             raise AssertionError(
@@ -1466,7 +1475,7 @@ class AwsSmoke:
                 f"session options: {schedule_options}"
             )
         if (
-            set(schedule_options) != {*SMOKE_RUNTIMES, "script"}
+            set(schedule_options) != {*OFFERED_RUNTIMES, "script"}
             or schedule_options.get("script") != {"bash": ["fixed"]}
         ):
             raise AssertionError(
@@ -1518,6 +1527,272 @@ class AwsSmoke:
         self._ok(
             "Chat options/history, Web App create/state/rename, and global "
             "Memory and Schedules create/search/list/delete paths worked without inference"
+        )
+
+    def check_embedding_index_resource_load(self) -> None:
+        """Exercise real local inference while proving the host remains responsive."""
+        self._step("local embedding backfill resource load")
+        page_count = 24
+        revised_count = 4
+        memory_base = "/v1/workspace/memory"
+        latencies: list[float] = []
+
+        def embedding_counts() -> tuple[int, int]:
+            raw = self._ssh_code(
+                "sudo -u postgres psql -tA -d kern_admin -F '|' -c \""
+                "SELECT count(*), count(*) FILTER (WHERE embeddings.revision = pages.revision)"
+                " FROM memory_page_embeddings AS embeddings"
+                " JOIN memory_pages AS pages ON pages.page_id = embeddings.page_id"
+                " WHERE pages.page_id LIKE 'embedding-load-%'\""
+            )
+            total, separator, current = raw.strip().partition("|")
+            if not separator:
+                raise AssertionError(f"invalid embedding count result: {raw!r}")
+            return int(total), int(current)
+
+        def wait_for_current(expected: int, timeout: float) -> float:
+            started = time.monotonic()
+            deadline = started + timeout
+            last = (-1, -1)
+            while time.monotonic() < deadline:
+                health_started = time.monotonic()
+                health = self._api("GET", "/v1/health")
+                latencies.append(time.monotonic() - health_started)
+                if health.get("network_controls", {}).get("status") != "active":
+                    raise AssertionError(f"host health degraded during embedding load: {health}")
+                last = embedding_counts()
+                if last[1] == expected:
+                    return time.monotonic() - started
+                time.sleep(0.5)
+            raise AssertionError(
+                f"embedding backfill did not reach {expected} current rows; last={last}"
+            )
+
+        def agent_memory_search(search_query: str) -> tuple[int, dict]:
+            request = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "workspace_api",
+                        "arguments": {
+                            "method": "GET",
+                            "path": (
+                                "/agent/memory/search?q="
+                                f"{quote(search_query, safe='')}&limit=100"
+                            ),
+                        },
+                    },
+                }
+            )
+            raw = self._ssh_code(
+                "printf '%s\\n' "
+                f"{shlex.quote(request)} | sudo -u kern-agent env "
+                "PYTHONPATH=/opt/kern-host python3 -m host.runtime.agent_shim.mcp_shim"
+            )
+            try:
+                rpc = json.loads(raw)
+                result = rpc["result"]
+                content = result["content"]
+                response = json.loads(content[0]["text"])
+                status = response["status"]
+                body = response["body"]
+            except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+                raise AssertionError(
+                    f"agent memory search returned an invalid MCP response: {raw!r}"
+                ) from exc
+            if not isinstance(status, int) or not isinstance(body, dict):
+                raise AssertionError(
+                    f"agent memory search returned an invalid response: {response!r}"
+                )
+            return status, body
+
+        def wait_for_agent_match(
+            search_query: str,
+            *,
+            page_id: str,
+            revision: int,
+            present: bool,
+            timeout: float,
+        ) -> tuple[float, int]:
+            started = time.monotonic()
+            deadline = started + timeout
+            conflicts = 0
+            last: dict = {}
+            while time.monotonic() < deadline:
+                status, last = agent_memory_search(search_query)
+                if status == 409:
+                    conflicts += 1
+                    time.sleep(0.5)
+                    continue
+                if status != 200:
+                    raise AssertionError(
+                        f"agent memory search returned HTTP {status}: {last}"
+                    )
+                if last.get("search_mode") != "hybrid":
+                    raise AssertionError(
+                        f"agent memory search did not use hybrid retrieval: {last}"
+                    )
+                pages = last.get("pages")
+                if not isinstance(pages, list):
+                    raise AssertionError(
+                        f"agent memory search omitted its pages array: {last}"
+                    )
+                matches = [
+                    page
+                    for page in pages
+                    if isinstance(page, dict) and page.get("page_id") == page_id
+                ]
+                if present and any(page.get("revision") == revision for page in matches):
+                    return time.monotonic() - started, conflicts
+                if not present and not matches:
+                    return time.monotonic() - started, conflicts
+                time.sleep(0.5)
+            expectation = "appear" if present else "disappear"
+            raise AssertionError(
+                f"{page_id} did not {expectation} for {search_query!r}; last={last}"
+            )
+
+        content_suffix = " ".join(["bounded local semantic indexing"] * 55)
+        for index in range(page_count):
+            if index == 0:
+                description = "Deployment recovery procedure"
+                content = (
+                    "If the deployment fails, restore the previous release artifact "
+                    "and redirect traffic to it."
+                )
+            else:
+                description = f"Embedding load fixture {index:02d}"
+                content = f"Fixture {index:02d}. {content_suffix}"
+            started = time.monotonic()
+            page = self._api(
+                "PUT",
+                f"{memory_base}/pages/embedding-load-{index:02d}",
+                {
+                    "description": description,
+                    "content": content,
+                    "expected_revision": 0,
+                },
+            ).get("page")
+            latencies.append(time.monotonic() - started)
+            if not isinstance(page, dict) or page.get("revision") != 1:
+                raise AssertionError(f"embedding load page create failed: {page}")
+
+        initial_seconds = wait_for_current(page_count, 90)
+        initial_retrieval_seconds, initial_conflicts = wait_for_agent_match(
+            "How should we undo a broken launch?",
+            page_id="embedding-load-00",
+            revision=1,
+            present=True,
+            timeout=90,
+        )
+        for index in range(revised_count):
+            if index == 0:
+                description = "Office access procedure"
+                content = (
+                    "Visitors must obtain a temporary badge from the reception desk "
+                    "before entering."
+                )
+            else:
+                description = f"Revised embedding load fixture {index:02d}"
+                content = f"Updated fixture {index:02d}. {content_suffix}"
+            self._api(
+                "PUT",
+                f"{memory_base}/pages/embedding-load-{index:02d}",
+                {
+                    "description": description,
+                    "content": content,
+                    "expected_revision": 1,
+                },
+            )
+        replacement_seconds = wait_for_current(page_count, 45)
+        replacement_retrieval_seconds, replacement_conflicts = wait_for_agent_match(
+            "How can a guest get into the building?",
+            page_id="embedding-load-00",
+            revision=2,
+            present=True,
+            timeout=90,
+        )
+        wait_for_agent_match(
+            "How should we undo a broken launch?",
+            page_id="embedding-load-00",
+            revision=2,
+            present=False,
+            timeout=10,
+        )
+
+        relation_bytes = int(
+            self._ssh_code(
+                "sudo -u postgres psql -tA -d kern_admin -c "
+                "\"SELECT pg_total_relation_size('memory_page_embeddings')\""
+            )
+        )
+        if relation_bytes > 32 * 1024 * 1024:
+            raise AssertionError(
+                f"{page_count} memory embeddings used an unexpected {relation_bytes} bytes"
+            )
+
+        properties = {}
+        for line in self._ssh_code(
+            "systemctl show kern-embedding.service "
+            "-p ActiveState -p NRestarts -p MemoryCurrent -p MemoryPeak "
+            "-p MemoryMax -p TasksCurrent -p CPUWeight -p IOWeight -p Nice"
+        ).splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                properties[key] = value
+        if properties.get("ActiveState") != "active" or properties.get("NRestarts") != "0":
+            raise AssertionError(f"embedding service restarted or stopped under load: {properties}")
+        if properties.get("MemoryMax") != str(1024 * 1024 * 1024):
+            raise AssertionError(f"embedding service lost its 1 GiB hard limit: {properties}")
+        if (
+            properties.get("CPUWeight") != "25"
+            or properties.get("IOWeight") != "25"
+            or properties.get("Nice") != "10"
+        ):
+            raise AssertionError(f"embedding service lost its low-priority controls: {properties}")
+        for field in ("MemoryCurrent", "MemoryPeak"):
+            value = properties.get(field, "")
+            if value.isdigit() and int(value) > 1024 * 1024 * 1024:
+                raise AssertionError(f"embedding service exceeded MemoryMax: {properties}")
+        tasks = properties.get("TasksCurrent", "")
+        if tasks.isdigit() and int(tasks) > 64:
+            raise AssertionError(f"embedding service exceeded TasksMax: {properties}")
+
+        ordered_latencies = sorted(latencies)
+        p95_latency = ordered_latencies[int(0.95 * (len(ordered_latencies) - 1))]
+        if p95_latency > 3.0:
+            raise AssertionError(
+                f"admin API p95 latency under embedding load was {p95_latency:.2f}s"
+            )
+
+        for index in range(page_count):
+            expected_revision = 2 if index < revised_count else 1
+            self._api(
+                "DELETE",
+                f"{memory_base}/pages/embedding-load-{index:02d}"
+                f"?expected_revision={expected_revision}",
+            )
+        if embedding_counts() != (0, 0):
+            raise AssertionError("soft-deleted memory pages retained derived embeddings")
+        wait_for_agent_match(
+            "How can a guest get into the building?",
+            page_id="embedding-load-00",
+            revision=2,
+            present=False,
+            timeout=10,
+        )
+
+        current_memory = properties.get("MemoryCurrent", "unknown")
+        self._ok(
+            f"{page_count} pages indexed in {initial_seconds:.1f}s, "
+            f"{revised_count} replacements in {replacement_seconds:.1f}s; "
+            f"semantic retrieval in {initial_retrieval_seconds:.1f}s/"
+            f"{replacement_retrieval_seconds:.1f}s with "
+            f"{initial_conflicts + replacement_conflicts} cursor conflicts; "
+            f"API p95 {p95_latency:.2f}s, service memory {current_memory} bytes, "
+            f"index {relation_bytes} bytes, no restart, cleanup complete"
         )
 
     def check_policy_validation_and_concurrency(self) -> None:
@@ -2216,10 +2491,12 @@ class AwsSmoke:
             "curl -s -o /dev/null -w '%{http_code}' --max-time 20"
         )
         # These unauthenticated API reads can be forwarded correctly while
-        # GitHub rate-limits the shared egress IP. Keep proxy-denial checks
-        # below exact; only upstream read responses get this tolerance.
-        read_ok = {"200", "403", "429"}
-        unauthenticated_read_ok = {"401", "403", "429"}
+        # GitHub rate-limits the shared egress IP or its search/read edge times
+        # out. The network-event assertion still proves the proxy allowed the
+        # request. Keep proxy-denial checks below exact; only upstream read
+        # responses get this tolerance.
+        read_ok = {"200", "403", "429", "502", "504"}
+        unauthenticated_read_ok = {"401", "403", "429", "502", "504"}
         checks = [
             # Reads are universal: the listed repo, a foreign public repo, and
             # non-repo paths (search) are all forwarded to GitHub.
@@ -3230,7 +3507,7 @@ class AwsSmoke:
                 # Polymarket and Web Fetch need no credential or config, so
                 # they must execute on the fresh host rather than fail closed.
                 if tool_id in ("polymarket", "web_fetch"):
-                    if response.get("isError") or not isinstance(parsed, dict) or parsed.get("status") != "success_executed":
+                    if response.get("isError") or not isinstance(parsed, dict):
                         raise AssertionError(f"credential-free {name} failed: {response} {parsed}")
                     public_results[action_id] = parsed
                 else:
@@ -3272,7 +3549,7 @@ class AwsSmoke:
         for action_id, arguments in dependent_public_calls:
             name = f"polymarket_{action_id}"
             response, parsed = shim_bundled_call("polymarket", action_id, arguments)
-            if response.get("isError") or not isinstance(parsed, dict) or parsed.get("status") != "success_executed":
+            if response.get("isError") or not isinstance(parsed, dict):
                 raise AssertionError(f"credential-free {name} failed: {response} {parsed}")
             triggered_actions.add(name)
 
@@ -3596,7 +3873,7 @@ class AwsSmoke:
         steer_elapsed = time.monotonic() - steer_started
         if steered.get("status") != "accepted":
             raise AssertionError(f"message on the running thread was not delivered as a steer: {steered}")
-        if self.agent_runtime in ("codex", "claude_code") and steer_elapsed >= 8:
+        if self.agent_runtime in ("codex", "claude_code", "grok") and steer_elapsed >= 8:
             raise AssertionError(
                 f"{self.agent_runtime} steer delivery was delayed "
                 "behind activity: "
@@ -4095,6 +4372,19 @@ class AwsSmoke:
             allowed_keys.add("codex_usage")
         elif runtime_type == "claude_code":
             allowed_keys.add("claude_usage")
+        elif runtime_type == "grok":
+            allowed_keys.update(
+                {
+                    "grok_usage",
+                    "coding_data_retention_opt_out",
+                    "zdr_enabled",
+                }
+            )
+            for key in ("coding_data_retention_opt_out", "zdr_enabled"):
+                if key in account and not isinstance(account[key], bool):
+                    raise AssertionError(
+                        f"Grok account metadata {key} is not boolean: {account}"
+                    )
         elif runtime_type == "hermes":
             allowed_keys = {
                 "provider", "agent_runtimes", "status", "account_id", "arn", "bedrock_usage"

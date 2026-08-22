@@ -48,6 +48,7 @@ from host.runtime.core.state import (
 DEFAULT_SESSION = {
     "codex": ("gpt-5.6-terra", "high"),
     "claude_code": ("claude-opus-5", "high"),
+    "grok": ("grok-4.6", "high"),
     "hermes": ("qwen.qwen3-coder-next", "high"),
     "script": ("bash", "fixed"),
 }
@@ -65,6 +66,7 @@ class FakeServer:
         thread_id: str | None = None,
         on_ready=None,
         on_session_id=None,
+        web_search: bool = False,
     ) -> None:
         self.started = 0
         self.closed = False
@@ -72,6 +74,7 @@ class FakeServer:
         self.thread_id = thread_id
         self.on_ready = on_ready
         self.on_session_id = on_session_id
+        self.web_search = web_search
         self.steered: list[str] = []
         self._delivered_steers = 0
         FakeServer.instances.append(self)
@@ -152,13 +155,20 @@ class OrchestratorTests(unittest.TestCase):
         self.addCleanup(orchestrator._LIVE.clear)
         save_policy(
             {
-                "network_integrations": {"openai": {"enabled": True}, "claude": {"enabled": True}},
+                "network_integrations": {
+                    "openai": {"enabled": True},
+                    "claude": {"enabled": True},
+                    "xai": {"enabled": True},
+                },
             },
             "2026-06-08T00:00:00Z",
         )
         self.server_patch = patch.object(orchestrator.codex_app_server, "CodexAppServer", FakeServer)
         self.server_patch.start()
         self.addCleanup(self.server_patch.stop)
+        self.grok_server_patch = patch.object(orchestrator.grok_agent, "GrokAcpServer", FakeServer)
+        self.grok_server_patch.start()
+        self.addCleanup(self.grok_server_patch.stop)
         # Unit tests mock provider traffic. A steady Claude status refresh
         # includes a live /usage probe and rereads the credential in case the
         # CLI rotated it; default both seams to a successful unchanged token.
@@ -188,6 +198,7 @@ class OrchestratorTests(unittest.TestCase):
         self.addCleanup(setattr, orchestrator, "_CLAUDE_LIVE_PROBE", None)
         orchestrator._set_runtime_status("codex", "active")
         orchestrator._set_runtime_status("claude_code", "active")
+        orchestrator._set_runtime_status("grok", "active")
 
     # -- helpers ---------------------------------------------------------------------
 
@@ -820,6 +831,26 @@ class OrchestratorTests(unittest.TestCase):
         )
         self.assertEqual(orchestrator._LIVE, {})
 
+    def test_policy_reconciliation_reaps_a_pending_grok_login(self) -> None:
+        seed_oauth_login(
+            "grok",
+            {
+                "status": "awaiting_login",
+                "device_code": "GROK-CODE",
+                "login_id": "pending-grok-login",
+                "login_url": "https://accounts.x.ai/device",
+                "expires_at": "2099-06-08T00:10:00Z",
+            },
+        )
+        save_policy({"network_integrations": {}}, "2026-08-18T00:00:01Z")
+
+        with patch.object(orchestrator.grok_agent, "close_login_server") as close:
+            orchestrator.reconcile_runtime_status_after_policy_change()
+
+        self.assertIsNone(state.oauth_login("grok"))
+        self.assertEqual(orchestrator.runtime_status("grok"), "deactivated")
+        close.assert_called_once_with()
+
     def test_stop_during_server_start_closes_the_process_after_start(self) -> None:
         start_entered = threading.Event()
         release_start = threading.Event()
@@ -1014,6 +1045,101 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(seen, [None, "claude-session-1"])
         self.assertEqual(seen_config, [("claude-fable-5", "ultracode")] * 2)
         self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "claude-session-1")
+
+    def test_grok_runtime_records_and_resumes_its_acp_session(self) -> None:
+        seen: list[str | None] = []
+        seen_config: list[tuple[str, str]] = []
+
+        def fake_run_turn(server, input_message, session_id, model, effort, on_message):
+            seen.append(session_id)
+            seen_config.append((model, effort))
+            on_message({
+                "provider": "grok",
+                "activity_id": "tool-1",
+                "kind": "tool",
+                "phase": "completed",
+                "title": "Tool finished",
+            })
+            on_message(f"answer: {input_message}")
+            return "grok-session-1", f"answer: {input_message}"
+
+        with patch.object(orchestrator.grok_agent, "run_turn", fake_run_turn):
+            service.send_thread_message(
+                "thread-grok",
+                {
+                    "message": "hello",
+                    "agent_runtime": "grok",
+                    "model": "grok-4.6",
+                    "effort": "xhigh",
+                },
+            )
+            self.wait_until_idle("thread-grok")
+            service.send_thread_message("thread-grok", {"message": "again"})
+            self.wait_until_idle("thread-grok")
+
+        self.assertEqual(seen, [None, "grok-session-1"])
+        self.assertEqual(seen_config, [("grok-4.6", "xhigh")] * 2)
+        self.assertEqual(
+            state.thread_session_config("thread-grok")["provider_session_id"],
+            "grok-session-1",
+        )
+        self.assertEqual(
+            [event["event_type"] for event in thread_events("thread-grok")],
+            [
+                "thread.message",
+                "thread.activity",
+                "thread.message",
+                "thread.message",
+                "thread.activity",
+                "thread.message",
+            ],
+        )
+
+    def test_grok_turn_server_needs_no_network_policy_read(self) -> None:
+        # The xAI integration has no options, so building a Grok server does
+        # not consult the policy at all.
+        server = orchestrator._new_agent_server(
+            "grok", "thread-grok", lambda: True, lambda _session_id: None
+        )
+        self.assertIsInstance(server, FakeServer)
+
+    def test_missing_grok_session_is_cleared_for_an_explicit_retry(self) -> None:
+        with state.mutation() as cur:
+            state.save_thread_session(
+                cur,
+                "grok",
+                "thread-stale-grok",
+                "deleted-session",
+                state.utc_now(),
+                "grok-4.6",
+                "high",
+            )
+
+        attempts: list[str | None] = []
+
+        def fake_run_turn(server, input_message, session_id, model, effort, on_message):
+            del server, input_message, model, effort, on_message
+            attempts.append(session_id)
+            if session_id:
+                raise orchestrator.grok_agent.GrokSessionNotFoundError(
+                    "the saved Grok session no longer exists"
+                )
+            return "replacement-session", "done"
+
+        with patch.object(orchestrator.grok_agent, "run_turn", fake_run_turn):
+            service.send_thread_message("thread-stale-grok", {"message": "first retry"})
+            self.wait_until_idle("thread-stale-grok")
+            self.assertIsNone(
+                state.thread_session_config("thread-stale-grok")["provider_session_id"]
+            )
+            service.send_thread_message("thread-stale-grok", {"message": "second retry"})
+            self.wait_until_idle("thread-stale-grok")
+
+        self.assertEqual(attempts, ["deleted-session", None])
+        self.assertEqual(
+            state.thread_session_config("thread-stale-grok")["provider_session_id"],
+            "replacement-session",
+        )
 
     def test_missing_claude_session_is_cleared_for_an_explicit_retry(self) -> None:
         save_attested_claude_account("acct", access_token_sha256="f" * 64)
@@ -2158,6 +2284,202 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(read_proxy_openai_account_id(), "acct-local")
         self.assertIsNone(state.oauth_login("codex"))
 
+    def test_grok_initial_login_uses_status_only_pin_before_entitlement_probe(self) -> None:
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:00Z",
+        )
+        orchestrator._set_runtime_status("grok", "awaiting_login")
+        seed_oauth_login(
+            "grok",
+            {
+                "status": "awaiting_login",
+                "device_code": "X",
+                "login_id": "grok-login",
+                "login_url": "https://accounts.x.ai/device",
+                "expires_at": "2099-06-08T00:10:00Z",
+            },
+        )
+
+        def account_status():
+            self.assertIsNone(state.read_proxy_xai_account_id())
+            self.assertEqual(
+                state.read_proxy_xai_status_probe_account_id(), "acct-xai"
+            )
+            return "active", None, {"account_id": "acct-xai", "zdr_enabled": True}
+
+        with (
+            patch.object(orchestrator.grok_agent, "collect_login_completion") as collect,
+            patch.object(
+                orchestrator.grok_agent,
+                "read_completed_login_account_id",
+                return_value="acct-xai",
+            ),
+            patch.object(orchestrator.grok_agent, "account_status", side_effect=account_status),
+        ):
+            self.assertEqual(orchestrator.refresh_runtime_status("grok"), "active")
+
+        collect.assert_called_once()
+        self.assertEqual(state.read_xai_account()["account_id"], "acct-xai")
+        self.assertIs(state.read_xai_account()["zdr_enabled"], True)
+        self.assertEqual(state.read_proxy_xai_account_id(), "acct-xai")
+        self.assertEqual(state.read_proxy_xai_status_probe_account_id(), "acct-xai")
+        self.assertIsNone(state.oauth_login("grok"))
+
+    def test_nonactive_grok_refresh_never_republishes_data_plane_pin(self) -> None:
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:00Z",
+        )
+        state.save_xai_account(
+            {
+                "account_id": "acct-xai",
+                "operator_approval": orchestrator.XAI_OPERATOR_APPROVAL,
+            }
+        )
+
+        def account_status():
+            self.assertIsNone(state.read_proxy_xai_account_id())
+            self.assertEqual(
+                state.read_proxy_xai_status_probe_account_id(), "acct-xai"
+            )
+            return "error", "subscription unavailable", None
+
+        with (
+            patch.object(orchestrator.grok_agent, "collect_login_completion"),
+            patch.object(orchestrator.grok_agent, "account_status", side_effect=account_status),
+        ):
+            self.assertEqual(orchestrator.refresh_runtime_status("grok"), "error")
+
+        self.assertIsNone(state.read_proxy_xai_account_id())
+        self.assertEqual(state.read_proxy_xai_status_probe_account_id(), "acct-xai")
+
+        save_policy({"network_integrations": {}}, "2026-08-17T00:00:01Z")
+        self.assertEqual(orchestrator.refresh_runtime_status("grok"), "deactivated")
+        self.assertIsNone(state.read_proxy_xai_status_probe_account_id())
+
+        orchestrator.reset_linked_account("grok")
+        self.assertIsNone(state.read_proxy_xai_status_probe_account_id())
+
+    def test_failed_grok_login_is_retired_before_status_probe(self) -> None:
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:00Z",
+        )
+        orchestrator._set_runtime_status("grok", "awaiting_login")
+        seed_oauth_login(
+            "grok",
+            {
+                "status": "awaiting_login",
+                "device_code": "X",
+                "login_id": "failed-login",
+                "login_url": "https://accounts.x.ai/device",
+                "expires_at": "2099-06-08T00:10:00Z",
+            },
+        )
+
+        def account_status():
+            self.assertIsNone(state.oauth_login("grok"))
+            return "awaiting_login", None, None
+
+        with (
+            patch.object(orchestrator.grok_agent, "collect_login_completion"),
+            patch.object(
+                orchestrator.grok_agent,
+                "read_completed_login_account_id",
+                side_effect=orchestrator.grok_agent.GrokAgentError("device flow expired"),
+            ),
+            patch.object(orchestrator.grok_agent, "close_completed_login_server") as close,
+            patch.object(orchestrator.grok_agent, "account_status", side_effect=account_status),
+        ):
+            self.assertEqual(orchestrator.refresh_runtime_status("grok"), "awaiting_login")
+
+        close.assert_called_once_with("failed-login")
+
+    def test_completed_grok_login_is_retired_when_the_post_login_probe_fails(self) -> None:
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:00Z",
+        )
+        orchestrator._set_runtime_status("grok", "awaiting_login")
+        seed_oauth_login(
+            "grok",
+            {
+                "status": "awaiting_login",
+                "device_code": "X",
+                "login_id": "completed-login",
+                "login_url": "https://accounts.x.ai/device",
+                "expires_at": "2099-06-08T00:10:00Z",
+            },
+        )
+
+        with (
+            patch.object(orchestrator.grok_agent, "collect_login_completion"),
+            patch.object(
+                orchestrator.grok_agent,
+                "read_completed_login_account_id",
+                return_value="acct-xai",
+            ),
+            patch.object(
+                orchestrator.grok_agent,
+                "account_status",
+                return_value=("error", "subscription unavailable", None),
+            ),
+            patch.object(
+                orchestrator.grok_agent, "close_completed_login_server"
+            ) as close,
+        ):
+            self.assertEqual(orchestrator.refresh_runtime_status("grok"), "error")
+
+        self.assertEqual(state.read_xai_account()["account_id"], "acct-xai")
+        self.assertIsNone(state.oauth_login("grok"))
+        close.assert_called_once_with("completed-login")
+
+    def test_completed_grok_reauth_is_retired_when_an_anchor_already_exists(self) -> None:
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:00Z",
+        )
+        state.save_xai_account(
+            {
+                "account_id": "acct-xai",
+                "operator_approval": orchestrator.XAI_OPERATOR_APPROVAL,
+            }
+        )
+        orchestrator._set_runtime_status("grok", "error")
+        seed_oauth_login(
+            "grok",
+            {
+                "status": "awaiting_login",
+                "device_code": "X",
+                "login_id": "completed-reauth",
+                "login_url": "https://accounts.x.ai/device",
+                "expires_at": "2099-06-08T00:10:00Z",
+            },
+        )
+
+        with (
+            patch.object(orchestrator.grok_agent, "collect_login_completion"),
+            patch.object(
+                orchestrator.grok_agent,
+                "read_completed_login_account_id",
+                return_value="acct-foreign",
+            ),
+            patch.object(
+                orchestrator.grok_agent,
+                "account_status",
+                return_value=("error", "account mismatch", None),
+            ),
+            patch.object(
+                orchestrator.grok_agent, "close_completed_login_server"
+            ) as close,
+        ):
+            self.assertEqual(orchestrator.refresh_runtime_status("grok"), "error")
+
+        self.assertEqual(state.read_xai_account()["account_id"], "acct-xai")
+        self.assertIsNone(state.oauth_login("grok"))
+        close.assert_called_once_with("completed-reauth")
+
     def test_codex_active_reauth_closes_the_parked_login_server(self) -> None:
         # A reauth against an already-approved anchor parks a login server that
         # first-login capture skips; the active commit must still close it, or
@@ -2287,6 +2609,40 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(read_openai_account(), {})
         self.assertIsNone(read_proxy_openai_account_id())
         self.assertIsNone(state.oauth_login("codex"))
+
+    def test_expired_grok_oauth_reaps_only_its_parked_login(self) -> None:
+        orchestrator._set_runtime_status("grok", "awaiting_login")
+        seed_oauth_login(
+            "grok",
+            {
+                "status": "awaiting_login",
+                "device_code": "X",
+                "login_id": "expired-grok-login",
+                "login_url": "https://accounts.x.ai/device",
+                "expires_at": "2000-06-08T00:10:00Z",
+            },
+        )
+
+        with (
+            patch.object(orchestrator.grok_agent, "collect_login_completion"),
+            patch.object(
+                orchestrator.grok_agent,
+                "read_completed_login_account_id",
+                side_effect=AssertionError("expired OAuth must not seed provider pin"),
+            ),
+            patch.object(
+                orchestrator.grok_agent,
+                "account_status",
+                return_value=("awaiting_login", None, None),
+            ),
+            patch.object(
+                orchestrator.grok_agent, "close_completed_login_server"
+            ) as close,
+        ):
+            self.assertEqual(orchestrator.refresh_runtime_status("grok"), "awaiting_login")
+
+        self.assertIsNone(state.oauth_login("grok"))
+        close.assert_called_once_with("expired-grok-login")
 
     def test_expired_claude_oauth_cannot_create_first_account_anchor(self) -> None:
         orchestrator._set_runtime_status("claude_code", "awaiting_login")
@@ -2854,7 +3210,7 @@ class StartBackgroundLoopsOrderTests(unittest.TestCase):
             with self.assertRaises(StopLoop):
                 orchestrator.runtime_status_loop()
 
-        self.assertEqual(polled, ["codex", "claude_code", "hermes"])
+        self.assertEqual(polled, ["codex", "claude_code", "grok", "hermes"])
         for runtime_type in orchestrator.UNMANAGED_RUNTIMES:
             self.assertNotIn(runtime_type, polled)
 

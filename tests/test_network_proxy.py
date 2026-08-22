@@ -10,6 +10,7 @@ from pathlib import Path
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -25,6 +26,8 @@ from host.network_integrations.claude import guard as claude_guard
 from host.network_integrations.claude.manifest import ClaudeIntegration
 from host.config import parse_network_controls
 from host.network_integrations.openai import guard as openai_guard
+from host.network_integrations.xai import guard as xai_guard
+from host.network_integrations.xai.manifest import XaiIntegration
 from host.runtime.core import db, network_policy, state
 from host.runtime.core.network_policy import load_policy
 from host.runtime.core.state import save_network_policy as save_policy
@@ -39,6 +42,23 @@ def openai_bearer(account_id: str) -> str:
         return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
     payload = {"https://api.openai.com/auth": {"chatgpt_account_id": account_id}}
     return "Bearer " + ".".join((segment({"alg": "RS256"}), segment(payload), "c2ln"))
+
+
+def xai_bearer(account_id: str, *, claim: str = "sub") -> str:
+    """A genuine-shaped xAI OAuth JWT (dummy signature) for one account."""
+    def segment(obj: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+    if claim == "sub":
+        claims = {"sub": account_id, "principal_id": account_id, "principal_type": "User"}
+    elif claim == "principal_id":
+        claims = {"sub": "user-subject", "principal_id": account_id, "principal_type": "Team"}
+    elif claim == "principalId":
+        claims = {"sub": "user-subject", "principalId": account_id, "principalType": "Team"}
+    else:
+        claims = {claim: account_id}
+    return "Bearer " + ".".join(
+        (segment({"alg": "RS256"}), segment(claims), "c2ln")
+    )
 
 
 class UpstreamHandler(BaseHTTPRequestHandler):
@@ -1511,6 +1531,582 @@ class OpenAIAccountBindingTests(unittest.TestCase):
             self.deny(ws + [("Authorization", openai_bearer("acct-attacker"))], method="GET"),
             "openai_token_account_mismatch",
         )
+
+
+class XaiRouteTests(unittest.TestCase):
+    """The xAI integration opens exactly two hosts under its owned apexes: the
+    OAuth issuer and the subscription chat proxy. Everything else beneath
+    ``x.ai`` and ``grok.com`` is denied by the route table — most importantly
+    ``api.x.ai``, the metered developer API, which bills console credits
+    instead of the operator's Grok subscription."""
+
+    CONFIG = XaiIntegration(enabled=True)
+    ACCOUNT = "user-pinned"
+
+    def deny(self, host: str, *, method: str = "POST", path: str = "/v1/responses") -> str | None:
+        headers = [("Authorization", xai_bearer(self.ACCOUNT))]
+        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+            return xai_guard.request_denied(
+                self.CONFIG, method, host, path, "", headers, b""
+            )
+
+    def test_auth_host_is_open_and_unpinned(self) -> None:
+        # The issuer establishes which account exists, so it cannot be pinned to
+        # one; it carries no model traffic. Mirrors auth.openai.com.
+        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=None):
+            self.assertIsNone(
+                xai_guard.request_denied(
+                    self.CONFIG, "POST", "auth.x.ai", "/oauth2/device/code", "", [], b""
+                )
+            )
+
+    def test_chat_proxy_inference_writes_and_status_reads_are_open(self) -> None:
+        for path in ("/v1/responses", "/v1/chat/completions"):
+            self.assertIsNone(self.deny("cli-chat-proxy.grok.com", path=path), path)
+        for path in (
+            "/v1/models",
+            "/v1/settings",
+            "/v1/user",
+            "/v1/billing",
+        ):
+            self.assertIsNone(
+                self.deny("cli-chat-proxy.grok.com", method="GET", path=path), path
+            )
+
+    def test_chat_proxy_status_and_account_routes_are_read_only(self) -> None:
+        for path in ("/v1/models", "/v1/settings", "/v1/user", "/v1/billing"):
+            self.assertEqual(
+                self.deny("cli-chat-proxy.grok.com", method="POST", path=path),
+                "network_policy_denied",
+                path,
+            )
+
+    def test_chat_proxy_storage_routes_are_denied(self) -> None:
+        # The same host serves blob storage. batch_upload is multipart, so the
+        # body guard cannot inspect it; the route table is the only thing that
+        # keeps agent files on this host.
+        for path in (
+            "/v1/storage",
+            "/v1/storage/batch_upload",
+            "/v1/storage/batch_upload_json",
+            "/v1/storage/multipart/init",
+            "/v1/storage/download",
+            "/v1/storage/exists",
+        ):
+            self.assertEqual(
+                self.deny("cli-chat-proxy.grok.com", path=path), "network_policy_denied", path
+            )
+
+    def test_chat_proxy_session_and_workspace_sync_is_denied(self) -> None:
+        # Conversation history and workspace state stay local because these
+        # routes are closed, not because code.grok.com is.
+        for path in (
+            "/v1/sessions",
+            "/v1/sessions/register",
+            "/v1/sessions/search",
+            "/v1/rest/workspaces",
+            "/v1/rest/skills",
+            "/v1/sandbox/environments",
+            "/v1/bundle/archive",
+            "/v1/subagents/bundle",
+            "/v1/feedback",
+            "/v1/traces",
+        ):
+            self.assertEqual(
+                self.deny("cli-chat-proxy.grok.com", path=path), "network_policy_denied", path
+            )
+
+    def test_allowed_paths_keep_their_query_strings(self) -> None:
+        # The live reads carry queries: /user?include=subscription drives the
+        # entitlement check and /billing?format=credits the usage snapshot.
+        headers = [("Authorization", xai_bearer(self.ACCOUNT))]
+        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+            for path, query in (("/v1/user", "include=subscription"), ("/v1/billing", "format=credits")):
+                self.assertIsNone(
+                    xai_guard.request_denied(
+                        self.CONFIG, "GET", "cli-chat-proxy.grok.com", path, query, headers, b""
+                    ),
+                    path,
+                )
+
+    def test_traversal_cannot_reach_a_denied_route(self) -> None:
+        self.assertEqual(
+            self.deny("cli-chat-proxy.grok.com", path="/v1/responses/../storage/batch_upload"),
+            "network_policy_denied",
+        )
+
+    def test_metered_developer_api_is_denied(self) -> None:
+        self.assertEqual(self.deny("api.x.ai"), "network_policy_denied")
+
+    def test_other_owned_hosts_are_denied(self) -> None:
+        for host in ("code.grok.com", "grok.com", "accounts.x.ai", "x.ai"):
+            self.assertEqual(self.deny(host), "network_policy_denied", host)
+
+    def test_host_allowed_matches_the_route_table(self) -> None:
+        self.assertTrue(xai_guard.host_allowed(self.CONFIG, "cli-chat-proxy.grok.com"))
+        self.assertTrue(xai_guard.host_allowed(self.CONFIG, "AUTH.X.AI"))
+        self.assertFalse(xai_guard.host_allowed(self.CONFIG, "api.x.ai"))
+
+    def test_unsupported_method_is_denied(self) -> None:
+        self.assertEqual(
+            self.deny("cli-chat-proxy.grok.com", method="DELETE"), "network_policy_denied"
+        )
+
+
+class XaiAccountBindingTests(unittest.TestCase):
+    """The bearer credential must authenticate as the pinned account.
+
+    xAI takes a personal login's account id from the token's ``sub`` and a team
+    login's from ``principal_id``, so the effective claim must satisfy the pin
+    and everything else fails closed.
+    """
+
+    CONFIG = XaiIntegration(enabled=True)
+    ACCOUNT = "user-pinned"
+    HOST = "cli-chat-proxy.grok.com"
+
+    def deny(self, headers, *, pinned: str | None = ACCOUNT, body: bytes = b"") -> str | None:
+        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=pinned):
+            return xai_guard.request_denied(
+                self.CONFIG, "POST", self.HOST, "/v1/responses", "", headers, body
+            )
+
+    def status_deny(
+        self,
+        headers,
+        *,
+        path: str = "/v1/user",
+        pinned: str | None = ACCOUNT,
+        status_pinned: str | None = None,
+    ) -> str | None:
+        with (
+            patch.object(xai_guard, "read_proxy_xai_account_id", return_value=pinned),
+            patch.object(
+                xai_guard,
+                "read_proxy_xai_status_probe_account_id",
+                return_value=status_pinned,
+            ),
+        ):
+            query = "include=subscription" if path == "/v1/user" else ""
+            return xai_guard.request_denied(
+                self.CONFIG, "GET", self.HOST, path, query, headers, b""
+            )
+
+    def test_matching_sub_claim_passes(self) -> None:
+        self.assertIsNone(
+            self.deny([("Authorization", xai_bearer(self.ACCOUNT))])
+        )
+
+    def test_team_principal_id_claim_also_passes(self) -> None:
+        token = xai_bearer(self.ACCOUNT, claim="principal_id")
+        self.assertIsNone(self.deny([("Authorization", token)]))
+        camel = xai_bearer(self.ACCOUNT, claim="principalId")
+        self.assertIsNone(self.deny([("Authorization", camel)]))
+
+    def test_team_token_cannot_pass_on_its_distinct_subject_claim(self) -> None:
+        # The token subject names the pin while its effective Team account is a
+        # different principal.
+        def segment(obj: dict) -> str:
+            return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+        token = "Bearer " + ".".join(
+            (
+                segment({"alg": "RS256"}),
+                segment(
+                    {
+                        "sub": self.ACCOUNT,
+                        "principal_id": "team-other",
+                        "principal_type": "Team",
+                    }
+                ),
+                "c2ln",
+            )
+        )
+        self.assertEqual(
+            self.deny([("Authorization", token)]),
+            "xai_token_account_mismatch",
+        )
+
+    def test_unpinned_account_fails_closed(self) -> None:
+        headers = [("Authorization", xai_bearer(self.ACCOUNT))]
+        self.assertEqual(self.deny(headers, pinned=None), "xai_account_unavailable")
+
+    def test_status_probe_pin_cannot_authorize_inference(self) -> None:
+        headers = [("Authorization", xai_bearer(self.ACCOUNT))]
+        self.assertEqual(self.deny(headers, pinned=None), "xai_account_unavailable")
+
+    def test_status_probe_pin_authorizes_only_status_route(self) -> None:
+        headers = [("Authorization", xai_bearer(self.ACCOUNT))]
+        self.assertIsNone(
+            self.status_deny(headers, pinned=None, status_pinned=self.ACCOUNT)
+        )
+        self.assertEqual(
+            xai_guard.request_denied(
+                self.CONFIG, "POST", self.HOST, "/v1/user", "", headers, b"{}"
+            ),
+            "network_policy_denied",
+        )
+
+    def test_active_account_status_route_accepts_pinned_bearer(self) -> None:
+        headers = [("Authorization", xai_bearer(self.ACCOUNT))]
+        self.assertIsNone(self.status_deny(headers))
+
+    def test_status_route_requires_matching_bearer(self) -> None:
+        headers = [("Authorization", xai_bearer("user-other"))]
+        self.assertEqual(self.status_deny(headers), "xai_token_account_mismatch")
+
+    def test_other_status_routes_also_accept_pinned_bearer(self) -> None:
+        headers = [("Authorization", xai_bearer(self.ACCOUNT))]
+        for path in ("/v1/models", "/v1/settings", "/v1/billing"):
+            self.assertIsNone(self.status_deny(headers, path=path), path)
+
+    def test_inference_accepts_pinned_bearer(self) -> None:
+        headers = [("Authorization", xai_bearer(self.ACCOUNT))]
+        self.assertIsNone(self.deny(headers))
+
+    def test_foreign_token_account_is_denied(self) -> None:
+        headers = [("Authorization", xai_bearer("user-attacker"))]
+        self.assertEqual(self.deny(headers), "xai_token_account_mismatch")
+
+    def test_missing_authorization_is_denied(self) -> None:
+        self.assertEqual(self.deny([]), "xai_token_account_mismatch")
+
+    def test_duplicate_authorization_is_denied(self) -> None:
+        token = xai_bearer(self.ACCOUNT)
+        headers = [("Authorization", token), ("Authorization", token)]
+        self.assertEqual(self.deny(headers), "xai_token_account_mismatch")
+
+    def test_opaque_api_key_is_not_a_jwt_and_is_denied(self) -> None:
+        headers = [("Authorization", "Bearer xai-live-000111222333")]
+        self.assertEqual(self.deny(headers), "xai_token_account_mismatch")
+
+    def test_token_without_identity_claim_is_denied(self) -> None:
+        token = xai_bearer(self.ACCOUNT, claim="team_id")
+        self.assertEqual(
+            self.deny([("Authorization", token)]), "xai_token_account_mismatch"
+        )
+
+    def test_non_bearer_scheme_is_denied(self) -> None:
+        credential = xai_bearer(self.ACCOUNT).split(" ", 1)[1]
+        headers = [("Authorization", "Basic " + credential)]
+        self.assertEqual(self.deny(headers), "xai_token_account_mismatch")
+
+
+class XaiServerToolTests(unittest.TestCase):
+    """Grok declares hosted tools as ``tools`` entries alongside the
+    client-executed ``function`` tools it runs locally. Every hosted tool is
+    denied — web search included, with no option to enable it — and an
+    unrecognised entry in a ``tools`` array fails closed."""
+
+    ACCOUNT = "user-pinned"
+    HOST = "cli-chat-proxy.grok.com"
+
+    def deny(self, payload) -> str | None:
+        config = XaiIntegration(enabled=True)
+        headers = [
+            ("Authorization", xai_bearer(self.ACCOUNT)),
+            ("Content-Type", "application/json"),
+        ]
+        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+            return xai_guard.request_denied(
+                config, "POST", self.HOST, "/v1/responses", "", headers, json.dumps(payload).encode()
+            )
+
+    def test_function_tools_are_allowed(self) -> None:
+        self.assertIsNone(self.deny({"tools": [{"type": "function", "name": "run_terminal_cmd"}]}))
+
+    def test_non_string_type_values_do_not_crash_the_guard(self) -> None:
+        # Grok's real Responses request includes nested schema objects whose
+        # `type` is a list. They are data, not replay envelopes or hosted-tool
+        # declarations, and the recursive walk must not try to hash the list.
+        self.assertIsNone(
+            self.deny({
+                "tools": [{
+                    "type": "function",
+                    "name": "run_terminal_cmd",
+                    "parameters": {"type": ["object", "null"]},
+                }]
+            })
+        )
+
+    def test_web_search_is_denied_with_its_own_reason(self) -> None:
+        # There is no toggle: web search is denied unconditionally, and keeps a
+        # distinct code so the agent reads "this host does not offer it" rather
+        # than "you declared something unrecognised".
+        self.assertEqual(self.deny({"tools": [{"type": "web_search"}]}), "xai_web_search_denied")
+
+    def test_x_search_is_denied(self) -> None:
+        self.assertEqual(self.deny({"tools": [{"type": "x_search"}]}), "xai_server_tool_denied")
+
+    def test_search_parameters_are_denied(self) -> None:
+        # xAI's second way of asking for a live search. It is not a tools entry
+        # and carries no type of its own, so it has to be decided explicitly or
+        # it bypasses the server-tool decision entirely.
+        self.assertEqual(
+            self.deny({"search_parameters": {"mode": "on"}}), "xai_web_search_denied"
+        )
+
+    def test_no_source_shape_makes_a_search_reachable(self) -> None:
+        # sources are not read at all: no corpus is reachable, so which one a
+        # request names decides nothing.
+        for sources in (None, [], "web", [{"type": "web"}], [{"type": "x"}],
+                        [{"type": "web"}, {"type": "news"}], [{"name": "web"}]):
+            parameters = {"mode": "on"}
+            if sources is not None:
+                parameters["sources"] = sources
+            self.assertEqual(
+                self.deny({"search_parameters": parameters}),
+                "xai_web_search_denied",
+                sources,
+            )
+
+    def test_web_source_entries_are_reported_as_a_search_not_a_tool(self) -> None:
+        # The source entries are {"type": "web"}-shaped. The search_parameters
+        # key is skipped by the tool walk so the web-prefix rule cannot collect
+        # them: the request is one denied search, not an unrecognised hosted
+        # tool, and the reason code has to say so.
+        self.assertEqual(
+            self.deny(
+                {"search_parameters": {"mode": "auto", "sources": [{"type": "web"}]}}),
+            "xai_web_search_denied",
+        )
+
+    def test_search_parameters_off_declares_nothing(self) -> None:
+        self.assertIsNone(self.deny({"search_parameters": {"mode": "off"}}))
+
+    def test_search_parameters_default_to_live_when_mode_is_absent(self) -> None:
+        # Fail closed: only an explicit "off" is off.
+        self.assertEqual(self.deny({"search_parameters": {}}), "xai_web_search_denied")
+
+    def test_search_parameters_unknown_mode_is_live(self) -> None:
+        self.assertEqual(
+            self.deny({"search_parameters": {"mode": "sometimes"}}), "xai_web_search_denied"
+        )
+
+    def test_every_source_is_still_denied_while_the_toggle_is_off(self) -> None:
+        # The corpora are not policed, but the toggle still is: with search
+        # off, no source reaches xAI, and the reason names the toggle the
+        # operator can flip rather than a tool they never declared.
+        for source in ("web", "x", "news", "rss"):
+            self.assertEqual(
+                self.deny(
+                    {"search_parameters": {"mode": "on", "sources": [{"type": source}]}}
+                ),
+                "xai_web_search_denied",
+                source,
+            )
+
+    def test_search_parameters_nested_under_another_key_are_still_decided(self) -> None:
+        self.assertEqual(
+            self.deny({"request": {"search_parameters": {"mode": "on"}}}),
+            "xai_web_search_denied",
+        )
+
+    def test_search_parameters_that_are_not_an_object_fail_closed(self) -> None:
+        self.assertEqual(self.deny({"search_parameters": True}), "xai_web_search_denied")
+
+    def test_other_hosted_tools_fail_closed(self) -> None:
+        for tool_type in ("browser", "computer_use", "code_execution", "code_interpreter",
+                          "collections_search", "file_search", "image_generation", "video_generation"):
+            self.assertEqual(
+                self.deny({"tools": [{"type": tool_type}]}),
+                "xai_server_tool_denied",
+                tool_type,
+            )
+
+    def test_code_execution_is_denied(self) -> None:
+        # xAI's documented server-side tool set is web search, X search, and
+        # code execution; the last runs Python on xAI infrastructure.
+        for tool_type in ("code_execution", "code_interpreter"):
+            self.assertEqual(
+                self.deny({"tools": [{"type": tool_type}]}),
+                "xai_server_tool_denied",
+                tool_type,
+            )
+
+    def test_unknown_hosted_tool_in_the_tools_array_fails_closed(self) -> None:
+        # A tools array is a declaration site, so an entry this host has never
+        # heard of is denied on the strength of where it appears rather than
+        # needing to be in a denylist first. xAI adds server-side tools.
+        self.assertEqual(
+            self.deny({"tools": [{"type": "future_hosted_thing"}]}),
+            "xai_server_tool_denied",
+        )
+
+    def test_untyped_tool_in_the_tools_array_fails_closed(self) -> None:
+        self.assertEqual(
+            self.deny({"tools": [{"name": "future_hosted_thing"}]}),
+            "xai_server_tool_denied",
+        )
+
+    def test_replayed_mcp_list_tools_descriptors_are_not_declarations(self) -> None:
+        # An mcp_list_tools item carries a `tools` array describing tools that
+        # already ran. Descending into it would read each untyped descriptor as
+        # an undeclarable capability and deny an ordinary follow-up turn.
+        self.assertIsNone(
+            self.deny({"input": [{
+                "type": "mcp_list_tools",
+                "server_label": "kern",
+                "tools": [{"name": "read_file", "description": "read a file"}],
+            }]})
+        )
+
+    def test_replay_subtrees_are_skipped_whole(self) -> None:
+        # Not just the item: everything under it. A replayed call names the
+        # server it reached and the tool it ran, and neither is a new
+        # declaration.
+        self.assertIsNone(
+            self.deny({"input": [
+                {"type": "mcp_call", "server_url": "https://example.invalid/mcp"},
+                {"type": "web_search_call", "action": {"type": "open_page", "url": "https://e.g/"}},
+                {"type": "x_search_call", "tools": [{"type": "x_search"}]},
+            ]})
+        )
+
+    def test_a_real_declaration_beside_a_replay_item_is_still_denied(self) -> None:
+        # Skipping replay subtrees must not become a way to smuggle one in.
+        self.assertEqual(
+            self.deny({
+                "input": [{"type": "mcp_list_tools", "tools": [{"name": "ok"}]}],
+                "tools": [{"type": "x_search"}],
+            }),
+            "xai_server_tool_denied",
+        )
+
+    def test_function_tools_alongside_a_hosted_tool_still_deny(self) -> None:
+        payload = {"tools": [{"type": "function", "name": "read_file"}, {"type": "x_search"}]}
+        self.assertEqual(self.deny(payload), "xai_server_tool_denied")
+
+    def test_renamed_web_tool_fails_closed(self) -> None:
+        # Any future dated or renamed web* hosted tool is collected by prefix and
+        # denied rather than forwarded unrecognised.
+        for tool_type in ("web", "web_fetch", "web_search_preview", "web_search_20260209"):
+            self.assertEqual(
+                self.deny({"tools": [{"type": tool_type}]}), "xai_server_tool_denied", tool_type
+            )
+
+    def test_remote_mcp_is_denied(self) -> None:
+        self.assertEqual(self.deny({"tools": [{"type": "mcp"}]}), "xai_remote_mcp_denied")
+        self.assertEqual(
+            self.deny({"tools": [{"type": "function", "server_url": "https://evil.example"}]}),
+            "xai_remote_mcp_denied",
+        )
+
+    def test_nested_tool_declaration_is_still_inspected(self) -> None:
+        self.assertEqual(
+            self.deny({"session": {"config": {"tools": [{"type": "x_search"}]}}}),
+            "xai_server_tool_denied",
+        )
+
+    def test_replay_history_items_are_not_tool_declarations(self) -> None:
+        # A follow-up request replays earlier hosted calls; they declare no new
+        # capability and must not be denied. The Responses API emits one item
+        # type per hosted family, including the families denied above.
+        self.assertIsNone(
+            self.deny({"input": [
+                {"type": "web_search_call", "id": "ws_1"},
+                {"type": "x_search_call"},
+                {"type": "code_interpreter_call"},
+                {"type": "file_search_call"},
+                {"type": "mcp_call"},
+            ]})
+        )
+
+    def test_replay_item_subtrees_are_skipped_entirely(self) -> None:
+        # An mcp_list_tools item carries a tools array of descriptors for tools
+        # that already ran. Descending into it would read those untyped
+        # descriptors as a declaration site and deny an ordinary follow-up.
+        self.assertIsNone(
+            self.deny({"input": [{
+                "type": "mcp_list_tools",
+                "server_label": "kern",
+                "tools": [
+                    {"name": "list_bundled_tools", "description": "..."},
+                    {"name": "call_tool", "input_schema": {"type": "object"}},
+                ],
+            }]})
+        )
+
+    def test_replayed_call_details_are_not_new_declarations(self) -> None:
+        # The action vocabulary a web_search_call replays, and the server an
+        # mcp_call names, describe what already happened. Neither may be read
+        # as a fresh declaration and deny the turn.
+        for action in ("search", "open_page", "find", "find_in_page"):
+            self.assertIsNone(
+                self.deny({"input": [{
+                    "type": "web_search_call",
+                    "action": {"type": action, "url": "https://example.com"},
+                }]}),
+                action,
+            )
+        self.assertIsNone(
+            self.deny({"input": [
+                {"type": "mcp_call", "server_url": "https://example.com/mcp"},
+            ]})
+        )
+
+    def test_tool_name_in_prompt_text_is_forwarded(self) -> None:
+        self.assertIsNone(self.deny({"input": [{"type": "message", "content": "use x_search"}]}))
+
+    def test_unparseable_json_body_fails_closed(self) -> None:
+        config = XaiIntegration(enabled=True)
+        headers = [
+            ("Authorization", xai_bearer(self.ACCOUNT)),
+            ("Content-Type", "application/json"),
+        ]
+        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+            reason = xai_guard.request_denied(
+                config, "POST", self.HOST, "/v1/responses", "", headers, b"{not json"
+            )
+        self.assertEqual(reason, "xai_body_not_json")
+
+    def deny_raw(self, body: bytes) -> str | None:
+        config = XaiIntegration(enabled=True)
+        headers = [
+            ("Authorization", xai_bearer(self.ACCOUNT)),
+            ("Content-Type", "application/json"),
+        ]
+        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+            return xai_guard.request_denied(
+                config, "POST", self.HOST, "/v1/responses", "", headers, body
+            )
+
+    @staticmethod
+    def nested_body(depth: int) -> bytes:
+        return (b'{"a":' * depth) + b"1" + (b"}" * depth)
+
+    def test_body_nested_past_the_walkers_is_denied_not_raised(self) -> None:
+        # Half the recursion limit parses on every interpreter, but the
+        # structural walkers spend more than two frames per level, so a body
+        # this shape reaches them and exhausts the stack. That must read as a
+        # denial with an audit record, not a RecursionError that drops the
+        # connection. Parsing here is an assertion about the fixture, not about
+        # the guard: it proves the walkers are what the body reaches.
+        body = self.nested_body(sys.getrecursionlimit() // 2)
+        self.assertIsInstance(json.loads(body), dict)
+        self.assertEqual(self.deny_raw(body), "xai_body_not_json")
+
+    def test_body_nested_far_past_the_limit_is_denied_not_raised(self) -> None:
+        # Which layer gives way is a CPython implementation detail: the parser
+        # recursed through 3.13 and is iterative on 3.14, so this body may be
+        # refused by the parser or by the walkers depending on the interpreter.
+        # The guard must answer the same way either way, so the test asserts
+        # only that — never which layer raised.
+        body = self.nested_body(sys.getrecursionlimit() * 2)
+        self.assertEqual(self.deny_raw(body), "xai_body_not_json")
+
+    def test_non_json_body_is_forwarded(self) -> None:
+        config = XaiIntegration(enabled=True)
+        headers = [
+            ("Authorization", xai_bearer(self.ACCOUNT)),
+            ("Content-Type", "text/plain"),
+        ]
+        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+            self.assertIsNone(
+                xai_guard.request_denied(
+                    config, "POST", self.HOST, "/v1/responses", "", headers, b"x_search"
+                )
+            )
 
 
 class BedrockGuardTests(unittest.TestCase):

@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import ast
+import json
 from http import HTTPStatus
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
+from host.network_integrations.xai import guard as xai_guard
+from host.network_integrations.xai.manifest import XaiIntegration
+from host.runtime.network_proxy.service import duplicate_header_denial
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
 from tests.stage.stage_tool_checks import _result_shape, _safe_arguments
 from tests.stage.stage_aws import STAGE_SUITE_CHOICES, StageAwsSmoke
@@ -91,6 +97,7 @@ class StageOrchestrationTests(unittest.TestCase):
             ],
             "next_cursor": None,
         }
+        semantic_search = {**search, "search_mode": "hybrid"}
         history = {
             **metadata,
             "thread": {"thread_id": "thread-7"},
@@ -128,7 +135,7 @@ class StageOrchestrationTests(unittest.TestCase):
             patch.object(
                 stage,
                 "_shim_tool_result",
-                side_effect=[search, history, history],
+                side_effect=[search, semantic_search, history, history],
             ) as tool,
             patch.object(stage, "_api", side_effect=fake_api),
         ):
@@ -140,6 +147,7 @@ class StageOrchestrationTests(unittest.TestCase):
             [call.args[0] for call in tool.call_args_list],
             [
                 "search_conversation_history",
+                "search_conversation_history",
                 "read_thread_history",
                 "read_thread_history",
             ],
@@ -147,6 +155,14 @@ class StageOrchestrationTests(unittest.TestCase):
         self.assertEqual(
             tool.call_args_list[0].args[1],
             {"query": "stagehistory123", "roles": ["user"], "limit": 1},
+        )
+        self.assertEqual(
+            tool.call_args_list[1].args[1],
+            {
+                "query": "Where is the plan for undoing a failed production launch?",
+                "roles": ["user"],
+                "limit": 5,
+            },
         )
 
     def test_stage_harness_import_does_not_require_playwright(self) -> None:
@@ -174,11 +190,11 @@ import tests.stage.stage_aws
 
     def test_all_selects_every_runtime_github_and_bundled_tool(self) -> None:
         selected = _selected_integrations("all")
-        self.assertEqual(selected[:4], ("codex", "claude", "hermes", "github"))
-        self.assertEqual(selected[4:], TOOL_SUITES)
+        self.assertEqual(selected[:5], ("codex", "claude", "grok", "hermes", "github"))
+        self.assertEqual(selected[5:], TOOL_SUITES)
         self.assertEqual(set(TOOL_SUITES), set(BUNDLED_TOOLS))
 
-    def test_all_runtimes_suite_is_offered_and_selects_the_three_runtimes(self) -> None:
+    def test_all_runtimes_suite_is_offered_and_selects_the_four_runtimes(self) -> None:
         self.assertIn(ALL_RUNTIMES_SUITE, STAGE_SUITE_CHOICES)
         self.assertEqual(STAGE_SUITE_CHOICES[0], "all")
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
@@ -188,14 +204,14 @@ import tests.stage.stage_aws
         with patch.object(
             stage,
             "_wait_for_runtime_status",
-            side_effect=["active", "active", "active"],
+            side_effect=["active", "active", "active", "active"],
         ) as wait:
             availability = stage.integration_availability(ALL_RUNTIMES_SUITE)
-        self.assertEqual(list(availability), ["codex", "claude", "hermes"])
+        self.assertEqual(list(availability), ["codex", "claude", "grok", "hermes"])
         self.assertTrue(all(reason is None for reason in availability.values()))
         self.assertEqual(
             [call.kwargs["runtime"] for call in wait.call_args_list],
-            ["codex", "claude_code", "hermes"],
+            ["codex", "claude_code", "grok", "hermes"],
         )
 
     def test_all_runtimes_bedrock_autoconfiguration_targets_hermes(self) -> None:
@@ -223,6 +239,161 @@ import tests.stage.stage_aws
             [call.kwargs["runtime"] for call in wait.call_args_list],
             ["hermes"],
         )
+
+    def test_grok_preflight_enable_preserves_policy_and_defaults_search_off(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        stored = {
+            "network_integrations": {
+                "github": {"enabled": True, "write_repositories": [{"owner": "o", "repo": "r"}]},
+                "custom": {"domains": {"example.com": {"allow_http_methods": ["GET"]}}},
+            }
+        }
+        writes: list[dict] = []
+
+        def fake_api(method: str, path: str, body: dict | None = None) -> dict:
+            if (method, path) == ("GET", "/v1/network/policy"):
+                return {"network_controls": stored}
+            if (method, path) == ("PUT", "/v1/network/policy"):
+                assert body is not None
+                writes.append(body)
+                return {}
+            raise AssertionError((method, path, body))
+
+        with patch.object(stage, "_api", side_effect=fake_api):
+            stage.prepare_grok_integration("grok")
+        self.assertEqual(writes[0]["network_integrations"]["xai"], {"enabled": True})
+        self.assertEqual(writes[0]["network_integrations"]["github"], stored["network_integrations"]["github"])
+        self.assertEqual(writes[0]["network_integrations"]["custom"], stored["network_integrations"]["custom"])
+
+    def test_grok_stage_matrix_matches_the_xai_guard(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        stage.total = 0
+        stage.passed = 0
+        account_id = "stage-grok-account"
+        events: list[dict] = []
+        network_queries: list[int] = []
+        policies: list[dict] = []
+        baseline = {
+            "network_integrations": {
+                "xai": {"enabled": True},
+                "github": {"enabled": True, "write_repositories": []},
+            }
+        }
+
+        def append_event(
+            method: str,
+            host: str,
+            path: str,
+            decision: str,
+            reason: str | None,
+        ) -> None:
+            events.append(
+                {
+                    "seq": len(events) + 1,
+                    "method": method,
+                    "host": host,
+                    "path": path,
+                    "decision": decision,
+                    "reason_code": reason,
+                }
+            )
+
+        def fake_api(method: str, path: str, body: dict | None = None) -> dict:
+            if (method, path) == ("PUT", "/v1/network/policy"):
+                assert body is not None
+                policies.append(json.loads(json.dumps(body)))
+                return {}
+            if (method, path) == ("POST", "/v1/agent-runtime/refresh"):
+                append_event("GET", "cli-chat-proxy.grok.com", "/v1/user", "allowed", None)
+                append_event("GET", "cli-chat-proxy.grok.com", "/v1/billing", "allowed", None)
+                return {
+                    "accounts": [
+                        {
+                            "agent_runtime": "grok",
+                            "provider": "xai",
+                            "status": "active",
+                            "account_id": account_id,
+                            "grok_usage": {"usage_percent": 12},
+                            "coding_data_retention_opt_out": True,
+                            "zdr_enabled": False,
+                        }
+                    ]
+                }
+            raise AssertionError((method, path, body))
+
+        def fake_ssh(command: str) -> str:
+            if "curl" not in command:
+                return "grok-cli-ok"
+            args = shlex.split(command)
+            args = args[args.index("curl") + 1 :]
+            method = args[args.index("-X") + 1]
+            headers: list[tuple[str, str]] = []
+            for index, arg in enumerate(args):
+                if arg == "-H":
+                    name, _, value = args[index + 1].partition(":")
+                    headers.append((name, value.strip()))
+            body = args[args.index("--data-binary") + 1].encode() if "--data-binary" in args else b""
+            parsed = urlsplit(args[-1])
+            event_method = method
+            event_path = parsed.path
+            integration = XaiIntegration(enabled=True)
+            if not xai_guard.host_allowed(integration, parsed.hostname or ""):
+                reason = "host_not_allowed"
+                event_method = "CONNECT"
+                event_path = ""
+            else:
+                reason = duplicate_header_denial(headers)
+            if reason is None:
+                with patch.object(
+                    xai_guard, "read_proxy_xai_account_id", return_value=account_id
+                ):
+                    reason = xai_guard.request_denied(
+                        integration,
+                        method,
+                        parsed.hostname or "",
+                        parsed.path,
+                        parsed.query,
+                        headers,
+                        body,
+                    )
+            append_event(
+                event_method,
+                parsed.hostname or "",
+                event_path,
+                "allowed" if reason is None else "denied",
+                reason,
+            )
+            # Real curl writes only a generic CONNECT 403 to stderr, while
+            # _ssh_code returns stdout. Keep the mock faithful to that shape.
+            if event_method == "CONNECT":
+                return ""
+            return reason or "upstream rejected synthetic credential"
+
+        def fake_network_events(since: int = 0) -> list[dict]:
+            network_queries.append(since)
+            return [event for event in events if event["seq"] > since]
+
+        with (
+            patch.object(stage, "enforcement_policy", side_effect=lambda: json.loads(json.dumps(baseline))),
+            patch.object(stage, "require_runtime_active"),
+            patch.object(stage, "_api", side_effect=fake_api),
+            patch.object(stage, "_api_status", return_value=(409, {})),
+            patch.object(stage, "_ssh_code", side_effect=fake_ssh),
+            patch.object(stage, "_network_events", side_effect=fake_network_events),
+        ):
+            stage.check_grok_connection_and_guards()
+
+        self.assertEqual((stage.passed, stage.total), (1, 1))
+        self.assertEqual(policies[-1]["network_integrations"]["xai"], {"enabled": True})
+        # Every denial case in the stage matrix, and the three allowed shapes
+        # plus the two refresh reads.
+        self.assertEqual(sum(event["decision"] == "denied" for event in events), 23)
+        self.assertEqual(sum(event["decision"] == "allowed" for event in events), 5)
+        # One baseline, one provider-refresh read, then one read per matrix
+        # row. The old implementation added a second full-history read for
+        # every row, which made the live check quadratic in retained events.
+        self.assertEqual(len(network_queries), 28)
+        self.assertLessEqual(network_queries.count(0), 2)
 
     def test_agent_catalog_parser_requires_unique_string_tool_ids(self) -> None:
         output = '```json\n{"tools":["twitter","gmail"]}\n```'
@@ -255,13 +426,12 @@ import tests.stage.stage_aws
         self.assertEqual(
             _result_shape(
                 {
-                    "status": "success_executed",
                     "message": "provider detail",
                     "reels": [{"url": "https://example.com/private-result"}],
                     "metadata": {"cursor": "secret-ish-provider-value"},
                 }
             ),
-            "message,metadata{1},reels[1],status",
+            "message,metadata{1},reels[1]",
         )
 
     def test_brave_stage_retries_one_provider_5xx(self) -> None:
@@ -525,7 +695,7 @@ import tests.stage.stage_aws
             patch.object(
                 stage,
                 "_wait_for_runtime_status",
-                side_effect=["active", "awaiting_login", "active"],
+                side_effect=["active", "awaiting_login", "active", "active"],
             ) as wait,
             patch.object(stage, "_github_config_failures", return_value=["credential validation is 'error'"]),
             patch.object(stage, "_tool_credential_failures", side_effect=lambda tool: [] if tool == "polymarket" else [f"{tool}: missing"]),
@@ -534,6 +704,7 @@ import tests.stage.stage_aws
 
         self.assertIsNone(availability["codex"])
         self.assertIn("awaiting_login", availability["claude"] or "")
+        self.assertIsNone(availability["grok"])
         self.assertIsNone(availability["hermes"])
         self.assertIn("validation", availability["github"] or "")
         self.assertIsNone(availability["polymarket"])
@@ -551,6 +722,7 @@ import tests.stage.stage_aws
             {
                 "codex": "gpt-5.6-luna",
                 "claude_code": "claude-sonnet-5",
+                "grok": "grok-4.6",
                 "hermes": "qwen.qwen3-coder-next",
             },
         )

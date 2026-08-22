@@ -24,6 +24,7 @@ from host.network_integrations.github import manifest as github
 from host.network_integrations.npm_packages import manifest as npm_packages
 from host.network_integrations.openai import manifest as openai
 from host.network_integrations.python_packages import manifest as python_packages
+from host.network_integrations.xai import manifest as xai
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,16 @@ def _build_registry(modules: tuple[Any, ...]) -> dict[str, RegisteredIntegration
 # Registry order is the operator- and agent-facing serialization order of
 # ``network_integrations``; ``custom`` (the catch-all for hosts no fixed apex
 # claims) is last.
-INTEGRATION_MODULES = (openai, claude, bedrock, github, python_packages, npm_packages, custom)
+INTEGRATION_MODULES = (
+    openai,
+    claude,
+    xai,
+    bedrock,
+    github,
+    python_packages,
+    npm_packages,
+    custom,
+)
 NETWORK_INTEGRATIONS: dict[str, RegisteredIntegration] = _build_registry(
     INTEGRATION_MODULES
 )

@@ -83,7 +83,7 @@ python3 tests/smoke-ui/run_admin_ui_mock.py --port 8000 --demo
 ```
 
 Open `http://127.0.0.1:8000/` and log in with password `dev`. Demo mode starts
-Codex, Claude Code, and Hermes active with representative usage values so the
+Codex, Claude Code, Grok, and Hermes active with representative usage values so the
 runtime toolbar is useful for visual inspection. The port is an argument so
 multiple developers or agents can choose non-conflicting localhost ports.
 

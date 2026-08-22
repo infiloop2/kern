@@ -48,6 +48,7 @@ from host.tools.shared.inputs import (
     int_field,
     schema,
 )
+from host.tools.shared import outputs
 from host.tools.shared.web import UnmappedProviderError
 from host.tools.tool import CredentialFlow
 
@@ -116,12 +117,154 @@ GRANDFATHERED_LANGUAGE_CODES = frozenset(
     }
 )
 
-RESULT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
-}
+_ISSUE_SCHEMA: JSONObject = outputs.obj(
+    {
+        "type": outputs.text("Google's issue type identifier."),
+        "severity": outputs.text("Severity Google assigns the issue, e.g. ERROR or WARNING."),
+        "message": outputs.text("Google's description of the issue, up to 500 characters."),
+    },
+    ["type", "severity", "message"],
+)
+
+LIST_PROPERTIES_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many properties were loaded."),
+        "properties": outputs.array_of(
+            outputs.obj(
+                {
+                    "site_url": outputs.text("Exact property URL; every other action requires one of these verbatim."),
+                    "permission_level": outputs.text("The connected account's access, e.g. siteOwner or siteFullUser."),
+                },
+                ["site_url", "permission_level"],
+            ),
+            f"Up to {MAX_PROPERTIES} properties the account can read. Properties with no read permission are left out.",
+        ),
+    },
+    ["message", "properties"],
+)
+QUERY_SEARCH_ANALYTICS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many analytics rows were loaded."),
+        "site_url": outputs.text("The property the rows belong to."),
+        "response_aggregation_type": outputs.text("How Google aggregated the rows, e.g. byPage or byProperty."),
+        "rows": outputs.array_of(
+            outputs.obj(
+                {
+                    "keys": outputs.array_of({"type": "string"}, "One value per requested dimension, in the order requested."),
+                    "clicks": outputs.number("Clicks from Google Search, absent when Google omits the metric."),
+                    "impressions": outputs.number("Impressions in Google Search, absent when Google omits the metric."),
+                    "ctr": outputs.number("Clicks divided by impressions, from 0 to 1."),
+                    "position": outputs.number("Average ranking position, where 1 is the top result."),
+                },
+                ["keys"],
+            ),
+            f"Up to {MAX_ANALYTICS_ROWS} rows, in Google's order.",
+        ),
+        "metadata": outputs.obj(
+            {
+                "first_incomplete_date": outputs.text("First date whose data is still being collected."),
+                "first_incomplete_hour": outputs.text("First hour whose data is still being collected."),
+            },
+            description="Google's freshness warning, present only when Google returns one.",
+        ),
+    },
+    ["message", "site_url", "response_aggregation_type", "rows"],
+)
+LIST_SITEMAPS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many sitemap records were loaded."),
+        "site_url": outputs.text("The property the sitemaps belong to."),
+        "sitemaps": outputs.array_of(
+            outputs.obj(
+                {
+                    "path": outputs.text("Sitemap URL as submitted."),
+                    "type": outputs.text("Sitemap format Google detected, e.g. sitemap or rssFeed."),
+                    "last_submitted": outputs.text("When the sitemap was last submitted."),
+                    "last_downloaded": outputs.text("When Google last fetched it, empty when it never has."),
+                    "is_pending": outputs.boolean("Google has not processed the sitemap yet."),
+                    "is_sitemaps_index": outputs.boolean("The file is an index pointing at other sitemaps."),
+                    "warnings": outputs.integer("Warnings Google raised while processing it."),
+                    "errors": outputs.integer("Errors Google raised while processing it."),
+                    "contents": outputs.array_of(
+                        outputs.obj(
+                            {
+                                "type": outputs.text("Content type, e.g. web or image."),
+                                "submitted": outputs.integer("URLs of this type in the sitemap."),
+                                "indexed": outputs.integer("URLs of this type Google reports as indexed. Google often returns 0 here."),
+                            },
+                            ["type", "submitted", "indexed"],
+                        ),
+                        "Up to 10 per-type breakdowns.",
+                    ),
+                },
+                ["path", "type", "last_submitted", "last_downloaded", "is_pending", "is_sitemaps_index", "warnings", "errors", "contents"],
+            ),
+            f"Up to {MAX_SITEMAPS} sitemap records.",
+        ),
+    },
+    ["message", "site_url", "sitemaps"],
+)
+INSPECT_URL_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the inspection was loaded."),
+        "inspection": outputs.obj(
+            {
+                "inspection_url": outputs.text("The URL that was inspected."),
+                "result_link": outputs.text("Link to the same result in the Search Console UI."),
+                "index_status": outputs.obj(
+                    {
+                        "verdict": outputs.text("Overall indexing verdict, e.g. PASS, NEUTRAL, or FAIL."),
+                        "coverage_state": outputs.text("Google's coverage summary, e.g. \"Submitted and indexed\"."),
+                        "robots_txt_state": outputs.text("Whether robots.txt allows the crawl."),
+                        "indexing_state": outputs.text("Whether indexing is allowed, e.g. INDEXING_ALLOWED."),
+                        "last_crawl_time": outputs.text("When Google last crawled the URL, empty when never."),
+                        "page_fetch_state": outputs.text("Result of Google's last fetch, e.g. SUCCESSFUL."),
+                        "google_canonical": outputs.text("The canonical URL Google chose."),
+                        "user_canonical": outputs.text("The canonical URL the page declares."),
+                        "crawled_as": outputs.text("Crawler used, e.g. MOBILE or DESKTOP."),
+                        "sitemaps": outputs.array_of({"type": "string"}, f"Up to {MAX_INSPECTION_ITEMS} sitemaps that reference the URL."),
+                        "referring_urls": outputs.array_of({"type": "string"}, f"Up to {MAX_INSPECTION_ITEMS} referring URLs Google found."),
+                    },
+                    ["verdict", "coverage_state", "robots_txt_state", "indexing_state", "last_crawl_time", "page_fetch_state", "google_canonical", "user_canonical", "crawled_as", "sitemaps", "referring_urls"],
+                ),
+                "mobile_usability": outputs.obj(
+                    {
+                        "verdict": outputs.text("Mobile usability verdict; empty when Google reports none."),
+                        "issues": outputs.array_of(_ISSUE_SCHEMA, f"Up to {MAX_INSPECTION_ITEMS} mobile usability issues."),
+                    },
+                    ["verdict", "issues"],
+                ),
+                "rich_results": outputs.obj(
+                    {
+                        "verdict": outputs.text("Rich-results verdict; empty when Google reports none."),
+                        "detected_items": outputs.array_of(
+                            outputs.obj(
+                                {
+                                    "type": outputs.text("Structured-data type Google detected, e.g. Product."),
+                                    "items": outputs.array_of(
+                                        outputs.obj(
+                                            {
+                                                "name": outputs.text("Name of the detected item."),
+                                                "issues": outputs.array_of(_ISSUE_SCHEMA, "Issues Google found with this item."),
+                                            },
+                                            ["name", "issues"],
+                                        ),
+                                        "Up to 10 items of this type.",
+                                    ),
+                                },
+                                ["type", "items"],
+                            ),
+                            "Up to 10 structured-data types found on the page.",
+                        ),
+                    },
+                    ["verdict", "detected_items"],
+                ),
+            },
+            ["inspection_url", "result_link", "index_status", "mobile_usability", "rich_results"],
+        ),
+    },
+    ["message", "inspection"],
+)
 
 
 MANIFEST = ToolManifest(
@@ -197,7 +340,7 @@ MANIFEST = ToolManifest(
                 "No agent-supplied data leaves the host. Runs directly with no approval."
             ),
             input_schema=schema({}),
-            output_schema=RESULT_SCHEMA,
+            output_schema=LIST_PROPERTIES_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="query_search_analytics",
@@ -257,7 +400,7 @@ MANIFEST = ToolManifest(
                 },
                 ["site_url", "start_date", "end_date"],
             ),
-            output_schema=RESULT_SCHEMA,
+            output_schema=QUERY_SEARCH_ANALYTICS_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="list_sitemaps",
@@ -275,7 +418,7 @@ MANIFEST = ToolManifest(
                 },
                 ["site_url"],
             ),
-            output_schema=RESULT_SCHEMA,
+            output_schema=LIST_SITEMAPS_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="inspect_url",
@@ -306,7 +449,7 @@ MANIFEST = ToolManifest(
                 },
                 ["site_url", "inspection_url"],
             ),
-            output_schema=RESULT_SCHEMA,
+            output_schema=INSPECT_URL_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="submit_sitemap",
@@ -875,8 +1018,7 @@ class GoogleSearchConsoleTool:
                 properties = _properties(access_token)
                 return ActionExecuted(
                     {
-                        "status": "success_executed",
-                        "message": f"Loaded {len(properties)} Search Console propert(ies).",
+                                                "message": f"Loaded {len(properties)} Search Console propert(ies).",
                         "properties": cast(list[JSONValue], properties),
                     }
                 )
@@ -892,8 +1034,7 @@ class GoogleSearchConsoleTool:
                 )
                 rows = _analytics_rows(response)
                 result: JSONObject = {
-                    "status": "success_executed",
-                    "message": f"Loaded {len(rows)} bounded Search Console analytics row(s).",
+                                        "message": f"Loaded {len(rows)} bounded Search Console analytics row(s).",
                     "site_url": site_url,
                     "rows": cast(list[JSONValue], rows),
                     "response_aggregation_type": _text(
@@ -918,8 +1059,7 @@ class GoogleSearchConsoleTool:
                 sitemaps = _sitemaps(access_token, site_url)
                 return ActionExecuted(
                     {
-                        "status": "success_executed",
-                        "message": f"Loaded {len(sitemaps)} bounded sitemap record(s).",
+                                                "message": f"Loaded {len(sitemaps)} bounded sitemap record(s).",
                         "site_url": site_url,
                         "sitemaps": cast(list[JSONValue], sitemaps),
                     }
@@ -947,8 +1087,7 @@ class GoogleSearchConsoleTool:
                 )
                 return ActionExecuted(
                     {
-                        "status": "success_executed",
-                        "message": "Loaded Google's indexed URL inspection result.",
+                                                "message": "Loaded Google's indexed URL inspection result.",
                         "inspection": _inspection_result(response, inspection_url),
                     }
                 )

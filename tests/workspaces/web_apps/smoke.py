@@ -42,6 +42,7 @@ DEFAULT_SESSION = {
 RUNTIME_LABELS = {
     "codex": "Codex",
     "claude_code": "Claude Code",
+    "grok": "Grok",
     "hermes": "Hermes",
 }
 DEMO_MODE = False
@@ -238,7 +239,7 @@ def _route_workspace_api(
         # rendering for real; no journey selects it. Demo mode narrows further.
         return {
             "session_options": public_session_options(),
-            "active_runtimes": ["codex"] if DEMO_MODE else ["claude_code", "codex"],
+            "active_runtimes": ["codex"] if DEMO_MODE else ["claude_code", "codex", "grok"],
         }
     with MOCK_LOCK:
         _progress_turns()
@@ -875,12 +876,29 @@ def _open_host_app(page: Any, name: str) -> None:
     expect(page.locator("#panel-workspace-web-apps")).to_be_visible()
 
 
-def _start_host_app(page: Any) -> None:
+def _start_host_app(page: Any, *, wait_for_selection: bool = True) -> None:
     from playwright.sync_api import expect
 
+    frame = page.locator("#panel-workspace-web-apps")
+    title = frame.locator("#app-title")
+    previous_title = title.text_content() or ""
     _open_mobile_host_navigation(page)
-    page.get_by_role("button", name="New app", exact=True).click()
-    expect(page.locator("#panel-workspace-web-apps")).to_be_visible()
+    create = page.get_by_role("button", name="New app", exact=True)
+    # A just-finished create can update navigation before its finally block
+    # clears the busy state. Waiting for the actual control prevents the next
+    # click from being ignored while creation is still marked in progress.
+    expect(create).to_be_enabled()
+    create.click()
+    expect(frame).to_be_visible()
+    if not wait_for_selection:
+        return
+    expect(title).to_have_text(re.compile(r"^app-[0-9]+$"))
+    if previous_title:
+        # The Apps panel can already be visible while the create request and
+        # asynchronous showApp() are still selecting the new app. Returning at
+        # that point lets a caller click settings just before showApp closes the
+        # popover, producing the long-standing intermittent UI-smoke failure.
+        expect(title).not_to_have_text(previous_title)
 
 
 def stylesheet_fallback_smoke(page: Any) -> None:
@@ -983,7 +1001,7 @@ def desktop_smoke(page: Any) -> None:
           };
         }"""
     )
-    _start_host_app(page)
+    _start_host_app(page, wait_for_selection=False)
     expect(page).to_have_url(re.compile(r"#apps$"))
     page.wait_for_function("() => typeof window.__releaseSlowAppCreate === 'function'")
     page.get_by_role("button", name="Home", exact=True).click()
@@ -1043,6 +1061,10 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#runtime")).to_have_value("codex")
     expect(frame.locator("#model")).to_have_value("gpt-5.6-terra")
     expect(frame.locator("#effort")).to_have_value("high")
+    frame.locator("#runtime").select_option("grok")
+    expect(frame.locator("#model")).to_have_value("grok-4.6")
+    expect(frame.locator("#effort option")).to_have_count(2)
+    frame.locator("#runtime").select_option("codex")
 
     with page.expect_file_chooser() as chooser:
         frame.get_by_role("button", name="Attach files").click()
@@ -1155,8 +1177,16 @@ def desktop_smoke(page: Any) -> None:
     frame.locator("#runtime").select_option("claude_code")
     frame.locator("#model").select_option("claude-fable-5")
     frame.locator("#effort").select_option("ultracode")
+    # _start_host_app waits for the new app to be selected, which is what
+    # closes the popover left open above. Toggling before that lands would
+    # close it instead of opening it and invert every assertion below.
     _start_host_app(page)
+    expect(frame.locator("#settings-popover")).to_be_hidden()
     frame.locator("#settings-open").click()
+    # And to_have_value does not require visibility, so wait for the popover
+    # itself before toggling it shut; otherwise the closing click can land
+    # while it is still opening and leave it open.
+    expect(frame.locator("#settings-popover")).to_be_visible()
     expect(frame.locator("#runtime")).to_have_value("codex")
     expect(frame.locator("#model")).to_have_value("gpt-5.6-terra")
     expect(frame.locator("#effort")).to_have_value("high")

@@ -21,6 +21,7 @@ from host.tools.manifest import (
     ToolManifest,
 )
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
+from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, int_field, schema
 from host.tools.shared.oauth2 import now
 from host.tools.shared.web import (
@@ -47,12 +48,56 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 EXCLUDE_REPLY_RE = re.compile(r"(?<!\S)-(?:is:reply|filter:replies)(?!\S)")
 EXCLUDE_RETWEET_RE = re.compile(r"(?<!\S)-(?:is:retweet|filter:nativeretweets)(?!\S)")
 
-OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
+# The provider's per-post counters, the result field each becomes, and what it
+# counts. One list feeds the normalization and the declared schema.
+POST_METRIC_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("viewCount", "impression_count", "Views."),
+    ("likeCount", "like_count", "Likes."),
+    ("replyCount", "reply_count", "Replies."),
+    ("retweetCount", "repost_count", "Reposts."),
+    ("quoteCount", "quote_count", "Quote posts."),
+    ("bookmarkCount", "bookmark_count", "Bookmarks."),
+)
+POST_METRIC_PROPERTIES: JSONObject = {
+    result_key: outputs.integer(description) for _, result_key, description in POST_METRIC_FIELDS
 }
+
+OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many posts were returned, out of how many the provider sent."),
+        "provider": outputs.text("Always twitterapi_io; names the source, since the official X tool returns a different shape."),
+        "query": outputs.text("The search string as sent to TwitterAPI.io, including any filters Kern appended."),
+        "query_type": outputs.text("Latest or Top, as sent to the provider."),
+        "provider_posts_returned": outputs.integer("How many posts the provider returned before local filtering."),
+        "billable_post_reads": outputs.integer("Post reads billed for this call; the provider bills at least one."),
+        "locally_filtered_posts": outputs.integer("Posts dropped here as malformed, replies, or reposts."),
+        "locally_truncated_posts": outputs.integer("Eligible posts dropped to honour max_results."),
+        "posts": outputs.array_of(
+            outputs.obj(
+                {
+                    "id": outputs.text("Numeric post id."),
+                    "text": outputs.text("Post text, clipped."),
+                    "url": outputs.text("Public x.com link to the post."),
+                    "created_at": outputs.text("Publication time as the provider formats it."),
+                    "lang": outputs.text("Language code the provider detected."),
+                    "conversation_id": outputs.text("Id of the conversation root, empty when the provider omits it."),
+                    "author_id": outputs.text("Numeric id of the author, empty when the provider omits it."),
+                    "author_username": outputs.text("Author handle without the @, empty when the provider omits it."),
+                    "author_name": outputs.text("Author display name."),
+                    "public_metrics": outputs.obj(
+                        POST_METRIC_PROPERTIES,
+                        description="Metrics the provider returned; a metric it omits has no entry.",
+                    ),
+                    "is_reply": outputs.boolean("The post replies to another post."),
+                    "is_retweet": outputs.boolean("The post is a repost of another post."),
+                },
+                ["id", "text", "url", "created_at", "lang", "conversation_id", "author_id", "author_username", "author_name", "public_metrics", "is_reply", "is_retweet"],
+            ),
+            "Up to max_results posts that survived local filtering.",
+        ),
+    },
+    ["message", "provider", "query", "query_type", "provider_posts_returned", "billable_post_reads", "locally_filtered_posts", "locally_truncated_posts", "posts"],
+)
 
 MANIFEST = ToolManifest(
     tool_id="twitterapi_io",
@@ -438,14 +483,7 @@ def _normalized_post(value: object) -> JSONObject | None:
     author = author_value if isinstance(author_value, dict) else {}
     author_username = _username(author.get("userName"))
     metrics: JSONObject = {}
-    for provider_key, result_key in (
-        ("viewCount", "impression_count"),
-        ("likeCount", "like_count"),
-        ("replyCount", "reply_count"),
-        ("retweetCount", "repost_count"),
-        ("quoteCount", "quote_count"),
-        ("bookmarkCount", "bookmark_count"),
-    ):
+    for provider_key, result_key, _ in POST_METRIC_FIELDS:
         count = _nonnegative_int(value.get(provider_key))
         if count is not None:
             metrics[result_key] = count
@@ -523,8 +561,7 @@ class TwitterApiIoTool(Tool):
                 exclude_retweets=request.exclude_retweets,
             )
             result: JSONObject = {
-                "status": "success_executed",
-                "message": (
+                                "message": (
                     f"TwitterAPI.io returned {len(posts)} public post(s) from "
                     f"{provider_posts} provider result(s)."
                 ),

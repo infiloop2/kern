@@ -25,6 +25,7 @@ from host.tools.tool import (
     OAuthStartConnectResult,
 )
 from host.tools.host_api import ConnectionAccount, HostAPI, StoredCredential
+from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
@@ -62,6 +63,7 @@ TWEET_ID_RE = re.compile(r"^[0-9]{1,25}$")
 USER_ID_RE = re.compile(r"^[0-9]{1,19}$")
 USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{1,15}$")
 WOEID_RE = re.compile(r"^[0-9]{1,10}$")
+START_TIME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 WORLDWIDE_WOEID = "1"
 TWEET_FIELDS = "created_at,author_id,public_metrics,conversation_id"
 X_READ_POLICY = (
@@ -78,12 +80,107 @@ X_PERSONALIZED_TRENDS_POLICY = (
 )
 
 
-X_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
+# X's public_metrics for a post: the fields _tweet_summary copies and what each
+# one counts. One list feeds the read and its declared schema.
+TWEET_METRIC_FIELDS: tuple[tuple[str, str], ...] = (
+    ("retweet_count", "Reposts."),
+    ("reply_count", "Replies."),
+    ("like_count", "Likes."),
+    ("quote_count", "Quote posts."),
+    ("bookmark_count", "Bookmarks."),
+    ("impression_count", "Impressions."),
+)
+TWEET_METRIC_PROPERTIES: JSONObject = {
+    field: outputs.integer(description) for field, description in TWEET_METRIC_FIELDS
 }
+
+TWEET_SCHEMA: JSONObject = outputs.obj(
+    {
+        "id": outputs.text("Post id; pass to read_tweet."),
+        "text": outputs.text("Post text, up to 1200 characters."),
+        "author_id": outputs.text("Numeric id of the author, empty when X does not expand it."),
+        "author_username": outputs.text("Author handle without the @, empty when X does not expand it."),
+        "created_at": outputs.text("ISO 8601 publication time."),
+        "metrics": outputs.obj(
+            TWEET_METRIC_PROPERTIES,
+            description="Public metrics X returned; a metric X withheld has no entry, so an empty object means X sent none.",
+        ),
+    },
+    ["id", "text", "author_id", "author_username", "created_at", "metrics"],
+)
+
+SEARCH_TWEETS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many posts the search returned."),
+        "tweets": outputs.array_of(TWEET_SCHEMA, "Up to max_results recent posts, newest first."),
+    },
+    ["message", "tweets"],
+)
+READ_TWEET_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Whether the post was loaded or not found."),
+        "tweet": outputs.nullable(TWEET_SCHEMA, "The post, or null when X returned nothing for that id."),
+    },
+    ["message", "tweet"],
+)
+USER_TWEETS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many posts were returned, or that the user was not found."),
+        "tweets": outputs.array_of(TWEET_SCHEMA, "Up to max_results of the user's recent posts; empty when the user was not found."),
+    },
+    ["message", "tweets"],
+)
+GET_TRENDS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many trends were returned, and for which place."),
+        "trends": outputs.array_of(
+            outputs.obj(
+                {
+                    "trend_name": outputs.text("The trending topic as X names it."),
+                    "tweet_count": outputs.nullable({"type": "integer"}, "Posts in the trend, null when X omits the count."),
+                },
+                ["trend_name", "tweet_count"],
+            ),
+            "Up to max_trends topics, in X's order.",
+        ),
+    },
+    ["message", "trends"],
+)
+GET_PERSONALIZED_TRENDS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many personalized trends were returned."),
+        "trends": outputs.array_of(
+            outputs.obj(
+                {
+                    "trend_name": outputs.text("The trending topic as X names it."),
+                    "category": outputs.text("Category X assigns the trend, empty when it sends none."),
+                    "post_count": outputs.nullable({"type": "integer"}, "Posts in the trend, null when X omits the count."),
+                    "trending_since": outputs.text("How long it has been trending, as X phrases it."),
+                },
+                ["trend_name", "category", "post_count", "trending_since"],
+            ),
+            "Up to 50 For You trends for the connected account.",
+        ),
+    },
+    ["message", "trends"],
+)
+LOOKUP_USER_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Which handle resolved to which user id."),
+        "user": outputs.obj(
+            {
+                "id": outputs.text("Numeric X user id."),
+                "username": outputs.text("Handle without the @."),
+                "name": outputs.text("Display name, up to 120 characters."),
+                "followers_count": outputs.integer("Followers; absent when X withholds the metric."),
+                "following_count": outputs.integer("Accounts followed; absent when X withholds the metric."),
+                "tweet_count": outputs.integer("Posts published; absent when X withholds the metric."),
+            },
+            ["id", "username", "name"],
+        ),
+    },
+    ["message", "user"],
+)
 
 
 MANIFEST = ToolManifest(
@@ -97,22 +194,24 @@ MANIFEST = ToolManifest(
     connection="oauth",
     actions=(
         ActionSpec(id="search_tweets",
-            description="Search public X posts from the last seven days with X query syntax and return post text, author, timestamp, and metrics. Use get_trends to discover trend names first; reads are billed per post returned.",
+            description="Search public X posts from the last seven days with X query syntax and return post text, author, timestamp, and metrics. Pass start_time or since_id on recurring searches so already-read posts are not billed again. Use get_trends to discover trend names first; reads are billed per post returned.",
             data_policy=X_READ_POLICY,
             input_schema=_schema(
                 {
                     "query": {"type": "string", "description": "X search query (up to 512 chars)."},
                     "max_results": {"type": "string", "description": "10-100 (default 10). Reads are billed per post returned."},
+                    "start_time": {"type": "string", "description": "Only return posts at or after this RFC3339 UTC second, e.g. 2026-08-20T12:00:00Z; must fall inside X's seven-day recent-search window. Mutually exclusive with since_id."},
+                    "since_id": {"type": "string", "description": "Only return posts with a numeric post id greater than this one. Mutually exclusive with start_time."},
                 },
                 ["query"],
             ),
-            output_schema=X_OUTPUT_SCHEMA,
+            output_schema=SEARCH_TWEETS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="read_tweet",
             description="Read one public X post by numeric post id and return its text, author, timestamp, and metrics. This does not read a thread or timeline.",
             data_policy=X_READ_POLICY,
             input_schema=_schema({"tweet_id": {"type": "string", "description": "Numeric X post id from a URL or another X action result."}}, ["tweet_id"]),
-            output_schema=X_OUTPUT_SCHEMA,
+            output_schema=READ_TWEET_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="user_tweets",
             description="Read one public user's recent posts and return text, timestamps, and metrics. Provide exactly one username or numeric user_id; this is that user's timeline, not the connected account's home feed.",
@@ -124,7 +223,7 @@ MANIFEST = ToolManifest(
                     "max_results": {"type": "string", "description": "5-100 (default 10)."},
                 }
             ),
-            output_schema=X_OUTPUT_SCHEMA,
+            output_schema=USER_TWEETS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_trends",
             description="Read public trending topic names and optional post counts for one geographic WOEID, worldwide by default. This returns topics, not posts; follow with search_tweets to find and rank posts about a trend.",
@@ -140,13 +239,13 @@ MANIFEST = ToolManifest(
                     "max_trends": {"type": "string", "description": "1-50 (default 20)."},
                 }
             ),
-            output_schema=X_OUTPUT_SCHEMA,
+            output_schema=GET_TRENDS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_personalized_trends",
             description="Read the connected account's personalized For You trend names, categories, counts, and start times. Requires X Premium and returns topics, not posts; follow with search_tweets for matching public posts.",
             data_policy=X_PERSONALIZED_TRENDS_POLICY,
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-            output_schema=X_OUTPUT_SCHEMA,
+            output_schema=GET_PERSONALIZED_TRENDS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="lookup_user",
             description="Resolve one public X user to their permanent numeric id, handle, display name, and public follower/following/post counts. Provide exactly one username or user_id. This reads a profile, not its posts; use user_tweets for those.",
@@ -163,7 +262,7 @@ MANIFEST = ToolManifest(
                     "user_id": {"type": "string", "description": "Permanent numeric X user id; mutually exclusive with username."},
                 }
             ),
-            output_schema=X_OUTPUT_SCHEMA,
+            output_schema=LOOKUP_USER_OUTPUT_SCHEMA,
         ),
     ),
     config=(
@@ -545,7 +644,15 @@ def _usernames_by_id(response: JSONObject) -> dict[str, str]:
 
 
 def _tweet_summary(tweet: JSONObject, usernames: dict[str, str]) -> JSONObject:
-    metrics = tweet.get("public_metrics")
+    raw_metrics = tweet.get("public_metrics")
+    raw_metrics = raw_metrics if isinstance(raw_metrics, dict) else {}
+    # Named fields rather than X's public_metrics object echoed through: an
+    # echoed provider body is a shape the manifest cannot state.
+    metrics: JSONObject = {}
+    for field, _ in TWEET_METRIC_FIELDS:
+        count = raw_metrics.get(field)
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            metrics[field] = count
     author_id = tweet.get("author_id")
     author_id_str = author_id if isinstance(author_id, str) else ""
     return {
@@ -554,14 +661,14 @@ def _tweet_summary(tweet: JSONObject, usernames: dict[str, str]) -> JSONObject:
         "author_id": author_id_str,
         "author_username": usernames.get(author_id_str, ""),
         "created_at": str(tweet.get("created_at") or ""),
-        "metrics": cast(JSONObject, metrics) if isinstance(metrics, dict) else {},
+        "metrics": metrics,
     }
 
 
 def _search_tweets(access_token: str, tool_input: JSONObject, api: HostAPI) -> JSONObject:
-    extra = set(tool_input) - {"query", "max_results"}
+    extra = set(tool_input) - {"query", "max_results", "start_time", "since_id"}
     if extra:
-        raise ToolInputValidationError("X search tool input only supports query and max_results.")
+        raise ToolInputValidationError("X search tool input only supports query, max_results, start_time, and since_id.")
     query = tool_input.get("query")
     if not isinstance(query, str) or not query.strip():
         raise ToolInputValidationError("X tool_input.query is required.")
@@ -571,15 +678,24 @@ def _search_tweets(access_token: str, tool_input: JSONObject, api: HostAPI) -> J
             f"X search query must be at most {MAX_QUERY_CHARS} characters."
         )
     max_results = int_field(tool_input, "max_results", provider="X", default=10, low=10, high=100)
-    params = encode_query(
-        {
-            "query": api.outbound.guard_request_parameter_string(query),
-            "max_results": str(max_results),
-            "tweet.fields": TWEET_FIELDS,
-            "expansions": "author_id",
-            "user.fields": "username",
-        }
-    )
+    start_time = tool_input.get("start_time")
+    since_id = tool_input.get("since_id")
+    if start_time is not None and since_id is not None:
+        raise ToolInputValidationError("X search accepts start_time or since_id, not both.")
+    if start_time is not None and (not isinstance(start_time, str) or not START_TIME_RE.fullmatch(start_time.strip())):
+        raise ToolInputValidationError("X tool_input.start_time must be an RFC3339 UTC second like 2026-08-20T12:00:00Z.")
+    query_params = {
+        "query": api.outbound.guard_request_parameter_string(query),
+        "max_results": str(max_results),
+        "tweet.fields": TWEET_FIELDS,
+        "expansions": "author_id",
+        "user.fields": "username",
+    }
+    if isinstance(start_time, str):
+        query_params["start_time"] = start_time.strip()
+    if since_id is not None:
+        query_params["since_id"] = _valid_tweet_id(since_id, field="since_id")
+    params = encode_query(query_params)
     response = _api_get(access_token, f"/tweets/search/recent?{params}", what="search")
     usernames = _usernames_by_id(response)
     data = response.get("data")
@@ -589,8 +705,7 @@ def _search_tweets(access_token: str, tool_input: JSONObject, api: HostAPI) -> J
         if isinstance(tweet, dict)
     ]
     return {
-        "status": "success_executed",
-        "message": f"X search returned {len(tweets)} post(s).",
+                "message": f"X search returned {len(tweets)} post(s).",
         "tweets": tweets,
     }
 
@@ -604,10 +719,9 @@ def _read_tweet(access_token: str, tool_input: JSONObject) -> JSONObject:
     response = _api_get(access_token, f"/tweets/{tweet_id}?{params}", what="post lookup")
     data = response.get("data")
     if not isinstance(data, dict):
-        return {"status": "success_executed", "message": "X post was not found.", "tweet": None}
+        return {"message": "X post was not found.", "tweet": None}
     return {
-        "status": "success_executed",
-        "message": "X post loaded.",
+                "message": "X post loaded.",
         "tweet": _tweet_summary(cast(JSONObject, data), _usernames_by_id(response)),
     }
 
@@ -633,7 +747,7 @@ def _user_tweets(access_token: str, tool_input: JSONObject) -> JSONObject:
         data = response.get("data")
         resolved = data.get("id") if isinstance(data, dict) else None
         if not isinstance(resolved, str) or not TWEET_ID_RE.fullmatch(resolved):
-            return {"status": "success_executed", "message": "X user was not found.", "tweets": []}
+            return {"message": "X user was not found.", "tweets": []}
         resolved_id = resolved
         resolved_username = handle
     max_results = int_field(tool_input, "max_results", provider="X", default=10, low=5, high=100)
@@ -648,8 +762,7 @@ def _user_tweets(access_token: str, tool_input: JSONObject) -> JSONObject:
             summary["author_username"] = resolved_username
             tweets.append(summary)
     return {
-        "status": "success_executed",
-        "message": f"X returned {len(tweets)} post(s) for the user.",
+                "message": f"X returned {len(tweets)} post(s) for the user.",
         "tweets": tweets,
     }
 
@@ -699,8 +812,7 @@ def _get_trends(api: HostAPI, tool_input: JSONObject) -> JSONObject:
             )
     place = "worldwide" if woeid.strip() == WORLDWIDE_WOEID else f"WOEID {woeid.strip()}"
     return {
-        "status": "success_executed",
-        "message": f"X returned {len(trends)} trending topic(s) for {place}.",
+                "message": f"X returned {len(trends)} trending topic(s) for {place}.",
         "trends": trends,
     }
 
@@ -724,8 +836,7 @@ def _personalized_trends(access_token: str, tool_input: JSONObject) -> JSONObjec
                 }
             )
     return {
-        "status": "success_executed",
-        "message": f"X returned {len(trends)} personalized (For You) trend(s) for the connected account.",
+                "message": f"X returned {len(trends)} personalized (For You) trend(s) for the connected account.",
         "trends": trends,
     }
 
@@ -795,8 +906,7 @@ def _lookup_user(access_token: str, tool_input: JSONObject) -> JSONObject:
             if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
                 user[field] = count
     return {
-        "status": "success_executed",
-        "message": f"Resolved @{resolved_username} to X user id {resolved_id}.",
+                "message": f"Resolved @{resolved_username} to X user id {resolved_id}.",
         "user": user,
     }
 

@@ -80,8 +80,9 @@ class ActionSpec:
     description: str
     data_policy: str
     input_schema: JSONObject
-    output_schema: JSONObject = {}          # empty for approval-gated actions
+    output_schema: JSONObject = {}          # required unless the action returns no JSON result
     approval: ApprovalKind = "direct"
+    returns_asset: bool = False             # the whole result is one streamed file
 
 @dataclass(frozen=True)
 class ConfigRequirement:
@@ -142,11 +143,24 @@ class ToolManifest:
   without deliberately renaming the package fails CI.
 - **`ActionSpec.id`** matches `^[A-Za-z0-9._:-]{1,128}$` and is unique within the
   tool. `input_schema` declares the callable parameters (JSON Schema); it is
-  required so agents can call the action over MCP. `output_schema` describes the
-  JSON result of a *direct* action and may be empty for approval-gated actions,
-  which return a user-visible message rather than a JSON result.
+  required so agents can call the action over MCP.
+- **`ActionSpec.output_schema`** describes the JSON result the action returns:
+  every field named, typed, and described, with every object closed
+  (`additionalProperties: false`), exactly like an input schema. It is required
+  for any action that returns a JSON result, and empty for the two kinds that
+  do not — an approval-gated action, which returns a user-visible message, and a
+  `returns_asset` action, whose whole result is one streamed file. The manifest
+  enforces that pairing, so an undescribed result is not a thing a tool can
+  ship. `describe_tool` returns it next to the input schema, so an agent learns
+  the shape of what it gets back before it makes the call.
 - **`ActionSpec.approval`** states the control structurally: `direct` executes
   immediately; `operator` queues the exact payload and waits for an approval.
+- **`ActionSpec.returns_asset`** marks the action whose entire result is a
+  `StreamingAsset` rather than JSON. With `approval`, it makes each action's
+  result kind a declaration rather than something a caller infers from prose.
+  The host holds the returned value to it: a file from an action that did not
+  declare one, or a JSON result from one that did, fails the call instead of
+  contradicting what `describe_tool` and the admin API published.
 - **`ActionSpec.data_policy`** is **per action**: one or two plain sentences on
   what the action does, exactly which request values leave the host for it, and
   whether approval happens before the third-party request. The combined
@@ -224,6 +238,10 @@ ApprovalResult = ApprovalExecuted | ActionFailed                          # exec
 
 - `ActionExecuted.result` is a JSON object validated against `output_schema`,
   shown to the agent. It must not include tokens, secrets, or raw provider bodies.
+  Because the schema is closed, a field the tool returns but does not declare
+  fails the call: normalize provider objects into named fields rather than
+  echoing them, and declare every field the action can produce, including the
+  ones it only sometimes sets.
 - `StreamingAsset` is the entire direct-action result, never a field inside an
   `ActionExecuted` JSON object. Entering `open_stream` yields one opened source
   plus its filename, media type, and exact encoded byte length. The host relays
@@ -232,8 +250,10 @@ ApprovalResult = ApprovalExecuted | ActionFailed                          # exec
   JSON-and-binary responses unrepresentable. Expected open or transfer failures
   raise `StreamingAssetError` with a redacted agent-visible message.
 - The outcome of an **approved** action is a single user-visible
-  `ApprovalExecuted.message` string, not a JSON result validated against an
-  `output_schema`. The host stores it as the approval's terminal `result` text
+  `ApprovalExecuted.message` string (or an `ActionFailed`); any other result
+  kind from `execute_approved` is recorded as a failed execution, so the
+  approval always reaches a terminal state. It is not a JSON result validated
+  against an `output_schema`. The host stores it as the approval's terminal `result` text
   (the failure error for a failed execution — the approval status says which),
   surfaces it to the operator in the admin UI, and returns it to the agent
   through `check_tool_approval` (as the terminal `execution_result` text) so

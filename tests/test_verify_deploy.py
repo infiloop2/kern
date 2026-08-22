@@ -119,6 +119,7 @@ class SocketTests(unittest.TestCase):
                 "kern-workspace",
                 "kern-agent-network",
                 "kern-admin",
+                "kern-embedding",
                 "postgres",
             },
         )

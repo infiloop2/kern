@@ -11,7 +11,7 @@ from host.tools.instagram_discovery import InstagramDiscoveryTool
 from host.tools.results import ActionExecuted, ActionFailed
 from host.tools.shared.web import WebRequestError
 
-from test_tools import FakeHostAPI
+from test_tools import FakeHostAPI, assert_matches_output_schema
 
 
 def configured_api() -> FakeHostAPI:
@@ -71,6 +71,7 @@ class InstagramDiscoveryToolTests(unittest.TestCase):
                 {"query": "dogs", "date_posted": "last-week", "page": "2", "limit": "5"},
                 configured_api(),
             )
+        assert_matches_output_schema(self, instagram_discovery.MANIFEST, "search_reels", result)
         assert isinstance(result, ActionExecuted)
         self.assertIn("/v2/instagram/reels/search?", seen["url"])
         self.assertIn("query=dogs", seen["url"])
@@ -155,6 +156,7 @@ class InstagramDiscoveryToolTests(unittest.TestCase):
             result = InstagramDiscoveryTool().execute(
                 "get_reel_details", {"url": "https://instagram.com/reel/ABC123/?utm_source=x#frag"}, configured_api()
             )
+        assert_matches_output_schema(self, instagram_discovery.MANIFEST, "get_reel_details", result)
         assert isinstance(result, ActionExecuted)
         self.assertIn("trim=true", seen["url"])
         self.assertIn("download_media=false", seen["url"])

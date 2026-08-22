@@ -32,6 +32,7 @@ flowchart LR
             tools["kern-tools<br/>Tool packages + tools.sock<br/>DNS + TCP 443 only"]
             agentnetwork["kern-agent-network<br/>Network introspection socket<br/>no egress"]
             workspace["kern-workspace<br/>Chat + Web Apps + Memory + Schedules + agent.sock<br/>fixed uid, port, explicit table grants<br/>no egress"]
+            embedding["kern-embedding<br/>socket-activated ONNX inference<br/>no DB or network access"]
             agent["kern-agent<br/>Codex + Claude Code + Hermes<br/>no sudo, DB role, or direct egress"]
             db["postgres<br/>kern_admin<br/>Unix socket only, peer auth"]
             tunnel["cloudflared<br/>Tunnel connector<br/>DNS, TCP 443/7844, UDP 7844"]
@@ -69,10 +70,14 @@ flowchart LR
 
     admin -->|"reverse proxy to fixed loopback port"| workspace
     workspace -->|"workspace.sock thread-only allowlist, peer uid"| admin
+    admin -->|"bounded query/passage text over Unix socket"| embedding
+    workspace -->|"bounded memory query/passage text"| embedding
 
     agent -->|"Workspace + bounded history tools via agent.sock"| workspace
 
     admin -->|"owner role, all host tables"| db
+    db -->|"pgvector conversation index"| admin
+    db -->|"pgvector memory index"| workspace
     admin -->|"admin-home + disk version"| adminvol
     proxy -->|"enforcement reads, event/push writes, working token"| db
     proxy -->|"CA keypair, leaf certs, Git quarantine"| adminvol

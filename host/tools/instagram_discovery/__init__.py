@@ -14,6 +14,7 @@ from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
+from host.tools.shared import outputs
 from host.tools.shared.inputs import bounded_int, clip as _text
 from host.tools.shared.web import UnmappedProviderError, WebRequestError, json_request, known_provider_transport_error, unmapped_provider_error
 from host.tools.tool import Tool
@@ -30,43 +31,43 @@ MAX_CAPTION_CHARS = 2_200
 DATE_WINDOWS = ("last-hour", "last-day", "last-week", "last-month", "last-year")
 AUDIO_ID_RE = re.compile(r"^[0-9]{1,30}$")
 
+# Counts and durations are normalized to decimal strings, with "0" standing in
+# for anything the provider did not give; every field is always present, empty
+# when unknown.
 REEL_PROPERTIES: JSONObject = {
-    "id": {"type": "string"},
-    "shortcode": {"type": "string"},
-    "url": {"type": "string"},
-    "caption": {"type": "string"},
-    "username": {"type": "string"},
-    "taken_at": {"type": "string"},
-    "like_count": {"type": "string"},
-    "comment_count": {"type": "string"},
-    "play_count": {"type": "string"},
-    "view_count": {"type": "string"},
-    "duration_seconds": {"type": "string"},
-    "video_url": {"type": "string"},
-    "image_url": {"type": "string"},
-    "audio_id": {"type": "string"},
-    "audio_name": {"type": "string"},
+    "id": outputs.text("Instagram media id."),
+    "shortcode": outputs.text("Instagram shortcode, empty when the provider sent a malformed one."),
+    "url": outputs.text("Public instagram.com Reel permalink; pass to get_reel_details."),
+    "caption": outputs.text("Reel caption, clipped."),
+    "username": outputs.text("Creator handle without the @."),
+    "taken_at": outputs.text("Publication time, ISO 8601 when the provider sent a timestamp."),
+    "like_count": outputs.text('Likes as a decimal string, "0" when unknown.'),
+    "comment_count": outputs.text('Comments as a decimal string, "0" when unknown.'),
+    "play_count": outputs.text('Plays as a decimal string, "0" when unknown.'),
+    "view_count": outputs.text('Views as a decimal string, falling back to plays.'),
+    "duration_seconds": outputs.text('Length in seconds as a decimal string, "0" when unknown.'),
+    "video_url": outputs.text("Temporary Instagram-hosted video URL, empty when absent."),
+    "image_url": outputs.text("Temporary Instagram-hosted thumbnail URL, empty when absent."),
+    "audio_id": outputs.text("Numeric audio id; pass to get_reels_by_audio."),
+    "audio_name": outputs.text("Track or original-audio name, empty when absent."),
 }
-LIST_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status", "message", "reels"],
-    "properties": {
-        "status": {"type": "string"},
-        "message": {"type": "string"},
-        "reels": {"type": "array", "items": {"type": "object", "properties": REEL_PROPERTIES}},
-        "next_cursor": {"type": "string"},
-        "has_more": {"type": "boolean"},
+REEL_SCHEMA: JSONObject = outputs.obj(REEL_PROPERTIES, list(REEL_PROPERTIES))
+LIST_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many unique public results this page returned."),
+        "reels": outputs.array_of(REEL_SCHEMA, f"Up to {MAX_RESULTS} Reels, deduplicated within the page."),
+        "next_cursor": outputs.text("Cursor for the next provider page; empty when there is none."),
+        "has_more": outputs.boolean("Another page exists and next_cursor will fetch it."),
     },
-}
-DETAIL_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status", "message", "reel"],
-    "properties": {
-        "status": {"type": "string"},
-        "message": {"type": "string"},
-        "reel": {"type": "object", "properties": REEL_PROPERTIES},
+    ["message", "reels", "next_cursor", "has_more"],
+)
+DETAIL_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the Reel was retrieved."),
+        "reel": REEL_SCHEMA,
     },
-}
+    ["message", "reel"],
+)
 
 MANIFEST = ToolManifest(
     tool_id="instagram_discovery",
@@ -629,8 +630,7 @@ def _list_result(
     reels = _normalized_reels(response, limit=limit)
     has_more_raw = _first(response.get("has_more"), _nested(response, "data", "has_more"))
     result: JSONObject = {
-        "status": "success_executed",
-        "message": f"{label} returned {len(reels)} unique public result(s).",
+                "message": f"{label} returned {len(reels)} unique public result(s).",
         "reels": cast(list[JSONValue], reels),
         "next_cursor": cursor,
         "has_more": (
@@ -704,7 +704,7 @@ class InstagramDiscoveryTool(Tool):
                 reel = _normalize_reel(_details_media(response))
                 if not reel.get("id") and not reel.get("shortcode") and not reel.get("url"):
                     raise RuntimeError("ScrapeCreators returned no public Reel details.")
-                return ActionExecuted({"status": "success_executed", "message": "Retrieved public Reel details.", "reel": reel})
+                return ActionExecuted({"message": "Retrieved public Reel details.", "reel": reel})
             return ActionFailed("Unsupported Instagram Discovery action.")
         except WebRequestError as exc:
             if exc.status in {401, 403}:

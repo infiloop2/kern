@@ -330,6 +330,14 @@ button.runtime-summary:hover {
 .usage-ring.usage-critical .usage-ring-value { stroke: var(--usage-critical); }
 .usage-ring.unavailable .usage-ring-value { stroke: transparent; }
 
+/* Deliberately the dim text colour, not a warning colour: a provider that
+   publishes no usage figure is a fact about the provider, not a problem with
+   this host. */
+.usage-note { align-items: center; color: var(--text-dim); cursor: help; display: grid; font-family: var(--font-mono); font-size: 0.55rem; justify-items: center; line-height: 1; }
+.usage-note svg { height: 20px; overflow: visible; width: 20px; }
+.usage-note circle { fill: none; stroke: var(--surface-3); stroke-dasharray: 2.5 2.5; stroke-width: 1.25; }
+.usage-note text { dominant-baseline: central; fill: var(--text-dim); font-family: var(--font-mono); font-size: 0.6rem; font-weight: 650; text-anchor: middle; }
+
 .usage-ring text {
   dominant-baseline: central;
   fill: var(--text);
@@ -1106,6 +1114,7 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-github { background: #f5f5f5; color: #181717; }
 .integration-logo-python_packages { background: linear-gradient(145deg, #3776ab 0 50%, #ffd343 50%); color: #fff; }
 .integration-logo-python_packages, .integration-logo-tool-instagram, .integration-logo-tool-instagram_discovery { border-color: transparent; }
+.integration-logo-word-xai { font-family: Arial, sans-serif; font-size: 1.15rem; letter-spacing: -0.04em; }
 .integration-logo-word-python { color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45); }
 .integration-logo-npm_packages { background: #cb3837; border-radius: 8px; }
 .integration-logo-word-npm { font-family: ui-monospace, monospace; font-size: 0.94rem; letter-spacing: -0.12em; margin-left: -0.1em; }

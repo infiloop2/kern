@@ -15,7 +15,11 @@ Schedules against the real Workspace service before any provider login, and
 proves the typed conversation-history MCP tools return their bounded,
 explicitly untrusted contract and reject an oversized query. The installed
 agent guidance is checked for current host orientation, identity-keyed memory,
-history trust, and GitHub REST fallback instructions. The remaining checks
+history trust, and GitHub REST fallback instructions. A real local-embedding
+load gate creates and indexes 24 near-limit memory pages on the production
+`t3.small` class, replaces four vectors, checks HNSW storage, service
+memory/tasks/restarts, and admin-health p95 latency during inference, then
+proves soft deletion removes the derived vectors. The remaining checks
 cover all three runtime status/account
 records and real message admission, the Bedrock provider policy that governs
 Hermes, every Bedrock pre-credential denial
@@ -31,7 +35,13 @@ The workflow installs its pinned Playwright driver before AWS credentials are
 injected. The credential-bearing step launches the hosted runner's preinstalled
 Chrome, so it downloads neither code nor a browser while the credentials are
 present. Playwright distinguishes browser launch, page navigation, and app
-frame failures directly.
+frame failures directly. The harness caps deployment at 20 minutes; recent
+healthy fresh smokes normally complete end to end in 7-8 minutes. Production
+bootstrap extracts the runtime library and extension definitions from the
+pinned, repository-signed pgvector binary using an isolated temporary apt
+state. It omits PGDG-specific LLVM bitcode, downloads no compiler toolchain,
+does not alter Ubuntu's PostgreSQL package, and leaves no third-party apt source
+configured on the host.
 
 Assumptions (checked, with clear failures):
 

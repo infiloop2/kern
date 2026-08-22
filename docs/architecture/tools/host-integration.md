@@ -111,8 +111,12 @@ context instead of rewriting its prefix:
   `unknown_tool_ids`, so a known dependency can be checked without loading the
   unrelated catalog.
 - **`describe_tool`** takes a `tool_id` and returns that tool's actions with
-  their full input schemas — fetched once the agent has committed to using the
-  tool, rather than carried in every prompt.
+  their full input schemas, and the output schema of every action that returns a
+  JSON result — fetched once the agent has committed to using the tool, rather
+  than carried in every prompt. The output schema is what makes the result
+  plannable: it names each field the agent gets back and what it means, so the
+  agent knows which id to carry into the next call without running the action to
+  find out. An action with no `output_schema` returns no JSON result at all.
 - **`call_tool`** takes `tool_id`, `action_id`, and `input` and runs the action.
   The flat `<tool_id>_<action>` names (e.g. `gmail_search_messages`) remain
   callable because approval records and audit rows address actions that way, but
@@ -248,7 +252,7 @@ with HTTP 429 — before the request body is read — rather than queueing. The
 operator delegation routes are not subject to this cap, so a busy agent can never
 block the operator from deciding approvals or disconnecting a tool.
 
-## Input validation
+## Input and output validation
 
 The host schema-validates action input against the manifest `input_schema`
 before invoking the package, and validates a direct action's result against its
@@ -258,11 +262,21 @@ regardless, because the agent needs it to call the action over MCP. (The host
 validation is defense-in-depth over the small JSON Schema subset manifests use;
 it is not a substitute for the tool's own checks.)
 
+The subset is `object`, `array`, `string`, `boolean`, `integer`, `number`, and
+`null`, plus `properties`, `required`, `additionalProperties`, `items`,
+`minItems`/`maxItems`, `enum`, `oneOf`, and `description`. Objects are always
+closed: `additionalProperties` must be `false` on every object in an input or
+an output schema, so a schema cannot claim to describe a result while leaving
+most of it unnamed. Nullable values are `oneOf` with `{"type": "null"}`.
+
 Registration rejects any declared keyword or shape outside exactly that
 enforced subset, including empty input schemas, untyped nested values, invalid
-array bounds, and `required` names without declared properties. The unit suite
-discovers and registers every bundled package, so an invalid manifest fails the
-pull request check before it can reach a host.
+array bounds, and `required` names without declared properties. The manifest
+also pins each action's declared result kind: an action that returns JSON must
+describe it, and an approval-gated or `returns_asset` action must not. The unit
+suite discovers and registers every bundled package, and each tool's suite
+validates its real results against its declared schema, so a manifest that
+drifts from the code fails the pull request check before it can reach a host.
 
 ## Host API implementation
 

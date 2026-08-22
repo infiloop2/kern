@@ -324,6 +324,24 @@ def ensure_database() -> None:
     run_setup(
         [str(pg_bin / "createdb"), "-h", str(socket_dir), "-U", "postgres", "kern_test"]
     )
+    # Bootstrap owns server-level extension provisioning. Mirror that
+    # prerequisite explicitly in the test environment rather than hiding it
+    # inside an application schema migration.
+    run_setup(
+        [
+            str(pg_bin / "psql"),
+            "-h",
+            str(socket_dir),
+            "-U",
+            "postgres",
+            "-d",
+            "kern_test",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            "CREATE EXTENSION IF NOT EXISTS vector;",
+        ]
+    )
 
     from host.runtime.deploy import migrate
 
@@ -409,6 +427,26 @@ def create_database(name: str) -> None:
             "ON_ERROR_STOP=1",
             "-c",
             "REVOKE CREATE ON SCHEMA public FROM PUBLIC;",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    # Extra databases that run the repository migrations need the same
+    # bootstrap prerequisite as the shared scratch database above.
+    subprocess.run(
+        [
+            str(pg_bin / "psql"),
+            "-h",
+            socket_dir,
+            "-U",
+            "postgres",
+            "-d",
+            name,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            "CREATE EXTENSION IF NOT EXISTS vector;",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,

@@ -10,7 +10,7 @@ from host.param_guard import ParamGuardDenied
 from host.tools import twitterapi_io
 from host.tools.results import ActionExecuted, ActionFailed
 from host.tools.shared.web import UnmappedProviderError, WebRequestError
-from test_tools import FakeHostAPI
+from test_tools import FakeHostAPI, assert_matches_output_schema
 
 
 def api() -> FakeHostAPI:
@@ -181,7 +181,7 @@ class TwitterApiIoToolTests(unittest.TestCase):
                 api(),
             )
 
-        self.assertIsInstance(result, ActionExecuted)
+        assert_matches_output_schema(self, twitterapi_io.MANIFEST, "search_tweets", result)
         assert isinstance(result, ActionExecuted)
         posts = result.result["posts"]
         self.assertIsInstance(posts, list)

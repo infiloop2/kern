@@ -31,6 +31,7 @@ on:
           - zoho_mail
           - claude
           - codex
+          - grok
           - pi
           - hermes
           - github

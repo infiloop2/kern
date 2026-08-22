@@ -34,6 +34,7 @@ from host.tools.manifest import (
     ToolManifest,
 )
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
+from host.tools.shared import outputs
 from host.tools.shared.inputs import (
     decoded_url_component_values,
     guard_url_parameter_string,
@@ -171,18 +172,16 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema={
-                "type": "object",
-                "required": ["status"],
-                "properties": {
-                    "status": {"type": "string"},
-                    "message": {"type": "string"},
-                    "url": {"type": "string", "description": "Final URL after any redirects."},
-                    "content_type": {"type": "string"},
-                    "content": {"type": "string"},
-                    "truncated": {"type": "boolean"},
+            output_schema=outputs.obj(
+                {
+                    "message": outputs.text("How much page text was fetched, and whether it was truncated."),
+                    "url": outputs.text("Final URL after any redirects; may differ from the one requested."),
+                    "content_type": outputs.text("Media type of the response, e.g. text/html."),
+                    "content": outputs.text("Page text with markup removed, truncated to the size limit."),
+                    "truncated": outputs.boolean("The page was longer than the limit and was cut short."),
                 },
-            },
+                ["message", "url", "content_type", "content", "truncated"],
+            ),
         ),
     ),
     protections=(
@@ -597,8 +596,7 @@ class WebFetchTool(Tool):
             content = content[:MAX_CONTENT_CHARS]
             suffix = ", truncated to the size limit" if truncated else ""
             result: JSONObject = {
-                "status": "success_executed",
-                "message": f"Fetched {len(content)} characters of page text{suffix}.",
+                                "message": f"Fetched {len(content)} characters of page text{suffix}.",
                 "url": final_url,
                 "content_type": media_type,
                 "content": content,

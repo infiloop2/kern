@@ -8,6 +8,7 @@ from http import HTTPStatus
 import json
 from pathlib import Path
 import tempfile
+from typing import Any
 import unittest
 from unittest.mock import patch
 
@@ -155,6 +156,508 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
         self.assertEqual(conflict.exception.status, HTTPStatus.CONFLICT)
 
+    def test_memory_links_follow_source_updates_deletes_and_restores(self) -> None:
+        def stored_links() -> list[tuple[str, str]]:
+            with db.transaction() as cur:
+                cur.execute(
+                    "SELECT source_page_id, target_page_id FROM memory_page_links"
+                    " ORDER BY source_page_id, target_page_id"
+                )
+                return [(str(source), str(target)) for source, target in cur.fetchall()]
+
+        for page_id in ("target-a", "target-b"):
+            memory.save_page(
+                page_id,
+                {
+                    "description": f"Target {page_id}",
+                    "content": "Target content.",
+                    "expected_revision": 0,
+                },
+                actor="agent",
+            )
+        source = memory.save_page(
+            "source",
+            {
+                "description": "Link source",
+                "content": "See [[target-a]].",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        self.assertEqual(memory.load_page("target-a")["backlinks"], ["source"])
+        self.assertEqual(stored_links(), [("source", "target-a")])
+
+        source = memory.save_page(
+            "source",
+            {
+                "description": "Link source",
+                "content": "Now see [[target-b]].",
+                "expected_revision": source["revision"],
+            },
+            actor="agent",
+        )
+        self.assertEqual(memory.load_page("target-a")["backlinks"], [])
+        self.assertEqual(memory.load_page("target-b")["backlinks"], ["source"])
+        self.assertEqual(stored_links(), [("source", "target-b")])
+
+        memory.delete_page(
+            "source",
+            {"expected_revision": [str(source["revision"])]},
+            actor="agent",
+        )
+        self.assertEqual(memory.load_page("target-b")["backlinks"], [])
+        self.assertEqual(stored_links(), [])
+
+        restored = memory.restore_revision("source", 1, {"expected_revision": 3})
+        self.assertEqual(memory.load_page("target-a")["backlinks"], ["source"])
+        self.assertEqual(memory.load_page("target-b")["backlinks"], [])
+        self.assertEqual(stored_links(), [("source", "target-a")])
+
+        # Restoring the deleted revision clears outgoing rows again.
+        memory.restore_revision(
+            "source", 3, {"expected_revision": restored["revision"]}
+        )
+        self.assertEqual(memory.load_page("target-a")["backlinks"], [])
+        self.assertEqual(stored_links(), [])
+
+    def test_target_delete_preserves_dangling_link_for_restore(self) -> None:
+        target = memory.save_page(
+            "target",
+            {
+                "description": "Link target",
+                "content": "Target content.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        memory.save_page(
+            "source",
+            {
+                "description": "Link source",
+                "content": "See [[target]].",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        memory.delete_page(
+            "target",
+            {"expected_revision": [str(target["revision"])]},
+            actor="agent",
+        )
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT source_page_id, target_page_id FROM memory_page_links"
+            )
+            self.assertEqual(cur.fetchall(), [("source", "target")])
+
+        memory.restore_revision("target", 1, {"expected_revision": 2})
+        self.assertEqual(memory.load_page("target")["backlinks"], ["source"])
+
+    def test_agent_memory_search_combines_semantic_and_lexical_matches(self) -> None:
+        first = memory.save_page(
+            "identity-provider",
+            {
+                "description": "OAuth callback troubleshooting",
+                "content": "Check the redirect URI and client registration.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        memory.save_page(
+            "deployment",
+            {
+                "description": "Production deployment checklist",
+                "content": "Verify the release before shifting traffic.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        pending = memory._unembedded_memory_pages("test-model", 10)
+        self.assertEqual(
+            {page_id for page_id, _revision, _description, _content in pending},
+            {"identity-provider", "deployment"},
+        )
+        identity_vector = [1.0] + [0.0] * 383
+        deployment_vector = [0.0, 1.0] + [0.0] * 382
+        memory._store_memory_page_embeddings(
+            "test-model",
+            [
+                ("identity-provider", first["revision"], identity_vector),
+                ("deployment", 1, deployment_vector),
+            ],
+        )
+
+        with (
+            patch.object(memory.embedding_client, "MODEL_NAME", "test-model"),
+            patch.object(
+                memory.embedding_client,
+                "embed_texts",
+                return_value=[identity_vector],
+            ),
+        ):
+            response = memory.route_agent(
+                "GET",
+                "/agent/memory/search",
+                None,
+                {"q": ["unable to sign in"]},
+            )
+
+        self.assertEqual(response["search_mode"], "hybrid")
+        self.assertEqual(response["pages"][0]["page_id"], "identity-provider")
+
+        memory.save_page(
+            "identity-provider",
+            {
+                "description": "Updated identity notes",
+                "content": "The old callback advice no longer applies.",
+                "expected_revision": first["revision"],
+            },
+            actor="agent",
+        )
+        self.assertEqual(
+            [row[0] for row in memory._unembedded_memory_pages("test-model", 10)],
+            ["identity-provider"],
+        )
+
+    def test_agent_memory_search_drops_an_unrelated_replacement_from_the_old_query(
+        self,
+    ) -> None:
+        original_query = [1.0] + [0.0] * 383
+        # Cosine similarity to original_query is 0.44: close to the 0.438
+        # measured for the stale real-host pair, high enough to pass the old
+        # 0.35 cutoff, but below the calibrated retrieval threshold. The
+        # vector remains normalized.
+        replacement_query = [0.44, 0.897997772825746] + [0.0] * 382
+        first = memory.save_page(
+            "replacement-probe",
+            {
+                "description": "Deployment recovery procedure",
+                "content": (
+                    "If the deployment fails, restore the previous release artifact "
+                    "and redirect traffic to it."
+                ),
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        memory._store_memory_page_embeddings(
+            "test-model",
+            [("replacement-probe", first["revision"], original_query)],
+        )
+
+        def embed_query(texts: list[str], *, kind: str) -> list[list[float]]:
+            self.assertEqual(kind, "query")
+            self.assertEqual(len(texts), 1)
+            if texts[0] == "How can a guest get into the building?":
+                return [replacement_query]
+            return [original_query]
+
+        with (
+            patch.object(memory.embedding_client, "MODEL_NAME", "test-model"),
+            patch.object(memory.embedding_client, "embed_texts", side_effect=embed_query),
+        ):
+            initial = memory.search_swarm_pages(
+                {"q": ["How should we undo a broken launch?"]}
+            )
+        self.assertEqual(
+            [page["page_id"] for page in initial["pages"]],
+            ["replacement-probe"],
+        )
+
+        updated = memory.save_page(
+            "replacement-probe",
+            {
+                "description": "Office access procedure",
+                "content": (
+                    "Visitors must obtain a temporary badge from the reception desk "
+                    "before entering."
+                ),
+                "expected_revision": first["revision"],
+            },
+            actor="agent",
+        )
+        memory._store_memory_page_embeddings(
+            "test-model",
+            [("replacement-probe", updated["revision"], replacement_query)],
+        )
+
+        with (
+            patch.object(memory.embedding_client, "MODEL_NAME", "test-model"),
+            patch.object(memory.embedding_client, "embed_texts", side_effect=embed_query),
+        ):
+            old_topic = memory.search_swarm_pages(
+                {"q": ["How should we undo a broken launch?"]}
+            )
+            new_topic = memory.search_swarm_pages(
+                {"q": ["How can a guest get into the building?"]}
+            )
+
+        self.assertEqual(old_topic["pages"], [])
+        # Popular suggestions are intentionally query-independent and remain a
+        # separate response field; callers must not flatten them into matches.
+        self.assertIn(
+            "replacement-probe",
+            [page["page_id"] for page in old_topic["popular_pages"]],
+        )
+        self.assertEqual(
+            [page["page_id"] for page in new_topic["pages"]],
+            ["replacement-probe"],
+        )
+        self.assertEqual(new_topic["pages"][0]["revision"], updated["revision"])
+
+    def test_agent_memory_search_falls_back_to_bounded_lexical_search(self) -> None:
+        memory.save_page(
+            "rollback",
+            {
+                "description": "Production rollback procedure",
+                "content": "Return to the previous release.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        with patch.object(
+            memory.embedding_client,
+            "embed_texts",
+            side_effect=memory.embedding_client.EmbeddingError("offline"),
+        ):
+            response = memory.route_agent(
+                "GET",
+                "/agent/memory/search",
+                None,
+                {"q": ["rollback"], "limit": ["1"]},
+            )
+
+        self.assertEqual(response["search_mode"], "lexical_fallback")
+        self.assertEqual(response["pages"][0]["page_id"], "rollback")
+
+    def test_description_substring_matches_page_beyond_the_exact_window(self) -> None:
+        # "auth" is not a full-text token of "OAuth", so these pages are only
+        # reachable through the substring channel. More than EXACT_CANDIDATES of
+        # them must still all be reachable, rather than stopping at that
+        # booster's bound with no cursor to continue.
+        total = memory.EXACT_CANDIDATES + 10
+        expected = {f"oauth-note-{index:03d}" for index in range(total)}
+        for page_id in sorted(expected):
+            memory.save_page(
+                page_id,
+                {
+                    "description": f"OAuth callback note {page_id}",
+                    "content": "unrelated body",
+                    "expected_revision": 0,
+                },
+                actor="agent",
+            )
+
+        seen: set[str] = set()
+        with patch.object(
+            memory.embedding_client,
+            "embed_texts",
+            side_effect=memory.embedding_client.EmbeddingError("offline"),
+        ):
+            query: dict[str, list[str]] = {"q": ["auth"], "limit": ["20"]}
+            response = memory.search_swarm_pages(query)
+            seen.update(page["page_id"] for page in response["pages"])
+            pages = 1
+            while "next_cursor" in response:
+                response = memory.search_swarm_pages(
+                    {**query, "cursor": [response["next_cursor"]]}
+                )
+                seen.update(page["page_id"] for page in response["pages"])
+                pages += 1
+                self.assertLessEqual(pages, 20, "pagination did not terminate")
+
+        self.assertEqual(response["search_mode"], "lexical_fallback")
+        self.assertEqual(expected - seen, set())
+
+    def test_reciprocal_links_do_not_consume_the_neighbor_budget(self) -> None:
+        # A page that links back to the seed appears in both halves of the edge
+        # union. Numbering each copy separately would spend two of the seed's
+        # neighbour slots on one page and push valid neighbours out.
+        per_seed = memory.GRAPH_NEIGHBORS_PER_SEED
+        neighbours = [f"n{index:02d}" for index in range(per_seed + 4)]
+        reciprocal = set(neighbours[:5])
+        for page_id in neighbours:
+            memory.save_page(
+                page_id,
+                {
+                    "description": f"Neighbour {page_id}",
+                    "content": "Links [[seed]]." if page_id in reciprocal else "Leaf.",
+                    "expected_revision": 0,
+                },
+                actor="agent",
+            )
+        memory.save_page(
+            "seed",
+            {
+                "description": "Seed page",
+                "content": " ".join(f"[[{page_id}]]" for page_id in neighbours),
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+
+        rows = memory._search_pages_graph(
+            ["seed"],
+            scope="swarm",
+            limit=memory.GRAPH_SEEDS * per_seed,
+        )
+        found = {str(row[0]) for row in rows}
+        self.assertNotIn("seed", found)
+        self.assertEqual(len(found), per_seed)
+
+    def test_search_restarts_when_pages_change_between_candidate_queries(self) -> None:
+        # The candidate channels each run in their own transaction. A page
+        # removed after its channel ran must not be reported from the stale
+        # tuple the fusion is still holding.
+        memory.save_page(
+            "deployment",
+            {
+                "description": "Production deployment checklist",
+                "content": "Verify the release before shifting traffic.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        real_exact = memory._search_pages_exact
+
+        def delete_after_exact(*args: Any, **kwargs: Any) -> list[tuple[Any, ...]]:
+            rows = real_exact(*args, **kwargs)
+            memory.delete_page(
+                "deployment", {"expected_revision": ["1"]}, actor="agent"
+            )
+            return rows
+
+        with (
+            patch.object(memory, "_search_pages_exact", side_effect=delete_after_exact),
+            patch.object(
+                memory.embedding_client,
+                "embed_texts",
+                side_effect=memory.embedding_client.EmbeddingError("offline"),
+            ),
+            self.assertRaises(WorkspaceError) as raised,
+        ):
+            memory.search_swarm_pages({"q": ["deployment"]})
+
+        self.assertEqual(raised.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("restart pagination", raised.exception.message)
+
+    def test_restoring_a_deleted_revision_drops_the_embedding(self) -> None:
+        first = memory.save_page(
+            "deployment",
+            {
+                "description": "Production checklist",
+                "content": "Verify the release.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        memory.delete_page(
+            "deployment",
+            {"expected_revision": [str(first["revision"])]},
+            actor="agent",
+        )
+        restored = memory.restore_revision(
+            "deployment", first["revision"], {"expected_revision": 2}
+        )
+        memory._store_memory_page_embeddings(
+            "test-model",
+            [("deployment", restored["revision"], [1.0] + [0.0] * 383)],
+        )
+
+        # Restoring back onto the deleted revision must clear the vector; the
+        # index loop skips deleted pages, so nothing else would remove it.
+        memory.restore_revision(
+            "deployment", 2, {"expected_revision": restored["revision"]}
+        )
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT count(*) FROM memory_page_embeddings WHERE page_id = 'deployment'"
+            )
+            self.assertEqual(cur.fetchone()[0], 0)
+
+    def test_current_memory_embedding_replaces_old_revision(self) -> None:
+        vector = [1.0] + [0.0] * 383
+        first = memory.save_page(
+            "page-a",
+            {
+                "description": "Original notes",
+                "content": "Stored context.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        memory._store_memory_page_embeddings(
+            "test-model", [("page-a", first["revision"], vector)]
+        )
+        updated = memory.save_page(
+            "page-a",
+            {
+                "description": "Replacement notes",
+                "content": "Current context.",
+                "expected_revision": first["revision"],
+            },
+            actor="agent",
+        )
+
+        self.assertEqual(
+            [row[0] for row in memory._unembedded_memory_pages("test-model", 10)],
+            ["page-a"],
+        )
+        memory._store_memory_page_embeddings(
+            "test-model", [("page-a", updated["revision"], vector)]
+        )
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT revision FROM memory_page_embeddings WHERE page_id = 'page-a'"
+            )
+            self.assertEqual(cur.fetchall(), [(2,)])
+
+    def test_exact_identity_and_one_hop_graph_improve_agent_search(self) -> None:
+        memory.save_page(
+            "deployment-runbook",
+            {
+                "description": "Production release procedure",
+                "content": "Read [[rollback-plan]] before shipping.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        memory.save_page(
+            "rollback-plan",
+            {
+                "description": "Emergency recovery",
+                "content": "Restore the previous release.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        memory.save_page(
+            "other-page",
+            {
+                "description": "Production release procedure notes",
+                "content": "A secondary exact-term match.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+
+        with patch.object(
+            memory.embedding_client,
+            "embed_texts",
+            side_effect=memory.embedding_client.EmbeddingError("offline"),
+        ):
+            response = memory.search_swarm_pages(
+                {"q": ["deployment-runbook"], "limit": ["3"]}
+            )
+
+        self.assertEqual(response["pages"][0]["page_id"], "deployment-runbook")
+        self.assertIn("rollback-plan", [page["page_id"] for page in response["pages"]])
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT source_page_id, target_page_id FROM memory_page_links"
+            )
+            self.assertEqual(cur.fetchall(), [("deployment-runbook", "rollback-plan")])
+
     def test_agent_memory_search_falls_back_to_weak_and_popular_pages(self) -> None:
         pages = (
             (
@@ -189,14 +692,19 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 actor="agent",
             )
 
-        for _ in range(2):
-            strong = memory.search_swarm_pages(
-                {"q": ["production deployments"]}
-            )
-            self.assertEqual(strong["pages"][0]["page_id"], "popular-one")
-            self.assertNotIn("popular_pages", strong)
-        memory.search_swarm_pages({"q": ["durable context"]})
-        memory.search_pages({"q": ["production deployments"]})
+        with patch.object(
+            memory.embedding_client,
+            "embed_texts",
+            side_effect=memory.embedding_client.EmbeddingError("offline"),
+        ):
+            for _ in range(2):
+                strong = memory.search_swarm_pages(
+                    {"q": ["production deployments"]}
+                )
+                self.assertEqual(strong["pages"][0]["page_id"], "popular-one")
+                self.assertNotIn("popular_pages", strong)
+            memory.search_swarm_pages({"q": ["durable context"]})
+            memory.search_pages({"q": ["production deployments"]})
 
         with db.transaction() as cur:
             cur.execute(
@@ -214,9 +722,14 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 " ELSE '2026-04-01T00:00:00Z' END"
             )
 
-        fallback = memory.search_swarm_pages(
-            {"q": ["introspection playwright chromium cleanup"]}
-        )
+        with patch.object(
+            memory.embedding_client,
+            "embed_texts",
+            side_effect=memory.embedding_client.EmbeddingError("offline"),
+        ):
+            fallback = memory.search_swarm_pages(
+                {"q": ["introspection playwright chromium cleanup"]}
+            )
         self.assertEqual(fallback["match_mode"], "weak")
         self.assertEqual(
             [page["page_id"] for page in fallback["pages"]], ["weak-match"]
@@ -224,6 +737,25 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         self.assertEqual(
             fallback["popular_pages"][0]["page_id"], "popular-one"
         )
+
+    def test_agent_memory_weak_search_treats_or_as_a_literal_acronym(self) -> None:
+        memory.save_page(
+            "operating-room",
+            {
+                "description": "Surgical suite procedure",
+                "content": "Consult the OR scheduling desk before access.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+
+        # Exercise the weak query directly with another term that does not
+        # match. PostgreSQL may recover a standalone OR as a lexeme, while an
+        # unquoted OR in this expression is ambiguous with the Boolean operator.
+        with db.transaction() as cur:
+            rows = memory._weak_search_rows(cur, "missing OR", scope="swarm")
+
+        self.assertEqual([row[0] for row in rows], ["operating-room"])
 
     def test_memory_delete_and_operator_restore_are_forward_revisions(self) -> None:
         created = memory.save_page(
@@ -1209,6 +1741,229 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedules.prune_retained(datetime(2026, 7, 1, tzinfo=timezone.utc))
         with self.assertRaises(WorkspaceError):
             schedules.load_schedule(schedule["id"], include_deleted=True)
+
+
+class MemorySearchPagingTests(unittest.TestCase):
+    """Hybrid paging depth, without a database."""
+
+    @staticmethod
+    def _row(index: int) -> tuple[Any, ...]:
+        return (
+            f"page-{index:04d}",
+            f"Description {index}",
+            "content",
+            1,
+            None,
+            "agent",
+            "2026-07-01T00:00:00Z",
+            "2026-07-01T00:00:00Z",
+            1.0 - index / 10000,
+        )
+
+    def test_weak_search_ignores_stopwords(self) -> None:
+        self.assertEqual(
+            memory._weak_search_tokens("How should we undo a broken launch?"),
+            ["undo", "broken", "launch"],
+        )
+        self.assertEqual(
+            memory._weak_search_tokens("Reset IT password for US CAN MAY"),
+            ["reset", "it", "password", "us", "can", "may"],
+        )
+
+    def test_paging_reaches_lexical_matches_below_the_fusion_window(self) -> None:
+        # 500 lexical matches: a fixed 200-row fusion window would strand every
+        # match past the 200th with no cursor to reach it.
+        total = 500
+        depths: list[int] = []
+
+        def lexical(_needle: str, limit: int, offset: int, **_kwargs: Any) -> list[tuple[Any, ...]]:
+            return [self._row(i) for i in range(offset, min(offset + limit, total))]
+
+        # Depth past the fusion window is carried by the id-only tail, which
+        # reaches the requested page without selecting page content.
+        def lexical_tail(_needle: str, limit: int, offset: int, **_kwargs: Any) -> list[str]:
+            depths.append(offset + limit)
+            return [f"page-{i:04d}" for i in range(offset, min(offset + limit, total))]
+
+        seen: list[str] = []
+        with (
+            patch.object(memory, "_search_pages_lexical", side_effect=lexical),
+            patch.object(memory, "_lexical_page_id_tail", side_effect=lexical_tail),
+            patch.object(memory, "_search_pages_exact", return_value=[]),
+            patch.object(memory, "_search_pages_graph", return_value=[]),
+            patch.object(
+                memory,
+                "_current_page_rows",
+                side_effect=lambda page_ids, *, scope: [
+                    self._row(int(page_id.split("-")[1]))[:8] for page_id in page_ids
+                ],
+            ),
+            patch.object(memory, "_record_memory_top_hit"),
+            patch.object(
+                memory.embedding_client,
+                "embed_texts",
+                side_effect=memory.embedding_client.EmbeddingError("offline"),
+            ),
+        ):
+            query: dict[str, list[str]] = {"q": ["release"], "limit": ["50"]}
+            response = memory.search_swarm_pages(query)
+            seen.extend(page["page_id"] for page in response["pages"])
+            while "next_cursor" in response:
+                response = memory.search_swarm_pages(
+                    {**query, "cursor": [response["next_cursor"]]}
+                )
+                self.assertTrue(response["pages"], "paged into an empty result page")
+                seen.extend(page["page_id"] for page in response["pages"])
+                self.assertLessEqual(len(seen), total, "pagination did not terminate")
+
+        self.assertEqual(len(seen), total)
+        self.assertEqual(seen[-1], f"page-{total - 1:04d}")
+        self.assertEqual(len(seen), len(set(seen)))
+        # Depth grows to cover the requested page instead of staying pinned.
+        self.assertGreater(max(depths), memory.SEMANTIC_CANDIDATES)
+        self.assertLessEqual(max(depths), memory.MAX_PAGES)
+
+    def test_a_deleted_top_hit_backfills_from_the_next_candidates(self) -> None:
+        # With limit=1 and the top candidate deleted between ranking and
+        # revalidation, the response must fall through to the next valid
+        # candidate rather than returning nothing and dropping to the weak
+        # fallback while strong candidates remain.
+        total = 5
+
+        def lexical(_needle: str, limit: int, offset: int, **_kwargs: Any) -> list[tuple[Any, ...]]:
+            return [self._row(i) for i in range(offset, min(offset + limit, total))]
+
+        def current(page_ids: list[str], **_kwargs: Any) -> list[tuple[Any, ...]]:
+            return [
+                self._row(int(page_id.split("-")[1]))[:8]
+                for page_id in page_ids
+                if page_id != "page-0000"
+            ]
+
+        with (
+            patch.object(memory, "_search_pages_lexical", side_effect=lexical),
+            patch.object(memory, "_search_pages_exact", return_value=[]),
+            patch.object(memory, "_search_pages_graph", return_value=[]),
+            patch.object(memory, "_current_page_rows", side_effect=current),
+            patch.object(memory, "_record_memory_top_hit"),
+            patch.object(memory, "_memory_search_fallback") as fallback,
+            patch.object(
+                memory.embedding_client,
+                "embed_texts",
+                side_effect=memory.embedding_client.EmbeddingError("offline"),
+            ),
+        ):
+            response = memory.search_swarm_pages({"q": ["release"], "limit": ["1"]})
+
+        fallback.assert_not_called()
+        self.assertEqual(
+            [page["page_id"] for page in response["pages"]], ["page-0001"]
+        )
+
+    def test_deleted_deep_tail_slice_backfills_and_keeps_its_cursor(self) -> None:
+        total = 300
+
+        def lexical(
+            _needle: str, limit: int, offset: int, **_kwargs: Any
+        ) -> list[tuple[Any, ...]]:
+            return [self._row(i) for i in range(offset, min(offset + limit, total))]
+
+        def lexical_tail(
+            _needle: str, limit: int, offset: int, **_kwargs: Any
+        ) -> list[str]:
+            return [f"page-{i:04d}" for i in range(offset, min(offset + limit, total))]
+
+        deleted = {"page-0250", "page-0251"}
+
+        def current(page_ids: list[str], **_kwargs: Any) -> list[tuple[Any, ...]]:
+            return [
+                self._row(int(page_id.split("-")[1]))[:8]
+                for page_id in page_ids
+                if page_id not in deleted
+            ]
+
+        with (
+            patch.object(memory, "_search_pages_lexical", side_effect=lexical),
+            patch.object(memory, "_lexical_page_id_tail", side_effect=lexical_tail),
+            patch.object(memory, "_search_pages_exact", return_value=[]),
+            patch.object(memory, "_search_pages_graph", return_value=[]),
+            patch.object(memory, "_current_page_rows", side_effect=current),
+            patch.object(memory, "_record_memory_top_hit"),
+            patch.object(
+                memory.embedding_client,
+                "embed_texts",
+                side_effect=memory.embedding_client.EmbeddingError("offline"),
+            ),
+        ):
+            response = memory.search_swarm_pages(
+                {
+                    "q": ["release"],
+                    "limit": ["2"],
+                    "cursor": [
+                        memory._encode_semantic_offset_cursor(
+                            250,
+                            "fallback",
+                            memory._memory_search_fingerprint("release", "swarm"),
+                            memory._memory_search_generation(),
+                        )
+                    ],
+                }
+            )
+
+        self.assertEqual(
+            [page["page_id"] for page in response["pages"]],
+            ["page-0252", "page-0253"],
+        )
+        self.assertIn("next_cursor", response)
+
+    def test_deeper_pages_do_not_rerank_the_consumed_prefix(self) -> None:
+        # A page that is both a semantic hit and a deep lexical match must not
+        # gain a lexical RRF score once a later request fetches past its rank:
+        # that would move it into the already-consumed prefix and lose it.
+        total = 400
+        window = memory.SEMANTIC_CANDIDATES
+        # The candidate ranks last among a full semantic set, so on its own it
+        # sorts below the whole lexical window; its lexical rank sits past the
+        # window, so only a deeper fetch can hand it a second RRF score.
+        deep = self._row(240)
+        semantic = [self._row(i) for i in range(window - 1)] + [deep]
+
+        def lexical(_needle: str, limit: int, offset: int, **_kwargs: Any) -> list[tuple[Any, ...]]:
+            return [self._row(i) for i in range(offset, min(offset + limit, total))]
+
+        def lexical_tail(_needle: str, limit: int, offset: int, **_kwargs: Any) -> list[str]:
+            return [f"page-{i:04d}" for i in range(offset, min(offset + limit, total))]
+
+        seen: list[str] = []
+        with (
+            patch.object(memory, "_search_pages_lexical", side_effect=lexical),
+            patch.object(memory, "_lexical_page_id_tail", side_effect=lexical_tail),
+            patch.object(memory, "_search_pages_exact", return_value=[]),
+            patch.object(memory, "_search_pages_graph", return_value=[]),
+            patch.object(
+                memory,
+                "_current_page_rows",
+                side_effect=lambda page_ids, *, scope: [
+                    self._row(int(page_id.split("-")[1]))[:8] for page_id in page_ids
+                ],
+            ),
+            patch.object(memory, "_record_memory_top_hit"),
+            patch.object(memory.embedding_client, "embed_texts", return_value=[[0.0] * 384]),
+            patch.object(memory, "_search_pages_semantic", return_value=semantic),
+        ):
+            query: dict[str, list[str]] = {"q": ["release"], "limit": ["50"]}
+            response = memory.search_swarm_pages(query)
+            seen.extend(page["page_id"] for page in response["pages"])
+            while "next_cursor" in response:
+                response = memory.search_swarm_pages(
+                    {**query, "cursor": [response["next_cursor"]]}
+                )
+                seen.extend(page["page_id"] for page in response["pages"])
+                self.assertLessEqual(len(seen), total + 1, "pagination did not terminate")
+
+        self.assertIn(deep[0], seen)
+        self.assertEqual(len(seen), len(set(seen)), "a page was returned twice")
+        self.assertEqual(set(seen), {f"page-{i:04d}" for i in range(total)})
 
 
 class WorkspaceIdentityTests(unittest.TestCase):

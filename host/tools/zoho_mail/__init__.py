@@ -35,6 +35,7 @@ from host.tools.results import (
     ApprovalExecuted,
     ApprovalResult,
 )
+from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
@@ -104,12 +105,83 @@ EMAIL_RE = re.compile(r"^[^@\s,<>]+@[^@\s,<>]+\.[^@\s,<>]+$")
 HTML_TAG_RE = re.compile(r"<[A-Za-z][^>]*>")
 
 
-ZOHO_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
+MESSAGE_PROPERTIES: JSONObject = {
+    "message_id": outputs.text("Zoho message id; pass with folder_id to read_message."),
+    "folder_id": outputs.text("Id of the folder holding the message."),
+    "thread_id": outputs.text("Id of the conversation, empty when Zoho sends none."),
+    "from": outputs.text("From address as Zoho renders it."),
+    "to": outputs.text("To addresses, comma-separated."),
+    "cc": outputs.text("Cc addresses, comma-separated."),
+    "sender": outputs.text("Envelope sender, when it differs from the From address."),
+    "subject": outputs.text("Subject line, plain text."),
+    "summary": outputs.text("Zoho's preview of the body, up to 4000 characters."),
+    "received_at_ms": outputs.text("Receipt time in epoch milliseconds, as a string."),
+    "sent_at_ms": outputs.text("Send time in epoch milliseconds, as a string."),
+    "read_status": outputs.text("Zoho's read flag for the message."),
+    "has_attachment": outputs.boolean("The message carries at least one attachment."),
 }
+MESSAGE_SCHEMA: JSONObject = outputs.obj(MESSAGE_PROPERTIES, list(MESSAGE_PROPERTIES))
+
+SEARCH_MESSAGES_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many messages the search returned."),
+        "search_key": outputs.text("The search string as sent to Zoho."),
+        "messages": outputs.array_of(MESSAGE_SCHEMA, "Up to the requested limit of matching messages, headers only."),
+    },
+    ["message", "search_key", "messages"],
+)
+LIST_FOLDERS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many folders were returned."),
+        "folders": outputs.array_of(
+            outputs.obj(
+                {
+                    "folder_id": outputs.text("Zoho folder id; pass to list_messages and read_message."),
+                    "name": outputs.text("Folder name."),
+                    "path": outputs.text("Full folder path, e.g. /Inbox/Receipts."),
+                    "type": outputs.text("Folder kind Zoho reports, e.g. Inbox or Sent."),
+                    "imap_access": outputs.boolean("The folder is exposed over IMAP."),
+                },
+                ["folder_id", "name", "path", "type", "imap_access"],
+            ),
+            "Every folder in the connected mailbox.",
+        ),
+    },
+    ["message", "folders"],
+)
+LIST_SENDERS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many verified sender addresses were returned."),
+        "default_from_address": outputs.text("The mailbox address send_email uses when from_address is omitted."),
+        "from_addresses": outputs.array_of(
+            {"type": "string"},
+            "Verified addresses this mailbox may send as, lowercased, with the default first.",
+        ),
+    },
+    ["message", "default_from_address", "from_addresses"],
+)
+LIST_MESSAGES_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many messages were returned, and from which folder."),
+        "folder_id": outputs.text("The folder that was listed."),
+        "messages": outputs.array_of(MESSAGE_SCHEMA, "Up to the requested limit of messages, headers only."),
+    },
+    ["message", "folder_id", "messages"],
+)
+READ_MESSAGE_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the message was loaded."),
+        "zoho_message": outputs.obj(
+            {
+                **MESSAGE_PROPERTIES,
+                "content": outputs.text(f"Message body as plain text, HTML stripped, up to {MAX_MESSAGE_CONTENT_CHARS} characters."),
+                "content_truncated": outputs.boolean("The body was longer than the cap and was clipped."),
+            },
+            [*MESSAGE_PROPERTIES, "content", "content_truncated"],
+        ),
+    },
+    ["message", "zoho_message"],
+)
 INLINE_SEGMENT_SCHEMA: JSONObject = {
     "oneOf": [
         {
@@ -226,14 +298,14 @@ MANIFEST = ToolManifest(
                 },
                 ["search_key"],
             ),
-            output_schema=ZOHO_OUTPUT_SCHEMA,
+            output_schema=SEARCH_MESSAGES_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="list_folders",
             description="List folders in the connected Zoho Mail mailbox, including the ids needed by list_messages and read_message.",
             data_policy="Read-only. Sends no agent-supplied values to Zoho. Folder metadata enters active model context. Runs directly with no approval.",
             input_schema=_schema({}),
-            output_schema=ZOHO_OUTPUT_SCHEMA,
+            output_schema=LIST_FOLDERS_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="list_senders",
@@ -245,7 +317,7 @@ MANIFEST = ToolManifest(
                 "verified sender aliases enter active model context. Runs directly with no approval."
             ),
             input_schema=_schema({}),
-            output_schema=ZOHO_OUTPUT_SCHEMA,
+            output_schema=LIST_SENDERS_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="list_messages",
@@ -262,7 +334,7 @@ MANIFEST = ToolManifest(
                 },
                 ["folder_id"],
             ),
-            output_schema=ZOHO_OUTPUT_SCHEMA,
+            output_schema=LIST_MESSAGES_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="read_message",
@@ -278,7 +350,7 @@ MANIFEST = ToolManifest(
                 },
                 ["folder_id", "message_id"],
             ),
-            output_schema=ZOHO_OUTPUT_SCHEMA,
+            output_schema=READ_MESSAGE_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="send_email",
@@ -306,7 +378,6 @@ MANIFEST = ToolManifest(
                 },
                 ["to", "subject", "blocks"],
             ),
-            output_schema=ZOHO_OUTPUT_SCHEMA,
             approval="operator",
         ),
     ),
@@ -585,8 +656,7 @@ def _sender_result(account: ConnectionAccount, record: JSONObject) -> JSONObject
     addresses = sorted(_account_addresses(record) - {default_address})
     addresses.insert(0, default_address)
     return {
-        "status": "success_executed",
-        "message": f"Zoho Mail returned {len(addresses)} verified sender address(es).",
+                "message": f"Zoho Mail returned {len(addresses)} verified sender address(es).",
         "default_from_address": default_address,
         "from_addresses": cast(list[JSONValue], addresses),
     }
@@ -908,8 +978,7 @@ def _search_messages(access_token: str, data_center: str, tool_input: JSONObject
     )
     records = _data_list(response, what="message search")[:limit]
     return {
-        "status": "success_executed",
-        "message": f"Zoho Mail returned {len(records)} message(s).",
+                "message": f"Zoho Mail returned {len(records)} message(s).",
         "search_key": guarded,
         "messages": cast(list[JSONValue], [_message_summary(record) for record in records]),
     }
@@ -935,8 +1004,7 @@ def _list_folders(access_token: str, data_center: str, tool_input: JSONObject, a
     )
     records = _data_list(response, what="folder listing")[:MAX_FOLDER_RESULTS]
     return {
-        "status": "success_executed",
-        "message": f"Zoho Mail returned {len(records)} folder(s).",
+                "message": f"Zoho Mail returned {len(records)} folder(s).",
         "folders": cast(list[JSONValue], [_folder_summary(record) for record in records]),
     }
 
@@ -954,8 +1022,7 @@ def _list_messages(access_token: str, data_center: str, tool_input: JSONObject, 
     )
     records = _data_list(response, what="message listing")[:limit]
     return {
-        "status": "success_executed",
-        "message": f"Zoho Mail returned {len(records)} message(s) from folder {folder_id}.",
+                "message": f"Zoho Mail returned {len(records)} message(s) from folder {folder_id}.",
         "folder_id": folder_id,
         "messages": cast(list[JSONValue], [_message_summary(record) for record in records]),
     }
@@ -980,7 +1047,7 @@ def _read_message(access_token: str, data_center: str, tool_input: JSONObject, a
     content, truncated = _message_text(content_data.get("content"))
     summary["content"] = content
     summary["content_truncated"] = truncated
-    return {"status": "success_executed", "message": "Zoho Mail message loaded.", "zoho_message": summary}
+    return {"message": "Zoho Mail message loaded.", "zoho_message": summary}
 
 
 def _email_field(tool_input: JSONObject, field: str, *, required: bool) -> str:

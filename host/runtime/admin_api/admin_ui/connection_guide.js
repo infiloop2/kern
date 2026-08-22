@@ -16,6 +16,7 @@ const INTEGRATION_LOGOS = {
   claude: `<svg viewBox="0 0 32 32"><path fill="currentColor" d="M14.1 3.3h3.8l-.5 9.3 7.8-5.1 1.9 3.3-8.3 4.2 8.3 4.2-1.9 3.3-7.8-5.1.5 9.3h-3.8l.5-9.3-7.8 5.1-1.9-3.3 8.3-4.2-8.3-4.2 1.9-3.3 7.8 5.1-.5-9.3Z"/></svg>`,
   bedrock: `<span class="integration-logo-word integration-logo-word-aws">aws</span><svg class="integration-logo-smile" viewBox="0 0 32 10"><path d="M4 2.5c6.5 4.8 14.8 5.1 23.8.2"/><path d="m24.2 1 4.2 1.4-2 3.8"/></svg>`,
   github: `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 .7A11.5 11.5 0 0 0 8.4 23c.6.1.8-.3.8-.6v-2.2c-3.4.7-4.1-1.4-4.1-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .7Z"/></svg>`,
+  xai: `<span class="integration-logo-word integration-logo-word-xai">xAI</span>`,
   python_packages: `<span class="integration-logo-word integration-logo-word-python"><b>Py</b></span>`,
   npm_packages: `<span class="integration-logo-word integration-logo-word-npm">npm</span>`,
   "tool:apify": `<span class="integration-logo-word integration-logo-word-apify">A</span>`,
@@ -129,6 +130,7 @@ function toolGuide(tool) {
       approval: action.approval,
       inputSchema: action.input_schema || {},
       outputSchema: action.output_schema || {},
+      returnsAsset: action.returns_asset === true,
     })),
     dataSummary: {
       items: tool.data_summary.cards.map(card => ({
@@ -190,9 +192,9 @@ document.addEventListener("kern-home-integration-statuses-updated", sortHomeInte
 
 function renderHomeIntegrationGroups() {
   const byId = new Map(loadedGuides.map(guide => [guide.id, guide]));
-  const inferenceIds = new Set(["openai", "claude", "bedrock"]);
+  const inferenceIds = new Set(["openai", "claude", "xai", "bedrock"]);
   const groups = [
-    ["AI inference", ["openai", "claude", "bedrock"].map(id => byId.get(id)).filter(Boolean)],
+    ["AI inference", ["openai", "claude", "xai", "bedrock"].map(id => byId.get(id)).filter(Boolean)],
     ["Tools", loadedGuides.filter(guide => guide.id !== "custom_domain" && !inferenceIds.has(guide.id))],
     ["Manual", loadedGuides.filter(guide => guide.id === "custom_domain")],
   ];
@@ -270,8 +272,16 @@ function renderConfig(config) {
 function renderPolicyPoints(points) {
   if (!points || !points.length) return "";
   return `<div class="guide-policy-points">${points.map(point => `
-    <div class="guide-policy-point"><span>${esc(point.label)}</span><p>${esc(point.text)}</p></div>`).join("")}
+    <div class="guide-policy-point"><span>${esc(point.label)}</span><p>${renderPolicyPointContent(point)}</p></div>`).join("")}
   </div>`;
+}
+
+function renderPolicyPointContent(point) {
+  if (!Array.isArray(point.content)) return esc(point.text);
+  return point.content.map(part => typeof part === "string"
+    ? esc(part)
+    : `<a href="${esc(part.url)}" target="_blank" rel="noopener noreferrer">${esc(part.label)}</a>`
+  ).join("");
 }
 
 function setupLinkIsInline(step) {
@@ -340,14 +350,13 @@ function schemaProperties(schema) {
 
 function schemaTypeLabel(schema) {
   if (!schema || typeof schema !== "object") return "unspecified";
+  // A union is a type in its own right, wherever it appears: a nullable field
+  // reads "number or null" rather than "unspecified".
+  if (Array.isArray(schema.oneOf)) return schema.oneOf.map(schemaTypeLabel).join(" or ");
   let label = Array.isArray(schema.type) ? schema.type.join(" or ") : (schema.type || "unspecified");
   if (label === "array") {
     const itemSchema = schema.items && typeof schema.items === "object" ? schema.items : {};
-    if (Array.isArray(itemSchema.oneOf)) {
-      label = `array of ${itemSchema.oneOf.map(schemaTypeLabel).join(" or ")}`;
-    } else {
-      label = `array of ${schemaTypeLabel(itemSchema)}`;
-    }
+    label = `array of ${schemaTypeLabel(itemSchema)}`;
   }
   if (Array.isArray(schema.enum)) label += ` · ${schema.enum.map(value => JSON.stringify(value)).join(" | ")}`;
   if (Number.isInteger(schema.minItems)) label += ` · min ${schema.minItems}`;
@@ -370,8 +379,15 @@ function renderParameterTable(title, schema, emptyLabel) {
         </div></td>
       </tr>`).join("")}</tbody>
     </table></div>` : `<p class="muted">${esc(emptyLabel)}</p>`}
-    ${schema && schema.additionalProperties !== false ? '<p class="muted">The manifest permits additional output fields beyond those listed.</p>' : ""}
   </section>`;
+}
+
+// An action returns exactly one kind of result, so an empty output table is a
+// fact about the action rather than a gap in the manifest: say which kind.
+function noOutputLabel(capability) {
+  if (capability.approval === "operator") return "This action queues an approval; the outcome is a message, not data fields.";
+  if (capability.returnsAsset) return "This action returns a file into the agent workspace, not data fields.";
+  return "No structured output fields are declared.";
 }
 
 function renderActionContract(capability) {
@@ -382,7 +398,7 @@ function renderActionContract(capability) {
     <summary>Parameters: ${inputCount} ${inputCount === 1 ? "input" : "inputs"} · ${outputCount} declared ${outputCount === 1 ? "output" : "outputs"}</summary>
     <div class="guide-action-contract-body">
       ${renderParameterTable("Input parameters", capability.inputSchema, "No input parameters.")}
-      ${renderParameterTable("Declared output fields", capability.outputSchema, "No structured output fields are declared.")}
+      ${renderParameterTable("Declared output fields", capability.outputSchema, noOutputLabel(capability))}
     </div>
   </details>`;
 }

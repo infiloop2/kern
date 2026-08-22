@@ -29,6 +29,7 @@ from host.tools.results import (
     ApprovalExecuted,
     ApprovalResult,
 )
+from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
 from host.tools.shared.web import (
     ProviderWarning,
@@ -63,12 +64,85 @@ FEED_SORTS = LISTING_SORTS | {"best"}
 SEARCH_SORTS = frozenset({"relevance", "hot", "top", "new", "comments"})
 TIME_FILTERS = frozenset({"hour", "day", "week", "month", "year", "all"})
 
-REDDIT_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
+# Reddit ids that fail their format check come back empty rather than as
+# whatever the provider sent, and created_utc is null when Reddit omits it.
+POST_SCHEMA: JSONObject = outputs.obj(
+    {
+        "id": outputs.text("Post id without the t3_ prefix; pass to read_post."),
+        "fullname": outputs.text("Reddit fullname such as t3_abc123; used as a listing cursor."),
+        "title": outputs.text("Post title, up to 500 characters."),
+        "body": outputs.text("Self-post text, up to 4000 characters; empty for link posts."),
+        "author": outputs.text("Author username without the u/ prefix."),
+        "subreddit": outputs.text("Subreddit name without the r/ prefix."),
+        "score": outputs.integer("Net upvotes; 0 when Reddit omits it."),
+        "comment_count": outputs.integer("Comments on the post; 0 when Reddit omits it."),
+        "created_utc": outputs.nullable({"type": "number"}, "Creation time as a Unix timestamp, null when Reddit omits it."),
+        "permalink": outputs.text("Full reddit.com link to the post."),
+        "outbound_url": outputs.text("Where a link post points; empty unless it is a safe public URL."),
+        "over_18": outputs.boolean("Reddit marks the post NSFW."),
+    },
+    ["id", "fullname", "title", "body", "author", "subreddit", "score", "comment_count", "created_utc", "permalink", "outbound_url", "over_18"],
+)
+COMMENT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "id": outputs.text("Comment id without the t1_ prefix; pass to create_comment as parent."),
+        "parent_id": outputs.text("Fullname of the parent post or comment."),
+        "author": outputs.text("Author username without the u/ prefix."),
+        "body": outputs.text("Comment text, up to 2000 characters."),
+        "score": outputs.integer("Net upvotes; 0 when Reddit omits it."),
+        "created_utc": outputs.nullable({"type": "number"}, "Creation time as a Unix timestamp, null when Reddit omits it."),
+        "depth": outputs.integer("Nesting depth, where 0 is a top-level reply."),
+        "permalink": outputs.text("Full reddit.com link to the comment."),
+    },
+    ["id", "parent_id", "author", "body", "score", "created_utc", "depth", "permalink"],
+)
+_LISTING_FIELDS: JSONObject = {
+    "posts": outputs.array_of(POST_SCHEMA, f"Up to the requested limit ({MAX_LISTING_LIMIT} maximum), in Reddit's order for the chosen sort."),
+    "next_cursor": outputs.text("Fullname to pass as after for the next page; empty on the last page."),
 }
+
+GET_PROFILE_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Which profile was loaded."),
+        "profile": outputs.obj(
+            {
+                "id": outputs.text("Reddit account id."),
+                "username": outputs.text("Username without the u/ prefix."),
+                "link_karma": outputs.integer("Karma from posts; 0 when Reddit omits it."),
+                "comment_karma": outputs.integer("Karma from comments; 0 when Reddit omits it."),
+                "created_utc": outputs.nullable({"type": "number"}, "Account creation time as a Unix timestamp, null when Reddit omits it."),
+                "is_gold": outputs.boolean("The account has Reddit Premium."),
+                "is_mod": outputs.boolean("The account moderates at least one subreddit."),
+            },
+            ["id", "username", "link_karma", "comment_karma", "created_utc", "is_gold", "is_mod"],
+        ),
+    },
+    ["message", "profile"],
+)
+GET_HOME_FEED_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {"message": outputs.text("How many home-feed posts were returned."), **_LISTING_FIELDS},
+    ["message", "posts", "next_cursor"],
+)
+GET_SUBREDDIT_POSTS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many posts were returned, and from which subreddit."),
+        "subreddit": outputs.text("The subreddit that was listed, without the r/ prefix."),
+        **_LISTING_FIELDS,
+    },
+    ["message", "subreddit", "posts", "next_cursor"],
+)
+SEARCH_POSTS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {"message": outputs.text("How many posts the search returned."), **_LISTING_FIELDS},
+    ["message", "posts", "next_cursor"],
+)
+READ_POST_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many comments were loaded, or that the post was not found."),
+        "post": outputs.nullable(POST_SCHEMA, "The post itself, null when Reddit returned no post for that id."),
+        "comments": outputs.array_of(COMMENT_SCHEMA, f"Up to comment_limit comments ({MAX_COMMENT_LIMIT} maximum), flattened depth-first with depth on each."),
+    },
+    ["message", "post", "comments"],
+)
 
 REDDIT_READ_POLICY = (
     "Read-only. Sends only the listed identifiers, filters, pagination values, or search query "
@@ -106,7 +180,7 @@ MANIFEST = ToolManifest(
                 "account summary to active model context. Runs directly with no approval."
             ),
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-            output_schema=REDDIT_OUTPUT_SCHEMA,
+            output_schema=GET_PROFILE_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="get_home_feed",
@@ -123,7 +197,7 @@ MANIFEST = ToolManifest(
                     "after": {"type": "string", "description": "Opaque next_cursor from an earlier Reddit listing result."},
                 }
             ),
-            output_schema=REDDIT_OUTPUT_SCHEMA,
+            output_schema=GET_HOME_FEED_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="get_subreddit_posts",
@@ -142,7 +216,7 @@ MANIFEST = ToolManifest(
                 },
                 ["subreddit"],
             ),
-            output_schema=REDDIT_OUTPUT_SCHEMA,
+            output_schema=GET_SUBREDDIT_POSTS_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="search_posts",
@@ -162,7 +236,7 @@ MANIFEST = ToolManifest(
                 },
                 ["query"],
             ),
-            output_schema=REDDIT_OUTPUT_SCHEMA,
+            output_schema=SEARCH_POSTS_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="read_post",
@@ -179,7 +253,7 @@ MANIFEST = ToolManifest(
                 },
                 ["post_id"],
             ),
-            output_schema=REDDIT_OUTPUT_SCHEMA,
+            output_schema=READ_POST_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="create_post",
@@ -198,7 +272,6 @@ MANIFEST = ToolManifest(
                 },
                 ["subreddit", "title", "kind"],
             ),
-            output_schema=REDDIT_OUTPUT_SCHEMA,
             approval="operator",
         ),
         ActionSpec(
@@ -218,7 +291,6 @@ MANIFEST = ToolManifest(
                 },
                 ["parent_id", "text"],
             ),
-            output_schema=REDDIT_OUTPUT_SCHEMA,
             approval="operator",
         ),
     ),
@@ -608,8 +680,7 @@ def _get_profile(api: HostAPI, tool_input: JSONObject) -> JSONObject:
     comment_karma = response.get("comment_karma")
     created = response.get("created_utc")
     return {
-        "status": "success_executed",
-        "message": f"Loaded Reddit profile {account['label']}.",
+                "message": f"Loaded Reddit profile {account['label']}.",
         "profile": {
             "id": account["id"],
             "username": str(account["label"])[2:],
@@ -636,8 +707,7 @@ def _get_home_feed(api: HostAPI, tool_input: JSONObject) -> JSONObject:
     response = _api_get(access_token, api, f"/{sort}?{encode_query(params)}", what="home feed")
     posts, cursor = _listing(response, limit=int(params["limit"]))
     return {
-        "status": "success_executed",
-        "message": f"Reddit returned {len(posts)} home-feed post(s).",
+                "message": f"Reddit returned {len(posts)} home-feed post(s).",
         "posts": posts,
         "next_cursor": cursor,
     }
@@ -660,8 +730,7 @@ def _get_subreddit_posts(api: HostAPI, tool_input: JSONObject) -> JSONObject:
     )
     posts, cursor = _listing(response, limit=int(params["limit"]))
     return {
-        "status": "success_executed",
-        "message": f"Reddit returned {len(posts)} post(s) from r/{subreddit}.",
+                "message": f"Reddit returned {len(posts)} post(s) from r/{subreddit}.",
         "subreddit": subreddit,
         "posts": posts,
         "next_cursor": cursor,
@@ -698,8 +767,7 @@ def _search_posts(api: HostAPI, tool_input: JSONObject) -> JSONObject:
     response = _api_get(access_token, api, f"{path}?{encode_query(params)}", what="post search")
     posts, cursor = _listing(response, limit=int(params["limit"]))
     return {
-        "status": "success_executed",
-        "message": f"Reddit search returned {len(posts)} post(s).",
+                "message": f"Reddit search returned {len(posts)} post(s).",
         "posts": posts,
         "next_cursor": cursor,
     }
@@ -781,8 +849,7 @@ def _read_post(api: HostAPI, tool_input: JSONObject) -> JSONObject:
         if len(items) > 1 and isinstance(items[1], dict):
             comments = _comment_summaries(cast(JSONObject, items[1]), limit=comment_limit)
     return {
-        "status": "success_executed",
-        "message": "Reddit post was not found." if post is None else f"Loaded Reddit post with {len(comments)} comment(s).",
+                "message": "Reddit post was not found." if post is None else f"Loaded Reddit post with {len(comments)} comment(s).",
         "post": post,
         "comments": comments,
     }

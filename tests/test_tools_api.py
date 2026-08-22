@@ -160,6 +160,11 @@ class ActionListingTests(ToolsApiTestCase):
                     self.assertEqual(by_id[action.id]["description"], action.description)
                     self.assertEqual(by_id[action.id]["input_schema"], action.input_schema)
                     self.assertEqual(by_id[action.id]["approval"], action.approval)
+                    # The result shape travels with the call shape, and only
+                    # for the actions that return a JSON result at all.
+                    self.assertEqual(
+                        by_id[action.id].get("output_schema", {}), action.output_schema
+                    )
 
         def described_action(tool_id: str, action_id: str) -> dict[str, Any]:
             result = tools_api.call_action("describe_tool", {"tool_id": tool_id})["result"]
@@ -170,6 +175,16 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertIn("not public-post", described_action("instagram", "get_recent_media")["description"])
         self.assertIn("not an objective global ranking", described_action("instagram_discovery", "get_trending_reels")["description"])
         self.assertIn("not a LinkedIn feed", described_action("linkedin_discovery", "search_posts")["description"])
+
+        # A described result names its fields and says what each one means, so
+        # the agent can plan the next call without running this one first.
+        messages = described_action("gmail", "search_messages")["output_schema"]["properties"]["messages"]
+        self.assertIn("newest first", messages["description"])
+        self.assertIn("read_message", messages["items"]["properties"]["id"]["description"])
+        # An approval-gated action returns an approval outcome, and an
+        # asset-returning action writes a file: neither carries a JSON result.
+        self.assertNotIn("output_schema", described_action("gmail", "send_email"))
+        self.assertNotIn("output_schema", described_action("openai_images", "generate_image"))
 
     def test_agent_notes_are_always_stated_and_carried_once(self) -> None:
         catalog = {entry["tool_id"]: entry for entry in

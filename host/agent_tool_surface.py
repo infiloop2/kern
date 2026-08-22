@@ -73,9 +73,12 @@ LIST_BUNDLED_TOOLS_TOOL: JSONObject = {
 DESCRIBE_TOOL_TOOL: JSONObject = {
     "name": "describe_tool",
     "description": (
-        "Return one bundled tool's callable actions with their full JSON input schemas. "
+        "Return one bundled tool's callable actions with their full JSON input schemas, "
+        "and the output schema of every action that returns a JSON result. "
         "Call this after list_bundled_tools, for the tool you are about to use; the "
-        "schemas are not in your context until you ask for them."
+        "schemas are not in your context until you ask for them. An action with no "
+        "output_schema returns no JSON result: an approval-gated one returns an approval "
+        "outcome, and the rest write a file into your workspace."
     ),
     "input_schema": {
         "type": "object",

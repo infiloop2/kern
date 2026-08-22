@@ -40,6 +40,11 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
         "claude-fable-5": ("high", "max", "ultracode"),
         "claude-sonnet-5": ("high", "max", "ultracode"),
     },
+    # Grok Build's subscription runtime exposes one pinned model in the
+    # vendored CLI. These are its wire-level reasoning effort values.
+    "grok": {
+        "grok-4.6": ("xhigh", "high"),
+    },
     # Hermes's headless CLI has no effort flag.
     "hermes": {
         "deepseek.v3.2": ("high",),

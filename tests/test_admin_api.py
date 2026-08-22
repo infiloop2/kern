@@ -259,6 +259,55 @@ def raw_admin_request(socket_path: str, request: bytes) -> bytes:
 
 
 class AdminUiStaticTests(unittest.TestCase):
+    def setUp(self) -> None:
+        snapshot = patch.object(
+            admin_api.state,
+            "conversation_search_snapshot",
+            return_value=(1, 10**12, 1, 20),
+        )
+        snapshot.start()
+        self.addCleanup(snapshot.stop)
+        retention = patch.object(
+            admin_api.state,
+            "conversation_search_retention",
+            return_value=(1, 1),
+        )
+        retention.start()
+        self.addCleanup(retention.stop)
+
+    def test_admin_api_reference_documents_every_oauth_runtime(self) -> None:
+        # The reference is the contract API clients follow, and a runtime added
+        # without it is undiscoverable: Grok shipped its routes, its reset
+        # value, and its account fields before this doc caught up. Derive the
+        # expectations from the service so the next runtime cannot repeat it.
+        reference = (
+            Path(__file__).parents[1] / "docs/api/AdminAPI.md"
+        ).read_text()
+        for runtime_type, flow in admin_api._OAUTH_LOGIN_FLOWS.items():
+            route = f"/v1/agent-runtime/{flow.oauth_key}-oauth-login"
+            self.assertIn(f"POST {route}", reference, runtime_type)
+            self.assertIn(f"GET  {route}", reference, runtime_type)
+            self.assertIn(f"| `POST` | `{route}` |", reference, runtime_type)
+            self.assertIn(f"| `GET` | `{route}` |", reference, runtime_type)
+
+        # Every runtime reset-linked-account accepts has to appear in the row
+        # documenting what it accepts.
+        reset_row = [
+            line for line in reference.splitlines()
+            if line.startswith("| `POST` | `/v1/agent-runtime/reset-linked-account`")
+        ]
+        self.assertEqual(len(reset_row), 1)
+        for runtime_type in admin_api.OAUTH_RUNTIME_TYPES:
+            self.assertIn(f'"{runtime_type}"', reset_row[0], runtime_type)
+
+        # The account response enumerates its runtimes and providers.
+        for runtime_type in admin_api.OAUTH_RUNTIME_TYPES:
+            self.assertIn(f"`{runtime_type}`", reference, runtime_type)
+        for usage_key in admin_api._RUNTIME_USAGE_KEYS.values():
+            self.assertIn(f"`accounts[].{usage_key}`", reference, usage_key)
+        for provider in ("openai", "claude", "xai", "bedrock"):
+            self.assertIn(f"`{provider}`", reference, provider)
+
     def test_database_free_admin_ui_contract(self) -> None:
         # The database-backed integration-test class is skipped when local PostgreSQL is
         # unavailable, but this method reads static assets only. Run the same
@@ -610,7 +659,14 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("renderDataSummary", guide)
         self.assertIn("action.input_schema || {}", guide)
         self.assertIn("action.output_schema || {}", guide)
-        self.assertIn("The manifest permits additional output fields beyond those listed.", guide)
+        # Every manifest object is closed now, so the guide states what an
+        # action returns instead of warning about undeclared extras.
+        self.assertNotIn("permits additional output fields", guide)
+        self.assertIn("This action queues an approval; the outcome is a message, not data fields.", guide)
+        self.assertIn("This action returns a file into the agent workspace, not data fields.", guide)
+        # A union is a type wherever it appears, so a nullable field renders as
+        # one instead of falling through to "unspecified".
+        self.assertIn('if (Array.isArray(schema.oneOf)) return schema.oneOf.map(schemaTypeLabel).join(" or ");', guide)
         self.assertNotIn("Complete JSON schemas", guide)
         self.assertNotIn('.guide-capability:has(> .guide-action-contract[open])', (
             runtime / "admin_ui" / "admin_ui.css"
@@ -622,10 +678,173 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn("guide.connection", guide)
         self.assertNotIn("guides.map(renderGuide)", guide)
         self.assertNotIn("scrollIntoView", guide)
+        # Opening a panel resets scroll, but `html` scrolls smoothly, and an
+        # animation in flight outlives a plain "instant" scroll — the reset has
+        # to cancel it rather than issue a competing one.
+        app_js = (runtime / "admin_ui" / "app.js").read_text()
+        reset = app_js.split("function resetPageScroll()")[1].split("\n}")[0]
+        self.assertIn('scrollBehavior = "auto"', reset)
+        self.assertIn('behavior: "instant"', reset)
+        # The other async scroll the panel reset has to beat: pushState with
+        # the browser's default restoration also restores an offset, after the
+        # panel has already reset itself.
+        self.assertIn('history.scrollRestoration = "manual"', app_js)
+        self.assertIn(
+            "scroll-behavior: smooth",
+            (runtime / "admin_ui" / "admin_ui.css").read_text(),
+        )
         self.assertIn('id="home-integration-groups"', html)
         self.assertIn("Integration guide", html)
         self.assertNotIn('id="panel-connection-guide"', html)
         self.assertNotIn("What each integration enables", html)
+
+    def test_xai_ui_copy_and_no_web_search_toggle_contract(self) -> None:
+        runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
+        catalog = (runtime / "admin_ui" / "integration_catalog.js").read_text()
+        network = (runtime / "admin_ui" / "network.js").read_text()
+        app = (runtime / "admin_ui" / "app.js").read_text()
+        helpers = (runtime / "admin_ui" / "helpers.js").read_text()
+        connection_guide = (runtime / "admin_ui" / "connection_guide.js").read_text()
+
+        self.assertIn('xai: {\n    label: "Grok"', catalog)
+        self.assertIn('["openai", "claude", "xai", "bedrock"]', connection_guide)
+        # The two hosts the guard opens, and the two it deliberately does not,
+        # are the operator-facing point of this integration.
+        self.assertIn("auth.x.ai", catalog)
+        self.assertIn("cli-chat-proxy.grok.com", catalog)
+        self.assertIn("metered developer API stays blocked", catalog)
+        self.assertIn("Run Grok Build chats and tasks", catalog)
+        self.assertIn("Creates and resumes Grok Build sessions", catalog)
+        self.assertIn("accepts live steering", catalog)
+        for url in (
+            "https://console.x.ai/",
+            "https://docs.x.ai/build/modes-and-commands#core-tui-commands",
+            "https://docs.x.ai/developers/faq/security#does-xai-train-on-customers-api-requests",
+            "https://docs.x.ai/build/enterprise#privacy--data-lifecycle",
+            "https://grok.com/?_s=data",
+            "https://x.com/settings/grok_settings",
+            "https://x.ai/legal/faq#how-do-i-select-whether-my-content-is-used-for-model-training",
+        ):
+            self.assertIn(url, catalog)
+
+        # The shared web-search control stays parameterised by provider, but
+        # Grok is not one of its providers: xAI ships no toggle at all.
+        self.assertIn("setProviderWebSearch", network)
+        self.assertIn("setProviderWebSearch(button.dataset.provider, true)", app)
+        self.assertIn("setProviderWebSearch(button.dataset.provider, false)", app)
+        self.assertNotIn("setClaudeWebSearch", network + app)
+        self.assertNotIn("enable-claude-web-search", network + app)
+        disclosures = network.split("WEB_SEARCH_DISCLOSURE")[1][:600]
+        self.assertIn("claude: {", disclosures)
+        self.assertNotIn("xai: {", disclosures)
+        self.assertIn('if (name === "claude" && enabled)', network)
+
+        # The operator-facing reason web search is absent, rather than silence
+        # about a capability Grok has everywhere else.
+        self.assertIn("Grok's server-side web search is not available on this host", catalog)
+        self.assertIn("Web search is blocked because Grok's cannot be narrowed", catalog)
+        self.assertIn("without that request ever passing this host's network policy", catalog)
+        # Nothing in the xAI entry may still offer the removed control. The
+        # capability block described it as optional after the toggle was gone,
+        # which is the shape this regression takes.
+        xai_entry = catalog.split('xai: {\n    label: "Grok"')[1].split("\n  bedrock: {")[0]
+        for advertised in (
+            "Web search (optional",
+            "off by default",
+            "unless you enable it",
+            "when you enable it",
+        ):
+            self.assertNotIn(advertised.lower(), xai_entry.lower(), advertised)
+        self.assertIn("Web search (not available)", xai_entry)
+
+        # The same drift hid in prose the catalog check cannot see. These
+        # phrases only make sense if an xAI search control exists, so they are
+        # the ones that must not come back anywhere the integration is
+        # described. Claude's toggle is discussed in the same documents, so
+        # this pins the claims rather than banning the word.
+        integration_doc = (
+            Path(__file__).parents[1] / "docs/architecture/xai-integration.md"
+        ).read_text()
+        controls_doc = (
+            Path(__file__).parents[1] / "docs/api/NetworkControls.md"
+        ).read_text()
+        architecture_controls_doc = (
+            Path(__file__).parents[1] / "docs/architecture/network-controls.md"
+        ).read_text()
+        xai_manifest = (
+            Path(__file__).parents[1]
+            / "host/network_integrations/xai/manifest.py"
+        ).read_text()
+        xai_guard = (
+            Path(__file__).parents[1]
+            / "host/network_integrations/xai/guard.py"
+        ).read_text()
+        # Every document that describes this integration, not just the two that
+        # describe it at length: the drift that survived two passes was one
+        # clause in the architecture index.
+        index_doc = (
+            Path(__file__).parents[1] / "docs/architecture/index.md"
+        ).read_text()
+        xai_index_row = [
+            line for line in index_doc.splitlines() if "xai-integration.md" in line
+        ]
+        self.assertEqual(len(xai_index_row), 1)
+        self.assertNotIn("web-search toggle", xai_index_row[0])
+        self.assertNotIn("routing metadata", xai_index_row[0])
+        self.assertIn("bearer-token account pinning", xai_index_row[0])
+        for claim in (
+            "when search is enabled",
+            "opting into live search",
+            "`web_search` requires `enabled`",
+            "the operator opted into",
+            "with the toggle on",
+            "control is shared with claude",
+        ):
+            self.assertNotIn(claim.lower(), integration_doc.lower(), claim)
+            self.assertNotIn(claim.lower(), controls_doc.lower(), claim)
+        self.assertIn(
+            "Grok's server-side web search is not available on this host",
+            integration_doc,
+        )
+        self.assertIn("the integration has no options", controls_doc.lower())
+        for obsolete_header_claim in (
+            "optional account header",
+            "identity headers must agree",
+            "every one it does send must match",
+            "matching header and `sub`",
+        ):
+            for document in (
+                architecture_controls_doc,
+                integration_doc,
+                xai_manifest,
+                xai_guard,
+            ):
+                self.assertNotIn(obsolete_header_claim, document.lower())
+
+        # Grok has a real account/login card, runtime status, and task-session
+        # selection through the ACP adapter.
+        self.assertIn('name === "openai" || name === "claude" || name === "xai"', network)
+        self.assertIn('grok: { label: "Grok", provider: "xai"', helpers)
+        self.assertIn('const XAI_INTEGRATION = "xai";', network)
+        self.assertIn('typeof account.zdr_enabled === "boolean"', network)
+        self.assertIn('` &middot; ZDR ${account.zdr_enabled ? "active" : "inactive"}`', network)
+        self.assertIn(
+            'typeof account.coding_data_retention_opt_out === "boolean"', network
+        )
+        self.assertIn(
+            '` &middot; coding-data opt-out ${account.coding_data_retention_opt_out ? "active" : "inactive"}`',
+            network,
+        )
+        self.assertIn("renderPolicyPointContent(point)", connection_guide)
+        self.assertIn('{ url: "https://console.x.ai/", label: "xAI Console" }', catalog)
+        self.assertIn(
+            '{ url: "https://grok.com/?_s=data", label: "Grok.com data controls" }',
+            catalog,
+        )
+        self.assertIn(
+            '{ url: "https://x.com/settings/grok_settings", label: "X Grok settings" }',
+            catalog,
+        )
 
     def test_bedrock_ui_copy_and_toolbar_contract(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
@@ -805,6 +1024,14 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn("usage-reset", health_js)
         self.assertNotIn(".usage-reset {", css)
         self.assertIn(".usage-window {", css)
+
+    def test_grok_usage_maps_every_normalized_billing_period(self) -> None:
+        runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
+        health_js = (runtime / "admin_ui" / "health.js").read_text()
+
+        self.assertIn('daily: { label: "day", summary: "daily" }', health_js)
+        self.assertIn('weekly: { label: "wk", summary: "weekly" }', health_js)
+        self.assertIn('monthly: { label: "mo", summary: "monthly" }', health_js)
 
     def test_upgrade_notice_is_descriptive_and_shown_with_home_version(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
@@ -1334,7 +1561,14 @@ class AdminUiStaticTests(unittest.TestCase):
                 "excerpt_truncated": False,
             },
         ]
-        with patch.object(admin_api.state, "search_thread_messages", return_value=rows) as search:
+        with (
+            patch.object(admin_api.state, "search_thread_messages", return_value=rows) as search,
+            patch.object(
+                admin_api.embedding_client,
+                "embed_texts",
+                side_effect=admin_api.embedding_client.EmbeddingError("offline"),
+            ),
+        ):
             response = admin_api.search_conversation_history(
                 {
                     "query": " tunnel status ",
@@ -1349,8 +1583,10 @@ class AdminUiStaticTests(unittest.TestCase):
             to_timestamp=None,
             thread_id="app-2",
             sources=("user", "agent"),
-            limit=2,
+            # One past the window, to detect whether a lexical tail exists.
+            limit=admin_api.CONVERSATION_SEMANTIC_CANDIDATES + 1,
             before=None,
+            max_seq=10**12,
         )
         self.assertEqual(response["matches"][0]["role"], "assistant")
         self.assertTrue(response["matches"][0]["excerpt_truncated"])
@@ -1374,11 +1610,18 @@ class AdminUiStaticTests(unittest.TestCase):
             "excerpt": "A degraded tunnel can still serve traffic.",
             "excerpt_truncated": False,
         }
-        with patch.object(
-            admin_api.state,
-            "search_thread_messages",
-            side_effect=[[row, {**row, "seq": 7}], []],
-        ) as search:
+        with (
+            patch.object(
+                admin_api.state,
+                "search_thread_messages",
+                side_effect=[[row, {**row, "seq": 7}], []],
+            ) as search,
+            patch.object(
+                admin_api.embedding_client,
+                "embed_texts",
+                side_effect=admin_api.embedding_client.EmbeddingError("offline"),
+            ),
+        ):
             request = {
                 "query": " degraded tunnel ",
                 "query_variants": ["serving traffic", "serving traffic"],
@@ -1396,7 +1639,47 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertEqual(first_call.args[0], ("degraded tunnel", "serving traffic"))
         self.assertEqual(first_call.kwargs["from_timestamp"], "2026-07-01T00:00:00Z")
         self.assertEqual(first_call.kwargs["sources"], ("agent",))
-        self.assertEqual(search.call_args_list[1].kwargs["before"], (0.5, 8))
+        self.assertEqual(search.call_args_list[1].kwargs["before"], None)
+
+    def test_legacy_rank_cursor_stays_on_plain_lexical_pagination(self) -> None:
+        row = {
+            "seq": 7,
+            "event_id": "event_7",
+            "timestamp": "2026-07-01T00:00:00Z",
+            "thread_id": "thread-1",
+            "source": "user",
+            "search_rank": 0.4,
+            "excerpt": "deployment detail",
+            "excerpt_truncated": False,
+        }
+        fingerprint = admin_api._conversation_search_fingerprint(
+            ["deployment"], None, None, None, ["user", "assistant"]
+        )
+        legacy_cursor = admin_api._encode_conversation_search_cursor(
+            fingerprint,
+            True,
+            {"rank": 0.5, "seq": 8},
+        )
+        with (
+            patch.object(
+                admin_api.state,
+                "search_thread_messages",
+                return_value=[row, {**row, "seq": 6}],
+            ) as search,
+            patch.object(admin_api.embedding_client, "embed_texts") as embed,
+        ):
+            response = admin_api.search_conversation_history(
+                {"query": "deployment", "limit": 1, "cursor": legacy_cursor}
+            )
+
+        embed.assert_not_called()
+        self.assertEqual(search.call_args.kwargs["before"], (0.5, 8))
+        self.assertEqual(search.call_args.kwargs["exclude_seqs"], ())
+        decoded = admin_api._decode_conversation_search_cursor(
+            response["next_cursor"], fingerprint, True
+        )
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded[0], "rank")
 
     def test_conversation_search_rejects_missing_filter_and_cursor_reuse(self) -> None:
         with self.assertRaises(admin_api.ApiError) as missing:
@@ -1454,6 +1737,23 @@ class AdminUiStaticTests(unittest.TestCase):
                     time_fingerprint,
                     False,
                     {"timestamp": "2026-99-31T00:00:00Z", "seq": 1},
+                ),
+            ),
+            (
+                {"query": "deployment"},
+                admin_api._encode_conversation_search_cursor(
+                    rank_fingerprint,
+                    True,
+                    {
+                        "rank": admin_api.CONVERSATION_SEMANTIC_CANDIDATES * 2 + 1,
+                        "seq": 1,
+                    },
+                    mode="hybrid",
+                    min_seq=1,
+                    max_seq=10,
+                    embedding_min_seq=1,
+                    embedding_generation=20,
+                    semantic_seqs=(),
                 ),
             ),
             ({"query": "deployment"}, "not-base64!"),
@@ -1581,6 +1881,657 @@ class AdminUiStaticTests(unittest.TestCase):
             self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
             self.assertIn("valid UTF-8", error.exception.message)
             search.assert_not_called()
+
+    def test_conversation_search_fuses_local_semantic_and_lexical_candidates(self) -> None:
+        lexical = [
+            {
+                "seq": 8,
+                "event_id": "event_8",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "thread_id": "thread-2",
+                "source": "agent",
+                "search_rank": 0.8,
+                "excerpt": "[[OAuth]] callback failure",
+                "excerpt_truncated": False,
+            }
+        ]
+        semantic = [
+            {
+                "seq": 7,
+                "event_id": "event_7",
+                "timestamp": "2026-06-30T00:00:00Z",
+                "thread_id": "thread-1",
+                "source": "user",
+                "search_rank": 0.9,
+                "excerpt": "Could not sign in with the identity provider",
+                "excerpt_truncated": False,
+            },
+            lexical[0],
+        ]
+        with (
+            patch.object(admin_api.state, "search_thread_messages", return_value=lexical) as text_search,
+            patch.object(admin_api.embedding_client, "embed_texts", return_value=[[0.0] * 384]) as embed,
+            patch.object(admin_api.state, "search_thread_messages_semantic", return_value=semantic) as vector_search,
+        ):
+            response = admin_api.search_conversation_history(
+                {
+                    "query": "Why could I not sign in?",
+                    "query_variants": ["login problem", "OAuth"],
+                    "from": None,
+                    "to": None,
+                    "thread_id": None,
+                    "roles": ["user", "assistant"],
+                    "limit": 2,
+                }
+            )
+
+        embed.assert_called_once_with(["Why could I not sign in?"], kind="query")
+        self.assertEqual(text_search.call_args.kwargs["limit"], 201)
+        self.assertEqual(
+            vector_search.call_args.kwargs["minimum_similarity"],
+            admin_api.embedding_client.MINIMUM_SIMILARITY,
+        )
+        # A hit present in both channels outranks a semantic-only result, and
+        # retains the lexical excerpt highlighting.
+        self.assertEqual([match["event_id"] for match in response["matches"]], ["event_8", "event_7"])
+        self.assertEqual(response["matches"][0]["excerpt"], "[[OAuth]] callback failure")
+        self.assertEqual(response["search_mode"], "hybrid")
+
+    def test_conversation_search_falls_back_when_local_model_is_unavailable(self) -> None:
+        row = {
+            "seq": 3,
+            "event_id": "event_3",
+            "timestamp": "2026-07-01T00:00:00Z",
+            "thread_id": "thread-1",
+            "source": "user",
+            "search_rank": 0.4,
+            "excerpt": "exact deployment identifier",
+            "excerpt_truncated": False,
+        }
+        older = {
+            **row,
+            "seq": 2,
+            "event_id": "event_2",
+            "search_rank": 0.3,
+        }
+        with (
+            patch.object(admin_api.state, "search_thread_messages", return_value=[row, older]),
+            patch.object(
+                admin_api.embedding_client,
+                "embed_texts",
+                side_effect=admin_api.embedding_client.EmbeddingError("offline"),
+            ),
+            patch.object(admin_api.state, "search_thread_messages_semantic") as vector_search,
+        ):
+            response = admin_api.search_conversation_history(
+                {"query": "Which deployment did we discuss?", "limit": 1}
+            )
+
+        vector_search.assert_not_called()
+        self.assertEqual(response["search_mode"], "lexical_fallback")
+        self.assertEqual(response["matches"][0]["event_id"], "event_3")
+        self.assertIsInstance(response["next_cursor"], str)
+
+    def test_hybrid_cursor_reuses_frozen_semantic_candidates(self) -> None:
+        lexical = [
+            {
+                "seq": seq,
+                "event_id": f"event_{seq}",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "thread_id": "thread-1",
+                "source": "user",
+                "search_rank": float(seq),
+                "excerpt": f"match {seq}",
+                "excerpt_truncated": False,
+            }
+            for seq in (3, 2, 1)
+        ]
+        semantic = [
+            {
+                **lexical[0],
+                "seq": 10,
+                "event_id": "event_10",
+                "excerpt": "semantic-only match",
+            }
+        ]
+        request = {"query": "deployment details", "limit": 1}
+        with (
+            patch.object(
+                admin_api.state, "search_thread_messages", return_value=lexical
+            ) as text_search,
+            patch.object(
+                admin_api.embedding_client,
+                "embed_texts",
+                return_value=[[0.0] * 384],
+            ) as embed,
+            patch.object(
+                admin_api.state,
+                "search_thread_messages_semantic",
+                return_value=semantic,
+            ) as vector_search,
+            patch.object(
+                admin_api.state,
+                "thread_messages_by_seqs",
+                return_value=semantic,
+            ) as frozen_search,
+        ):
+            first = admin_api.search_conversation_history(request)
+            resumed = admin_api.search_conversation_history(
+                {**request, "cursor": first["next_cursor"]}
+            )
+
+        self.assertEqual(first["matches"][0]["event_id"], "event_3")
+        self.assertEqual(resumed["search_mode"], "hybrid")
+        self.assertEqual(resumed["matches"][0]["event_id"], "event_2")
+        self.assertEqual(text_search.call_count, 2)
+        embed.assert_called_once()
+        vector_search.assert_called_once()
+        self.assertEqual(frozen_search.call_args.args, ((10,),))
+        self.assertEqual(
+            frozen_search.call_args.kwargs,
+            {
+                "from_timestamp": None,
+                "to_timestamp": None,
+                "thread_id": None,
+                "sources": ("user", "agent"),
+                "max_seq": 10**12,
+            },
+        )
+        self.assertEqual(
+            {call.kwargs["max_seq"] for call in text_search.call_args_list},
+            {10**12},
+        )
+        self.assertEqual(
+            {
+                call.kwargs["max_embedding_generation"]
+                for call in vector_search.call_args_list
+            },
+            {20},
+        )
+
+    def test_conversation_cursor_expires_when_retention_advances(self) -> None:
+        row = {
+            "seq": 3,
+            "event_id": "event_3",
+            "timestamp": "2026-07-01T00:00:00Z",
+            "thread_id": "thread-1",
+            "source": "user",
+            "search_rank": 0.4,
+            "excerpt": "deployment detail",
+            "excerpt_truncated": False,
+        }
+        request = {"query": "deployment", "limit": 1}
+        with (
+            patch.object(
+                admin_api.state,
+                "search_thread_messages",
+                return_value=[row, {**row, "seq": 2}],
+            ),
+            patch.object(
+                admin_api.embedding_client,
+                "embed_texts",
+                return_value=[[0.0] * 384],
+            ),
+            patch.object(
+                admin_api.state,
+                "search_thread_messages_semantic",
+                return_value=[],
+            ),
+            patch.object(
+                admin_api.state,
+                "conversation_search_retention",
+                side_effect=[(1, 1), (1, 1), (2, 1)],
+            ),
+        ):
+            first = admin_api.search_conversation_history(request)
+            with self.assertRaises(admin_api.ApiError) as expired:
+                admin_api.search_conversation_history(
+                    {**request, "cursor": first["next_cursor"]}
+                )
+
+        self.assertEqual(expired.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("restart", expired.exception.message)
+
+    def test_hybrid_search_transitions_to_the_lexical_tail(self) -> None:
+        lexical = [
+            {
+                "seq": 400 - index,
+                "event_id": f"event_{400 - index}",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "thread_id": "thread-1",
+                "source": "user",
+                "search_rank": 1.0 - index / 1000,
+                "excerpt": f"match {index}",
+                "excerpt_truncated": False,
+            }
+            # One past the candidate window, so the service sees a real tail.
+            for index in range(admin_api.CONVERSATION_SEMANTIC_CANDIDATES + 1)
+        ]
+        older = {
+            **lexical[-1],
+            "seq": 199,
+            "event_id": "event_199",
+            "search_rank": 0.1,
+            "excerpt": "older exact match",
+        }
+
+        def text_search(*_args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return [older] if kwargs["before"] is not None else lexical
+
+        request = {
+            "query": "What exact match was discussed?",
+            "query_variants": ["exact match"],
+            "from": None,
+            "to": None,
+            "thread_id": None,
+            "roles": ["user", "assistant"],
+            "limit": 25,
+        }
+        with (
+            patch.object(admin_api.state, "search_thread_messages", side_effect=text_search),
+            patch.object(admin_api.embedding_client, "embed_texts", return_value=[[0.0] * 384]),
+            patch.object(admin_api.state, "search_thread_messages_semantic", return_value=[]),
+        ):
+            response = admin_api.search_conversation_history(request)
+            for _page in range(7):
+                response = admin_api.search_conversation_history(
+                    {**request, "cursor": response["next_cursor"]}
+                )
+
+            tail = response["next_cursor"]
+            final = admin_api.search_conversation_history(
+                {**request, "cursor": tail}
+            )
+
+        self.assertEqual(final["search_mode"], "lexical")
+        self.assertEqual(final["matches"][0]["event_id"], "event_199")
+
+    def test_fallback_transitions_to_an_unfiltered_lexical_tail(self) -> None:
+        """Inference recovery must not hide an unseen deep lexical match."""
+        lexical = [
+            {
+                "seq": 400 - index,
+                "event_id": f"event_{400 - index}",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "thread_id": "thread-1",
+                "source": "user",
+                "search_rank": 1.0 - index / 1000,
+                "excerpt": f"match {index}",
+                "excerpt_truncated": False,
+            }
+            for index in range(admin_api.CONVERSATION_SEMANTIC_CANDIDATES + 1)
+        ]
+        older = {
+            **lexical[-1],
+            "seq": 199,
+            "event_id": "event_199",
+            "search_rank": 0.1,
+            "excerpt": "unseen deep lexical match",
+        }
+
+        def text_search(*_args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return [older] if kwargs["before"] is not None else lexical
+
+        request = {
+            "query": "exact match",
+            "roles": ["user", "assistant"],
+            "limit": 25,
+        }
+        unavailable = admin_api.embedding_client.EmbeddingError("offline")
+        with (
+            patch.object(admin_api.state, "search_thread_messages", side_effect=text_search) as search,
+            patch.object(
+                admin_api.embedding_client,
+                "embed_texts",
+                side_effect=[unavailable, [[0.0] * 384]],
+            ) as embed,
+        ):
+            first = admin_api.search_conversation_history(request)
+            fingerprint = admin_api._conversation_search_fingerprint(
+                ["exact match"], None, None, None, ["user", "assistant"]
+            )
+            decoded = None
+            while first["next_cursor"] is not None:
+                decoded = admin_api._decode_conversation_search_cursor(
+                    first["next_cursor"], fingerprint, True
+                )
+                if decoded[0] == "rank":
+                    break
+                first = admin_api.search_conversation_history(
+                    {**request, "cursor": first["next_cursor"]}
+                )
+            second = admin_api.search_conversation_history(
+                {**request, "cursor": first["next_cursor"]}
+            )
+
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded[0], "rank")
+        self.assertEqual(second["matches"][0]["event_id"], "event_199")
+        self.assertEqual(search.call_args_list[-1].kwargs["exclude_seqs"], ())
+        self.assertEqual(embed.call_count, 1)
+
+    def test_in_progress_hybrid_cursor_does_not_require_inference(self) -> None:
+        fingerprint = admin_api._conversation_search_fingerprint(
+            ["deployment"], None, None, None, ["user", "assistant"]
+        )
+        cursor = admin_api._encode_conversation_search_cursor(
+            fingerprint,
+            True,
+            {"rank": 25, "seq": 1},
+            mode="hybrid",
+            min_seq=1,
+            max_seq=10,
+            embedding_min_seq=1,
+            embedding_generation=20,
+            semantic_seqs=(7,),
+        )
+        semantic = {
+            "seq": 7,
+            "event_id": "event_7",
+            "timestamp": "2026-07-01T00:00:00Z",
+            "thread_id": "thread-1",
+            "source": "user",
+            "search_rank": 0.0,
+            "excerpt": "frozen match",
+            "excerpt_truncated": False,
+        }
+        with (
+            patch.object(admin_api.state, "search_thread_messages", return_value=[]),
+            patch.object(
+                admin_api.embedding_client,
+                "embed_texts",
+                side_effect=admin_api.embedding_client.EmbeddingError("offline"),
+            ) as embed,
+            patch.object(
+                admin_api.state, "thread_messages_by_seqs", return_value=[semantic]
+            ) as frozen_search,
+        ):
+            response = admin_api.search_conversation_history(
+                {"query": "deployment", "cursor": cursor}
+            )
+
+        embed.assert_not_called()
+        self.assertEqual(frozen_search.call_args.args, ((7,),))
+        self.assertEqual(response["search_mode"], "hybrid")
+
+    def test_forged_frozen_ids_cannot_cross_search_filters(self) -> None:
+        request = {
+            "query": "deployment",
+            "thread_id": "thread-1",
+            "roles": ["user"],
+        }
+        fingerprint = admin_api._conversation_search_fingerprint(
+            ["deployment"], None, None, "thread-1", ["user"]
+        )
+        cursor = admin_api._encode_conversation_search_cursor(
+            fingerprint,
+            True,
+            {"rank": 1, "seq": 1},
+            mode="hybrid",
+            min_seq=1,
+            max_seq=10,
+            embedding_min_seq=1,
+            embedding_generation=20,
+            semantic_seqs=(7,),
+        )
+        with (
+            patch.object(admin_api.state, "search_thread_messages", return_value=[]),
+            # A forged id for another thread/role is removed by the database
+            # lookup after the original request filters are reapplied.
+            patch.object(
+                admin_api.state, "thread_messages_by_seqs", return_value=[]
+            ) as frozen_search,
+            self.assertRaises(admin_api.ApiError) as raised,
+        ):
+            admin_api.search_conversation_history({**request, "cursor": cursor})
+
+        self.assertEqual(raised.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(
+            frozen_search.call_args.kwargs["sources"],
+            ("user",),
+        )
+        self.assertEqual(frozen_search.call_args.kwargs["thread_id"], "thread-1")
+
+    def test_frozen_semantic_ids_are_authenticated_by_the_cursor(self) -> None:
+        fingerprint = admin_api._conversation_search_fingerprint(
+            ["deployment"], None, None, None, ["user", "assistant"]
+        )
+        cursor = admin_api._encode_conversation_search_cursor(
+            fingerprint,
+            True,
+            {"rank": 1, "seq": 1},
+            mode="hybrid",
+            min_seq=1,
+            max_seq=10,
+            embedding_min_seq=1,
+            embedding_generation=20,
+            semantic_seqs=(7,),
+        )
+        padded = cursor + "=" * (-len(cursor) % 4)
+        fields = json.loads(base64.urlsafe_b64decode(padded))
+        fields[8] = [8]
+        forged = base64.urlsafe_b64encode(
+            json.dumps(fields, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+
+        with (
+            patch.object(admin_api.state, "search_thread_messages") as lexical,
+            patch.object(admin_api.state, "thread_messages_by_seqs") as frozen,
+            self.assertRaises(admin_api.ApiError) as raised,
+        ):
+            admin_api.search_conversation_history(
+                {"query": "deployment", "cursor": forged}
+            )
+
+        self.assertEqual(raised.exception.status, HTTPStatus.BAD_REQUEST)
+        lexical.assert_not_called()
+        frozen.assert_not_called()
+
+    def test_hybrid_search_ends_when_matches_stop_at_the_candidate_window(self) -> None:
+        # Exactly CONVERSATION_SEMANTIC_CANDIDATES matches means the result set
+        # ends at the window rather than continuing below it, so the last fused
+        # page must not advertise a lexical continuation that returns nothing.
+        lexical = [
+            {
+                "seq": 400 - index,
+                "event_id": f"event_{400 - index}",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "thread_id": "thread-1",
+                "source": "user",
+                "search_rank": 1.0 - index / 1000,
+                "excerpt": f"match {index}",
+                "excerpt_truncated": False,
+            }
+            for index in range(admin_api.CONVERSATION_SEMANTIC_CANDIDATES)
+        ]
+
+        def text_search(*_args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return [] if kwargs["before"] is not None else lexical
+
+        request = {
+            "query": "What exact match was discussed?",
+            "query_variants": ["exact match"],
+            "from": None,
+            "to": None,
+            "thread_id": None,
+            "roles": ["user", "assistant"],
+            "limit": 25,
+        }
+        with (
+            patch.object(admin_api.state, "search_thread_messages", side_effect=text_search),
+            patch.object(admin_api.embedding_client, "embed_texts", return_value=[[0.0] * 384]),
+            patch.object(admin_api.state, "search_thread_messages_semantic", return_value=[]),
+        ):
+            response = admin_api.search_conversation_history(request)
+            pages = 1
+            while response.get("next_cursor"):
+                response = admin_api.search_conversation_history(
+                    {**request, "cursor": response["next_cursor"]}
+                )
+                pages += 1
+                self.assertTrue(response["matches"], "paged into an empty result page")
+                self.assertLessEqual(pages, 16, "pagination did not terminate")
+
+        self.assertEqual(pages, admin_api.CONVERSATION_SEMANTIC_CANDIDATES // 25)
+
+    def test_embedding_passages_use_the_full_utf8_budget(self) -> None:
+        # embed_texts validates UTF-8 bytes, so passages must be clipped by the
+        # same measure. Budgeting against JSON-escaped size would spend roughly
+        # three bytes per non-ASCII byte and drop the tail of a valid message.
+        limit = admin_api.embedding_client.MAX_TEXT_BYTES
+        message = "🙂" * (limit // 2)
+        sent: list[list[str]] = []
+
+        def embed(texts: list[str], **_kwargs: Any) -> list[list[float]]:
+            sent.append(texts)
+            raise admin_api.embedding_client.EmbeddingError("stop the loop")
+
+        with (
+            patch.object(
+                admin_api.state,
+                "unembedded_thread_messages",
+                return_value=[(1, message)],
+            ),
+            patch.object(admin_api.embedding_client, "embed_texts", side_effect=embed),
+            patch.object(admin_api.time, "sleep", side_effect=RuntimeError("halt")),
+            patch.object(admin_api.host_errors, "report_unexpected"),
+        ):
+            with self.assertRaises(RuntimeError):
+                admin_api.embedding_index_loop()
+
+        self.assertTrue(sent, "the indexer never called the embedding client")
+        encoded = sent[0][0].encode()
+        self.assertLessEqual(len(encoded), limit)
+        # Comfortably past the ~1/3 an escaped budget would have allowed.
+        self.assertGreater(len(encoded), limit * 3 // 4)
+
+    def test_embedding_index_batches_bound_head_of_line_wait(self) -> None:
+        pending = [
+            (0, "x" * (15 * 1024)),
+            (1, "x" * (15 * 1024)),
+            (2, "x" * admin_api.embedding_client.MAX_TEXT_BYTES),
+        ]
+
+        bounded = admin_api._bounded_embedding_batch(pending)
+
+        self.assertEqual([seq for seq, _message in bounded], [0, 1])
+        self.assertLessEqual(
+            sum(len(text.encode()) for _seq, text in bounded),
+            admin_api.CONVERSATION_EMBEDDING_BATCH_BYTES,
+        )
+
+    def test_hybrid_lexical_tail_uses_frozen_semantic_exclusion(self) -> None:
+        fingerprint = admin_api._conversation_search_fingerprint(
+            ["deployment"], None, None, None, ["user", "assistant"]
+        )
+        cursor = admin_api._encode_conversation_search_cursor(
+            fingerprint,
+            True,
+            {"rank": 0.5, "seq": 8},
+            mode="lexical",
+            min_seq=1,
+            max_seq=10,
+            embedding_min_seq=1,
+            embedding_generation=20,
+            semantic_seqs=(7,),
+        )
+        with (
+            patch.object(
+                admin_api.embedding_client,
+                "embed_texts",
+                side_effect=admin_api.embedding_client.EmbeddingError("offline"),
+            ),
+            patch.object(admin_api.state, "search_thread_messages", return_value=[]) as search,
+            patch.object(
+                admin_api.state,
+                "thread_messages_by_seqs",
+                return_value=[
+                    {
+                        "seq": 7,
+                        "event_id": "event_7",
+                        "timestamp": "2026-07-01T00:00:00Z",
+                        "thread_id": "thread-1",
+                        "source": "user",
+                        "search_rank": 0.0,
+                        "excerpt": "frozen match",
+                        "excerpt_truncated": False,
+                    }
+                ],
+            ),
+        ):
+            response = admin_api.search_conversation_history(
+                {"query": "deployment", "cursor": cursor}
+            )
+
+        self.assertEqual(response["search_mode"], "lexical")
+        self.assertEqual(search.call_args.kwargs["exclude_seqs"], (7,))
+
+    def test_lexical_tail_does_not_repeat_semantic_hits(self) -> None:
+        # A message can be a semantic candidate and also match lexically below
+        # the fused window. It is returned on a hybrid page; the tail must not
+        # hand it back again at its lexical rank.
+        window = admin_api.CONVERSATION_SEMANTIC_CANDIDATES
+        total = 260
+
+        def row(index: int) -> dict[str, Any]:
+            return {
+                "seq": 1000 - index,
+                "event_id": f"event_{1000 - index}",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "thread_id": "thread-1",
+                "source": "user",
+                "search_rank": 1.0 - index / 10000,
+                "excerpt": f"match {index}",
+                "excerpt_truncated": False,
+            }
+
+        # Rank 241 overall: inside the tail, and also a semantic candidate.
+        semantic = [row(240)]
+
+        def text_search(*_args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            excluded = set(kwargs.get("exclude_seqs") or ())
+            candidates = [row(i) for i in range(total)]
+            if kwargs["before"] is not None:
+                rank, seq = kwargs["before"]
+                candidates = [
+                    r
+                    for r in candidates
+                    if (r["search_rank"], r["seq"]) < (rank, seq)
+                ]
+            candidates = [r for r in candidates if r["seq"] not in excluded]
+            return candidates[: kwargs["limit"]]
+
+        request = {
+            "query": "What exact match was discussed?",
+            "query_variants": ["exact match"],
+            "from": None,
+            "to": None,
+            "thread_id": None,
+            "roles": ["user", "assistant"],
+            "limit": 25,
+        }
+        seen: list[str] = []
+        with (
+            patch.object(admin_api.state, "search_thread_messages", side_effect=text_search),
+            patch.object(admin_api.embedding_client, "embed_texts", return_value=[[0.0] * 384]),
+            patch.object(
+                admin_api.state, "search_thread_messages_semantic", return_value=semantic
+            ),
+            patch.object(
+                admin_api.state, "thread_messages_by_seqs", return_value=semantic
+            ),
+        ):
+            response = admin_api.search_conversation_history(request)
+            seen.extend(m["event_id"] for m in response["matches"])
+            while response.get("next_cursor"):
+                response = admin_api.search_conversation_history(
+                    {**request, "cursor": response["next_cursor"]}
+                )
+                seen.extend(m["event_id"] for m in response["matches"])
+                self.assertLessEqual(len(seen), total + window, "paging did not terminate")
+
+        self.assertIn(f"event_{1000 - 240}", seen)
+        self.assertEqual(len(seen), len(set(seen)), "a conversation hit was returned twice")
 
     def test_conversation_search_reports_the_relevance_work_limit(self) -> None:
         cancelled = pgclient.Error(
@@ -4716,7 +5667,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn(".tab-button svg { display: block; height: 19px; width: 19px; }", ui)
         self.assertIn('`Host: ${health.agent_name}`', ui)
         self.assertNotIn("animation: panel-in", ui)
-        self.assertIn("refreshVisibleTab(name).catch(() => {})", ui)
+        # The tab refresh stays caught so a failing panel cannot surface as an
+        # unhandled rejection, and it now also re-asserts the panel's scroll
+        # position once it resolves — a panel is not finished opening until
+        # then, and the arriving content can move the page.
+        self.assertIn("refreshVisibleTab(name).then(() => {", ui)
+        self.assertIn("}).catch(() => {});", ui)
+        # The re-assert is for a panel the operator has not touched. A slow
+        # refresh leaves the panel readable, so snapping them back would be
+        # worse than the misplaced scroll it corrects, and a newer navigation
+        # within the same tab must not be dragged backwards either.
+        self.assertIn("if (openSequence !== panelOpenSequence) return;", ui)
+        self.assertIn("if (operatorScrolledSincePanelOpen) return;", ui)
+        self.assertIn('for (const event of ["wheel", "touchmove", "keydown"])', ui)
         self.assertIn('"agent-log": {', ui)
         self.assertIn("enter: [() => agentLog.showFirstPage()]", ui)
         self.assertIn('"net-log": {', ui)
@@ -5855,6 +6818,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         "account_id": "acct_claude",
                         "email": "claude@example.com",
                     },
+                    {"agent_runtime": "grok", "provider": "xai", "status": "loading"},
                     {
                         "provider": "bedrock",
                         "agent_runtimes": ["hermes"],
@@ -5933,6 +6897,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         },
                     },
                     {"agent_runtime": "claude_code", "provider": "claude", "status": "awaiting_login"},
+                    {"agent_runtime": "grok", "provider": "xai", "status": "loading"},
                     {
                         "provider": "bedrock",
                         "agent_runtimes": ["hermes"],
@@ -6036,6 +7001,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                             "last_checked_at": "2026-06-29T23:10:00Z",
                         },
                     },
+                    {"agent_runtime": "grok", "provider": "xai", "status": "loading"},
                     {
                         "provider": "bedrock",
                         "agent_runtimes": ["hermes"],
@@ -6043,6 +7009,33 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         "bedrock_usage": EMPTY_BEDROCK_USAGE,
                     },
                 ]
+            },
+        )
+
+    def test_agent_accounts_expose_stored_grok_zdr_status_when_available(self) -> None:
+        set_runtime_statuses(codex="deactivated", claude_code="deactivated", grok="active")
+        state.save_xai_account(
+            {
+                "account_id": "acct-xai",
+                "email": "grok@example.com",
+                "operator_approval": orchestrator.XAI_OPERATOR_APPROVAL,
+                "coding_data_retention_opt_out": True,
+                "zdr_enabled": True,
+            }
+        )
+
+        _, body = self.request("GET", "/v1/agent-runtime/account")
+
+        self.assertEqual(
+            body["accounts"][2],
+            {
+                "agent_runtime": "grok",
+                "provider": "xai",
+                "status": "active",
+                "account_id": "acct-xai",
+                "email": "grok@example.com",
+                "coding_data_retention_opt_out": True,
+                "zdr_enabled": True,
             },
         )
 
@@ -6078,7 +7071,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
 
         refresh.assert_called_once_with("claude_code", force_provider_probe=True)
-        self.assertEqual([account["provider"] for account in body["accounts"]], ["openai", "claude", "bedrock"])
+        self.assertEqual(
+            [account["provider"] for account in body["accounts"]], ["openai", "claude", "xai", "bedrock"]
+        )
 
     def test_agent_runtime_refresh_endpoint_forces_requested_bedrock_runtime(self) -> None:
         save_policy(
@@ -6110,6 +7105,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             [
                 ("codex", {"force_provider_probe": True}),
                 ("claude_code", {"force_provider_probe": True}),
+                ("grok", {"force_provider_probe": True}),
                 ("hermes", {"force_provider_probe": True}),
             ],
         )
@@ -6127,6 +7123,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             [
                 ("codex", {"force_provider_probe": True}),
                 ("claude_code", {"force_provider_probe": True}),
+                ("grok", {"force_provider_probe": True}),
                 ("hermes", {"force_provider_probe": False}),
             ],
         )
@@ -6160,7 +7157,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
     def test_oauth_start_rejects_disabled_provider_before_spawning_helper(self) -> None:
         save_policy({"network_integrations": {}}, "t")
-        set_runtime_statuses(codex="awaiting_login", claude_code="awaiting_login")
+        set_runtime_statuses(codex="awaiting_login", claude_code="awaiting_login", grok="awaiting_login")
 
         with (
             patch(
@@ -6171,15 +7168,23 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "host.runtime.admin_api.service.claude_code.start_oauth_login",
                 side_effect=AssertionError("disabled Claude provider must not spawn login helper"),
             ),
+            patch(
+                "host.runtime.admin_api.service.grok_agent.start_device_login",
+                side_effect=AssertionError("disabled xAI provider must not spawn login helper"),
+            ),
         ):
-            for path in ("/v1/agent-runtime/codex-oauth-login", "/v1/agent-runtime/claude-oauth-login"):
+            for path in (
+                "/v1/agent-runtime/codex-oauth-login",
+                "/v1/agent-runtime/claude-oauth-login",
+                "/v1/agent-runtime/grok-oauth-login",
+            ):
                 with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as error:
                     self.request("POST", path)
                 self.assertEqual(error.exception.code, 409)
 
     def test_current_oauth_rejects_disabled_provider_even_with_stale_oauth_state(self) -> None:
         save_policy({"network_integrations": {}}, "t")
-        set_runtime_statuses(codex="awaiting_login", claude_code="awaiting_login")
+        set_runtime_statuses(codex="awaiting_login", claude_code="awaiting_login", grok="awaiting_login")
         save_oauth_login("codex", {
             "status": "awaiting_login",
             "device_code": "CODE",
@@ -6192,8 +7197,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "login_url": "https://claude.com/cai/oauth/authorize",
             "expires_at": "2099-06-08T00:10:00Z",
         })
+        save_oauth_login("grok", {
+            "status": "awaiting_login",
+            "device_code": "GROK",
+            "login_id": "grok-login-1",
+            "login_url": "https://accounts.x.ai/device",
+            "expires_at": "2099-06-08T00:10:00Z",
+        })
 
-        for path in ("/v1/agent-runtime/codex-oauth-login", "/v1/agent-runtime/claude-oauth-login"):
+        for path in (
+            "/v1/agent-runtime/codex-oauth-login",
+            "/v1/agent-runtime/claude-oauth-login",
+            "/v1/agent-runtime/grok-oauth-login",
+        ):
             with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as error:
                 self.request("GET", path)
             self.assertEqual(error.exception.code, 409)
@@ -6711,6 +7727,147 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(first["status"], "awaiting_code")
         self.assertEqual(start.call_count, 1)
 
+    def test_grok_oauth_start_reuses_existing_device_login(self) -> None:
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:01Z",
+        )
+        set_runtime_statuses(grok="awaiting_login")
+        login = admin_api.grok_agent.GrokLogin(
+            login_id="grok-login-1",
+            login_url="https://accounts.x.ai/device?user_code=GROK-CODE",
+            user_code="GROK-CODE",
+        )
+
+        with (
+            patch(
+                "host.runtime.admin_api.service.grok_agent.start_device_login",
+                return_value=login,
+            ) as start,
+            # The parked server is what makes the stored row worth reusing.
+            patch(
+                "host.runtime.admin_api.service.grok_agent.login_server_parked",
+                return_value=True,
+            ),
+        ):
+            first = admin_api.start_grok_oauth_login()
+            second = admin_api.start_grok_oauth_login()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["device_code"], "GROK-CODE")
+        self.assertNotIn("login_id", first)
+        self.assertEqual(start.call_count, 1)
+        self.assertEqual(state.oauth_login("grok")["login_id"], "grok-login-1")
+
+    def test_grok_oauth_start_retries_after_clearing_an_unanchored_credential(self) -> None:
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:01Z",
+        )
+        set_runtime_statuses(grok="awaiting_login")
+        login = admin_api.grok_agent.GrokLogin(
+            login_id="fresh-login",
+            login_url="https://accounts.x.ai/device?user_code=FRESH-CODE",
+            user_code="FRESH-CODE",
+        )
+
+        with (
+            patch(
+                "host.runtime.admin_api.service.grok_agent.start_device_login",
+                side_effect=[
+                    admin_api.grok_agent.GrokLoginAlreadyAuthenticated(
+                        "already authenticated"
+                    ),
+                    login,
+                ],
+            ) as start,
+            patch(
+                "host.runtime.admin_api.service._clear_local_agent_auth"
+            ) as clear,
+        ):
+            response = admin_api.start_grok_oauth_login()
+
+        self.assertEqual(response["device_code"], "FRESH-CODE")
+        self.assertEqual(start.call_count, 2)
+        clear.assert_called_once_with("grok")
+        self.assertEqual(state.oauth_login("grok")["login_id"], "fresh-login")
+
+    def test_grok_oauth_start_preserves_an_approved_credential(self) -> None:
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:01Z",
+        )
+        set_runtime_statuses(grok="error")
+        state.save_xai_account(
+            {
+                "account_id": "approved-account",
+                "operator_approval": orchestrator.XAI_OPERATOR_APPROVAL,
+            }
+        )
+
+        with (
+            patch(
+                "host.runtime.admin_api.service.grok_agent.start_device_login",
+                side_effect=admin_api.grok_agent.GrokLoginAlreadyAuthenticated(
+                    "already authenticated"
+                ),
+            ),
+            patch(
+                "host.runtime.admin_api.service._clear_local_agent_auth"
+            ) as clear,
+            self.assertRaises(admin_api.ApiError) as error,
+        ):
+            admin_api.start_grok_oauth_login()
+
+        self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("Disconnect", str(error.exception))
+        clear.assert_not_called()
+        self.assertEqual(
+            state.read_xai_account()["account_id"], "approved-account"
+        )
+
+    def test_grok_oauth_start_discards_a_login_whose_server_is_gone(self) -> None:
+        # Only the CLI process holding the long-running authenticate request
+        # advances Grok's device flow, and an admin API restart stops that
+        # scope through BindsTo. The row outlives it, so reusing it would hand
+        # the operator a code nobody is exchanging until it expires.
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:01Z",
+        )
+        set_runtime_statuses(grok="awaiting_login")
+        logins = [
+            admin_api.grok_agent.GrokLogin(
+                login_id=f"grok-login-{index}",
+                login_url=f"https://accounts.x.ai/device?user_code=CODE-{index}",
+                user_code=f"CODE-{index}",
+            )
+            for index in (1, 2)
+        ]
+
+        with (
+            patch(
+                "host.runtime.admin_api.service.grok_agent.start_device_login",
+                side_effect=logins,
+            ) as start,
+            patch(
+                "host.runtime.admin_api.service.grok_agent.login_server_parked",
+                return_value=False,
+            ),
+        ):
+            first = admin_api.start_grok_oauth_login()
+            second = admin_api.start_grok_oauth_login()
+            with self.assertRaises(admin_api.ApiError) as absent:
+                admin_api.current_grok_oauth_login()
+
+        self.assertEqual(first["device_code"], "CODE-1")
+        self.assertEqual(second["device_code"], "CODE-2")
+        self.assertEqual(start.call_count, 2)
+        # And the read path does not offer the dead code either.
+        self.assertEqual(absent.exception.status, HTTPStatus.NOT_FOUND)
+        # The row that survives is the one the second mint stored.
+        self.assertEqual(state.oauth_login("grok")["login_id"], "grok-login-2")
+
     def test_network_events_are_read_from_the_database_with_cursor_paging(self) -> None:
         # Network events live in the database now (the proxy writes them under
         # its own role); the admin API exposes a single newest-first cursor.
@@ -6963,6 +8120,8 @@ class ToolRoutesTests(unittest.TestCase):
         self.assertEqual(gmail["connection_status"], {"connected": False})
         self.assertTrue(any(action["id"] == "send_email" for action in gmail["actions"]))
         self.assertTrue(all("output_schema" in action for action in gmail["actions"]))
+        # The operator can see which result kind each action produces.
+        self.assertTrue(all("returns_asset" in action for action in gmail["actions"]))
         # Data policy is per action.
         self.assertTrue(all(action["data_policy"] for action in gmail["actions"]))
         send = next(action for action in gmail["actions"] if action["id"] == "send_email")

@@ -15,7 +15,7 @@ from host.tools.runway import RunwayTool
 from host.tools.shared import media as shared_media
 from host.tools.shared.web import WebRequestError
 
-from test_tools import FakeHostAPI
+from test_tools import FakeHostAPI, assert_matches_output_schema
 
 
 def api_with_key() -> FakeHostAPI:
@@ -72,6 +72,7 @@ class RunwayToolTests(unittest.TestCase):
                 {"prompt": "a fox runs on a beach", "duration_seconds": "8", "ratio": "720:1280", "seed": "42"},
                 api_with_key(),
             )
+        assert_matches_output_schema(self, runway.MANIFEST, "generate_video", result)
         assert isinstance(result, ActionExecuted)
         self.assertEqual(result.result["task_id"], "task-123")
         self.assertEqual(result.result["task_status"], "PENDING")
@@ -508,6 +509,7 @@ class RunwayToolTests(unittest.TestCase):
 
             with patch.object(runway, "json_request", fake_json_request):
                 result = RunwayTool().execute("get_task", {"task_id": "task-1"}, api_with_key())
+            assert_matches_output_schema(self, runway.MANIFEST, "get_task", result)
             assert isinstance(result, ActionExecuted)
             self.assertEqual(result.result["task_status"], expected_status)
             if expected_url:

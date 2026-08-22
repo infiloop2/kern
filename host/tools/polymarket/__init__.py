@@ -11,6 +11,7 @@ from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL, ParamGuardDenied
 from host.tools.host_api import HostAPI
 from host.tools.shared.inputs import ToolInputValidationError, clip as _clip, int_field, schema as _schema
+from host.tools.shared import outputs
 from host.tools.shared.web import WebRequestError, encode_query, json_request, known_provider_transport_error, unmapped_provider_error
 from host.tools.tool import Tool
 
@@ -34,12 +35,101 @@ POLYMARKET_READ_POLICY = (
 )
 
 
-POLYMARKET_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
+# One market summary, as _market_summary builds it: strings are clipped and
+# empty when Polymarket omits them, and the two money figures are null when the
+# provider reports no number at all.
+MARKET_PROPERTIES: JSONObject = {
+    "id": outputs.text("Numeric Gamma market id; pass to get_market."),
+    "question": outputs.text("The tradable question, up to 300 characters."),
+    "slug": outputs.text("URL slug for the market on polymarket.com."),
+    "outcomes": outputs.text('JSON array of outcome names as a string, e.g. \'["Yes", "No"]\'.'),
+    "outcome_prices": outputs.text("JSON array of current prices as a string, positionally matching outcomes."),
+    "clob_token_ids": outputs.text("JSON array of outcome token ids as a string; pass one to get_order_book or price_history."),
+    "volume_24h": outputs.nullable({"type": "number"}, "Traded volume over the last 24 hours in USD."),
+    "liquidity": outputs.nullable({"type": "number"}, "Resting order-book liquidity in USD."),
+    "end_date": outputs.text("ISO 8601 date the market resolves, empty when Polymarket omits it."),
+    "active": outputs.boolean("The market is currently tradable."),
+    "closed": outputs.boolean("The market has stopped trading."),
+    "description": outputs.text("Full resolution criteria; get_market only, up to 1500 characters."),
 }
+MARKET_SCHEMA: JSONObject = outputs.obj(MARKET_PROPERTIES)
+EVENT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "id": outputs.text("Numeric Gamma event id."),
+        "title": outputs.text("Event title, up to 300 characters."),
+        "slug": outputs.text("URL slug for the event on polymarket.com."),
+        "description": outputs.text("Event description, up to 600 characters."),
+        "volume_24h": outputs.nullable({"type": "number"}, "Traded volume across the event over the last 24 hours in USD."),
+        "liquidity": outputs.nullable({"type": "number"}, "Resting order-book liquidity across the event in USD."),
+        "end_date": outputs.text("ISO 8601 date the event resolves, empty when Polymarket omits it."),
+        "markets": outputs.array_of(MARKET_SCHEMA, "Up to 10 of the event's markets."),
+    }
+)
+BOOK_LEVEL_SCHEMA: JSONObject = outputs.obj(
+    {
+        "price": outputs.text("Price per share between 0 and 1, as a decimal string."),
+        "size": outputs.text("Shares resting at this price, as a decimal string."),
+    }
+)
+
+LIST_MARKETS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many markets Polymarket returned."),
+        "markets": outputs.array_of(MARKET_SCHEMA, "The page of markets, at most the requested limit."),
+    },
+    ["message", "markets"],
+)
+LIST_EVENTS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many events Polymarket returned."),
+        "events": outputs.array_of(EVENT_SCHEMA, "The page of events, at most the requested limit."),
+    },
+    ["message", "events"],
+)
+SEARCH_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many events and markets the search matched."),
+        "query": outputs.text("The searched text, echoed as sent to Polymarket."),
+        "events": outputs.array_of(EVENT_SCHEMA, "Matching active events."),
+        "markets": outputs.array_of(MARKET_SCHEMA, "Markets belonging to the matched events, deduplicated by id."),
+    },
+    ["message", "query", "events", "markets"],
+)
+GET_MARKET_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Whether the market was loaded or not found."),
+        "market": outputs.nullable(MARKET_SCHEMA, "The market, including its description; null when no market matched."),
+    },
+    ["message", "market"],
+)
+ORDER_BOOK_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the book was loaded."),
+        "token_id": outputs.text("The outcome token this book belongs to."),
+        "bids": outputs.array_of(BOOK_LEVEL_SCHEMA, "Up to 10 buy levels as Polymarket ordered them."),
+        "asks": outputs.array_of(BOOK_LEVEL_SCHEMA, "Up to 10 sell levels as Polymarket ordered them."),
+        "midpoint": outputs.text("Midpoint price between best bid and ask, empty when unavailable."),
+    },
+    ["message", "token_id", "bids", "asks", "midpoint"],
+)
+PRICE_HISTORY_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many price points were returned."),
+        "token_id": outputs.text("The outcome token this history belongs to."),
+        "interval": outputs.text("The requested window, echoed back."),
+        "history": outputs.array_of(
+            outputs.obj(
+                {
+                    "t": outputs.integer("Unix timestamp in seconds."),
+                    "p": outputs.number("Price per share between 0 and 1."),
+                },
+                ["t", "p"],
+            ),
+            "Up to the 200 most recent points, oldest first.",
+        ),
+    },
+    ["message", "token_id", "interval", "history"],
+)
 
 
 MANIFEST = ToolManifest(
@@ -59,7 +149,7 @@ MANIFEST = ToolManifest(
                     "include_closed": {"type": "boolean", "description": "Include inactive and resolved markets instead of active/open only (default false)."},
                 }
             ),
-            output_schema=POLYMARKET_OUTPUT_SCHEMA,
+            output_schema=LIST_MARKETS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="list_events",
             description="List umbrella topics that group related tradable markets, defaulting to active events ranked by 24-hour volume. Each event carries aggregate metadata and up to 10 nested market summaries; use list_markets for a flat ranking of individual questions.",
@@ -72,25 +162,25 @@ MANIFEST = ToolManifest(
                     "include_closed": {"type": "boolean", "description": "Include inactive and resolved events instead of active/open only (default false)."},
                 }
             ),
-            output_schema=POLYMARKET_OUTPUT_SCHEMA,
+            output_schema=LIST_EVENTS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="search",
             description="Search Polymarket by public keyword and return both umbrella events and individual tradable markets in separate arrays. Use an event to preserve related questions, or a market's outcome token ids for price/order-book reads.",
             data_policy=POLYMARKET_READ_POLICY,
             input_schema=_schema({"query": {"type": "string", "description": "Public topic or question keywords, up to 200 characters."}, "limit_per_type": {"type": "string", "description": "Maximum events and maximum markets returned separately, 1-50 each (default 10)."}}, ["query"]),
-            output_schema=POLYMARKET_OUTPUT_SCHEMA,
+            output_schema=SEARCH_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_market",
             description="Read one individual tradable market by exactly one Gamma market id or slug. Returns its question, outcomes, current prices, and outcome-specific CLOB token ids used by get_order_book and price_history.",
             data_policy=POLYMARKET_READ_POLICY,
             input_schema=_schema({"market_id": {"type": "string", "description": "Gamma market id; mutually exclusive with slug."}, "slug": {"type": "string", "description": "Market URL slug; mutually exclusive with market_id."}}),
-            output_schema=POLYMARKET_OUTPUT_SCHEMA,
+            output_schema=GET_MARKET_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_order_book",
             description="Read the top 10 bids, top 10 asks, and midpoint for one outcome token within a market. Pass a decimal token id from a market's clob_token_ids, not the market or event id.",
             data_policy=POLYMARKET_READ_POLICY,
             input_schema=_schema({"token_id": {"type": "string", "description": "Decimal CLOB outcome token id from get_market, list_markets, or an event's nested market."}}, ["token_id"]),
-            output_schema=POLYMARKET_OUTPUT_SCHEMA,
+            output_schema=ORDER_BOOK_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="price_history",
             description="Read up to 200 timestamp/price points for one outcome token over a selected interval. Pass a decimal token id from a market's clob_token_ids; this is outcome price history, not aggregate market volume.",
@@ -102,7 +192,7 @@ MANIFEST = ToolManifest(
                 },
                 ["token_id"],
             ),
-            output_schema=POLYMARKET_OUTPUT_SCHEMA,
+            output_schema=PRICE_HISTORY_OUTPUT_SCHEMA,
         ),
     ),
     protections=(
@@ -289,8 +379,7 @@ def _list_markets(tool_input: JSONObject) -> JSONObject:
         for market in _records(response)[: int(params["limit"])]
     ]
     return {
-        "status": "success_executed",
-        "message": f"Polymarket returned {len(markets)} market(s).",
+                "message": f"Polymarket returned {len(markets)} market(s).",
         "markets": markets,
     }
 
@@ -304,8 +393,7 @@ def _list_events(tool_input: JSONObject) -> JSONObject:
         for event in _records(response)[: int(params["limit"])]
     ]
     return {
-        "status": "success_executed",
-        "message": f"Polymarket returned {len(events)} event(s).",
+                "message": f"Polymarket returned {len(events)} event(s).",
         "events": events,
     }
 
@@ -345,8 +433,7 @@ def _search(tool_input: JSONObject, api: HostAPI) -> JSONObject:
                     seen_markets.add(key)
                     markets.append(_market_summary(market_object))
     return {
-        "status": "success_executed",
-        "message": f"Polymarket search returned {len(events)} event(s) and {len(markets)} market(s).",
+                "message": f"Polymarket search returned {len(events)} event(s) and {len(markets)} market(s).",
         "query": query,
         "events": events,
         "markets": markets,
@@ -378,10 +465,10 @@ def _get_market(tool_input: JSONObject, api: HostAPI) -> JSONObject:
         records = _records(response)
         record = records[0] if records else None
     if not record or not record.get("id"):
-        return {"status": "success_executed", "message": "Polymarket market was not found.", "market": None}
+        return {"message": "Polymarket market was not found.", "market": None}
     market = _market_summary(record)
     market["description"] = _clip(record.get("description"), MAX_TEXT_CHARS)
-    return {"status": "success_executed", "message": "Polymarket market loaded.", "market": market}
+    return {"message": "Polymarket market loaded.", "market": market}
 
 
 def _get_order_book(tool_input: JSONObject) -> JSONObject:
@@ -402,8 +489,7 @@ def _get_order_book(tool_input: JSONObject) -> JSONObject:
         return levels
 
     return {
-        "status": "success_executed",
-        "message": "Polymarket order book loaded.",
+                "message": "Polymarket order book loaded.",
         "token_id": token_id,
         "bids": _levels(book.get("bids")),
         "asks": _levels(book.get("asks")),
@@ -442,8 +528,7 @@ def _price_history(tool_input: JSONObject) -> JSONObject:
                 if isinstance(timestamp, int) and isinstance(price, (int, float)) and not isinstance(price, bool):
                     points.append({"t": timestamp, "p": price})
     return {
-        "status": "success_executed",
-        "message": f"Polymarket returned {len(points)} price point(s).",
+                "message": f"Polymarket returned {len(points)} price point(s).",
         "token_id": token_id,
         "interval": interval,
         "history": points,

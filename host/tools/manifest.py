@@ -34,18 +34,32 @@ ACTION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 GUIDE_IMAGE_RE = re.compile(r"^/guide-assets/[a-z0-9][a-z0-9._-]*\.png$")
 
 
-def _validate_closed_input_schema(value: object, *, action: str, path: str = "input_schema") -> None:
-    """Reject every open object schema, including objects nested in arrays or unions."""
-    if isinstance(value, dict):
-        if (value.get("type") == "object" or "properties" in value) and value.get("additionalProperties") is not False:
-            raise ValueError(
-                f"ActionSpec.input_schema object at {path} must set additionalProperties to false for {action}."
-            )
-        for key, child in value.items():
-            _validate_closed_input_schema(child, action=action, path=f"{path}.{key}")
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _validate_closed_input_schema(child, action=action, path=f"{path}[{index}]")
+def _validate_closed_schema(value: object, *, action: str, path: str) -> None:
+    """Reject every open object schema, including objects nested in arrays or unions.
+
+    Input and output are held to the same rule: an open object says nothing
+    about the fields it does not name, so ``additionalProperties: true`` lets a
+    schema claim to describe a shape while describing almost none of it.
+    """
+    if not isinstance(value, dict):
+        return
+    if (value.get("type") == "object" or "properties" in value) and value.get("additionalProperties") is not False:
+        raise ValueError(
+            f"ActionSpec schema object at {path} must set additionalProperties to false for {action}."
+        )
+    # Descend only where a schema can hold another schema. Walking every dict
+    # would read a declared field named "properties" or "items" as a schema of
+    # its own and reject it for a rule it was never subject to.
+    properties = value.get("properties")
+    if isinstance(properties, dict):
+        for name, child in properties.items():
+            _validate_closed_schema(child, action=action, path=f"{path}.properties.{name}")
+    if "items" in value:
+        _validate_closed_schema(value["items"], action=action, path=f"{path}.items")
+    one_of = value.get("oneOf")
+    if isinstance(one_of, list):
+        for index, child in enumerate(one_of):
+            _validate_closed_schema(child, action=action, path=f"{path}.oneOf[{index}]")
 
 
 @dataclass(frozen=True)
@@ -57,11 +71,16 @@ class ActionSpec:
     it queues an approval before changing third-party state. The operator sees
     it next to the action before enabling the tool.
 
-    ``output_schema`` describes the JSON ``ActionExecuted.result`` of a direct
-    action. It does not apply when that action returns an exclusive
-    ``StreamingAsset``. It may be empty (``{}``) for approval-gated actions,
-    which return a user-visible ``ApprovalExecuted`` message rather than a JSON
-    result.
+    Each action produces exactly one kind of result, and the spec says which:
+    an approval-gated action returns a user-visible ``ApprovalExecuted``
+    message, a ``returns_asset`` action returns an exclusive
+    ``StreamingAsset``, and every other action returns a JSON
+    ``ActionExecuted.result``.
+
+    ``output_schema`` describes that JSON result: every field the agent can
+    read back, named and typed, with every object closed. It is required for a
+    plain direct action and empty (``{}``) for the two kinds that return no
+    JSON result at all.
     """
 
     id: str
@@ -70,6 +89,9 @@ class ActionSpec:
     input_schema: JSONObject
     output_schema: JSONObject = field(default_factory=dict)
     approval: ApprovalKind = "direct"
+    # The whole result is one binary file relayed to the agent workspace, so
+    # there is no JSON result to describe.
+    returns_asset: bool = False
 
 
 @dataclass(frozen=True)
@@ -196,7 +218,26 @@ class ToolManifest:
                 raise ValueError(f"ActionSpec.approval must be direct or operator for {self.tool_id}:{spec.id}.")
             if spec.input_schema.get("type") != "object":
                 raise ValueError(f"ActionSpec.input_schema must be an object schema for {self.tool_id}:{spec.id}.")
-            _validate_closed_input_schema(spec.input_schema, action=f"{self.tool_id}:{spec.id}")
+            _validate_closed_schema(spec.input_schema, action=f"{self.tool_id}:{spec.id}", path="input_schema")
+            if spec.approval == "operator" and spec.returns_asset:
+                raise ValueError(
+                    f"ActionSpec.returns_asset cannot be set on approval-gated action {self.tool_id}:{spec.id}."
+                )
+            # A JSON result is what the agent reads back, so it must be
+            # described. The other two result kinds carry no JSON at all, and a
+            # schema for them would describe something that never exists.
+            if spec.approval == "operator" or spec.returns_asset:
+                if spec.output_schema:
+                    kind = "approval-gated" if spec.approval == "operator" else "asset-returning"
+                    raise ValueError(
+                        f"ActionSpec.output_schema must be empty for {kind} action {self.tool_id}:{spec.id}."
+                    )
+            else:
+                if spec.output_schema.get("type") != "object":
+                    raise ValueError(
+                        f"ActionSpec.output_schema must be an object schema for direct action {self.tool_id}:{spec.id}."
+                    )
+                _validate_closed_schema(spec.output_schema, action=f"{self.tool_id}:{spec.id}", path="output_schema")
             seen_actions.add(spec.id)
         for index, protection in enumerate(self.protections):
             if not protection.strip():

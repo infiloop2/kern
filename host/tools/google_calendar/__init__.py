@@ -34,6 +34,7 @@ from host.tools.shared.google import (
     google_json_request,
     google_oauth_setup_steps,
 )
+from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, schema as _schema, string_value as _string_value
 from host.tools.shared.web import UnmappedProviderError
 
@@ -68,12 +69,27 @@ CALENDAR_CHANGE_TOOL_FIELDS = frozenset(
 CALENDAR_EVENT_ID_RE = re.compile(r"^[a-v0-9]{5,1024}(_[0-9]{8}T[0-9]{6}Z)?$")
 
 
-CALENDAR_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
-}
+READ_EVENTS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that events were loaded."),
+        "events": outputs.array_of(
+            outputs.obj(
+                {
+                    "id": outputs.text("Calendar event id; pass to event_change to update or delete it."),
+                    "summary": outputs.text("Event title, empty when the event has none."),
+                    "description": outputs.text("Event description, empty when the event has none."),
+                    "location": outputs.text("Event location, empty when the event has none."),
+                    "start_time": outputs.text("RFC 3339 start, or a bare date for an all-day event."),
+                    "end_time": outputs.text("RFC 3339 end, or a bare date for an all-day event."),
+                    "html_link": outputs.text("Google Calendar link to the event."),
+                },
+                ["id", "summary", "description", "location", "start_time", "end_time", "html_link"],
+            ),
+            f"Up to {CALENDAR_READ_MAX_EVENTS} events from the primary calendar, earliest first, with recurring series expanded.",
+        ),
+    },
+    ["message", "events"],
+)
 
 
 MANIFEST = ToolManifest(
@@ -125,7 +141,7 @@ MANIFEST = ToolManifest(
                 "go to Google. Runs directly with no approval."
             ),
             input_schema=_schema({"start_time": {"type": "string", "description": "Optional inclusive ISO 8601 window start; defaults to now."}, "end_time": {"type": "string", "description": "Optional exclusive ISO 8601 window end; defaults to seven days after now."}}),
-            output_schema=CALENDAR_OUTPUT_SCHEMA,
+            output_schema=READ_EVENTS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="event_change",
             description="Queue approval to create, update, or delete an event.",
@@ -146,7 +162,6 @@ MANIFEST = ToolManifest(
                 },
                 ["operation"],
             ),
-            output_schema=CALENDAR_OUTPUT_SCHEMA,
             approval="operator",
         ),
     ),
@@ -523,7 +538,7 @@ class GoogleCalendarTool:
             if action == "read_events":
                 read_input = _calendar_read_input(tool_input)
                 events = _calendar_events(CALENDAR_CREDENTIALS.access_token(api), read_input)
-                result: JSONObject = {"status": "success_executed", "message": "Calendar events loaded.", "events": cast(list[JSONValue], events)}
+                result: JSONObject = {"message": "Calendar events loaded.", "events": cast(list[JSONValue], events)}
                 return ActionExecuted(result)
             if action == "event_change":
                 proposal = _calendar_change_proposal(tool_input)

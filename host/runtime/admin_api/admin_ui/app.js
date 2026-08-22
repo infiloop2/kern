@@ -24,7 +24,7 @@ import { agentLog, hostDiagnosticLog, netLog, toolLog, toggleHostDiagnosticFilte
 import {
   addDomainRule, addGithubRepo, approveGithubPush, deleteGithubCredential,
   loadPolicy, recheckGithubAudit, rejectGithubPush, removeDomainRule,
-  removeGithubRepo, resetLinkedAccount, connectBedrockCredentials, setClaudeWebSearch, setGithubCredential, setGithubRequireApproval,
+  removeGithubRepo, resetLinkedAccount, connectBedrockCredentials, setProviderWebSearch, setGithubCredential, setGithubRequireApproval,
   setIntegrationEnabled, refreshPendingGithubPushes, toggleGithubCredentialMode,
   selectIntegrationDetail, toggleGithubRepoAudit,
 } from "./network.js";
@@ -40,6 +40,13 @@ import {
   finishPasskeyLogin, refreshLoginPasskeyStatus, refreshPasskeySetup,
   setupPasskey, showPasskeyGuidance,
 } from "./passkeys.js";
+
+// Panel navigation is pushState within one document, and every panel decides
+// its own scroll position (see resetPageScroll). Leaving restoration on "auto"
+// lets the browser also restore a remembered offset for the entry it is
+// creating, asynchronously and after the panel has already reset — which opens
+// a freshly navigated panel part-way down. Own the decision instead.
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
 
 if ("serviceWorker" in navigator && window.isSecureContext) {
   window.addEventListener("load", () => {
@@ -113,6 +120,18 @@ function dismissIPhoneInstall() {
 
 let activeTab = "home";
 let activeTabRefresh = Promise.resolve();
+// Each panel opening gets a number, so a later one within the same tab -- a
+// Home detail replacing another -- is distinguishable from the one whose
+// refresh is resolving. Comparing tab names alone cannot see that.
+let panelOpenSequence = 0;
+// Whether the operator has asked to scroll since the current panel opened.
+// Tracked from input intent rather than from scroll position, because the
+// position moving is exactly what the reset below exists to correct: a layout
+// shift produces a scroll event but none of these.
+let operatorScrolledSincePanelOpen = false;
+for (const event of ["wheel", "touchmove", "keydown"]) {
+  window.addEventListener(event, () => { operatorScrolledSincePanelOpen = true; }, { passive: true });
+}
 const staticTabs = ["home", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics"];
 const homeDetailTabs = new Set(staticTabs.filter(name => name !== "home"));
 const MOBILE_NAV_QUERY = "(max-width: 860px)";
@@ -480,7 +499,16 @@ function syncIPhoneStandaloneViewport() {
 }
 
 function resetPageScroll() {
+  // `html` sets scroll-behavior: smooth, and an animation already in flight
+  // keeps running across a later "instant" scroll — so a reset issued while
+  // the page is still gliding gets overwritten a frame or two afterwards and
+  // the panel opens part-way down. Dropping the property for the duration of
+  // the jump cancels the running animation instead of racing it.
+  const root = document.documentElement;
+  const previous = root.style.scrollBehavior;
+  root.style.scrollBehavior = "auto";
   window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+  root.style.scrollBehavior = previous;
 }
 
 let workspaceViewportRecovery = 0;
@@ -629,8 +657,29 @@ function showTab(name, workspaceActionSequence = null) {
   $("panel-workspace-global").hidden = name !== "workspace-global";
   renderWorkspaceNavigation();
   setMobileNavOpen(false, closeDrawer);
-  if (viewportPanelOpen || name === "home" || homeDetailTabs.has(name)) resetPageScroll();
-  activeTabRefresh = refreshVisibleTab(name).catch(() => {});
+  const opensAtTop = viewportPanelOpen || name === "home" || homeDetailTabs.has(name);
+  const openSequence = ++panelOpenSequence;
+  if (opensAtTop) {
+    operatorScrolledSincePanelOpen = false;
+    resetPageScroll();
+  }
+  // A panel has not finished opening when showTab returns -- its refresh is
+  // still in flight, and the content that lands can move the page out from
+  // under the reset above. Which mechanism moves it varies by engine, so
+  // rather than chase each one, re-assert the position at the point the panel
+  // is actually open.
+  //
+  // Only for the panel that is still open and untouched, though. A slow
+  // refresh leaves the panel visible and interactive -- the network tab runs
+  // four enter refreshers in sequence -- so an operator can be reading part
+  // way down by the time this resolves, and snapping them back would be worse
+  // than the misplaced scroll it fixes.
+  activeTabRefresh = refreshVisibleTab(name).then(() => {
+    if (!opensAtTop) return;
+    if (openSequence !== panelOpenSequence) return;
+    if (operatorScrolledSincePanelOpen) return;
+    resetPageScroll();
+  }).catch(() => {});
   return true;
 }
 
@@ -1359,8 +1408,8 @@ document.addEventListener("click", event => {
     "remove-github-repo": () => removeGithubRepo(button.dataset.owner, button.dataset.repo),
     "enable-github-require-approval": () => setGithubRequireApproval(true),
     "disable-github-require-approval": () => setGithubRequireApproval(false),
-    "enable-claude-web-search": () => setClaudeWebSearch(true),
-    "disable-claude-web-search": () => setClaudeWebSearch(false),
+    "enable-web-search": () => setProviderWebSearch(button.dataset.provider, true),
+    "disable-web-search": () => setProviderWebSearch(button.dataset.provider, false),
     "connect-bedrock-credentials": () => connectBedrockCredentials(button.dataset.integration),
     "add-domain-rule": () => addDomainRule(),
     "remove-domain-rule": () => removeDomainRule(button.dataset.domain),

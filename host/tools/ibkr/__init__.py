@@ -29,6 +29,7 @@ from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult, ApprovalResult
 from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, schema as _schema
 from host.tools.shared.rsa_pkcs1 import (
     RSAKeyError,
@@ -54,17 +55,21 @@ MAX_TRADE_DAYS = 7  # the /iserver/account/trades window IBKR serves
 ACCOUNT_ID_RE = re.compile(r"^[A-Za-z0-9]{1,20}$")
 CONSUMER_KEY_RE = re.compile(r"^[A-Z]{9}$")
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
-SUMMARY_KEYS = (
-    "netliquidation",
-    "totalcashvalue",
-    "settledcash",
-    "availablefunds",
-    "buyingpower",
-    "excessliquidity",
-    "grosspositionvalue",
-    "initmarginreq",
-    "maintmarginreq",
+# The figures IBKR's summary endpoint reports, each with what it means. One
+# list feeds both the read and its declared output schema, so the two cannot
+# drift apart.
+SUMMARY_FIGURES: tuple[tuple[str, str], ...] = (
+    ("netliquidation", "Total account value if every position were liquidated now."),
+    ("totalcashvalue", "Total cash balance."),
+    ("settledcash", "Cash that has settled and is withdrawable."),
+    ("availablefunds", "Funds available for new positions."),
+    ("buyingpower", "Buying power, including margin."),
+    ("excessliquidity", "Cushion above maintenance margin."),
+    ("grosspositionvalue", "Gross market value of all positions."),
+    ("initmarginreq", "Initial margin requirement."),
+    ("maintmarginreq", "Maintenance margin requirement."),
 )
+SUMMARY_KEYS = tuple(key for key, _ in SUMMARY_FIGURES)
 IBKR_READ_POLICY = (
     "Read-only. Sends only OAuth-signed requests for the operator's own account "
     "to Interactive Brokers' Web API and returns live portfolio data (accounts, "
@@ -78,12 +83,110 @@ IBKR_UNAUTHORIZED_MESSAGE = (
 )
 
 
-IBKR_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
+def _provider_value(description: str) -> JSONObject:
+    """One field copied straight from IBKR.
+
+    IBKR sends numbers for money, size, and price fields and strings elsewhere,
+    and _picked substitutes an empty string for anything it did not send.
+    """
+    return {"oneOf": [{"type": "string"}, {"type": "number"}], "description": description}
+
+
+GET_ACCOUNTS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many accounts this login can reach."),
+        "accounts": outputs.array_of(
+            outputs.obj(
+                {
+                    "account_id": outputs.text("IBKR account id such as U1234567; pass to the other actions."),
+                    "alias": _provider_value("Account alias you set in Client Portal."),
+                    "title": _provider_value("Account title IBKR holds on file."),
+                    "display_name": _provider_value("Name IBKR displays for the account."),
+                    "currency": _provider_value("Base currency of the account."),
+                    "type": _provider_value("Account type, e.g. INDIVIDUAL."),
+                },
+                ["account_id", "alias", "title", "display_name", "currency", "type"],
+            ),
+            f"Up to {MAX_ACCOUNTS} accounts, deduplicated, with malformed ids dropped.",
+        ),
+    },
+    ["message", "accounts"],
+)
+GET_POSITIONS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many open positions were returned, for which account."),
+        "account_id": outputs.text("The account these positions belong to."),
+        "positions": outputs.array_of(
+            outputs.obj(
+                {
+                    "symbol": _provider_value("Ticker symbol."),
+                    "description": _provider_value("Contract description IBKR renders."),
+                    "asset_category": _provider_value("Asset class, e.g. STK or OPT."),
+                    "currency": _provider_value("Currency the position is denominated in."),
+                    "quantity": _provider_value("Signed position size; negative when short."),
+                    "mark_price": _provider_value("Current mark price per unit."),
+                    "position_value": _provider_value("Market value of the position."),
+                    "avg_cost": _provider_value("Average cost per unit."),
+                    "unrealized_pnl": _provider_value("Unrealized profit or loss."),
+                    "realized_pnl": _provider_value("Realized profit or loss."),
+                },
+                ["symbol", "description", "asset_category", "currency", "quantity", "mark_price", "position_value", "avg_cost", "unrealized_pnl", "realized_pnl"],
+            ),
+            f"Up to {MAX_POSITIONS} open positions as of this live snapshot.",
+        ),
+    },
+    ["message", "account_id", "positions"],
+)
+SUMMARY_PROPERTIES: JSONObject = {
+    key: outputs.obj(
+        {
+            "amount": outputs.nullable({"type": "number"}, "The figure IBKR reports, null when it sends no number."),
+            "currency": outputs.text("Currency of the amount, empty when IBKR omits it."),
+        },
+        ["amount", "currency"],
+        description=description,
+    )
+    for key, description in SUMMARY_FIGURES
 }
+GET_ACCOUNT_SUMMARY_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the summary was loaded, for which account."),
+        "account_id": outputs.text("The account this summary belongs to."),
+        "summary": outputs.obj(
+            SUMMARY_PROPERTIES,
+            description="One entry per figure IBKR returned; a figure IBKR omits has no entry.",
+        ),
+    },
+    ["message", "account_id", "summary"],
+)
+
+GET_TRADES_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("How many trades were returned, over how many days, for which account."),
+        "account_id": outputs.text("The account these executions belong to."),
+        "trades": outputs.array_of(
+            outputs.obj(
+                {
+                    "execution_id": _provider_value("IBKR's id for this execution."),
+                    "trade_time": _provider_value("Execution time as IBKR formats it."),
+                    "symbol": _provider_value("Ticker symbol."),
+                    "description": _provider_value("Order description IBKR renders."),
+                    "sec_type": _provider_value("Security type, e.g. STK or OPT."),
+                    "side": _provider_value("B for buy or S for sell."),
+                    "size": _provider_value("Executed quantity."),
+                    "price": _provider_value("Execution price per unit."),
+                    "commission": _provider_value("Commission charged."),
+                    "net_amount": _provider_value("Net cash effect of the execution."),
+                    "exchange": _provider_value("Venue the order executed on."),
+                    "currency": _provider_value("Currency of the execution."),
+                },
+                ["execution_id", "trade_time", "symbol", "description", "sec_type", "side", "size", "price", "commission", "net_amount", "exchange", "currency"],
+            ),
+            f"Up to {MAX_TRADES} completed executions belonging to this account.",
+        ),
+    },
+    ["message", "account_id", "trades"],
+)
 
 _ACCOUNT_INPUT: JSONObject = {
     "account_id": {
@@ -103,19 +206,19 @@ MANIFEST = ToolManifest(
             description="List the IBKR accounts available to the connected username, with each account's id, title, alias, currency, and type. Call this first; the other actions require one of these account ids.",
             data_policy=IBKR_READ_POLICY,
             input_schema=_schema({}),
-            output_schema=IBKR_OUTPUT_SCHEMA,
+            output_schema=GET_ACCOUNTS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_positions",
             description="Read up to 100 current open positions for one IBKR account, including quantity, mark/value, cost, and unrealized/realized PnL. This is a live portfolio snapshot, not executions or an order book.",
             data_policy=IBKR_READ_POLICY,
             input_schema=_schema(dict(_ACCOUNT_INPUT)),
-            output_schema=IBKR_OUTPUT_SCHEMA,
+            output_schema=GET_POSITIONS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_account_summary",
             description="Read one IBKR account's live financial summary: net liquidation, cash, available funds, buying power, excess liquidity, position value, and initial/maintenance margin with currencies. This does not list positions or trades.",
             data_policy=IBKR_READ_POLICY,
             input_schema=_schema(dict(_ACCOUNT_INPUT)),
-            output_schema=IBKR_OUTPUT_SCHEMA,
+            output_schema=GET_ACCOUNT_SUMMARY_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_trades",
             description="Read up to 100 completed executions for one IBKR account from the last 1-7 days, including side, size, price, commission, exchange, and time. This is trade history, not open positions or pending orders.",
@@ -126,7 +229,7 @@ MANIFEST = ToolManifest(
                     "days": {"type": "string", "description": "How many days back, 1-7 (default 7)."},
                 }
             ),
-            output_schema=IBKR_OUTPUT_SCHEMA,
+            output_schema=GET_TRADES_OUTPUT_SCHEMA,
         ),
     ),
     config=(
@@ -460,8 +563,7 @@ def _resolve_account(material: _OAuthMaterial, live_session_token: str, requeste
 def _accounts_result(material: _OAuthMaterial, live_session_token: str) -> JSONObject:
     accounts = _portfolio_accounts(material, live_session_token)
     return {
-        "status": "success_executed",
-        "message": f"IBKR returned {len(accounts)} account(s) for this login.",
+                "message": f"IBKR returned {len(accounts)} account(s) for this login.",
         "accounts": cast(list[JSONValue], accounts),
     }
 
@@ -514,8 +616,7 @@ def _positions_result(material: _OAuthMaterial, live_session_token: str, account
         if isinstance(entry, dict)
     ]
     return {
-        "status": "success_executed",
-        "message": f"IBKR returned {len(positions)} open position(s) for account {account_id} (live).",
+                "message": f"IBKR returned {len(positions)} open position(s) for account {account_id} (live).",
         "account_id": account_id,
         "positions": positions,
     }
@@ -536,8 +637,7 @@ def _summary_result(material: _OAuthMaterial, live_session_token: str, account_i
                 "currency": currency if isinstance(currency, str) else "",
             }
     return {
-        "status": "success_executed",
-        "message": f"IBKR account summary loaded for account {account_id} (live).",
+                "message": f"IBKR account summary loaded for account {account_id} (live).",
         "account_id": account_id,
         "summary": summary,
     }
@@ -631,8 +731,7 @@ def _trades_result(
         for entry in matching_trades[:MAX_TRADES]
     ]
     return {
-        "status": "success_executed",
-        "message": f"IBKR returned {len(trades)} trade(s) from the last {days} day(s) for account {account_id}.",
+                "message": f"IBKR returned {len(trades)} trade(s) from the last {days} day(s) for account {account_id}.",
         "account_id": account_id,
         "trades": trades,
     }

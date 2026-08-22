@@ -97,7 +97,9 @@ does not select or authorize an App.
 
 The two typed history tools search user/assistant messages across retained
 Chat threads and read bounded chronological pages with optional normalized
-activity. An agent selects an existing Web App explicitly through routes under
+activity. Natural-language search fuses the full-text index with vectors from
+the local socket-activated encoder; timestamp-only search does not invoke it.
+An agent selects an existing Web App explicitly through routes under
 `/agent/apps/{app_id}/...`. Any agent thread may read any existing app and
 write any active app. Archived apps remain readable but reject every agent
 mutation. Chat has no agent-callable product API.
@@ -116,13 +118,13 @@ general loopback egress. One process serves the browser TCP endpoint, the
 agent Unix socket, generated Web Apps, and the global schedule runner. All
 tables live in the admin database's `public` schema: Chat uses `chat_threads`;
 Web Apps uses `web_apps` and `web_app_revisions`; global resources use
-`memory_pages`, `memory_page_revisions`, `schedules`, `schedule_revisions`, and
-`schedule_runs`.
+`memory_pages`, `memory_page_revisions`, `memory_page_embeddings`,
+`memory_page_links`, `schedules`, `schedule_revisions`, and `schedule_runs`.
 
 All schema changes live in the single immutable `host/migrations` stream and
 its `schema_migrations` ledger. `kern-admin` owns every table and performs DDL.
-Migrations grant `kern-workspace` DML only on those eight tables and their
-five sequences; it cannot read any other admin, credential, network, or tool
+Migrations grant `kern-workspace` DML only on those tables and their bounded
+sequences; it cannot read any other admin, credential, network, or tool
 state and has no DDL rights.
 
 Migration `0027_global_memory_schedules.sql` imports current live per-App

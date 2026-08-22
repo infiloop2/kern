@@ -114,6 +114,37 @@ class XToolReadTests(unittest.TestCase):
             with self.subTest(tool_input=tool_input):
                 self.assertIsInstance(tool.execute("search_tweets", tool_input, connected_api()), ActionFailed)
 
+    def test_search_passes_time_bounds_through_to_recent_search(self) -> None:
+        seen: dict[str, str] = {}
+
+        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            seen["url"] = url
+            return {"data": []}
+
+        with patch.object(twitter, "json_request", fake_json_request):
+            result = XTool().execute(
+                "search_tweets", {"query": "kern", "start_time": "2026-08-20T12:00:00Z"}, connected_api()
+            )
+        assert isinstance(result, ActionExecuted)
+        self.assertIn("start_time=2026-08-20T12%3A00%3A00Z", seen["url"])
+
+        with patch.object(twitter, "json_request", fake_json_request):
+            result = XTool().execute("search_tweets", {"query": "kern", "since_id": "9001"}, connected_api())
+        assert isinstance(result, ActionExecuted)
+        self.assertIn("since_id=9001", seen["url"])
+
+    def test_search_rejects_bad_or_conflicting_time_bounds(self) -> None:
+        tool = XTool()
+        for tool_input in (
+            {"query": "x", "start_time": "yesterday"},
+            {"query": "x", "start_time": "2026-08-20 12:00:00"},
+            {"query": "x", "start_time": "2026-08-20T12:00:00+00:00"},
+            {"query": "x", "since_id": "not-a-post-id"},
+            {"query": "x", "start_time": "2026-08-20T12:00:00Z", "since_id": "9001"},
+        ):
+            with self.subTest(tool_input=tool_input):
+                self.assertIsInstance(tool.execute("search_tweets", tool_input, connected_api()), ActionFailed)
+
     def test_read_results_are_capped_even_if_provider_returns_extra_items(self) -> None:
         provider_tweets = [{"id": str(index), "text": "post"} for index in range(30)]
         with patch.object(twitter, "json_request", return_value={"data": provider_tweets}):

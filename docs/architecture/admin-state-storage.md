@@ -34,11 +34,13 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `operator_connections` | Operator access endpoints, one row per mode (duplicates impossible by key); per-mode field requirements are row constraints, and the Cloudflare tunnel token is encrypted. |
 | `admin_passkey_config`, `admin_passkeys` | The single administrator's stable WebAuthn user handle plus enrolled credential ids, RP domains, ES256 public keys, counters, transport/backup metadata, and timestamps. No private passkey material is stored. Upgrade/recover preserve these rows; only explicit root `reconfigure --reset-admin-passkeys` removes them. |
 | `agent_events` | Agent runtime and turn events with a direct `thread_id` column (`NULL` for runtime events, indexed with `seq` for per-thread paging) and typed payload columns (message/source, error, runtime, provider-neutral activity JSON); pruned to the newest 10,000,000. The event log is the single durable record of a thread's turn history — turns themselves are orchestrator memory, and the former `tasks`/`task_steers` tables were dropped by migration `0005_thread_only_turns.sql`, which also renamed `task.*` event types to `turn.*` and replaced the events' `task_id` with `thread_id`. A synchronous steer is appended only after provider acknowledgement; there is no steer mailbox or delivery-marker table. |
+| `conversation_message_embeddings` | Rebuildable local pgvector encodings for the newest 250,000 user/agent message rows; activity and lifecycle events do not consume this quota. Source-event deletion cascades to vectors, and pruning is amortized across embedding batches. Relevance cursors freeze their initial semantic candidate ids so later pages do not rerun HNSW against a changing graph. |
 | `thread_sessions` | One canonical row per user `thread_id`: current runtime, provider session/thread id, model, effort, recency, and durable idle/running state. An idle configuration change atomically replaces runtime/model/effort and clears the provider session before admitting the next run; the retained `agent_events` remain the thread's handoff source. Rows referenced by retained events stay; unreferenced rows beyond the 100,000 most recently used per runtime are pruned. |
 | `chat_threads` | Chat's immutable `thread-N` ids, editable display names, and archive state. Messages and provider state remain in the host thread tables above. |
 | `web_apps` | Web Apps' immutable `app-N` ids, editable names, archive state, generated UI bundle, durable JSON data, and one optimistic revision counter. |
 | `web_app_revisions` | Sparse, bounded full-state UI/data revisions for generated Web Apps. Every retained row is restorable as a new forward revision. |
-| `memory_pages`, `memory_page_revisions` | Host-global bounded memory pages plus their latest 100 immutable revisions. Pages soft-delete for 90 days and expose local full-text search; swarm pages also expose derived links/backlinks, while individual pages are excluded from the link graph. |
+| `memory_pages`, `memory_page_revisions`, `memory_page_links` | Host-global bounded memory pages plus their latest 100 immutable revisions and a replace-on-write index of current swarm-page links. Pages soft-delete for 90 days; individual pages are excluded from the link graph. |
+| `memory_page_embeddings` | One rebuildable local pgvector encoding per current memory page and model. The stored revision must match the current page revision before semantic search can use it; updates temporarily fall back to lexical search until asynchronous replacement. Soft deletion removes the vector. |
 | `schedules`, `schedule_revisions`, `schedule_runs` | Host-global schedule definitions, their latest 100 revisions, and bounded run metadata. Each run snapshots its submitted message plus runtime/model/effort and references a fresh `schedule-ID-run-ID` host thread; agent responses and activity remain in `agent_events`. |
 | `oauth_logins` | In-flight OAuth logins, fully typed per flow (device code + login handle for Codex, browser code for Claude). Hermes has no row here: its Bedrock credential connect is a single API call with nothing in flight. |
 | `provider_accounts` | Admin-side provider account records: `account_id` typed, remaining provider-owned metadata as a cached document. An anchored row (`account_id` plus its provider's approval marker in metadata) is trigger-guarded: `provider_accounts_anchor_guard` refuses writes that change or delete the approved identity. The singleton `bedrock` provider row carries only cached AWS display metadata, not an anchor. |
@@ -135,8 +137,9 @@ non-owner roles with table or schema grants:
   credentials, or reach tool state.
 - The `kern-workspace` role has DML only on `chat_threads`, `web_apps`,
   `web_app_revisions`, `memory_pages`, `memory_page_revisions`, `schedules`,
-  `schedule_revisions`, and `schedule_runs`, plus the four sequences those
-  tables use. It has no access to unrelated admin,
+  `schedule_revisions`, `schedule_runs`, `memory_page_embeddings`, and
+  `memory_page_links`, plus the bounded sequences those tables use. It has no
+  access to unrelated admin,
   credential, network, or tool tables and no DDL rights.
 - The `postgres` superuser is reachable only by the `postgres` OS user, i.e.
   by operators through sudo: `sudo -u postgres psql kern_admin`.

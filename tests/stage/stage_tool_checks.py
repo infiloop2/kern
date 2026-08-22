@@ -248,11 +248,7 @@ class StageToolChecks:
             raise AssertionError(f"{name} returned non-JSON result text: {text!r}") from exc
         if not isinstance(parsed, dict):
             raise AssertionError(f"{name} returned a non-object result: {type(parsed).__name__}")
-        print(
-            f"    [mcp result] {name} status={parsed.get('status')!r} "
-            f"payload_shape={_result_shape(parsed)}",
-            flush=True,
-        )
+        print(f"    [mcp result] {name} payload_shape={_result_shape(parsed)}", flush=True)
         return parsed
 
     def check_agent_mcp_catalog(self, runtime: str) -> None:
@@ -292,6 +288,46 @@ class StageToolChecks:
                 f"agent MCP catalog mismatch: missing={missing}, extra={extra}, actual={actual}"
             )
         self._ok(f"agent returned all {len(expected)} bundled tool ids through MCP")
+
+    def check_agent_workspace_mcp(self, runtime: str) -> None:
+        """Prove the runtime can call the peer-authenticated Workspace MCP path."""
+        self._step(f"{RUNTIME_LABELS[runtime]} agent Workspace MCP identity")
+        prompt = (
+            "Call the MCP tool workspace_api exactly once with method GET and path "
+            "/agent/identity. From its result, reply with exactly one JSON object shaped "
+            '{"thread_id":"returned thread id"}. Use body.thread_id from the tool result. '
+            "Do not include Markdown or commentary."
+        )
+        thread_name = f"mcp-workspace-{self.thread_id_component(runtime)}-{int(time.time())}"
+        turn_baseline = self._latest_thread_event_seq(thread_name)
+        started = self.send_message(
+            thread_name,
+            prompt,
+            runtime=runtime,
+            model=CHEAP_MODELS[runtime],
+            effort=CHEAP_EFFORT,
+        )
+        if started.get("status") != "accepted":
+            raise AssertionError(f"agent Workspace MCP turn did not start: {started}")
+        done = self._wait_for_turn(thread_name, since=turn_baseline, timeout=240)
+        if done.get("status") != "completed":
+            raise AssertionError(
+                f"agent Workspace MCP turn failed: {self._thread_failure_detail(thread_name)}"
+            )
+        output = done.get("output_message") or ""
+        start, end = output.find("{"), output.rfind("}")
+        if start < 0 or end < start:
+            raise AssertionError(f"agent Workspace MCP output was not JSON: {output!r}")
+        try:
+            parsed = json.loads(output[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise AssertionError(f"agent Workspace MCP output was invalid JSON: {output!r}") from exc
+        expected = {"thread_id": self.api_thread_id(thread_name)}
+        if parsed != expected:
+            raise AssertionError(
+                f"agent Workspace MCP returned the wrong thread identity: {parsed!r}"
+            )
+        self._ok("agent called workspace_api and received its cgroup-derived thread identity")
 
     def check_tool_live(self, tool_id: str) -> None:
         """Exercise one tool deeply through the real agent-side MCP shim."""
@@ -879,13 +915,10 @@ class StageToolChecks:
         return f"generated and saved one image ({parsed['size_bytes']} bytes) into the agent workspace"
 
     def _successful_tool_call(self, name: str, arguments: dict) -> dict:
-        result = self._shim_tool_result(name, arguments)
-        if result.get("status") != "success_executed" and name != "check_tool_approval":
-            raise AssertionError(
-                f"{name} returned invalid status {result.get('status')!r}; "
-                f"keys={sorted(result)}"
-            )
-        return result
+        # _shim_tool_result already fails closed on an MCP error, non-JSON text,
+        # or a non-object result, which is the whole success contract: a result
+        # object exists only for a call that succeeded.
+        return self._shim_tool_result(name, arguments)
 
     # A live provider having no public content for a search or lookup (an empty
     # result, or a 404-style "not found") is the only failure this reader

@@ -14,7 +14,7 @@ from host.tools.instagram import InstagramTool
 from host.tools.shared.web import WebRequestError
 from host.tools.tool import OAuthCompleteConnectResult
 
-from test_tools import FakeHostAPI, FRESH_EXPIRES_AT
+from test_tools import FakeHostAPI, assert_matches_output_schema, FRESH_EXPIRES_AT
 
 ME_RESPONSE: JSONObject = {
     "user_id": "17841400000000000",
@@ -59,6 +59,39 @@ class InstagramReadTests(unittest.TestCase):
         assert isinstance(result, ActionExecuted)
         self.assertEqual(result.result["username"], "clawcreates")
         self.assertEqual(result.result["followers_count"], 1234)
+
+    def test_every_direct_result_matches_its_declared_output_schema(self) -> None:
+        cases: tuple[tuple[str, JSONObject, JSONObject], ...] = (
+            ("get_profile", {}, dict(ME_RESPONSE)),
+            (
+                "get_recent_media",
+                {},
+                {"data": [{"id": "1", "media_type": "VIDEO", "media_product_type": "REELS",
+                           "caption": "hello", "permalink": "https://instagram.com/p/x",
+                           "timestamp": "2026-07-01T00:00:00+0000", "like_count": 10, "comments_count": 2}]},
+            ),
+            # A provider that reports no counts must still satisfy the schema:
+            # the manifest declares those fields nullable, not absent.
+            ("get_recent_media", {}, {"data": [{"id": "2"}]}),
+        )
+        limit_cases: tuple[tuple[str, JSONObject, list[JSONObject]], ...] = (
+            # get_publishing_limit resolves the account first, so it makes two
+            # provider calls.
+            ("get_publishing_limit", {}, [dict(ME_RESPONSE), {"data": [{"quota_usage": 4, "config": {"quota_total": 100}}]}]),
+            ("get_publishing_limit", {}, [dict(ME_RESPONSE), {"data": []}]),
+        )
+        for action, tool_input, responses in limit_cases:
+            with self.subTest(action=action), patch.object(
+                instagram, "json_request", side_effect=responses
+            ):
+                result = InstagramTool().execute(action, tool_input, connected_api())
+            assert_matches_output_schema(self, instagram.MANIFEST, action, result)
+        for action, tool_input, provider_response in cases:
+            with self.subTest(action=action), patch.object(
+                instagram, "json_request", return_value=provider_response
+            ):
+                result = InstagramTool().execute(action, tool_input, connected_api())
+            assert_matches_output_schema(self, instagram.MANIFEST, action, result)
 
     def test_provider_account_id_must_be_numeric_before_path_use(self) -> None:
         with patch.object(instagram, "json_request", return_value={"user_id": "../media", "username": "bad"}):

@@ -140,6 +140,106 @@ export const MANAGED_INTEGRATIONS = {
       ["platform.claude.com", "GET and POST only for the Claude OAuth endpoints"],
     ],
   },
+  xai: {
+    label: "Grok",
+    summary: "Run Grok Build chats and tasks through your Grok subscription. Grok's server-side web search is not available on this host.",
+    protections: [
+      "The linked xAI account is pinned. Traffic naming another account, or a credential that does not claim the linked one, is denied until you explicitly disconnect and log in again.",
+      "Only the subscription chat proxy is opened. xAI's metered developer API stays blocked, so inference draws on your Grok subscription's usage pool instead of billing an xAI console credit balance.",
+      "Every Grok server-side tool is blocked, with no setting to turn any of them on: web search, X search, code execution, media generation, and remote tool servers. Session sync to xAI is blocked too, so conversation state stays on this host.",
+      "Web search is blocked because Grok's cannot be narrowed. It searches and opens live pages as one capability, and xAI's servers do the fetching — so an allowed search could pull a model-chosen URL, carrying arbitrary agent-chosen data in its parameters, without that request ever passing this host's network policy. Grok answers from what it already knows plus what the agent reads locally.",
+    ],
+    setupSteps: [
+      { title: "Enable Grok", description: "On Home, open Grok under Integrations and choose Enable." },
+      { title: "Start the Grok login", description: "In Account, choose Start Grok login. Open the displayed URL, sign in with the account holding the Grok subscription, and confirm the device code." },
+      { title: "Verify the linked account", description: "Return to Kern and wait for the row to show connected with the expected email or account id. That identity is now the operator-approved account anchor." },
+    ],
+    dataSummary: {
+      items: [
+        {
+          title: "What leaves this host",
+          description: "Assume any host data available to Grok Build can go to xAI, including prompts, conversation history, workspace files and diffs, tool inputs, and tool results.",
+          links: [],
+        },
+        {
+          title: "Where it can go",
+          points: [
+            { label: "xAI", text: "Everything the agent sends goes to xAI's services under the linked account." },
+            { label: "Nowhere else", text: "Grok's server-side web search is blocked with no option to enable it, so nothing leaves for a search and no page is fetched on your behalf. The linked account and the chat proxy are the whole of this integration's reach." },
+          ],
+          links: [],
+        },
+        {
+          title: "What xAI can do with it",
+          description: "Kern uses the Grok Build coding-agent path. Its coding-data and team ZDR controls are separate from the consumer controls for Grok.com and Grok on X.",
+          points: [
+            {
+              label: "For Kern and Grok Build",
+              content: [
+                "This is the relevant account setting for Kern. Open Settings with /privacy and choose Opt out under Coding data, retention, and training. xAI says opting out prevents coding data such as prompts, traces, and metrics from being retained and used for training or product improvement. It is account-backed rather than a config.toml key; Kern displays its observed state next to the connected account when Grok reports it. On team accounts only a team admin can change it. For team settings, open the ",
+                { url: "https://console.x.ai/", label: "xAI Console" },
+                " as a team admin. Team ZDR is stronger: it prevents prompt, code, and response persistence at the inference layer when the Grok CLI login belongs to that team. While ZDR is on, the coding-data choice cannot be changed.",
+              ],
+            },
+            {
+              label: "What Kern enforces locally",
+              text: "Kern pins Grok product telemetry and trace upload off in root-owned requirements, and its network proxy blocks trace, storage, session-sync, workspace-sync, feedback, and bundle-upload routes. Those controls prevent separate client-side uploads but do not rewrite the xAI account choice, so confirm that the connected-account row says coding-data opt-out active (or use /privacy).",
+            },
+            {
+              label: "For the xAI developer API",
+              text: "This is not the path Kern opens. xAI says API inputs and outputs are not used for training without explicit permission even when ZDR is off; by default they may still be retained for up to 30 days for abuse auditing. ZDR removes that default content retention.",
+            },
+            {
+              label: "For the Grok app and Grok on X",
+              content: [
+                "These are separate consumer data paths and their toggles do not change Grok Build or team ZDR. xAI's consumer terms allow conversations to be used to train its models by default, and paid tiers are not exempt. ",
+                { url: "https://grok.com/?_s=data", label: "Grok.com data controls" },
+                " control whether content and interactions from new Grok web and mobile-app conversations are used for training. Separately, ",
+                { url: "https://x.com/settings/grok_settings", label: "X Grok settings" },
+                " control whether X can share your public X data — including public posts and profile metadata — plus your interactions, inputs, and results with Grok on X for training and fine-tuning. Turn off both settings if you use both products. Opting out applies to future data, not data already collected.",
+              ],
+            },
+          ],
+          links: [
+            { url: "https://docs.x.ai/build/modes-and-commands#core-tui-commands", label: "Grok Build /privacy documentation" },
+            { url: "https://docs.x.ai/developers/faq/security#does-xai-train-on-customers-api-requests", label: "xAI API training and retention" },
+            { url: "https://docs.x.ai/build/enterprise#privacy--data-lifecycle", label: "Grok Build privacy and ZDR" },
+            { url: "https://x.ai/legal/faq#how-do-i-select-whether-my-content-is-used-for-model-training", label: "Grok training opt-out instructions" },
+            { url: "https://x.ai/legal/privacy-policy", label: "xAI Privacy Policy" },
+            { url: "https://x.ai/legal/subprocessor-list", label: "xAI subprocessor list" },
+            { url: "https://x.ai/privacy-portal", label: "xAI privacy portal (access and deletion)" },
+          ],
+        },
+        {
+          title: "How long xAI retains it",
+          description: "xAI does not publish a specific retention period for Grok conversation data, and opting out of training changes how data is used rather than whether it is kept.",
+          points: [
+            { label: "If retention matters to you", text: "Zero Data Retention is the setting that addresses it, and it is a team-admin control rather than a per-user one. Access and deletion requests go through xAI's privacy portal." },
+          ],
+          links: [
+            { url: "https://console.x.ai/", label: "Open xAI Console team settings" },
+            { url: "https://docs.x.ai/build/enterprise#privacy--data-lifecycle", label: "Grok Build privacy and ZDR" },
+          ],
+        },
+      ],
+    },
+    capabilities: [
+      { name: "Grok Build runtime", description: "Creates and resumes Grok Build sessions for Chat, Apps, and Schedules, streams messages and activity, accepts live steering, and exposes the connected subscription's usage when xAI reports it." },
+      {
+        name: "Web search (not available)",
+        description: "Grok's server-side web search is blocked, and there is no setting that turns it on. It cannot be narrowed: searching and opening live pages are one capability, and xAI's servers do the fetching, so an allowed search could pull a model-chosen URL, carrying arbitrary agent-chosen data in its parameters, without that request ever passing this host's network policy. Grok answers from what it already knows plus what the agent reads locally, and the agent's own tools reach only your allowed domains.",
+        linkUrl: "https://docs.x.ai/developers/tools/web-search",
+        linkLabel: "xAI web search documentation",
+      },
+    ],
+    controls: [
+      "The proxy fails closed when the account pin or request body cannot be checked.",
+    ],
+    networkScope: [
+      ["auth.x.ai", "GET and POST for the operator login flow"],
+      ["cli-chat-proxy.grok.com", "GET and POST; pinned-account, OAuth-token, and server-side tool guards"],
+    ],
+  },
   bedrock: {
     label: "Hermes (AWS Bedrock)",
     summary: "Connect your AWS account and let Hermes run tasks through Bedrock in your own account.",

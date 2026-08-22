@@ -25,6 +25,7 @@ from host.tools.tool import (
     OAuthStartConnectResult,
 )
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI
+from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
@@ -65,12 +66,16 @@ LITTLE_TEXT_RESERVED = "\\|{}@[]()<>#*_~"
 SUMMARY_MAX_BYTES = 500
 
 
-LINKEDIN_OUTPUT_SCHEMA: JSONObject = {
-    "type": "object",
-    "required": ["status"],
-    "properties": {"status": {"type": "string"}},
-    "additionalProperties": True,
-}
+GET_PROFILE_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the profile was loaded."),
+        "member_id": outputs.text("LinkedIn member id (the OpenID sub) of the connected profile."),
+        "name": outputs.text("Full name on the connected profile."),
+        "email": outputs.text("Primary email LinkedIn returns for the profile."),
+        "picture": outputs.text("LinkedIn-hosted profile picture URL, empty when there is none."),
+    },
+    ["message", "member_id", "name", "email", "picture"],
+)
 
 
 MANIFEST = ToolManifest(
@@ -86,7 +91,7 @@ MANIFEST = ToolManifest(
                 "and returns it to the host and active model context. Runs directly with no approval."
             ),
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-            output_schema=LINKEDIN_OUTPUT_SCHEMA,
+            output_schema=GET_PROFILE_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="create_post",
             description="Queue approval to publish a text-only LinkedIn post from the connected personal profile, visible publicly or to connections. This creates a post but cannot read it back through LinkedIn's self-serve API.",
@@ -105,7 +110,6 @@ MANIFEST = ToolManifest(
                 },
                 "additionalProperties": False,
             },
-            output_schema=LINKEDIN_OUTPUT_SCHEMA,
             approval="operator",
         ),
     ),
@@ -461,8 +465,7 @@ class LinkedInTool:
                 access_token = LINKEDIN_CREDENTIALS.access_token(api)
                 userinfo = _fetch_userinfo(access_token)
                 result: JSONObject = {
-                    "status": "success_executed",
-                    "message": "LinkedIn profile loaded.",
+                                        "message": "LinkedIn profile loaded.",
                     "member_id": str(userinfo.get("sub") or ""),
                     "name": str(userinfo.get("name") or ""),
                     "email": str(userinfo.get("email") or ""),
