@@ -20,7 +20,8 @@ from collections.abc import Mapping
 from typing import cast
 
 from host.tools.json_types import JSONObject
-from host.tools.host_api import HostAPI, StoredCredential
+from host.tools.host_api import ConnectionAccount, HostAPI, StoredCredential
+from host.tools.tool import ConnectionStatus
 
 OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60
 ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60
@@ -29,6 +30,63 @@ ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60
 class IntegrationReconnectRequired(RuntimeError):
     """The saved connection is missing, expired, revoked, or superseded; the
     operator must reconnect the tool. shared/google.py re-exports this class."""
+
+
+class OAuth2CredentialStore:
+    """Shared lifecycle for authorization-code credential stores.
+
+    Providers still own their URL construction, token exchange, refresh, and
+    identity lookup. This base owns the invariant storage behavior that must
+    be identical across them: connection status, default local disconnect,
+    required-scope validation, and timestamp-preserving credential saves.
+    """
+
+    reconnect_message: str
+    required_scopes: frozenset[str]
+
+    def disconnect(self, api: HostAPI) -> None:
+        api.credentials.clear()
+
+    def connection_status(self, api: HostAPI) -> ConnectionStatus:
+        existing = api.credentials.load()
+        if existing is None:
+            return {"connected": False}
+        return {"connected": True, "account": existing["account"]}
+
+    def load_connected(self, api: HostAPI) -> StoredCredential:
+        existing = api.credentials.load()
+        if existing is None:
+            raise IntegrationReconnectRequired(self.reconnect_message)
+        require_scopes(
+            api,
+            existing,
+            self.required_scopes,
+            reconnect_message=self.reconnect_message,
+        )
+        return existing
+
+    def save_connection(
+        self,
+        api: HostAPI,
+        account: ConnectionAccount,
+        secret: JSONObject,
+        *,
+        metadata: JSONObject | None = None,
+    ) -> StoredCredential:
+        existing = api.credentials.load()
+        current_time = now()
+        created_at = existing["metadata"].get("created_at") if existing else None
+        credential: StoredCredential = {
+            "account": account,
+            "secret": secret,
+            "metadata": {
+                "created_at": created_at if isinstance(created_at, int) else current_time,
+                "updated_at": current_time,
+                **(metadata or {}),
+            },
+        }
+        api.credentials.save(credential)
+        return credential
 
 
 def now() -> int:

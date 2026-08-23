@@ -739,7 +739,7 @@ class NetworkProxyTests(unittest.TestCase):
         self.assertEqual(read_network_events()[-1]["protocol"], "wss")
 
     def test_connection_slot_is_released_when_the_handler_thread_cannot_start(self) -> None:
-        server = network_proxy.BoundedThreadingHTTPServer(("127.0.0.1", 0), network_proxy.ProxyHandler)
+        server = network_proxy.DropAtCapacityServer(("127.0.0.1", 0), network_proxy.ProxyHandler)
         self.addCleanup(server.server_close)
         client, request = socket.socketpair()
         self.addCleanup(client.close)
@@ -1794,9 +1794,9 @@ class XaiAccountBindingTests(unittest.TestCase):
 
 class XaiServerToolTests(unittest.TestCase):
     """Grok declares hosted tools as ``tools`` entries alongside the
-    client-executed ``function`` tools it runs locally. Every hosted tool is
-    denied — web search included, with no option to enable it — and an
-    unrecognised entry in a ``tools`` array fails closed."""
+    client-executed ``function`` tools it runs locally. Only X search and
+    xAI-hosted media generation are allowed. Web search and every other or
+    unrecognised entry in a ``tools`` array fail closed."""
 
     ACCOUNT = "user-pinned"
     HOST = "cli-chat-proxy.grok.com"
@@ -1835,8 +1835,40 @@ class XaiServerToolTests(unittest.TestCase):
         # than "you declared something unrecognised".
         self.assertEqual(self.deny({"tools": [{"type": "web_search"}]}), "xai_web_search_denied")
 
-    def test_x_search_is_denied(self) -> None:
-        self.assertEqual(self.deny({"tools": [{"type": "x_search"}]}), "xai_server_tool_denied")
+    def test_x_search_and_its_x_only_filters_are_allowed(self) -> None:
+        self.assertIsNone(self.deny({"tools": [{"type": "x_search"}]}))
+        self.assertIsNone(
+            self.deny({
+                "tools": [{
+                    "type": "x_search",
+                    "allowed_x_handles": ["xai"],
+                    "from_date": "2026-08-01",
+                    "to_date": "2026-08-23",
+                    "enable_image_understanding": True,
+                    "enable_video_understanding": True,
+                }]
+            })
+        )
+
+    def test_xai_hosted_media_generation_is_allowed(self) -> None:
+        self.assertIsNone(
+            self.deny({"tools": [{"type": "image_generation", "action": "generate"}]})
+        )
+        self.assertIsNone(self.deny({"tools": [{"type": "video_generation"}]}))
+
+    def test_allowed_hosted_families_cannot_name_an_external_input(self) -> None:
+        for declaration in (
+            {"type": "x_search", "server_url": "https://example.com"},
+            {"type": "image_generation"},
+            {"type": "image_generation", "action": "auto"},
+            {"type": "image_generation", "action": "edit"},
+            {"type": "image_generation", "action": "generate", "image_url": "https://example.com/i.png"},
+            {"type": "video_generation", "image_url": "https://example.com/i.png"},
+        ):
+            self.assertIsNotNone(
+                self.deny({"tools": [declaration]}),
+                declaration,
+            )
 
     def test_search_parameters_are_denied(self) -> None:
         # xAI's second way of asking for a live search. It is not a tools entry
@@ -1907,7 +1939,7 @@ class XaiServerToolTests(unittest.TestCase):
 
     def test_other_hosted_tools_fail_closed(self) -> None:
         for tool_type in ("browser", "computer_use", "code_execution", "code_interpreter",
-                          "collections_search", "file_search", "image_generation", "video_generation"):
+                          "collections_search", "file_search"):
             self.assertEqual(
                 self.deny({"tools": [{"type": tool_type}]}),
                 "xai_server_tool_denied",
@@ -1968,14 +2000,14 @@ class XaiServerToolTests(unittest.TestCase):
         self.assertEqual(
             self.deny({
                 "input": [{"type": "mcp_list_tools", "tools": [{"name": "ok"}]}],
-                "tools": [{"type": "x_search"}],
+                "tools": [{"type": "code_interpreter"}],
             }),
             "xai_server_tool_denied",
         )
 
-    def test_function_tools_alongside_a_hosted_tool_still_deny(self) -> None:
+    def test_function_tools_alongside_x_search_are_allowed(self) -> None:
         payload = {"tools": [{"type": "function", "name": "read_file"}, {"type": "x_search"}]}
-        self.assertEqual(self.deny(payload), "xai_server_tool_denied")
+        self.assertIsNone(self.deny(payload))
 
     def test_renamed_web_tool_fails_closed(self) -> None:
         # Any future dated or renamed web* hosted tool is collected by prefix and
@@ -1992,9 +2024,14 @@ class XaiServerToolTests(unittest.TestCase):
             "xai_remote_mcp_denied",
         )
 
-    def test_nested_tool_declaration_is_still_inspected(self) -> None:
+    def test_nested_allowed_tool_declaration_is_allowed(self) -> None:
+        self.assertIsNone(
+            self.deny({"session": {"config": {"tools": [{"type": "x_search"}]}}})
+        )
+
+    def test_nested_denied_tool_declaration_is_still_inspected(self) -> None:
         self.assertEqual(
-            self.deny({"session": {"config": {"tools": [{"type": "x_search"}]}}}),
+            self.deny({"session": {"config": {"tools": [{"type": "code_interpreter"}]}}}),
             "xai_server_tool_denied",
         )
 
@@ -2006,6 +2043,8 @@ class XaiServerToolTests(unittest.TestCase):
             self.deny({"input": [
                 {"type": "web_search_call", "id": "ws_1"},
                 {"type": "x_search_call"},
+                {"type": "image_generation_call", "result": "base64"},
+                {"type": "video_generation_call", "result": {"url": "https://vidgen.x.ai/v.mp4"}},
                 {"type": "code_interpreter_call"},
                 {"type": "file_search_call"},
                 {"type": "mcp_call"},

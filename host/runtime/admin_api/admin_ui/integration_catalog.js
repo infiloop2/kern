@@ -142,11 +142,11 @@ export const MANAGED_INTEGRATIONS = {
   },
   xai: {
     label: "Grok",
-    summary: "Run Grok Build chats and tasks through your Grok subscription. Grok's server-side web search is not available on this host.",
+    summary: "Run Grok Build chats and tasks through your Grok subscription, with X search enabled. Grok's server-side web search is not available on this host.",
     protections: [
       "The linked xAI account is pinned. Traffic naming another account, or a credential that does not claim the linked one, is denied until you explicitly disconnect and log in again.",
       "Only the subscription chat proxy is opened. xAI's metered developer API stays blocked, so inference draws on your Grok subscription's usage pool instead of billing an xAI console credit balance.",
-      "Every Grok server-side tool is blocked, with no setting to turn any of them on: web search, X search, code execution, media generation, and remote tool servers. Session sync to xAI is blocked too, so conversation state stays on this host.",
+      "The server-side tool allowlist is fixed to shapes that stay on xAI/X infrastructure: X search with X-only filters, text-to-image generation with no external input, and a bare reserved video-generation declaration. Web search, code execution, collections search, hosted browsing, remote tool servers, unknown tools, and media declarations carrying extra inputs stay blocked. Session sync to xAI is blocked too, so conversation state stays on this host.",
       "Web search is blocked because Grok's cannot be narrowed. It searches and opens live pages as one capability, and xAI's servers do the fetching — so an allowed search could pull a model-chosen URL, carrying arbitrary agent-chosen data in its parameters, without that request ever passing this host's network policy. Grok answers from what it already knows plus what the agent reads locally.",
     ],
     setupSteps: [
@@ -165,7 +165,9 @@ export const MANAGED_INTEGRATIONS = {
           title: "Where it can go",
           points: [
             { label: "xAI", text: "Everything the agent sends goes to xAI's services under the linked account." },
-            { label: "Nowhere else", text: "Grok's server-side web search is blocked with no option to enable it, so nothing leaves for a search and no page is fetched on your behalf. The linked account and the chat proxy are the whole of this integration's reach." },
+            { label: "X search", text: "The host sends the query and surrounding conversation only to xAI's pinned subscription chat proxy. xAI runs X search on its servers against X posts, users, threads, and X-hosted media; this host does not contact x.com or a third-party search provider." },
+            { label: "Media generation", text: "The proxy admits only text-to-image generation and the bare reserved video-generation declaration; external-input fields and unknown options fail closed. It does not open api.x.ai, imgen.x.ai, or vidgen.x.ai. Grok Build 1.0.5 does not yet expose these media tools, and xAI currently documents video generation only on its separate metered developer API, so this is a narrow policy allowance rather than a working media workflow today." },
+            { label: "Nowhere else", text: "Web search and browsing remain blocked, so xAI cannot fetch arbitrary pages through Grok's hosted tools. Remote MCP, hosted code, collections search, and unknown hosted tools remain blocked too." },
           ],
           links: [],
         },
@@ -225,6 +227,18 @@ export const MANAGED_INTEGRATIONS = {
     },
     capabilities: [
       { name: "Grok Build runtime", description: "Creates and resumes Grok Build sessions for Chat, Apps, and Schedules, streams messages and activity, accepts live steering, and exposes the connected subscription's usage when xAI reports it." },
+      {
+        name: "X search",
+        description: "Allows Grok's hosted x_search tool. The request goes only to the pinned xAI chat proxy; xAI executes keyword, semantic, user, and thread search against X data on its servers.",
+        linkUrl: "https://docs.x.ai/developers/tools/x-search",
+        linkLabel: "xAI X search documentation",
+      },
+      {
+        name: "xAI-hosted media declarations",
+        description: "Allows only image_generation with action generate and a bare video_generation declaration through the chat proxy; external inputs and unknown options fail closed. Grok Build 1.0.5 does not emit either declaration, and xAI currently exposes video generation through the blocked metered developer API, so media generation is not yet usable from the Grok runtime.",
+        linkUrl: "https://docs.x.ai/developers/tools/image-generation",
+        linkLabel: "xAI image generation tool documentation",
+      },
       {
         name: "Web search (not available)",
         description: "Grok's server-side web search is blocked, and there is no setting that turns it on. It cannot be narrowed: searching and opening live pages are one capability, and xAI's servers do the fetching, so an allowed search could pull a model-chosen URL, carrying arbitrary agent-chosen data in its parameters, without that request ever passing this host's network policy. Grok answers from what it already knows plus what the agent reads locally, and the agent's own tools reach only your allowed domains.",
@@ -332,6 +346,7 @@ export const MANAGED_INTEGRATIONS = {
       "GitHub credentials never reach the agent: the host injects the working token into requests at the proxy and strips any credential the agent sends, so the token is never returned to or read by the agent.",
       "Reads can reach any public repository and private repositories visible to the credential; writes work only for the repositories you configure.",
       "Repository administration, GraphQL, Git LFS uploads, and other write paths that could reach beyond the configured repositories stay denied.",
+      "Direct Git pushes to main are blocked by default. Push a feature branch and merge it through a pull request, or explicitly disable the protection in Settings.",
       "Keep approval for `.github` pushes enabled. Workflow changes can make GitHub Actions run arbitrary code with network access and repository credentials.",
       "Search/read query values pass the host parameter guard: values shaped like a secret, credential, or sensitive identifier are denied before the request is sent. Request headers are not inspected; the agent's Authorization is replaced with the host-held token and User-Agent with a fixed host value.",
       "GitHub Actions Azure downloads are limited to GitHub's documented productionresultssa0 through productionresultssa19 storage accounts; path and query values take the parameter guard.",
@@ -342,6 +357,7 @@ export const MANAGED_INTEGRATIONS = {
       { title: "Or create and install a GitHub App", description: "In GitHub Settings > Developer settings > GitHub Apps, create an app with only the repository permissions your workflow needs. Install it on the selected repositories, note the App ID and installation ID, then generate and download a private key. Kern uses those values to mint short-lived installation tokens.", linkUrl: "https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app", linkLabel: "View GitHub's app registration guide" },
       { title: "Store the credential", description: "Enable GitHub, expand the row, select the credential type, enter its values, and choose Set credential. Stored secret values are never read back into the UI." },
       { title: "Add write repositories", description: "Under Write repositories, add each owner/repository that may receive a push or mutating REST API call. Repositories not listed remain read-only." },
+      { title: "Keep direct main pushes blocked", description: "Kern enables Block direct pushes to main by default. Agents can still push feature branches and merge pull requests, but the proxy rejects a Git push transaction that updates refs/heads/main." },
       { title: "Keep .github push approval enabled", description: "Kern enables Require approval for .github pushes when GitHub is first turned on. Keep it enabled so workflow and other .github path changes are held for an operator decision; GitHub Actions workflows can execute arbitrary code with network access and repository credentials." },
     ],
     capabilities: [

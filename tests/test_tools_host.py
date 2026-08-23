@@ -101,6 +101,12 @@ def _fake_account() -> JSONObject:
     return {"id": "acct-1", "label": "notes@example.com", "scopes": ["notes"]}
 
 
+def _connection(
+    connection_id: str = "connection_test",
+) -> tools_host.ConnectionScope:
+    return tools_host.ConnectionScope(connection_id=connection_id, account=None)
+
+
 class FakeCredentialFlow(CredentialFlow):
     def start_connect(self, params: OAuthStartConnectParams, api: HostAPI) -> OAuthStartConnectResult:
         del params, api
@@ -162,7 +168,9 @@ class FakeTool:
             return ActionFailed("Note write failed.")
         if text == "raise":
             raise RuntimeError("unexpected tool crash")
-        api.credentials.save({"account": _fake_account(), "secret": {"text": text}, "metadata": {}})
+        existing = api.credentials.load()
+        account = existing["account"] if existing is not None else _fake_account()
+        api.credentials.save({"account": account, "secret": {"text": text}, "metadata": {}})
         return ApprovalExecuted(f"Wrote the note ({len(str(text))} chars).")
 
 
@@ -419,27 +427,147 @@ class ToolsHostTestCase(unittest.TestCase):
 
 class HostCredentialsTests(ToolsHostTestCase):
     def test_round_trip_and_partition_isolation(self) -> None:
-        credentials = tools_host.HostCredentials("fake_notes")
+        credentials = tools_host.HostCredentials("fake_notes", _connection())
         self.assertIsNone(credentials.load())
         stored: StoredCredential = {"account": _fake_account(), "secret": {"text": "hello"}, "metadata": {}}
         credentials.save(stored)
         self.assertEqual(credentials.load(), stored)
-        self.assertIsNone(tools_host.HostCredentials("gmail").load())
+        self.assertIsNone(tools_host.HostCredentials("gmail", _connection()).load())
         credentials.clear()
         credentials.clear()  # absent clear is a no-op
         self.assertIsNone(credentials.load())
 
+    def test_connections_are_independent_and_duplicate_accounts_are_rejected(self) -> None:
+        first = tools_host.HostCredentials("fake_notes", _connection("connection_first"))
+        second = tools_host.HostCredentials("fake_notes", _connection("connection_second"))
+        first_record: StoredCredential = {
+            "account": {"id": "acct-1", "label": "first@example.com", "scopes": ["notes"]},
+            "secret": {"text": "first"},
+            "metadata": {},
+        }
+        second_record: StoredCredential = {
+            "account": {"id": "acct-2", "label": "second@example.com", "scopes": ["notes"]},
+            "secret": {"text": "second"},
+            "metadata": {},
+        }
+        first.save(first_record)
+        second.save(second_record)
+        self.assertEqual(first.load(), first_record)
+        self.assertEqual(second.load(), second_record)
+        self.assertEqual(
+            state.tool_connections("fake_notes"),
+            [
+                {"connection_id": "connection_first", "account": first_record["account"]},
+                {"connection_id": "connection_second", "account": second_record["account"]},
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "already connected"):
+            tools_host.HostCredentials(
+                "fake_notes", _connection("connection_duplicate")
+            ).save(first_record)
+
+        replacement: StoredCredential = {
+            "account": {
+                "id": "acct-3",
+                "label": "replacement@example.com",
+                "scopes": ["notes"],
+            },
+            "secret": {"text": "replacement"},
+            "metadata": {},
+        }
+        with self.assertRaisesRegex(ValueError, "bound to a different fake_notes account"):
+            first.save(replacement)
+        self.assertEqual(first.load(), first_record)
+
+    def test_scoped_credentials_reject_a_changed_account(self) -> None:
+        connection_id = "connection_first"
+        original: StoredCredential = {
+            "account": {"id": "acct-1", "label": "first@example.com", "scopes": ["notes"]},
+            "secret": {"text": "first"},
+            "metadata": {},
+        }
+        replacement: StoredCredential = {
+            "account": {"id": "acct-2", "label": "second@example.com", "scopes": ["notes"]},
+            "secret": {"text": "second"},
+            "metadata": {},
+        }
+        state.put_tool_credential("fake_notes", original, connection_id)
+        scope = tools_host.connection_scope(
+            tools_host.BUNDLED_TOOLS["fake_notes"], connection_id
+        )
+
+        state.delete_tool_credential("fake_notes", connection_id)
+        state.put_tool_credential("fake_notes", replacement, connection_id)
+
+        credentials = tools_host.HostCredentials("fake_notes", scope)
+        with self.assertRaisesRegex(
+            tools_host.ConnectionAccountChangedError,
+            "changed while the tool call was starting",
+        ):
+            credentials.load()
+
     def test_value_validation(self) -> None:
-        credentials = tools_host.HostCredentials("fake_notes")
+        credentials = tools_host.HostCredentials("fake_notes", _connection())
         with self.assertRaises(ValueError):
             credentials.save({"secret": {"bad": float("nan")}})  # type: ignore[typeddict-item]
         with self.assertRaises(ValueError):
             credentials.save({"secret": {"big": "x" * (tools_host.CREDENTIAL_VALUE_MAX_BYTES + 1)}})  # type: ignore[typeddict-item]
 
 
+class HostAPIScopeTests(ToolsHostTestCase):
+    def test_unconnected_oauth_tool_has_no_credential_scope(self) -> None:
+        api = tools_host.host_api_for(
+            tools_host.BUNDLED_TOOLS["fake_notes"], tools_host.NO_CONNECTION
+        )
+        self.assertIsNone(api.credentials.load())
+        with self.assertRaisesRegex(ValueError, "without a connection scope"):
+            api.credentials.save(
+                {"account": _fake_account(), "secret": {}, "metadata": {}}
+            )
+
+    def test_enable_only_tool_rejects_an_oauth_connection_scope(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not use account connections"):
+            tools_host.host_api_for(
+                tools_host.BUNDLED_TOOLS["brave_search"], _connection()
+            )
+
+    def test_enable_only_approval_executes_without_an_account_scope(self) -> None:
+        reddit = tools_host.BUNDLED_TOOLS["reddit"]
+        self.assertEqual(reddit.manifest.connection, "enable_only")
+
+        def queue(_tool: Tool, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
+            del tool_input
+            approval = api.approvals.request(
+                action_id=action, summary="Publish test value.", payload={}
+            )
+            return ActionPendingApproval(approval.approval_id, approval.summary)
+
+        def publish(
+            _tool: Tool, approval: ApprovalRecord, api: HostAPI
+        ) -> ApprovalExecuted:
+            del approval, api
+            return ApprovalExecuted("Published test value.")
+
+        with (
+            patch.object(type(reddit), "execute", queue),
+            patch.object(type(reddit), "execute_approved", publish),
+        ):
+            with state.mutation() as cur:
+                state.set_tool_enabled(cur, "reddit", True)
+            queued = tools_host.execute_action(
+                "reddit",
+                "create_post",
+                {"subreddit": "kern", "title": "Test", "kind": "self", "text": "Body"},
+            )
+            decided = tools_host.decide_approval(queued["approval_id"], "approve")
+
+        self.assertEqual(decided["approval"]["status"], "executed")
+        self.assertEqual(decided["result"]["message"], "Published test value.")
+
+
 class HostApprovalsTests(ToolsHostTestCase):
     def test_request_validates_action_summary_and_payload(self) -> None:
-        approvals = tools_host.HostApprovals(FAKE_MANIFEST)
+        approvals = tools_host.HostApprovals(FAKE_MANIFEST, _connection())
         with self.assertRaises(ValueError):
             approvals.request(action_id="not_in_manifest", summary="s", payload={})
         with self.assertRaises(ValueError):
@@ -450,13 +578,104 @@ class HostApprovalsTests(ToolsHostTestCase):
             approvals.request(action_id="write_note", summary="s", payload={"big": "x" * 70_000})
 
     def test_request_returns_the_pending_record(self) -> None:
-        approvals = tools_host.HostApprovals(FAKE_MANIFEST)
+        approvals = tools_host.HostApprovals(FAKE_MANIFEST, _connection())
         record = approvals.request(action_id="write_note", summary="Write.", payload={"text": "hi"})
         self.assertEqual(record.status, "pending")
         self.assertEqual(record.payload, {"text": "hi"})
 
 
 class ExecuteActionTests(ToolsHostTestCase):
+    def test_multiple_accounts_require_selection_and_run_against_the_selected_connection(self) -> None:
+        self.prepare_fake_tool()
+        for connection_id, account_id, label, text in (
+            ("connection_first", "acct-1", "first@example.com", "first"),
+            ("connection_second", "acct-2", "second@example.com", "second"),
+        ):
+            tools_host.HostCredentials("fake_notes", _connection(connection_id)).save(
+                {
+                    "account": {"id": account_id, "label": label, "scopes": ["notes"]},
+                    "secret": {"text": text},
+                    "metadata": {},
+                }
+            )
+        with self.assertRaisesRegex(tools_host.ToolCallError, "multiple connected accounts"):
+            tools_host.execute_action("fake_notes", "read_note", {})
+        result = tools_host.execute_action(
+            "fake_notes", "read_note", {}, connection_id="connection_second"
+        )
+        self.assertEqual(result["result"]["text"], "second")
+        event = state.page_tool_events_before(None)[0]
+        self.assertEqual(event["connection_id"], "connection_second")
+        self.assertEqual(event["account_label"], "second@example.com")
+
+    def test_approval_executes_with_the_connection_selected_when_queued(self) -> None:
+        self.prepare_fake_tool()
+        credential: StoredCredential = {
+            "account": {"id": "acct-2", "label": "second@example.com", "scopes": ["notes"]},
+            "secret": {"text": "before"},
+            "metadata": {},
+        }
+        tools_host.HostCredentials(
+            "fake_notes", _connection("connection_second")
+        ).save(credential)
+        queued = tools_host.execute_action(
+            "fake_notes", "write_note", {"text": "after"},
+            connection_id="connection_second",
+        )
+        approval = state.tool_approval(queued["approval_id"])
+        self.assertEqual(approval["connection_id"], "connection_second")
+        self.assertEqual(approval["account_id"], "acct-2")
+        tools_host.decide_approval(queued["approval_id"], "approve")
+        self.assertEqual(
+            tools_host.HostCredentials(
+                "fake_notes", _connection("connection_second")
+            ).load()["secret"],
+            {"text": "after"},
+        )
+
+    def test_approval_fails_if_its_connection_now_has_another_account(self) -> None:
+        self.prepare_fake_tool()
+        connection_id = "connection_second"
+        tools_host.HostCredentials("fake_notes", _connection(connection_id)).save(
+            {
+                "account": {
+                    "id": "acct-2",
+                    "label": "second@example.com",
+                    "scopes": ["notes"],
+                },
+                "secret": {"text": "second"},
+                "metadata": {},
+            }
+        )
+        queued = tools_host.execute_action(
+            "fake_notes",
+            "write_note",
+            {"text": "approved for second"},
+            connection_id=connection_id,
+        )
+        state.delete_tool_credential("fake_notes", connection_id)
+        replacement: StoredCredential = {
+            "account": {
+                "id": "acct-3",
+                "label": "third@example.com",
+                "scopes": ["notes"],
+            },
+            "secret": {"text": "third"},
+            "metadata": {},
+        }
+        state.put_tool_credential("fake_notes", replacement, connection_id)
+
+        decision = tools_host.decide_approval(queued["approval_id"], "approve")
+
+        self.assertEqual(decision["approval"]["status"], "failed")
+        self.assertIn("no longer connected", decision["result"]["error"])
+        self.assertEqual(
+            tools_host.HostCredentials(
+                "fake_notes", _connection(connection_id)
+            ).load(),
+            replacement,
+        )
+
     def test_rejects_unknown_disabled_and_invalid_calls(self) -> None:
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown tool"):
             tools_host.execute_action("missing_tool", "read_note", {})
@@ -645,6 +864,13 @@ class ExecuteActionTests(ToolsHostTestCase):
 class ApprovalLifecycleTests(ToolsHostTestCase):
     def queue_write(self, text: str) -> str:
         self.prepare_fake_tool()
+        tools_host.HostCredentials("fake_notes", _connection()).save(
+            {
+                "account": _fake_account(),
+                "secret": {"text": ""},
+                "metadata": {},
+            }
+        )
         return tools_host.execute_action("fake_notes", "write_note", {"text": text})["approval_id"]
 
     def test_approved_execution_must_report_one_message(self) -> None:
@@ -670,7 +896,10 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
         self.assertEqual(decision["approval"]["status"], "executed")
         self.assertEqual(decision["result"], {"status": "executed", "message": "Wrote the note (5 chars)."})
         self.assertEqual(state.tool_approval(approval_id)["result"], "Wrote the note (5 chars).")
-        self.assertEqual(tools_host.HostCredentials("fake_notes").load()["secret"], {"text": "hello"})
+        self.assertEqual(
+            tools_host.HostCredentials("fake_notes", _connection()).load()["secret"],
+            {"text": "hello"},
+        )
         with self.assertRaisesRegex(tools_host.ToolCallError, "not pending"):
             tools_host.decide_approval(approval_id, "approve")
 
@@ -678,7 +907,10 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
         approval_id = self.queue_write("secret")
         decision = tools_host.decide_approval(approval_id, "deny")
         self.assertEqual(decision["approval"]["status"], "denied")
-        self.assertIsNone(tools_host.HostCredentials("fake_notes").load())
+        self.assertEqual(
+            tools_host.HostCredentials("fake_notes", _connection()).load()["secret"],
+            {"text": ""},
+        )
         with self.assertRaisesRegex(tools_host.ToolCallError, "not pending"):
             tools_host.decide_approval(approval_id, "deny")
 
@@ -919,12 +1151,17 @@ class ToolConfigStateTests(ToolsHostTestCase):
             state.save_tool_config_value(cur, "fake_notes", "FAKE_NOTES_TOKEN", "token-1")
             # The same key name for a different tool is a separate value.
             state.save_tool_config_value(cur, "gmail", "GOOGLE_OAUTH_CLIENT_ID", "other")
-        api = tools_host.host_api_for(tools_host.BUNDLED_TOOLS["fake_notes"])
+        tool = tools_host.BUNDLED_TOOLS["fake_notes"]
+        api = tools_host.host_api_for(
+            tool, tools_host.connection_scope(tool, _connection().connection_id)
+        )
         self.assertEqual(dict(api.config), {"FAKE_NOTES_TOKEN": "token-1"})
         # Clearing a value removes the key from the tool's config view.
         with state.mutation() as cur:
             state.save_tool_config_value(cur, "fake_notes", "FAKE_NOTES_TOKEN", "")
-        cleared = tools_host.host_api_for(tools_host.BUNDLED_TOOLS["fake_notes"])
+        cleared = tools_host.host_api_for(
+            tool, tools_host.connection_scope(tool, _connection().connection_id)
+        )
         self.assertEqual(dict(cleared.config), {})
 
     def test_config_and_credentials_are_encrypted_at_rest(self) -> None:
@@ -935,7 +1172,7 @@ class ToolConfigStateTests(ToolsHostTestCase):
             "secret": {"refresh_token": "rt-secret"},
             "metadata": {"created_at": "2026-07-09T00:00:00Z"},
         }
-        state.put_tool_credential("fake_notes", credential)
+        state.put_tool_credential("fake_notes", credential, _connection().connection_id)
         # The secret columns must be secretbox ciphertext, never the plaintext;
         # the connected-account columns are non-secret by contract and stay
         # readable in place.
@@ -953,16 +1190,25 @@ class ToolConfigStateTests(ToolsHostTestCase):
         self.assertTrue(credential_secret.startswith("enc:v1:"))
         self.assertNotIn("rt-secret", credential_secret)
         # Round-trips transparently for the tool call and credential layers.
-        api = tools_host.host_api_for(tools_host.BUNDLED_TOOLS["fake_notes"])
+        tool = tools_host.BUNDLED_TOOLS["fake_notes"]
+        api = tools_host.host_api_for(
+            tool, tools_host.connection_scope(tool, _connection().connection_id)
+        )
         self.assertEqual(dict(api.config), {"FAKE_NOTES_TOKEN": "super-secret-key"})
-        self.assertEqual(state.tool_credential("fake_notes"), credential)
+        self.assertEqual(
+            state.tool_credential("fake_notes", _connection().connection_id), credential
+        )
 
     def test_malformed_credential_is_rejected(self) -> None:
         # A credential missing its contract fields is refused outright instead
         # of stored partially.
         with self.assertRaises(ValueError):
-            state.put_tool_credential("fake_notes", {"secret": {"refresh_token": "rt-secret"}})
-        self.assertIsNone(state.tool_credential("fake_notes"))
+            state.put_tool_credential(
+                "fake_notes",
+                {"secret": {"refresh_token": "rt-secret"}},
+                _connection().connection_id,
+            )
+        self.assertIsNone(state.tool_credential("fake_notes", _connection().connection_id))
 
 
 if __name__ == "__main__":

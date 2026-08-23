@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from host.runtime.core import host_errors
-from host.runtime.host_errors import collector
+from host.runtime.host_diagnostics_collector import collector
 
 
 def journal_row(
@@ -179,7 +179,7 @@ class HostErrorCollectorTests(unittest.TestCase):
         self.assertFalse(any(argument.startswith("--since=") for argument in command))
         self.assertFalse(any(argument.startswith("--after-cursor=") for argument in command))
 
-    @patch("host.runtime.host_errors.collector.state.ingest_host_diagnostic")
+    @patch("host.runtime.host_diagnostics_collector.collector.state.ingest_host_diagnostic")
     def test_invalid_payload_is_skipped_without_database_work(self, ingest: Mock) -> None:
         process = Mock()
         process.stdout = iter([journal_row({"kind": "invalid"})])
@@ -191,7 +191,7 @@ class HostErrorCollectorTests(unittest.TestCase):
         ingest.assert_not_called()
         process.terminate.assert_not_called()
 
-    @patch("host.runtime.host_errors.collector.state.ingest_host_diagnostic")
+    @patch("host.runtime.host_diagnostics_collector.collector.state.ingest_host_diagnostic")
     def test_untrusted_unit_is_skipped_without_database_work(self, ingest: Mock) -> None:
         process = Mock()
         process.stdout = iter([
@@ -203,7 +203,7 @@ class HostErrorCollectorTests(unittest.TestCase):
         ingest.assert_not_called()
 
     @patch(
-        "host.runtime.host_errors.collector.state.ingest_host_diagnostic",
+        "host.runtime.host_diagnostics_collector.collector.state.ingest_host_diagnostic",
         side_effect=RuntimeError("database unavailable"),
     )
     def test_database_failure_stops_the_stream(self, ingest: Mock) -> None:

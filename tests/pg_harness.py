@@ -357,7 +357,7 @@ def reset_database() -> None:
     """Truncate every state table and clear the in-process stores (test
     setUp); the schema stays migrated."""
     ensure_database()
-    from host.runtime.admin_api import orchestrator
+    from host.runtime.agent_runtime import orchestrator
 
     orchestrator._RUNTIME_STATUSES.clear()
     from host.runtime.core import db

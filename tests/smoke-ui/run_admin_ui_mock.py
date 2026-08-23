@@ -185,7 +185,7 @@ class MockState:
     tool_enabled: set[str] = field(default_factory=set)
     # Config is scoped per tool: tool_id -> set of configured keys.
     tool_config: dict[str, set[str]] = field(default_factory=dict)
-    tool_connections: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tool_connections: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     tool_approvals: list[dict[str, Any]] = field(default_factory=list)
     tool_events: list[dict[str, Any]] = field(default_factory=list)
     next_approval_number: int = 1
@@ -206,6 +206,9 @@ class MockState:
             "result": result,
             "created_at": created_at if created_at is not None else int(time.time()),
             "decided_at": 0 if status == "pending" else int(time.time()),
+            "connection_id": "default",
+            "account_id": "",
+            "account_label": "",
         }
         self.next_approval_number += 1
         self.tool_approvals.append(approval)
@@ -836,7 +839,7 @@ def seed_state() -> None:
             "exception_type": "RuntimeError",
             "summary": "execution observed a thread without its provider session",
             "traceback": (
-                'File "host/runtime/admin_api/orchestrator.py", line 1042, in execute_thread\n'
+                'File "host/runtime/agent_runtime/orchestrator.py", line 1042, in execute_thread\n'
                 '  raise RuntimeError("thread session missing")'
             ),
             "context": {"agent_runtime": "codex", "thread_id": "thread_16"},
@@ -898,10 +901,10 @@ def seed_state() -> None:
         STATE.tool_config[tool_id] = {"GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"}
     STATE.tool_enabled.update({"gmail", "google_calendar"})
     for tool_id in ("gmail", "google_calendar"):
-        STATE.tool_connections[tool_id] = {
-            "connected": True,
+        STATE.tool_connections[tool_id] = [{
+            "connection_id": "default",
             "account": {"id": "mock-google-sub", "label": "akshay@infiloop.io", "scopes": ["email"]},
-        }
+        }]
     STATE.add_tool_approval(
         "google_calendar",
         "event_change",
@@ -1423,7 +1426,12 @@ def list_tools() -> dict[str, Any]:
                 },
             }
             if manifest.connection == "oauth":
-                entry["connection_status"] = STATE.tool_connections.get(tool_id) or {"connected": False}
+                connections = STATE.tool_connections.get(tool_id) or []
+                entry["connected_accounts"] = connections
+                entry["connection_status"] = (
+                    {"connected": True, "account": connections[0]["account"]}
+                    if connections else {"connected": False}
+                )
             entries.append(entry)
     return {"tools": entries}
 
@@ -1464,19 +1472,36 @@ def tool_action(tool_id: str, operation: str, body: Any) -> dict[str, Any]:
         if tool_id not in STATE.tool_enabled:
             raise ApiError(HTTPStatus.CONFLICT, f"{tool_id} is not enabled")
         if operation == "oauth_connect/start":
+            connection_id = (
+                body.get("connection_id")
+                if isinstance(body, dict) and isinstance(body.get("connection_id"), str)
+                else f"connection_{tool_id}"
+            )
             return {
                 "authorization_url": f"/oauth/callback?code={MOCK_OAUTH_CODE}&state=mock-state",
                 "state": "mock-state",
+                "connection_id": connection_id,
             }
         if operation == "oauth_connect/complete":
             code = body.get("code") if isinstance(body, dict) else None
             if code != MOCK_OAUTH_CODE:
                 raise ApiError(HTTPStatus.BAD_REQUEST, "invalid authorization code")
             account = {"id": "mock-google-sub", "label": "operator@example.com", "scopes": ["email"]}
-            STATE.tool_connections[tool_id] = {"connected": True, "account": account}
-            return {"account": account}
-        STATE.tool_connections.pop(tool_id, None)
-        return {"tool_id": tool_id, "connected": False}
+            connection_id = body.get("connection_id") if isinstance(body, dict) else None
+            if not isinstance(connection_id, str) or not connection_id:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "connection_id is required")
+            connections = STATE.tool_connections.setdefault(tool_id, [])
+            connections[:] = [item for item in connections if item["connection_id"] != connection_id]
+            connections.append({"connection_id": connection_id, "account": account})
+            return {"account": account, "connection_id": connection_id}
+        connection_id = body.get("connection_id") if isinstance(body, dict) else None
+        if not isinstance(connection_id, str) or not connection_id:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "connection_id is required")
+        connections = STATE.tool_connections.get(tool_id, [])
+        STATE.tool_connections[tool_id] = [
+            item for item in connections if item["connection_id"] != connection_id
+        ]
+        return {"tool_id": tool_id, "connection_id": connection_id, "connected": False}
 
 
 def decide_tool_approval(approval_id: str, decision: str) -> dict[str, Any]:
@@ -2194,13 +2219,13 @@ def agent_processes() -> dict[str, Any]:
         if STATE.claude_oauth:
             add_process(4400, "claude", "claude auth login --claudeai", 71, 18)
         if STATE.grok_oauth and not STATE.logged_in.get("grok"):
-            add_process(4450, "grok", "grok --disable-web-search agent --no-leader stdio", 76, 20)
+            add_process(4450, "grok", "grok --disable-web-search agent --always-approve --no-leader stdio", 76, 20)
         if STATE.logged_in.get("codex"):
             add_process(4310, "codex", "codex app-server --listen stdio://", 88, 184)
         if STATE.logged_in.get("claude_code"):
             add_process(4410, "claude", "claude -p /usage --output-format json", 96, 9)
         if STATE.logged_in.get("grok"):
-            add_process(4460, "grok", "grok --disable-web-search agent --no-leader stdio", 82, 11)
+            add_process(4460, "grok", "grok --disable-web-search agent --always-approve --no-leader stdio", 82, 11)
 
         running = [thread for thread in STATE.threads.values() if thread.get("_running")]
         for index, thread in enumerate(running, start=1):

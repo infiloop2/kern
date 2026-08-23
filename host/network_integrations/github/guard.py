@@ -9,9 +9,10 @@ Dispatching an existing workflow is treated as a repository-scoped write; the
 remaining workflow administration routes stay denied. So the guard only ever
 gates writes; reads pass through.
 
-This module also owns the two post-decision hooks on GitHub domains: the
-``.github`` push-approval gate (``gate_response``, engine in ``push_gate``)
-and working-credential injection (``rewrite_request_headers``).
+This module also owns the post-decision hooks on GitHub domains: the direct-main
+push block and ``.github`` push-approval gate (``gate_response``, with parsing
+and quarantine support in ``push_gate``), plus working-credential injection
+(``rewrite_request_headers``).
 """
 
 from __future__ import annotations
@@ -223,16 +224,16 @@ def _github_actions_blob_request_denied(
 def gate_response(
     config: GitHubIntegration, method: str, host: str, path: str, body: bytes
 ) -> tuple[bytes | None, str | None]:
-    """The ``.github`` approval gate, applied after a push has passed the write
-    guard. Returns ``(response, denial)``:
+    """Git push controls, applied after a push has passed the write guard.
+    Returns ``(response, denial)``:
 
     - ``(None, None)`` — not a gated push, or a clean one: forward normally.
     - ``(bytes, code)`` — send ``bytes`` (a git ``report-status``) back to the
-      agent instead of forwarding; the push is queued for approval.
+      agent instead of forwarding; the push is blocked or queued for approval.
     - ``(None, code)`` — fail closed with a plain proxy denial (the push could
       not be parsed or inspected).
     """
-    if not config.require_dot_github_approval:
+    if not config.block_direct_main_pushes and not config.require_dot_github_approval:
         return None, None
     # Trigger: a receive-pack POST to github.com. The write guard has already
     # run (the proxy calls this only after the deny decision passed), so the
@@ -240,6 +241,21 @@ def gate_response(
     # here.
     parts = [part for part in normalized_path(path).split("/") if part]
     if host.lower() != "github.com" or method.upper() != "POST" or len(parts) != 3 or parts[2] != "git-receive-pack":
+        return None, None
+    if config.block_direct_main_pushes:
+        try:
+            commands, capabilities, _pack = push_gate.parse_receive_pack(body)
+        except push_gate.GateError:
+            return None, "github_main_push_guard_unavailable"
+        if any(ref == "refs/heads/main" for _old, _new, ref in commands):
+            refs = [ref for _old, _new, ref in commands]
+            report = push_gate.build_report_status(
+                refs,
+                "direct pushes to main are blocked; push a branch and open a pull request",
+                side_band=push_gate.side_band_requested(capabilities),
+            )
+            return push_gate.build_http_response(report), "github_main_push_denied"
+    if not config.require_dot_github_approval:
         return None, None
     owner, repo = parts[0].lower(), parts[1].removesuffix(".git").lower()
     try:

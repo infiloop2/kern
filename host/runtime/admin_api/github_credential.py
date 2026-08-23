@@ -45,13 +45,12 @@ so GitHub API calls go through the fixed root helper
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import json
-import subprocess
 import threading
 from typing import Any
 
 from host.runtime.core import state
 from host.runtime.core.network_policy import managed_integration
+from host.runtime.core.root_helpers import HelperError, run_helper_json
 
 MINT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/mint-github-app-token"]
 HELPER_TIMEOUT_SECONDS = 60
@@ -162,39 +161,14 @@ def _mint_app_token(credential: dict[str, Any]) -> tuple[str, str]:
     return token, expires_at
 
 
-class HelperError(Exception):
-    pass
-
-
 def _run_helper_json(
     command: list[str],
     payload: dict[str, Any],
     *,
     timeout: int = HELPER_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    try:
-        proc = subprocess.run(
-            command,
-            input=json.dumps(payload),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise HelperError(f"{command[-1]} failed: {exc}") from exc
-    try:
-        value = json.loads(proc.stdout or "{}")
-    except json.JSONDecodeError as exc:
-        raise HelperError(f"{command[-1]} returned invalid JSON") from exc
-    if proc.returncode != 0:
-        error = value.get("error", {}) if isinstance(value, dict) else {}
-        message = error.get("message") if isinstance(error, dict) else None
-        raise HelperError(message or proc.stderr.strip() or f"{command[-1]} failed")
-    if not isinstance(value, dict):
-        raise HelperError(f"{command[-1]} returned invalid JSON")
-    return value
+    """Compatibility seam for tests and callers that patch the mint helper."""
+    return run_helper_json(command, payload, timeout=timeout)
 
 
 def _github_integration_enabled() -> bool:

@@ -4,8 +4,9 @@ cd /mnt/kern-agent/agent-home
 
 # Grok's server-side web search is not offered on this host, so every
 # invocation passes --disable-web-search, which turns off that search and
-# Grok's web fetch together. There is no operator toggle and therefore no
-# decision for a caller to state.
+# Grok's client-side web fetch together. The root-owned model configuration
+# independently leaves hosted X search enabled. There is no operator toggle
+# and therefore no decision for a caller to state.
 #
 # The flag is a top-level grok option and must precede the `agent` subcommand:
 # `grok agent ... stdio --disable-web-search` is rejected outright as an
@@ -49,6 +50,11 @@ fi
 # --no-leader keeps one turn to one process: leader mode would spawn a shared
 # background agent behind its own socket, outliving the scope this launcher
 # creates and breaking the host's authoritative reap.
+# --always-approve is the process-wide permission mode for agent servers. The
+# ACP yoloMode field only applies when a session is created; resumed sessions
+# can otherwise fall back to agent-writable config and ask a nonexistent ACP
+# user channel for permission. The OS, proxy and host tool approval gates stay
+# authoritative for every process and external action.
 # GROK_LOGIN_DEVICE_FLOW is equally load-bearing: without it Grok 1.0.5's ACP
 # authenticate method chooses a loopback OAuth callback, which cannot complete
 # from the operator's browser on a remote host.
@@ -73,4 +79,4 @@ exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
   GROK_DISABLE_AUTOUPDATER=1 \
   GROK_LOGIN_DEVICE_FLOW=1 \
-  /usr/local/bin/grok --disable-web-search agent --no-leader stdio
+  /usr/local/bin/grok --disable-web-search agent --always-approve --no-leader stdio

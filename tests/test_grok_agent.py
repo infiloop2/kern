@@ -5,9 +5,8 @@ import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
-from host.runtime.admin_api import grok_agent
-from host.runtime.admin_api import thread_scope
-from host.runtime.admin_api.grok_agent import GrokAcpServer, GrokAgentError
+from host.runtime.agent_runtime import grok_agent, thread_scope
+from host.runtime.agent_runtime.grok_agent import GrokAcpServer, GrokAgentError
 
 
 # A scripted stand-in for `grok agent stdio`, speaking the ACP framing the real

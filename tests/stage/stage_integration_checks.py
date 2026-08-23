@@ -481,9 +481,10 @@ class StageIntegrationChecks(AwsSmoke):
             ("search parameters", "xai_web_search_denied", {"headers": matching_headers, "body": '{"search_parameters":{"mode":"on"}}'}),
             ("web-source search parameters", "xai_web_search_denied", {"headers": matching_headers, "body": '{"search_parameters":{"mode":"auto","sources":[{"type":"web"}]}}'}),
             ("news-source search parameters", "xai_web_search_denied", {"headers": matching_headers, "body": '{"search_parameters":{"mode":"on","sources":[{"type":"news"}]}}'}),
-            ("X search", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"x_search"}]}' }),
             ("code execution", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"code_execution"}]}' }),
             ("collections search", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"file_search"}]}' }),
+            ("image editing", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"image_generation","action":"edit"}]}' }),
+            ("video external input", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"video_generation","image_url":"https://example.com/frame.png"}]}' }),
             ("remote MCP", "xai_remote_mcp_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"mcp","server_url":"https://example.com"}]}' }),
             ("unknown hosted tool", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"type":"future_hosted_thing"}]}' }),
             ("untyped hosted tool", "xai_server_tool_denied", {"headers": matching_headers, "body": '{"tools":[{"name":"future_hosted_thing"}]}' }),
@@ -515,6 +516,18 @@ class StageIntegrationChecks(AwsSmoke):
                             '"tools":[{"name":"call_tool"}]}]}',
                 },
             ),
+            (
+                "X search",
+                {"headers": matching_headers, "body": '{"tools":[{"type":"x_search"}]}'},
+            ),
+            (
+                "image generation",
+                {"headers": matching_headers, "body": '{"tools":[{"type":"image_generation","action":"generate"}]}'},
+            ),
+            (
+                "video generation",
+                {"headers": matching_headers, "body": '{"tools":[{"type":"video_generation"}]}'},
+            ),
         ]
         for label, request in allowed_cases:
             assert_decision(label, "allowed", None, **request)
@@ -522,12 +535,13 @@ class StageIntegrationChecks(AwsSmoke):
         self.require_runtime_active("grok")
         print(
             f"    [provider guards] runtime=grok denial_cases={len(denial_cases)} "
-            f"allowed_cases={len(allowed_cases)} web_search=unavailable",
+            f"allowed_cases={len(allowed_cases)} x_search=available web_search=unavailable",
             flush=True,
         )
         self._ok(
             f"live auth, entitlement, and billing passed; {len(denial_cases)} fail-closed edge "
-            f"cases and {len(allowed_cases)} allowed payloads held; Web search is not offered"
+            f"cases and {len(allowed_cases)} allowed payloads held; X search is available and "
+            f"Web search is not offered"
         )
 
     def check_grok_task(self) -> None:

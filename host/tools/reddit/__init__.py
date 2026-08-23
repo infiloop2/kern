@@ -39,6 +39,7 @@ from host.tools.shared.web import (
     json_request,
     known_provider_transport_error,
     provider_warning,
+    transport_or_unmapped_provider_error,
     unmapped_provider_error,
 )
 
@@ -520,10 +521,7 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     elif exc.status:
         message = f"Reddit returned HTTP {exc.status} for the {what} request."
     else:
-        known = known_provider_transport_error(exc)
-        if known:
-            return RuntimeError(known)
-        return unmapped_provider_error("Reddit", what, exc)
+        return transport_or_unmapped_provider_error("Reddit", what, exc)
     return provider_warning("Reddit", what, exc, message)
 
 

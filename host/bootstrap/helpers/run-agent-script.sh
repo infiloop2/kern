@@ -3,7 +3,7 @@ set -euo pipefail
 cd /mnt/kern-agent/agent-home
 
 # Runs one static bash script from the agent home as the agent user, for the
-# script agent runtime (host/runtime/admin_api/script_runner.py). This is the
+# script agent runtime (host/runtime/agent_runtime/script_runner.py). This is the
 # same process boundary the model runtimes get — the kern_agent.slice scope,
 # the proxy environment, and the per-thread scope name — so a scheduled script
 # is as confined as an agent turn, and no more privileged.

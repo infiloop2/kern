@@ -19,6 +19,9 @@ from unittest.mock import MagicMock, patch
 import pg_harness
 
 from host.runtime.core import db, pgclient, secretbox, state
+from host.runtime.core.state import events as state_events
+from host.runtime.core.state import network as state_network
+from host.runtime.core.state import tools as state_tools
 from state_seed import read_agent_events, read_network_events
 from host.runtime.core.state import (
     load_config,
@@ -933,8 +936,8 @@ class StateStorageTests(unittest.TestCase):
 
         vector = [1.0] + [0.0] * 383
         with (
-            patch.object(state, "CONVERSATION_EMBEDDING_MESSAGE_LIMIT", 3),
-            patch.object(state, "CONVERSATION_EMBEDDING_PRUNE_EVERY_BATCHES", 1),
+            patch.object(state_events, "CONVERSATION_EMBEDDING_MESSAGE_LIMIT", 3),
+            patch.object(state_events, "CONVERSATION_EMBEDDING_PRUNE_EVERY_BATCHES", 1),
         ):
             pending = state.unembedded_thread_messages(10)
             self.assertEqual(
@@ -1086,7 +1089,7 @@ class StateStorageTests(unittest.TestCase):
         with state.mutation() as cur:
             for index in range(8):
                 state.append_agent_event(cur, "thread.message", None, {"message": f"m{index}", "source": "user"})
-        with patch.object(state, "AGENT_EVENT_LIMIT", 5), state.mutation() as cur:
+        with patch.object(state_events, "AGENT_EVENT_LIMIT", 5), state.mutation() as cur:
             state.prune_agent_events(cur)
         seqs = [event["seq"] for event in read_agent_events()]
         self.assertEqual(len(seqs), 5)
@@ -1094,7 +1097,7 @@ class StateStorageTests(unittest.TestCase):
 
         for index in range(8):
             state.append_network_event("https", "GET", "example.com", 443, f"/p{index}", "", True)
-        with patch.object(state, "NETWORK_EVENT_LIMIT", 5), state.mutation() as cur:
+        with patch.object(state_network, "NETWORK_EVENT_LIMIT", 5), state.mutation() as cur:
             state.prune_network_events(cur)
         network_seqs = [event["seq"] for event in read_network_events()]
         self.assertEqual(len(network_seqs), 5)
@@ -1102,7 +1105,7 @@ class StateStorageTests(unittest.TestCase):
 
         for index in range(8):
             state.record_tool_event("calendar", "list", "succeeded", f"event {index}")
-        with patch.object(state, "TOOL_EVENT_LIMIT", 5), state.mutation() as cur:
+        with patch.object(state_events, "TOOL_EVENT_LIMIT", 5), state.mutation() as cur:
             state.prune_event_logs(cur)
         tool_seqs = [event["seq"] for event in state.page_tool_events_before(None)]
         self.assertEqual(len(tool_seqs), 5)
@@ -1289,6 +1292,36 @@ class StateStorageTests(unittest.TestCase):
         record = state.network_policy_record()
         assert record is not None
         self.assertEqual(record["controls"], controls)
+
+    def test_block_direct_main_pushes_opt_out_round_trips(self) -> None:
+        controls = {
+            "network_integrations": {
+                "github": {
+                    "enabled": True,
+                    "write_repositories": [{"owner": "infiloop2", "repo": "kern"}],
+                    "block_direct_main_pushes": False,
+                }
+            },
+        }
+        state.save_network_policy(controls, "2026-06-08T00:00:00Z")
+        record = state.network_policy_record()
+        assert record is not None
+        self.assertEqual(record["controls"], controls)
+
+        # Omitting the field restores the safe default and remains sparse in
+        # the operator-facing policy document.
+        defaulted = {
+            "network_integrations": {
+                "github": {
+                    "enabled": True,
+                    "write_repositories": [{"owner": "infiloop2", "repo": "kern"}],
+                }
+            },
+        }
+        state.save_network_policy(defaulted, "2026-06-08T00:00:01Z")
+        record = state.network_policy_record()
+        assert record is not None
+        self.assertEqual(record["controls"], defaulted)
 
     def test_pending_pushes_lifecycle(self) -> None:
         state.enqueue_pending_push(
@@ -1748,8 +1781,8 @@ class HostErrorStorageTests(unittest.TestCase):
     def test_coalesced_sequence_rotation_does_not_consume_retention_slots(self) -> None:
         seen_usec = 1_800_000_000_000_000
         with (
-            patch.object(state, "HOST_DIAGNOSTIC_LIMIT", 2),
-            patch.object(state, "HOST_DIAGNOSTIC_PRUNE_EVERY", 1),
+            patch.object(state_tools, "HOST_DIAGNOSTIC_LIMIT", 2),
+            patch.object(state_tools, "HOST_DIAGNOSTIC_PRUNE_EVERY", 1),
         ):
             state.ingest_host_diagnostic(seen_usec, self.event())
             state.ingest_host_diagnostic(

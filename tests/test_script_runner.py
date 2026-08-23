@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from host import agent_scripts
 from host.agent_scripts import SCRIPT_TIMEOUT_SECONDS, script_path_error
-from host.runtime.admin_api import script_runner, thread_scope
+from host.runtime.agent_runtime import script_runner, thread_scope
 
 
 def _fake_launcher(body: str) -> list[str]:

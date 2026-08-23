@@ -38,7 +38,6 @@ import math
 import os
 from pathlib import Path
 import re
-import shutil
 import secrets
 import socket
 import subprocess
@@ -55,11 +54,86 @@ from host.session_options import session_config_error
 # workspace_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
 # object and reads its attributes only at request time, never during import.
-from host.runtime.admin_api import admin_auth, admin_passkeys, agent_activity, workspace_api as workspace_admin_api, workspace_proxy, bedrock_credentials, claude_code, codex_app_server, github_credential, github_repo_audit, grok_agent, orchestrator, tools_client as tools_admin_api, upgrade_check
+from host.runtime.admin_api import admin_auth, admin_passkeys, workspace_api as workspace_admin_api, workspace_proxy, github_credential, github_repo_audit, tools_client as tools_admin_api, upgrade_check
+from host.runtime.agent_runtime import (
+    agent_activity,
+    bedrock_credentials,
+    claude_code,
+    codex_app_server,
+    grok_agent,
+    orchestrator,
+)
+from host.runtime.admin_api.agent_files import (
+    DOWNLOAD_MAX_BYTES as AGENT_FILE_DOWNLOAD_MAX_BYTES,
+    HELPER_COMMAND as AGENT_FILE_HELPER_COMMAND,
+    HELPER_TIMEOUT_SECONDS as AGENT_FILE_HELPER_TIMEOUT_SECONDS,
+    IMAGE_STREAM_MAX_BYTES as AGENT_FILE_IMAGE_STREAM_MAX_BYTES,
+    STREAM_MAX_BYTES as AGENT_FILE_STREAM_MAX_BYTES,
+    STREAM_MEDIA_TYPES as AGENT_FILE_STREAM_MEDIA_TYPES,
+    UPLOAD_FILENAME_MAX_BYTES as AGENT_FILE_UPLOAD_FILENAME_MAX_BYTES,
+    UPLOAD_HELPER_COMMAND as AGENT_FILE_UPLOAD_HELPER_COMMAND,
+    UPLOAD_MAX_BYTES as AGENT_FILE_UPLOAD_MAX_BYTES,
+    content_disposition as _agent_file_content_disposition,
+    helper_error_message as _helper_error_message,
+    list_files as agent_file_list,
+    path_from_query as _agent_file_path,
+    read_file as agent_file_read,
+    upload_filename as _agent_file_upload_filename,
+)
+from host.runtime.admin_api.conversation_history import (
+    _conversation_search_fingerprint,
+    _decode_conversation_search_cursor,
+    _encode_conversation_search_cursor,
+    read_conversation_history,
+    search_conversation_history,
+)
+from host.runtime.admin_api.request_params import one as _one
 from host.runtime.core import host_errors, network_policy, pgclient, state
+from host.runtime.core.host_metrics import (
+    AGENT_CGROUP_ROOT,
+    AGENT_PROCESS_LIMIT,
+    PROC_ROOT,
+    agent_processes,
+    cpu_usage_percent,
+    filesystem_metrics,
+    host_metrics,
+    memory_metrics,
+    swap_metrics,
+)
+from host.runtime.core.root_helpers import HelperTimedOut, run_root_helper as _run_root_helper
 from host.runtime.embeddings import client as embedding_client
 from host.runtime.tools import tools_host
-from host.runtime.admin_api.orchestrator import agent_runtime_status
+from host.runtime.agent_runtime.orchestrator import agent_runtime_status
+from host.runtime.admin_api.request_params import clip_json_encoded_text as _clip_json_encoded_text
+from host.runtime.admin_api.runtime_accounts import (
+    OAUTH_RUNTIME_TYPES,
+    _OAUTH_LOGIN_FLOWS,
+    _current_bedrock_account,
+    complete_claude_oauth_login,
+    connect_bedrock_credentials,
+    current_agent_accounts,
+    current_bedrock_credentials,
+    current_claude_oauth_login,
+    current_codex_oauth_login,
+    current_grok_oauth_login,
+    disconnect_bedrock_credentials,
+    refresh_agent_runtime_accounts,
+    reset_linked_account,
+    start_claude_oauth_login,
+    start_codex_oauth_login,
+    start_grok_oauth_login,
+)
+from host.runtime.admin_api.threads import (
+    _handoff_event_block,
+    _session_handoff_message,
+    _thread_list_prefix,
+    clear_thread_memory,
+    get_thread,
+    list_threads,
+    send_thread_message,
+    stop_thread,
+    thread_route,
+)
 from host.runtime.core.state import (
     load_config,
     page_agent_events_before,
@@ -262,27 +336,8 @@ OAUTH_LOGIN_LOCK_TIMEOUT_SECONDS = 5
 # logging in again — resetting the linked account never has to fix them first.
 OAUTH_LOGIN_STATUSES = ("awaiting_login", "error")
 REBOOT_HELPER_TIMEOUT_SECONDS = 10
-AGENT_FILE_HELPER_TIMEOUT_SECONDS = 10
-AGENT_FILE_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/read-agent-file"]
-AGENT_FILE_UPLOAD_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/upload-agent-file"]
-AGENT_FILE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
-AGENT_FILE_UPLOAD_FILENAME_MAX_BYTES = 200
-AGENT_FILE_STREAM_MAX_BYTES = 200_000_000
-AGENT_FILE_IMAGE_STREAM_MAX_BYTES = 25 * 1024 * 1024
-AGENT_FILE_DOWNLOAD_MAX_BYTES = 200_000_000
-AGENT_FILE_STREAM_MEDIA_TYPES = {
-    ".mp4": "video/mp4",
-    ".mov": "video/quicktime",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".webp": "image/webp",
-}
 AGENT_AUTH_CLEAR_HELPER_TIMEOUT_SECONDS = 10
 AGENT_AUTH_CLEAR_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/clear-agent-auth"]
-AGENT_CGROUP_ROOT = Path("/sys/fs/cgroup/kern_agent.slice")
-PROC_ROOT = Path("/proc")
-AGENT_PROCESS_LIMIT = 1000
 # Lock inventory for this module (each request runs on its own handler
 # thread, so every handler is concurrent with every other and with the
 # orchestrator's workers):
@@ -874,6 +929,272 @@ class Handler(BaseHTTPRequestHandler):
         return length
 
 
+class _RouteRequest(NamedTuple):
+    """One dispatched request, as its route handler sees it."""
+
+    method: str
+    path: str
+    query: dict[str, list[str]]
+    body: Any
+    path_match: re.Match[str] | None
+
+    def capture(self, group: int) -> str:
+        """A capture from this route's path pattern. Only pattern routes have
+        one, so a handler asking an exact-path route for a capture is a routing
+        table mistake rather than a client error."""
+        if self.path_match is None:
+            raise TypeError("route has no path pattern")
+        return self.path_match.group(group)
+
+
+class _Route(NamedTuple):
+    """One admin API route.
+
+    ``method`` of ``None`` matches any method, and ``path`` is either an exact
+    path or a pattern matched against the whole path. ``operator_only`` marks a
+    route the Workspace principal may never reach even if the shared allowlist
+    ever named it, and ``query_keys`` is the set of query parameters the route
+    accepts; anything else is rejected before the handler runs.
+    """
+
+    method: str | None
+    path: str | re.Pattern[str]
+    handler: Callable[[_RouteRequest], Any]
+    operator_only: bool = False
+    query_keys: frozenset[str] | None = None
+    query_label: str = ""
+
+
+def _route_matches(entry: _Route, method: str, path: str) -> tuple[bool, re.Match[str] | None]:
+    if entry.method is not None and entry.method != method:
+        return False, None
+    if isinstance(entry.path, str):
+        return path == entry.path, None
+    path_match = entry.path.fullmatch(path)
+    return path_match is not None, path_match
+
+
+def _workspace_proxy_route(request: _RouteRequest) -> Any:
+    return workspace_proxy.route_request(request.method, request.path, request.query, request.body)
+
+
+def _agent_accounts_route(request: _RouteRequest) -> dict[str, Any]:
+    if request.query:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "agent-runtime account endpoint does not accept query parameters")
+    return current_agent_accounts()
+
+
+def _agent_events_route(request: _RouteRequest) -> dict[str, Any]:
+    return {
+        "events": page_agent_events_before(
+            _optional_non_negative_int(request.query, "before"),
+            limit=_event_page_limit(request.query),
+        )
+    }
+
+
+def _tool_events_route(request: _RouteRequest) -> dict[str, Any]:
+    return {
+        "events": state.page_tool_events_before(
+            _optional_non_negative_int(request.query, "before"),
+            limit=_event_page_limit(request.query),
+        )
+    }
+
+
+def _tool_event_route(request: _RouteRequest) -> dict[str, Any]:
+    if request.query:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "tool event detail does not accept query parameters")
+    event = state.tool_event(int(request.capture(1)))
+    if event is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, "tool event not found")
+    return {"event": event}
+
+
+def _host_diagnostics_route(request: _RouteRequest) -> dict[str, Any]:
+    service_filter = _one(request.query, "service")
+    if service_filter is not None and SERVICE_NAME_RE.fullmatch(service_filter) is None:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic service is invalid")
+    severity_filter = _one(request.query, "severity")
+    if severity_filter is not None and severity_filter not in {"error", "warning"}:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic severity is invalid")
+    return {
+        "events": state.page_host_diagnostics_before(
+            _optional_non_negative_int(request.query, "before"),
+            service=service_filter,
+            severity=severity_filter,
+            limit=_event_page_limit(request.query),
+        )
+    }
+
+
+def _host_diagnostic_route(request: _RouteRequest) -> dict[str, Any]:
+    if request.query:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic detail does not accept query parameters")
+    diagnostic = state.host_diagnostic(int(request.capture(1)))
+    if diagnostic is None:
+        raise ApiError(HTTPStatus.NOT_FOUND, "host diagnostic not found")
+    return {"diagnostic": diagnostic}
+
+
+def _network_events_route(request: _RouteRequest) -> dict[str, Any]:
+    return {
+        "events": state.page_network_events_before(
+            _optional_non_negative_int(request.query, "before"),
+            decision=_network_event_decision(request.query),
+            limit=_event_page_limit(request.query),
+        )
+    }
+
+
+def _delete_github_credential_route(request: _RouteRequest) -> dict[str, Any]:
+    deleted = github_credential.delete()
+    github_repo_audit.refresh(force=True)
+    return _credential_response(deleted)
+
+
+def _github_audit_route(request: _RouteRequest) -> dict[str, Any]:
+    # The UI's re-check action: re-converge with a fresh mint first (grants may
+    # have changed on GitHub), force-refresh the repository audits with that
+    # published token, and return the updated credential view (warnings
+    # included).
+    github_credential.reconcile(mint_fresh=True)
+    github_repo_audit.refresh(force=True)
+    return _credential_response(github_credential.metadata())
+
+
+def _resolve_pending_push_route(request: _RouteRequest) -> dict[str, Any]:
+    parts = [part for part in request.path.split("/") if part]
+    # .../github-pending-pushes/<id>/<approve|reject>
+    if len(parts) != 5 or parts[4] not in ("approve", "reject"):
+        raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
+    return resolve_pending_push(parts[3], parts[4])
+
+
+# The Workspace service reaches the admin API through these proxied subtrees;
+# each one is operator-only here so a Workspace principal can never take the
+# proxy path back into the admin API.
+_WORKSPACE_PROXY_SUBTREES = ("getting-started", "chat", "web-apps", "memory", "schedules")
+
+# Order decides ties: the first entry whose method and path match handles the
+# request. Specific paths therefore precede the subtree entries that would
+# otherwise swallow them, and a pattern that does not match (a non-numeric
+# event id, say) falls through to the next entry. A request matching no entry
+# is a 404, and a method with no entry for an otherwise known path is a 404
+# too, never a 405.
+_ROUTES: tuple[_Route, ...] = (
+    _Route("GET", "/v1/health", lambda request: health()),
+    _Route("GET", "/v1/agent-runtime/status", lambda request: agent_runtime_status()),
+    _Route("GET", "/v1/agent-runtime/account", _agent_accounts_route),
+    _Route("POST", "/v1/agent-runtime/refresh", lambda request: refresh_agent_runtime_accounts(request.body)),
+    *(
+        _Route(
+            None,
+            re.compile(rf"/v1/workspace/{re.escape(subtree)}(?:/.*)?"),
+            _workspace_proxy_route,
+            operator_only=True,
+        )
+        for subtree in _WORKSPACE_PROXY_SUBTREES
+    ),
+    _Route("POST", "/v1/agent-runtime/codex-oauth-login", lambda request: start_codex_oauth_login()),
+    _Route("GET", "/v1/agent-runtime/codex-oauth-login", lambda request: current_codex_oauth_login()),
+    _Route("POST", "/v1/agent-runtime/claude-oauth-login", lambda request: start_claude_oauth_login()),
+    _Route("GET", "/v1/agent-runtime/claude-oauth-login", lambda request: current_claude_oauth_login()),
+    _Route(
+        "POST",
+        "/v1/agent-runtime/claude-oauth-login/complete",
+        lambda request: complete_claude_oauth_login(request.body),
+    ),
+    _Route("POST", "/v1/agent-runtime/grok-oauth-login", lambda request: start_grok_oauth_login()),
+    _Route("GET", "/v1/agent-runtime/grok-oauth-login", lambda request: current_grok_oauth_login()),
+    _Route("GET", "/v1/agent-runtime/bedrock-credentials", lambda request: current_bedrock_credentials()),
+    _Route(
+        "POST",
+        "/v1/agent-runtime/bedrock-credentials",
+        lambda request: connect_bedrock_credentials(request.body),
+    ),
+    _Route("DELETE", "/v1/agent-runtime/bedrock-credentials", lambda request: disconnect_bedrock_credentials()),
+    _Route("POST", "/v1/agent-runtime/reset-linked-account", lambda request: reset_linked_account(request.body)),
+    _Route(
+        "GET",
+        "/v1/threads",
+        lambda request: list_threads(request.query),
+        query_keys=frozenset({"before", "limit", "prefix"}),
+        query_label="thread list",
+    ),
+    _Route("POST", "/v1/conversation-history/search", lambda request: search_conversation_history(request.body)),
+    _Route("POST", "/v1/conversation-history/read", lambda request: read_conversation_history(request.body)),
+    _Route(
+        None,
+        re.compile(r"/v1/threads/.*"),
+        lambda request: thread_route(request.method, request.path, request.query, request.body),
+    ),
+    _Route(
+        "GET",
+        "/v1/events",
+        _agent_events_route,
+        query_keys=frozenset({"before", "limit"}),
+        query_label="event",
+    ),
+    _Route("GET", "/v1/network/policy", lambda request: network_policy.network_policy_response()),
+    _Route("PUT", "/v1/network/policy", lambda request: replace_network_policy(request.body)),
+    _Route(
+        "GET",
+        "/v1/tools/events",
+        _tool_events_route,
+        query_keys=frozenset({"before", "limit"}),
+        query_label="tool event",
+    ),
+    _Route("GET", re.compile(r"/v1/tools/events/([1-9][0-9]*)"), _tool_event_route),
+    _Route(
+        "GET",
+        "/v1/host-diagnostics",
+        _host_diagnostics_route,
+        query_keys=frozenset({"before", "limit", "service", "severity"}),
+        query_label="host diagnostic",
+    ),
+    _Route("GET", re.compile(r"/v1/host-diagnostics/([1-9][0-9]*)"), _host_diagnostic_route),
+    _Route(
+        None,
+        re.compile(r"/v1/tools(?:/.*)?"),
+        lambda request: tools_admin_api.tools_route(request.method, request.path, request.body),
+    ),
+    _Route(
+        "GET",
+        "/v1/network/events",
+        _network_events_route,
+        query_keys=frozenset({"before", "decision", "limit"}),
+        query_label="network event",
+    ),
+    # Deliberately not gated on the GitHub integration being enabled: staging
+    # the credential first, then enabling, is the flow that never leaves the
+    # proxy allowing repositories with no working token. reconcile() ties the
+    # published token to enablement either way.
+    _Route(
+        "GET",
+        "/v1/network-tools/github-credential",
+        lambda request: _credential_response(github_credential.metadata()),
+    ),
+    _Route("PUT", "/v1/network-tools/github-credential", lambda request: replace_github_credential(request.body)),
+    _Route("DELETE", "/v1/network-tools/github-credential", _delete_github_credential_route),
+    _Route("POST", "/v1/network-tools/github-audit", _github_audit_route),
+    _Route(
+        "GET",
+        "/v1/network-tools/github-pending-pushes",
+        lambda request: {"pending_pushes": state.read_pending_pushes()},
+    ),
+    _Route(
+        "POST",
+        re.compile(r"/v1/network-tools/github-pending-pushes/.*"),
+        _resolve_pending_push_route,
+    ),
+    _Route("GET", "/v1/agent-files", lambda request: agent_file_list(_agent_file_path(request.query))),
+    _Route("GET", "/v1/agent-files/read", lambda request: agent_file_read(_agent_file_path(request.query))),
+    _Route("GET", "/v1/agent-processes", lambda request: agent_processes()),
+    _Route("POST", "/v1/host-runtime/reboot", lambda request: reboot_host()),
+)
+
+
 def route(
     method: str,
     path: str,
@@ -897,171 +1218,15 @@ def route(
         # in-process caller cannot accidentally turn WorkspacePrincipal into
         # general admin authority.
         raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
-    if method == "GET" and path == "/v1/health":
-        return health()
-    if method == "GET" and path == "/v1/agent-runtime/status":
-        return agent_runtime_status()
-    if method == "GET" and path == "/v1/agent-runtime/account":
-        if query:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "agent-runtime account endpoint does not accept query parameters")
-        return current_agent_accounts()
-    if method == "POST" and path == "/v1/agent-runtime/refresh":
-        return refresh_agent_runtime_accounts(body)
-    if path == "/v1/workspace/getting-started" or path.startswith("/v1/workspace/getting-started/"):
-        if not is_operator:
+    for entry in _ROUTES:
+        matched, path_match = _route_matches(entry, method, path)
+        if not matched:
+            continue
+        if entry.operator_only and not is_operator:
             raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
-        return workspace_proxy.route_request(method, path, query, body)
-    if path == "/v1/workspace/chat" or path.startswith("/v1/workspace/chat/"):
-        if not is_operator:
-            raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
-        return workspace_proxy.route_request(method, path, query, body)
-    if path == "/v1/workspace/web-apps" or path.startswith("/v1/workspace/web-apps/"):
-        if not is_operator:
-            raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
-        return workspace_proxy.route_request(method, path, query, body)
-    if path == "/v1/workspace/memory" or path.startswith("/v1/workspace/memory/"):
-        if not is_operator:
-            raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
-        return workspace_proxy.route_request(method, path, query, body)
-    if path == "/v1/workspace/schedules" or path.startswith("/v1/workspace/schedules/"):
-        if not is_operator:
-            raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
-        return workspace_proxy.route_request(method, path, query, body)
-    if path == "/v1/agent-runtime/codex-oauth-login":
-        if method == "POST":
-            return start_codex_oauth_login()
-        if method == "GET":
-            return current_codex_oauth_login()
-    if path == "/v1/agent-runtime/claude-oauth-login":
-        if method == "POST":
-            return start_claude_oauth_login()
-        if method == "GET":
-            return current_claude_oauth_login()
-    if path == "/v1/agent-runtime/claude-oauth-login/complete" and method == "POST":
-        return complete_claude_oauth_login(body)
-    if path == "/v1/agent-runtime/grok-oauth-login":
-        if method == "POST":
-            return start_grok_oauth_login()
-        if method == "GET":
-            return current_grok_oauth_login()
-    if path == "/v1/agent-runtime/bedrock-credentials":
-        if method == "GET":
-            return current_bedrock_credentials()
-        if method == "POST":
-            return connect_bedrock_credentials(body)
-        if method == "DELETE":
-            return disconnect_bedrock_credentials()
-    if path == "/v1/agent-runtime/reset-linked-account" and method == "POST":
-        return reset_linked_account(body)
-    if path == "/v1/threads" and method == "GET":
-        _reject_query_keys(query, {"before", "limit", "prefix"}, "thread list")
-        return list_threads(query)
-    if path == "/v1/conversation-history/search" and method == "POST":
-        return search_conversation_history(body)
-    if path == "/v1/conversation-history/read" and method == "POST":
-        return read_conversation_history(body)
-    if path.startswith("/v1/threads/"):
-        return thread_route(method, path, query, body)
-    if path == "/v1/events" and method == "GET":
-        _reject_query_keys(query, {"before", "limit"}, "event")
-        return {
-            "events": page_agent_events_before(
-                _optional_non_negative_int(query, "before"),
-                limit=_event_page_limit(query),
-            )
-        }
-    if path == "/v1/network/policy":
-        if method == "GET":
-            return network_policy.network_policy_response()
-        if method == "PUT":
-            return replace_network_policy(body)
-    if path == "/v1/tools/events" and method == "GET":
-        _reject_query_keys(query, {"before", "limit"}, "tool event")
-        return {
-            "events": state.page_tool_events_before(
-                _optional_non_negative_int(query, "before"),
-                limit=_event_page_limit(query),
-            )
-        }
-    tool_event_match = re.fullmatch(r"/v1/tools/events/([1-9][0-9]*)", path)
-    if tool_event_match and method == "GET":
-        if query:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "tool event detail does not accept query parameters")
-        event = state.tool_event(int(tool_event_match.group(1)))
-        if event is None:
-            raise ApiError(HTTPStatus.NOT_FOUND, "tool event not found")
-        return {"event": event}
-    if path == "/v1/host-diagnostics" and method == "GET":
-        _reject_query_keys(query, {"before", "limit", "service", "severity"}, "host diagnostic")
-        service_filter = _one(query, "service")
-        if service_filter is not None and SERVICE_NAME_RE.fullmatch(service_filter) is None:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic service is invalid")
-        severity_filter = _one(query, "severity")
-        if severity_filter is not None and severity_filter not in {"error", "warning"}:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic severity is invalid")
-        return {
-            "events": state.page_host_diagnostics_before(
-                _optional_non_negative_int(query, "before"),
-                service=service_filter,
-                severity=severity_filter,
-                limit=_event_page_limit(query),
-            )
-        }
-    host_diagnostic_match = re.fullmatch(r"/v1/host-diagnostics/([1-9][0-9]*)", path)
-    if host_diagnostic_match and method == "GET":
-        if query:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic detail does not accept query parameters")
-        diagnostic = state.host_diagnostic(int(host_diagnostic_match.group(1)))
-        if diagnostic is None:
-            raise ApiError(HTTPStatus.NOT_FOUND, "host diagnostic not found")
-        return {"diagnostic": diagnostic}
-    if path == "/v1/tools" or path.startswith("/v1/tools/"):
-        return tools_admin_api.tools_route(method, path, body)
-    if path == "/v1/network/events" and method == "GET":
-        _reject_query_keys(query, {"before", "decision", "limit"}, "network event")
-        return {
-            "events": state.page_network_events_before(
-                _optional_non_negative_int(query, "before"),
-                decision=_network_event_decision(query),
-                limit=_event_page_limit(query),
-            )
-        }
-    if path == "/v1/network-tools/github-credential":
-        # Deliberately not gated on the GitHub integration being enabled:
-        # staging the credential first, then enabling, is the flow that never
-        # leaves the proxy allowing repositories with no working token.
-        # reconcile() ties the published token to enablement either way.
-        if method == "GET":
-            return _credential_response(github_credential.metadata())
-        if method == "PUT":
-            return replace_github_credential(body)
-        if method == "DELETE":
-            deleted = github_credential.delete()
-            github_repo_audit.refresh(force=True)
-            return _credential_response(deleted)
-    if path == "/v1/network-tools/github-audit" and method == "POST":
-        # The UI's re-check action: re-converge with a fresh mint first
-        # (grants may have changed on GitHub), force-refresh the repository
-        # audits with that published token, and
-        # return the updated credential view (warnings included).
-        github_credential.reconcile(mint_fresh=True)
-        github_repo_audit.refresh(force=True)
-        return _credential_response(github_credential.metadata())
-    if path == "/v1/network-tools/github-pending-pushes" and method == "GET":
-        return {"pending_pushes": state.read_pending_pushes()}
-    if path.startswith("/v1/network-tools/github-pending-pushes/") and method == "POST":
-        parts = [part for part in path.split("/") if part]
-        # .../github-pending-pushes/<id>/<approve|reject>
-        if len(parts) == 5 and parts[4] in ("approve", "reject"):
-            return resolve_pending_push(parts[3], parts[4])
-    if path == "/v1/agent-files" and method == "GET":
-        return agent_file_list(_agent_file_path(query))
-    if path == "/v1/agent-files/read" and method == "GET":
-        return agent_file_read(_agent_file_path(query))
-    if path == "/v1/agent-processes" and method == "GET":
-        return agent_processes()
-    if path == "/v1/host-runtime/reboot" and method == "POST":
-        return reboot_host()
+        if entry.query_keys is not None:
+            _reject_query_keys(query, entry.query_keys, entry.query_label)
+        return entry.handler(_RouteRequest(method, path, query, body, path_match))
     raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
 
 
@@ -1120,32 +1285,8 @@ def _credential_response(metadata: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-class HelperTimedOut(Exception):
-    """A root helper ran past its timeout. could_not_terminate means the
-    unprivileged kill of the sudo-spawned child failed too."""
-
-    def __init__(self, could_not_terminate: bool) -> None:
-        super().__init__("root helper timed out")
-        self.could_not_terminate = could_not_terminate
 
 
-def _run_root_helper(argv: list[str], timeout_seconds: int) -> "subprocess.CompletedProcess[str]":
-    """Run one sudo root helper; each caller maps returncodes and
-    HelperTimedOut to its own status policy."""
-    try:
-        return subprocess.run(
-            argv,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except (subprocess.TimeoutExpired, PermissionError) as exc:
-        # On timeout, subprocess.run kills the child — but the helper runs as
-        # root via sudo, so the unprivileged service user's kill raises
-        # PermissionError in place of TimeoutExpired.
-        raise HelperTimedOut(isinstance(exc, PermissionError)) from exc
 
 
 def reboot_host() -> dict[str, str]:
@@ -1168,240 +1309,16 @@ def reboot_host() -> dict[str, str]:
     return {"status": "accepted"}
 
 
-def agent_file_list(path: str) -> dict[str, Any]:
-    return _run_agent_file_helper("list", path)
 
 
-def agent_file_read(path: str) -> dict[str, Any]:
-    return _run_agent_file_helper("read", path)
 
 
-def _run_agent_file_helper(action: str, path: str) -> dict[str, Any]:
-    try:
-        proc = _run_root_helper([*AGENT_FILE_HELPER_COMMAND, action, path], AGENT_FILE_HELPER_TIMEOUT_SECONDS)
-    except HelperTimedOut as exc:
-        message = (
-            "agent file helper timed out (the root helper could not be terminated)"
-            if exc.could_not_terminate
-            else "agent file helper timed out"
-        )
-        raise ApiError(HTTPStatus.GATEWAY_TIMEOUT, message) from exc
-    if proc.returncode != 0:
-        message = _helper_error_message(proc.stdout, proc.stderr)
-        status = {
-            2: HTTPStatus.NOT_FOUND,
-            3: HTTPStatus.BAD_REQUEST,
-            4: HTTPStatus.BAD_REQUEST,
-        }.get(proc.returncode, HTTPStatus.INTERNAL_SERVER_ERROR)
-        raise ApiError(status, message or "agent file helper failed")
-    try:
-        value = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "agent file helper returned invalid JSON") from exc
-    if not isinstance(value, dict):
-        raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "agent file helper returned invalid JSON")
-    return value
 
 
-def agent_processes() -> dict[str, Any]:
-    """Return a bounded process snapshot for the agent runtime slice — exactly
-    the fields the admin UI renders."""
-    pids = sorted(_agent_slice_pids())
-    uptime = _proc_uptime()
-    clk_tck = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
-    processes: list[dict[str, Any]] = []
-    for pid in pids[:AGENT_PROCESS_LIMIT]:
-        process = _agent_process_info(pid, uptime, clk_tck)
-        if process is not None:
-            processes.append(process)
-    return {"processes": processes, "truncated": len(pids) > AGENT_PROCESS_LIMIT}
 
 
-def _agent_slice_pids() -> set[int]:
-    if not AGENT_CGROUP_ROOT.is_dir():
-        return set()
-    pids: set[int] = set()
-    try:
-        for proc_file in AGENT_CGROUP_ROOT.rglob("cgroup.procs"):
-            try:
-                lines = proc_file.read_text().splitlines()
-            except (OSError, UnicodeDecodeError):
-                continue
-            for line in lines:
-                try:
-                    pid = int(line)
-                except ValueError:
-                    continue
-                if pid > 0:
-                    pids.add(pid)
-    except OSError:
-        return set()
-    return pids
 
 
-def _agent_process_info(pid: int, uptime: float, clk_tck: int) -> dict[str, Any] | None:
-    proc_dir = PROC_ROOT / str(pid)
-    try:
-        stat = _proc_stat(proc_dir / "stat")
-        status = _proc_status(proc_dir / "status")
-    except (OSError, ValueError, IndexError):
-        return None
-    name = status.get("Name") or stat["name"]
-    cmdline = _proc_cmdline(proc_dir / "cmdline") or f"[{name}]"
-    result: dict[str, Any] = {
-        "pid": pid,
-        "state": stat["state"],
-        "name": name,
-        "cmdline": cmdline,
-    }
-    rss_bytes = _rss_bytes(status.get("VmRSS"))
-    if rss_bytes is not None:
-        result["rss_bytes"] = rss_bytes
-    if uptime > 0 and clk_tck > 0:
-        result["elapsed_seconds"] = int(max(0.0, uptime - (stat["start_ticks"] / clk_tck)))
-    return result
-
-
-def _proc_stat(path: Path) -> dict[str, Any]:
-    raw = path.read_text()
-    left = raw.find("(")
-    right = raw.rfind(")")
-    if left < 0 or right <= left:
-        raise ValueError("malformed proc stat")
-    fields = raw[right + 2 :].split()
-    return {
-        "name": raw[left + 1 : right],
-        "state": fields[0],
-        "start_ticks": int(fields[19]),
-    }
-
-
-def _proc_status(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for line in path.read_text().splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        values[key] = value.strip()
-    return values
-
-
-def _proc_cmdline(path: Path) -> str:
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        return ""
-    return raw.rstrip(b"\0").replace(b"\0", b" ").decode("utf-8", "replace")
-
-
-def _proc_uptime() -> float:
-    try:
-        return float((PROC_ROOT / "uptime").read_text().split()[0])
-    except (OSError, ValueError, IndexError):
-        return 0.0
-
-
-def _rss_bytes(rss_line: str | None) -> int | None:
-    if not rss_line:
-        return None
-    parts = rss_line.split()
-    if not parts:
-        return None
-    try:
-        value = int(parts[0])
-    except ValueError:
-        return None
-    unit = parts[1].lower() if len(parts) > 1 else "kb"
-    return value * 1024 if unit == "kb" else value
-
-
-def _helper_error_message(stdout: str, stderr: str) -> str:
-    try:
-        value = json.loads(stdout)
-    except json.JSONDecodeError:
-        return stderr.strip()
-    if isinstance(value, dict):
-        error = value.get("error")
-        if isinstance(error, dict):
-            message = error.get("message")
-            if isinstance(message, str):
-                return message
-    return stderr.strip()
-
-
-def thread_route(
-    method: str,
-    path: str,
-    query: dict[str, list[str]],
-    body: Any,
-) -> Any:
-    parts = path.strip("/").split("/")
-    if len(parts) < 3 or not PRODUCT_THREAD_ID_RE.fullmatch(parts[2]):
-        raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
-    thread_id = parts[2]
-    if len(parts) == 3 and method == "GET":
-        if query:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "thread detail does not accept query parameters")
-        return {"thread": get_thread(thread_id)}
-    if len(parts) == 4 and parts[3] == "messages" and method == "POST":
-        return send_thread_message(thread_id, body)
-    if len(parts) == 4 and parts[3] == "stop" and method == "POST":
-        return stop_thread(thread_id)
-    if len(parts) == 4 and parts[3] == "clear-memory" and method == "POST":
-        return clear_thread_memory(thread_id)
-    if len(parts) == 4 and parts[3] == "events" and method == "GET":
-        _reject_query_keys(
-            query,
-            {"since", "before", "limit", "message_bytes", "event_type"},
-            "thread event",
-        )
-        message_bytes = _optional_bounded_positive_query_int(
-            query, "message_bytes", THREAD_EVENT_MESSAGE_BYTES_LIMIT
-        )
-        requested_event_types = query.get("event_type")
-        event_types: tuple[str, ...] | None = None
-        if requested_event_types:
-            unknown_event_types = sorted(
-                set(requested_event_types) - THREAD_DISPLAY_EVENT_TYPES
-            )
-            if unknown_event_types:
-                raise ApiError(
-                    HTTPStatus.BAD_REQUEST,
-                    f"unsupported thread event type: {unknown_event_types[0]}",
-                )
-            event_types = tuple(dict.fromkeys(requested_event_types))
-        since = _optional_non_negative_int(query, "since")
-        before = _optional_non_negative_int(query, "before")
-        if since is not None and before is not None:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "since and before cannot be combined")
-        page_kwargs: dict[str, Any] = {"before": before}
-        if event_types is not None:
-            page_kwargs["event_types"] = event_types
-        events = state.page_thread_events(
-            thread_id, since, _event_page_limit(query), **page_kwargs
-        )
-        if message_bytes is not None:
-            for event in events:
-                payload = event.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                for field in ("message", "error_message"):
-                    value = payload.get(field)
-                    if isinstance(value, str):
-                        payload[field] = _clip_json_encoded_text(value, message_bytes)
-                activity = payload.get("activity")
-                if isinstance(activity, dict):
-                    # A single event must stay below the Workspace proxy's 1 MiB
-                    # response cap. Keep the useful command/tool output large,
-                    # but bound both rich text fields and mark every clip.
-                    detail_budget = min(message_bytes, 24 * 1024)
-                    output_budget = max(1, message_bytes - detail_budget)
-                    for field, budget in (("detail", detail_budget), ("output", output_budget)):
-                        value = activity.get(field)
-                        if isinstance(value, str):
-                            activity[field] = _clip_json_encoded_text(value, budget)
-        return {"events": events}
-    raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
 
 
 def health() -> dict[str, Any]:
@@ -1645,484 +1562,6 @@ def _bounded_embedding_batch(
     return bounded
 
 
-def _mint_codex_login() -> tuple[dict[str, str], dict[str, str]]:
-    login = codex_app_server.start_device_login()
-    response = {
-        "status": "awaiting_login",
-        "device_code": login.user_code,
-        "login_url": login.verification_url,
-        "expires_at": _minutes_from_now(10),
-    }
-    return response, response | {"login_id": login.login_id}
-
-
-def _mint_claude_login() -> tuple[dict[str, str], dict[str, str]]:
-    login = claude_code.start_oauth_login()
-    response = {
-        "status": "awaiting_code",
-        "login_url": login.login_url,
-        "expires_at": _minutes_from_now(10),
-    }
-    return response, response
-
-
-def _mint_grok_login() -> tuple[dict[str, str], dict[str, str]]:
-    """Start the Grok device login.
-
-    This is the Codex shape, not the Claude one: xAI shows the operator a code
-    in their browser and polls for approval itself, so there is no completion
-    endpoint to call back into. The status poller observes the resolved
-    ``authenticate`` on the parked server and captures the anchor from there.
-    The code is embedded in the verification URL's query string rather than
-    returned as a field, and the adapter lifts it out.
-    """
-    try:
-        login = grok_agent.start_device_login()
-    except grok_agent.GrokLoginAlreadyAuthenticated:
-        # A browser flow may have written the credential just before its
-        # parked completion server was lost. Grok then has no anchor to trust,
-        # but refuses to issue another URL while that credential remains.
-        # Clear it through the same root helper as an operator reset and retry
-        # once, so every accepted anchor still comes from a fresh browser flow.
-        account = state.read_xai_account()
-        if account.get("operator_approval") == orchestrator.XAI_OPERATOR_APPROVAL:
-            raise ApiError(
-                HTTPStatus.CONFLICT,
-                "Disconnect the linked Grok account before signing in again",
-            )
-        _clear_local_agent_auth("grok")
-        login = grok_agent.start_device_login()
-    response = {
-        "status": "awaiting_login",
-        "device_code": login.user_code or "",
-        "login_url": login.login_url,
-        "expires_at": _minutes_from_now(10),
-    }
-    # login_id is persisted but never returned: it is what scopes the anchor
-    # capture and the parked-server close to this exact login.
-    return response, response | {"login_id": login.login_id}
-
-
-class _OAuthLoginFlow(NamedTuple):
-    """One runtime's login flow: the codex and claude endpoints are the same
-    machine, differing only in these fields. mint returns (public response,
-    persisted record); close tears down a login whose gate re-check lost."""
-
-    runtime_type: str
-    # oauth_logins keys on the provider spelling ('claude'), not the runtime
-    # type ('claude_code'); orchestrator.mark_oauth_login_completed keys the
-    # same way.
-    oauth_key: str
-    display: str
-    provider: str
-    response_keys: tuple[str, ...]
-    mint: Callable[[], tuple[dict[str, str], dict[str, str]]]
-    close: Callable[[], None]
-    # Whether a persisted row still has the process that can complete it, for
-    # flows where one is required. None means the row stands on its own.
-    parked: Callable[[], bool] | None = None
-
-
-_OAUTH_LOGIN_FLOWS = {
-    "codex": _OAuthLoginFlow(
-        runtime_type="codex",
-        oauth_key="codex",
-        display="Codex",
-        provider="OpenAI",
-        response_keys=("status", "device_code", "login_url", "expires_at"),
-        mint=_mint_codex_login,
-        close=lambda: codex_app_server.close_login_server(),
-    ),
-    "claude_code": _OAuthLoginFlow(
-        runtime_type="claude_code",
-        oauth_key="claude",
-        display="Claude",
-        provider="Claude",
-        response_keys=("status", "login_url", "expires_at"),
-        mint=_mint_claude_login,
-        close=lambda: claude_code.close_login_process(),
-    ),
-    "grok": _OAuthLoginFlow(
-        runtime_type="grok",
-        oauth_key="grok",
-        display="Grok",
-        provider="xAI",
-        response_keys=("status", "device_code", "login_url", "expires_at"),
-        mint=_mint_grok_login,
-        close=lambda: grok_agent.close_login_server(),
-        parked=lambda: grok_agent.login_server_parked(),
-    ),
-}
-
-
-def _require_oauth_login_available(flow: _OAuthLoginFlow) -> None:
-    if not orchestrator.runtime_network_enabled(flow.runtime_type):
-        raise ApiError(
-            HTTPStatus.CONFLICT,
-            f"{flow.display} OAuth login is unavailable while {flow.provider} provider access is disabled",
-        )
-    if orchestrator.runtime_status(flow.runtime_type) not in OAUTH_LOGIN_STATUSES:
-        raise ApiError(
-            HTTPStatus.CONFLICT,
-            f"{flow.display} OAuth login is only available while awaiting_login or in error",
-        )
-
-
-def _start_oauth_login(flow: _OAuthLoginFlow) -> dict[str, str]:
-    if not OAUTH_LOGIN_LOCK.acquire(timeout=OAUTH_LOGIN_LOCK_TIMEOUT_SECONDS):
-        raise ApiError(HTTPStatus.CONFLICT, f"{flow.display} OAuth login is already starting")
-    try:
-        _require_oauth_login_available(flow)
-        oauth = state.oauth_login(flow.oauth_key)
-        if oauth and flow.parked is not None and not flow.parked():
-            # The row outlived the process that can complete it. Grok's device
-            # flow is driven by the CLI holding the long-running authenticate
-            # request, and an admin API restart stops that scope through
-            # BindsTo, so returning the row would hand the operator a code
-            # nobody is exchanging until it expires. Drop it and mint again.
-            with state.mutation() as cur:
-                state.set_oauth_login(cur, flow.oauth_key, None)
-            oauth = None
-        if oauth:
-            return {key: oauth[key] for key in flow.response_keys}
-        response, persisted = flow.mint()
-        with state.mutation() as cur:
-            # Re-check the gate inside the mutation: a policy disable or a
-            # completed refresh that raced the slow mint must not park a
-            # fresh login process, so the loser closes it here.
-            try:
-                _require_oauth_login_available(flow)
-            except ApiError:
-                flow.close()
-                raise
-            state.set_oauth_login(cur, flow.oauth_key, persisted)
-        return response
-    finally:
-        OAUTH_LOGIN_LOCK.release()
-
-
-def _current_oauth_login_response(flow: _OAuthLoginFlow) -> dict[str, str]:
-    _require_oauth_login_available(flow)
-    oauth = state.oauth_login(flow.oauth_key)
-    # A row whose driving process is gone is not a login in progress. Report it
-    # as absent rather than handing back a code nobody is exchanging; the row
-    # itself is cleared by the next start, which is the mutating path.
-    if oauth and flow.parked is not None and not flow.parked():
-        oauth = None
-    if not oauth:
-        raise ApiError(HTTPStatus.NOT_FOUND, f"{flow.display} OAuth login has not been started")
-    return {key: oauth[key] for key in flow.response_keys}
-
-
-def start_codex_oauth_login() -> dict[str, str]:
-    return _start_oauth_login(_OAUTH_LOGIN_FLOWS["codex"])
-
-
-def current_codex_oauth_login() -> dict[str, str]:
-    return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["codex"])
-
-
-def start_claude_oauth_login() -> dict[str, str]:
-    return _start_oauth_login(_OAUTH_LOGIN_FLOWS["claude_code"])
-
-
-def current_claude_oauth_login() -> dict[str, str]:
-    return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["claude_code"])
-
-
-def start_grok_oauth_login() -> dict[str, str]:
-    return _start_oauth_login(_OAUTH_LOGIN_FLOWS["grok"])
-
-
-def current_grok_oauth_login() -> dict[str, str]:
-    return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["grok"])
-
-
-def complete_claude_oauth_login(body: Any) -> dict[str, str]:
-    if not isinstance(body, dict) or not isinstance(body.get("code"), str) or not body["code"].strip():
-        raise ApiError(HTTPStatus.BAD_REQUEST, "code must be a non-empty string")
-    if not orchestrator.runtime_network_enabled("claude_code"):
-        raise ApiError(HTTPStatus.CONFLICT, "Claude OAuth login is unavailable while Claude provider access is disabled")
-    try:
-        claude_code.complete_oauth_login(body["code"])
-    except claude_code.ClaudeCodeError as exc:
-        raise ApiError(HTTPStatus.CONFLICT, str(exc)) from exc
-    orchestrator.mark_oauth_login_completed("claude", _claude_completed_token_hash())
-    status = orchestrator.refresh_runtime_status("claude_code")
-    if status != "active":
-        # The pending login record must survive until the refresh above: it is
-        # the operator-approval window that lets the refresh capture the first
-        # trusted account. On an active result the refresh clears it itself.
-        with state.mutation() as cur:
-            state.set_oauth_login(cur, "claude", None)
-    return {"status": "accepted"}
-
-
-def _claude_completed_token_hash() -> str | None:
-    """Bind the operator approval to the token the login just wrote: first
-    capture requires attesting this exact token, so agent credentials swapped
-    after completion do not inherit the approval. If the read fails, the
-    completion refresh cannot capture a first trusted account and the
-    non-active completion path clears the spent login so the operator can
-    retry."""
-    try:
-        account = claude_code.read_claude_account()
-    except claude_code.ClaudeCodeError:
-        return None
-    value = account.get("access_token_sha256") if account else None
-    return value if isinstance(value, str) and value else None
-
-
-# Long-term IAM user access key ids only (AKIA prefix, 20 characters).
-# Temporary session credentials (ASIA...) need an X-Amz-Security-Token the
-# proxy deliberately denies, so rejecting them here with a clear message
-# beats the generic STS failure they would otherwise hit.
-BEDROCK_ACCESS_KEY_ID_RE = re.compile(r"^AKIA[0-9A-Z]{16}$")
-
-
-def connect_bedrock_credentials(body: Any) -> dict[str, str]:
-    """Store the operator-pasted AWS key pair and region as one connection.
-
-    Only this operator API
-    writes that row, so the stored credential is the approval. The request
-    synchronously attests the key even while Bedrock is disabled; a failed
-    candidate is never stored and leaves any previous validated connection
-    unchanged."""
-    if not isinstance(body, dict):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be an object")
-    unexpected = sorted(set(body) - {"access_key_id", "secret_access_key", "region"})
-    if unexpected:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "unexpected request fields: " + ", ".join(unexpected))
-    access_key_id = body.get("access_key_id")
-    secret_access_key = body.get("secret_access_key")
-    region = body.get("region")
-    if not isinstance(access_key_id, str) or not access_key_id.strip():
-        raise ApiError(HTTPStatus.BAD_REQUEST, "access_key_id must be a non-empty string")
-    if not BEDROCK_ACCESS_KEY_ID_RE.fullmatch(access_key_id.strip()):
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "access_key_id must be a long-term IAM access key id (20 characters, AKIA prefix); "
-            "temporary session credentials (ASIA...) are not supported — create a long-term "
-            "access key for a dedicated IAM user instead",
-        )
-    if not isinstance(secret_access_key, str) or not secret_access_key.strip():
-        raise ApiError(HTTPStatus.BAD_REQUEST, "secret_access_key must be a non-empty string")
-    if region not in BEDROCK_REGIONS:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "region must be one of " + ", ".join(BEDROCK_REGIONS),
-        )
-    try:
-        status, error_message = orchestrator.replace_and_validate_bedrock_credentials(
-            access_key_id.strip(),
-            secret_access_key.strip(),
-            region,
-        )
-    except bedrock_credentials.BedrockCredentialsError as exc:
-        raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
-    if status != "active":
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            error_message or "AWS credential validation failed",
-        )
-    if not orchestrator.runtime_network_enabled("hermes"):
-        return {"status": "accepted"}
-    # Runtime refresh reads the validated row without another AWS call. The
-    # proxy reads that same row directly.
-    orchestrator.refresh_runtime_status("hermes")
-    return {"status": "accepted"}
-
-
-def current_bedrock_credentials() -> dict[str, Any]:
-    """Return non-secret metadata for the validated Bedrock credential."""
-    access_key_id = state.read_bedrock_access_key_id()
-    response: dict[str, Any] = {"connected": access_key_id is not None}
-    if access_key_id is not None:
-        response["access_key_id"] = access_key_id
-        region = state.read_bedrock_region()
-        if region is not None:
-            response["region"] = region
-    return response
-
-
-def disconnect_bedrock_credentials() -> dict[str, str]:
-    """Delete the AWS connection and stop Hermes."""
-    orchestrator.disconnect_bedrock_connection()
-    return {"status": "accepted"}
-
-
-def reset_linked_account(body: Any) -> dict[str, str]:
-    """Delete the linked-account guard: the operator-approved anchor, its
-    proxy pin, pending OAuth approval, local agent auth files, and old runtime
-    processes. Callable in any runtime status."""
-    if not isinstance(body, dict) or body.get("agent_runtime") not in OAUTH_RUNTIME_TYPES:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "agent_runtime must be one of " + ", ".join(OAUTH_RUNTIME_TYPES))
-    runtime_type = body["agent_runtime"]
-    orchestrator.reset_linked_account(runtime_type)
-    try:
-        _clear_local_agent_auth(runtime_type)
-    except ApiError:
-        orchestrator.refresh_runtime_status(runtime_type)
-        raise
-    orchestrator.refresh_runtime_status(runtime_type)
-    return {"status": "accepted"}
-
-
-# The clear-agent-auth helper is named for the provider whose files it
-# removes, not for the runtime that uses them.
-_AGENT_AUTH_HELPER_RUNTIMES = {"codex": "codex", "claude_code": "claude", "grok": "grok"}
-
-
-def _clear_local_agent_auth(runtime_type: str) -> None:
-    helper_runtime = _AGENT_AUTH_HELPER_RUNTIMES[runtime_type]
-    try:
-        proc = _run_root_helper(
-            [*AGENT_AUTH_CLEAR_HELPER_COMMAND, helper_runtime], AGENT_AUTH_CLEAR_HELPER_TIMEOUT_SECONDS
-        )
-    except HelperTimedOut as exc:
-        message = (
-            f"{runtime_type} reset helper could not be terminated; retry reset"
-            if exc.could_not_terminate
-            else f"{runtime_type} reset timed out clearing local auth files; retry reset"
-        )
-        raise ApiError(HTTPStatus.CONFLICT, message) from exc
-    if proc.returncode != 0:
-        detail = _helper_error_message(proc.stdout, proc.stderr)
-        message = f"{runtime_type} reset failed clearing local auth files; retry reset"
-        if detail:
-            message = f"{message}: {detail}"
-        raise ApiError(HTTPStatus.CONFLICT, message)
-
-
-AGENT_RUNTIME_TYPES = ("codex", "claude_code", "grok", "hermes")
-OAUTH_RUNTIME_TYPES = ("codex", "claude_code", "grok")
-
-
-def current_agent_accounts() -> dict[str, Any]:
-    statuses = orchestrator.all_runtime_status_records()
-    return {
-        "accounts": [
-            _current_agent_account(statuses, "codex"),
-            _current_agent_account(statuses, "claude_code"),
-            _current_agent_account(statuses, "grok"),
-            _current_bedrock_account(statuses),
-        ]
-    }
-
-
-def refresh_agent_runtime_accounts(body: Any) -> dict[str, Any]:
-    runtime_types: tuple[str, ...]
-    if body is None:
-        runtime_types = AGENT_RUNTIME_TYPES
-    elif isinstance(body, dict):
-        runtime = body.get("agent_runtime")
-        if runtime is None:
-            runtime_types = AGENT_RUNTIME_TYPES
-        elif isinstance(runtime, str) and runtime in AGENT_RUNTIME_TYPES:
-            runtime_types = (runtime,)
-        else:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "agent_runtime must be one of " + ", ".join(AGENT_RUNTIME_TYPES))
-    else:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be an object")
-    for runtime_type in runtime_types:
-        force_probe = (
-            runtime_type != "hermes"
-            or orchestrator.runtime_network_enabled(runtime_type)
-        )
-        orchestrator.refresh_runtime_status(runtime_type, force_provider_probe=force_probe)
-    return current_agent_accounts()
-
-
-def _current_agent_account(statuses: dict[str, dict[str, Any]], runtime_type: str) -> dict[str, Any]:
-    status = str(statuses.get(runtime_type, {}).get("status", "loading"))
-    if runtime_type == "claude_code":
-        response = {"agent_runtime": "claude_code", "provider": "claude", "status": status}
-        account = read_claude_account()
-        if account.get("identity_attestation") != orchestrator.CLAUDE_IDENTITY_ATTESTATION:
-            account = {}
-    elif runtime_type == "grok":
-        response = {"agent_runtime": "grok", "provider": "xai", "status": status}
-        account = read_xai_account()
-        if account.get("operator_approval") != orchestrator.XAI_OPERATOR_APPROVAL:
-            account = {}
-    else:
-        response = {"agent_runtime": "codex", "provider": "openai", "status": status}
-        account = read_openai_account()
-        if account.get("operator_approval") != orchestrator.OPENAI_OPERATOR_APPROVAL:
-            account = {}
-    return _account_response_tail(response, account, status, runtime_type)
-
-
-def _current_bedrock_account(statuses: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    status = str(statuses.get("hermes", {}).get("status", "loading"))
-    response: dict[str, Any] = {
-        "provider": "bedrock",
-        "agent_runtimes": ["hermes"],
-        "status": status,
-        # Live usage survives credential state on purpose: the counters record
-        # month-to-date work already done, and reporting them costs one local
-        # aggregate read.
-        "bedrock_usage": _bedrock_live_usage(),
-    }
-    # Credential and display metadata are stored or cleared atomically, so the
-    # account is meaningful only while the validated credential remains.
-    account = state.read_bedrock_account() if state.read_bedrock_access_key_id() else {}
-    return _account_response_tail(response, account, status, "bedrock")
-
-
-def _account_response_tail(
-    response: dict[str, Any],
-    account: dict[str, Any],
-    status: str,
-    runtime_type: str,
-) -> dict[str, Any]:
-    if status == "active":
-        response.update(_account_response_metadata(account, runtime_type))
-        return response
-    # The account anchor outlives sessions and deactivation; expose its
-    # identity (never plan/usage) so the UI can show which account is linked
-    # while the runtime is logged out or in error.
-    for key in ("account_id", "email", "arn"):
-        value = account.get(key)
-        if isinstance(value, str) and value:
-            response[key] = value
-    return response
-
-
-_BEDROCK_USAGE_TOKEN_FIELDS = (
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-)
-
-
-def _bedrock_live_usage() -> dict[str, Any]:
-    """Month-to-date Bedrock usage.
-
-    The proxy counts the token usage AWS reports in each allowed response and
-    the USD it priced that response at, per model and UTC day. This
-    sums the current month straight from those stored counters — the cost is
-    the recorded figure, not re-priced at read time. It remains an estimate of
-    what AWS will bill, not the bill itself: unmetered requests (``requests``
-    minus ``metered_requests``) are surfaced instead of silently rounding the
-    estimate down."""
-    month_start = time.strftime("%Y-%m-01", time.gmtime())
-    usage: dict[str, Any] = {
-        "month_to_date": 0.0,
-        "currency": "USD",
-        "requests": 0,
-        "metered_requests": 0,
-        **{field: 0 for field in _BEDROCK_USAGE_TOKEN_FIELDS},
-    }
-    for row in state.read_bedrock_usage(month_start):
-        usage["requests"] += row["requests"]
-        usage["metered_requests"] += row["metered_requests"]
-        usage["month_to_date"] += row["cost_usd"]
-        for field in _BEDROCK_USAGE_TOKEN_FIELDS:
-            usage[field] += row[field]
-    usage["month_to_date"] = round(usage["month_to_date"], 4)
-    return usage
 
 
 # Bedrock is absent on purpose: its usage is computed live from the proxy's
@@ -2140,1150 +1579,22 @@ _RUNTIME_USAGE_KEYS = {
 _THREAD_SEND_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 
-def _thread_send_lock(thread_id: str) -> threading.Lock:
-    return _THREAD_SEND_LOCKS[hash(thread_id) % len(_THREAD_SEND_LOCKS)]
 
 
-def _account_response_metadata(account: dict[str, Any], runtime_type: str) -> dict[str, Any]:
-    # Provider capture sanitizes metadata before storage; this selects only the
-    # public fields without re-normalizing provider-owned usage shapes.
-    response: dict[str, Any] = {}
-    for key in ("account_id", "email", "plan_type", "arn"):
-        value = account.get(key)
-        if isinstance(value, str) and value:
-            response[key] = value
-    if runtime_type == "grok":
-        for key in ("coding_data_retention_opt_out", "zdr_enabled"):
-            if isinstance(account.get(key), bool):
-                response[key] = account[key]
-    usage_key = _RUNTIME_USAGE_KEYS.get(runtime_type)
-    if usage_key is None:
-        return response
-    usage = account.get(usage_key)
-    if isinstance(usage, dict) and usage:
-        response[usage_key] = usage
-    return response
 
 
-def send_thread_message(
-    thread_id: str,
-    body: Any,
-) -> dict[str, Any]:
-    """The one write path for agent work: start a turn on an idle thread
-    (creating the thread on its first message) or steer the thread's running
-    turn. There is no queue — a message that cannot run now is rejected with
-    a retry hint and the caller decides."""
-    if PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "thread_id must start with app-, thread-, or schedule-",
-        )
-    message = _message(body)
-    with _thread_send_lock(thread_id):
-        session_config = state.thread_session_config(thread_id)
-        agent_runtime, model, effort = _resolve_session_config(body, session_config, thread_id)
-        switching_session = _session_configuration_changed(
-            session_config, agent_runtime, model, effort
-        )
-        if not switching_session and orchestrator.steer_live_turn(
-            thread_id, agent_runtime, message
-        ):
-            turn = None
-            provider_session_id = None
-        else:
-            after_commit: list[Callable[[], None]] = []
-            with state.mutation(after_commit=after_commit) as cur:
-                # Re-read inside the admission transaction. The send lock keeps
-                # same-thread messages ordered, while this snapshot keeps the
-                # initial session row and turn events in one commit.
-                session_config = state.thread_session_config(thread_id, cur)
-                agent_runtime, model, effort = _resolve_session_config(body, session_config, thread_id)
-                switching_session = _session_configuration_changed(
-                    session_config, agent_runtime, model, effort
-                )
-                launch_message = message
-                session_change_activity = None
-                handoff_events: list[dict[str, Any]] = []
-                missing_provider_context = (
-                    session_config is not None
-                    and not session_config.get("provider_session_id")
-                )
-                if switching_session or missing_provider_context:
-                    handoff_events = state.recent_thread_handoff_events(
-                        cur,
-                        thread_id,
-                        message_character_limit=THREAD_HANDOFF_MESSAGE_CHARACTER_LIMIT,
-                        activity_character_limit=THREAD_HANDOFF_ACTIVITY_CHARACTER_LIMIT,
-                        activity_event_character_limit=THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT,
-                        # A cleared thread has no provider session, so it takes
-                        # the handoff path; the floor is what keeps that path
-                        # from handing back the context that was cleared.
-                        after_seq=int((session_config or {}).get("context_cleared_seq") or 0),
-                    )
-                if switching_session:
-                    assert session_config is not None
-                    if session_config["status"] != "idle":
-                        raise ApiError(
-                            HTTPStatus.CONFLICT,
-                            "thread runtime, model, and effort can change only while the thread is idle",
-                        )
-                    try:
-                        state.rotate_thread_session(
-                            cur,
-                            thread_id,
-                            agent_runtime,
-                            model,
-                            effort,
-                            utc_now(),
-                        )
-                    except ValueError as exc:
-                        raise ApiError(
-                            HTTPStatus.CONFLICT,
-                            "thread runtime, model, and effort can change only while the thread is idle",
-                        ) from exc
-                    provider_session_id = None
-                    session_change_activity = _session_change_activity(
-                        session_config,
-                        agent_runtime,
-                        model,
-                        effort,
-                    )
-                else:
-                    provider_session_id = (
-                        session_config.get("provider_session_id") if session_config else None
-                    )
-                    state.save_thread_session(
-                        cur,
-                        agent_runtime,
-                        thread_id,
-                        provider_session_id,
-                        utc_now(),
-                        model,
-                        effort,
-                    )
-                # Only when there is history to hand over. Both paths above can
-                # produce none — a cleared thread by its floor, a first-message
-                # switch by having no events — and the prompt tells the new
-                # session it is continuing a thread, which is exactly wrong for
-                # a run that starts fresh.
-                if handoff_events:
-                    launch_message = _session_handoff_message(handoff_events, message)
-                turn = orchestrator.admit_turn(
-                    cur,
-                    after_commit,
-                    thread_id,
-                    agent_runtime,
-                    model,
-                    effort,
-                    message,
-                    pre_message_activity=session_change_activity,
-                )
-            orchestrator.launch_turn(turn, launch_message, provider_session_id)
-    return {
-        "status": "accepted",
-        "thread": _public_thread(thread_id, agent_runtime, model, effort),
-    }
 
 
-def get_thread(thread_id: str) -> dict[str, Any]:
-    config = state.thread_session_config(thread_id)
-    if config is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
-    return _public_thread(
-        thread_id,
-        config["agent_runtime"],
-        config["model"],
-        config["effort"],
-        last_used_at=config.get("last_used_at"),
-    )
 
 
-def stop_thread(thread_id: str) -> dict[str, str]:
-    if state.thread_session_config(thread_id) is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
-    if not orchestrator.stop_thread_turn(thread_id):
-        raise ApiError(HTTPStatus.CONFLICT, "the thread has no running work")
-    return {"status": "accepted"}
 
 
-def clear_thread_memory(thread_id: str) -> dict[str, str]:
-    """Drop the thread's provider session so its next run starts fresh.
-
-    This deletes nothing. Retained events stay readable in the thread and in
-    conversation history; they simply stop being replayed into the provider.
-    The visible marker is committed with the state change, so a thread can
-    never show a clear that did not take effect.
-    """
-    # Take the same lock a send does: the clear must land either wholly before
-    # or wholly after a send, never between that send's session snapshot and
-    # its launch, which would strip context the run was admitted with. Holding
-    # it also means no new turn can be admitted between the live check below
-    # and the write.
-    with _thread_send_lock(thread_id):
-        session_config = state.thread_session_config(thread_id)
-        if session_config is None:
-            raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
-        if session_config["status"] != "idle":
-            raise ApiError(
-                HTTPStatus.CONFLICT,
-                "working memory can be cleared only while the thread is idle",
-            )
-        # A stopped turn returns the thread to durable idle while its process
-        # is still closing, and that finishing worker may still report a
-        # provider session for its run number. Clearing on the persisted status
-        # alone would let that late write restore the session just cleared, so
-        # the fence is the live set: once a thread leaves it, no worker can
-        # still write for it.
-        if thread_id in orchestrator.live_thread_ids():
-            raise ApiError(
-                HTTPStatus.CONFLICT,
-                "the thread is still finishing; retry shortly",
-            )
-        with state.mutation() as cur:
-            session_config = state.thread_session_config(thread_id, cur)
-            if session_config is None:
-                raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
-            if session_config["status"] != "idle":
-                raise ApiError(
-                    HTTPStatus.CONFLICT,
-                    "working memory can be cleared only while the thread is idle",
-                )
-            cleared_seq = state.append_agent_event(
-                cur,
-                # Its own display type, not thread.activity: the Chat UI can
-                # hide activity, and the boundary must stay visible when it is.
-                "thread.memory_cleared",
-                thread_id,
-                {"message": WORKING_MEMORY_CLEARED_NOTICE},
-                run_number=session_config["run_number"],
-            )
-            try:
-                state.clear_thread_context(cur, thread_id, cleared_seq, utc_now())
-            except ValueError as exc:
-                raise ApiError(
-                    HTTPStatus.CONFLICT,
-                    "working memory can be cleared only while the thread is idle",
-                ) from exc
-    return {"status": "cleared"}
 
 
-def _conversation_utf8_bytes(value: str, field: str) -> bytes:
-    try:
-        return value.encode()
-    except UnicodeEncodeError as exc:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            f"{field} must be valid UTF-8",
-        ) from exc
 
 
-def _optional_conversation_text(value: Any, field: str, maximum: int) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.strip():
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be a non-empty string")
-    if "\x00" in value:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must not contain NUL")
-    normalized = value.strip()
-    if len(_conversation_utf8_bytes(normalized, field)) > maximum:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            f"{field} must be at most {maximum} UTF-8 bytes",
-        )
-    return normalized
 
 
-def _optional_conversation_timestamp(value: Any, field: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an RFC 3339 timestamp")
-    if len(_conversation_utf8_bytes(value, field)) > 64:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an RFC 3339 timestamp")
-    timestamp_match = RFC3339_TIMESTAMP_RE.fullmatch(value)
-    if timestamp_match is None:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an RFC 3339 timestamp")
-    try:
-        fraction = timestamp_match.group("fraction")
-        parse_value = value
-        if fraction is not None and len(fraction) > 6:
-            parse_value = (
-                value[: timestamp_match.start("fraction") + 6]
-                + value[timestamp_match.end("fraction") :]
-            )
-        parsed = datetime.fromisoformat(
-            parse_value[:-1] + "+00:00"
-            if parse_value.endswith(("Z", "z"))
-            else parse_value
-        )
-        parsed = parsed.astimezone(timezone.utc)
-        if fraction is not None and any(digit != "0" for digit in fraction):
-            parsed = parsed.replace(microsecond=0) + timedelta(seconds=1)
-    except (ValueError, OverflowError) as exc:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            f"{field} must be an RFC 3339 timestamp",
-        ) from exc
-    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _conversation_limit(value: Any, maximum: int) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            f"limit must be between 1 and {maximum}",
-        )
-    return value
-
-
-def _conversation_event_seq(value: Any, field: str) -> int:
-    if not isinstance(value, str) or (match := EVENT_ID_RE.fullmatch(value)) is None:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an event id")
-    seq = int(match.group(1))
-    if seq > POSTGRES_BIGINT_MAX:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an event id")
-    return seq
-
-
-def _conversation_search_fingerprint(
-    queries: list[str],
-    from_timestamp: str | None,
-    to_timestamp: str | None,
-    thread_id: str | None,
-    roles: list[str],
-) -> str:
-    encoded = json.dumps(
-        [queries, from_timestamp, to_timestamp, thread_id, roles],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()[:24]
-
-
-def _encode_conversation_search_cursor(
-    fingerprint: str,
-    relevance: bool,
-    value: dict[str, Any],
-    *,
-    mode: str | None = None,
-    min_seq: int | None = None,
-    max_seq: int | None = None,
-    embedding_min_seq: int | None = None,
-    embedding_generation: int | None = None,
-    semantic_seqs: tuple[int, ...] | None = None,
-) -> str:
-    cursor_mode = mode or ("rank" if relevance else "time")
-    if relevance:
-        fields = [fingerprint, cursor_mode, value.get("rank"), value.get("seq")]
-        snapshot = [
-            min_seq,
-            max_seq,
-            embedding_min_seq,
-            embedding_generation,
-            None if semantic_seqs is None else list(semantic_seqs),
-        ]
-        if all(item is not None for item in snapshot):
-            fields.extend(snapshot)
-            signature = hmac.new(
-                _CONVERSATION_CURSOR_SIGNING_KEY,
-                json.dumps(fields, separators=(",", ":")).encode(),
-                hashlib.sha256,
-            ).hexdigest()
-            fields.append(signature)
-        elif cursor_mode != "rank":
-            raise ValueError("relevance cursor requires a complete snapshot")
-    else:
-        fields = [fingerprint, "time", value.get("timestamp"), value.get("seq")]
-    raw = json.dumps(fields, separators=(",", ":")).encode()
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-
-
-def _decode_conversation_search_cursor(
-    value: Any,
-    fingerprint: str,
-    relevance: bool,
-) -> tuple[
-    str,
-    float | int | str,
-    int,
-    int | None,
-    int | None,
-    int | None,
-    int | None,
-    tuple[int, ...] | None,
-] | None:
-    if value is None:
-        return None
-    try:
-        if not isinstance(value, str) or not value:
-            raise ValueError
-        encoded = _conversation_utf8_bytes(value, "cursor")
-        if len(encoded) > CONVERSATION_CURSOR_BYTES:
-            raise ValueError
-        padded = encoded + b"=" * (-len(encoded) % 4)
-        decoded = json.loads(
-            base64.b64decode(padded, altchars=b"-_", validate=True)
-        )
-        if not isinstance(decoded, list) or len(decoded) not in {4, 10}:
-            raise ValueError
-        if len(decoded) == 10:
-            signature = decoded.pop()
-            if not isinstance(signature, str) or not hmac.compare_digest(
-                signature,
-                hmac.new(
-                    _CONVERSATION_CURSOR_SIGNING_KEY,
-                    json.dumps(decoded, separators=(",", ":")).encode(),
-                    hashlib.sha256,
-                ).hexdigest(),
-            ):
-                raise ValueError
-        cursor_fingerprint, mode, position, seq = decoded[:4]
-        valid_modes = {"rank", "hybrid", "fallback", "lexical"} if relevance else {"time"}
-        if (
-            cursor_fingerprint != fingerprint
-            or mode not in valid_modes
-            or not isinstance(seq, int)
-            or isinstance(seq, bool)
-            or seq < 1
-            or seq > POSTGRES_BIGINT_MAX
-        ):
-            raise ValueError
-        if relevance:
-            if len(decoded) == 4:
-                # Cursors issued before snapshot fields existed were plain
-                # lexical rank cursors. Preserve that compatibility without
-                # pretending they are stable hybrid positions.
-                if mode != "rank":
-                    raise ValueError
-                snapshot: tuple[
-                    int | None,
-                    int | None,
-                    int | None,
-                    int | None,
-                    tuple[int, ...] | None,
-                ] = (
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            else:
-                (
-                    min_seq,
-                    max_seq,
-                    embedding_min_seq,
-                    embedding_generation,
-                    encoded_semantic_seqs,
-                ) = decoded[4:]
-                if (
-                    not isinstance(min_seq, int)
-                    or isinstance(min_seq, bool)
-                    or min_seq < 0
-                    or not isinstance(max_seq, int)
-                    or isinstance(max_seq, bool)
-                    or max_seq < min_seq
-                    or max_seq > POSTGRES_BIGINT_MAX
-                    or not isinstance(embedding_min_seq, int)
-                    or isinstance(embedding_min_seq, bool)
-                    or embedding_min_seq < 0
-                    or embedding_min_seq > max_seq
-                    or not isinstance(embedding_generation, int)
-                    or isinstance(embedding_generation, bool)
-                    or embedding_generation < 0
-                    or embedding_generation > POSTGRES_BIGINT_MAX
-                    or not isinstance(encoded_semantic_seqs, list)
-                    or len(encoded_semantic_seqs) > CONVERSATION_SEMANTIC_CANDIDATES
-                    or any(
-                        not isinstance(candidate, int)
-                        or isinstance(candidate, bool)
-                        or candidate < 1
-                        or candidate > max_seq
-                        for candidate in encoded_semantic_seqs
-                    )
-                    or len(set(encoded_semantic_seqs)) != len(encoded_semantic_seqs)
-                ):
-                    raise ValueError
-                snapshot = (
-                    min_seq,
-                    max_seq,
-                    embedding_min_seq,
-                    embedding_generation,
-                    tuple(encoded_semantic_seqs),
-                )
-            if mode in {"hybrid", "fallback"}:
-                if (
-                    not isinstance(position, int)
-                    or isinstance(position, bool)
-                    or not 0 <= position <= CONVERSATION_SEMANTIC_CANDIDATES * 2
-                ):
-                    raise ValueError
-                return (
-                    mode,
-                    position,
-                    seq,
-                    snapshot[0],
-                    snapshot[1],
-                    snapshot[2],
-                    snapshot[3],
-                    snapshot[4],
-                )
-            if (
-                not isinstance(position, (int, float))
-                or isinstance(position, bool)
-            ):
-                raise ValueError
-            try:
-                rank = float(position)
-            except OverflowError as exc:
-                raise ValueError from exc
-            if not math.isfinite(rank) or rank < 0:
-                raise ValueError
-            # ``rank`` is the pre-hybrid cursor mode. It must continue as plain
-            # lexical pagination: that client has not consumed a fused prefix,
-            # so excluding today's semantic candidates would silently skip
-            # results it has never seen.
-            return (
-                mode,
-                rank,
-                seq,
-                snapshot[0],
-                snapshot[1],
-                snapshot[2],
-                snapshot[3],
-                snapshot[4],
-            )
-        if not isinstance(position, str) or UTC_TIMESTAMP_RE.fullmatch(position) is None:
-            raise ValueError
-        try:
-            datetime.strptime(position, "%Y-%m-%dT%H:%M:%SZ")
-        except ValueError as exc:
-            raise ValueError from exc
-        return "time", position, seq, None, None, None, None, None
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "cursor is invalid or belongs to different search filters",
-        ) from exc
-
-
-def _require_conversation_search_snapshot(
-    expected_event_min_seq: int,
-    expected_embedding_min_seq: int,
-) -> None:
-    event_min_seq, embedding_min_seq = state.conversation_search_retention()
-    source_expired = expected_event_min_seq > 0 and event_min_seq != expected_event_min_seq
-    vectors_expired = expected_embedding_min_seq > 0 and (
-        embedding_min_seq == 0 or embedding_min_seq > expected_embedding_min_seq
-    )
-    if source_expired or vectors_expired:
-        raise ApiError(
-            HTTPStatus.CONFLICT,
-            "conversation search cursor snapshot expired; restart the search",
-        )
-
-
-def _frozen_conversation_semantic_rows(
-    semantic_seqs: tuple[int, ...],
-    *,
-    from_timestamp: str | None,
-    to_timestamp: str | None,
-    thread_id: str | None,
-    sources: tuple[str, ...],
-    min_seq: int,
-    max_seq: int,
-    embedding_min_seq: int,
-) -> list[dict[str, Any]]:
-    """Resolve cursor ids only when every id still satisfies its search."""
-    rows = state.thread_messages_by_seqs(
-        semantic_seqs,
-        from_timestamp=from_timestamp,
-        to_timestamp=to_timestamp,
-        thread_id=thread_id,
-        sources=sources,
-        max_seq=max_seq,
-    )
-    if len(rows) != len(semantic_seqs):
-        # Prefer the specific expiry response when retention advanced during
-        # this lookup; otherwise the cursor was altered or never belonged to
-        # these fingerprinted filters.
-        _require_conversation_search_snapshot(min_seq, embedding_min_seq)
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "cursor is invalid or belongs to different search filters",
-        )
-    return rows
-
-
-def search_conversation_history(body: Any) -> dict[str, Any]:
-    """Validate and execute one public, bounded history-search request."""
-    if not isinstance(body, dict):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "conversation search must be an object")
-    allowed = {
-        "query",
-        "query_variants",
-        "from",
-        "to",
-        "thread_id",
-        "roles",
-        "limit",
-        "cursor",
-    }
-    unexpected = sorted(set(body) - allowed)
-    if unexpected:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            f"unsupported conversation search field: {unexpected[0]}",
-        )
-    query = _optional_conversation_text(body.get("query"), "query", CONVERSATION_QUERY_BYTES)
-    variants = body.get("query_variants", [])
-    if not isinstance(variants, list) or len(variants) > CONVERSATION_VARIANT_LIMIT:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            f"query_variants must contain at most {CONVERSATION_VARIANT_LIMIT} strings",
-        )
-    normalized_variants: list[str] = []
-    for value in variants:
-        variant = _optional_conversation_text(
-            value, "query variant", CONVERSATION_VARIANT_BYTES
-        )
-        if variant is None:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "query variants must be non-empty")
-        if variant not in normalized_variants:
-            normalized_variants.append(variant)
-    if normalized_variants and query is None:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "query_variants require query")
-    queries = ([] if query is None else [query]) + [
-        variant for variant in normalized_variants if variant != query
-    ]
-    from_timestamp = _optional_conversation_timestamp(body.get("from"), "from")
-    to_timestamp = _optional_conversation_timestamp(body.get("to"), "to")
-    if (
-        from_timestamp is not None
-        and to_timestamp is not None
-        and from_timestamp >= to_timestamp
-    ):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "from must be earlier than to")
-    thread_id = body.get("thread_id")
-    if thread_id is not None and (
-        not isinstance(thread_id, str)
-        or PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None
-    ):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "thread_id is invalid")
-    if query is None and from_timestamp is None and to_timestamp is None and thread_id is None:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "provide query, from, to, or thread_id",
-        )
-    roles = body.get("roles", ["user", "assistant"])
-    if (
-        not isinstance(roles, list)
-        or not roles
-        or not all(isinstance(role, str) for role in roles)
-        or set(roles) - {"user", "assistant"}
-    ):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "roles must contain user and/or assistant")
-    roles = list(dict.fromkeys(roles))
-    limit = _conversation_limit(body.get("limit", 10), CONVERSATION_SEARCH_LIMIT)
-    fingerprint = _conversation_search_fingerprint(
-        queries, from_timestamp, to_timestamp, thread_id, roles
-    )
-    decoded_cursor = _decode_conversation_search_cursor(
-        body.get("cursor"), fingerprint, bool(queries)
-    )
-    cursor_mode = decoded_cursor[0] if decoded_cursor is not None else None
-    snapshot_min_seq: int | None = None
-    snapshot_max_seq: int | None = None
-    snapshot_embedding_min_seq: int | None = None
-    snapshot_embedding_generation: int | None = None
-    snapshot_semantic_seqs: tuple[int, ...] | None = None
-    hybrid_offset = 0
-    before: tuple[float, int] | tuple[str, int] | None = None
-    if decoded_cursor is not None:
-        (
-            _mode,
-            position,
-            seq,
-            snapshot_min_seq,
-            snapshot_max_seq,
-            snapshot_embedding_min_seq,
-            snapshot_embedding_generation,
-            snapshot_semantic_seqs,
-        ) = decoded_cursor
-        if cursor_mode in {"hybrid", "fallback"}:
-            if not isinstance(position, int) or isinstance(position, bool):
-                raise ApiError(HTTPStatus.BAD_REQUEST, "cursor is invalid")
-            hybrid_offset = position
-        elif queries:
-            if not isinstance(position, float):
-                raise ApiError(HTTPStatus.BAD_REQUEST, "cursor is invalid")
-            before = (position, seq)
-        else:
-            if not isinstance(position, str):
-                raise ApiError(HTTPStatus.BAD_REQUEST, "cursor is invalid")
-            before = (position, seq)
-    if queries and decoded_cursor is None:
-        (
-            snapshot_min_seq,
-            snapshot_max_seq,
-            snapshot_embedding_min_seq,
-            snapshot_embedding_generation,
-        ) = state.conversation_search_snapshot()
-    if queries and snapshot_min_seq is not None:
-        assert snapshot_embedding_min_seq is not None
-        _require_conversation_search_snapshot(
-            snapshot_min_seq,
-            snapshot_embedding_min_seq,
-        )
-    search_mode = "lexical" if queries else "timestamp"
-    continuation_mode: str | None = None
-    lexical_tail: dict[str, Any] | None = None
-    lexical_tail_mode = "lexical"
-    try:
-        sources = tuple("user" if role == "user" else "agent" for role in roles)
-        if queries and cursor_mode not in {"rank", "lexical"}:
-            lexical_rows = state.search_thread_messages(
-                tuple(queries),
-                from_timestamp=from_timestamp,
-                to_timestamp=to_timestamp,
-                thread_id=thread_id,
-                sources=sources,
-                limit=CONVERSATION_SEMANTIC_CANDIDATES + 1,
-                before=None,
-                max_seq=snapshot_max_seq,
-            )
-            # The extra row distinguishes a result set that ends exactly at the
-            # candidate window from one with more matches below it, so a lexical
-            # continuation is only advertised when a tail really exists.
-            if len(lexical_rows) > CONVERSATION_SEMANTIC_CANDIDATES:
-                lexical_rows = lexical_rows[:CONVERSATION_SEMANTIC_CANDIDATES]
-                last_lexical = lexical_rows[-1]
-                lexical_tail = {
-                    "rank": last_lexical["search_rank"],
-                    "seq": last_lexical["seq"],
-                }
-            if cursor_mode == "fallback":
-                # A fallback cursor owns a lexical-only positional offset.
-                # Keep that ordering stable even if inference has recovered;
-                # switching it to fused ranking would skip or repeat hits.
-                rows = _hybrid_conversation_rows(lexical_rows, [])[hybrid_offset:]
-                search_mode = "lexical_fallback"
-                continuation_mode = "fallback"
-                lexical_tail_mode = "rank"
-            elif cursor_mode == "hybrid":
-                # The first page froze the ordered HNSW candidate ids. Fetch
-                # their immutable source rows instead of rerunning an
-                # approximate scan whose graph may have changed meanwhile.
-                assert snapshot_semantic_seqs is not None
-                assert snapshot_min_seq is not None
-                assert snapshot_max_seq is not None
-                assert snapshot_embedding_min_seq is not None
-                semantic_rows = _frozen_conversation_semantic_rows(
-                    snapshot_semantic_seqs,
-                    from_timestamp=from_timestamp,
-                    to_timestamp=to_timestamp,
-                    thread_id=thread_id,
-                    sources=sources,
-                    min_seq=snapshot_min_seq,
-                    max_seq=snapshot_max_seq,
-                    embedding_min_seq=snapshot_embedding_min_seq,
-                )
-                rows = _hybrid_conversation_rows(
-                    lexical_rows,
-                    semantic_rows,
-                )[hybrid_offset:]
-                search_mode = "hybrid"
-                continuation_mode = "hybrid"
-            else:
-                try:
-                    query_embedding = embedding_client.embed_texts(
-                        [query or queries[0]], kind="query"
-                    )[0]
-                    semantic_rows = state.search_thread_messages_semantic(
-                        query_embedding,
-                        embedding_client.MODEL_NAME,
-                        from_timestamp=from_timestamp,
-                        to_timestamp=to_timestamp,
-                        thread_id=thread_id,
-                        sources=sources,
-                        limit=CONVERSATION_SEMANTIC_CANDIDATES,
-                        minimum_similarity=embedding_client.MINIMUM_SIMILARITY,
-                        max_seq=snapshot_max_seq,
-                        max_embedding_generation=snapshot_embedding_generation,
-                    )
-                    snapshot_semantic_seqs = tuple(
-                        int(row["seq"]) for row in semantic_rows
-                    )
-                    rows = _hybrid_conversation_rows(
-                        lexical_rows,
-                        semantic_rows,
-                    )[hybrid_offset:]
-                    search_mode = "hybrid"
-                    continuation_mode = "hybrid"
-                except (embedding_client.EmbeddingError, pgclient.Error, OSError) as exc:
-                    if not isinstance(exc, embedding_client.EmbeddingError):
-                        host_errors.report_unexpected("admin_api.embedding_search", exc)
-                    snapshot_semantic_seqs = ()
-                    rows = _hybrid_conversation_rows(lexical_rows, [])[hybrid_offset:]
-                    search_mode = "lexical_fallback"
-                    continuation_mode = "fallback"
-                    # A fallback prefix contains only lexical candidates, so
-                    # its tail must not exclude semantic candidates.
-                    lexical_tail_mode = "rank"
-        else:
-            # A lexical continuation walks below the fused window, where the
-            # semantic candidates already returned on the hybrid pages appear
-            # again at their own lexical rank. Exclude the candidate ids frozen
-            # by the first page so the walk yields each hit once without
-            # rerunning inference or HNSW.
-            exclude_seqs: tuple[int, ...] = ()
-            if queries and cursor_mode == "lexical":
-                assert snapshot_semantic_seqs is not None
-                assert snapshot_min_seq is not None
-                assert snapshot_max_seq is not None
-                assert snapshot_embedding_min_seq is not None
-                _frozen_conversation_semantic_rows(
-                    snapshot_semantic_seqs,
-                    from_timestamp=from_timestamp,
-                    to_timestamp=to_timestamp,
-                    thread_id=thread_id,
-                    sources=sources,
-                    min_seq=snapshot_min_seq,
-                    max_seq=snapshot_max_seq,
-                    embedding_min_seq=snapshot_embedding_min_seq,
-                )
-                exclude_seqs = snapshot_semantic_seqs
-            rows = state.search_thread_messages(
-                tuple(queries),
-                from_timestamp=from_timestamp,
-                to_timestamp=to_timestamp,
-                thread_id=thread_id,
-                sources=sources,
-                limit=limit + 1,
-                before=before,
-                max_seq=snapshot_max_seq,
-                exclude_seqs=exclude_seqs,
-            )
-            continuation_mode = (
-                "rank" if cursor_mode == "rank" else "lexical"
-            ) if queries else None
-    except pgclient.Error as exc:
-        if exc.sqlstate == "57014":
-            raise ApiError(
-                HTTPStatus.UNPROCESSABLE_ENTITY,
-                "conversation search exceeded its work limit; narrow the query or time range",
-            ) from exc
-        raise
-    if queries and snapshot_min_seq is not None:
-        assert snapshot_embedding_min_seq is not None
-        _require_conversation_search_snapshot(
-            snapshot_min_seq,
-            snapshot_embedding_min_seq,
-        )
-    page = rows[:limit]
-    matches = []
-    for row in page:
-        excerpt = _clip_json_encoded_text(
-            row["excerpt"], CONVERSATION_SEARCH_EXCERPT_BYTES
-        )
-        matches.append(
-            {
-                "thread_id": row["thread_id"],
-                "event_id": row["event_id"],
-                "timestamp": row["timestamp"],
-                "role": "user" if row["source"] == "user" else "assistant",
-                "excerpt": excerpt,
-                "excerpt_truncated": row["excerpt_truncated"] or excerpt != row["excerpt"],
-            }
-        )
-    response: dict[str, Any] = {
-        "provenance": HISTORY_PROVENANCE,
-        "trust": HISTORY_TRUST,
-        "instruction_authority": HISTORY_INSTRUCTION_AUTHORITY,
-        "matches": matches,
-        "search_mode": search_mode,
-        "next_cursor": None,
-    }
-    if len(rows) > limit and page:
-        last = page[-1]
-        next_value = (
-            {
-                "rank": (
-                    hybrid_offset + limit
-                    if continuation_mode in {"hybrid", "fallback"}
-                    else last["search_rank"]
-                ),
-                "seq": last["seq"],
-            }
-            if queries
-            else {"timestamp": last["timestamp"], "seq": last["seq"]}
-        )
-        response["next_cursor"] = _encode_conversation_search_cursor(
-            fingerprint,
-            bool(queries),
-            next_value,
-            mode=continuation_mode,
-            min_seq=snapshot_min_seq,
-            max_seq=snapshot_max_seq,
-            embedding_min_seq=snapshot_embedding_min_seq,
-            embedding_generation=snapshot_embedding_generation,
-            semantic_seqs=snapshot_semantic_seqs,
-        )
-    elif lexical_tail is not None and page:
-        response["next_cursor"] = _encode_conversation_search_cursor(
-            fingerprint,
-            True,
-            lexical_tail,
-            mode=lexical_tail_mode,
-            min_seq=snapshot_min_seq,
-            max_seq=snapshot_max_seq,
-            embedding_min_seq=snapshot_embedding_min_seq,
-            embedding_generation=snapshot_embedding_generation,
-            semantic_seqs=snapshot_semantic_seqs,
-        )
-    return response
-
-
-def _hybrid_conversation_rows(
-    lexical_rows: list[dict[str, Any]],
-    semantic_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Fuse bounded candidate sets while favoring exact lexical evidence."""
-    by_seq: dict[int, dict[str, Any]] = {}
-    scores: dict[int, float] = {}
-    for rank, row in enumerate(lexical_rows, start=1):
-        seq = int(row["seq"])
-        by_seq[seq] = row
-        scores[seq] = scores.get(seq, 0.0) + 2.0 / (60 + rank)
-    for rank, row in enumerate(semantic_rows, start=1):
-        seq = int(row["seq"])
-        by_seq.setdefault(seq, row)
-        scores[seq] = scores.get(seq, 0.0) + 1.0 / (60 + rank)
-    ranked = [dict(row, search_rank=scores[seq]) for seq, row in by_seq.items()]
-    ranked.sort(
-        key=lambda row: (float(row["search_rank"]), int(row["seq"])),
-        reverse=True,
-    )
-    return ranked
-
-
-def read_conversation_history(body: Any) -> dict[str, Any]:
-    """Validate and execute one public, bounded thread-history request."""
-    if not isinstance(body, dict):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "conversation read must be an object")
-    allowed = {
-        "thread_id",
-        "before",
-        "after",
-        "around_event_id",
-        "include_activity",
-        "limit",
-    }
-    unexpected = sorted(set(body) - allowed)
-    if unexpected:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            f"unsupported conversation read field: {unexpected[0]}",
-        )
-    thread_id = body.get("thread_id")
-    if (
-        not isinstance(thread_id, str)
-        or PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None
-    ):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "thread_id is invalid")
-    cursors: dict[str, int] = {}
-    for public_name, internal_name in (
-        ("before", "before"),
-        ("after", "after"),
-        ("around_event_id", "around"),
-    ):
-        value = body.get(public_name)
-        if value is None:
-            continue
-        cursors[internal_name] = _conversation_event_seq(value, public_name)
-    if len(cursors) > 1:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "before, after, and around_event_id cannot be combined",
-        )
-    include_activity = body.get("include_activity", False)
-    if not isinstance(include_activity, bool):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "include_activity must be a boolean")
-    limit = _conversation_limit(body.get("limit", 20), CONVERSATION_READ_LIMIT)
-    event_types = CONVERSATION_EVENT_TYPES if include_activity else ("thread.message",)
-    if "around" in cursors:
-        raw_events = state.page_thread_events_around(
-            thread_id,
-            cursors["around"],
-            limit,
-            event_types=event_types,
-        )
-        if raw_events is None:
-            raise ApiError(HTTPStatus.NOT_FOUND, "anchor event not found in thread")
-        mode = "around"
-    elif "after" in cursors:
-        raw_events = state.page_thread_events(
-            thread_id,
-            cursors["after"],
-            limit,
-            event_types=event_types,
-        )
-        mode = "after"
-    else:
-        raw_events = state.page_thread_events(
-            thread_id,
-            None,
-            limit,
-            before=cursors.get("before"),
-            event_types=event_types,
-        )
-        mode = "before"
-
-    projected = [_conversation_event(event) for event in raw_events]
-    events = _bounded_conversation_events(projected, mode, cursors.get("around"))
-    response: dict[str, Any] = {
-        "provenance": HISTORY_PROVENANCE,
-        "trust": HISTORY_TRUST,
-        "instruction_authority": HISTORY_INSTRUCTION_AUTHORITY,
-        "thread": {"thread_id": thread_id},
-        "events": events,
-        "older_cursor": None,
-        "newer_cursor": None,
-    }
-    if events:
-        oldest = _event_seq(events[0]["event_id"])
-        newest = _event_seq(events[-1]["event_id"])
-        has_older, has_newer = state.thread_event_page_bounds(
-            thread_id,
-            oldest,
-            newest,
-            event_types=event_types,
-        )
-        if has_older:
-            response["older_cursor"] = f"event_{oldest}"
-        if has_newer:
-            response["newer_cursor"] = f"event_{newest}"
-    return response
-
-
-def _conversation_event(event: dict[str, Any]) -> dict[str, Any]:
-    payload = event.get("payload")
-    payload = payload if isinstance(payload, dict) else {}
-    if event.get("event_type") == "thread.message":
-        content = payload.get("message")
-        content = content if isinstance(content, str) else ""
-        clipped = _clip_json_encoded_text(content, CONVERSATION_MESSAGE_BYTES)
-        return {
-            "event_id": event["event_id"],
-            "timestamp": event["timestamp"],
-            "type": "message",
-            "role": "user" if payload.get("source") == "user" else "assistant",
-            "content": clipped,
-            "truncated": clipped != content,
-        }
-    activity = payload.get("activity")
-    activity = activity if isinstance(activity, dict) else {}
-    summary: dict[str, Any] = {}
-    truncated = False
-    for field, budget in CONVERSATION_ACTIVITY_FIELDS:
-        value = activity.get(field)
-        if not isinstance(value, str) or not value:
-            continue
-        clipped = _clip_json_encoded_text(value, budget)
-        summary[field] = clipped
-        truncated = truncated or clipped != value
-    return {
-        "event_id": event["event_id"],
-        "timestamp": event["timestamp"],
-        "type": "activity",
-        "activity": summary,
-        "truncated": truncated or bool(set(activity) - set(summary)),
-    }
-
-
-def _bounded_conversation_events(
-    events: list[dict[str, Any]], mode: str, anchor: int | None
-) -> list[dict[str, Any]]:
-    """Keep a contiguous page within the exact encoded response budget."""
-    if not events:
-        return []
-    if mode == "after":
-        order = list(range(len(events)))
-    elif mode == "around" and anchor is not None:
-        anchor_index = next(
-            (index for index, event in enumerate(events) if _event_seq(event["event_id"]) == anchor),
-            len(events) - 1,
-        )
-        order = [anchor_index]
-        distance = 1
-        while len(order) < len(events):
-            if anchor_index - distance >= 0:
-                order.append(anchor_index - distance)
-            if anchor_index + distance < len(events):
-                order.append(anchor_index + distance)
-            distance += 1
-    else:
-        order = list(reversed(range(len(events))))
-    selected: set[int] = set()
-    for index in order:
-        candidate = [events[item] for item in sorted((*selected, index))]
-        if len(json.dumps({"events": candidate}).encode()) > CONVERSATION_RESPONSE_BYTES - 4096:
-            break
-        selected.add(index)
-    return [events[index] for index in sorted(selected)]
-
-
-def _event_seq(event_id: str) -> int:
-    return int(event_id.removeprefix("event_"))
-
-
-def list_threads(
-    query: dict[str, list[str]],
-) -> dict[str, Any]:
-    limit = _event_page_limit(query)
-    before = _thread_list_cursor(query)
-    prefix = _thread_list_prefix(query)
-    summaries = state.page_thread_summaries(
-        before,
-        limit + 1,
-        thread_prefix=prefix,
-    )
-    page = summaries[:limit]
-    live = orchestrator.live_thread_ids()
-    for thread in page:
-        if thread["thread_id"] in live:
-            thread["status"] = "running"
-    response: dict[str, Any] = {"threads": page}
-    if len(summaries) > limit and page:
-        response["next_before"] = _encode_thread_list_cursor(page[-1])
-    return response
-
-
-def _public_thread(
-    thread_id: str,
-    agent_runtime: str,
-    model: str,
-    effort: str,
-    *,
-    last_used_at: str | None = None,
-) -> dict[str, Any]:
-    config = state.thread_session_config(thread_id)
-    latest_event_seq, latest_message_seq = state.latest_thread_event_seqs(thread_id)
-    if last_used_at is None:
-        last_used_at = config.get("last_used_at") if config else None
-    status = str(config.get("status") if config else "idle")
-    if thread_id in orchestrator.live_thread_ids():
-        status = "running"
-    return {
-        "thread_id": thread_id,
-        "agent_runtime": agent_runtime,
-        "model": model,
-        "effort": effort,
-        "last_used_at": str(last_used_at or ""),
-        "status": status or "idle",
-        "latest_event_seq": latest_event_seq,
-        "latest_message_seq": latest_message_seq,
-    }
 
 
 def replace_network_policy(body: Any) -> dict[str, Any]:
@@ -3328,373 +1639,26 @@ def replace_network_policy(body: Any) -> dict[str, Any]:
     return {"network_controls": policy, "updated_at": updated_at}
 
 
-def host_metrics() -> dict[str, Any]:
-    return {
-        "cpu": {"usage_percent": cpu_usage_percent()},
-        "memory": memory_metrics(),
-        "filesystem": filesystem_metrics(),
-        "swap": swap_metrics(),
-    }
 
 
-def cpu_usage_percent() -> float:
-    # Deliberately samples /proc/stat 50ms apart on the calling thread: health
-    # requests each run on their own handler thread, so the brief block delays
-    # only that response, and it keeps the metric stateless.
-    first = _cpu_times()
-    time.sleep(0.05)
-    second = _cpu_times()
-    idle_delta = second["idle"] - first["idle"]
-    total_delta = second["total"] - first["total"]
-    if total_delta <= 0:
-        return 0.0
-    return round(100.0 * (1.0 - idle_delta / total_delta), 1)
 
 
-def _cpu_times() -> dict[str, int]:
-    values = [int(part) for part in Path("/proc/stat").read_text().splitlines()[0].split()[1:]]
-    idle = values[3] + values[4]
-    return {"idle": idle, "total": sum(values)}
 
 
-def memory_metrics() -> dict[str, int]:
-    mem = _proc_meminfo()
-    total = mem["MemTotal"] * 1024
-    available = mem.get("MemAvailable", 0) * 1024
-    return {"used_bytes": total - available, "total_bytes": total}
 
 
-def _filesystem_usage(path: str) -> dict[str, int] | None:
-    try:
-        usage = shutil.disk_usage(path)
-    except FileNotFoundError:
-        return None
-    return {"used_bytes": usage.used, "total_bytes": usage.total}
 
 
-def filesystem_metrics() -> dict[str, Any]:
-    root = _filesystem_usage("/") or {"used_bytes": 0, "total_bytes": 0}
-    mounts = {"root": root}
-    for name, path in (
-        ("admin", "/mnt/kern-admin"),
-        ("agent", "/mnt/kern-agent"),
-    ):
-        usage = _filesystem_usage(path)
-        if usage is not None:
-            mounts[name] = usage
-    return {"mounts": mounts}
 
 
-def swap_metrics() -> dict[str, int]:
-    mem = _proc_meminfo()
-    total = mem.get("SwapTotal", 0) * 1024
-    free = mem.get("SwapFree", 0) * 1024
-    return {"allocated_bytes": total, "used_bytes": total - free}
 
 
-def _proc_meminfo() -> dict[str, int]:
-    values: dict[str, int] = {}
-    for line in Path("/proc/meminfo").read_text().splitlines():
-        key, value = line.split(":", 1)
-        values[key] = int(value.strip().split()[0])
-    return values
 
 
-def _message(body: Any) -> str:
-    """The one request-body validation for a thread message send; the session
-    configuration readers below trust the dict this establishes."""
-    if not isinstance(body, dict):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
-    value = body.get("message")
-    if not isinstance(value, str) or not value:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "message must be a non-empty string")
-    if len(value) > MESSAGE_LIMIT:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"message must be at most {MESSAGE_LIMIT} characters")
-    return value
 
 
-def _agent_runtime(body: dict[str, Any]) -> str:
-    value = body.get("agent_runtime")
-    if not isinstance(value, str) or value not in AGENT_RUNTIMES:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "agent_runtime must be one of " + ", ".join(sorted(AGENT_RUNTIMES)))
-    return value
 
 
-def _runs_scripts(thread_id: str) -> bool:
-    """Whether this thread may run the script runtime.
-
-    The script runtime reads a thread's message as a path to a bash script
-    rather than as conversation, so a Chat or App thread rotated onto it would
-    start treating the user's next sentence as a filename. The Workspace
-    surfaces already refuse to offer it, but this is the executor: the boundary
-    is enforced here, on the one thing a direct caller cannot forge, so a send
-    that bypasses those surfaces cannot rotate a product thread onto it either.
-    """
-    return thread_id.startswith(SCHEDULE_THREAD_PREFIX)
-
-
-def _session_config(
-    body: dict[str, Any], runtime: str, *, allow_script: bool
-) -> tuple[str, str]:
-    model = body.get("model")
-    effort = body.get("effort")
-    error = session_config_error(runtime, model, effort, allow_script=allow_script)
-    if error is not None:
-        raise ApiError(HTTPStatus.BAD_REQUEST, error)
-    assert isinstance(model, str) and isinstance(effort, str)
-    return model, effort
-
-
-def _resolve_session_config(
-    body: dict[str, Any],
-    session_config: dict[str, Any] | None,
-    thread_id: str,
-) -> tuple[str, str, str]:
-    allow_script = _runs_scripts(thread_id)
-    stored = None
-    if session_config is not None:
-        stored = (
-            session_config["agent_runtime"],
-            session_config["model"],
-            session_config["effort"],
-        )
-
-    fields = ("agent_runtime", "model", "effort")
-    supplied = [field for field in fields if field in body]
-    if stored is not None:
-        # A superseded configuration stays readable and can be replaced, but
-        # cannot start another provider session as-is.
-        if session_config_error(*stored, allow_script=allow_script) is not None and (
-            not supplied or tuple(body.get(field) for field in fields) == stored
-        ):
-            raise ApiError(
-                HTTPStatus.CONFLICT,
-                "this thread runs a session configuration that is no longer offered;"
-                " select a currently offered model to continue",
-            )
-        if not supplied:
-            return stored
-        if len(supplied) != len(fields):
-            raise ApiError(
-                HTTPStatus.BAD_REQUEST,
-                "agent_runtime, model, and effort must be provided together",
-            )
-        requested_runtime = _agent_runtime(body)
-        requested_model, requested_effort = _session_config(
-            body, requested_runtime, allow_script=allow_script
-        )
-        return requested_runtime, requested_model, requested_effort
-    if not supplied:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "agent_runtime, model, and effort are required when starting a new thread",
-        )
-    if len(supplied) != len(fields):
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "agent_runtime, model, and effort must be provided together",
-        )
-
-    agent_runtime = _agent_runtime(body)
-    model, effort = _session_config(body, agent_runtime, allow_script=allow_script)
-    return agent_runtime, model, effort
-
-
-def _session_configuration_changed(
-    session_config: dict[str, Any] | None,
-    runtime: str,
-    model: str,
-    effort: str,
-) -> bool:
-    if session_config is None:
-        return False
-    return (
-        session_config["agent_runtime"],
-        session_config["model"],
-        session_config["effort"],
-    ) != (runtime, model, effort)
-
-
-def _session_change_activity(
-    previous: dict[str, Any],
-    runtime: str,
-    model: str,
-    effort: str,
-) -> dict[str, Any]:
-    previous_runtime = str(previous["agent_runtime"])
-    title = (
-        "Agent provider changed"
-        if previous_runtime != runtime
-        else "Agent session changed"
-    )
-
-    def label(runtime_type: str, model_name: str, effort_name: str) -> str:
-        runtime_name = orchestrator.RUNTIME_LABELS.get(runtime_type, runtime_type)
-        return f"{runtime_name} · {model_name} · {effort_name}"
-
-    detail = (
-        f"{label(previous_runtime, str(previous['model']), str(previous['effort']))}"
-        f" → {label(runtime, model, effort)}"
-    )
-    return agent_activity.activity(
-        "kern",
-        "session-change",
-        "status",
-        "completed",
-        title,
-        detail=detail,
-        status="completed",
-    )
-
-
-def _handoff_event_block(event: dict[str, Any]) -> str:
-    payload = event.get("payload")
-    payload = payload if isinstance(payload, dict) else {}
-    event_type = event.get("event_type")
-    if event_type == "thread.message":
-        label = "User" if payload.get("source") == "user" else "Agent"
-        return f"{label}:\n{payload.get('message', '')}"
-    if event_type == "thread.activity":
-        activity = payload.get("activity")
-        activity = activity if isinstance(activity, dict) else {}
-        summary = {
-            key: activity[key]
-            for key in ("provider", "kind", "phase", "title", "status")
-            if key in activity
-        }
-        for key, limit in (
-            ("detail", THREAD_HANDOFF_ACTIVITY_DETAIL_LIMIT),
-            ("output", THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT),
-            ("error", THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT),
-        ):
-            value = activity.get(key)
-            if isinstance(value, str) and value:
-                summary[key] = agent_activity.clip_text(value, limit)
-        block = "Agent activity (summary):\n" + json.dumps(
-            summary, ensure_ascii=False, indent=2, default=str
-        )
-        return agent_activity.clip_text(
-            block, THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT
-        )
-    return ""
-
-
-def _bounded_handoff_section(
-    history: list[dict[str, Any]], character_limit: int
-) -> str:
-    """Newest event blocks within one exact model-facing character budget."""
-    if character_limit <= 0:
-        return ""
-    blocks_reversed: list[str] = []
-    remaining = character_limit
-    omitted = False
-    for event in reversed(history):
-        separator_size = 2 if blocks_reversed else 0
-        block = _handoff_event_block(event)
-        if not block:
-            continue
-        available = remaining - separator_size
-        if available <= 0:
-            omitted = True
-            break
-        if len(block) <= available:
-            blocks_reversed.append(block)
-            remaining -= separator_size + len(block)
-            continue
-        marker = "\n[Earlier event content truncated]\n"
-        content_space = available - len(marker)
-        if content_space > 1:
-            prefix_size = content_space // 2
-            suffix_size = content_space - prefix_size
-            blocks_reversed.append(
-                block[:prefix_size] + marker + block[-suffix_size:]
-            )
-        omitted = True
-        break
-    if len(blocks_reversed) < len(history):
-        omitted = True
-    transcript = "\n\n".join(reversed(blocks_reversed))
-    if omitted:
-        marker = "[Older retained thread events were omitted.]"
-        if len(marker) >= character_limit:
-            return marker[:character_limit]
-        content_limit = character_limit - len(marker) - 2
-        if len(transcript) > content_limit:
-            transcript = transcript[-content_limit:]
-        transcript = marker + ("\n\n" + transcript if transcript else "")
-    return transcript
-
-
-def _session_handoff_message(history: list[dict[str, Any]], message: str) -> str:
-    """Build independently bounded conversation and activity handoff sections."""
-    conversation = _bounded_handoff_section(
-        [event for event in history if event.get("event_type") == "thread.message"],
-        THREAD_HANDOFF_MESSAGE_CHARACTER_LIMIT,
-    )
-    activity = _bounded_handoff_section(
-        [event for event in history if event.get("event_type") == "thread.activity"],
-        THREAD_HANDOFF_ACTIVITY_CHARACTER_LIMIT,
-    )
-    return (
-        "You are a new agent session continuing a thread previously handled by another "
-        "agent session. Your provider-side context and cache are not available. Use the "
-        "retained conversation and activity below, then respond to the current "
-        "user message. Do not mention this handoff unless it is relevant.\n\n"
-        "--- RETAINED CONVERSATION ---\n"
-        f"{conversation or '[No retained messages.]'}\n"
-        "--- END RETAINED CONVERSATION ---\n\n"
-        "--- RECENT AGENT ACTIVITY ---\n"
-        f"{activity or '[No retained activity.]'}\n"
-        "--- END RECENT AGENT ACTIVITY ---\n\n"
-        "--- CURRENT USER MESSAGE ---\n"
-        f"{message}\n"
-        "--- END CURRENT USER MESSAGE ---"
-    )
-
-
-def _one(query: dict[str, list[str]], key: str) -> str | None:
-    values = query.get(key)
-    if not values:
-        return None
-    if len(values) != 1:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must appear once")
-    return values[0]
-
-
-def _agent_file_path(query: dict[str, list[str]]) -> str:
-    value = _one(query, "path")
-    if value is None or value == "":
-        return "/"
-    if "\0" in value:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "path contains a NUL byte")
-    if len(value) > 4096:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "path is too long")
-    return value
-
-
-def _agent_file_content_disposition(path: str) -> str:
-    filename = Path(path).name or "download"
-    clipped = filename.encode("utf-8")[:180].decode("utf-8", errors="ignore") or "download"
-    fallback = re.sub(r"[^A-Za-z0-9._-]", "_", clipped)[:120] or "download"
-    encoded = quote(clipped, safe="")
-    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
-
-
-def _agent_file_upload_filename(query: dict[str, list[str]]) -> str:
-    _reject_query_keys(query, {"filename"}, "agent file upload")
-    value = _one(query, "filename")
-    if value is None or value in {"", ".", ".."}:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "filename must be non-empty")
-    if any(character in value for character in ("/", "\\", "\0")):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "filename must not contain path separators or a NUL byte")
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "filename must not contain control characters")
-    if len(value.encode("utf-8")) > AGENT_FILE_UPLOAD_FILENAME_MAX_BYTES:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            f"filename must be at most {AGENT_FILE_UPLOAD_FILENAME_MAX_BYTES} UTF-8 bytes",
-        )
-    return value
 
 
 def _optional_non_negative_int(query: dict[str, list[str]], key: str) -> int | None:
@@ -3729,30 +1693,6 @@ def _optional_bounded_positive_query_int(
     return parsed
 
 
-def _clip_json_encoded_text(value: str, maximum: int) -> str:
-    """Bound the encoded JSON string, including escaping of control bytes.
-
-    Event pages cross a hard 1 MiB bridge. A UTF-8-only bound is insufficient:
-    one control byte or non-ASCII code point can expand under the default JSON
-    serializer used by both HTTP hops.
-    """
-    def encoded_size(text: str) -> int:
-        return len(json.dumps(text).encode())
-
-    if encoded_size(value) <= maximum:
-        return value
-    suffix = "\n… (truncated)"
-    if encoded_size(suffix) > maximum:
-        return agent_activity.clip_text(value, maximum)
-    low = 0
-    high = len(value)
-    while low < high:
-        middle = (low + high + 1) // 2
-        if encoded_size(value[:middle] + suffix) <= maximum:
-            low = middle
-        else:
-            high = middle - 1
-    return value[:low] + suffix
 
 
 def _network_event_decision(query: dict[str, list[str]]) -> str | None:
@@ -3779,61 +1719,13 @@ def _event_page_limit(query: dict[str, list[str]]) -> int:
     return parsed
 
 
-def _thread_list_prefix(query: dict[str, list[str]]) -> str | None:
-    prefix = _one(query, "prefix")
-    if prefix is None:
-        return None
-    if PRODUCT_THREAD_PREFIX_RE.fullmatch(prefix) is None:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "prefix must start with app-, thread-, or schedule-",
-        )
-    return prefix
 
 
-def _encode_thread_list_cursor(thread: dict[str, Any]) -> str:
-    raw = json.dumps(
-        [
-            str(thread.get("last_used_at") or ""),
-            str(thread["thread_id"]),
-        ],
-        separators=(",", ":"),
-    ).encode()
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def _thread_list_cursor(
-    query: dict[str, list[str]],
-) -> tuple[str, str] | None:
-    value = _one(query, "before")
-    if value is None:
-        return None
-    try:
-        if not value or len(value) > 512:
-            raise ValueError
-        padded = value + "=" * (-len(value) % 4)
-        decoded = base64.b64decode(
-            padded.encode(),
-            altchars=b"-_",
-            validate=True,
-        )
-        fields = json.loads(decoded)
-        if (
-            not isinstance(fields, list)
-            or len(fields) != 2
-            or not all(isinstance(field, str) for field in fields)
-            or PRODUCT_THREAD_ID_RE.fullmatch(fields[1]) is None
-        ):
-            raise ValueError
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "before must be a valid thread list cursor",
-        ) from exc
-    return fields[0], fields[1]
 
 
-def _reject_query_keys(query: dict[str, list[str]], allowed: set[str], label: str) -> None:
+def _reject_query_keys(query: dict[str, list[str]], allowed: frozenset[str], label: str) -> None:
     unexpected = sorted(set(query) - allowed)
     if unexpected:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"unsupported {label} query parameter: {unexpected[0]}")

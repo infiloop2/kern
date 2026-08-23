@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
-from host.runtime.admin_api import claude_code, thread_scope
+from host.runtime.agent_runtime import claude_code, thread_scope
 
 
 class ClaudeCodeTests(unittest.TestCase):
@@ -274,7 +274,7 @@ class ClaudeCodeTests(unittest.TestCase):
     def test_one_malformed_claude_block_does_not_hide_later_content(self) -> None:
         emitted = []
         with patch(
-            "host.runtime.admin_api.claude_code._claude_tool_title",
+            "host.runtime.agent_runtime.claude_code._claude_tool_title",
             side_effect=ValueError("malformed provider block"),
         ):
             claude_code._emit_claude_content(

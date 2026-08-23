@@ -33,7 +33,7 @@ def _default_session_options(runtime: str) -> tuple[str, str]:
 def load_state() -> dict[str, Any]:
     from host.runtime.core import db
 
-    from host.runtime.admin_api import orchestrator
+    from host.runtime.agent_runtime import orchestrator
 
     snapshot: dict[str, Any] = {
         "agent_runtime_statuses": orchestrator.all_runtime_status_records(),
@@ -63,7 +63,7 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(snapshot: dict[str, Any]) -> None:
-    from host.runtime.admin_api import orchestrator
+    from host.runtime.agent_runtime import orchestrator
 
     with orchestrator._RUNTIME_STATUS_LOCK:
         orchestrator._RUNTIME_STATUSES.clear()

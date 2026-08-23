@@ -9,9 +9,9 @@ is provided by the host behind these interfaces. Tool code receives a
 - no direct database or file access for credentials (use ``credentials``),
 - no tool-owned approval bookkeeping (use ``approvals``).
 
-Every ``HostAPI`` instance is already scoped to one tool on one local
-Kern host. Credentials and approval records are implicitly partitioned by
-tool; a tool can never see another tool's data.
+Every ``HostAPI`` instance is already scoped to one tool and one host-selected
+OAuth connection on one local Kern host. A tool can never enumerate or switch
+connections and can never see another tool's data.
 
 See docs/architecture/tools/tool-contract.md for the full specification and the
 rules of the boundary.
@@ -79,11 +79,11 @@ class Credentials(Protocol):
     """The tool's OAuth credential store — the only place tool state lives.
 
     OAuth tools are the only tools that persist state, and all they persist is a
-    single connected-account credential. Rather than a generic key/value store,
-    the host exposes this purpose-built, typed service: one ``StoredCredential``
-    per tool. The tool decides *what* the credential is; the host decides
-    *where and how* it is stored (partitioning, encryption at rest). Enable-only
-    tools never call this service.
+    connected-account credential selected for this call. Rather than a generic
+    key/value store, the host exposes this purpose-built, typed service: one
+    ``StoredCredential`` per connection. The tool cannot enumerate or select
+    connections; the host decides *which* one is in scope and where/how it is
+    stored (partitioning, encryption at rest). Enable-only tools never call it.
     """
 
     def load(self) -> StoredCredential | None:

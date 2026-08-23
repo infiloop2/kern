@@ -39,10 +39,10 @@ from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
+    OAuth2CredentialStore,
     access_token_is_fresh,
     clear_if_still_loaded,
     now,
-    require_scopes,
     save_if_still_connected,
     signed_state,
     verify_state,
@@ -54,10 +54,10 @@ from host.tools.shared.web import (
     json_request,
     known_provider_transport_error,
     provider_warning,
+    transport_or_unmapped_provider_error,
     unmapped_provider_error,
 )
 from host.tools.tool import (
-    ConnectionStatus,
     CredentialFlow,
     OAuthCompleteConnectParams,
     OAuthCompleteConnectResult,
@@ -567,10 +567,7 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     elif exc.status:
         message = f"Zoho Mail returned HTTP {exc.status} for the {what} request."
     else:
-        known = known_provider_transport_error(exc)
-        if known:
-            return RuntimeError(known)
-        return unmapped_provider_error("Zoho Mail", what, exc)
+        return transport_or_unmapped_provider_error("Zoho Mail", what, exc)
     return provider_warning("Zoho Mail", what, exc, message)
 
 
@@ -685,8 +682,11 @@ def _fetch_mail_account(access_token: str, data_center: str, scopes: list[str]) 
     raise RuntimeError("Zoho Mail returned no usable hosted mailbox for the connected user.")
 
 
-class ZohoMailCredentialStore:
+class ZohoMailCredentialStore(OAuth2CredentialStore):
     """Zoho authorization-code OAuth with one-hour tokens and offline refresh."""
+
+    reconnect_message = ZOHO_RECONNECT_MESSAGE
+    required_scopes = REQUIRED_ZOHO_SCOPES
 
     def start_connect(self, params: OAuthStartConnectParams, api: HostAPI) -> OAuthStartConnectResult:
         data_center = _data_center(api)
@@ -761,19 +761,12 @@ class ZohoMailCredentialStore:
         if not token_payload["refresh_token"]:
             raise RuntimeError("Zoho Mail connection returned no refresh token. Reconnect and grant offline access.")
         account, _ = _fetch_mail_account(str(token_payload["access_token"]), data_center, granted_scopes)
-        existing = api.credentials.load()
-        created_at = existing["metadata"].get("created_at") if existing is not None else None
-        current_time = now()
-        credential: StoredCredential = {
-            "account": account,
-            "secret": token_payload,
-            "metadata": {
-                "created_at": created_at if isinstance(created_at, int) else current_time,
-                "updated_at": current_time,
-                "data_center": data_center,
-            },
-        }
-        api.credentials.save(credential)
+        self.save_connection(
+            api,
+            account,
+            token_payload,
+            metadata={"data_center": data_center},
+        )
         return {"account": account}
 
     def disconnect(self, api: HostAPI) -> None:
@@ -795,17 +788,8 @@ class ZohoMailCredentialStore:
                     pass
         api.credentials.clear()
 
-    def connection_status(self, api: HostAPI) -> ConnectionStatus:
-        existing = api.credentials.load()
-        if existing is None:
-            return {"connected": False}
-        return {"connected": True, "account": existing["account"]}
-
     def access_context(self, api: HostAPI) -> tuple[str, str, StoredCredential]:
-        existing = api.credentials.load()
-        if existing is None:
-            raise IntegrationReconnectRequired(ZOHO_RECONNECT_MESSAGE)
-        require_scopes(api, existing, REQUIRED_ZOHO_SCOPES, reconnect_message=ZOHO_RECONNECT_MESSAGE)
+        existing = self.load_connected(api)
         data_center = existing["metadata"].get("data_center")
         if not isinstance(data_center, str) or data_center not in ZOHO_DATA_CENTERS:
             clear_if_still_loaded(api, existing)
@@ -866,9 +850,7 @@ class ZohoMailCredentialStore:
         return str(updated_payload["access_token"]), data_center, updated
 
     def refresh_account(self, api: HostAPI, access_token: str, data_center: str) -> tuple[ConnectionAccount, JSONObject]:
-        existing = api.credentials.load()
-        if existing is None:
-            raise IntegrationReconnectRequired(ZOHO_RECONNECT_MESSAGE)
+        existing = self.load_connected(api)
         account, record = _fetch_mail_account(access_token, data_center, existing["account"]["scopes"])
         if account["id"] != existing["account"]["id"]:
             clear_if_still_loaded(api, existing)

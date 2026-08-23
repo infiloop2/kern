@@ -202,12 +202,9 @@ available.
 
 Grok's hosted tools are declared as entries in a request's `tools` array,
 alongside the client-executed `function` tools the CLI runs locally on this
-host. xAI's documented server-side set is web search, X search, and code
-execution.
-
-**Every one of them is denied, and the integration has no options.** A config
-naming `web_search` for xAI is rejected at parse time rather than accepted and
-ignored.
+host. The integration has no options and a fixed allowlist: `x_search`,
+`image_generation`, and `video_generation`. A config naming `web_search` for
+xAI is rejected at parse time rather than accepted and ignored.
 
 Web search is denied rather than offered because Grok's has no narrow form. It
 searches *and browses live pages* as one capability, and xAI's servers do the
@@ -218,6 +215,23 @@ control to allow instead. The full reasoning, including the sub-operations a
 search performs and why none of them is separately deniable, is in [The xAI
 integration](../architecture/xai-integration.md#grok-web-search).
 
+Allowed hosted declarations:
+
+- **X search** (`x_search`) — xAI performs keyword, semantic, user, and thread
+  search against X data on its servers. The host sends only to the pinned
+  `cli-chat-proxy.grok.com` request path; it does not contact x.com or a
+  third-party search provider.
+- **Image generation** (`image_generation`) — an xAI Responses tool that runs
+  on xAI servers. Kern requires `action: "generate"`; `auto`, `edit`, external
+  input fields, and unknown options are denied. Grok Build 1.0.5 does not yet
+  declare or decode it, so this is a policy allowance rather than a usable
+  runtime feature today.
+- **Video generation** (`video_generation`) — reserved for an xAI-hosted
+  declaration. xAI currently documents video only through the separate
+  metered `api.x.ai` Imagine API, which stays blocked, and Grok Build 1.0.5 does
+  not emit this tool. Only the bare declaration is admitted; every option
+  fails closed until its data flow is reviewed.
+
 Denied hosted tools:
 
 - **Web search** (`web_search`) — denied with its own reason code,
@@ -225,14 +239,11 @@ Denied hosted tools:
   rather than "unrecognised tool". Both of xAI's ways of asking for one are
   covered: a `tools` entry, and a `search_parameters` object that is not an
   explicit `mode: "off"`.
-- **X search** (`x_search`) — a separate corpus (posts, users, threads) reached
-  on the same terms.
 - **Code execution** (`code_execution`, `code_interpreter`) — runs code on xAI
   infrastructure. The agent has a local shell on this host, so nothing is lost.
 - **Collections search** (`file_search`, `collections_search`) — searches
   xAI-hosted document collections, which this host never populates.
-- **Hosted browsing and media generation** (`browser`, `computer_use`,
-  `image_generation`, `video_generation`).
+- **Hosted browsing** (`browser`, `computer_use`).
 - **Remote MCP servers** — they make xAI call an external server with request
   data.
 
@@ -241,13 +252,14 @@ Two of those are spelled differently on the wire and in xAI's SDK
 spellings are denied.
 
 Anything else appearing in a `tools` array that is not a client-executed
-`function` is denied too. That is what keeps a hosted tool xAI ships later from
-being forwarded unreviewed: the denial follows from *where* the entry appears,
-not from it already being on a list. Replay history items — `web_search_call`,
-`x_search_call`, `code_interpreter_call`, `file_search_call`, `mcp_call`,
-`mcp_list_tools` — describe earlier calls rather than declaring new ones, and
-they and their whole subtrees are skipped so ordinary follow-up turns are not
-denied.
+`function` or one of the three allowed names is denied too. That is what keeps
+a hosted tool xAI ships later from being forwarded unreviewed: the denial
+follows from *where* the entry appears, not from it already being on a list.
+Replay history items — `web_search_call`, `x_search_call`,
+`image_generation_call`, `video_generation_call`, `code_interpreter_call`,
+`file_search_call`, `mcp_call`, `mcp_list_tools` — describe earlier calls rather
+than declaring new ones, and they and their whole subtrees are skipped so
+ordinary follow-up turns are not denied.
 
 ## AWS Bedrock Integration
 
@@ -309,6 +321,7 @@ alters or gates the relayed bytes.
 | `write_repositories` | No | array | Repositories the agent may also **write** to — git push and mutating REST calls. Repository administration stays denied even for these (see below). Reads are universal and need no listing. Owner/repo are normalized to lowercase; duplicates are rejected. This is also the list the repository audit inspects. Enabling with an empty list gives a read-only agent. |
 | `write_repositories[].owner` | Yes | string | GitHub owner (user or organization) identifier. |
 | `write_repositories[].repo` | Yes | string | GitHub repository identifier. |
+| `block_direct_main_pushes` | No | boolean | Default `true` while GitHub is enabled. When `true`, the proxy rejects any git receive-pack transaction that updates `refs/heads/main`; no approval item is created. Feature-branch pushes and pull-request merges are unaffected. Set this to `false` to allow direct pushes to `main`. |
 | `require_dot_github_approval` | No | boolean | Default `false`. When `true`, a git push that changes any `.github/` path is held for operator approval instead of reaching GitHub (see [the `.github` approval gate](#the-github-approval-gate)). Requires the integration enabled. |
 
 The access model is **all reads, scoped writes**. An agent's utility comes from
@@ -420,6 +433,18 @@ One more reason exists as a fail-closed default: `github_repo_scope_required`
 fires if the GitHub guard receives a host for which it has no access rules. It
 is unreachable with today's fixed dispatch table; it exists so a future wiring
 mistake denies instead of allowing.
+
+### Direct `main` push block
+
+Before `.github` inspection, the proxy parses the receive-pack command list.
+When `block_direct_main_pushes` is enabled and any command updates
+`refs/heads/main`, the proxy returns a Git-native `report-status` rejection for
+the whole transaction with reason `github_main_push_denied`. The request body
+is not forwarded or indexed, and no approval item is created. A malformed
+command list fails closed with `github_main_push_guard_unavailable`. This
+control applies only to smart-HTTP Git pushes: pushing a feature branch and
+merging it with the pull-request API remains allowed for configured write
+repositories.
 
 ### The `.github` approval gate
 

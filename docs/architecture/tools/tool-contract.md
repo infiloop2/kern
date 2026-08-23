@@ -9,11 +9,12 @@ The Python protocols under `host/tools/` express this contract as code
 (`manifest.py`, `tool.py`, `results.py`, `host_api.py`); this document is the
 source of truth and the two must agree.
 
-A tool package is pure tool logic: no UI, and the only state it owns is one OAuth
-credential. Everything tool-specific — actions, input schemas, third-party API
-calls, third-party auth — lives in the package. Everything deployment-specific —
-where the credential lives, how config is supplied, how approvals are decided and
-audited — is provided by the host behind the **host API**.
+A tool package is pure tool logic: no UI, and the only state it owns is the OAuth
+credential selected for the current host-scoped call. Everything tool-specific —
+actions, input schemas, third-party API calls, third-party auth — lives in the
+package. Everything deployment-specific — where the credential lives, how config
+is supplied, how approvals are decided and audited — is provided by the host
+behind the **host API**.
 
 ```
 agent / chat / MCP gateway
@@ -357,10 +358,12 @@ generic `StreamingAsset` result instead and never enters this staged-asset store
 
 ### Credentials
 
-OAuth tools are the only tools that persist state, and all they persist is one
+OAuth tools are the only tools that persist state, and all they persist is a
 connected-account credential. Instead of a generic key/value store, the host
-exposes a purpose-built typed service — one `StoredCredential` per tool.
-Enable-only tools never touch it.
+exposes a purpose-built typed service containing the one `StoredCredential`
+selected for that call. A package cannot enumerate or switch the host's
+connections; connection discovery and selection are host concerns. Enable-only
+tools never touch it.
 
 ```python
 class ConnectionAccount(TypedDict):

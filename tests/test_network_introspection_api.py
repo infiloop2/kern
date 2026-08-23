@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 import pg_harness
 
@@ -117,6 +118,63 @@ class NetworkIntrospectionTests(unittest.TestCase):
         self.assertEqual([denial["host"] for denial in denials], ["evil.example.com", "github.com"])
         self.assertIn("write repositories", denials[1]["guidance"])
         self.assertIn("custom-domain rule", denials[0]["guidance"])
+
+    def test_repeated_denials_collapse_into_counted_entries(self) -> None:
+        for _ in range(3):
+            state.append_network_event(
+                "https", "GET", "poll.example.com", 443, "/v1/bundle", "", False,
+                "host_not_allowed",
+            )
+        state.append_network_event(
+            "https", "CONNECT", "evil.example.com", 443, "", "", False,
+            "host_not_allowed",
+        )
+
+        result = network_introspection_api.call_action("recent_network_denials", {"limit": 2})
+
+        denials = result["result"]["denials"]
+        self.assertEqual(
+            [denial["host"] for denial in denials], ["evil.example.com", "poll.example.com"]
+        )
+        self.assertEqual(denials[0]["count"], 1)
+        self.assertNotIn("first_timestamp", denials[0])
+        self.assertEqual(denials[1]["count"], 3)
+        self.assertLessEqual(denials[1]["first_timestamp"], denials[1]["timestamp"])
+
+    def test_denial_counts_include_duplicates_past_the_limit_page(self) -> None:
+        state.append_network_event(
+            "https", "GET", "poll.example.com", 443, "/v1/bundle", "", False,
+            "host_not_allowed",
+        )
+        for host in ("one.example.com", "two.example.com"):
+            state.append_network_event(
+                "https", "CONNECT", host, 443, "", "", False, "host_not_allowed"
+            )
+        state.append_network_event(
+            "https", "GET", "poll.example.com", 443, "/v1/bundle", "", False,
+            "host_not_allowed",
+        )
+
+        result = network_introspection_api.call_action("recent_network_denials", {"limit": 2})
+
+        denials = result["result"]["denials"]
+        self.assertEqual(
+            [denial["host"] for denial in denials], ["poll.example.com", "two.example.com"]
+        )
+        self.assertEqual(denials[0]["count"], 2)
+
+    def test_denial_result_marks_a_bounded_scan_as_truncated(self) -> None:
+        for _ in range(4):
+            state.append_network_event(
+                "https", "GET", "poll.example.com", 443, "/v1/bundle", "", False,
+                "host_not_allowed",
+            )
+
+        with patch.object(network_introspection_api, "_DENIAL_SCAN_LIMIT", 3):
+            result = network_introspection_api.call_action("recent_network_denials", {})
+
+        self.assertTrue(result["result"]["truncated"])
+        self.assertEqual(result["result"]["denials"][0]["count"], 3)
 
     def test_limit_validation_and_socket_peer_gate(self) -> None:
         for bad in (0, 101, "5", True):

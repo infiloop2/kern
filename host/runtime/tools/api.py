@@ -38,6 +38,7 @@ from http import HTTPStatus
 import os
 from pathlib import Path
 import re
+import secrets
 import threading
 import time
 from typing import Any, BinaryIO, NoReturn, cast
@@ -149,19 +150,12 @@ def _string_field(tool_input: Any, field: str) -> str:
 def _list_bundled_tools(tool_input: Any) -> dict[str, Any]:
     """The bundled catalog, optionally restricted to known tool ids.
 
-    The unfiltered form lets an agent tell the operator which existing tool to
-    enable instead of rebuilding it. A caller that already knows its required
-    integrations can request only those entries and avoid ingesting unrelated
-    catalog context.
-
-    Action descriptions are included but input schemas are not: descriptions
-    are what the agent plans from, schemas are what it needs only once it
-    commits to a call (describe_tool). agent_notes is the agent-only text that
-    adds to description, included for the same reason: it says what to do when
-    no action covers the need, which is a planning fact, and an agent that reads
-    only this catalog would otherwise never learn it. It is always stated, empty
-    included, so an agent can tell "this tool has nothing to add" from "this
-    surface does not carry it"."""
+    The unfiltered form is a cheap capability index: it lets an agent tell the
+    operator which existing tool to enable instead of rebuilding it, but omits
+    every action and agent note. Those fields grow with each integration and
+    are useful only after the agent has selected a tool. Passing tool_ids
+    returns the focused entries with actions and agent_notes; input and output
+    schemas remain behind describe_tool."""
     if not isinstance(tool_input, dict):
         raise tools_host.ToolCallError("Tool input must be an object.")
     if set(tool_input) - {"tool_ids"}:
@@ -189,24 +183,26 @@ def _list_bundled_tools(tool_input: Any) -> dict[str, Any]:
     for tool_id in selected_ids:
         tool = tools_host.BUNDLED_TOOLS[tool_id]
         manifest = tool.manifest
-        actions: list[dict[str, Any]] = []
-        for spec in manifest.actions:
-            action: dict[str, Any] = {"id": spec.id, "description": spec.description}
-            # Only the exceptional case is stated; absent means "direct".
-            if spec.approval == "operator":
-                action["approval"] = "operator"
-            actions.append(action)
-        tools.append(
-            {
-                "tool_id": tool_id,
-                "display_name": manifest.display_name,
-                "description": manifest.description,
-                "connection": manifest.connection,
-                "enabled": tool_id in enabled,
-                "agent_notes": manifest.agent_notes,
-                "actions": actions,
-            }
-        )
+        entry: dict[str, Any] = {
+            "tool_id": tool_id,
+            "display_name": manifest.display_name,
+            "description": manifest.description,
+            "connection": manifest.connection,
+            "enabled": tool_id in enabled,
+        }
+        if requested is not None:
+            actions: list[dict[str, Any]] = []
+            for spec in manifest.actions:
+                action: dict[str, Any] = {"id": spec.id, "description": spec.description}
+                # Only the exceptional case is stated; absent means "direct".
+                if spec.approval == "operator":
+                    action["approval"] = "operator"
+                actions.append(action)
+            entry["agent_notes"] = manifest.agent_notes
+            entry["actions"] = actions
+            if manifest.connection == "oauth":
+                entry["connected_accounts"] = state.tool_connections(tool_id)
+        tools.append(entry)
     result: dict[str, Any] = {"tools": tools}
     if unknown_ids is not None:
         result["unknown_tool_ids"] = unknown_ids
@@ -223,8 +219,10 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
     result; an approval-gated action and one that returns a file both carry no
     output schema, which the approval field and the description already state.
 
-    Agent guidance is not repeated here: agent_notes is one field per tool and
-    the catalog already carried it."""
+    Agent guidance is included once per described tool. Broad discovery omits
+    it to keep the capability index small, so describe_tool must be a
+    self-contained path from an unfiltered catalog to safe tool use. A caller
+    that used focused discovery may see the same short note twice."""
     tool_id = _string_field(tool_input, "tool_id")
     if set(tool_input) - {"tool_id"}:
         raise tools_host.ToolCallError("describe_tool accepts only tool_id.")
@@ -240,6 +238,12 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
             "tool_id": tool_id,
             "display_name": manifest.display_name,
             "enabled": tool_id in state.enabled_tool_ids(),
+            "agent_notes": manifest.agent_notes,
+            **(
+                {"connected_accounts": state.tool_connections(tool_id)}
+                if manifest.connection == "oauth"
+                else {}
+            ),
             "actions": [
                 {
                     "id": spec.id,
@@ -261,10 +265,11 @@ def _call_tool(
     """Invoke one bundled action addressed by tool_id and action_id."""
     tool_id = _string_field(tool_input, "tool_id")
     action_id = _string_field(tool_input, "action_id")
-    extra = set(tool_input) - {"tool_id", "action_id", "input"}
+    extra = set(tool_input) - {"tool_id", "action_id", "connection_id", "input"}
     if extra:
         raise tools_host.ToolCallError(
-            f"call_tool accepts only tool_id, action_id, and input; got {', '.join(sorted(extra))}."
+            "call_tool accepts only tool_id, action_id, connection_id, and input; "
+            f"got {', '.join(sorted(extra))}."
         )
     tool = tools_host.BUNDLED_TOOLS.get(tool_id)
     if tool is None:
@@ -278,7 +283,16 @@ def _call_tool(
     action_input = tool_input.get("input")
     if action_input is None:
         action_input = {}
-    return tools_host.execute_action(tool_id, action_id, action_input, asset_store)
+    connection_id = tool_input.get("connection_id")
+    if connection_id is not None and (not isinstance(connection_id, str) or not connection_id):
+        raise tools_host.ToolCallError("connection_id must be a non-empty string when provided.")
+    return tools_host.execute_action(
+        tool_id,
+        action_id,
+        action_input,
+        asset_store,
+        connection_id=connection_id,
+    )
 
 
 def _check_approval(tool_input: Any) -> dict[str, Any]:
@@ -321,6 +335,18 @@ OPERATOR_DISCONNECT_RE = re.compile(r"^/operator/tools/([a-z0-9_]{1,64})/oauth_c
 OPERATOR_DECIDE_RE = re.compile(
     r"^/operator/tools/([a-z0-9_]{1,64})/approvals/([A-Za-z0-9._:-]{1,128})/(approve|deny)$"
 )
+CONNECTION_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+def _operator_connection_id(body: Any, *, create: bool = False) -> str:
+    value = body.get("connection_id") if isinstance(body, dict) else None
+    if value is None and create:
+        return f"connection_{secrets.token_hex(12)}"
+    if value is None:
+        raise OperatorError(HTTPStatus.BAD_REQUEST, "connection_id is required")
+    if not isinstance(value, str) or CONNECTION_ID_RE.fullmatch(value) is None:
+        raise OperatorError(HTTPStatus.BAD_REQUEST, "connection_id is invalid")
+    return value
 
 
 def _operator_connect_flow(tool_id: str, *, require_enabled: bool = True) -> Any:
@@ -344,9 +370,16 @@ def _operator_start_connect(
     flow = _operator_connect_flow(tool_id)
     if not isinstance(body, dict) or not isinstance(body.get("redirect_uri"), str) or not body["redirect_uri"]:
         raise OperatorError(HTTPStatus.BAD_REQUEST, "redirect_uri is required")
-    api = tools_host.host_api_for(tools_host.bundled_tool(tool_id), asset_store)
+    connection_id = _operator_connection_id(body, create=True)
+    tool = tools_host.bundled_tool(tool_id)
+    api = tools_host.host_api_for(
+        tool,
+        tools_host.connection_scope(tool, connection_id),
+        asset_store=asset_store,
+    )
     try:
-        return flow.start_connect({"redirect_uri": body["redirect_uri"]}, api)
+        result = flow.start_connect({"redirect_uri": body["redirect_uri"]}, api)
+        return {**result, "connection_id": connection_id}
     except (ValueError, KeyError, tools_host.ToolConfigKeyUnsetError) as exc:
         raise OperatorError(HTTPStatus.BAD_REQUEST, str(exc) or "invalid connect request") from exc
     except ProviderWarning as exc:
@@ -364,7 +397,13 @@ def _operator_complete_connect(
     params = {key: body.get(key) for key in ("code", "redirect_uri", "state")}
     if not all(isinstance(value, str) and value for value in params.values()):
         raise OperatorError(HTTPStatus.BAD_REQUEST, "code, redirect_uri, and state are required")
-    api = tools_host.host_api_for(tools_host.bundled_tool(tool_id), asset_store)
+    connection_id = _operator_connection_id(body)
+    tool = tools_host.bundled_tool(tool_id)
+    api = tools_host.host_api_for(
+        tool,
+        tools_host.connection_scope(tool, connection_id),
+        asset_store=asset_store,
+    )
     try:
         result = flow.complete_connect(params, api)
     except (ValueError, KeyError, tools_host.ToolConfigKeyUnsetError) as exc:
@@ -375,24 +414,51 @@ def _operator_complete_connect(
         raise OperatorError(HTTPStatus.BAD_GATEWAY, str(exc) or "tool connect flow failed") from exc
     account = result.get("account") if isinstance(result, dict) else None
     label = account.get("label") if isinstance(account, dict) else None
-    state.record_tool_event(tool_id, "oauth_connect", "connected", label if isinstance(label, str) else "")
-    return result
+    account_id = account.get("id") if isinstance(account, dict) else None
+    state.record_tool_event(
+        tool_id,
+        "oauth_connect",
+        "connected",
+        label if isinstance(label, str) else "",
+        connection_id=connection_id,
+        account_id=account_id if isinstance(account_id, str) else "",
+        account_label=label if isinstance(label, str) else "",
+    )
+    return {**result, "connection_id": connection_id}
 
 
 def _operator_disconnect(
-    tool_id: str, asset_store: tool_assets.ToolAssetStore | None = None
+    tool_id: str,
+    body: Any = None,
+    asset_store: tool_assets.ToolAssetStore | None = None,
 ) -> dict[str, Any]:
     # Disconnect skips the enabled gate so stored tokens can always be revoked.
     flow = _operator_connect_flow(tool_id, require_enabled=False)
-    api = tools_host.host_api_for(tools_host.bundled_tool(tool_id), asset_store)
+    connection_id = _operator_connection_id({} if body is None else body)
+    credential = state.tool_credential(tool_id, connection_id)
+    account = credential["account"] if credential is not None else {"id": "", "label": ""}
+    tool = tools_host.bundled_tool(tool_id)
+    api = tools_host.host_api_for(
+        tool,
+        tools_host.connection_scope(tool, connection_id),
+        asset_store=asset_store,
+    )
     try:
         flow.disconnect(api)
     except ProviderWarning as exc:
         _report_operator_provider_warning(tool_id, "oauth_disconnect", exc)
     except Exception as exc:  # noqa: BLE001 - tool packages redact their messages
         raise OperatorError(HTTPStatus.BAD_GATEWAY, str(exc) or "tool disconnect failed") from exc
-    state.record_tool_event(tool_id, "oauth_connect", "disconnected", "")
-    return {"tool_id": tool_id, "connected": False}
+    state.record_tool_event(
+        tool_id,
+        "oauth_connect",
+        "disconnected",
+        account["label"],
+        connection_id=connection_id,
+        account_id=account["id"],
+        account_label=account["label"],
+    )
+    return {"tool_id": tool_id, "connection_id": connection_id, "connected": False}
 
 
 def _report_operator_provider_warning(tool_id: str, action_id: str, exc: ProviderWarning) -> NoReturn:
@@ -453,7 +519,7 @@ def handle_operator(
         return _operator_complete_connect(complete.group(1), body, asset_store)
     disconnect = OPERATOR_DISCONNECT_RE.fullmatch(path)
     if disconnect:
-        return _operator_disconnect(disconnect.group(1), asset_store)
+        return _operator_disconnect(disconnect.group(1), body, asset_store)
     decide = OPERATOR_DECIDE_RE.fullmatch(path)
     if decide:
         return _operator_decide(

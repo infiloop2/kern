@@ -20,7 +20,8 @@ from unittest.mock import MagicMock, patch
 
 import pg_harness
 
-from host.runtime.admin_api import orchestrator, service
+from host.runtime.admin_api import service
+from host.runtime.agent_runtime import orchestrator, provider_account_trust
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.core import db, state
 from host.network_integrations.claude import guard as claude_guard
@@ -190,12 +191,12 @@ class OrchestratorTests(unittest.TestCase):
         # Live-validation verdicts are process-global memos; isolate tests.
         # Reset on the way out too: the other classes in this file do not all
         # clear these, so leaving a memo behind makes them order-dependent.
-        orchestrator._CLAUDE_LIVE_PROBE = None
-        orchestrator._CLAUDE_ATTESTATION_MEMO = None
+        provider_account_trust._CLAUDE_LIVE_PROBE = None
+        provider_account_trust._CLAUDE_ATTESTATION_MEMO = None
         orchestrator.codex_app_server.clear_live_validation_failure()
         self.addCleanup(orchestrator.codex_app_server.clear_live_validation_failure)
         self.addCleanup(setattr, orchestrator, "_CLAUDE_ATTESTATION_MEMO", None)
-        self.addCleanup(setattr, orchestrator, "_CLAUDE_LIVE_PROBE", None)
+        self.addCleanup(setattr, provider_account_trust, "_CLAUDE_LIVE_PROBE", None)
         orchestrator._set_runtime_status("codex", "active")
         orchestrator._set_runtime_status("claude_code", "active")
         orchestrator._set_runtime_status("grok", "active")
@@ -1524,6 +1525,7 @@ class OrchestratorTests(unittest.TestCase):
                 running = threading.Event()
                 release = threading.Event()
                 provider = MagicMock()
+                provider.refresh_before_turn = False
 
                 def blocking_run_turn(server, *_args):
                     server.on_session_id(session_id)
@@ -1546,7 +1548,7 @@ class OrchestratorTests(unittest.TestCase):
                             on_session_id=on_session_id,
                         ),
                     ),
-                    patch.object(orchestrator, "_provider_module", return_value=provider),
+                    patch.object(orchestrator, "harness_adapter", return_value=provider),
                 ):
                     self.start_turn(thread_id, runtime=runtime)
                     try:
@@ -2004,7 +2006,7 @@ class OrchestratorTests(unittest.TestCase):
         # A failed attestation is memoized for CLAUDE_LIVE_PROBE_RETRY_SECONDS
         # so the five-second poll does not refetch the profile; simulate the
         # retry window elapsing.
-        orchestrator._CLAUDE_ATTESTATION_MEMO = None
+        provider_account_trust._CLAUDE_ATTESTATION_MEMO = None
         with (
             patch.object(orchestrator.claude_code, "account_status", return_value=probe),
             patch.object(
@@ -2119,7 +2121,7 @@ class OrchestratorTests(unittest.TestCase):
                 "read_claude_usage",
                 return_value={"current_session_used_percent": 12},
             ) as usage_probe,
-            patch.object(orchestrator, "utc_now", return_value="2026-07-16T14:00:00Z"),
+            patch.object(provider_account_trust, "utc_now", return_value="2026-07-16T14:00:00Z"),
         ):
             self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "active")
 
@@ -2727,7 +2729,7 @@ class OrchestratorTests(unittest.TestCase):
                 "account_status",
                 return_value=("active", None, {"account_id": "acct-trusted", "access_token_sha256": "1" * 64}),
             ),
-            patch.object(orchestrator, "_claude_attestation_allowed", return_value=False) as allowed,
+            patch.object(provider_account_trust, "_claude_attestation_allowed", return_value=False) as allowed,
             patch.object(
                 orchestrator.claude_code,
                 "read_attested_identity",
@@ -3144,11 +3146,11 @@ class StartBackgroundLoopsOrderTests(unittest.TestCase):
         order: list[str] = []
         with (
             patch(
-                "host.runtime.admin_api.orchestrator.github_credential.reconcile",
+                "host.runtime.agent_runtime.orchestrator.github_credential.reconcile",
                 side_effect=lambda: order.append("refresh"),
             ),
             patch(
-                "host.runtime.admin_api.orchestrator.threading.Thread",
+                "host.runtime.agent_runtime.orchestrator.threading.Thread",
                 side_effect=lambda *a, **k: order.append("thread") or _NoopThread(),
             ),
         ):
@@ -3169,13 +3171,13 @@ class StartBackgroundLoopsOrderTests(unittest.TestCase):
         observed: list[str] = []
         with (
             patch(
-                "host.runtime.admin_api.orchestrator.github_credential.reconcile",
+                "host.runtime.agent_runtime.orchestrator.github_credential.reconcile",
                 side_effect=lambda: observed.append(
                     orchestrator.runtime_status("script")
                 ),
             ),
             patch(
-                "host.runtime.admin_api.orchestrator.threading.Thread",
+                "host.runtime.agent_runtime.orchestrator.threading.Thread",
                 side_effect=lambda *a, **k: _NoopThread(),
             ),
         ):
@@ -3217,7 +3219,7 @@ class StartBackgroundLoopsOrderTests(unittest.TestCase):
 
 class ClaudeLiveStatusTests(unittest.TestCase):
     def setUp(self) -> None:
-        orchestrator._CLAUDE_LIVE_PROBE = None
+        provider_account_trust._CLAUDE_LIVE_PROBE = None
         self.addCleanup(setattr, orchestrator, "_CLAUDE_LIVE_PROBE", None)
 
     def stored_account(self, token_hash: str) -> dict[str, str]:
@@ -3230,7 +3232,7 @@ class ClaudeLiveStatusTests(unittest.TestCase):
     def test_invalid_steady_token_requires_login(self) -> None:
         account = {"access_token_sha256": "old"}
         with (
-            patch.object(orchestrator, "read_claude_account", return_value=self.stored_account("old")),
+            patch.object(provider_account_trust, "read_claude_account", return_value=self.stored_account("old")),
             patch.object(
                 orchestrator.claude_code,
                 "read_claude_usage",
@@ -3243,7 +3245,7 @@ class ClaudeLiveStatusTests(unittest.TestCase):
     def test_refresh_rotation_is_attested_instead_of_failed_by_the_old_proxy_pin(self) -> None:
         account = {"access_token_sha256": "old", "plan_type": "max"}
         with (
-            patch.object(orchestrator, "read_claude_account", return_value=self.stored_account("old")),
+            patch.object(provider_account_trust, "read_claude_account", return_value=self.stored_account("old")),
             patch.object(
                 orchestrator.claude_code,
                 "read_claude_usage",
@@ -3265,7 +3267,7 @@ class ClaudeLiveStatusTests(unittest.TestCase):
     def test_first_capture_uses_attestation_without_a_pre_pin_usage_probe(self) -> None:
         account = {"access_token_sha256": "new"}
         with (
-            patch.object(orchestrator, "read_claude_account", return_value={}),
+            patch.object(provider_account_trust, "read_claude_account", return_value={}),
             patch.object(orchestrator.claude_code, "read_claude_usage") as usage,
         ):
             self.assertEqual(orchestrator._live_claude_status(account), ("active", None, account))
@@ -3274,7 +3276,7 @@ class ClaudeLiveStatusTests(unittest.TestCase):
     def test_failed_authentication_is_not_reprobed_until_the_token_changes(self) -> None:
         account = {"access_token_sha256": "old"}
         with (
-            patch.object(orchestrator, "read_claude_account", return_value=self.stored_account("old")),
+            patch.object(provider_account_trust, "read_claude_account", return_value=self.stored_account("old")),
             patch.object(
                 orchestrator.claude_code,
                 "read_claude_usage",
@@ -3290,7 +3292,7 @@ class ClaudeLiveStatusTests(unittest.TestCase):
 
     def test_new_token_bypasses_a_failure_verdict(self) -> None:
         with (
-            patch.object(orchestrator, "read_claude_account", return_value=self.stored_account("old")),
+            patch.object(provider_account_trust, "read_claude_account", return_value=self.stored_account("old")),
             patch.object(
                 orchestrator.claude_code,
                 "read_claude_usage",
@@ -3310,24 +3312,24 @@ class ClaudeLiveStatusTests(unittest.TestCase):
         fetched_usage = {"current_session_used_percent": 14}
         usage = {**fetched_usage, "last_checked_at": "2026-07-16T14:00:00Z"}
         with (
-            patch.object(orchestrator, "read_claude_account", return_value=self.stored_account("old")),
+            patch.object(provider_account_trust, "read_claude_account", return_value=self.stored_account("old")),
             patch.object(orchestrator.claude_code, "read_claude_usage", return_value=dict(fetched_usage)) as probe,
             patch.object(orchestrator.claude_code, "read_claude_account", return_value=dict(account)),
-            patch.object(orchestrator, "utc_now", return_value="2026-07-16T14:00:00Z"),
+            patch.object(provider_account_trust, "utc_now", return_value="2026-07-16T14:00:00Z"),
         ):
             expected = ("active", None, {"access_token_sha256": "old", "claude_usage": usage})
             self.assertEqual(orchestrator._live_claude_status(account), expected)
             self.assertEqual(orchestrator._live_claude_status(account), expected)
             self.assertEqual(probe.call_count, 1)
-            assert orchestrator._CLAUDE_LIVE_PROBE is not None
-            orchestrator._CLAUDE_LIVE_PROBE["at"] -= orchestrator.CLAUDE_LIVE_PROBE_RETRY_SECONDS + 1
+            assert provider_account_trust._CLAUDE_LIVE_PROBE is not None
+            provider_account_trust._CLAUDE_LIVE_PROBE["at"] -= orchestrator.CLAUDE_LIVE_PROBE_RETRY_SECONDS + 1
             self.assertEqual(orchestrator._live_claude_status(account), expected)
         self.assertEqual(probe.call_count, 2)
 
     def test_forced_active_probe_bypasses_the_retry_window(self) -> None:
         account = {"access_token_sha256": "old"}
         with (
-            patch.object(orchestrator, "read_claude_account", return_value=self.stored_account("old")),
+            patch.object(provider_account_trust, "read_claude_account", return_value=self.stored_account("old")),
             patch.object(
                 orchestrator.claude_code,
                 "read_claude_usage",
@@ -3337,7 +3339,7 @@ class ClaudeLiveStatusTests(unittest.TestCase):
                 ],
             ) as probe,
             patch.object(orchestrator.claude_code, "read_claude_account", return_value=dict(account)),
-            patch.object(orchestrator, "utc_now", return_value="2026-07-16T14:00:00Z"),
+            patch.object(provider_account_trust, "utc_now", return_value="2026-07-16T14:00:00Z"),
         ):
             first = orchestrator._live_claude_status(account)
             cached = orchestrator._live_claude_status(account)
@@ -3354,7 +3356,7 @@ class ClaudeLiveStatusTests(unittest.TestCase):
         account = {"access_token_sha256": "old"}
         expected = ("error", "could not validate Claude authentication: proxy unreachable", None)
         with (
-            patch.object(orchestrator, "read_claude_account", return_value=self.stored_account("old")),
+            patch.object(provider_account_trust, "read_claude_account", return_value=self.stored_account("old")),
             patch.object(
                 orchestrator.claude_code,
                 "read_claude_usage",
@@ -3365,8 +3367,8 @@ class ClaudeLiveStatusTests(unittest.TestCase):
             self.assertEqual(orchestrator._live_claude_status(account), expected)
             self.assertEqual(orchestrator._live_claude_status(account), expected)
             self.assertEqual(probe.call_count, 1)
-            assert orchestrator._CLAUDE_LIVE_PROBE is not None
-            orchestrator._CLAUDE_LIVE_PROBE["at"] -= orchestrator.CLAUDE_LIVE_PROBE_RETRY_SECONDS + 1
+            assert provider_account_trust._CLAUDE_LIVE_PROBE is not None
+            provider_account_trust._CLAUDE_LIVE_PROBE["at"] -= orchestrator.CLAUDE_LIVE_PROBE_RETRY_SECONDS + 1
             self.assertEqual(orchestrator._live_claude_status(account), expected)
         self.assertEqual(probe.call_count, 2)
 

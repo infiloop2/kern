@@ -329,6 +329,17 @@
           </div>
           <div class="detail-card">
             <div class="detail-card-head">
+              <h3>Block direct pushes to <code>main</code></h3>
+              <span class="seg">
+                <button data-action="enable-github-block-main-pushes">Enable</button>
+                <button data-action="disable-github-block-main-pushes">Disable</button>
+              </span>
+            </div>
+            <p class="muted">A Git push that updates <code>refs/heads/main</code> is rejected by the proxy. Push a feature branch and merge it through a pull request instead. This does not create an approval request.</p>
+            <span id="github-block-main-pushes-status" class="muted"></span>
+          </div>
+          <div class="detail-card">
+            <div class="detail-card-head">
               <h3>Require approval for <code>.github</code> pushes</h3>
               <span class="seg">
                 <button data-action="enable-github-require-approval">Enable</button>

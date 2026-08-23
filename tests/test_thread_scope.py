@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
-from host.runtime.admin_api import thread_scope
+from host.runtime.agent_runtime import thread_scope
 
 
 class ThreadScopeTests(unittest.TestCase):

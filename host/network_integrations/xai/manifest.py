@@ -1,10 +1,11 @@
 """xAI managed integration: static contract.
 
 Opens the xAI OAuth path and a narrow allowlist of chat-proxy endpoints, pinned
-to the configured account by the bearer token's account claim. Every Grok
-server-side tool is denied — web search, X search, hosted browsing, code
-execution, and remote MCP servers alike — and the integration exposes no
-options.
+to the configured account by the bearer token's account claim. X search with
+X-only filters, text-to-image generation, and a bare reserved video-generation
+declaration are allowed; web search, hosted browsing, code execution,
+collections search, remote MCP servers, unknown tools, and media shapes with
+external inputs remain denied. The integration exposes no options.
 
 The chat proxy also serves blob storage, remote session registration and
 search, workspace sync, and cloud sandboxes. Those routes would move agent
@@ -35,10 +36,11 @@ MANIFEST = IntegrationManifest(
     description=(
         "Grok runtime access to the xAI CLI chat proxy under the pinned account, plus the "
         "xAI OAuth login path. The metered developer API is not opened, so inference draws "
-        "on the operator's Grok subscription. Every Grok server-side tool is denied, web "
-        "search included: Grok's searches and browses live pages as one capability, from "
-        "xAI's infrastructure rather than this host, so it has no shape this host can "
-        "safely allow. The integration has no options."
+        "on the operator's Grok subscription. X search with X-only filters, text-to-image "
+        "generation, and a bare reserved video-generation declaration are allowed; web "
+        "search, code execution, hosted browsing, collections search, remote MCP, unknown "
+        "tools, and media declarations with external inputs remain denied. The integration "
+        "has no options."
     ),
     owned_apexes=("x.ai", "grok.com"),
     denial_reasons=(
@@ -74,10 +76,11 @@ MANIFEST = IntegrationManifest(
         ),
         DenialReason(
             "xai_server_tool_denied",
-            "Grok server-side tools that reach external sources or run code off-box (X search, "
-            "hosted browsing, code interpreter, collections search, media generation) are always "
-            "denied on this host, and no operator setting enables any of them. Remove the tool "
-            "declaration.",
+            "This Grok server-side tool is not one of the narrowly approved xAI/X-hosted "
+            "shapes: X search with X-only filters, text-to-image generation, or the bare "
+            "reserved video-generation declaration. Hosted browsing, code interpreter, "
+            "collections search, unknown tools, and media declarations that could name an "
+            "external input remain denied. Remove or narrow the tool declaration.",
         ),
         DenialReason(
             "xai_remote_mcp_denied",
@@ -91,8 +94,10 @@ MANIFEST = IntegrationManifest(
 @dataclass(frozen=True)
 class XaiIntegration:
     """When enabled, the Grok runtime reaches the xAI CLI chat proxy under the
-    pinned account. There are no options: every Grok server-side tool — web
-    search included — is denied, so enablement is the whole configuration.
+    pinned account. There are no options: X search with X-only filters,
+    text-to-image generation, and a bare reserved video-generation declaration
+    are admitted, while every other Grok server-side tool or shape — web search
+    included — is denied, so enablement is the whole configuration.
 
     Web search is not offered because Grok's has no shape narrow enough to
     offer. It searches and browses live pages in one indivisible capability,

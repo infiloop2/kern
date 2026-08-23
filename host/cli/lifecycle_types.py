@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -26,3 +27,15 @@ class LifecycleCommand:
     # VM on the operator's machine). Only the provider selection point and
     # provider modules branch on this.
     provider: str = "aws"
+
+
+class LifecycleProvider(Protocol):
+    """Infrastructure provider surface used by deploy/upgrade/recovery."""
+
+    def main_for_lifecycle(self, command: LifecycleCommand) -> int: ...
+
+
+class PowerProvider(Protocol):
+    """Infrastructure provider surface used by start/stop."""
+
+    def main_for_power(self, mode: str, agent_name: str) -> int: ...

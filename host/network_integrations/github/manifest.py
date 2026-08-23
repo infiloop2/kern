@@ -31,8 +31,9 @@ MANIFEST = IntegrationManifest(
         "the credential reaches are allowed, pushes and API writes must target a configured "
         "write repository, workflow dispatches are allowed in those repositories, and other "
         "repository administration (access grants, hooks, publishing, workflow control) is "
-        "denied even there. Optionally holds pushes that change "
-        ".github/ paths for operator approval. Also permits read-only GitHub Actions log, "
+        "denied even there. Direct pushes to main are blocked by default, and it can "
+        "optionally hold pushes that change .github/ paths for operator approval. Also "
+        "permits read-only GitHub Actions log, "
         "artifact, summary, and cache downloads from GitHub's documented Azure Blob hosts."
     ),
     # GitHub documents Azure Blob storage as the backing service for Actions
@@ -85,6 +86,18 @@ MANIFEST = IntegrationManifest(
             "gate.",
         ),
         DenialReason(
+            "github_main_push_denied",
+            "Direct pushes to main are blocked by the GitHub integration. Push the commits "
+            "to a feature branch and open a pull request, or ask the operator to disable "
+            "Block direct pushes to main in the admin UI's Network tab.",
+        ),
+        DenialReason(
+            "github_main_push_guard_unavailable",
+            "Direct pushes to main are blocked, but the receive-pack command list could not "
+            "be inspected safely, so the push failed closed. Retry the push; if it keeps "
+            "failing, ask the operator to check the host.",
+        ),
+        DenialReason(
             "github_push_queued_for_approval",
             "The push changes a .github/ path, so it was held for operator approval instead "
             "of being forwarded; each ref was reported as 'queued for approval as "
@@ -122,13 +135,15 @@ class GitHubIntegration:
     """When enabled, the agent may read any repository the injected token
     reaches; ``write_repositories`` is the list it may also push to and mutate
     through the API (repository administration stays denied even there). The
-    list is what the audit inspects. ``require_dot_github_approval`` holds a push
-    that changes any ``.github/`` path for operator approval instead of
-    forwarding it to GitHub."""
+    list is what the audit inspects. ``block_direct_main_pushes`` rejects a git
+    push that updates ``refs/heads/main`` before it reaches GitHub.
+    ``require_dot_github_approval`` holds a push that changes any ``.github/``
+    path for operator approval instead of forwarding it to GitHub."""
 
     enabled: bool
     write_repositories: tuple[GitHubRepository, ...] = ()
     require_dot_github_approval: bool = False
+    block_direct_main_pushes: bool = True
 
     def to_json(self) -> dict[str, Any]:
         value: dict[str, Any] = {"enabled": self.enabled}
@@ -136,6 +151,10 @@ class GitHubIntegration:
             value["write_repositories"] = [repo.to_json() for repo in self.write_repositories]
         if self.require_dot_github_approval:
             value["require_dot_github_approval"] = True
+        # Protection is the default. Preserve only the explicit opt-out so a
+        # missing field stays safe across config and database round-trips.
+        if self.enabled and not self.block_direct_main_pushes:
+            value["block_direct_main_pushes"] = False
         return value
 
 
@@ -143,21 +162,32 @@ def parse(raw: dict[str, Any]) -> GitHubIntegration:
     if not raw:
         return GitHubIntegration(False)
     context = "network_integrations.github"
-    reject_extra(raw, {"enabled", "write_repositories", "require_dot_github_approval"}, context)
+    reject_extra(
+        raw,
+        {"enabled", "write_repositories", "require_dot_github_approval", "block_direct_main_pushes"},
+        context,
+    )
     enabled = raw.get("enabled", False)
     if not isinstance(enabled, bool):
         raise IntegrationConfigError(f"{context}.enabled must be true or false")
     require_dot_github_approval = raw.get("require_dot_github_approval", False)
     if not isinstance(require_dot_github_approval, bool):
         raise IntegrationConfigError(f"{context}.require_dot_github_approval must be true or false")
+    block_direct_main_pushes = raw.get("block_direct_main_pushes", enabled)
+    if not isinstance(block_direct_main_pushes, bool):
+        raise IntegrationConfigError(f"{context}.block_direct_main_pushes must be true or false")
     write_repositories = parse_write_repositories(raw.get("write_repositories", []), context)
     # A disabled GitHub integration carries no other state.
-    if not enabled and (write_repositories or require_dot_github_approval):
+    if not enabled and (write_repositories or require_dot_github_approval or block_direct_main_pushes):
         raise IntegrationConfigError(
-            f"{context}.write_repositories and require_dot_github_approval require enabled to be true"
+            f"{context}.write_repositories, require_dot_github_approval, and "
+            "block_direct_main_pushes require enabled to be true"
         )
     return GitHubIntegration(
-        enabled=enabled, write_repositories=write_repositories, require_dot_github_approval=require_dot_github_approval
+        enabled=enabled,
+        write_repositories=write_repositories,
+        require_dot_github_approval=require_dot_github_approval,
+        block_direct_main_pushes=block_direct_main_pushes,
     )
 
 

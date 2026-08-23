@@ -1,15 +1,27 @@
-# GitHub `.github` Approval Control
+# GitHub Push Controls
 
-The GitHub integration supports one file-level write control:
+The GitHub integration blocks direct pushes to `main` by default and supports
+one independent file-level approval control:
 `require_dot_github_approval`. When this boolean is true, a write-repository
 push that changes `.github/` is held for operator approval before anything is
 sent to GitHub.
 
 ## Policy Surface
 
-The toggle lives under `network_integrations.github` next to
-`write_repositories`. Reads are unchanged, and normal writes to configured write
-repositories still pass. The guard denies REST write paths that can create or
+Both toggles live under `network_integrations.github` next to
+`write_repositories`. `block_direct_main_pushes` defaults to true whenever the
+integration is enabled. The operator may set it to false in the Network
+settings. Reads are unchanged, and normal writes to configured write
+repositories still pass.
+
+The main-branch block applies only to smart-HTTP Git pushes. A receive-pack
+transaction containing an update or deletion of `refs/heads/main` is rejected
+as `github_main_push_denied`; every ref in a multi-ref push is rejected because
+none of the request is forwarded. The proxy parses only the command list and
+does not index the pack or create an approval row. Feature-branch pushes and
+pull-request merges remain allowed.
+
+For `.github` approval, the guard denies REST write paths that can create or
 move `.github` changes without entering `git-receive-pack`, including
 `contents/.github...`, `git/{refs,trees,commits}`, and lower-level branch merge
 APIs. Those denials use `github_dot_github_rest_write_denied`. Pull-request
@@ -24,10 +36,12 @@ governed by the configured repository-scoped merge permission.
 ## Push Flow
 
 For smart-HTTP `git-receive-pack` pushes to a configured write repository, the
-proxy buffers the request body and asks `host/network_integrations/github/push_gate/` to
-inspect it. The gate resolves thin packs against a per-repo quarantine mirror
-and uses real `git` plumbing (`index-pack` and `diff-tree`) to compute changed
-paths.
+proxy buffers the request body. It first rejects a command list that targets
+`refs/heads/main` when main protection is enabled. Otherwise, if `.github`
+approval is enabled, it asks `host/network_integrations/github/push_gate/` to
+inspect the pack. The approval gate resolves thin packs against a per-repo
+quarantine mirror and uses real `git` plumbing (`index-pack` and `diff-tree`) to
+compute changed paths.
 
 - If no changed path is `.github` or under `.github/`, the proxy forwards the
   original push body upstream.
@@ -37,8 +51,9 @@ paths.
   the agent the push is queued for approval. The network event reason is
   `github_push_queued_for_approval`.
 
-The proxy parses pkt-line command framing only. Pack objects are parsed by
-`git`, not by custom Python object logic.
+The proxy parses pkt-line command framing only. Main-branch rejection stops at
+that command list. Pack objects are parsed by `git`, not by custom Python
+object logic, only when `.github` inspection is needed.
 
 ## Queue Bound
 
@@ -76,7 +91,7 @@ Pending-ref cleanup is housekeeping of the proxy-private mirror. A leftover
 
 ## Failure Behavior
 
-The gate fails closed. If receive-pack parsing, quarantine indexing, mirror
+The controls fail closed. If receive-pack parsing, quarantine indexing, mirror
 fetch, pending-row insertion, or approval replay cannot complete, the push is
 not forwarded silently. A held push is marked with a terminal resolved state
 (`approved`, `rejected`, or `failed`) with the failure recorded in `detail`;

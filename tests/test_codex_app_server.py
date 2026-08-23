@@ -13,9 +13,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from host.constants import WORKSPACE_ADMIN_API_TIMEOUT_SECONDS
-from host.runtime.admin_api import workspace_proxy, thread_scope
-from host.runtime.admin_api import codex_app_server as codex_app_server_module
-from host.runtime.admin_api.codex_app_server import (
+from host.runtime.admin_api import workspace_proxy
+from host.runtime.agent_runtime import codex_app_server as codex_app_server_module
+from host.runtime.agent_runtime import thread_scope
+from host.runtime.agent_runtime.codex_app_server import (
     CodexAppServer,
     CodexAppServerError,
     CodexTurnFinishing,
@@ -576,7 +577,7 @@ class CodexAppServerTests(unittest.TestCase):
         # Real Codex 0.124.0 account/read returns email/plan/type, not the
         # account id. Kern stores only the public identity fields it uses.
         result = {"account": {"email": "dev@example.com", "planType": "pro", "type": "chatgpt"}}
-        with patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"):
+        with patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"):
             self.assertEqual(
                 self.account_status_with_result(result),
                 (
@@ -593,8 +594,8 @@ class CodexAppServerTests(unittest.TestCase):
         # data-plane guard.
         result = {"account": {"email": "dev@example.com", "planType": "pro", "type": "chatgpt"}}
         with (
-            patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"),
-            patch("host.runtime.admin_api.codex_app_server.read_proxy_openai_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_proxy_openai_account_id", return_value="acct_123"),
         ):
             self.assertEqual(
                 self.account_status_with_result(result, rate_limits_error=True),
@@ -613,8 +614,8 @@ class CodexAppServerTests(unittest.TestCase):
         # the refresh_error would fail this test if the fallback ran.
         result = {"account": {"email": "dev@example.com", "planType": "pro", "type": "chatgpt"}}
         with (
-            patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"),
-            patch("host.runtime.admin_api.codex_app_server.read_proxy_openai_account_id", return_value=None),
+            patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_proxy_openai_account_id", return_value=None),
         ):
             self.assertEqual(
                 self.account_status_with_result(
@@ -632,8 +633,8 @@ class CodexAppServerTests(unittest.TestCase):
     def test_account_status_maps_failed_credential_refresh_to_awaiting_login(self) -> None:
         result = {"account": {"email": "dev@example.com", "planType": "pro", "type": "chatgpt"}}
         with (
-            patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"),
-            patch("host.runtime.admin_api.codex_app_server.read_proxy_openai_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_proxy_openai_account_id", return_value="acct_123"),
         ):
             self.assertEqual(
                 self.account_status_with_result(
@@ -651,8 +652,8 @@ class CodexAppServerTests(unittest.TestCase):
         # or account reset clears the verdict and revalidates from scratch.
         result = {"account": {"email": "dev@example.com", "planType": "pro", "type": "chatgpt"}}
         with (
-            patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"),
-            patch("host.runtime.admin_api.codex_app_server.read_proxy_openai_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_proxy_openai_account_id", return_value="acct_123"),
         ):
             self.assertEqual(
                 self.account_status_with_result(
@@ -679,8 +680,8 @@ class CodexAppServerTests(unittest.TestCase):
     def test_explicit_refresh_bypasses_failed_credential_refresh_memo(self) -> None:
         result = {"account": {"email": "dev@example.com", "planType": "pro", "type": "chatgpt"}}
         with (
-            patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"),
-            patch("host.runtime.admin_api.codex_app_server.read_proxy_openai_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_proxy_openai_account_id", return_value="acct_123"),
         ):
             self.assertEqual(
                 self.account_status_with_result(
@@ -709,8 +710,8 @@ class CodexAppServerTests(unittest.TestCase):
         # on its own, so the next scheduled recheck revalidates.
         result = {"account": {"email": "dev@example.com", "planType": "pro", "type": "chatgpt"}}
         with (
-            patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"),
-            patch("host.runtime.admin_api.codex_app_server.read_proxy_openai_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.read_proxy_openai_account_id", return_value="acct_123"),
         ):
             status, error_message, account = self.account_status_with_result(
                 result, rate_limits_error=True, refresh_error="app-server unreachable"
@@ -771,7 +772,7 @@ class CodexAppServerTests(unittest.TestCase):
                 },
             },
         }
-        with patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"):
+        with patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"):
             self.assertEqual(
                 self.account_status_with_result(result, rate_limits),
                 (
@@ -805,8 +806,8 @@ class CodexAppServerTests(unittest.TestCase):
         park_login(login_server)
 
         with (
-            patch("host.runtime.admin_api.codex_app_server.CodexAppServer", side_effect=AssertionError("started new server")),
-            patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.CodexAppServer", side_effect=AssertionError("started new server")),
+            patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"),
         ):
             self.assertEqual(
                 codex_app_server_module.account_status(),
@@ -871,7 +872,7 @@ class CodexAppServerTests(unittest.TestCase):
         login_server = FakeLoginServer(None)
         park_login(login_server)
 
-        with patch("host.runtime.admin_api.codex_app_server.CodexAppServer", side_effect=AssertionError("started new server")):
+        with patch("host.runtime.agent_runtime.codex_app_server.CodexAppServer", side_effect=AssertionError("started new server")):
             self.assertEqual(codex_app_server_module.account_status(), ("awaiting_login", None, None))
 
         self.assertEqual(login_server.calls, ["account/read"])
@@ -881,7 +882,7 @@ class CodexAppServerTests(unittest.TestCase):
         login_server = FakeLoginServer(None, account_error="not logged in")
         park_login(login_server)
 
-        with patch("host.runtime.admin_api.codex_app_server.CodexAppServer", side_effect=AssertionError("started new server")):
+        with patch("host.runtime.agent_runtime.codex_app_server.CodexAppServer", side_effect=AssertionError("started new server")):
             self.assertEqual(codex_app_server_module.account_status(), ("awaiting_login", None, None))
 
         self.assertEqual(login_server.calls, ["account/read"])
@@ -897,8 +898,8 @@ class CodexAppServerTests(unittest.TestCase):
         # The poller captures the trusted account id from the login tokens the
         # instant it observes the completion, so patch the helper around the poll.
         with (
-            patch("host.runtime.admin_api.codex_app_server.CodexAppServer", side_effect=AssertionError("started new server")),
-            patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"),
+            patch("host.runtime.agent_runtime.codex_app_server.CodexAppServer", side_effect=AssertionError("started new server")),
+            patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"),
         ):
             self.assertEqual(codex_app_server_module.account_status(), ("awaiting_login", None, None))
 
@@ -934,7 +935,7 @@ class CodexAppServerTests(unittest.TestCase):
 
     def test_account_status_errors_for_account_when_helper_cannot_find_id(self) -> None:
         result = {"account": {"email": "dev@example.com", "planType": "pro", "type": "chatgpt"}}
-        with patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value=None):
+        with patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value=None):
             status, detail, account_id = self.account_status_with_result(result)
         self.assertEqual(status, "error")
         self.assertIn("without a supported account id", detail or "")
@@ -957,7 +958,7 @@ class CodexAppServerTests(unittest.TestCase):
         ]
         try:
             login = codex_app_server_module.start_device_login()
-            with patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"):
+            with patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"):
                 self.assertIsNone(codex_app_server_module.read_completed_device_login_account_id("other-login"))
                 # Once the completion notification for this login is recorded, capture
                 # reads the trusted account id from the login tokens (root helper).
@@ -975,7 +976,7 @@ class CodexAppServerTests(unittest.TestCase):
         codex_app_server_module.DEFAULT_COMMAND = [sys.executable, "-u", "-c", fake_login_server_with_delayed_account()]
         try:
             login = codex_app_server_module.start_device_login()
-            with patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="acct_123"):
+            with patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="acct_123"):
                 self.assertIsNone(codex_app_server_module.read_completed_device_login_account_id(login.login_id))
                 # The first status read surfaces the completion notification before the
                 # account itself reads back; the poller records it so capture succeeds.
@@ -1000,7 +1001,7 @@ class CodexAppServerTests(unittest.TestCase):
             login = codex_app_server_module.start_device_login()
             # Completion is recorded, but the helper cannot read a supported id: fail
             # closed rather than anchor an empty account.
-            with patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value=None):
+            with patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value=None):
                 codex_app_server_module.account_status()
                 with self.assertRaises(CodexAppServerError) as error:
                     codex_app_server_module.read_completed_device_login_account_id(login.login_id)
@@ -1022,7 +1023,7 @@ class CodexAppServerTests(unittest.TestCase):
             # An active account with no completion notification for this login (an
             # attacker-swapped auth file) must never be captured as the anchor: with
             # no recorded completion, the helper id is never even read.
-            with patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="auth_file_acct"):
+            with patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="auth_file_acct"):
                 codex_app_server_module.account_status()
                 self.assertIsNone(codex_app_server_module.read_completed_device_login_account_id(login.login_id))
         finally:
@@ -1041,7 +1042,7 @@ class CodexAppServerTests(unittest.TestCase):
             login = codex_app_server_module.start_device_login()
             # A completion notification for a different login id must not satisfy
             # capture for this login.
-            with patch("host.runtime.admin_api.codex_app_server.read_codex_account_id", return_value="auth_file_acct"):
+            with patch("host.runtime.agent_runtime.codex_app_server.read_codex_account_id", return_value="auth_file_acct"):
                 codex_app_server_module.account_status()
                 self.assertIsNone(codex_app_server_module.read_completed_device_login_account_id(login.login_id))
         finally:
@@ -1266,7 +1267,7 @@ for line in sys.stdin:
 
     def test_codex_activity_normalization_skips_parser_failures(self) -> None:
         with patch(
-            "host.runtime.admin_api.codex_app_server.agent_activity.activity",
+            "host.runtime.agent_runtime.codex_app_server.agent_activity.activity",
             side_effect=ValueError("malformed provider item"),
         ):
             self.assertIsNone(

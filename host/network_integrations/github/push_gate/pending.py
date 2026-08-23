@@ -26,7 +26,7 @@ import threading
 from typing import Any
 
 from host.runtime.core import state
-from host.runtime.admin_api.github_credential import HelperError, _run_helper_json
+from host.runtime.core.root_helpers import HelperError, run_helper_json
 
 APPROVE_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/approve-github-push"]
 APPROVE_HELPER_TIMEOUT_SECONDS = 150
@@ -35,6 +35,13 @@ APPROVE_HELPER_TIMEOUT_SECONDS = 150
 # instead of queueing behind a 150s replay.
 RESOLVE_LOCK = threading.Lock()
 RESOLVE_LOCK_TIMEOUT_SECONDS = 5
+
+
+def _run_helper_json(
+    command: list[str], payload: dict[str, Any], *, timeout: int
+) -> dict[str, Any]:
+    """Compatibility seam for the pending-push helper tests."""
+    return run_helper_json(command, payload, timeout=timeout)
 
 
 class PendingPushError(Exception):

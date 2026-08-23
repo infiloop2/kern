@@ -6,7 +6,7 @@ Code, this wrapper subscribes to Hermes's ``pre_tool_call``/``post_tool_call``
 plugin hooks and prints one provider-independent activity record per event to
 stdout, each on its own line behind an ASCII Record-Separator sentinel plus the
 per-turn ``--activity-nonce`` secret. The host adapter
-(``host.runtime.admin_api.hermes_agent``) mints that nonce, passes it in, and
+(``host.runtime.agent_runtime.hermes_agent``) mints that nonce, passes it in, and
 splits the framed lines from the answer text as it streams stdout. Because the
 model never sees the nonce, its (model-controlled) answer text cannot reproduce
 the frame to forge a card or steal itself out of the response. Emission is

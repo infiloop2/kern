@@ -4,7 +4,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from host.runtime.admin_api import bedrock_credentials
+from host.runtime.agent_runtime import bedrock_credentials
 
 
 class BedrockCredentialsTests(unittest.TestCase):

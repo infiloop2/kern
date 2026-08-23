@@ -146,7 +146,7 @@ export const toolLog = createPagedLog({
   row: event => `
     <tr>
       <td class="muted time">${esc(formatDateTime(event.timestamp))}</td>
-      <td class="mono">${esc(event.tool_id)}</td>
+      <td><span class="mono">${esc(event.tool_id)}</span>${event.account_label ? `<br><span class="muted">${esc(event.account_label)} · <span class="mono">${esc(event.connection_id || "")}</span></span>` : ""}</td>
       <td class="mono">${esc(event.action_id)}</td>
       <td>${badge(event.outcome)}${event.detail ? ` <span class="muted">${esc(event.detail)}</span>` : ""}</td>
       <td>${event.has_arguments ? `<details class="tool-event-arguments" data-tool-event-seq="${esc(event.seq)}"><summary class="muted">view</summary><pre class="metadata"></pre></details>` : ""}</td>

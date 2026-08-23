@@ -72,6 +72,15 @@ def _list_network_integrations() -> dict[str, Any]:
     return {"status": "executed", "result": {"network_integrations": integrations}}
 
 
+# A repeating denial (a polling client retrying the same blocked request) can
+# push everything else out of the feed within the hour, so identical denials
+# collapse into one counted entry. The scan is bounded so a flood cannot turn
+# one tool call into an unbounded table walk.
+_DENIAL_SCAN_LIMIT = 1000
+
+_DENIAL_IDENTITY_FIELDS = ("protocol", "method", "host", "port", "path", "query", "reason_code")
+
+
 def _recent_network_denials(tool_input: Any) -> dict[str, Any]:
     limit = 20
     if isinstance(tool_input, dict) and tool_input.get("limit") is not None:
@@ -80,21 +89,52 @@ def _recent_network_denials(tool_input: Any) -> dict[str, Any]:
             raise NetworkToolCallError("limit must be an integer between 1 and 100.")
         limit = raw_limit
     catalog = registry.denial_reason_catalog()
-    denials = []
-    for event in state.page_network_events_before(None, decision="denied", limit=limit):
-        entry = {
-            key: event[key]
-            for key in ("timestamp", "protocol", "method", "host", "port", "path", "query")
-            if key in event
-        }
-        code = event.get("reason_code")
-        if code is not None:
-            entry["reason_code"] = code
-            reason = catalog.get(code)
-            if reason is not None:
-                entry["guidance"] = reason.guidance
-        denials.append(entry)
-    return {"status": "executed", "result": {"denials": denials}}
+    denials: list[dict[str, Any]] = []
+    collapsed: dict[tuple[Any, ...], dict[str, Any]] = {}
+    cursor: int | None = None
+    scanned = 0
+    while scanned < _DENIAL_SCAN_LIMIT:
+        page = state.page_network_events_before(
+            cursor,
+            decision="denied",
+            limit=min(state.EVENT_PAGE_LIMIT, _DENIAL_SCAN_LIMIT - scanned),
+        )
+        if not page:
+            break
+        for event in page:
+            scanned += 1
+            identity = tuple(event.get(field) for field in _DENIAL_IDENTITY_FIELDS)
+            existing = collapsed.get(identity)
+            if existing is not None:
+                existing["count"] += 1
+                # Pages are newest-first, so this occurrence is the oldest yet.
+                existing["first_timestamp"] = event["timestamp"]
+                continue
+            if len(denials) >= limit:
+                continue
+            entry = {
+                key: event[key]
+                for key in ("timestamp", "protocol", "method", "host", "port", "path", "query")
+                if key in event
+            }
+            entry["count"] = 1
+            code = event.get("reason_code")
+            if code is not None:
+                entry["reason_code"] = code
+                reason = catalog.get(code)
+                if reason is not None:
+                    entry["guidance"] = reason.guidance
+            collapsed[identity] = entry
+            denials.append(entry)
+        cursor = page[-1]["seq"]
+    truncated = (
+        scanned == _DENIAL_SCAN_LIMIT
+        and bool(state.page_network_events_before(cursor, decision="denied", limit=1))
+    )
+    return {
+        "status": "executed",
+        "result": {"denials": denials, "truncated": truncated},
+    }
 
 
 def _agent_peer_uids() -> frozenset[int]:

@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from host.runtime.admin_api import hermes_agent, thread_scope
+from host.runtime.agent_runtime import hermes_agent, thread_scope
 
 # A scripted fake of the Hermes stdin adapter: one process per prompt, session
 # id on stderr, answer text on stdout, and resume keeps the session id.

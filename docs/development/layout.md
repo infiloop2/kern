@@ -17,11 +17,12 @@ host/
     verify_deploy.py        # root end-of-deploy verification of the provisioned state
   cli/                      # operator-side lifecycle and power commands
   migrations/               # one immutable host + workspace migration stream
-  runtime/                  # one package per service process; each socket has
-                            # exactly one serving package (see runtime/__init__.py)
+  runtime/                  # service entrypoints plus process-owned domains;
+                            # each socket has one serving package (see runtime/__init__.py)
     admin_api/              # kern-admin: operator TCP API, admin UI assets,
-                            # workspace socket, orchestrator, agent CLI adapters,
-                            # GitHub credential/audit flows
+                            # workspace socket, routes, GitHub credential/audit flows
+    agent_runtime/          # kern-admin: turn orchestration, provider trust,
+                            # agent harness adapters and process supervision
     network_proxy/          # kern-proxy: policy-enforcing HTTP(S)/WS(S) proxy
     tools/                  # kern-tools: tools socket, tool execution, assets
     agent_network/          # kern-agent-network: read-only introspection socket
@@ -59,26 +60,26 @@ Important source areas and the context that runs them:
 | `host/runtime/workspace/` | `kern-workspace` | Contains the fixed Chat and Web Apps backends, UI assets, browser dispatcher, agent Unix-socket API, and scheduler. See [workspaces](../architecture/workspaces/workspaces.md). |
 | `host/migrations/` | `kern-admin` during bootstrap | Holds one ordered immutable stream for every table in `public`, including Chat and Web Apps. The consolidation migration grants the runtime Workspace role DML only on its named tables and sequences. |
 | `host/tools/` | `kern-tools` | Defines the host-neutral tool contract and bundled packages. Package discovery is directory-based; helper packages are explicitly excluded. |
-| `host/runtime/admin_api/service.py` | `kern-admin` | Serves `127.0.0.1:7443`, authenticates operator APIs, dispatches Workspace/tool routes, owns thread state, and starts the background loops and maintenance. |
+| `host/runtime/admin_api/service.py` | `kern-admin` | Serves `127.0.0.1:7443`, authenticates operator APIs, dispatches the declarative route table, and starts background maintenance. Thread, account, history, file, and host-metric domains live in focused sibling modules. |
 | `host/runtime/admin_api/admin_ui/` | Browser, served by admin API | Implements the native-ES-module operator UI and its static assets. |
 | `host/runtime/admin_api/errors.py` | Admin route modules | Holds the shared `ApiError` class so the `__main__` service and imported route modules map status codes consistently. |
 | `host/runtime/admin_api/workspace_proxy.py` | `kern-admin` | Proxies authenticated `/v1/workspace/chat` and `/v1/workspace/web-apps` browser requests to the fixed Workspace service without forwarding the operator session cookie. |
 | `host/runtime/admin_api/workspace_api.py` | `kern-admin` | Serves the peer-authenticated Workspace-service Unix socket and exposes only allowlisted direct thread routes. |
-| `host/runtime/admin_api/orchestrator.py` | `kern-admin` | Owns turn admission and the live turn processes, plus the runtime status/account pollers and credential convergence. |
-| `host/runtime/admin_api/codex_app_server.py` | Admin adapter controlling an agent child | Implements the Codex stdio JSON-RPC protocol and runtime lifecycle. |
-| `host/runtime/admin_api/claude_code.py` | Admin adapter controlling an agent child | Implements Claude Code stream-json turns, steering, login, and status probes. |
+| `host/runtime/agent_runtime/orchestrator.py`, `provider_account_trust.py` | `kern-admin` | Own turn admission/live processes and runtime-status polling; account trust, provider attestation, and credential convergence are isolated from turn lifecycle. `harness.py` and `harness_registry.py` define the adapter contract. |
+| `host/runtime/agent_runtime/codex_app_server.py` | Admin adapter controlling an agent child | Implements the Codex stdio JSON-RPC protocol and runtime lifecycle. |
+| `host/runtime/agent_runtime/claude_code.py` | Admin adapter controlling an agent child | Implements Claude Code stream-json turns, steering, login, and status probes. |
 | `host/runtime/network_proxy/service.py` | `kern-proxy` | Serves `127.0.0.1:7445`, terminates/inspects proxied traffic, applies policy before upstream connections, and records network events. |
 | `host/runtime/core/network_policy.py` | Admin and proxy processes | Loads policy and provides shared path canonicalization and route matching used by integration guards. |
 | `host/runtime/agent_network/` | `kern-agent-network` | Serves read-only integration status and denial guidance over the peer-authenticated agent-network socket with no egress. |
 | `host/runtime/core/db.py`, `pgclient.py` | Admin, proxy, tools, agent-network, Workspace, and bootstrap clients | Implement peer-authenticated Unix-socket PostgreSQL connections, pooling, and transactions without a driver dependency. |
-| `host/runtime/core/state.py` | Admin, proxy, tools, and agent-network processes under their OS roles | Implements per-operation normalized storage access. Database grants remain the cross-process authority boundary. |
+| `host/runtime/core/state/` | Admin, proxy, tools, and agent-network processes under their OS roles | Implements per-operation normalized storage access, organized by config, threads, accounts, events, network, and tools behind a stable package facade. Database grants remain the cross-process authority boundary. |
 | `host/runtime/deploy/migrate.py` | `kern-admin` during bootstrap | Applies ordered admin-state migrations before application services start; the running admin service never migrates. |
 | `host/runtime/deploy/write_config.py` | `kern-admin` during bootstrap | Chooses replacement or carried-over operator config for the lifecycle mode, encrypts secrets, stores normalized rows, and returns the effective config to root bootstrap. |
 | `host/runtime/admin_api/tools_client.py` | `kern-admin` | Implements operator-facing tool listing, config, enablement, OAuth delegation, approvals, and audit routes. |
 | `host/runtime/tools/service.py`, `api.py` | `kern-tools` | Own the tools socket, execute tool packages with scoped database access and direct HTTPS egress, and recover interrupted approvals. |
 | `host/runtime/tools/tools_host.py` | Admin and tools processes | Implements tool discovery, manifest validation, config/credential views, single-use approvals, and tool audit events. |
 | `host/runtime/agent_shim/mcp_shim.py` | `kern-agent`, spawned by each harness | Aggregates the peer-authenticated tools, network-introspection, and Workspace sockets over one stdio MCP server. |
-| `host/runtime/admin_api/github_*.py` | `kern-admin`, with fixed root helpers for egress | Converges the GitHub credential, derives repository warnings, queues `.github` pushes, and resolves operator decisions. |
+| `host/runtime/admin_api/github_*.py` | `kern-admin`, with fixed root helpers for egress | Converges the GitHub credential, derives repository warnings, and resolves operator decisions for queued `.github` pushes. Direct-main rejection stays entirely in the proxy and creates no queue item. |
 
 Develop and run unit CI against Python 3.11. Production uses Ubuntu 22.04's
 system Python 3.10; the runtime stays standard-library-only and fresh AWS smoke

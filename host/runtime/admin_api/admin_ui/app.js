@@ -24,7 +24,8 @@ import { agentLog, hostDiagnosticLog, netLog, toolLog, toggleHostDiagnosticFilte
 import {
   addDomainRule, addGithubRepo, approveGithubPush, deleteGithubCredential,
   loadPolicy, recheckGithubAudit, rejectGithubPush, removeDomainRule,
-  removeGithubRepo, resetLinkedAccount, connectBedrockCredentials, setProviderWebSearch, setGithubCredential, setGithubRequireApproval,
+  removeGithubRepo, resetLinkedAccount, connectBedrockCredentials, setProviderWebSearch, setGithubBlockMainPushes,
+  setGithubCredential, setGithubRequireApproval,
   setIntegrationEnabled, refreshPendingGithubPushes, toggleGithubCredentialMode,
   selectIntegrationDetail, toggleGithubRepoAudit,
 } from "./network.js";
@@ -40,6 +41,11 @@ import {
   finishPasskeyLogin, refreshLoginPasskeyStatus, refreshPasskeySetup,
   setupPasskey, showPasskeyGuidance,
 } from "./passkeys.js";
+import {
+  closeIPhoneInstallGuide, dismissIPhoneInstall, hideIPhoneInstallUi,
+  isIPhoneStandalone, scheduleIPhoneInstallCoach, showIPhoneInstallGuide,
+} from "./install.js";
+import { createWorkspaceLastSeen } from "./workspace_last_seen.js";
 
 // Panel navigation is pushState within one document, and every panel decides
 // its own scroll position (see resetPageScroll). Leaving restoration on "auto"
@@ -55,67 +61,6 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
       // fully usable if a browser or private session declines registration.
     });
   }, { once: true });
-}
-
-const IOS_INSTALL_DISMISSED_AT = "kern.ios-install-dismissed-at.v1";
-const IOS_INSTALL_REMIND_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
-let iosInstallTimer = null;
-let iosInstallReturnFocus = null;
-
-function isIPhoneStandalone() {
-  return /iPhone/i.test(navigator.userAgent) && (
-    window.matchMedia("(display-mode: standalone)").matches
-    || window.navigator.standalone === true
-  );
-}
-
-function shouldOfferIPhoneInstall() {
-  if (!/iPhone/i.test(navigator.userAgent) || isIPhoneStandalone()) return false;
-  try {
-    const dismissedAt = Number(localStorage.getItem(IOS_INSTALL_DISMISSED_AT) || 0);
-    return !dismissedAt || Date.now() - dismissedAt >= IOS_INSTALL_REMIND_AFTER_MS;
-  } catch (_error) {
-    return true;
-  }
-}
-
-function hideIPhoneInstallUi() {
-  $("ios-install-coach").hidden = true;
-  $("ios-install-overlay").hidden = true;
-  document.body.classList.remove("install-guide-open");
-}
-
-function scheduleIPhoneInstallCoach() {
-  hideIPhoneInstallUi();
-  if (iosInstallTimer) clearTimeout(iosInstallTimer);
-  if (!shouldOfferIPhoneInstall()) return;
-  iosInstallTimer = setTimeout(() => {
-    iosInstallTimer = null;
-    if (!$("app").hidden && shouldOfferIPhoneInstall()) $("ios-install-coach").hidden = false;
-  }, 3500);
-}
-
-function showIPhoneInstallGuide(trigger) {
-  iosInstallReturnFocus = trigger || null;
-  $("ios-install-coach").hidden = true;
-  $("ios-install-overlay").hidden = false;
-  document.body.classList.add("install-guide-open");
-  $("ios-install-done").focus();
-}
-
-function closeIPhoneInstallGuide() {
-  $("ios-install-overlay").hidden = true;
-  document.body.classList.remove("install-guide-open");
-  if (iosInstallReturnFocus?.isConnected) iosInstallReturnFocus.focus();
-  iosInstallReturnFocus = null;
-  if (shouldOfferIPhoneInstall()) $("ios-install-coach").hidden = false;
-}
-
-function dismissIPhoneInstall() {
-  try { localStorage.setItem(IOS_INSTALL_DISMISSED_AT, String(Date.now())); }
-  catch (_error) { /* Dismissal remains valid for this page load. */ }
-  hideIPhoneInstallUi();
-  iosInstallReturnFocus = null;
 }
 
 let activeTab = "home";
@@ -139,7 +84,6 @@ let mobileNavOpen = false;
 let uploadPickerOpen = false;
 let nextUploadSelectionId = 1;
 const APP_UPLOAD_SELECTION_LIMIT = 10;
-const WORKSPACE_LAST_SEEN_KEY = "kern.workspace-last-seen.v2";
 const pendingAppUploads = new Map();
 let chatNavArchived = false;
 let webAppsNavArchived = false;
@@ -153,161 +97,15 @@ const workspaceMounts = new Map();
 let workspaceInitialization = null;
 window.KernWorkspaceRoots = {};
 
-function emptyWorkspaceLastSeen() {
-  return {
-    active: { chat: false, apps: false },
-    archived: { chat: false, apps: false },
-    chat: {},
-    apps: {},
-  };
-}
-
-function parseWorkspaceLastSeen(value) {
-  if (!value) return emptyWorkspaceLastSeen();
-  try {
-    const parsed = JSON.parse(value);
-    if (!parsed || typeof parsed !== "object") return emptyWorkspaceLastSeen();
-    return {
-      active: {
-        chat: parsed.active?.chat === true,
-        apps: parsed.active?.apps === true,
-      },
-      archived: {
-        chat: parsed.archived?.chat === true,
-        apps: parsed.archived?.apps === true,
-      },
-      chat: parsed.chat && typeof parsed.chat === "object" ? parsed.chat : {},
-      apps: parsed.apps && typeof parsed.apps === "object" ? parsed.apps : {},
-    };
-  } catch (_error) {
-    return emptyWorkspaceLastSeen();
-  }
-}
-
-function loadWorkspaceLastSeen() {
-  try { return parseWorkspaceLastSeen(localStorage.getItem(WORKSPACE_LAST_SEEN_KEY)); }
-  catch (_error) { return emptyWorkspaceLastSeen(); }
-}
-
-let workspaceLastSeen = loadWorkspaceLastSeen();
-
-function workspaceItemMarker(kind, item) {
-  // Keep the persisted `activity` field for compatibility with existing
-  // last-seen data, but advance it only for conversation messages. Agent
-  // reasoning, tool calls, and other activity must not create an unread dot.
-  const marker = { activity: Math.max(0, Number(item.latest_message_seq) || 0) };
-  if (kind === "apps") marker.revision = Math.max(0, Number(item.revision) || 0);
-  return marker;
-}
-
-function workspaceItemId(kind, item) {
-  return kind === "chat" ? item.thread_id : item.app_id;
-}
-
-function mergeWorkspaceMarkers(kind, left = {}, right = {}) {
-  if (!left || typeof left !== "object") left = {};
-  if (!right || typeof right !== "object") right = {};
-  const merged = {
-    activity: Math.max(Number(left.activity) || 0, Number(right.activity) || 0),
-  };
-  if (kind === "apps") {
-    merged.revision = Math.max(Number(left.revision) || 0, Number(right.revision) || 0);
-  }
-  return merged;
-}
-
-function mergeWorkspaceLastSeen(left, right) {
-  const merged = emptyWorkspaceLastSeen();
-  for (const kind of ["chat", "apps"]) {
-    merged.active[kind] = left.active[kind] || right.active[kind];
-    merged.archived[kind] = left.archived[kind] || right.archived[kind];
-    for (const itemId of new Set([...Object.keys(left[kind]), ...Object.keys(right[kind])])) {
-      merged[kind][itemId] = mergeWorkspaceMarkers(kind, left[kind][itemId], right[kind][itemId]);
-    }
-  }
-  return merged;
-}
-
-function saveWorkspaceLastSeen() {
-  try {
-    // A storage event can arrive after another tab has already advanced a
-    // different item. Re-read and merge immediately before the whole-map write
-    // so this tab never knowingly replaces that newer marker with its snapshot.
-    workspaceLastSeen = mergeWorkspaceLastSeen(loadWorkspaceLastSeen(), workspaceLastSeen);
-    localStorage.setItem(WORKSPACE_LAST_SEEN_KEY, JSON.stringify(workspaceLastSeen));
-  }
-  catch (_error) { /* The markers remain valid for this page load. */ }
-}
-
-function initializeWorkspaceLastSeen(kind, items, archived) {
-  if (archived || workspaceLastSeen.active[kind]) return;
-  for (const item of items) {
-    const itemId = workspaceItemId(kind, item);
-    workspaceLastSeen[kind][itemId] = mergeWorkspaceMarkers(
-      kind,
-      workspaceLastSeen[kind][itemId],
-      workspaceItemMarker(kind, item),
-    );
-  }
-  workspaceLastSeen.active[kind] = true;
-  saveWorkspaceLastSeen();
-}
-
-function initializeArchivedWorkspaceLastSeen(kind, items, archived) {
-  if (!archived || workspaceLastSeen.archived[kind]) return;
-  for (const item of items) {
-    const itemId = workspaceItemId(kind, item);
-    workspaceLastSeen[kind][itemId] = mergeWorkspaceMarkers(
-      kind,
-      workspaceLastSeen[kind][itemId],
-      workspaceItemMarker(kind, item),
-    );
-  }
-  workspaceLastSeen.archived[kind] = true;
-  saveWorkspaceLastSeen();
-}
-
-function workspaceItemHasChanges(kind, item, archived) {
-  if (!(archived ? workspaceLastSeen.archived[kind] : workspaceLastSeen.active[kind])) {
-    return false;
-  }
-  const seen = workspaceLastSeen[kind][workspaceItemId(kind, item)];
-  if (!seen || typeof seen !== "object") return true;
-  const current = workspaceItemMarker(kind, item);
-  return current.activity > (Number(seen.activity) || 0)
-    || (kind === "apps" && current.revision > (Number(seen.revision) || 0));
-}
+const workspaceLastSeen = createWorkspaceLastSeen({
+  currentTab: () => activeTab,
+  currentRoute: () => workspaceRouteFromLocation(),
+  render: () => renderWorkspaceNavigation(),
+});
 
 function markWorkspaceSeen(kind, item) {
-  if (!item || !["chat", "apps"].includes(kind) || document.visibilityState !== "visible") return;
-  const itemId = workspaceItemId(kind, item);
-  const route = workspaceRouteFromLocation();
-  const expectedTab = kind === "chat" ? "workspace-chat" : "workspace-web-apps";
-  if (!itemId || activeTab !== expectedTab || route?.itemId !== itemId) return;
-  const current = workspaceItemMarker(kind, item);
-  const seen = workspaceLastSeen[kind][itemId] || {};
-  const next = {
-    activity: Math.max(current.activity, Number(seen.activity) || 0),
-  };
-  if (kind === "apps") {
-    next.revision = Math.max(current.revision, Number(seen.revision) || 0);
-  }
-  if (JSON.stringify(next) === JSON.stringify(seen)) return;
-  workspaceLastSeen[kind][itemId] = next;
-  saveWorkspaceLastSeen();
-  renderWorkspaceNavigation();
+  workspaceLastSeen.markSeen(kind, item);
 }
-
-window.addEventListener("storage", event => {
-  if (event.key !== WORKSPACE_LAST_SEEN_KEY) return;
-  if (event.newValue === null) workspaceLastSeen = emptyWorkspaceLastSeen();
-  else {
-    const incoming = parseWorkspaceLastSeen(event.newValue);
-    workspaceLastSeen = mergeWorkspaceLastSeen(workspaceLastSeen, incoming);
-    if (JSON.stringify(workspaceLastSeen) !== JSON.stringify(incoming)) saveWorkspaceLastSeen();
-  }
-  renderWorkspaceNavigation();
-});
 
 function showLoginError(message) {
   const element = $("login-error");
@@ -1072,10 +870,10 @@ async function refreshWorkspaceNavigation() {
   ) return;
   chatNavItems = chat.threads || [];
   webAppNavItems = webApps.apps || [];
-  initializeWorkspaceLastSeen("chat", chatNavItems, chatNavArchived);
-  initializeWorkspaceLastSeen("apps", webAppNavItems, webAppsNavArchived);
-  initializeArchivedWorkspaceLastSeen("chat", chatNavItems, chatNavArchived);
-  initializeArchivedWorkspaceLastSeen("apps", webAppNavItems, webAppsNavArchived);
+  workspaceLastSeen.initialize("chat", chatNavItems, chatNavArchived);
+  workspaceLastSeen.initialize("apps", webAppNavItems, webAppsNavArchived);
+  workspaceLastSeen.initializeArchived("chat", chatNavItems, chatNavArchived);
+  workspaceLastSeen.initializeArchived("apps", webAppNavItems, webAppsNavArchived);
   renderWorkspaceNavigation();
 }
 
@@ -1137,7 +935,7 @@ function renderWorkspaceRows(containerId, items, action, archived) {
     label.className = "workspace-nav-label";
     label.textContent = item.name || itemId;
     primary.append(label);
-    const hasChanges = workspaceItemHasChanges(
+    const hasChanges = workspaceLastSeen.hasChanges(
       kind === "chat" ? "chat" : "apps",
       item,
       archived,
@@ -1406,6 +1204,8 @@ document.addEventListener("click", event => {
     "disable-integration": () => setIntegrationEnabled(button.dataset.integration, false),
     "add-github-repo": () => addGithubRepo(),
     "remove-github-repo": () => removeGithubRepo(button.dataset.owner, button.dataset.repo),
+    "enable-github-block-main-pushes": () => setGithubBlockMainPushes(true),
+    "disable-github-block-main-pushes": () => setGithubBlockMainPushes(false),
     "enable-github-require-approval": () => setGithubRequireApproval(true),
     "disable-github-require-approval": () => setGithubRequireApproval(false),
     "enable-web-search": () => setProviderWebSearch(button.dataset.provider, true),
@@ -1427,8 +1227,8 @@ document.addEventListener("click", event => {
     "enable-tool": () => setToolEnabled(button.dataset.tool, true),
     "disable-tool": () => setToolEnabled(button.dataset.tool, false),
     "save-tool-config": () => saveToolConfig(button.dataset.tool, button.dataset.key),
-    "connect-tool": () => connectTool(button.dataset.tool),
-    "disconnect-tool": () => disconnectTool(button.dataset.tool),
+    "connect-tool": () => connectTool(button.dataset.tool, button.dataset.connection || ""),
+    "disconnect-tool": () => disconnectTool(button.dataset.tool, button.dataset.connection || ""),
     "decide-approval": () => decideToolApproval(button.dataset.tool, button.dataset.approvalId, button.dataset.decision),
     "copy-callback-uri": () => copyCallbackUri(button),
   };

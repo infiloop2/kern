@@ -1147,6 +1147,20 @@ def desktop_smoke(page, url: str) -> None:
     github_row.get_by_role("button", name="Enable", exact=True).click()
     github_message = github_row.locator("[data-integration-message='github']")
     expect(github_message).to_contain_text("GitHub enabled")
+    expect(page.locator("#github-block-main-pushes-status")).to_contain_text("direct pushes to main are blocked")
+    main_block_enable = page.locator("[data-action='enable-github-block-main-pushes']")
+    main_block_disable = page.locator("[data-action='disable-github-block-main-pushes']")
+    expect(main_block_enable).to_be_disabled()
+    expect(main_block_enable).to_have_text("Enabled")
+    expect(main_block_disable).to_be_enabled()
+    main_block_disable.click()
+    expect(github_message).to_contain_text("Direct pushes to main allowed")
+    expect(page.locator("#github-block-main-pushes-status")).to_contain_text("can reach GitHub")
+    expect(main_block_enable).to_be_enabled()
+    expect(main_block_disable).to_be_disabled()
+    main_block_enable.click()
+    expect(github_message).to_contain_text("Direct pushes to main blocked")
+    expect(page.locator("#github-block-main-pushes-status")).to_contain_text("direct pushes to main are blocked")
     expect(page.locator("#github-require-approval-status")).to_contain_text("held for approval")
     approval_enable = page.locator("[data-action='enable-github-require-approval']")
     approval_disable = page.locator("[data-action='disable-github-require-approval']")
@@ -1442,7 +1456,8 @@ def tools_smoke(page, url: str) -> None:
 
     open_home_integration(page, "tool:gmail")
     gmail_row = page.locator("#tools [data-tool-row='gmail']")
-    expect(gmail_row).to_contain_text("connected: akshay@infiloop.io")
+    expect(gmail_row).to_contain_text("1 account connected")
+    expect(gmail_row).to_contain_text("akshay@infiloop.io")
     expect(gmail_row).to_contain_text("GOOGLE_OAUTH_CLIENT_ID")
     gmail_approvals = gmail_row.locator(".tool-approvals")
     expect(gmail_approvals).to_contain_text("Invoice follow-up")
@@ -1456,6 +1471,7 @@ def tools_smoke(page, url: str) -> None:
     # A cancelled provider callback reloads the shell. The focused row is
     # rendered first so its callback result cannot be erased by tab refresh.
     page.evaluate("sessionStorage.setItem('kern_tool_connect', 'gmail')")
+    page.evaluate("sessionStorage.setItem('kern_tool_connection', 'default')")
     page.goto(f"{url.rstrip('/')}/oauth/callback?error=access_denied", wait_until="domcontentloaded")
     expect(page.locator("#panel-network")).to_be_visible()
     expect(page.locator("#integration-detail-title")).to_have_text("Gmail")
@@ -1614,13 +1630,13 @@ def mobile_smoke(page, url: str) -> None:
     # confirm the click landed rather than letting the assertions below be the
     # synchronization.
     expect(connected_row.locator(".status-chips")).to_contain_text("enabled")
-    expect(connected_row.locator(".status-chips")).to_contain_text("connected: akshay@infiloop.io")
+    expect(connected_row.locator(".status-chips")).to_contain_text("1 account connected")
     for row in (connected_row,):
         chips_box = row.locator(".status-chips").bounding_box()
         actions_box = row.locator(".integration-actions").bounding_box()
         if not chips_box or not actions_box or chips_box["y"] + chips_box["height"] > actions_box["y"] + 1:
             raise AssertionError("phone integration status overlaps or competes with its actions")
-    connected_label = connected_row.locator(".chip-label")
+    connected_label = connected_row.locator(".connection-identity")
     if connected_label.evaluate("element => element.scrollWidth > element.clientWidth + 1"):
         raise AssertionError("connected account identity is truncated on a phone")
 

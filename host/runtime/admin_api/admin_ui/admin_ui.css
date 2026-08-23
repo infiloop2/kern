@@ -1654,6 +1654,7 @@ button.integration-chevron {
 .integration-chevron[aria-expanded="true"] svg { transform: rotate(90deg); }
 
 .integration-actions { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-end; }
+.integration-account-actions { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-end; }
 
 /* The enabled/connected chips share one summary-grid cell. */
 .status-chips {

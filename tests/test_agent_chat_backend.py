@@ -305,7 +305,7 @@ class AgentChatBackendTests(unittest.TestCase):
                         "host.runtime.workspace.chat.backend.call_admin_api",
                         side_effect=(busy, busy, {"status": "accepted"}),
                     ) as admin_call,
-                    patch.object(backend, "SEND_BUSY_RETRY_DELAY_SECONDS", 0),
+                    patch("host.runtime.workspace.busy_retry.RETRY_DELAY_SECONDS", 0),
                 ):
                     result = backend.send_chat_message(
                         {"thread_id": "thread-1", "input_message": "go"}
@@ -322,7 +322,7 @@ class AgentChatBackendTests(unittest.TestCase):
         with (
             patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
             patch("host.runtime.workspace.chat.backend.call_admin_api", side_effect=busy) as admin_call,
-            patch.object(backend, "SEND_BUSY_RETRY_DELAY_SECONDS", 0),
+            patch("host.runtime.workspace.busy_retry.RETRY_DELAY_SECONDS", 0),
             self.assertRaises(backend.WorkspaceError) as error,
         ):
             backend.send_chat_message({"thread_id": "thread-1", "input_message": "go"})
