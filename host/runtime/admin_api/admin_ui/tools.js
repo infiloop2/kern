@@ -59,12 +59,12 @@ function renderTools() {
 
 function renderToolRow(tool) {
   const expanded = expandedTools.has(tool.tool_id);
-  const connected = tool.connection_status && tool.connection_status.connected === true;
+  const connections = Array.isArray(tool.connected_accounts) ? tool.connected_accounts : [];
+  const connected = connections.length > 0;
   const chips = [badge(tool.enabled ? "enabled" : "disabled")];
   if (tool.connection === "oauth" && (tool.enabled || connected)) {
-    const account = (tool.connection_status && tool.connection_status.account) || {};
     chips.push(connected
-      ? `<span class="status active">connected: <span class="chip-label">${esc(account.label || "")}</span></span>`
+      ? `<span class="status active">${connections.length} account${connections.length === 1 ? "" : "s"} connected</span>`
       : `<span class="status">not connected</span>`);
   }
   return `
@@ -88,7 +88,7 @@ function renderToolRow(tool) {
         ${tool.connection === "oauth" && (tool.enabled || connected) ? `
         <div class="detail-card">
           <div class="detail-card-head"><h3>Connection</h3></div>
-          ${renderToolConnection(tool, connected)}
+          ${renderToolConnections(tool, connections)}
         </div>` : ""}
         ${tool.config.length ? `
         <div class="detail-card">
@@ -110,20 +110,26 @@ function renderToolRow(tool) {
 // account is connected, even if the tool was later disabled or its config
 // cleared, so the operator always has a path to revoke and delete stored
 // tokens (the backend allows it too). Connect requires the tool to be enabled.
-function renderToolConnection(tool, connected) {
-  const account = (tool.connection_status && tool.connection_status.account) || {};
-  if (connected) {
-    return `
-      <div class="integration-account">
-        <p class="connection-summary">Connected account: <span class="connection-identity">${esc(account.label || "")}</span></p>
-        <button class="ghost sm" data-action="disconnect-tool" data-tool="${esc(tool.tool_id)}">Disconnect</button>
-      </div>`;
-  }
-  return `
-    <div class="integration-account">
-      <p class="connection-summary">No account connected yet. Connect signs in on the provider's site and stores the tokens on the host.</p>
-      <button class="primary sm" data-action="connect-tool" data-tool="${esc(tool.tool_id)}">Connect</button>
+function renderToolConnections(tool, connections) {
+  const rows = connections.map(connection => {
+    const account = connection.account || {};
+    return `<div class="integration-account">
+      <p class="connection-summary">
+        <span class="connection-identity">${esc(account.label || account.id || "Connected account")}</span>
+        <span class="muted mono">${esc(connection.connection_id || "")}</span>
+      </p>
+      <span class="integration-account-actions">
+        <button class="ghost sm" data-action="connect-tool" data-tool="${esc(tool.tool_id)}" data-connection="${esc(connection.connection_id || "")}"${tool.enabled ? "" : " disabled"}>Reconnect</button>
+        <button class="danger ghost sm" data-action="disconnect-tool" data-tool="${esc(tool.tool_id)}" data-connection="${esc(connection.connection_id || "")}">Disconnect</button>
+      </span>
     </div>`;
+  }).join("");
+  const empty = connections.length ? "" : `
+    <p class="connection-summary">No account connected yet. Connect signs in on the provider's site and stores the tokens on the host.</p>`;
+  return `${rows}${empty}<div class="integration-account">
+    <p class="connection-summary muted">Each account gets a stable connection id that agents use to target reads and approved writes.</p>
+    <button class="primary sm" data-action="connect-tool" data-tool="${esc(tool.tool_id)}"${tool.enabled ? "" : " disabled"}>${connections.length ? "Connect another account" : "Connect account"}</button>
+  </div>`;
 }
 
 function renderToolConfigRow(tool, entry) {
@@ -168,21 +174,26 @@ function oauthRedirectUri() {
   return location.origin + "/oauth/callback";
 }
 
-export async function connectTool(toolId) {
+export async function connectTool(toolId, connectionId = "") {
   try {
     toolsMessage(toolId, "");
-    const response = await api("POST", `/v1/tools/${encodeURIComponent(toolId)}/oauth_connect/start`,
-      { redirect_uri: oauthRedirectUri() });
+    const body = { redirect_uri: oauthRedirectUri() };
+    if (connectionId) body.connection_id = connectionId;
+    const response = await api("POST", `/v1/tools/${encodeURIComponent(toolId)}/oauth_connect/start`, body);
+    if (!response.connection_id) throw new Error("Connect did not return a connection id.");
     sessionStorage.setItem("kern_tool_connect", toolId);
+    sessionStorage.setItem("kern_tool_connection", response.connection_id);
     location.assign(response.authorization_url);
   } catch (error) { toolsMessage(toolId, error.message, true); }
 }
 
-export async function disconnectTool(toolId) {
+export async function disconnectTool(toolId, connectionId) {
   if (!confirm("Disconnect this account? Stored tokens are revoked and deleted.")) return;
   try {
     toolsMessage(toolId, "");
-    await api("POST", `/v1/tools/${encodeURIComponent(toolId)}/oauth_connect/disconnect`, {});
+    await api("POST", `/v1/tools/${encodeURIComponent(toolId)}/oauth_connect/disconnect`, {
+      connection_id: connectionId,
+    });
     await refreshTools();
     toolsMessage(toolId, "Account disconnected.");
   } catch (error) { toolsMessage(toolId, error.message, true); }
@@ -195,8 +206,10 @@ export async function disconnectTool(toolId) {
 export async function completeToolConnect(callbackSearch = location.search) {
   const params = new URLSearchParams(callbackSearch);
   const toolId = sessionStorage.getItem("kern_tool_connect");
+  const connectionId = sessionStorage.getItem("kern_tool_connection");
   sessionStorage.removeItem("kern_tool_connect");
-  if (!toolId) { notice("Tool connect callback had no pending tool."); return; }
+  sessionStorage.removeItem("kern_tool_connection");
+  if (!toolId || !connectionId) { notice("Tool connect callback had no pending connection."); return; }
   if (!params.get("code")) {
     try { await refreshTools(); } catch (_error) { /* render the callback error if the row already exists */ }
     toolsMessage(toolId, `Connect cancelled: ${params.get("error") || "no authorization code returned"}.`, true);
@@ -209,6 +222,7 @@ export async function completeToolConnect(callbackSearch = location.search) {
       code: params.get("code"),
       state: params.get("state") || "",
       redirect_uri: oauthRedirectUri(),
+      connection_id: connectionId,
     });
     const label = result.account && result.account.label;
     message = `Connected ${toolId}${label ? ` as ${label}` : ""}.`;
@@ -249,6 +263,7 @@ function renderToolApprovalsTable(toolId) {
       <tr>
         <td class="muted time">${esc(formatUnixTime(approval.created_at))}</td>
         <td>
+          ${approval.account_label ? `<div class="status active">${esc(approval.account_label)} <span class="mono">${esc(approval.connection_id || "")}</span></div>` : ""}
           <div>${esc(approval.summary)}</div>
           <details data-approval-id="${esc(approval.approval_id)}" data-tool="${esc(toolId)}"><summary class="muted">exact payload</summary><pre class="metadata"></pre></details>
         </td>

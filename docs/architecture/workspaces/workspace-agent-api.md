@@ -4,8 +4,10 @@ The Workspace agent socket is the single agent-facing transport for Kern's
 Workspace service. The MCP shim exposes Web Apps, first-class self-memory,
 host-global memory, schedules, and thread identity through `workspace_api`, and provides typed
 `search_conversation_history` and `read_thread_history` tools over the same
-boundary. Routes are documented in the host-global agent instructions. Tool
-listing itself is not dynamic discovery and grants no
+boundary. A compact capability map and failure-prone invariants remain in the
+host-global instructions; complete App, memory, and schedule routes live in
+the root-owned release references those instructions point to. Tool listing
+itself is not dynamic discovery and grants no
 additional identity.
 
 The MCP shim sends `POST /call` to

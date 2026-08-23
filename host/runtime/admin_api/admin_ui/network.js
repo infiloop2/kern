@@ -452,9 +452,9 @@ export async function setIntegrationEnabled(name, enabled) {
     // A disabled integration carries no other state: disabling GitHub also
     // removes its write repositories (the stored credential stays).
     const value = enabled ? { ...objectValue(managed[name]), "enabled": true } : { "enabled": false };
-    // GitHub workflow changes are an arbitrary-code boundary. Start every
-    // newly enabled GitHub integration with the approval gate on; the
-    // operator can still turn it off explicitly after reviewing the risk.
+    // GitHub workflow changes and direct default-branch updates are safety
+    // boundaries. The .github gate is explicit here; main protection is the
+    // policy's default unless the operator stores an explicit false.
     if (enabled && name === "github") value.require_dot_github_approval = true;
     managed[name] = value;
   }, `${MANAGED_INTEGRATIONS[name].label} ${enabled ? "enabled" : "disabled"}.`);
@@ -529,9 +529,15 @@ function githubRequireApproval(policy) {
   return objectValue(objectValue(policy.network_integrations).github).require_dot_github_approval === true;
 }
 
-function githubIntegrationObject(enabled, writeRepositories, requireApproval) {
+function githubBlocksDirectMainPushes(policy) {
+  const github = objectValue(objectValue(policy.network_integrations).github);
+  return github.enabled === true && github.block_direct_main_pushes !== false;
+}
+
+function githubIntegrationObject(enabled, writeRepositories, requireApproval, blockMainPushes) {
   const value = { "enabled": enabled === true, "write_repositories": writeRepositories };
   if (requireApproval) value.require_dot_github_approval = true;
+  if (!blockMainPushes) value.block_direct_main_pushes = false;
   return value;
 }
 
@@ -541,6 +547,7 @@ function renderGithubRepos() {
   $("github-repo").disabled = !enabled;
   const addButton = document.querySelector('[data-action="add-github-repo"]');
   if (addButton) addButton.disabled = !enabled;
+  renderGithubMainPushProtection();
   renderGithubApproval();
   const repositories = githubRepositories(activeNetworkPolicy);
   if (!repositories.length) {
@@ -620,7 +627,12 @@ export async function addGithubRepo() {
     const remaining = githubRepositories(policy).filter(repo =>
       !(objectValue(repo).owner === entry.owner && objectValue(repo).repo === entry.repo));
     remaining.push(entry);
-    managed.github = githubIntegrationObject(github.enabled === true, remaining, githubRequireApproval(policy));
+    managed.github = githubIntegrationObject(
+      github.enabled === true,
+      remaining,
+      githubRequireApproval(policy),
+      githubBlocksDirectMainPushes(policy),
+    );
   }, `Write repository ${entry.owner}/${entry.repo} saved.`);
   $("github-repo").value = "";
 }
@@ -632,8 +644,55 @@ export async function removeGithubRepo(owner, repo) {
     const github = objectValue(managed.github);
     const remaining = githubRepositories(policy).filter(entry =>
       !(objectValue(entry).owner === owner && objectValue(entry).repo === repo));
-    managed.github = githubIntegrationObject(github.enabled === true, remaining, githubRequireApproval(policy));
+    managed.github = githubIntegrationObject(
+      github.enabled === true,
+      remaining,
+      githubRequireApproval(policy),
+      githubBlocksDirectMainPushes(policy),
+    );
   }, `Write repository ${owner}/${repo} removed.`);
+}
+
+function renderGithubMainPushProtection() {
+  const managed = objectValue(activeNetworkPolicy.network_integrations);
+  const enabled = objectValue(managed.github).enabled === true;
+  const blocked = githubBlocksDirectMainPushes(activeNetworkPolicy);
+  const status = $("github-block-main-pushes-status");
+  if (status) {
+    status.textContent = !enabled
+      ? "Enable the GitHub integration first."
+      : blocked
+        ? "Enabled — direct pushes to main are blocked."
+        : "Disabled — direct pushes to main can reach GitHub.";
+  }
+  const enableButton = document.querySelector('[data-action="enable-github-block-main-pushes"]');
+  const disableButton = document.querySelector('[data-action="disable-github-block-main-pushes"]');
+  if (enableButton) {
+    enableButton.disabled = !enabled || blocked;
+    enableButton.textContent = enabled && blocked ? "Enabled" : "Enable";
+  }
+  if (disableButton) {
+    disableButton.disabled = !enabled || !blocked;
+    disableButton.textContent = enabled && !blocked ? "Disabled" : "Disable";
+  }
+}
+
+export async function setGithubBlockMainPushes(blockMainPushes) {
+  const managed = objectValue(activeNetworkPolicy.network_integrations);
+  if (objectValue(managed.github).enabled !== true) {
+    policyMessage("github", "Enable the GitHub integration before changing main push protection.", true);
+    return;
+  }
+  await publishPolicy("github", policy => {
+    const managed = policy.network_integrations;
+    const github = objectValue(managed.github);
+    managed.github = githubIntegrationObject(
+      github.enabled === true,
+      githubRepositories(policy),
+      githubRequireApproval(policy),
+      blockMainPushes,
+    );
+  }, `Direct pushes to main ${blockMainPushes ? "blocked" : "allowed"}.`);
 }
 
 function renderGithubApproval() {
@@ -670,7 +729,12 @@ export async function setGithubRequireApproval(requireApproval) {
   await publishPolicy("github", policy => {
     const managed = policy.network_integrations;
     const github = objectValue(managed.github);
-    managed.github = githubIntegrationObject(github.enabled === true, githubRepositories(policy), requireApproval);
+    managed.github = githubIntegrationObject(
+      github.enabled === true,
+      githubRepositories(policy),
+      requireApproval,
+      githubBlocksDirectMainPushes(policy),
+    );
   }, `.github push approval ${requireApproval ? "enabled" : "disabled"}.`);
 }
 

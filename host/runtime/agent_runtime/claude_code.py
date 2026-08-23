@@ -21,7 +21,8 @@ import time
 from typing import IO, Any, Callable
 from uuid import uuid4
 
-from host.runtime.admin_api import agent_activity, thread_scope
+from host.runtime.agent_runtime import agent_activity, thread_scope
+from host.runtime.agent_runtime.harness import ProviderSessionLost, subprocess_cwd
 
 DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-claude-code"]
 DEFAULT_ACCOUNT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/read-claude-account"]
@@ -80,7 +81,7 @@ class ClaudeAuthenticationError(ClaudeCodeError):
     pass
 
 
-class ClaudeSessionNotFoundError(ClaudeCodeError):
+class ClaudeSessionNotFoundError(ClaudeCodeError, ProviderSessionLost):
     """The requested local Claude session no longer exists."""
 
 
@@ -863,7 +864,7 @@ def _subprocess_cwd(command: list[str]) -> str | None:
     # In production, the admin API cannot traverse the agent user's private
     # 0700 home. The sudo helper starts as root, cds there, and then drops to
     # kern-agent. Custom test commands still run from AGENT_CWD.
-    return None if command == DEFAULT_COMMAND else AGENT_CWD
+    return subprocess_cwd(command, DEFAULT_COMMAND, AGENT_CWD)
 
 
 def _fill_claude_account_metadata(account: dict[str, Any], status: dict[str, Any]) -> None:

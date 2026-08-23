@@ -768,7 +768,7 @@ class StageToolChecks:
         print(f"    [derived coverage] twitter actions={derived}/2", flush=True)
         return (
             f"search, global/personal trends, {derived} result-derived read(s), "
-            "and no API publishing surface"
+            "and approval-gated publishing not exercised"
         )
 
     def _check_twitterapi_io_live(self) -> str:

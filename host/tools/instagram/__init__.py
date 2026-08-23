@@ -20,7 +20,6 @@ from host.tools.results import (
     ApprovalResult,
 )
 from host.tools.tool import (
-    ConnectionStatus,
     CredentialFlow,
     OAuthCompleteConnectParams,
     OAuthCompleteConnectResult,
@@ -32,10 +31,10 @@ from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
+    OAuth2CredentialStore,
     access_token_is_fresh,
     clear_if_still_loaded,
     now,
-    require_scopes,
     save_if_still_connected,
     signed_state,
     verify_state,
@@ -47,6 +46,7 @@ from host.tools.shared.web import (
     json_request,
     known_provider_transport_error,
     stream_request_bytes,
+    transport_or_unmapped_provider_error,
     unmapped_provider_error,
 )
 
@@ -281,10 +281,7 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     elif exc.status:
         message = f"Instagram API returned HTTP {exc.status} for the {what} request."
     else:
-        known = known_provider_transport_error(exc)
-        if known:
-            return RuntimeError(known)
-        return unmapped_provider_error("Instagram", what, exc)
+        return transport_or_unmapped_provider_error("Instagram", what, exc)
     return RuntimeError(message)
 
 
@@ -333,9 +330,12 @@ def _account_from_me(me: JSONObject, scopes: list[str]) -> ConnectionAccount:
     return {"id": user_id, "label": label, "scopes": scopes}
 
 
-class InstagramCredentialStore:
+class InstagramCredentialStore(OAuth2CredentialStore):
     """Business Login for Instagram: code -> short-lived token -> long-lived
     (60-day) token, refreshed in place while still valid."""
+
+    reconnect_message = IG_RECONNECT_MESSAGE
+    required_scopes = REQUIRED_IG_SCOPES
 
     def start_connect(self, params: OAuthStartConnectParams, api: HostAPI) -> OAuthStartConnectResult:
         state = signed_state(secret=api.config["INSTAGRAM_APP_SECRET"], tool_id=MANIFEST.tool_id)
@@ -402,43 +402,21 @@ class InstagramCredentialStore:
         expires_in = long_lived.get("expires_in")
         me = _fetch_me(access_token)
         account = _account_from_me(me, granted_scopes)
-        existing = api.credentials.load()
-        created_at = existing["metadata"].get("created_at") if existing is not None else None
         current_time = now()
-        api.credentials.save(
+        self.save_connection(
+            api,
+            account,
             {
-                "account": account,
-                "secret": {
-                    "access_token": access_token,
-                    "expires_at": current_time
-                    + (expires_in if isinstance(expires_in, int) else LONG_LIVED_TOKEN_LIFETIME_SECONDS),
-                    "obtained_at": current_time,
-                },
-                "metadata": {
-                    "created_at": created_at if isinstance(created_at, int) else current_time,
-                    "updated_at": current_time,
-                },
-            }
+                "access_token": access_token,
+                "expires_at": current_time
+                + (expires_in if isinstance(expires_in, int) else LONG_LIVED_TOKEN_LIFETIME_SECONDS),
+                "obtained_at": current_time,
+            },
         )
         return {"account": account}
 
-    def disconnect(self, api: HostAPI) -> None:
-        # Instagram Login has no self-serve revoke endpoint; clearing the
-        # credential is the disconnect (the user can also remove the app in
-        # their Instagram settings).
-        api.credentials.clear()
-
-    def connection_status(self, api: HostAPI) -> ConnectionStatus:
-        existing = api.credentials.load()
-        if existing is None:
-            return {"connected": False}
-        return {"connected": True, "account": existing["account"]}
-
     def access_token(self, api: HostAPI) -> str:
-        existing = api.credentials.load()
-        if existing is None:
-            raise IntegrationReconnectRequired(IG_RECONNECT_MESSAGE)
-        require_scopes(api, existing, REQUIRED_IG_SCOPES, reconnect_message=IG_RECONNECT_MESSAGE)
+        existing = self.load_connected(api)
         payload = cast(Mapping[str, object], existing["secret"])
         if not access_token_is_fresh(payload, now()):
             # Drop the dead token so connection_status stops reporting connected
@@ -493,9 +471,7 @@ class InstagramCredentialStore:
         return access_token
 
     def refresh_identity(self, api: HostAPI, access_token: str) -> ConnectionAccount:
-        existing = api.credentials.load()
-        if existing is None:
-            raise IntegrationReconnectRequired(IG_RECONNECT_MESSAGE)
+        existing = self.load_connected(api)
         account = _account_from_me(_fetch_me(access_token), existing["account"]["scopes"])
         if existing["account"]["id"] != account["id"]:
             raise IntegrationReconnectRequired(IG_RECONNECT_MESSAGE)

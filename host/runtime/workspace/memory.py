@@ -19,6 +19,7 @@ from urllib.parse import unquote
 from host.runtime.core import db, host_errors, pgclient
 from host.runtime.embeddings import client as embedding_client
 from host.runtime.workspace.host_api import WorkspaceError
+from host.runtime.workspace.query import one as _one
 
 
 PAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -1251,15 +1252,6 @@ def _optional_positive_int(query: dict[str, list[str]], key: str) -> int | None:
     if not raw.isdigit() or not 1 <= int(raw) <= MAX_BIGINT:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"{key} must be a positive integer")
     return int(raw)
-
-
-def _one(query: dict[str, list[str]], key: str) -> str | None:
-    values = query.get(key)
-    if not values:
-        return None
-    if len(values) != 1:
-        raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"{key} must be provided once")
-    return values[0]
 
 
 def _reject_query_keys(

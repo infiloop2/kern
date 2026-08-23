@@ -1345,13 +1345,13 @@ Tool endpoints:
 
 | Method | Path | Request | Response | Behavior |
 | --- | --- | --- | --- | --- |
-| `GET` | `/v1/tools` | none | Tool list response | Lists every bundled tool with its manifest (actions with per-action data policy, config requirements), enablement, per-tool config status, and OAuth connection account. Responses never include config values, tokens, or client secrets. |
+| `GET` | `/v1/tools` | none | Tool list response | Lists every bundled tool with its manifest (actions with per-action data policy, config requirements), enablement, per-tool config status, and OAuth connection accounts. Responses never include config values, tokens, or client secrets. |
 | `PUT` | `/v1/tools/{tool_id}/config` | `{"key", "value"}` | `{"tool_id", "key", "set"}` | Sets one config value declared by that tool's manifest. Config is scoped per tool (a repeated key name holds an independent value per tool) and every value is a secret: write-only, stored encrypted at rest (secretbox); an empty `value` clears the key. `400` when `key` is not declared by `{tool_id}`. |
 | `POST` | `/v1/tools/{tool_id}/enable` | none | `{"tool_id", "enabled"}` | Enables the tool for agent calls. Not gated on config: a tool can be enabled with partial or no config set (per-key config status is reported by `GET /v1/tools`); an action that needs an unset key fails when the tool reads it. |
 | `POST` | `/v1/tools/{tool_id}/disable` | none | `{"tool_id", "enabled"}` | Disables the tool. Stored connections and credentials are kept; use disconnect to remove them. |
-| `POST` | `/v1/tools/{tool_id}/oauth_connect/start` | `{"redirect_uri"}` | `{"authorization_url", "state"}` | Starts the tool's OAuth connect flow (OAuth tools only, `409` otherwise or when disabled). The UI uses `<admin origin>/oauth/callback` as the redirect URI; register that URL with the OAuth provider. Reached over SSH-forwarded localhost it is a loopback URL such as `http://localhost:7443/oauth/callback` (providers accept loopback without HTTPS); reached over a Cloudflare Tunnel hostname it is that HTTPS origin's `/oauth/callback`. Building the URL needs no egress and runs in the admin service; the later code exchange (`oauth_connect/complete`) runs in the dedicated tools service. |
-| `POST` | `/v1/tools/{tool_id}/oauth_connect/complete` | `{"code", "state", "redirect_uri"}` | `{"account": {...}}` | Completes the OAuth flow with the provider callback values and stores tokens in the tool credential store. Returns the connected `account` (see `ConnectionAccount` below); `400` for an invalid or expired `state`. |
-| `POST` | `/v1/tools/{tool_id}/oauth_connect/disconnect` | none | `{"tool_id", "connected": false}` | Revokes third-party tokens where possible and deletes the stored credential. |
+| `POST` | `/v1/tools/{tool_id}/oauth_connect/start` | `{"redirect_uri", "connection_id"?}` | `{"authorization_url", "state", "connection_id"}` | Starts the tool's OAuth connect flow (OAuth tools only, `409` otherwise or when disabled). Omit `connection_id` to connect another account; Kern generates the opaque connection id returned in the response. Pass an existing id to reconnect that account. Preserve the returned id for `complete`. The UI uses `<admin origin>/oauth/callback` as the redirect URI; register that URL with the OAuth provider. Reached over SSH-forwarded localhost it is a loopback URL such as `http://localhost:7443/oauth/callback` (providers accept loopback without HTTPS); reached over a Cloudflare Tunnel hostname it is that HTTPS origin's `/oauth/callback`. Building the URL needs no egress and runs in the admin service; the later code exchange (`oauth_connect/complete`) runs in the dedicated tools service. |
+| `POST` | `/v1/tools/{tool_id}/oauth_connect/complete` | `{"code", "state", "redirect_uri", "connection_id"}` | `{"account": {...}, "connection_id"}` | Completes the OAuth flow for the connection id returned by `start` and stores tokens in that connection's credential store. Returns the connected `account` (see `ConnectionAccount` below); `400` for a missing connection id or invalid/expired `state`. |
+| `POST` | `/v1/tools/{tool_id}/oauth_connect/disconnect` | `{"connection_id"}` | `{"tool_id", "connected": false, "connection_id"}` | Revokes third-party tokens where possible and deletes only the selected connection. |
 | `GET` | `/v1/tools/{tool_id}/approvals` | none | Approval list response | Lists `{tool_id}`'s action approvals as a bounded working set: pending first (so open decisions surface at the top), then newest decided ones as bounded history. Approvals are addressed under their tool so the operator UI shows each tool's approvals in its own row. Payload is omitted from the list; fetch it per approval. The paginated audit trail is `/v1/tools/events`. |
 | `GET` | `/v1/tools/{tool_id}/approvals/{approval_id}` | none | `{"approval"}` | The full approval record for `{approval_id}`, including its (up to 64 KiB) payload. `404` when `{approval_id}` is not an approval of `{tool_id}`. |
 | `POST` | `/v1/tools/{tool_id}/approvals/{approval_id}/approve` | none | `{"approval", "result"}` | Approves a pending approval and immediately executes the recorded payload exactly once; the response carries the terminal approval record (`executed` or `failed`) and the execution result. `404` when `{approval_id}` is not an approval of `{tool_id}`; `409` when it is not pending. |
@@ -1438,6 +1438,12 @@ Tool list response:
           }
         ]
       },
+      "connected_accounts": [
+        {
+          "connection_id": "connection_0123456789abcdef01234567",
+          "account": {"id": "provider-sub-1", "label": "operator@example.com", "scopes": ["..."]}
+        }
+      ],
       "connection_status": {"connected": true, "account": {"id": "provider-sub-1", "label": "operator@example.com", "scopes": ["..."]}}
     }
   ]
@@ -1458,7 +1464,8 @@ tool. Each tool object has:
 | `protections[]` | Short operator-facing safeguards rendered on the focused Home integration page. |
 | `setup_steps[]` | Ordered provider-side and Kern setup steps. A step may include a provider documentation link and a local audited screenshot with alt text; `show_callback`/`show_config` render this host's OAuth callback URI or the tool's config keys inside that step. |
 | `data_summary` | The operator-facing data story as exactly four `cards`, in order: what leaves this host, where it can go, what the third party can do with it, and how long it retains it. Each card has a `description` and/or labeled `points`, plus authoritative policy `links`. |
-| `connection_status` | OAuth tools only: `{"connected": bool, "account"?: ConnectionAccount}`; never contains tokens or client secrets. |
+| `connected_accounts` | OAuth tools only: every connected account as `{"connection_id", "account": ConnectionAccount}`. `connection_id` is an opaque host-generated slot identifier used by agent calls and OAuth lifecycle endpoints; it is not derived from an email or provider id. Never contains tokens or client secrets. |
+| `connection_status` | Transitional aggregate for older clients: `{"connected": bool, "account"?: ConnectionAccount}` using the first connection when present. New clients use `connected_accounts`. |
 
 `ConnectionAccount` is the explicit connected-account structure every OAuth tool
 returns and the host stores/displays: `{"id", "label", "scopes"}` — `id` is the
@@ -1473,6 +1480,9 @@ Approval record:
   "approval_id": "approval_7.Xr9K2unguessable-token",
   "tool_id": "gmail",
   "action_id": "send_email",
+  "connection_id": "connection_0123456789abcdef01234567",
+  "account_id": "provider-sub-1",
+  "account_label": "operator@example.com",
   "status": "pending",
   "summary": "Send Gmail message to billing@example.com with subject \"Invoice\".",
   "payload": {"...": "the exact JSON the tool executes if approved"},
@@ -1487,6 +1497,9 @@ Approval record:
 | `approval_id` | string | Host-assigned id `approval_<number>.<token>`: the sequential number plus an unguessable capability token, so the id itself is the agent's poll capability and a guessed number never resolves. |
 | `tool_id` | string | The tool the approval belongs to. |
 | `action_id` | string | The manifest action id (`ActionSpec.id`) the approval will execute. |
+| `connection_id` | string | The host connection selected when the action was queued; empty for an enable-only tool. |
+| `account_id` | string | The stable provider account id snapshotted when the action was queued. Empty for an enable-only tool or a retained approval created before multi-account support. |
+| `account_label` | string | The provider account's display label snapshotted for the approval UI; empty in the same cases as `account_id`. |
 | `status` | string | One of `pending`, `approved`, `denied`, `expired`, `executed`, `failed`. Terminal states are `denied`, `expired`, `executed`, `failed`. |
 | `summary` | string | Redacted, operator-displayable description of the proposed action (1-500 UTF-8 bytes). |
 | `payload` | object | The exact JSON the tool executes if approved (up to 64 KiB). Omitted from the list response; returned by `GET /v1/tools/{tool_id}/approvals/{approval_id}`. |
@@ -1512,6 +1525,9 @@ Tool event summary (from `/v1/tools/events`):
   "event_id": "tool_event_412",
   "tool_id": "example_tool",
   "action_id": "send_item",
+  "connection_id": "connection_0123456789abcdef01234567",
+  "account_id": "provider-sub-1",
+  "account_label": "operator@example.com",
   "outcome": "executed",
   "detail": "approval_7",
   "has_arguments": true
@@ -1525,6 +1541,8 @@ Tool event summary (from `/v1/tools/events`):
 | `event_id` | string | `tool_event_<seq>`. |
 | `tool_id` | string | The tool the event concerns. |
 | `action_id` | string | The manifest action id (`ActionSpec.id`) for a call; `oauth_connect` for a connect/disconnect, `enablement` for an enable/disable, or `config` for a config change. |
+| `connection_id` | string | The selected host connection for an OAuth event; empty for enable-only tools and pre-profile audit history. |
+| `account_id`, `account_label` | string | Non-secret provider identity snapshotted for the event; empty where no account identity was available. |
 | `outcome` | string | For a tool call: `executed`, `pending_approval`, or `failed`. For an approval decision: `executed`, `failed`, or `denied`. For a connection change: `connected` or `disconnected`. For an enablement change: `enabled` or `disabled`. For a config change: `set` or `cleared`. |
 | `detail` | string | Short context string: an error message, the related `approval_id`, the connected account label, or the config key that changed. May be empty. |
 | `has_arguments` | boolean | `true` for an accepted tool call or approval decision, including calls whose exact argument object is `{}`. `false` for config, enablement, and connection lifecycle events. |

@@ -74,6 +74,20 @@ def github_push_gate_response(policy, method, host, path, body):
     )
 
 
+def github_receive_pack(*refs: str, side_band: bool = True) -> bytes:
+    old = "0" * 40
+    new = "1" * 40
+    capabilities = "report-status"
+    if side_band:
+        capabilities += " side-band-64k"
+    lines = []
+    for index, ref in enumerate(refs):
+        suffix = f"\x00{capabilities}" if index == 0 else ""
+        payload = f"{old} {new} {ref}{suffix}".encode()
+        lines.append(f"{len(payload) + 4:04x}".encode() + payload)
+    return b"".join(lines) + b"0000PACK"
+
+
 def _gate_capacity(pending: int = 0) -> ExitStack:
     stack = ExitStack()
     stack.enter_context(
@@ -135,8 +149,8 @@ class ConfigTests(unittest.TestCase):
                 {"network_integrations": {"claude": {"enabled": False, "web_search": True}}})
 
     def test_xai_carries_enablement_and_nothing_else(self) -> None:
-        # The xAI integration has no options: every Grok server-side tool is
-        # denied, so enablement is the whole of its configuration.
+        # The xAI integration has no options: its exact hosted-tool allowlist is
+        # fixed, so enablement is the whole of its configuration.
         parsed = parse_network_controls({"network_integrations": {"xai": {"enabled": True}}})
         self.assertEqual(parsed.to_json()["network_integrations"]["xai"], {"enabled": True})
 
@@ -200,7 +214,8 @@ class ConfigTests(unittest.TestCase):
         # require_dot_github_approval) require the integration to be enabled. An
         # enabled integration with an empty list stays valid (a read-only agent).
         with self.assertRaisesRegex(
-            ConfigError, r"network_integrations\.github\.write_repositories and require_dot_github_approval require enabled to be true"
+            ConfigError,
+            r"network_integrations\.github\.write_repositories, require_dot_github_approval, and block_direct_main_pushes require enabled to be true",
         ):
             parse_network_controls(
                 {
@@ -215,6 +230,7 @@ class ConfigTests(unittest.TestCase):
             }
         )
         self.assertEqual(read_only.to_json()["network_integrations"], {"github": {"enabled": True}})
+        self.assertTrue(read_only.integrations["github"].block_direct_main_pushes)
         # A disabled integration serializes away.
         bare = parse_network_controls(
             {"network_integrations": {"github": {"enabled": False}}}
@@ -859,6 +875,7 @@ class PolicyTests(unittest.TestCase):
                 "network_integrations": {
                     "github": {
                         "enabled": True,
+                        "block_direct_main_pushes": False,
                         "require_dot_github_approval": True,
                         "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
                     }
@@ -910,7 +927,11 @@ class PolicyTests(unittest.TestCase):
             parse_network_controls(
                 {
                     "network_integrations": {
-                        "github": {"enabled": True, "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}]}
+                        "github": {
+                            "enabled": True,
+                            "block_direct_main_pushes": False,
+                            "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
+                        }
                     },
                 }
             )
@@ -973,6 +994,95 @@ class PolicyTests(unittest.TestCase):
             )
         )
 
+    def test_direct_main_pushes_are_blocked_by_default_without_queueing(self) -> None:
+        policy = parse_network_controls(
+            {
+                "network_integrations": {
+                    "github": {
+                        "enabled": True,
+                        "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
+                    }
+                }
+            }
+        )
+        github = policy.integrations["github"]
+        self.assertTrue(github.block_direct_main_pushes)
+        # The safe default stays sparse in serialized policy. Only the
+        # operator's explicit opt-out needs durable representation.
+        self.assertNotIn("block_direct_main_pushes", policy.to_json()["network_integrations"]["github"])
+        self.assertEqual(
+            github_push_gate_response(
+                policy,
+                "POST",
+                "github.com",
+                "/infiversehq/kern-tools.git/git-receive-pack",
+                github_receive_pack("refs/heads/feature/x"),
+            ),
+            (None, None),
+        )
+        body = github_receive_pack("refs/heads/feature/x", "refs/heads/main")
+        with (
+            patch("host.network_integrations.github.guard.push_gate.inspect") as inspect_fn,
+            patch("host.network_integrations.github.guard.enqueue_pending_push") as enqueue_fn,
+        ):
+            response, reason = github_push_gate_response(
+                policy, "POST", "github.com", "/infiversehq/kern-tools.git/git-receive-pack", body
+            )
+        self.assertEqual(reason, "github_main_push_denied")
+        assert response is not None
+        self.assertTrue(response.startswith(b"HTTP/1.1 200 OK"))
+        self.assertIn(b"ng refs/heads/main direct pushes to main are blocked", response)
+        # A receive-pack transaction is atomic at the proxy boundary: no ref
+        # in a multi-ref request is forwarded when main is present.
+        self.assertIn(b"ng refs/heads/feature/x direct pushes to main are blocked", response)
+        inspect_fn.assert_not_called()
+        enqueue_fn.assert_not_called()
+
+    def test_main_push_protection_can_be_disabled(self) -> None:
+        policy = parse_network_controls(
+            {
+                "network_integrations": {
+                    "github": {
+                        "enabled": True,
+                        "block_direct_main_pushes": False,
+                        "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
+                    }
+                }
+            }
+        )
+        self.assertFalse(policy.integrations["github"].block_direct_main_pushes)
+        self.assertFalse(
+            policy.to_json()["network_integrations"]["github"]["block_direct_main_pushes"]
+        )
+        self.assertEqual(
+            github_push_gate_response(
+                policy,
+                "POST",
+                "github.com",
+                "/infiversehq/kern-tools.git/git-receive-pack",
+                github_receive_pack("refs/heads/main"),
+            ),
+            (None, None),
+        )
+
+    def test_main_push_guard_fails_closed_on_malformed_receive_pack(self) -> None:
+        policy = parse_network_controls(
+            {
+                "network_integrations": {
+                    "github": {
+                        "enabled": True,
+                        "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
+                    }
+                }
+            }
+        )
+        self.assertEqual(
+            github_push_gate_response(
+                policy, "POST", "github.com", "/infiversehq/kern-tools.git/git-receive-pack", b"not-pkt-line"
+            ),
+            (None, "github_main_push_guard_unavailable"),
+        )
+
     def test_github_push_gate_cleans_pending_refs_when_enqueue_fails(self) -> None:
         class FakeResult:
             touches_github = True
@@ -993,6 +1103,7 @@ class PolicyTests(unittest.TestCase):
             "network_integrations": {
                 "github": {
                     "enabled": True,
+                    "block_direct_main_pushes": False,
                     "require_dot_github_approval": True,
                     "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
                 }
@@ -1033,6 +1144,7 @@ class PolicyTests(unittest.TestCase):
             "network_integrations": {
                 "github": {
                     "enabled": True,
+                    "block_direct_main_pushes": False,
                     "require_dot_github_approval": True,
                     "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
                 }
@@ -1057,6 +1169,7 @@ class PolicyTests(unittest.TestCase):
             "network_integrations": {
                 "github": {
                     "enabled": True,
+                    "block_direct_main_pushes": False,
                     "require_dot_github_approval": True,
                     "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
                 }

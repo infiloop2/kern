@@ -20,14 +20,24 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from host.runtime.core import state
-from host.runtime.admin_api.github_credential import HelperError, _run_helper_json
+from host.runtime.core.root_helpers import HelperError, run_helper_json
 from host.runtime.core.network_policy import managed_integration
 
 AUDIT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/audit-github-repo"]
+AUDIT_HELPER_TIMEOUT_SECONDS = 60
 # Repository configuration changes rarely; the forced refreshes on credential
 # and repository-list changes cover the moments that matter, and the poller
 # re-checks on this TTL to catch drift made directly on GitHub.
 AUDIT_TTL = timedelta(days=1)
+
+
+def _run_helper_json(command: list[str], payload: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility seam for tests that stand in for the audit helper."""
+    return run_helper_json(
+        command,
+        payload,
+        timeout=AUDIT_HELPER_TIMEOUT_SECONDS,
+    )
 
 
 def refresh(force: bool = False) -> None:

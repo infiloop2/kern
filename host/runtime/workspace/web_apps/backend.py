@@ -26,6 +26,31 @@ from urllib.parse import quote, unquote
 from host.constants import MAX_WORKSPACE_RESPONSE_BODY_BYTES
 from host.runtime.core import db
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
+from host.runtime.workspace.busy_retry import post_with_busy_retry
+from host.runtime.workspace.web_apps import collections as collection_store
+from host.runtime.workspace.web_apps.collections import (
+    COLLECTION_NAME_RE,
+    COLLECTION_ROW_ID_RE,
+    MAX_COLLECTION_BATCH_OPERATIONS,
+    MAX_COLLECTION_DATA_BYTES,
+    MAX_COLLECTION_FIELD_BYTES,
+    MAX_COLLECTION_QUERY_FILTERS,
+    MAX_COLLECTION_QUERY_LIMIT,
+    MAX_COLLECTION_QUERY_OFFSET,
+    MAX_COLLECTION_RESTORE_BATCH_BYTES,
+    MAX_COLLECTION_RESTORE_BATCH_ROWS,
+    MAX_COLLECTION_ROW_BYTES,
+    MAX_COLLECTION_ROWS,
+    MAX_COLLECTIONS,
+)
+from host.runtime.workspace.web_apps.data_shape import (
+    MAX_SHAPE_ARRAY_SAMPLE,
+    MAX_SHAPE_DEPTH,
+    MAX_SHAPE_NODES,
+    MAX_SHAPE_OBJECT_KEYS,
+    data_shape,
+    utf8_length as _utf8_length,
+)
 from host.session_options import public_session_options, recorded_session_config, session_config_error
 
 
@@ -72,34 +97,10 @@ MAX_PATH_DEPTH = 16
 MAX_PATH_KEY_BYTES = 128
 MAX_DATA_READ_PATHS = 16
 MAX_BATCH_OPERATIONS = 32
-MAX_COLLECTIONS = 64
-MAX_COLLECTION_ROWS = 100_000
-MAX_COLLECTION_DATA_BYTES = 50 * 1024 * 1024
-MAX_COLLECTION_ROW_BYTES = 128 * 1024
-MAX_COLLECTION_BATCH_OPERATIONS = 100
-MAX_COLLECTION_RESTORE_BATCH_ROWS = 100
-MAX_COLLECTION_RESTORE_BATCH_BYTES = 1024 * 1024
-MAX_COLLECTION_QUERY_FILTERS = 8
-MAX_COLLECTION_QUERY_LIMIT = 100
-MAX_COLLECTION_QUERY_OFFSET = 1_000_000
-MAX_COLLECTION_FIELD_BYTES = 128
-COLLECTION_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
-COLLECTION_ROW_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~:-]{0,127}")
 # A shape response answers "which branch should I read" and must stay far
 # cheaper than the document it describes, so every dimension it walks is
 # bounded and every cut it makes is marked where the caller would otherwise
 # read absence as completeness.
-MAX_SHAPE_DEPTH = 6
-MAX_SHAPE_OBJECT_KEYS = 64
-MAX_SHAPE_ARRAY_SAMPLE = 200
-MAX_SHAPE_NODES = 1000
-# A repeated short string is a category worth naming. A string that never
-# repeats is an identifier, and copying identifiers would turn the map back
-# into the data it exists to avoid returning.
-MAX_SHAPE_ENUM_VALUES = 8
-MIN_SHAPE_ENUM_OBSERVATIONS = 4
-MIN_SHAPE_ENUM_VALUE_OBSERVATIONS = 2
-MAX_SHAPE_ENUM_VALUE_BYTES = 40
 JAVASCRIPT_FORBIDDEN = re.compile(r"\bimport\b")
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # Message creation and other writes on one workspace must not interleave.
@@ -116,6 +117,11 @@ AGENT_UPDATES_LOCKED_MESSAGE = (
     "The user has locked agent updates for this app. Do not change the app now; "
     "retry again in a while after the user unlocks updates."
 )
+
+# Keep these validation seams available to existing route and test callers
+# while the collection engine lives in its own module.
+_validated_collection_name = collection_store._validated_collection_name
+_validated_collection_row = collection_store._validated_collection_row
 
 
 def route_browser(
@@ -698,15 +704,13 @@ def create_message(body: Any, *, app_id: str) -> dict[str, Any]:
 
 def _send_with_busy_retry(app_id: str, host_request: dict[str, Any]) -> dict[str, Any]:
     path = f"/v1/threads/{quote(app_id, safe='')}/messages"
-    for attempt in range(SEND_BUSY_RETRIES):
-        try:
-            return call_admin_api("POST", path, host_request)
-        except WorkspaceError as exc:
-            transient = exc.status == HTTPStatus.CONFLICT and SEND_RETRY_MARKER in exc.message
-            if not transient or attempt == SEND_BUSY_RETRIES - 1:
-                raise
-            time.sleep(SEND_BUSY_RETRY_DELAY_SECONDS)
-    raise WorkspaceError(HTTPStatus.CONFLICT, "the thread stayed busy while sending; retry the message")
+    return post_with_busy_retry(
+        path,
+        host_request,
+        attempts=SEND_BUSY_RETRIES,
+        exhausted_message="the thread stayed busy while sending; retry the message",
+        post=call_admin_api,
+    )
 
 
 def load_app_state(app_id: str) -> dict[str, Any]:
@@ -806,170 +810,8 @@ def load_app_data_shape(app_id: str) -> dict[str, Any]:
     return {
         "revision": state["revision"],
         "updated_at": state["updated_at"],
-        "shape": _data_shape([state["data"]], 0, _ShapeBudget(MAX_SHAPE_NODES)),
+        "shape": data_shape(state["data"]),
     }
-
-
-class _ShapeBudget:
-    """Bounds one shape response to a fixed number of described nodes."""
-
-    def __init__(self, limit: int) -> None:
-        self.remaining = limit
-
-    def take(self) -> bool:
-        if self.remaining <= 0:
-            return False
-        self.remaining -= 1
-        return True
-
-
-def _data_shape(values: list[Any], depth: int, budget: _ShapeBudget) -> dict[str, Any]:
-    """Describe one position from every value observed there.
-
-    Array elements are merged into a single ``items`` node so an array of a
-    thousand records costs one record's description. Merging is also what makes
-    a category visible: one observation cannot show that a field repeats.
-    """
-    node = _shape_node(values, depth, budget)
-    # A merged position has no single encoded size, so the size belongs to the
-    # array that holds it rather than to a representative element.
-    if len(values) == 1 and node["type"] in {"object", "array", "string"}:
-        node["bytes"] = _encoded_size(values[0])
-    return node
-
-
-def _shape_node(values: list[Any], depth: int, budget: _ShapeBudget) -> dict[str, Any]:
-    kinds = sorted({_shape_kind(value) for value in values})
-    if len(kinds) > 1:
-        return {"type": "mixed", "types": kinds}
-    if kinds[0] == "object":
-        return _object_shape(values, depth, budget)
-    if kinds[0] == "array":
-        return _array_shape(values, depth, budget)
-    return _scalar_shape(kinds[0], values)
-
-
-def _shape_kind(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, dict):
-        return "object"
-    if isinstance(value, list):
-        return "array"
-    if isinstance(value, str):
-        return "string"
-    return "number"
-
-
-def _object_shape(
-    values: list[Any], depth: int, budget: _ShapeBudget
-) -> dict[str, Any]:
-    node: dict[str, Any] = {"type": "object"}
-    if depth >= MAX_SHAPE_DEPTH:
-        node["truncated"] = True
-        return node
-    observed: dict[str, list[Any]] = {}
-    for value in values:
-        for key, child in value.items():
-            observed.setdefault(key, []).append(child)
-    keys: dict[str, Any] = {}
-    for key in sorted(observed):
-        if len(keys) >= MAX_SHAPE_OBJECT_KEYS or not budget.take():
-            node["truncated"] = True
-            break
-        child_shape = _data_shape(observed[key], depth + 1, budget)
-        # Absent from some observed records, so a caller reading it must handle
-        # the gap rather than trust the merged description.
-        if len(observed[key]) < len(values):
-            child_shape["optional"] = True
-        # A write validates the path it targets but not the keys inside the
-        # value it stores, so a document can hold a key the read route will not
-        # traverse. Naming it beats hiding it: the branch exists, and only a
-        # full data read can reach it.
-        if not _addressable_key(key):
-            child_shape["addressable"] = False
-        keys[key] = child_shape
-    node["keys"] = keys
-    return node
-
-
-def _array_shape(
-    values: list[Any], depth: int, budget: _ShapeBudget
-) -> dict[str, Any]:
-    node: dict[str, Any] = {"type": "array"}
-    # A merged position holds one array per observed record, so no single
-    # length is true of all of them and a summed one would advertise an index
-    # that the record a caller reads does not have. Sizes describe a single
-    # observation, exactly as `bytes` does.
-    if len(values) == 1:
-        node["length"] = len(values[0])
-    elements = [element for value in values for element in value]
-    if not elements:
-        return node
-    if depth >= MAX_SHAPE_DEPTH:
-        node["truncated"] = True
-        return node
-    if len(elements) > MAX_SHAPE_ARRAY_SAMPLE:
-        # Categories below are drawn from a prefix, so an enum here may be
-        # incomplete. Saying so keeps a partial map from reading as a total one.
-        node["sampled"] = MAX_SHAPE_ARRAY_SAMPLE
-        elements = elements[:MAX_SHAPE_ARRAY_SAMPLE]
-    if not budget.take():
-        node["truncated"] = True
-        return node
-    node["items"] = _data_shape(elements, depth + 1, budget)
-    return node
-
-
-def _scalar_shape(kind: str, values: list[Any]) -> dict[str, Any]:
-    node: dict[str, Any] = {"type": kind}
-    if kind != "string":
-        return node
-    distinct = sorted(set(values))
-    # Categories repeat and identifiers do not, so the position must average at
-    # least two observations per distinct value. Merely requiring one repeat
-    # would let a field of names with a single coincidental duplicate publish
-    # every name it holds.
-    if (
-        len(values) >= MIN_SHAPE_ENUM_OBSERVATIONS
-        and len(distinct) * MIN_SHAPE_ENUM_VALUE_OBSERVATIONS <= len(values)
-        and len(distinct) <= MAX_SHAPE_ENUM_VALUES
-        and all(_enum_value_fits(value) for value in distinct)
-    ):
-        node["enum"] = distinct
-    return node
-
-
-def _utf8_length(text: str) -> int | None:
-    """Return the UTF-8 size, or None when the string cannot be encoded.
-
-    JSON may escape a lone surrogate, which parses into a ``str`` that no UTF-8
-    measurement accepts, so a stored document can hold one. Describing that
-    document must not fail on it.
-    """
-    try:
-        return len(text.encode())
-    except UnicodeEncodeError:
-        return None
-
-
-def _addressable_key(key: str) -> bool:
-    """Whether ``read_app_data_path`` accepts this key as a path segment."""
-    size = _utf8_length(key)
-    # `_validated_path` measures segments the same way, so a key that cannot be
-    # measured is a key the read route refuses.
-    return bool(key) and size is not None and size <= MAX_PATH_KEY_BYTES
-
-
-def _enum_value_fits(value: str) -> bool:
-    size = _utf8_length(value)
-    return size is not None and size <= MAX_SHAPE_ENUM_VALUE_BYTES
-
-
-def _encoded_size(value: Any) -> int:
-    return len(json.dumps(value, separators=(",", ":")).encode())
 
 
 def read_app_data_path(app_id: str, body: Any) -> dict[str, Any]:
@@ -1256,458 +1098,31 @@ def _apply_data_operations(
 
 
 def list_collections(app_id: str) -> dict[str, Any]:
-    """Return bounded collection summaries at one coherent App revision."""
-    _require_web_app(app_id)
-    with db.transaction() as cur:
-        cur.execute(
-            "SELECT revision, updated_at FROM web_apps"
-            " WHERE app_id = %s FOR SHARE",
-            (app_id,),
-        )
-        app_state = cur.fetchone()
-        if app_state is None:
-            raise WorkspaceError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
-        cur.execute(
-            "SELECT row_count, data_bytes FROM web_app_collection_state"
-            " WHERE app_id = %s",
-            (app_id,),
-        )
-        collection_state = cur.fetchone()
-        if collection_state is None:
-            raise WorkspaceError(
-                HTTPStatus.INTERNAL_SERVER_ERROR, "app collection state is unavailable"
-            )
-        cur.execute(
-            "SELECT collection, COUNT(*), COALESCE(SUM(value_bytes), 0)"
-            " FROM web_app_collection_rows WHERE app_id = %s"
-            " GROUP BY collection ORDER BY collection",
-            (app_id,),
-        )
-        collections = [
-            {"name": str(name), "rows": int(rows), "bytes": int(size)}
-            for name, rows, size in cur.fetchall()
-        ]
-    return {
-        "revision": int(app_state[0]),
-        "rows": int(collection_state[0]),
-        "bytes": int(collection_state[1]),
-        "updated_at": app_state[1],
-        "items": collections,
-    }
+    return collection_store.list_collections(
+        app_id, require_web_app=_require_web_app
+    )
 
 
 def query_collection(app_id: str, collection: str, body: Any) -> dict[str, Any]:
-    """Filter, sort, and page one collection without loading the App document."""
-    _require_web_app(app_id)
-    collection = _validated_collection_name(collection)
-    request = {} if body is None else _required_object(body, "collection query")
-    _require_keys(
-        request,
-        {"filters", "ids", "sort", "limit", "offset"},
-        required=set(),
+    return collection_store.query_collection(
+        app_id,
+        collection,
+        body,
+        require_web_app=_require_web_app,
     )
-    raw_filters = request.get("filters", [])
-    if (
-        not isinstance(raw_filters, list)
-        or len(raw_filters) > MAX_COLLECTION_QUERY_FILTERS
-    ):
-        raise WorkspaceError(
-            HTTPStatus.UNPROCESSABLE_ENTITY,
-            f"filters must contain 0 to {MAX_COLLECTION_QUERY_FILTERS} entries",
-        )
-
-    clauses = ["app_id = %s", "collection = %s"]
-    parameters: list[Any] = [app_id, collection]
-    for raw_filter in raw_filters:
-        item = _required_object(raw_filter, "collection filter")
-        operation = _required_text(item.get("op"), "filter op")
-        required = {"field", "op", "value"} if operation in {"eq", "ne"} else {"field", "op"}
-        _require_keys(item, {"field", "op", "value"}, required=required)
-        field = _validated_collection_field(item.get("field"))
-        if operation == "eq":
-            exact_value = _validated_json_value(item.get("value"), "filter value")
-            # GIN narrows candidates while the extracted-value comparison
-            # preserves exact object and array equality semantics.
-            clauses.append("value_json @> %s AND value_json -> %s = %s")
-            parameters.extend(
-                (
-                    db.jsonb({field: exact_value}),
-                    field,
-                    db.jsonb(exact_value),
-                )
-            )
-        elif operation == "ne":
-            clauses.append("value_json -> %s IS DISTINCT FROM %s")
-            parameters.extend(
-                (
-                    field,
-                    db.jsonb(
-                        _validated_json_value(item.get("value"), "filter value")
-                    ),
-                )
-            )
-        elif operation == "exists":
-            clauses.append("value_json ? %s")
-            parameters.append(field)
-        elif operation == "missing":
-            clauses.append("NOT value_json ? %s")
-            parameters.append(field)
-        else:
-            raise WorkspaceError(
-                HTTPStatus.UNPROCESSABLE_ENTITY,
-                "filter op must be eq, ne, exists, or missing",
-            )
-
-    ids = request.get("ids")
-    if ids is not None:
-        if not isinstance(ids, list) or not ids or len(ids) > MAX_COLLECTION_QUERY_LIMIT:
-            raise WorkspaceError(
-                HTTPStatus.UNPROCESSABLE_ENTITY,
-                f"ids must contain 1 to {MAX_COLLECTION_QUERY_LIMIT} row ids",
-            )
-        normalized_ids = [_validated_collection_row_id(value) for value in ids]
-        if len(set(normalized_ids)) != len(normalized_ids):
-            raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "ids must be unique")
-        placeholders = ",".join("%s" for _ in normalized_ids)
-        clauses.append(f"row_id IN ({placeholders})")
-        parameters.extend(normalized_ids)
-
-    limit = request.get("limit", 50)
-    if (
-        isinstance(limit, bool)
-        or not isinstance(limit, int)
-        or limit < 1
-        or limit > MAX_COLLECTION_QUERY_LIMIT
-    ):
-        raise WorkspaceError(
-            HTTPStatus.UNPROCESSABLE_ENTITY,
-            f"limit must be from 1 to {MAX_COLLECTION_QUERY_LIMIT}",
-        )
-    offset = request.get("offset", 0)
-    if (
-        isinstance(offset, bool)
-        or not isinstance(offset, int)
-        or offset < 0
-        or offset > MAX_COLLECTION_QUERY_OFFSET
-    ):
-        raise WorkspaceError(
-            HTTPStatus.UNPROCESSABLE_ENTITY,
-            f"offset must be from 0 to {MAX_COLLECTION_QUERY_OFFSET}",
-        )
-
-    order_sql = "row_id ASC"
-    order_parameters: list[Any] = []
-    if request.get("sort") is not None:
-        sort = _required_object(request["sort"], "collection sort")
-        _require_keys(sort, {"field", "direction"}, required={"field", "direction"})
-        field = _validated_collection_field(sort.get("field"))
-        direction = _required_text(sort.get("direction"), "sort direction").lower()
-        if direction not in {"asc", "desc"}:
-            raise WorkspaceError(
-                HTTPStatus.UNPROCESSABLE_ENTITY, "sort direction must be asc or desc"
-            )
-        order_sql = f"value_json -> %s {direction.upper()} NULLS LAST, row_id ASC"
-        order_parameters.append(field)
-
-    where_sql = " AND ".join(clauses)
-    with db.transaction() as cur:
-        # Every storage path shares the web_apps row lock, so the returned App
-        # revision, count, and page describe one coherent logical state.
-        cur.execute(
-            "SELECT revision, updated_at FROM web_apps"
-            " WHERE app_id = %s FOR SHARE",
-            (app_id,),
-        )
-        state = cur.fetchone()
-        if state is None:
-            raise WorkspaceError(
-                HTTPStatus.INTERNAL_SERVER_ERROR, "app collection state is unavailable"
-            )
-        cur.execute(
-            f"SELECT COUNT(*) FROM web_app_collection_rows WHERE {where_sql}",
-            tuple(parameters),
-        )
-        count_row = cur.fetchone()
-        total = int(count_row[0]) if count_row is not None else 0
-        cur.execute(
-            "SELECT row_id, value_json FROM web_app_collection_rows"
-            f" WHERE {where_sql} ORDER BY {order_sql} LIMIT %s OFFSET %s",
-            (*parameters, *order_parameters, limit, offset),
-        )
-        rows = [
-            {"id": str(row_id), "value": value}
-            for row_id, value in cur.fetchall()
-        ]
-    next_offset = offset + len(rows) if offset + len(rows) < total else None
-    return {
-        "name": collection,
-        "revision": int(state[0]),
-        "rows": rows,
-        "total": total,
-        "offset": offset,
-        "next_offset": next_offset,
-        "updated_at": state[1],
-    }
 
 
-def apply_collection_actions(app_id: str, collection: str, body: Any) -> dict[str, Any]:
-    """Apply one bounded row batch as a new whole-App revision."""
-    _require_web_app(app_id)
-    collection = _validated_collection_name(collection)
-    request = _required_object(body, "collection action")
-    _require_keys(
-        request,
-        {"expected_revision", "operations"},
-        required={"expected_revision", "operations"},
+def apply_collection_actions(
+    app_id: str, collection: str, body: Any
+) -> dict[str, Any]:
+    return collection_store.apply_collection_actions(
+        app_id,
+        collection,
+        body,
+        require_web_app=_require_web_app,
+        record_revision=_record_state_row_revision,
+        utc_now=_utc_now,
     )
-    expected_revision = _required_counter(
-        request.get("expected_revision"), "expected_revision"
-    )
-    raw_operations = request.get("operations")
-    if (
-        not isinstance(raw_operations, list)
-        or not raw_operations
-        or len(raw_operations) > MAX_COLLECTION_BATCH_OPERATIONS
-    ):
-        raise WorkspaceError(
-            HTTPStatus.UNPROCESSABLE_ENTITY,
-            "operations must contain 1 to"
-            f" {MAX_COLLECTION_BATCH_OPERATIONS} row actions",
-        )
-    operations: list[tuple[str, str, dict[str, Any] | None, int]] = []
-    seen_ids: set[str] = set()
-    for raw_operation in raw_operations:
-        operation = _required_object(raw_operation, "collection row action")
-        name = _required_text(operation.get("action"), "action")
-        required = {"action", "id", "value"} if name == "upsert" else {"action", "id"}
-        _require_keys(operation, {"action", "id", "value"}, required=required)
-        if name not in {"upsert", "delete"}:
-            raise WorkspaceError(
-                HTTPStatus.UNPROCESSABLE_ENTITY, "row action must be upsert or delete"
-            )
-        row_id = _validated_collection_row_id(operation.get("id"))
-        if row_id in seen_ids:
-            raise WorkspaceError(
-                HTTPStatus.UNPROCESSABLE_ENTITY,
-                "a row id may appear only once in one batch",
-            )
-        seen_ids.add(row_id)
-        if name == "upsert":
-            row_value, value_bytes = _validated_collection_row(operation.get("value"))
-            operations.append((name, row_id, row_value, value_bytes))
-        else:
-            operations.append((name, row_id, None, 0))
-
-    now = _utc_now()
-    with db.transaction() as cur:
-        cur.execute(
-            f"SELECT {STATE_COLUMNS} FROM web_apps"
-            " WHERE app_id = %s FOR UPDATE",
-            (app_id,),
-        )
-        app_state = cur.fetchone()
-        if app_state is None:
-            raise WorkspaceError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
-        if int(app_state[0]) != expected_revision:
-            raise WorkspaceError(
-                HTTPStatus.CONFLICT, "the app changed; read state and retry"
-            )
-        cur.execute(
-            "SELECT row_count, data_bytes FROM web_app_collection_state"
-            " WHERE app_id = %s FOR UPDATE",
-            (app_id,),
-        )
-        collection_state = cur.fetchone()
-        if collection_state is None:
-            raise WorkspaceError(
-                HTTPStatus.INTERNAL_SERVER_ERROR, "app collection state is unavailable"
-            )
-        placeholders = ",".join("%s" for _ in seen_ids)
-        cur.execute(
-            "SELECT row_id, value_bytes FROM web_app_collection_rows"
-            f" WHERE app_id = %s AND collection = %s AND row_id IN ({placeholders})",
-            (app_id, collection, *seen_ids),
-        )
-        existing = {str(row_id): int(size) for row_id, size in cur.fetchall()}
-        row_count = int(collection_state[0])
-        data_bytes = int(collection_state[1])
-        for name, row_id, _value, value_bytes in operations:
-            previous = existing.get(row_id)
-            if name == "delete":
-                if previous is None:
-                    raise WorkspaceError(
-                        HTTPStatus.UNPROCESSABLE_ENTITY, "collection row does not exist"
-                    )
-                row_count -= 1
-                data_bytes -= previous
-            elif previous is None:
-                row_count += 1
-                data_bytes += value_bytes
-            else:
-                data_bytes += value_bytes - previous
-        if row_count > MAX_COLLECTION_ROWS:
-            raise WorkspaceError(
-                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                f"app collections exceed {MAX_COLLECTION_ROWS} rows",
-            )
-        if data_bytes > MAX_COLLECTION_DATA_BYTES:
-            raise WorkspaceError(
-                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                f"app collections exceed {MAX_COLLECTION_DATA_BYTES} bytes",
-            )
-        if not existing and any(name == "upsert" for name, *_rest in operations):
-            cur.execute(
-                "SELECT COUNT(DISTINCT collection) FROM web_app_collection_rows"
-                " WHERE app_id = %s",
-                (app_id,),
-            )
-            collection_count_row = cur.fetchone()
-            assert collection_count_row is not None
-            collection_count = int(collection_count_row[0])
-            if collection_count >= MAX_COLLECTIONS:
-                cur.execute(
-                    "SELECT 1 FROM web_app_collection_rows"
-                    " WHERE app_id = %s AND collection = %s LIMIT 1",
-                    (app_id, collection),
-                )
-                if cur.fetchone() is None:
-                    raise WorkspaceError(
-                        HTTPStatus.CONFLICT,
-                        f"an app may retain at most {MAX_COLLECTIONS} collections",
-                    )
-        for name, row_id, stored_value, value_bytes in operations:
-            if name == "delete":
-                cur.execute(
-                    "DELETE FROM web_app_collection_rows"
-                    " WHERE app_id = %s AND collection = %s AND row_id = %s",
-                    (app_id, collection, row_id),
-                )
-            else:
-                cur.execute(
-                    "INSERT INTO web_app_collection_rows"
-                    " (app_id, collection, row_id, value_json, value_bytes, updated_at)"
-                    " VALUES (%s, %s, %s, %s, %s, %s)"
-                    " ON CONFLICT (app_id, collection, row_id) DO UPDATE SET"
-                    " value_json = EXCLUDED.value_json,"
-                    " value_bytes = EXCLUDED.value_bytes,"
-                    " updated_at = EXCLUDED.updated_at",
-                    (
-                        app_id,
-                        collection,
-                        row_id,
-                        db.jsonb(stored_value),
-                        value_bytes,
-                        now,
-                    ),
-                )
-        cur.execute(
-            "UPDATE web_app_collection_state SET row_count = %s, data_bytes = %s"
-            " WHERE app_id = %s",
-            (row_count, data_bytes, app_id),
-        )
-        cur.execute(
-            "UPDATE web_apps SET revision = revision + 1, updated_at = %s"
-            " WHERE app_id = %s"
-            f" RETURNING {STATE_COLUMNS}",
-            (now, app_id),
-        )
-        changed = cur.fetchone()
-        assert changed is not None
-        _record_state_row_revision(
-            cur, app_id, changed, "agent", "collection", None
-        )
-    return {"ok": True, "revision": int(changed[0]), "updated_at": changed[5]}
-
-
-def _validated_collection_name(value: Any) -> str:
-    if not isinstance(value, str) or COLLECTION_NAME_RE.fullmatch(value) is None:
-        raise WorkspaceError(
-            HTTPStatus.BAD_REQUEST,
-            "collection must start with a lowercase letter and contain only"
-            " lowercase letters, numbers, _ or -",
-        )
-    return value
-
-
-def _validated_collection_row_id(value: Any) -> str:
-    if not isinstance(value, str) or COLLECTION_ROW_ID_RE.fullmatch(value) is None:
-        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "invalid collection row id")
-    return value
-
-
-def _validated_collection_field(value: Any) -> str:
-    size = _utf8_length(value) if isinstance(value, str) else None
-    if not value or size is None or size > MAX_COLLECTION_FIELD_BYTES or "\0" in value:
-        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "invalid collection field")
-    assert isinstance(value, str)
-    return value
-
-
-def _validated_json_value(value: Any, label: str) -> Any:
-    try:
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        canonical = json.loads(encoded)
-    except (TypeError, ValueError) as exc:
-        raise WorkspaceError(
-            HTTPStatus.UNPROCESSABLE_ENTITY, f"{label} must contain only JSON values"
-        ) from exc
-    if _json_contains_nul(canonical):
-        raise WorkspaceError(
-            HTTPStatus.UNPROCESSABLE_ENTITY, f"{label} must not contain NUL characters"
-        )
-    if _json_contains_invalid_unicode(canonical):
-        raise WorkspaceError(
-            HTTPStatus.UNPROCESSABLE_ENTITY,
-            f"{label} must contain valid Unicode text",
-        )
-    return canonical
-
-
-def _validated_collection_row(value: Any) -> tuple[dict[str, Any], int]:
-    if not isinstance(value, dict):
-        raise WorkspaceError(
-            HTTPStatus.UNPROCESSABLE_ENTITY, "collection row value must be an object"
-        )
-    canonical = _validated_json_value(value, "collection row value")
-    for field in canonical:
-        _validated_collection_field(field)
-    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
-    if len(encoded) > MAX_COLLECTION_ROW_BYTES:
-        raise WorkspaceError(
-            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-            f"collection row exceeds {MAX_COLLECTION_ROW_BYTES} bytes",
-        )
-    return canonical, len(encoded)
-
-
-def _json_contains_nul(value: Any) -> bool:
-    if isinstance(value, str):
-        return "\0" in value
-    if isinstance(value, list):
-        return any(_json_contains_nul(item) for item in value)
-    if isinstance(value, dict):
-        return any("\0" in key or _json_contains_nul(item) for key, item in value.items())
-    return False
-
-
-def _json_contains_invalid_unicode(value: Any) -> bool:
-    if isinstance(value, str):
-        try:
-            value.encode()
-        except UnicodeEncodeError:
-            return True
-        return False
-    if isinstance(value, list):
-        return any(_json_contains_invalid_unicode(item) for item in value)
-    if isinstance(value, dict):
-        return any(
-            _json_contains_invalid_unicode(key) or _json_contains_invalid_unicode(item)
-            for key, item in value.items()
-        )
-    return False
-
-
-# --- Unified revisions -------------------------------------------------------
 
 
 def _insert_revision(
@@ -1737,102 +1152,8 @@ def _insert_revision(
     )
 
 
-def _collection_snapshot_json(cur: Any, app_id: str) -> str:
-    """Encode the complete row store for one retained App revision."""
-    cur.execute(
-        "SELECT collection, row_id, value_json FROM web_app_collection_rows"
-        " WHERE app_id = %s ORDER BY collection, row_id",
-        (app_id,),
-    )
-    collections: dict[str, dict[str, Any]] = {}
-    for collection, row_id, value in cur.fetchall():
-        collections.setdefault(str(collection), {})[str(row_id)] = value
-    return json.dumps(
-        collections, sort_keys=True, separators=(",", ":"), allow_nan=False
-    )
-
-
-def _restore_collection_snapshot(
-    cur: Any, app_id: str, encoded: str, now: str
-) -> None:
-    """Replace the current row store with one complete retained copy."""
-    try:
-        collections = json.loads(encoded)
-    except (TypeError, ValueError) as exc:
-        raise WorkspaceError(
-            HTTPStatus.INTERNAL_SERVER_ERROR,
-            "app revision collection snapshot is invalid",
-        ) from exc
-    if not isinstance(collections, dict):
-        raise WorkspaceError(
-            HTTPStatus.INTERNAL_SERVER_ERROR,
-            "app revision collection snapshot is invalid",
-        )
-
-    rows: list[tuple[str, str, dict[str, Any], int]] = []
-    data_bytes = 0
-    for raw_collection, raw_values in collections.items():
-        collection = _validated_collection_name(raw_collection)
-        if not isinstance(raw_values, dict):
-            raise WorkspaceError(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                "app revision collection snapshot is invalid",
-            )
-        for raw_row_id, raw_value in raw_values.items():
-            row_id = _validated_collection_row_id(raw_row_id)
-            value, value_bytes = _validated_collection_row(raw_value)
-            rows.append((collection, row_id, value, value_bytes))
-            data_bytes += value_bytes
-    if (
-        len(collections) > MAX_COLLECTIONS
-        or len(rows) > MAX_COLLECTION_ROWS
-        or data_bytes > MAX_COLLECTION_DATA_BYTES
-    ):
-        raise WorkspaceError(
-            HTTPStatus.INTERNAL_SERVER_ERROR,
-            "app revision collection snapshot exceeds collection limits",
-        )
-
-    cur.execute("DELETE FROM web_app_collection_rows WHERE app_id = %s", (app_id,))
-    batch: list[tuple[str, str, dict[str, Any], int]] = []
-    batch_bytes = 0
-    for row in rows:
-        if batch and (
-            len(batch) >= MAX_COLLECTION_RESTORE_BATCH_ROWS
-            or batch_bytes + row[3] > MAX_COLLECTION_RESTORE_BATCH_BYTES
-        ):
-            _insert_collection_snapshot_batch(cur, app_id, batch, now)
-            batch = []
-            batch_bytes = 0
-        batch.append(row)
-        batch_bytes += row[3]
-    if batch:
-        _insert_collection_snapshot_batch(cur, app_id, batch, now)
-    cur.execute(
-        "UPDATE web_app_collection_state SET row_count = %s, data_bytes = %s"
-        " WHERE app_id = %s",
-        (len(rows), data_bytes, app_id),
-    )
-
-
-def _insert_collection_snapshot_batch(
-    cur: Any,
-    app_id: str,
-    rows: list[tuple[str, str, dict[str, Any], int]],
-    now: str,
-) -> None:
-    placeholders = ",".join("(%s, %s, %s, %s, %s, %s)" for _row in rows)
-    parameters: list[Any] = []
-    for collection, row_id, value, value_bytes in rows:
-        parameters.extend(
-            (app_id, collection, row_id, db.jsonb(value), value_bytes, now)
-        )
-    cur.execute(
-        "INSERT INTO web_app_collection_rows"
-        " (app_id, collection, row_id, value_json, value_bytes, updated_at)"
-        f" VALUES {placeholders}",
-        tuple(parameters),
-    )
+_collection_snapshot_json = collection_store._collection_snapshot_json
+_restore_collection_snapshot = collection_store._restore_collection_snapshot
 
 
 def _record_state_revision(

@@ -37,7 +37,8 @@ import threading
 from typing import Any, Callable, cast
 
 from host.agent_scripts import AGENT_HOME, SCRIPT_TIMEOUT_SECONDS, script_path_error
-from host.runtime.admin_api import thread_scope
+from host.runtime.agent_runtime import thread_scope
+from host.runtime.agent_runtime.harness import subprocess_cwd
 
 DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-agent-script"]
 AGENT_CWD = AGENT_HOME
@@ -337,4 +338,4 @@ def _subprocess_cwd(command: list[str]) -> str | None:
     # In production the admin API cannot traverse the agent user's private
     # 0700 home; the sudo launcher starts as root, cds there, and demotes to
     # kern-agent. A custom test command still runs from AGENT_CWD.
-    return None if command == DEFAULT_COMMAND else AGENT_CWD
+    return subprocess_cwd(command, DEFAULT_COMMAND, AGENT_CWD)

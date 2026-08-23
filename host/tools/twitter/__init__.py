@@ -14,26 +14,28 @@ from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, Data
 from host.tools.results import (
     ActionExecuted,
     ActionFailed,
+    ActionPendingApproval,
     ActionResult,
+    ApprovalExecuted,
+    ApprovalResult,
 )
 from host.tools.tool import (
-    ConnectionStatus,
     CredentialFlow,
     OAuthCompleteConnectParams,
     OAuthCompleteConnectResult,
     OAuthStartConnectParams,
     OAuthStartConnectResult,
 )
-from host.tools.host_api import ConnectionAccount, HostAPI, StoredCredential
+from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI, StoredCredential
 from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
+    OAuth2CredentialStore,
     access_token_is_fresh,
     clear_if_still_loaded,
     now,
     pkce_verifier_and_challenge,
-    require_scopes,
     save_if_still_connected,
     signed_state,
     verify_state,
@@ -45,6 +47,7 @@ from host.tools.shared.web import (
     json_request,
     known_provider_transport_error,
     provider_warning,
+    transport_or_unmapped_provider_error,
     unmapped_provider_error,
 )
 
@@ -52,13 +55,17 @@ X_AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
 X_TOKEN_URL = "https://api.x.com/2/oauth2/token"
 X_REVOKE_URL = "https://api.x.com/2/oauth2/revoke"
 X_API_BASE_URL = "https://api.x.com/2"
-X_OAUTH_SCOPES = ("tweet.read", "users.read", "offline.access")
+X_OAUTH_SCOPES = ("tweet.read", "users.read", "tweet.write", "offline.access")
 # offline.access is required at connect time: without it X issues no refresh
 # token, and the 2-hour access token would strand the connection.
-REQUIRED_X_SCOPES = frozenset(X_OAUTH_SCOPES)
+REQUIRED_X_READ_SCOPES = frozenset(("tweet.read", "users.read", "offline.access"))
+REQUIRED_X_CONNECT_SCOPES = frozenset(X_OAUTH_SCOPES)
+REQUIRED_X_WRITE_SCOPES = REQUIRED_X_READ_SCOPES | {"tweet.write"}
 X_RECONNECT_MESSAGE = "X (Twitter) is no longer connected. Please reconnect the tool."
+X_WRITE_RECONNECT_MESSAGE = "Reconnect X to grant tweet.write before publishing."
 DEFAULT_TOKEN_LIFETIME_SECONDS = 7200
 MAX_QUERY_CHARS = 512
+MAX_TWEET_CHARS = 4_000
 TWEET_ID_RE = re.compile(r"^[0-9]{1,25}$")
 USER_ID_RE = re.compile(r"^[0-9]{1,19}$")
 USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{1,15}$")
@@ -66,6 +73,8 @@ WOEID_RE = re.compile(r"^[0-9]{1,10}$")
 START_TIME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 WORLDWIDE_WOEID = "1"
 TWEET_FIELDS = "created_at,author_id,public_metrics,conversation_id"
+# Host approval summaries are capped at 500 UTF-8 bytes.
+SUMMARY_MAX_BYTES = 500
 X_READ_POLICY = (
     "Read-only. Sends the listed query values to the X API authenticated as the "
     "connected account and returns public post data. Each call is billed to the "
@@ -187,9 +196,9 @@ MANIFEST = ToolManifest(
     tool_id="twitter",
     display_name="X (Twitter)",
     description=(
-        "Connect your X account and let your agent search and read X posts, trends, and public "
-        "profiles. Replies and direct messages are prepared as X links that you open, review, and "
-        "send yourself."
+        "Connect one or more X accounts and let your agent search and read X posts, trends, and "
+        "public profiles, and publish posts, replies, or quote posts with your approval. Direct "
+        "messages are prepared as X links that you open, review, and send yourself."
     ),
     connection="oauth",
     actions=(
@@ -264,6 +273,28 @@ MANIFEST = ToolManifest(
             ),
             output_schema=LOOKUP_USER_OUTPUT_SCHEMA,
         ),
+        ActionSpec(
+            id="post_tweet",
+            description=(
+                "Queue approval to publish exactly one standalone post, reply, or quote post as "
+                "the selected connected account. Set neither target id for a standalone post, or "
+                "exactly one reply/quote id; Kern fetches and shows the target in the approval."
+            ),
+            data_policy=(
+                "Publishes a post from the selected X account, visible per that account's audience "
+                "settings. Nothing reaches X until the operator approves it. Posting consumes the "
+                "deployment's X API credits, and the approval stays bound to the selected account."
+            ),
+            input_schema=_schema(
+                {
+                    "text": {"type": "string", "description": "Post text (up to 4,000 characters)."},
+                    "in_reply_to_tweet_id": {"type": "string", "description": "Reply to this numeric post id."},
+                    "quote_tweet_id": {"type": "string", "description": "Quote this numeric post id."},
+                },
+                ["text"],
+            ),
+            approval="operator",
+        ),
     ),
     config=(
         ConfigRequirement(key="X_OAUTH_CLIENT_ID", description="X developer app OAuth 2.0 client id."),
@@ -271,16 +302,16 @@ MANIFEST = ToolManifest(
         ConfigRequirement(key="X_BEARER_TOKEN", description="X developer app Bearer Token (app-only auth; used by trends lookups, which do not accept user-context tokens)."),
     ),
     protections=(
-        "This tool only reads. Nothing is published, sent, or changed on your X account through it, so no action needs your approval.",
-        "A reply or direct message the agent prepares is a link: X receives it only when you open that link and send it yourself.",
-        "Public reads consume X pay-per-use credits. Your X credentials stay encrypted in write-only tool config.",
+        "Reading does not require approval. Publishing a post, reply, or quote post happens only after your approval.",
+        "Each approval is bound to the selected X account. Direct messages remain links that you open, review, and send yourself.",
+        "Public reads and writes consume X pay-per-use credits. Your X credentials stay encrypted in write-only tool config.",
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(PARAM_GUARD_TECHNICAL_DETAIL,),
     agent_notes=(
-        "To help the operator post, reply, or send a direct message, draft the text and return a "
-        "Markdown link they can open. Post: https://x.com/intent/tweet?text=<percent-encoded-post>. "
-        "Reply: that same link plus &in_reply_to=<numeric-post-id>. Direct message: "
+        "Use post_tweet for an approval-gated standalone post, reply, or quote post from the "
+        "selected connected account. To help the operator send a direct message, draft the text "
+        "and return this Markdown link: "
         "https://x.com/messages/compose?recipient_id=<numeric-user-id>&text=<percent-encoded-message>, "
         "resolving a handle to that id with lookup_user first. "
         "Percent-encode the text. Chat and generated Web Apps open x.com links in a new tab, so the "
@@ -289,14 +320,14 @@ MANIFEST = ToolManifest(
     setup_steps=(
         SetupStep(
             title="Create an X developer project and app",
-            description="Sign in to the X Developer Console, create or select the project, and create the app that will own this integration. Enable the current pay-per-use API access and add enough credits for recent search, profile lookups, and trends. Keep this app dedicated enough that its billing and credentials can be revoked without affecting unrelated systems.",
+            description="Sign in to the X Developer Console, create or select the project, and create the app that will own this integration. Enable the current pay-per-use API access and add enough credits for reads and intended writes. Keep this app dedicated enough that its billing and credentials can be revoked without affecting unrelated systems.",
             link_url="https://developer.x.com/",
             link_label="Open the X Developer Portal",
         ),
         SetupStep(
             title="Configure user authentication",
             show_callback=True,
-            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, leave App permissions at Read, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. If X requires a Website URL, use your public Kern base URL: for a callback such as https://host.example/oauth/callback, use https://host.example. You do not need a separate website. Then save. Kern requests exactly tweet.read, users.read, and offline.access; it requests no write, post, or direct-message scope at all. offline.access lets X issue refresh tokens after the two-hour access token expires.",
+            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, set App permissions to Read and write, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. Kern requests tweet.read, users.read, tweet.write, and offline.access; it requests no direct-message scope. offline.access lets X issue refresh tokens after the two-hour access token expires.",
             link_url="https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code",
             link_label="View X OAuth 2.0 authorization-code documentation",
         ),
@@ -307,7 +338,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and connect Kern",
             show_config=True,
-            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, choose Connect, sign in as the account the agent may read as, and approve the three displayed scopes. An existing connection keeps working, and you can disconnect and reconnect once to drop the direct-message permissions it was granted before. Confirm the page shows the expected @username. Replies and direct messages use X's official links in your own browser and do not use these credentials.",
+            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, connect every X identity the agent may use, and approve all four displayed scopes. Existing read-only connections keep working for reads but must be reconnected before publishing. Confirm every expected @username appears.",
         ),
     ),
     data_summary=DataSummary(
@@ -316,7 +347,8 @@ MANIFEST = ToolManifest(
                 title="What leaves this host",
                 points=(
                     DataSummaryPoint(label="Reads", text="Search queries, post ids, usernames, trend locations, and paging values go to X directly. Query text is received and logged like any other request, so it is itself data sent to X. The search query first passes the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent."),
-                    DataSummaryPoint(label="Reply and message drafts", text="Kern never sends a reply or direct message through the API. An agent may put a numeric post or user id and a percent-encoded draft in an official x.com reply-intent or message-compose link; X receives the draft only when you open that link in your browser."),
+                    DataSummaryPoint(label="Posts, replies, and quote posts", text="A post, reply, or quote post reaches X only after your approval. Kern sends exactly the approved text and, for a reply or quote post, the target post id as the selected account."),
+                    DataSummaryPoint(label="Message drafts", text="Kern does not send direct messages through the API. X receives a message draft only when you open its official compose link in your browser."),
                     DataSummaryPoint(label="Profile lookups", text="A handle or user id you ask the agent to resolve goes to X and returns that account's public id, handle, display name, and public follower, following, and post counts. This is the same public lookup the X website performs and sends no message text."),
                 ),
             ),
@@ -324,7 +356,7 @@ MANIFEST = ToolManifest(
                 title="Where it can go",
                 points=(
                     DataSummaryPoint(label="X", text="Reads and the OAuth connection stay within X's services under the connected account."),
-                    DataSummaryPoint(label="The public internet", text="Nothing is published or sent by this tool. If you open a prepared link, X shows the draft for you to review, edit, and send yourself."),
+                    DataSummaryPoint(label="The public internet", text="An approved post is published under the selected X account's audience settings. Direct-message drafts remain reviewable browser links."),
                 ),
             ),
             DataSummaryCard(
@@ -341,8 +373,8 @@ MANIFEST = ToolManifest(
             DataSummaryCard(
                 title="How long X retains it",
                 description=(
-                    "X keeps account, security, and API records under its "
-                    "Privacy Policy with no single fixed period. Anything you send yourself from a prepared link stays on X until you or X remove it. Disconnect revokes the token where possible and always clears "
+                    "A published post stays on X until you or X remove it. X keeps account, security, and API records under its "
+                    "Privacy Policy with no single fixed period. Anything you send yourself from a prepared link also stays on X until you or X remove it. Disconnect revokes the token where possible and always clears "
                     "the local credential, but does not delete X's own records."
                 ),
                 links=(
@@ -403,11 +435,14 @@ def _fetch_me(access_token: str) -> ConnectionAccount:
     return {"id": user_id, "label": label, "scopes": []}
 
 
-class XCredentialStore:
+class XCredentialStore(OAuth2CredentialStore):
     """OAuth 2.0 authorization-code + PKCE against X, with rotating single-use
     refresh tokens. The PKCE verifier rides in the HMAC-signed state (see
     shared/oauth2.signed_state for why that is acceptable for a confidential
     client)."""
+
+    reconnect_message = X_RECONNECT_MESSAGE
+    required_scopes = REQUIRED_X_READ_SCOPES
 
     def start_connect(self, params: OAuthStartConnectParams, api: HostAPI) -> OAuthStartConnectResult:
         verifier, challenge = pkce_verifier_and_challenge()
@@ -469,31 +504,19 @@ class XCredentialStore:
                 raise RuntimeError(known) from exc
             raise unmapped_provider_error("X", "OAuth token exchange", exc) from None
         granted_scopes = str(token_response.get("scope") or "").split()
-        missing = REQUIRED_X_SCOPES - set(granted_scopes)
+        missing = REQUIRED_X_CONNECT_SCOPES - set(granted_scopes)
         if missing:
             raise RuntimeError(
                 "X connection is missing required permissions: "
                 f"{', '.join(sorted(missing))}. Update the X app permissions and reconnect."
             )
-        existing = api.credentials.load()
         token_payload = _token_payload_from_response(token_response, fallback_refresh_token="")
         if not token_payload["refresh_token"]:
             raise RuntimeError("X connection returned no refresh token. Reconnect and grant offline access.")
         access_token = str(token_payload["access_token"])
         identity = _fetch_me(access_token)
         account: ConnectionAccount = {"id": identity["id"], "label": identity["label"], "scopes": granted_scopes}
-        created_at = existing["metadata"].get("created_at") if existing is not None else None
-        current_time = now()
-        api.credentials.save(
-            {
-                "account": account,
-                "secret": token_payload,
-                "metadata": {
-                    "created_at": created_at if isinstance(created_at, int) else current_time,
-                    "updated_at": current_time,
-                },
-            }
-        )
+        self.save_connection(api, account, token_payload)
         return {"account": account}
 
     def disconnect(self, api: HostAPI) -> None:
@@ -515,17 +538,17 @@ class XCredentialStore:
                     pass  # Best-effort revoke; the credential is cleared regardless.
         api.credentials.clear()
 
-    def connection_status(self, api: HostAPI) -> ConnectionStatus:
-        existing = api.credentials.load()
-        if existing is None:
-            return {"connected": False}
-        return {"connected": True, "account": existing["account"]}
-
-    def access_token(self, api: HostAPI) -> str:
-        existing = api.credentials.load()
-        if existing is None:
-            raise IntegrationReconnectRequired(X_RECONNECT_MESSAGE)
-        require_scopes(api, existing, REQUIRED_X_SCOPES, reconnect_message=X_RECONNECT_MESSAGE)
+    def access_token(
+        self,
+        api: HostAPI,
+        *,
+        required_scopes: frozenset[str] = REQUIRED_X_READ_SCOPES,
+        reconnect_message: str = X_RECONNECT_MESSAGE,
+    ) -> str:
+        existing = self.load_connected(api)
+        if required_scopes - set(existing["account"]["scopes"]):
+            # A legacy read-only connection remains valid for read actions.
+            raise IntegrationReconnectRequired(reconnect_message)
         payload = cast(Mapping[str, object], existing["secret"])
         if access_token_is_fresh(payload, now()):
             return str(payload.get("access_token") or "")
@@ -573,25 +596,34 @@ class XCredentialStore:
         # connection is lost. Keep the old one only if none was returned.
         updated_payload = _token_payload_from_response(token_response, fallback_refresh_token=refresh_token)
         refreshed_scope = token_response.get("scope")
-        if isinstance(refreshed_scope, str) and REQUIRED_X_SCOPES - set(refreshed_scope.split()):
-            clear_if_still_loaded(api, existing)
-            raise IntegrationReconnectRequired(X_RECONNECT_MESSAGE)
+        refreshed_account: ConnectionAccount = existing["account"]
+        refreshed_scopes = set(refreshed_account["scopes"])
+        if isinstance(refreshed_scope, str):
+            refreshed_scopes = set(refreshed_scope.split())
+            if REQUIRED_X_READ_SCOPES - refreshed_scopes:
+                clear_if_still_loaded(api, existing)
+                raise IntegrationReconnectRequired(X_RECONNECT_MESSAGE)
+            refreshed_account = {
+                "id": existing["account"]["id"],
+                "label": existing["account"]["label"],
+                "scopes": sorted(refreshed_scopes),
+            }
         save_if_still_connected(
             api,
             existing,
             {
-                "account": existing["account"],
+                "account": refreshed_account,
                 "secret": updated_payload,
                 "metadata": {**existing["metadata"], "updated_at": now()},
             },
             reconnect_message=X_RECONNECT_MESSAGE,
         )
+        if required_scopes - refreshed_scopes:
+            raise IntegrationReconnectRequired(reconnect_message)
         return str(updated_payload["access_token"])
 
     def refresh_identity(self, api: HostAPI, access_token: str) -> ConnectionAccount:
-        existing = api.credentials.load()
-        if existing is None:
-            raise IntegrationReconnectRequired(X_RECONNECT_MESSAGE)
+        existing = self.load_connected(api)
         identity = _fetch_me(access_token)
         if existing["account"]["id"] != identity["id"]:
             clear_if_still_loaded(api, existing)
@@ -625,10 +657,7 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     elif exc.status:
         message = f"X API returned HTTP {exc.status} for the {what} request."
     else:
-        known = known_provider_transport_error(exc)
-        if known:
-            return RuntimeError(known)
-        return unmapped_provider_error("X", what, exc)
+        return transport_or_unmapped_provider_error("X", what, exc)
     return provider_warning("X", what, exc, message)
 
 
@@ -911,6 +940,91 @@ def _lookup_user(access_token: str, tool_input: JSONObject) -> JSONObject:
     }
 
 
+def _post_proposal(tool_input: JSONObject) -> JSONObject:
+    extra = set(tool_input) - {"text", "in_reply_to_tweet_id", "quote_tweet_id"}
+    if extra:
+        raise ToolInputValidationError(
+            "X post tool input only supports text, in_reply_to_tweet_id, and quote_tweet_id."
+        )
+    text = tool_input.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ToolInputValidationError("X tool_input.text is required.")
+    text = text.strip()
+    # Preserve the former publishing contract. X accepts longer posts for
+    # eligible accounts, so validation uses the old 4,000-character bound.
+    if len(text) > MAX_TWEET_CHARS:
+        raise ToolInputValidationError(
+            f"X post text must be at most {MAX_TWEET_CHARS} characters."
+        )
+    proposal: JSONObject = {"text": text}
+    if tool_input.get("in_reply_to_tweet_id") is not None:
+        proposal["in_reply_to_tweet_id"] = _valid_tweet_id(
+            tool_input.get("in_reply_to_tweet_id"), field="in_reply_to_tweet_id"
+        )
+    if tool_input.get("quote_tweet_id") is not None:
+        proposal["quote_tweet_id"] = _valid_tweet_id(
+            tool_input.get("quote_tweet_id"), field="quote_tweet_id"
+        )
+    if "in_reply_to_tweet_id" in proposal and "quote_tweet_id" in proposal:
+        raise ToolInputValidationError(
+            "X post supports either in_reply_to_tweet_id or quote_tweet_id, not both."
+        )
+    return proposal
+
+
+def _target_tweet_preview(access_token: str, tweet_id: str) -> JSONObject:
+    """Load the reply/quote target for the approval and later revalidation."""
+    params = encode_query(
+        {
+            "tweet.fields": "author_id,created_at",
+            "expansions": "author_id",
+            "user.fields": "username",
+        }
+    )
+    response = _api_get(access_token, f"/tweets/{tweet_id}?{params}", what="post lookup")
+    data = response.get("data")
+    if not isinstance(data, dict):
+        raise ToolInputValidationError("The referenced X post was not found.")
+    resolved_id = data.get("id")
+    if not isinstance(resolved_id, str) or resolved_id != tweet_id:
+        raise ToolInputValidationError("The referenced X post was not found.")
+    usernames = _usernames_by_id(response)
+    author_id = data.get("author_id")
+    return {
+        "id": resolved_id,
+        "author_username": usernames.get(author_id if isinstance(author_id, str) else "", ""),
+        "text": clip_text(str(data.get("text") or ""), 300),
+    }
+
+
+def _post_summary(
+    proposal: JSONObject, account_label: str, target: JSONObject | None
+) -> str:
+    text = str(proposal.get("text") or "")
+    count = f"{len(text)}-char post"
+    account_label = clip_text(account_label, 80)
+    for text_clip, target_clip in ((240, 120), (160, 80), (100, 40)):
+        if target is not None and "in_reply_to_tweet_id" in proposal:
+            summary = (
+                f"Reply on X as {account_label} to post {target.get('id')} by "
+                f"@{target.get('author_username') or 'unknown'} "
+                f"(\"{clip_text(str(target.get('text') or ''), target_clip)}\"), "
+                f"{count}: \"{clip_text(text, text_clip)}\""
+            )
+        elif target is not None:
+            summary = (
+                f"Quote-post on X as {account_label} of post {target.get('id')} by "
+                f"@{target.get('author_username') or 'unknown'} "
+                f"(\"{clip_text(str(target.get('text') or ''), target_clip)}\"), "
+                f"{count}: \"{clip_text(text, text_clip)}\""
+            )
+        else:
+            summary = f"Post on X as {account_label}, {count}: \"{clip_text(text, text_clip)}\""
+        if len(summary.encode("utf-8")) <= SUMMARY_MAX_BYTES:
+            return summary
+    return summary
+
+
 class XTool:
     @property
     def manifest(self) -> ToolManifest:
@@ -935,6 +1049,32 @@ class XTool:
                 return ActionExecuted(_personalized_trends(X_CREDENTIALS.access_token(api), tool_input))
             if action == "lookup_user":
                 return ActionExecuted(_lookup_user(X_CREDENTIALS.access_token(api), tool_input))
+            if action == "post_tweet":
+                proposal = _post_proposal(tool_input)
+                access_token = X_CREDENTIALS.access_token(
+                    api,
+                    required_scopes=REQUIRED_X_WRITE_SCOPES,
+                    reconnect_message=X_WRITE_RECONNECT_MESSAGE,
+                )
+                account = X_CREDENTIALS.refresh_identity(api, access_token)
+                target_id = proposal.get("in_reply_to_tweet_id") or proposal.get("quote_tweet_id")
+                target: JSONObject | None = None
+                if isinstance(target_id, str):
+                    target = _target_tweet_preview(access_token, target_id)
+                payload: JSONObject = {
+                    "action": action,
+                    "tool_id": MANIFEST.tool_id,
+                    "x_account": {"id": account["id"], "label": account["label"]},
+                    "proposal": proposal,
+                }
+                if target is not None:
+                    payload["target_tweet"] = target
+                approval = api.approvals.request(
+                    action_id=action,
+                    summary=_post_summary(proposal, account["label"], target),
+                    payload=payload,
+                )
+                return ActionPendingApproval(approval.approval_id, approval.summary)
             return ActionFailed("Unsupported X action.")
         except ToolInputValidationError as exc:
             return ActionFailed(exc.message)
@@ -944,6 +1084,73 @@ class XTool:
             raise
         except Exception as exc:
             return ActionFailed(str(exc) or "X tool request failed.")
+
+    def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
+        try:
+            if approval.action_id != "post_tweet":
+                return ActionFailed("X approval action is invalid.")
+            payload = approval.payload
+            proposal = payload.get("proposal")
+            approved_account = payload.get("x_account")
+            if not isinstance(proposal, dict) or not isinstance(approved_account, dict):
+                return ActionFailed("X approval payload is invalid.")
+            proposal_object = cast(JSONObject, proposal)
+            access_token = X_CREDENTIALS.access_token(
+                api,
+                required_scopes=REQUIRED_X_WRITE_SCOPES,
+                reconnect_message=X_WRITE_RECONNECT_MESSAGE,
+            )
+            current_account = X_CREDENTIALS.refresh_identity(api, access_token)
+            if approved_account.get("id") != current_account["id"]:
+                return ActionFailed("X account changed after approval. Please queue a new approval.")
+            approved_target = payload.get("target_tweet")
+            if isinstance(approved_target, dict):
+                proposal_target = (
+                    proposal_object.get("in_reply_to_tweet_id")
+                    or proposal_object.get("quote_tweet_id")
+                )
+                if approved_target.get("id") != proposal_target:
+                    return ActionFailed("X approval target is invalid. Please queue a new approval.")
+                current_target = _target_tweet_preview(
+                    access_token, str(approved_target.get("id") or "")
+                )
+                if current_target.get("id") != approved_target.get("id"):
+                    return ActionFailed(
+                        "The referenced X post changed after approval. Please queue a new approval."
+                    )
+            body: JSONObject = {"text": proposal_object.get("text")}
+            reply_id = proposal_object.get("in_reply_to_tweet_id")
+            if isinstance(reply_id, str):
+                body["reply"] = {"in_reply_to_tweet_id": reply_id}
+            quote_id = proposal_object.get("quote_tweet_id")
+            if isinstance(quote_id, str):
+                body["quote_tweet_id"] = quote_id
+            try:
+                response = json_request(
+                    "POST",
+                    f"{X_API_BASE_URL}/tweets",
+                    headers={"authorization": f"Bearer {access_token}"},
+                    body=body,
+                    failure_message="X post request failed.",
+                    invalid_response_message="X post returned an invalid response.",
+                )
+            except WebRequestError as exc:
+                raise _mapped_web_error(exc, "post") from exc
+            data = response.get("data")
+            posted_id = data.get("id") if isinstance(data, dict) else None
+            if not isinstance(posted_id, str) or not TWEET_ID_RE.fullmatch(posted_id):
+                return ActionFailed("X did not confirm the new post.")
+            return ApprovalExecuted(
+                f"Posted to X as {current_account['label']} (post id {posted_id})."
+            )
+        except ToolInputValidationError as exc:
+            return ActionFailed(exc.message)
+        except IntegrationReconnectRequired as exc:
+            return ActionFailed(str(exc), reconnect_required=True)
+        except ProviderWarning:
+            raise
+        except Exception as exc:
+            return ActionFailed(str(exc) or "X write failed after approval.")
 
 
 # The instance the host discovers (see host.runtime.tools.tools_host).

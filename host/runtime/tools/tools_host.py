@@ -7,8 +7,8 @@ and approvals backed by admin state, config from the operator-supplied per-tool
 config), validates action input against the manifest schemas, runs the
 single-use approval lifecycle, and records every call as an audit event.
 
-Each Kern host is single-operator, so credential and approval state only
-need per-tool partitions.
+Each Kern host is single-operator. OAuth credentials are partitioned by tool
+and host-generated connection id; approval records snapshot that selection.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from host.tools import (
     Tool,
     ToolManifest,
 )
-from host.tools.host_api import AssetMetadata
+from host.tools.host_api import AssetMetadata, ConnectionAccount
 from host.tools.manifest import ActionSpec, TOOL_ID_RE
 from host.tools.shared.web import ProviderWarning, UnmappedProviderError
 
@@ -153,6 +153,10 @@ class ToolConfigKeyUnsetError(RuntimeError):
     escape uncaught."""
 
 
+class ConnectionAccountChangedError(ValueError):
+    """A connection no longer resolves to the account selected for a call."""
+
+
 def _ensure_json_object(value: Any, *, what: str, max_bytes: int) -> str:
     """Validate a JSON object per the host API's value rules and return its
     compact serialization (used for the byte-size limit). json.dumps with
@@ -169,24 +173,75 @@ def _ensure_json_object(value: Any, *, what: str, max_bytes: int) -> str:
     return serialized
 
 
-class HostCredentials:
-    """``tools.Credentials`` backed by the tool_credentials table: one stored
-    OAuth credential per tool."""
+@dataclass(frozen=True)
+class ConnectionScope:
+    """One host-selected account slot and its non-secret identity snapshot.
 
-    def __init__(self, tool_id: str) -> None:
+    Tool packages receive only the services already scoped to this value; they
+    cannot enumerate connections or switch to another one.
+    """
+
+    connection_id: str
+    account: ConnectionAccount | None
+
+    @property
+    def account_id(self) -> str:
+        return self.account["id"] if self.account is not None else ""
+
+    @property
+    def account_label(self) -> str:
+        return self.account["label"] if self.account is not None else ""
+
+
+NO_CONNECTION = ConnectionScope(connection_id="", account=None)
+
+
+class HostCredentials:
+    """``tools.Credentials`` for one host-selected OAuth connection."""
+
+    def __init__(self, tool_id: str, connection: ConnectionScope) -> None:
         self._tool_id = tool_id
+        self._connection = connection
 
     def load(self) -> StoredCredential | None:
-        record = state.tool_credential(self._tool_id)
+        if not self._connection.connection_id:
+            return None
+        record = state.tool_credential(self._tool_id, self._connection.connection_id)
+        expected_account = self._connection.account
+        if (
+            record is not None
+            and expected_account is not None
+            and record["account"]["id"] != expected_account["id"]
+        ):
+            raise ConnectionAccountChangedError(
+                "The connected account changed while the tool call was starting. Retry the call."
+            )
         return cast(StoredCredential, record) if record is not None else None
 
     def save(self, credential: StoredCredential) -> None:
+        if not self._connection.connection_id:
+            raise ValueError("Cannot save a credential without a connection scope.")
         record = dict(credential)
         _ensure_json_object(record, what="Credential", max_bytes=CREDENTIAL_VALUE_MAX_BYTES)
-        state.put_tool_credential(self._tool_id, record)
+        expected_account = self._connection.account
+        account = record.get("account")
+        if (
+            expected_account is not None
+            and (
+                not isinstance(account, dict)
+                or account.get("id") != expected_account["id"]
+            )
+        ):
+            raise ConnectionAccountChangedError(
+                "This connection is already bound to a different provider account. "
+                "Add a new connection instead."
+            )
+        state.put_tool_credential(self._tool_id, record, self._connection.connection_id)
 
     def clear(self) -> None:
-        state.delete_tool_credential(self._tool_id)
+        if not self._connection.connection_id:
+            return
+        state.delete_tool_credential(self._tool_id, self._connection.connection_id)
 
 
 class HostApprovals:
@@ -194,8 +249,13 @@ class HostApprovals:
     tool's partition. Decisions and terminal outcomes are applied by the
     module-level lifecycle functions, not through this tool-facing surface."""
 
-    def __init__(self, manifest: ToolManifest) -> None:
+    def __init__(
+        self,
+        manifest: ToolManifest,
+        connection: ConnectionScope,
+    ) -> None:
         self._manifest = manifest
+        self._connection = connection
 
     def request(self, *, action_id: str, summary: str, payload: JSONObject) -> ApprovalRecord:
         spec = self._manifest.action(action_id)
@@ -208,6 +268,9 @@ class HostApprovals:
             record = state.insert_tool_approval(
                 self._manifest.tool_id, action_id, summary, payload, int(time.time()),
                 pending_limit=PENDING_APPROVAL_LIMIT,
+                connection_id=self._connection.connection_id,
+                account_id=self._connection.account_id,
+                account_label=self._connection.account_label,
             )
         except state.PendingToolApprovalLimitReached as exc:
             raise ApprovalBackpressureError(
@@ -271,13 +334,34 @@ class _ToolConfigView(dict[str, str]):
 _OUTBOUND_GUARD = OutboundGuardService()
 
 
-def host_api_for(tool: Tool, asset_store: tool_assets.ToolAssetStore | None = None) -> HostToolAPI:
+def connection_scope(tool: Tool, connection_id: str) -> ConnectionScope:
+    """Resolve the host scope for one tool from its manifest and stored account."""
+    if tool.manifest.connection != "oauth":
+        if connection_id:
+            raise ValueError(f"Tool {tool.manifest.tool_id} does not use account connections.")
+        return NO_CONNECTION
+    if not connection_id:
+        raise ValueError("connection_id must be non-empty.")
+    credential = state.tool_credential(tool.manifest.tool_id, connection_id)
+    account = cast(ConnectionAccount, credential["account"]) if credential is not None else None
+    return ConnectionScope(connection_id=connection_id, account=account)
+
+
+def host_api_for(
+    tool: Tool,
+    connection: ConnectionScope,
+    *,
+    asset_store: tool_assets.ToolAssetStore | None = None,
+) -> HostToolAPI:
     manifest = tool.manifest
+    if manifest.connection != "oauth" and connection != NO_CONNECTION:
+        raise ValueError(f"Tool {manifest.tool_id} does not use account connections.")
     config = state.tool_config_values(manifest.tool_id, [entry.key for entry in manifest.config])
+    credentials = HostCredentials(manifest.tool_id, connection)
     return HostToolAPI(
-        credentials=HostCredentials(manifest.tool_id),
+        credentials=credentials,
         config=_ToolConfigView(config),
-        approvals=HostApprovals(manifest),
+        approvals=HostApprovals(manifest, connection),
         assets=HostAssets(
             manifest.tool_id,
             asset_store or _DEFAULT_ASSET_STORE,
@@ -304,6 +388,36 @@ def enabled_tool(tool_id: str) -> Tool:
     return tool
 
 
+def resolve_connection(tool: Tool, requested: str | None) -> ConnectionScope:
+    """Resolve an agent-selected OAuth connection without exposing credentials.
+
+    A single connection remains implicit for backwards compatibility. Once a
+    tool has several accounts, the agent must name one explicitly so a write
+    can never drift to whichever account happened to be connected first.
+    """
+    if tool.manifest.connection != "oauth":
+        if requested:
+            raise ToolCallError(f"Tool {tool.manifest.tool_id} does not use account connections.")
+        return connection_scope(tool, "")
+    connections = state.tool_connections(tool.manifest.tool_id)
+    if requested:
+        if any(item["connection_id"] == requested for item in connections):
+            return connection_scope(tool, requested)
+        raise ToolCallError(
+            f"Unknown connection_id for {tool.manifest.tool_id}: {requested}. "
+            "Call list_bundled_tools to see connected accounts."
+        )
+    if len(connections) > 1:
+        choices = ", ".join(
+            f"{item['connection_id']} ({item['account']['label']})" for item in connections
+        )
+        raise ToolCallError(
+            f"Tool {tool.manifest.tool_id} has multiple connected accounts. "
+            f"Pass connection_id to call_tool: {choices}."
+        )
+    return connection_scope(tool, connections[0]["connection_id"]) if connections else NO_CONNECTION
+
+
 # -- action execution ----------------------------------------------------------
 
 
@@ -315,6 +429,7 @@ class StreamingAction:
     tool_id: str
     action: str
     arguments: JSONObject
+    connection: ConnectionScope
 
 
 def _provider_warning_context(
@@ -345,11 +460,14 @@ def execute_action(
     action: str,
     tool_input: Any,
     asset_store: tool_assets.ToolAssetStore | None = None,
+    *,
+    connection_id: str | None = None,
 ) -> dict[str, Any] | StreamingAction:
     """Run one agent-initiated action call end to end: resolve the enabled
     tool, schema-validate the input, invoke the package, audit, and return
     either its JSON result shape or an exclusive streaming result."""
     tool = enabled_tool(tool_id)
+    connection = resolve_connection(tool, connection_id)
     spec = tool.manifest.action(action) if isinstance(action, str) else None
     if spec is None:
         raise ToolCallError(f"Tool {tool_id} has no action {action}.")
@@ -369,8 +487,16 @@ def execute_action(
         raise ToolCallError(str(exc)) from exc
     audit_arguments = cast(JSONObject, json.loads(serialized_input))
     try:
-        result = tool.execute(action, audit_arguments, host_api_for(tool, asset_store))
-    except (ApprovalBackpressureError, ToolConfigKeyUnsetError) as exc:
+        result = tool.execute(
+            action,
+            audit_arguments,
+            host_api_for(tool, connection, asset_store=asset_store),
+        )
+    except (
+        ApprovalBackpressureError,
+        ConnectionAccountChangedError,
+        ToolConfigKeyUnsetError,
+    ) as exc:
         result = ActionFailed(str(exc))
     except ProviderWarning as exc:
         host_errors.report_warning(
@@ -390,13 +516,23 @@ def execute_action(
     kind_error = _result_kind_error(spec, result)
     if kind_error:
         result_json = _result_kind_mismatch(tool_id, action, kind_error)
-        _audit(tool_id, action, result_json, arguments=audit_arguments)
+        _audit(
+            tool_id, action, result_json, arguments=audit_arguments,
+            connection_id=connection.connection_id, account_id=connection.account_id,
+            account_label=connection.account_label,
+        )
         return result_json
     if isinstance(result, StreamingAsset):
-        return StreamingAction(result, tool_id, action, audit_arguments)
+        return StreamingAction(
+            result, tool_id, action, audit_arguments, connection,
+        )
     result_json = _result_json(result)
     result_json = _validate_output(tool_id, action, spec, result_json)
-    _audit(tool_id, action, result_json, arguments=audit_arguments)
+    _audit(
+        tool_id, action, result_json, arguments=audit_arguments,
+        connection_id=connection.connection_id, account_id=connection.account_id,
+        account_label=connection.account_label,
+    )
     return result_json
 
 
@@ -416,6 +552,9 @@ def finish_streaming_action(streaming: StreamingAction, error: str | None = None
         streaming.action,
         result_json,
         arguments=streaming.arguments,
+        connection_id=streaming.connection.connection_id,
+        account_id=streaming.connection.account_id,
+        account_label=streaming.connection.account_label,
     )
 
 
@@ -429,10 +568,22 @@ def _execute_approved(
     tool_id, action, approval_id = record["tool_id"], record["action_id"], record["approval_id"]
     try:
         tool = enabled_tool(tool_id)
+        connection = connection_scope(tool, record["connection_id"])
+        expected_account_id = record["account_id"]
+        if expected_account_id and connection.account_id != expected_account_id:
+            raise ConnectionAccountChangedError(
+                "The account selected for this approval is no longer connected. "
+                "Queue the action again."
+            )
         result: Any = tool.execute_approved(
-            _approval_record(record), host_api_for(tool, asset_store)
+            _approval_record(record),
+            host_api_for(tool, connection, asset_store=asset_store),
         )
-    except (ToolCallError, ToolConfigKeyUnsetError) as exc:
+    except (
+        ConnectionAccountChangedError,
+        ToolCallError,
+        ToolConfigKeyUnsetError,
+    ) as exc:
         result = ActionFailed(str(exc))
     except ProviderWarning as exc:
         host_errors.report_warning(
@@ -461,6 +612,9 @@ def _execute_approved(
         result_json,
         detail=_approval_audit_detail(approval_id, result_json),
         arguments=cast(JSONObject, record["payload"]),
+        connection_id=record["connection_id"],
+        account_id=record["account_id"],
+        account_label=record["account_label"],
     )
     return result_json
 
@@ -558,13 +712,21 @@ def _audit(
     *,
     detail: str | None = None,
     arguments: JSONObject | None = None,
+    connection_id: str = "",
+    account_id: str = "",
+    account_label: str = "",
 ) -> None:
     outcome = result_json["status"]
     if detail is None:
         detail = result_json.get("error") or result_json.get("approval_id") or ""
     if not isinstance(detail, str):
         detail = ""
-    state.record_tool_event(tool_id, action, outcome, detail, arguments)
+    state.record_tool_event(
+        tool_id, action, outcome, detail, arguments,
+        connection_id=connection_id,
+        account_id=account_id,
+        account_label=account_label,
+    )
 
 
 # -- approval lifecycle --------------------------------------------------------
@@ -587,7 +749,11 @@ def decide_approval(
             raise ToolCallError(f"Approval {approval_id} is not pending.")
         # Deny has no execute_approved call to audit, so record it here.
         state.record_tool_event(
-            record["tool_id"], record["action_id"], "denied", approval_id, cast(JSONObject, record["payload"])
+            record["tool_id"], record["action_id"], "denied", approval_id,
+            cast(JSONObject, record["payload"]),
+            connection_id=record["connection_id"],
+            account_id=record["account_id"],
+            account_label=record["account_label"],
         )
         return {"approval": state.tool_approval(approval_id)}
     if not state.transition_tool_approval(approval_id, "pending", "approved", now):

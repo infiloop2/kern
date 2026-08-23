@@ -38,7 +38,7 @@ from host.tools.shared.rsa_pkcs1 import (
     load_rsa_private_key,
     sign_sha256_pkcs1_v1_5,
 )
-from host.tools.shared.web import UnmappedProviderError, WebRequestError, encode_query, json_request, known_provider_transport_error, unmapped_provider_error
+from host.tools.shared.web import UnmappedProviderError, WebRequestError, encode_query, json_request, known_provider_transport_error, transport_or_unmapped_provider_error, unmapped_provider_error
 
 IBKR_API_BASE_URL = "https://api.ibkr.com/v1/api"
 # IBKR rejects requests without a User-Agent.
@@ -416,10 +416,7 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     elif exc.status:
         message = f"IBKR Web API returned HTTP {exc.status} on the {what} request."
     else:
-        known = known_provider_transport_error(exc)
-        if known:
-            return RuntimeError(known)
-        return unmapped_provider_error("IBKR", what, exc)
+        return transport_or_unmapped_provider_error("IBKR", what, exc)
     return RuntimeError(message)
 
 

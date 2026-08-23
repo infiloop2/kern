@@ -12,6 +12,7 @@ from urllib.parse import quote
 from host.agent_scripts import script_path_error
 from host.runtime.core import db, host_errors
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
+from host.runtime.workspace.query import one as _one
 from host.session_options import SCRIPT_RUNTIME, schedule_session_options
 
 
@@ -916,15 +917,6 @@ def _optional_non_negative_int(query: dict[str, list[str]], key: str) -> int | N
     if not raw.isdigit() or int(raw) > MAX_BIGINT:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"{key} must be non-negative")
     return int(raw)
-
-
-def _one(query: dict[str, list[str]], key: str) -> str | None:
-    values = query.get(key)
-    if not values:
-        return None
-    if len(values) != 1:
-        raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"{key} must be provided once")
-    return values[0]
 
 
 def _reject_query_keys(query: dict[str, list[str]], allowed: set[str], label: str) -> None:

@@ -25,8 +25,8 @@ so operators and contributors can jump to the trust boundary they need.
 | [Web Apps workspace](workspaces/personal-web-app-builder.md) | Isolated agent-generated workspaces and preview capabilities. |
 | [Workspace agent API](workspaces/workspace-agent-api.md) | Peer-authenticated agent calls through the main Workspace service; Web Apps are its current agent-callable resource. |
 | [Network controls](network-controls.md) | nftables, typed integration guards (AI providers, GitHub, packages, custom domains), agent introspection, and fail-closed behavior. |
-| [The xAI integration](xai-integration.md) | Everything about Grok Build access: hosts opened and deliberately closed, bearer-token account pinning, why every server-side tool is denied and web search is not offered at all, stored state, admin UI, and ACP runtime. |
-| [GitHub write-path controls](github-write-path-controls.md) | The implemented `.github` push-inspection, quarantine, approval, replay, and failure model. |
+| [The xAI integration](xai-integration.md) | Everything about Grok Build access: hosts opened and deliberately closed, bearer-token account pinning, the X-search/media hosted-tool allowlist, why web search is not offered, stored state, admin UI, and ACP runtime. |
+| [GitHub write-path controls](github-write-path-controls.md) | The default-on direct-main push block plus `.github` inspection, quarantine, approval, replay, and failure model. |
 | [Tools](tools/README.md) | Bundled tool framework: the host-neutral tool contract, this host's integration, approvals, and the bundled tool packages. |
 | [Local sockets](local-sockets.md) | Peer-credentialed Unix-domain sockets (tools, Workspace agent/admin, network introspection, Postgres) and their trust boundaries. |
 | [Agent preview ports](agent-preview-ports.md) | The loopback port range the agent may serve HTTP on and test against, and the operator's SSH-forward path to view it. |

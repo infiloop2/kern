@@ -186,9 +186,21 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertNotIn("output_schema", described_action("gmail", "send_email"))
         self.assertNotIn("output_schema", described_action("openai_images", "generate_image"))
 
-    def test_agent_notes_are_always_stated_and_carried_once(self) -> None:
-        catalog = {entry["tool_id"]: entry for entry in
-                   tools_api.call_action("list_bundled_tools", {})["result"]["tools"]}
+    def test_agent_notes_are_stated_only_for_focused_catalog_entries(self) -> None:
+        broad_catalog = {
+            entry["tool_id"]: entry
+            for entry in tools_api.call_action("list_bundled_tools", {})["result"]["tools"]
+        }
+        for entry in broad_catalog.values():
+            self.assertNotIn("agent_notes", entry)
+            self.assertNotIn("actions", entry)
+
+        catalog = {
+            entry["tool_id"]: entry
+            for entry in tools_api.call_action(
+                "list_bundled_tools", {"tool_ids": list(tools_host.BUNDLED_TOOLS)}
+            )["result"]["tools"]
+        }
         # Always stated, empty included, so "this tool has nothing to add" is
         # distinguishable from "this surface does not carry it".
         for tool_id, entry in catalog.items():
@@ -198,15 +210,15 @@ class ActionListingTests(ToolsApiTestCase):
                     tools_host.BUNDLED_TOOLS[tool_id].manifest.agent_notes,
                 )
         self.assertEqual(catalog["gmail"]["agent_notes"], "")
-        # An agent that plans from the catalog alone and never calls
-        # describe_tool still learns X cannot post or DM and what to hand back
-        # instead, so the reply-intent URL form must survive here.
-        self.assertIn("x.com/intent/tweet", catalog["twitter"]["agent_notes"])
+        # An agent planning from the catalog learns the approval-gated API
+        # post path and that DMs remain operator-sent compose links.
+        self.assertIn("post_tweet", catalog["twitter"]["agent_notes"])
         self.assertIn("x.com/messages/compose", catalog["twitter"]["agent_notes"])
 
-        # One field per tool, so describe_tool does not carry it a second time.
+        # Broad discovery goes directly to describe_tool, so the described tool
+        # repeats its one short note to make that documented path self-contained.
         described = tools_api.call_action("describe_tool", {"tool_id": "twitter"})["result"]
-        self.assertNotIn("agent_notes", described)
+        self.assertEqual(described["agent_notes"], catalog["twitter"]["agent_notes"])
         for action in described["actions"]:
             with self.subTest(action=action["id"]):
                 self.assertNotIn("agent_notes", action)
@@ -239,7 +251,7 @@ class ActionListingTests(ToolsApiTestCase):
             tools_api.call_action("call_tool", {"tool_id": "fake_notes", "action_id": "nope"})
         with self.assertRaisesRegex(tools_host.ToolCallError, "must be a non-empty string"):
             tools_api.call_action("call_tool", {"tool_id": "fake_notes"})
-        with self.assertRaisesRegex(tools_host.ToolCallError, "only tool_id, action_id, and input"):
+        with self.assertRaisesRegex(tools_host.ToolCallError, "only tool_id, action_id, connection_id, and input"):
             tools_api.call_action(
                 "call_tool", {"tool_id": "fake_notes", "action_id": "read_note", "extra": 1}
             )
@@ -262,15 +274,59 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertEqual(result["status"], "executed")
         by_id = {entry["tool_id"]: entry for entry in result["result"]["tools"]}
         self.assertTrue(by_id["fake_notes"]["enabled"])
-        self.assertEqual(
-            [action["id"] for action in by_id["fake_notes"]["actions"]],
-            ["read_note", "crash_note", "write_note"],
-        )
         gmail = by_id["gmail"]
         self.assertFalse(gmail["enabled"])
         self.assertEqual(gmail["connection"], "oauth")
         self.assertEqual(gmail["display_name"], "Gmail")
-        self.assertIn("search_messages", [action["id"] for action in gmail["actions"]])
+        self.assertNotIn("actions", gmail)
+
+        focused = tools_api.call_action(
+            "list_bundled_tools", {"tool_ids": ["fake_notes", "gmail"]}
+        )["result"]["tools"]
+        focused_by_id = {entry["tool_id"]: entry for entry in focused}
+        self.assertEqual(
+            [action["id"] for action in focused_by_id["fake_notes"]["actions"]],
+            ["read_note", "crash_note", "write_note"],
+        )
+        self.assertIn(
+            "search_messages",
+            [action["id"] for action in focused_by_id["gmail"]["actions"]],
+        )
+
+    def test_call_tool_selects_one_of_multiple_connected_accounts(self) -> None:
+        for connection_id, account_id, label, text in (
+            ("connection_first", "acct-1", "first@example.com", "first"),
+            ("connection_second", "acct-2", "second@example.com", "second"),
+        ):
+            tools_host.HostCredentials(
+                "fake_notes", tools_host.ConnectionScope(connection_id, None)
+            ).save(
+                {
+                    "account": {"id": account_id, "label": label, "scopes": ["notes"]},
+                    "secret": {"text": text},
+                    "metadata": {},
+                }
+            )
+        catalog = tools_api.call_action(
+            "list_bundled_tools", {"tool_ids": ["fake_notes"]}
+        )["result"]["tools"][0]
+        self.assertEqual(
+            [item["connection_id"] for item in catalog["connected_accounts"]],
+            ["connection_first", "connection_second"],
+        )
+        with self.assertRaisesRegex(tools_host.ToolCallError, "multiple connected accounts"):
+            tools_api.call_action(
+                "call_tool", {"tool_id": "fake_notes", "action_id": "read_note"}
+            )
+        result = tools_api.call_action(
+            "call_tool",
+            {
+                "tool_id": "fake_notes",
+                "action_id": "read_note",
+                "connection_id": "connection_second",
+            },
+        )
+        self.assertEqual(result["result"]["text"], "second")
 
     def test_list_bundled_tools_filters_known_ids_and_reports_unknown_ids(self) -> None:
         result = tools_api.call_action(
@@ -306,7 +362,9 @@ class ActionListingTests(ToolsApiTestCase):
     def test_catalog_carries_descriptions_but_not_schemas(self) -> None:
         # Descriptions are what the agent plans from; schemas are what it needs
         # only once it commits to a call, so they stay behind describe_tool.
-        catalog = tools_api.call_action("list_bundled_tools", {})["result"]["tools"]
+        catalog = tools_api.call_action(
+            "list_bundled_tools", {"tool_ids": ["fake_notes"]}
+        )["result"]["tools"]
         by_id = {entry["tool_id"]: entry for entry in catalog}
         for action in by_id["fake_notes"]["actions"]:
             self.assertTrue(action["description"])
@@ -327,6 +385,19 @@ class ActionListingTests(ToolsApiTestCase):
             tools_api.call_action(7, {})
 
     def test_check_tool_approval_reports_status(self) -> None:
+        tools_host.HostCredentials(
+            "fake_notes", tools_host.ConnectionScope("connection_test", None)
+        ).save(
+            {
+                "account": {
+                    "id": "acct-1",
+                    "label": "notes@example.com",
+                    "scopes": ["notes"],
+                },
+                "secret": {"text": ""},
+                "metadata": {},
+            }
+        )
         pending = tools_api.call_action("fake_notes_write_note", {"text": "hello"})
         self.assertEqual(pending["status"], "pending_approval")
         # The token is folded into the id; no separate field.
@@ -511,7 +582,7 @@ class ToolsSocketTests(ToolsApiTestCase):
         status, _ = self.http(
             admin_only, "POST", "/operator/tools/fake_notes/oauth_connect/disconnect", {}
         )
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 400)
 
     def test_concurrency_cap_returns_429(self) -> None:
         socket_path = self.start_server()

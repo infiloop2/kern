@@ -845,7 +845,7 @@ def tunnel_websocket(
         client.close()
 
 
-class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+class DropAtCapacityServer(ThreadingHTTPServer):
     """Cap concurrent connections. Each handler may buffer up to MAX_BODY_BYTES
     for inspection, so without a cap the untrusted agent could open many large
     POSTs at once and OOM the proxy — its only sanctioned network path."""
@@ -872,7 +872,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 
 
 def main() -> int:
-    BoundedThreadingHTTPServer((HOST, PORT), ProxyHandler).serve_forever()
+    DropAtCapacityServer((HOST, PORT), ProxyHandler).serve_forever()
     return 0
 
 

@@ -44,7 +44,8 @@ import threading
 import time
 from typing import IO, Any, Callable
 
-from host.runtime.admin_api import agent_activity, thread_scope
+from host.runtime.agent_runtime import agent_activity, thread_scope
+from host.runtime.agent_runtime.harness import ProviderTurnFinishing
 from host.runtime.core.state import read_proxy_openai_account_id
 
 DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-codex-app-server"]
@@ -95,7 +96,7 @@ class CodexTimeout(CodexAppServerError):
     pass
 
 
-class CodexTurnFinishing(CodexAppServerError):
+class CodexTurnFinishing(CodexAppServerError, ProviderTurnFinishing):
     """A steer arrived after Codex published this turn's completion."""
 
 

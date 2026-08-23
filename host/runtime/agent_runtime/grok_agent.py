@@ -53,7 +53,8 @@ import time
 from typing import IO, Any, Callable, NoReturn
 from urllib.parse import parse_qs, urlsplit
 
-from host.runtime.admin_api import agent_activity, thread_scope
+from host.runtime.agent_runtime import agent_activity, thread_scope
+from host.runtime.agent_runtime.harness import ProviderSessionLost, ProviderTurnFinishing
 
 PRODUCTION_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-grok"]
 DEFAULT_COMMAND = PRODUCTION_COMMAND
@@ -141,11 +142,11 @@ class GrokTimeout(GrokAgentError):
     pass
 
 
-class GrokSessionNotFoundError(GrokAgentError):
+class GrokSessionNotFoundError(GrokAgentError, ProviderSessionLost):
     """The recorded provider session no longer exists."""
 
 
-class GrokTurnFinishing(GrokAgentError):
+class GrokTurnFinishing(GrokAgentError, ProviderTurnFinishing):
     """The provider completed before a live steer could be accepted."""
 
 

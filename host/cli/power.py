@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 
+from host.cli.lifecycle_types import PowerProvider
+
 
 def main_for_power_mode(mode: str, argv: list[str] | None = None) -> int:
     if mode not in {"start", "stop"}:
@@ -27,10 +29,11 @@ def main_for_power_mode(mode: str, argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    provider: PowerProvider
     if args.provider == "aws":
         from host.cli import power_aws
-
-        return power_aws.main_for_power(mode, args.agent_name)
-    from host.cli import lifecycle_lima
-
-    return lifecycle_lima.main_for_power(mode, args.agent_name)
+        provider = power_aws
+    else:
+        from host.cli import lifecycle_lima
+        provider = lifecycle_lima
+    return provider.main_for_power(mode, args.agent_name)

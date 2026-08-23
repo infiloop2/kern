@@ -150,7 +150,7 @@ class HermesStdinActivityTests(unittest.TestCase):
     def test_activity_prefix_matches_the_host_adapter(self) -> None:
         # The wrapper and the host adapter must agree byte-for-byte or the
         # host would treat activity lines as answer text.
-        from host.runtime.admin_api import hermes_agent
+        from host.runtime.agent_runtime import hermes_agent
 
         self.assertEqual(hermes_stdin.ACTIVITY_LINE_PREFIX, hermes_agent.ACTIVITY_LINE_PREFIX)
 

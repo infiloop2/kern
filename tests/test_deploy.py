@@ -1834,7 +1834,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("[features]\ntelemetry = false", grok_policy)
         self.assertIn("[telemetry]\ntrace_upload = false", grok_policy)
         self.assertIn(
-            '[model."grok-4.6"]\nsupports_backend_search = false',
+            '[model."grok-4.6"]\nsupports_backend_search = true',
             grok_policy,
         )
         self.assertIn(
@@ -1845,6 +1845,10 @@ class DeployUnitTests(unittest.TestCase):
 
     def test_rendered_bootstrap_provisions_admin_state_postgres(self) -> None:
         bootstrap = render._render_bootstrap()
+
+        # Detailed agent guidance is read from the root-owned release tree.
+        # Never claim a generic path in the preserved, user-owned agent home.
+        self.assertNotIn('agent_home / "references"', bootstrap)
 
         # The Debian default cluster (root volume) is disabled before the
         # server package installs; the real data directory lives on the
@@ -2103,6 +2107,16 @@ class DeployUnitTests(unittest.TestCase):
         # Grok 1.0.5 otherwise advertises its loopback OAuth callback through
         # ACP, which no browser can reach on a remote Kern host.
         self.assertIn("GROK_LOGIN_DEVICE_FLOW=1", launcher)
+
+    def test_grok_launcher_forces_noninteractive_permissions(self) -> None:
+        launcher = Path("host/bootstrap/helpers/run-grok.sh").read_text()
+        # ACP yoloMode is session-new metadata. The launcher must also select
+        # Grok's process-wide agent-server mode so a resumed session cannot
+        # fall back to an agent-writable config and request local approval.
+        self.assertIn(
+            "grok --disable-web-search agent --always-approve --no-leader stdio",
+            launcher,
+        )
 
     def test_read_grok_account_selects_identity_by_signed_principal_type(self) -> None:
         helper = Path("host/bootstrap/helpers/read-grok-account.sh").read_text()
@@ -2696,6 +2710,9 @@ class DeployUnitTests(unittest.TestCase):
         # on the delivered tree.
         self.assertIn("VERSION", names)
         self.assertIn("host/bootstrap/agent-home/agents_claude.md", names)
+        self.assertIn("host/bootstrap/agent-home/references/web-apps.md", names)
+        self.assertIn("host/bootstrap/agent-home/references/memory.md", names)
+        self.assertIn("host/bootstrap/agent-home/references/schedules.md", names)
         self.assertIn("host/runtime/root_helpers/upload_agent_file.py", names)
         self.assertIn(
             "host/bootstrap/vendor/pgvector/"

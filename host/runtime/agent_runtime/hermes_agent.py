@@ -12,7 +12,7 @@ Hermes has no mid-turn steering channel in this mode. Each API turn maps to
 exactly one Hermes process and model turn; later input starts a new turn on
 the same thread and resumes its stored Hermes session. The provider's
 credential surface (operator paste and STS attestation) is owned by
-``host.runtime.admin_api.bedrock_credentials``.
+``host.runtime.agent_runtime.bedrock_credentials``.
 """
 
 from __future__ import annotations
@@ -26,7 +26,8 @@ import threading
 import time
 from typing import Any, Callable
 
-from host.runtime.admin_api import agent_activity, bedrock_credentials, thread_scope
+from host.runtime.agent_runtime import agent_activity, bedrock_credentials, thread_scope
+from host.runtime.agent_runtime.harness import subprocess_cwd
 
 DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-hermes"]
 AGENT_CWD = "/mnt/kern-agent/agent-home"
@@ -383,4 +384,4 @@ def _subprocess_cwd(command: list[str]) -> str | None:
     # In production, the admin API cannot traverse the agent user's private
     # 0700 home. The sudo helper starts as root, cds there, and then drops to
     # kern-agent. Custom test commands still run from AGENT_CWD.
-    return None if command == DEFAULT_COMMAND else AGENT_CWD
+    return subprocess_cwd(command, DEFAULT_COMMAND, AGENT_CWD)

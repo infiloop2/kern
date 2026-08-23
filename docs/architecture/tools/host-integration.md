@@ -7,8 +7,9 @@ and configures them, and how approvals resolve. The framework and bundled
 packages themselves are host-neutral; everything here is Kern-specific and
 lives in `host/`.
 
-Each Kern host is for one operator. Tool credentials, config, and approvals
-are partitioned by `tool_id`.
+Each Kern host is for one operator. Config is partitioned by `tool_id`;
+OAuth credentials use `(tool_id, connection_id)`, and approvals snapshot the
+selected connection plus its non-secret provider account identity.
 
 ## Where tool code runs, and its internet access
 
@@ -98,26 +99,34 @@ The bundled catalog is not enumerated in the listing. The agent reaches it by
 explicit discovery through three listed actions, whose results append to the
 context instead of rewriting its prefix:
 
-- **`list_bundled_tools`** returns the full bundled catalog by default, or only
-  the entries named in an optional `tool_ids` array — `tool_id`, display
-  name, description, connection type, `enabled`, and each action's id and
-  one-line description — from manifests plus the enablement set only (no
-  credentials, no third-party calls). Action input schemas are deliberately
-  excluded: descriptions are what the agent plans from. It lets the agent
+- **`list_bundled_tools`** returns a cheap capability catalog by default —
+  `tool_id`, display name, description, connection type, and `enabled` — or
+  focused entries named in an optional `tool_ids` array with their action ids,
+  one-line action descriptions, agent-only usage notes, and OAuth tools'
+  non-secret `connected_accounts` (`connection_id` plus provider id, label,
+  and scopes). Nothing consults secret tokens or third parties. Action input
+  schemas are deliberately excluded: descriptions are what the agent plans
+  from. This lets the agent
   distinguish *bundled but not enabled* (ask the operator to enable it under
   Home > Integrations) from *not bundled at all* (no host integration exists; the
   agent tells the operator the tool is not implemented and to file a feature
-  request), instead of inferring from an empty list. Filtered responses include
-  `unknown_tool_ids`, so a known dependency can be checked without loading the
-  unrelated catalog.
+  request), instead of inferring from an empty list. Focused responses include
+  `unknown_tool_ids`, so a known dependency can be checked without loading
+  unrelated actions and notes.
 - **`describe_tool`** takes a `tool_id` and returns that tool's actions with
-  their full input schemas, and the output schema of every action that returns a
-  JSON result — fetched once the agent has committed to using the tool, rather
-  than carried in every prompt. The output schema is what makes the result
+  their full input schemas, the tool's agent-only usage notes, and the output
+  schema of every action that returns a JSON result — fetched once the agent
+  has committed to using the tool, rather than carried in every prompt. This
+  keeps the broad-discovery → describe path self-contained; a focused catalog
+  response carries the same short note so a caller can plan before requesting
+  schemas. The output schema is what makes the result
   plannable: it names each field the agent gets back and what it means, so the
   agent knows which id to carry into the next call without running the action to
   find out. An action with no `output_schema` returns no JSON result at all.
-- **`call_tool`** takes `tool_id`, `action_id`, and `input` and runs the action.
+- **`call_tool`** takes `tool_id`, `action_id`, optional `connection_id`, and
+  `input` and runs the action. One connected account is selected implicitly for
+  compatibility; with multiple accounts the agent must pass a listed
+  `connection_id`, or the host rejects the call as ambiguous.
   The flat `<tool_id>_<action>` names (e.g. `gmail_search_messages`) remain
   callable because approval records and audit rows address actions that way, but
   they are no longer listed.
@@ -282,8 +291,9 @@ drifts from the code fails the pull request check before it can reach a host.
 
 `host.runtime.tools.tools_host` implements the contract against admin state:
 
-- **Credentials** — the `tool_credentials` table, one row per tool holding that
-  tool's `StoredCredential` in its contract fields: the non-secret connected-
+- **Credentials** — the `tool_credentials` table, one row per
+  `(tool_id, connection_id)` holding that connection's `StoredCredential` in
+  its contract fields: the non-secret connected-
   account columns (`account_id`, `account_label`, `account_scopes`), the
   `secret` column (the provider token JSON, serialized and stored as secretbox
   ciphertext, encrypted at rest like every other secret column), and the
@@ -296,6 +306,9 @@ drifts from the code fails the pull request check before it can reach a host.
 - **Approvals** — the `tool_approvals` table. The host assigns `approval_<number>`
   ids; every status change is an atomic conditional update from the expected
   prior status, so an approval is single-use by construction. Exact host policy:
+  each row also copies `connection_id`, `account_id`, and `account_label`; an
+  approved action is executed with that stored connection, never whichever
+  account is current when the operator clicks Approve.
   new pending approvals are capped at `PENDING_APPROVAL_LIMIT = 1000` (backpressure
   once reached), pending approvals expire after
   `APPROVAL_PENDING_TTL_SECONDS = 24h` (swept by the admin API's hourly
@@ -310,8 +323,8 @@ drifts from the code fails the pull request check before it can reach a host.
   state to reconcile files lost across a restart.
 - **Audit** — every tool call, approval decision, connect/disconnect, enable/
   disable, and config change is recorded in the `tool_events` table
-  (`tool_id`, `action_id`, `outcome`, `detail`, and the exact bounded action
-  `arguments` for calls and approval decisions),
+  (`tool_id`, `action_id`, `outcome`, `detail`, connection/account identity,
+  and the exact bounded action `arguments` for calls and approval decisions),
   the tool-side peer of the agent and network event logs. `GET /v1/tools/events`
   pages summaries newest-first with the same `before`/`limit` cursor model;
   `GET /v1/tools/events/<seq>` loads one event's arguments only when the

@@ -17,7 +17,6 @@ from host.tools.results import (
     ApprovalResult,
 )
 from host.tools.tool import (
-    ConnectionStatus,
     CredentialFlow,
     OAuthCompleteConnectParams,
     OAuthCompleteConnectResult,
@@ -29,10 +28,10 @@ from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
+    OAuth2CredentialStore,
     access_token_is_fresh,
     clear_if_still_loaded,
     now,
-    require_scopes,
     signed_state,
     verify_state,
 )
@@ -42,6 +41,7 @@ from host.tools.shared.web import (
     json_request,
     json_request_with_headers,
     known_provider_transport_error,
+    transport_or_unmapped_provider_error,
     unmapped_provider_error,
 )
 
@@ -242,10 +242,13 @@ def _account_from_userinfo(userinfo: JSONObject, scopes: list[str]) -> Connectio
     return {"id": sub, "label": label, "scopes": scopes}
 
 
-class LinkedInCredentialStore:
+class LinkedInCredentialStore(OAuth2CredentialStore):
     """OAuth 2.0 authorization code against LinkedIn. Self-serve apps get
     60-day access tokens and no refresh tokens: expiry surfaces as
     reconnect_required rather than a silent refresh."""
+
+    reconnect_message = LINKEDIN_RECONNECT_MESSAGE
+    required_scopes = REQUIRED_LINKEDIN_SCOPES
 
     def start_connect(self, params: OAuthStartConnectParams, api: HostAPI) -> OAuthStartConnectResult:
         state = signed_state(secret=api.config["LINKEDIN_OAUTH_CLIENT_SECRET"], tool_id=MANIFEST.tool_id)
@@ -303,41 +306,20 @@ class LinkedInCredentialStore:
         except WebRequestError as exc:
             raise _mapped_web_error(exc, "profile lookup") from exc
         account = _account_from_userinfo(userinfo, granted_scopes)
-        existing = api.credentials.load()
-        created_at = existing["metadata"].get("created_at") if existing is not None else None
         current_time = now()
-        api.credentials.save(
+        self.save_connection(
+            api,
+            account,
             {
-                "account": account,
-                "secret": {
-                    "access_token": access_token,
-                    "expires_at": current_time
-                    + (expires_in if isinstance(expires_in, int) else DEFAULT_TOKEN_LIFETIME_SECONDS),
-                },
-                "metadata": {
-                    "created_at": created_at if isinstance(created_at, int) else current_time,
-                    "updated_at": current_time,
-                },
-            }
+                "access_token": access_token,
+                "expires_at": current_time
+                + (expires_in if isinstance(expires_in, int) else DEFAULT_TOKEN_LIFETIME_SECONDS),
+            },
         )
         return {"account": account}
 
-    def disconnect(self, api: HostAPI) -> None:
-        # LinkedIn has no self-serve token revocation endpoint; the 60-day
-        # token simply ages out after the credential is cleared.
-        api.credentials.clear()
-
-    def connection_status(self, api: HostAPI) -> ConnectionStatus:
-        existing = api.credentials.load()
-        if existing is None:
-            return {"connected": False}
-        return {"connected": True, "account": existing["account"]}
-
     def access_token(self, api: HostAPI) -> str:
-        existing = api.credentials.load()
-        if existing is None:
-            raise IntegrationReconnectRequired(LINKEDIN_RECONNECT_MESSAGE)
-        require_scopes(api, existing, REQUIRED_LINKEDIN_SCOPES, reconnect_message=LINKEDIN_RECONNECT_MESSAGE)
+        existing = self.load_connected(api)
         payload = cast(Mapping[str, object], existing["secret"])
         if not access_token_is_fresh(payload, now()):
             clear_if_still_loaded(api, existing)
@@ -345,9 +327,7 @@ class LinkedInCredentialStore:
         return str(payload.get("access_token") or "")
 
     def refresh_identity(self, api: HostAPI, access_token: str) -> ConnectionAccount:
-        existing = api.credentials.load()
-        if existing is None:
-            raise IntegrationReconnectRequired(LINKEDIN_RECONNECT_MESSAGE)
+        existing = self.load_connected(api)
         account = _account_from_userinfo(_fetch_userinfo(access_token), existing["account"]["scopes"])
         if existing["account"]["id"] != account["id"]:
             raise IntegrationReconnectRequired(LINKEDIN_RECONNECT_MESSAGE)
@@ -380,10 +360,7 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     elif exc.status:
         message = f"LinkedIn API returned HTTP {exc.status} for the {what} request."
     else:
-        known = known_provider_transport_error(exc)
-        if known:
-            return RuntimeError(known)
-        return unmapped_provider_error("LinkedIn", what, exc)
+        return transport_or_unmapped_provider_error("LinkedIn", what, exc)
     return RuntimeError(message)
 
 

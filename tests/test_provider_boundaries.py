@@ -32,10 +32,12 @@ class ProviderBoundaryTests(unittest.TestCase):
             self.assertNotIn("_aws(", source)
             self.assertNotIn("_limactl(", source)
             self.assertNotIn("_bootstrap_payload", source)
-        self.assertIn("lifecycle_aws.main_for_lifecycle", lifecycle)
-        self.assertIn("lifecycle_lima.main_for_lifecycle", lifecycle)
-        self.assertIn("power_aws.main_for_power", power)
-        self.assertIn("lifecycle_lima.main_for_power", power)
+        self.assertIn("from host.cli import lifecycle_aws", lifecycle)
+        self.assertIn("from host.cli import lifecycle_lima", lifecycle)
+        self.assertIn("from host.cli import power_aws", power)
+        self.assertIn("from host.cli import lifecycle_lima", power)
+        self.assertIn("provider.main_for_lifecycle(command)", lifecycle)
+        self.assertIn("provider.main_for_power(mode, args.agent_name)", power)
 
     def test_provider_modules_never_enter_runtime_packages(self) -> None:
         forbidden = {

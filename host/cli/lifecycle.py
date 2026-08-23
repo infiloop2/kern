@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 from host.constants import OPERATOR_TUNNEL_TOKEN_ENV_NAME, PUBLIC_GITHUB_REPOSITORY
-from host.cli.lifecycle_types import LifecycleCommand
+from host.cli.lifecycle_types import LifecycleCommand, LifecycleProvider
 
 
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -131,10 +131,11 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
 
 def main_for_mode(mode: str, argv: list[str] | None = None) -> int:
     command = _parse_args(mode, argv)
+    provider: LifecycleProvider
     if command.provider == "aws":
         from host.cli import lifecycle_aws
-
-        return lifecycle_aws.main_for_lifecycle(command)
-    from host.cli import lifecycle_lima
-
-    return lifecycle_lima.main_for_lifecycle(command)
+        provider = lifecycle_aws
+    else:
+        from host.cli import lifecycle_lima
+        provider = lifecycle_lima
+    return provider.main_for_lifecycle(command)

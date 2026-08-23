@@ -1,10 +1,11 @@
-"""The ``.github`` push-approval gate, a component of the GitHub integration.
+"""Git receive-pack controls for the GitHub integration.
 
 One vertical feature across three privilege domains:
 
-- ``engine`` (proxy): inspects a buffered ``git-receive-pack`` body against a
-  quarantine mirror, quarantines held objects, and synthesizes the
-  report-status answer. Invoked by the GitHub guard's ``gate_response`` hook.
+- ``engine`` (proxy): parses a buffered ``git-receive-pack`` command list,
+  synthesizes blocked report-status answers, and, for the independent
+  ``.github`` approval control, inspects packs against a quarantine mirror.
+  Invoked by the GitHub guard's ``gate_response`` hook.
 - ``pending`` (admin service): operator approve/reject of held pushes.
 - ``approve`` (root helper): replays approved objects to GitHub — root has
   egress and reads the proxy-owned mirror; installed as the
@@ -19,16 +20,24 @@ from host.network_integrations.github.push_gate.engine import (
     PENDING_PUSH_LIMIT,
     GateError,
     GateResult,
+    build_http_response,
+    build_report_status,
     inspect,
     new_push_id,
+    parse_receive_pack,
     quarantine_lock,
+    side_band_requested,
 )
 
 __all__ = [
     "PENDING_PUSH_LIMIT",
     "GateError",
     "GateResult",
+    "build_http_response",
+    "build_report_status",
     "inspect",
     "new_push_id",
+    "parse_receive_pack",
     "quarantine_lock",
+    "side_band_requested",
 ]

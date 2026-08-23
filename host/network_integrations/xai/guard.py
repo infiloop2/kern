@@ -5,9 +5,10 @@ exact hosts and methods plus two request controls.
 
 Every guarded request to the CLI chat proxy must authenticate with an xAI
 OAuth token whose JWT claims the account pinned from the Grok login.
-Requests that would make xAI reach an external source with request data
-(X search, web search, remote MCP, hosted browsing or media generation) are
-denied unconditionally; the integration exposes no options.
+Only the hosted capabilities that stay within xAI/X are allowed: X search and
+media generation. Requests that would make xAI reach any other external source
+with request data (web search, remote MCP or hosted browsing) are denied
+unconditionally; the integration exposes no options.
 
 Only two hosts are opened under the owned apexes. Everything else beneath them
 is denied by the route table, which is what keeps ``api.x.ai`` — the metered
@@ -29,34 +30,54 @@ from host.runtime.core.state import (
     read_proxy_xai_status_probe_account_id,
 )
 
-# Hosted tools that make xAI reach an external source with request data, run
-# code off-box, or generate media on xAI infrastructure. All are denied
-# outright. ``web_search`` is not listed here only because it keeps its own
-# denial code; it is denied just as unconditionally.
+# Hosted tools that make xAI reach a non-X external source with request data or
+# run code off-box. All are denied outright. ``web_search`` is not listed here
+# only because it keeps its own denial code; it is denied just as
+# unconditionally.
 #
 # xAI names the same tool two ways, so both spellings are listed. The wire
 # ``type`` a Responses API request carries is ``code_interpreter`` and
 # ``file_search``; the Python SDK's helpers for those are ``code_execution``
 # and ``collections_search``, and a client that serialises the helper name
-# must not slip past a set that only knows the wire one. ``browser``,
-# ``computer_use`` and the media families are not tools xAI documents today;
-# they are held here so a rename lands on a name already denied.
+# must not slip past a set that only knows the wire one. ``browser`` and
+# ``computer_use`` are held here so a rename lands on a name already denied.
 _DENIED_HOSTED_TOOL_TYPES = frozenset(
     {
-        "x_search",
         "browser",
         "computer_use",
         "code_execution",
         "code_interpreter",
         "collections_search",
         "file_search",
+    }
+)
+# These are the only server-executed tools admitted through the subscription
+# chat proxy. xAI documents X search as an X-only corpus and image generation
+# as executing on xAI's servers. ``video_generation`` is reserved explicitly
+# for the same xAI-hosted family, although Grok Build 1.0.5 does not emit it.
+# Keeping this an allowlist means every future or misspelled hosted tool still
+# fails closed at a ``tools`` declaration site.
+_ALLOWED_HOSTED_TOOL_TYPES = frozenset(
+    {
+        "x_search",
         "image_generation",
         "video_generation",
     }
 )
+_X_SEARCH_TOOL_KEYS = frozenset(
+    {
+        "type",
+        "allowed_x_handles",
+        "excluded_x_handles",
+        "from_date",
+        "to_date",
+        "enable_image_understanding",
+        "enable_video_understanding",
+    }
+)
 # The one tool family the agent executes locally. Its egress is the agent's own,
-# already gated by this proxy, so it is the only entry a ``tools`` array may
-# carry at all.
+# already gated by this proxy, so it remains allowed alongside the three
+# explicitly admitted hosted types.
 _CLIENT_EXECUTED_TOOL_TYPE = "function"
 # History items replaying an earlier hosted call. They appear in legitimate
 # follow-up requests and declare no new capability, so every walk below skips
@@ -74,6 +95,8 @@ _HISTORY_ITEM_TYPES = frozenset(
     {
         "web_search_call",
         "x_search_call",
+        "image_generation_call",
+        "video_generation_call",
         "code_interpreter_call",
         "file_search_call",
         "mcp_call",
@@ -270,10 +293,11 @@ def _jwt_account_id(token: str) -> str | None:
 
 
 def _server_tool_denial(headers: list[tuple[str, str]], body: bytes) -> str | None:
-    """Deny a request that declares an xAI server-side tool reaching an external
-    source or running code off-box. Mirrors the OpenAI and Claude body guards:
-    decode, confirm the body parses as JSON, then enforce structurally. A body
-    that cannot be decoded, parsed, or walked as declared fails closed."""
+    """Deny a request that declares an unapproved xAI server-side tool.
+
+    Mirrors the OpenAI and Claude body guards: decode, confirm the body parses
+    as JSON, then enforce structurally. A body that cannot be decoded, parsed,
+    or walked as declared fails closed."""
     if not body:
         return None
     header_map = {key.lower(): value for key, value in headers}
@@ -310,17 +334,18 @@ def _tool_violation(payload: Any) -> str | None:
     into that array.
 
     Collection is deliberately two-sided. A ``tools`` array is a declaration
-    site, so *every* entry there that is not a client-executed ``function`` is
-    guarded — that is what makes a hosted tool this host has never heard of
-    (xAI adds them: web search, X search, and code execution today) fail closed
-    instead of being forwarded because it is missing from a denylist. The
-    named hosted families are additionally collected anywhere in the body, so
-    a declaration nested under some other key is still inspected.
+    site, so every entry there that is neither a client-executed ``function``
+    nor one of the exact allowed hosted types is guarded — that is what makes a
+    hosted tool this host has never heard of fail closed instead of being
+    forwarded because it is missing from a denylist. The named denied families
+    are additionally collected anywhere in the body, so a declaration nested
+    under some other key is still inspected.
 
-    No hosted tool survives this. ``web_search`` keeps its own denial code
-    rather than folding into ``xai_server_tool_denied``, because "the host does
-    not offer this" is a different thing for an agent to read than "you
-    declared something unrecognised"."""
+    Only X search and xAI-hosted media generation survive this. ``web_search``
+    keeps its own denial code rather than folding into
+    ``xai_server_tool_denied``, because "the host does not offer this" is a
+    different thing for an agent to read than "you declared something
+    unrecognised"."""
     search_violation = _search_parameters_violation(payload)
     if search_violation is not None:
         return search_violation
@@ -403,7 +428,8 @@ def _iter_tool_objects(payload: Any) -> list[dict[str, Any]]:
 
     Two collection rules, because they fail closed against different things:
 
-    1. Every non-``function`` entry of a ``tools`` array, wherever that array
+    1. Every entry of a ``tools`` array that is neither a local ``function`` nor
+       one of the three explicitly allowed hosted shapes, wherever that array
        appears. A ``tools`` array is a declaration site, so an unrecognised
        entry there is an undeclarable capability rather than an unknown shape —
        denying it is what keeps a hosted tool xAI adds later from being
@@ -421,11 +447,30 @@ def _iter_tool_objects(payload: Any) -> list[dict[str, Any]]:
     declaration site and deny the turn."""
     matches: list[dict[str, Any]] = []
 
+    def is_allowed_hosted(node: dict[str, Any]) -> bool:
+        """Admit only shapes whose server-side destination stays within xAI/X.
+
+        X search accepts the current vendor-documented X-only filters. Image
+        generation is text-to-image only: ``auto``/``edit`` can make xAI fetch
+        an input image URL. Video has no documented Responses-tool schema yet,
+        so only the bare declaration is reserved; options need a new review.
+        """
+        type_value = node.get("type")
+        if type_value == "x_search":
+            return not node.keys() - _X_SEARCH_TOOL_KEYS
+        if type_value == "image_generation":
+            return node.keys() == {"type", "action"} and node.get("action") == "generate"
+        if type_value == "video_generation":
+            return node.keys() == {"type"}
+        return False
+
     def is_guarded(node: dict[str, Any]) -> bool:
         # Replay items never reach here; walk returns before calling this.
         type_value = node.get("type")
         if not isinstance(type_value, str):
             return False
+        if type_value in _ALLOWED_HOSTED_TOOL_TYPES:
+            return not is_allowed_hosted(node)
         return (
             type_value == "mcp"
             or type_value.startswith("web")
@@ -437,7 +482,10 @@ def _iter_tool_objects(payload: Any) -> list[dict[str, Any]]:
             if _is_replay_item(node):
                 return
             raw_type = node.get("type")
-            declared = in_tools_array and raw_type != _CLIENT_EXECUTED_TOOL_TYPE
+            declared = in_tools_array and (
+                raw_type != _CLIENT_EXECUTED_TOOL_TYPE
+                and not is_allowed_hosted(node)
+            )
             if declared or is_guarded(node):
                 matches.append(node)
             for key, value in node.items():

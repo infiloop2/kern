@@ -117,6 +117,16 @@ def unmapped_provider_error(provider: str, operation: str, exc: WebRequestError)
     return UnmappedProviderError(provider, operation, status=exc.status)
 
 
+def transport_or_unmapped_provider_error(
+    provider: str, operation: str, exc: WebRequestError
+) -> Exception:
+    """Map the provider-neutral no-status tail shared by API adapters."""
+    known = known_provider_transport_error(exc)
+    if known:
+        return RuntimeError(known)
+    return unmapped_provider_error(provider, operation, exc)
+
+
 def provider_warning(
     provider: str,
     operation: str,

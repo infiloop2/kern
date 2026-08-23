@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from host.runtime.admin_api import agent_activity
+from host.runtime.agent_runtime import agent_activity
 
 
 class AgentActivityTests(unittest.TestCase):

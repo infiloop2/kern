@@ -1034,12 +1034,12 @@ mcps = false
 [cli]
 use_leader = false
 
-# --disable-web-search removes Grok's client web_search and web_fetch tools,
-# but Grok 1.0.5 separately injects the hosted x_search capability whenever
-# its model advertises backend search. Keep every hosted search out of the
-# request; the proxy still denies one if a changed client sends it anyway.
+# --disable-web-search removes Grok's client web_search and web_fetch tools.
+# Grok 1.0.5 separately injects the hosted x_search capability when the model
+# advertises backend search; keep that X-only capability on. The proxy still
+# denies web search and every hosted tool outside its explicit xAI/X allowlist.
 [model."grok-4.6"]
-supports_backend_search = false
+supports_backend_search = true
 
 # The only MCP server Grok may inherit is Kern's bundled-tools shim. Keeping
 # it in the root-owned highest-precedence layer prevents the agent-owned Grok,
@@ -1523,7 +1523,7 @@ User=kern-admin
 SupplementaryGroups=systemd-journal
 UMask=0077
 Environment=PYTHONPATH=/opt/kern-host
-ExecStart=/usr/bin/python3 -m host.runtime.host_errors.collector
+ExecStart=/usr/bin/python3 -m host.runtime.host_diagnostics_collector.collector
 ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-host-errors
 Restart=always
 RestartSec=3

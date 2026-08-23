@@ -202,42 +202,54 @@ end.
 ## Server-side tools
 
 Grok declares hosted tools as entries in a request's `tools` array, alongside
-the client-executed `function` tools the CLI runs locally on this host. xAI's
-documented server-side set is web search, X search, and code execution.
+the client-executed `function` tools the CLI runs locally on this host. The
+guard has a fixed three-family allowlist: `x_search` with the documented X-only
+filters, `image_generation` restricted to `action: "generate"`, and a bare
+`video_generation` declaration with no options. There is no operator option
+and every other hosted tool or shape, including one xAI adds later, fails
+closed.
 
-No hosted tool is allowed, and there is no option that allows one. `web_search`
-is denied like the rest but keeps its own reason code, because it is the tool an
-operator would expect to be offered — the reasoning is in [Grok web
-search](#grok-web-search).
+### The three allowed declarations
 
-### Every hosted tool, denied
+| Tool | What is allowed | Current runtime support |
+| --- | --- | --- |
+| `x_search` | xAI executes keyword, semantic, user, and thread search against X data. The host sends the query and surrounding inference context only to `cli-chat-proxy.grok.com`; xAI performs the X-side work. | **Usable now.** Grok Build 1.0.5 emits this declaration when `supports_backend_search = true`. |
+| `image_generation` | xAI's Responses image-generation tool runs on xAI servers and returns generated image data in the response. Kern requires `action: "generate"`; the default `auto` and `edit` shapes are denied because editing can make xAI fetch an input image URL. | **Policy-ready, not surfaced.** xAI documents the tool, but Grok Build 1.0.5 neither declares it nor decodes its result type. |
+| `video_generation` | Only the bare declaration is reserved for the corresponding xAI-hosted family. Any option is denied until its destination semantics are reviewed. | **Not usable today.** xAI does not currently document a Responses `video_generation` tool; its video generation API is the separate, metered `api.x.ai` flow, which remains blocked. |
+
+This deliberately does **not** open `api.x.ai`, `imgen.x.ai`, or `vidgen.x.ai`.
+The developer image/video APIs use an API key, bill the xAI Console account,
+and can accept public input URLs; that is a different integration and data-flow
+decision from allowing a bare hosted-tool declaration through the pinned Grok
+subscription request.
+
+### What remains denied
 
 | Tool | Reason |
 | --- | --- |
-| `x_search` | The hosted X-search tool. Reaches X posts, users and threads from xAI's infrastructure, on the same terms as web search. |
+| `web_search` and live `search_parameters` | Searches and opens arbitrary live pages from xAI infrastructure. See [Grok web search](#grok-web-search). |
 | `file_search` / `collections_search` | Searches xAI-hosted document collections, which this host never populates. |
-| `code_execution`, `code_interpreter` | Runs code on xAI infrastructure. The agent has a local shell on this host, so nothing is lost by denying it. |
-| `browser`, `computer_use` | A driven remote browser. |
-| `image_generation`, `video_generation` | Media generation on xAI infrastructure. |
+| `code_execution`, `code_interpreter` | Runs code on xAI infrastructure. The agent already has a policy-gated local shell. |
+| `browser`, `computer_use` | A driven remote browser that can reach non-X destinations. |
 | Remote MCP (`type: mcp`, or a `server_url` anywhere) | Makes xAI call an external server with request data. |
+| Any unknown or untyped `tools` entry | Has not received a destination and data-flow review, so it fails closed. |
 
-xAI spells two of these twice, and both spellings are denied: the wire `type`
-in a Responses API request is `code_interpreter` and `file_search`, while the
-Python SDK's helpers for the same tools are `code_execution` and
-`collections_search`. `browser`, `computer_use`, `image_generation` and
-`video_generation` are not tools xAI documents today; they are held so a rename
-lands on a name already denied.
+xAI spells two denied families twice, and both spellings are covered: the wire
+`type` in a Responses API request is `code_interpreter` and `file_search`,
+while the Python SDK's helpers are `code_execution` and
+`collections_search`.
 
 ### How the guard collects tools
 
 Two collection rules, because they fail closed against different things:
 
-1. **Every non-`function` entry of a `tools` array**, wherever that array
-   appears. A `tools` array is a declaration site, so an unrecognised entry
-   there is an undeclarable capability rather than an unknown shape. This is
-   what keeps a hosted tool xAI ships later from being forwarded unreviewed —
-   the denial follows from *where* the entry appears, not from someone having
-   remembered to add it to a list.
+1. **Every entry of a `tools` array except `function` and the three exact
+   allowed hosted types**, wherever that array appears. A `tools` array is a
+   declaration site, so an unrecognised entry there is an undeclarable
+   capability rather than an unknown shape. This is what keeps a hosted tool
+   xAI ships later from being forwarded unreviewed — the denial follows from
+   *where* the entry appears, not from someone having remembered to add it to a
+   denylist.
 2. **The named hosted families anywhere else in the body**: `type: mcp`, any
    `type` starting with `web` (covering `web_search` and any future dated or
    renamed variant), or a member of the denied set above. This catches a
@@ -260,7 +272,9 @@ Two collection rules, because they fail closed against different things:
 
 Replay history items are excluded from rules 1 and 2, along with their whole
 subtrees. They describe an earlier hosted call rather than declaring a new one,
-and appear in legitimate follow-up requests.
+and appear in legitimate follow-up requests. This includes the allowed
+`x_search_call`, `image_generation_call`, and `video_generation_call` families
+as well as denied families whose earlier output may still appear in history.
 
 A body that cannot be decoded (`xai_body_undecodable`) or that declares JSON and
 does not parse (`xai_body_not_json`) is denied rather than forwarded
@@ -271,6 +285,56 @@ parser does and so give way first — is denied under the same
 that dropped the connection rather than a denial the operator can see. A body
 that is not JSON at all is forwarded: xAI parses requests as JSON, so one it
 cannot parse cannot declare tools, whatever its content-type label says.
+
+### Data-flow audit for the allowed tools
+
+The host-side destination is the same for all three declarations. Grok Build
+sends one ordinary Responses request through the loopback policy proxy to
+`https://cli-chat-proxy.grok.com/v1/responses`. The request carries the linked
+account's xAI OAuth bearer plus the model input: system instructions, the user
+prompt, relevant conversation history, local-tool schemas/results, and any
+workspace content the agent chose to include. The proxy authenticates the
+bearer against the pinned account and inspects the complete buffered JSON body
+before forwarding it.
+
+| Capability | Host sends to | What xAI receives | Downstream execution | What comes back |
+| --- | --- | --- | --- | --- |
+| X search | `cli-chat-proxy.grok.com` only | The ordinary inference context plus `{"type":"x_search"}` and any X handle/date/media-understanding filters | xAI says it executes the search server-side against X posts, users, threads, images, and videos. This host makes no request to `x.com` or to a third-party search provider. | X-search call metadata, citations/results used by the model, and the final model response |
+| Image generation declaration | `cli-chat-proxy.grok.com` only | The ordinary inference context plus `{"type":"image_generation","action":"generate"}` | xAI documents this as a built-in tool executed on xAI servers. Kern denies edit/auto declarations and external-input fields. The Responses shape returns generated image bytes inline. | An `image_generation_call` item containing generated image data, once Grok Build supports it |
+| Video generation declaration | `cli-chat-proxy.grok.com` only | The ordinary inference context plus `{"type":"video_generation"}` | No current upstream execution path is documented for this declaration. Kern does not translate it into, or open, the metered Imagine API. | Nothing usable with Grok Build 1.0.5 |
+
+The guard does not accept a destination URL as configuration and does not open
+another host for these tools. X search accepts only its documented X handle,
+date, and X-media-understanding fields. Image generation must be explicitly
+text-to-image, and video generation must be bare; an added URL or unknown
+option fails closed. The only host-originated model request therefore ends at
+an xAI hostname. For X search, xAI's server-side operation reaches the X
+corpus; that downstream hop does not cross this host and is outside Kern's
+network-event log. xAI's public tool documentation names X as the corpus but
+does not describe any independent search provider, so the claim Kern can make
+is **xAI/X only**, not a stronger claim about xAI's undisclosed internal
+subprocessors.
+
+Web search remains a materially different path: it can open arbitrary public
+URLs selected during model execution. Remote MCP likewise names an arbitrary
+server, and hosted browsing does not stay within X. Those declarations remain
+denied. The route table separately keeps storage, session/workspace sync,
+feedback, traces, `api.x.ai`, `imgen.x.ai`, and `vidgen.x.ai` closed, so this
+change does not create a file-upload, developer-billing, or media-download
+route.
+
+The linked account's coding-data opt-out and team ZDR state govern retention at
+xAI; Kern displays both when Grok reports them. Locally, telemetry and trace
+upload stay disabled and provider session sync stays blocked. Those controls
+do not make the inference request anonymous: xAI still receives the pinned
+account bearer and the request content needed to answer the turn.
+
+Vendor facts in this audit are grounded in xAI's current documentation:
+[X Search](https://docs.x.ai/developers/tools/x-search),
+[the image-generation Responses tool](https://docs.x.ai/developers/tools/image-generation),
+[the separate video REST API](https://docs.x.ai/developers/rest-api-reference/inference/videos),
+[server-side tool execution](https://docs.x.ai/developers/tools/overview), and
+[API retention/ZDR](https://docs.x.ai/developers/faq/security).
 
 ## Grok web search
 
@@ -406,21 +470,20 @@ egress that the network policy decides like any other request. The separate
 requirements setting described below controls Grok's hosted `x_search`
 injection, not this local tool.
 
-### Request fields that are not inspected, and why that is sound
+### Search fields that are and are not admitted
 
-Several fields shape a search without changing its `type`:
-`enable_image_understanding` (which unlocks xAI's internal `view_image`),
-`enable_image_search`, `enable_video_understanding` (X search only), and
-`filters.allowed_domains` / `filters.excluded_domains`. Likewise
-`search_parameters.sources`, which names the corpora — `web`, `x`, `news`,
-`rss`.
+X search options do not change its destination: `allowed_x_handles`,
+`excluded_x_handles`, `from_date`, `to_date`, `enable_image_understanding`, and
+`enable_video_understanding` all constrain or enrich searches within X posts
+and X-hosted media. The guard therefore allows them with `x_search` rather than
+maintaining a second copy of xAI's evolving option schema.
 
-None is read. That is sound only because no search is reachable in the first
-place: a request carrying any of them is already denied on the `web_search`
-entry or on `search_parameters`, so the corpus or flag it names decides
-nothing. They are catalogued here because they become live decisions the moment
-anyone reopens the question — `filters.allowed_domains` in particular is the
-one field that could bound the egress path above.
+Fields that shape web search (`enable_image_search`,
+`filters.allowed_domains`, and `filters.excluded_domains`) are immaterial
+because a `web_search` declaration is denied first. Likewise,
+`search_parameters.sources` may name `web`, `x`, `news`, or `rss`, but the
+whole `search_parameters` path remains denied unless its mode is explicitly
+`off`. X search has one admitted request shape: the typed `x_search` tool.
 
 ### What would leave, if it ever did
 
@@ -449,11 +512,12 @@ Two layers, and only the first is load-bearing:
    is any `search_parameters` that is not an explicit `mode: "off"`.
 2. **Grok's client posture.** The launcher passes `--disable-web-search`
    unconditionally, removing the client web-search and fetch tools. The
-   root-owned requirements also set `grok-4.6`'s
-   `supports_backend_search = false`, because Grok 1.0.5 otherwise injects the
-   separate hosted `x_search` tool on follow-up requests. Defence in depth
-   only — the agent has a shell and could run `grok` itself without either.
-   See [Why the launcher is not the enforcement](#why-the-launcher-is-not-the-enforcement).
+   root-owned requirements set `grok-4.6`'s
+   `supports_backend_search = true`, which makes Grok 1.0.5 declare the
+   separately allowed hosted `x_search` tool. The flag is defence in depth for
+   web access, not its enforcement — the agent has a shell and could run
+   `grok` itself without it. See [Why the launcher is not the
+   enforcement](#why-the-launcher-is-not-the-enforcement).
 
 ## Denial reasons
 
@@ -467,7 +531,7 @@ agent-facing guidance and joinable by the agent introspection tools.
 | `xai_body_undecodable` | Content-Encoding could not be decoded for inspection. |
 | `xai_body_not_json` | The body declared JSON and did not parse, or was nested too deeply to inspect. |
 | `xai_web_search_denied` | Server-side web search is not available on this host, and no setting enables it. Covers both a `web_search` tool entry and a `search_parameters` object that is not an explicit `mode: "off"`. |
-| `xai_server_tool_denied` | An always-denied hosted tool, or an unrecognised entry in a `tools` array. |
+| `xai_server_tool_denied` | A hosted tool outside the fixed X-search/image/video allowlist, or an unrecognised entry in a `tools` array. |
 | `xai_remote_mcp_denied` | A remote MCP server declaration. |
 
 ## Stored state
@@ -559,11 +623,11 @@ ring replaces the note with no further change.
 | --- | --- |
 | Route table | Both opened hosts, inference-only POST, read-only settings/model/user/billing routes, the explicit `api.x.ai` and `code.grok.com` denials, method rejection, case-insensitive host matching |
 | Account and credential binding | Personal `sub`; team `principal_id`; unpinned; missing, foreign, and duplicated bearers; opaque key; non-Bearer scheme; a token whose only claim is unrelated |
-| Server tools | Function tools; web search by tool entry and by `search_parameters`, over every source shape; X search; code execution; collections search under both spellings; unknown and untyped entries in a `tools` array; renamed `web*` variants; remote MCP by type and by `server_url`; nested declarations; replay items and their subtrees; tool names in prompt text; unparseable, over-nested, and non-JSON bodies |
+| Server tools | Function tools; allowed X-search/image/video declarations; web search by tool entry and by `search_parameters`, over every source shape; code execution; collections search under both spellings; unknown and untyped entries in a `tools` array; renamed `web*` variants; remote MCP by type and by `server_url`; nested declarations; replay items and their subtrees; tool names in prompt text; unparseable, over-nested, and non-JSON bodies |
 | Config | That `enabled` is the only accepted key and a `web_search` option is rejected rather than ignored, apex reservation against custom domains |
 | Persistence | The policy round-trip, that a `web_search` key is rejected rather than ignored, and that no `xai_settings` table exists |
 | Admin UI | Catalog copy, that the shared web-search card is not wired to xAI, account/privacy status, and Grok runtime selection |
-| ACP turns | New/load session framing, replay suppression, model/effort metadata, streamed text/reasoning/tool activity, steering acknowledgement, cancel, missing-session recovery, and orchestration persistence |
+| ACP turns | New/load session framing, replay suppression, process-wide noninteractive permissions across new and resumed sessions, model/effort metadata, streamed text/reasoning/tool activity, steering acknowledgement, cancel, missing-session recovery, and orchestration persistence |
 
 ## The CLI as it actually behaves
 
@@ -580,7 +644,9 @@ The properties below are verified against `grok 1.0.5` by running it:
 | ACP extension methods | Carry a **leading underscore** on the wire: `_x.ai/auth/info`, `_x.ai/auth/get_url`, `_x.ai/auth/check_subscription`, `_x.ai/billing`. Without it the server answers `-32601`. |
 | Login flow | **Device code.** `_x.ai/auth/get_url` returns `{auth_url, mode: "device"}`; the code is a `user_code` query parameter inside `auth_url`, and the browser leg happens on `accounts.x.ai`. xAI polls approval itself and resolves the long-running `authenticate` request, so there is no completion endpoint. |
 | `--disable-web-search` | A **top-level** option. `grok agent ... stdio --disable-web-search` is rejected as an unexpected argument; it must precede the `agent` subcommand. |
-| `supports_backend_search = false` | Required on the pinned `grok-4.6` model as well. Live testing through the managed MITM proxy showed that `--disable-web-search` removes the client `web_search`/`web_fetch` tools but Grok 1.0.5 otherwise adds the distinct hosted `x_search` tool after a local tool call. |
+| `--always-approve` | An **`agent` subcommand** option and required on every autonomous launcher invocation. ACP `_meta.yoloMode` applies when `session/new` creates a session; the process flag also holds on `session/load`, overrides agent-writable user config, and prevents a resumed session from requesting an unavailable local approval channel. |
+| `supports_backend_search = true` | Enables the distinct hosted `x_search` declaration. Live testing through the managed MITM proxy showed that `--disable-web-search` independently removes the client `web_search`/`web_fetch` tools, so X search can be enabled without reopening web search. |
+| Media tools | Grok Build 1.0.5 has no `image_generation` or `video_generation` hosted-tool variant and no decoder for their call items. The proxy allows those exact declaration names for a future compatible release, but the current runtime cannot invoke them. |
 | `GROK_LOGIN_DEVICE_FLOW=1` | Required for ACP login on a remote host. Without it Grok 1.0.5 advertises a loopback callback URL that the operator's browser cannot reach. |
 | Access token | A **JWT**, stored as the `key` field of an `auth.json` session keyed by `"<issuer>::<client_id>"`. Its claims carry `sub`, `principal_id`, `principal_type`, `team_id` and `tier`, and on a personal login `sub == principal_id == user_id`. |
 | Binary location | The npm package is a Node trampoline that decompresses the real binary into `$GROK_HOME/bin` — inside the agent's own home. Bootstrap decompresses it to a root-owned `/usr/local/bin/grok` instead, so the version pin and the launcher's flags are not agent-editable. |
@@ -599,13 +665,19 @@ tool declaration regardless of which process sent it.
 
 ## Turn lifecycle
 
-Each turn runs a fresh `grok agent --no-leader stdio` process in the host
-thread's systemd scope. A new Kern thread sends `session/new` with the pinned
-model, reasoning effort, working directory, and non-interactive permission
-mode. A later turn sends `session/load` with the stored ACP session id; replayed
-provider history is discarded because Kern already owns the durable transcript.
-The adapter then submits a text block through `session/prompt` and persists the
-provider session id as soon as Grok confirms it.
+Each turn runs a fresh
+`grok --disable-web-search agent --always-approve --no-leader stdio` process in
+the host thread's systemd scope. The process-wide permission flag is
+load-bearing because Kern has no interactive local-approval channel and later
+turns resume existing sessions. A new Kern thread also sends
+`_meta.yoloMode: true` with `session/new`, alongside the pinned model, reasoning
+effort, and working directory. A later turn sends `session/load` with the stored
+ACP session id; replayed provider history is discarded because Kern already
+owns the durable transcript. The adapter then submits a text block through
+`session/prompt` and persists the provider session id as soon as Grok confirms
+it. The host OS, network proxy, and explicit integration approval gates remain
+the security boundaries underneath Grok's noninteractive local permission
+mode.
 
 Standard `session/update` and xAI `_x.ai/session/update` notifications are
 mapped into provider-independent reasoning, plan, tool, command, and background
@@ -645,3 +717,7 @@ Before changing the pinned Grok CLI version:
 5. Confirm the OAuth device flow still targets `auth.x.ai` and completes
    without a browser on the host.
 6. Confirm the CLI still honours `HTTPS_PROXY` and `GROK_EXTRA_CA_BUNDLE`.
+7. Confirm `grok agent --always-approve --no-leader stdio` remains valid, and
+   live-test a write-capable terminal tool on both `session/new` and
+   `session/load`. Neither turn may issue `session/request_permission`; Kern has
+   no local operator channel to answer it.

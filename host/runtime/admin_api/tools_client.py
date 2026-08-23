@@ -195,7 +195,15 @@ def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> 
         },
     }
     if manifest.connection == "oauth":
-        entry["connection_status"] = tool.credentials.connection_status(tools_host.host_api_for(tool))
+        connections = state.tool_connections(manifest.tool_id)
+        entry["connected_accounts"] = connections
+        # Keep the old aggregate field during the API transition. New clients
+        # use connected_accounts because a single account value is ambiguous.
+        entry["connection_status"] = (
+            {"connected": True, "account": connections[0]["account"]}
+            if connections
+            else {"connected": False}
+        )
     return entry
 
 

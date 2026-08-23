@@ -43,14 +43,18 @@ LIST_BUNDLED_TOOLS_TOOL: JSONObject = {
     "name": "list_bundled_tools",
     "description": (
         "List tools bundled with this Kern host: their tool_id, whether the operator "
-        "has enabled them, and a one-line description of each action. Omit tool_ids for "
-        "the full catalog, or pass known ids to return only those tools. Start here, then call "
+        "has enabled them, and a one-line tool description. Omit tool_ids for the cheap "
+        "capability catalog, or pass known ids to include those tools' actions and agent_notes. "
+        "Start here, then call "
         "describe_tool for the schemas of the actions you intend to use and call_tool to "
         "run one. An action marked approval=operator queues for operator approval instead "
         "of running immediately. A tool listed here but not enabled exists on the host but "
         "cannot run until the operator enables it (and, for OAuth tools, connects it) under "
         "Home > Integrations in the admin UI — ask the operator instead of building a "
         "replacement. A capability with no entry here has no bundled tool at all. "
+        "OAuth tools also return connected_accounts with stable connection_id values. "
+        "When more than one account is connected, choose the intended account and pass "
+        "its connection_id to call_tool. "
         "agent_notes adds to a tool's description: how to use it correctly, including what to do "
         "when no action covers what you need; follow it. Empty means there is nothing to add."
     ),
@@ -73,7 +77,8 @@ LIST_BUNDLED_TOOLS_TOOL: JSONObject = {
 DESCRIBE_TOOL_TOOL: JSONObject = {
     "name": "describe_tool",
     "description": (
-        "Return one bundled tool's callable actions with their full JSON input schemas, "
+        "Return one bundled tool's agent usage notes and callable actions with their full "
+        "JSON input schemas, "
         "and the output schema of every action that returns a JSON result. "
         "Call this after list_bundled_tools, for the tool you are about to use; the "
         "schemas are not in your context until you ask for them. An action with no "
@@ -99,13 +104,19 @@ CALL_TOOL_TOOL: JSONObject = {
         "Run one action of one bundled tool. Use the tool_id and action_id from "
         "list_bundled_tools and an input matching the schema from describe_tool. An "
         "approval-gated action returns a pending status with an approval_id instead of a "
-        "result; poll check_tool_approval with that id and do not re-issue the action."
+        "result; poll check_tool_approval with that id and do not re-issue the action. "
+        "For an OAuth tool with multiple connected accounts, connection_id is required "
+        "and binds the call, approval, execution, and audit record to that account."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "tool_id": {"type": "string", "description": "Bundled tool id, e.g. gmail."},
             "action_id": {"type": "string", "description": "Action id from that tool."},
+            "connection_id": {
+                "type": "string",
+                "description": "Connected account id from list_bundled_tools; required when that OAuth tool has multiple accounts.",
+            },
             "input": {"description": "Action input object matching its describe_tool schema."},
         },
         "required": ["tool_id", "action_id"],
@@ -152,8 +163,10 @@ RECENT_NETWORK_DENIALS_TOOL: JSONObject = {
     "name": "recent_network_denials",
     "description": (
         "List this host's most recent denied network requests with each denial's code and "
-        "guidance on what would change the outcome. Use this after an HTTP request, git push, "
-        "or package install failed with a 403 or unclear client error."
+        "guidance on what would change the outcome. Repeated identical denials collapse into "
+        "one entry with a count and first/last timestamps. Counts cover at most the newest "
+        "1,000 denials, and the result reports when that window was truncated. Use this after "
+        "an HTTP request, git push, or package install failed with a 403 or unclear client error."
     ),
     "input_schema": {
         "type": "object",

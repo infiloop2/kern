@@ -141,6 +141,7 @@ class MigrateRunnerTests(unittest.TestCase):
             },
             event_indexes,
         )
+
         with db.transaction() as cur:
             cur.execute(
                 "INSERT INTO oauth_logins"
@@ -180,6 +181,39 @@ class MigrateRunnerTests(unittest.TestCase):
                 " ('app_agent_chat', 'app_personal_web_app_builder')"
             )
             self.assertEqual(cur.fetchall(), [])
+
+    def test_connection_profiles_preserve_oauth_and_enable_only_approvals(self) -> None:
+        migrate.up(target=44, quiet=True)
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO tool_credentials"
+                " (tool_id, account_id, account_label, account_scopes, secret, metadata)"
+                " VALUES ('gmail', 'google-sub', 'person@example.com', '[]'::jsonb,"
+                " 'encrypted', '{}'::jsonb)"
+            )
+            for tool_id in ("gmail", "reddit"):
+                cur.execute(
+                    "INSERT INTO tool_approvals"
+                    " (tool_id, action_id, status, summary, payload, check_token, created_at)"
+                    " VALUES (%s, 'publish', 'pending', 'Publish.', '{}'::jsonb, %s, 1)",
+                    (tool_id, f"{tool_id}-" + "x" * 32),
+                )
+
+        self.assertEqual(migrate.up(target=45, quiet=True), [45])
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT tool_id, connection_id, account_id, account_label"
+                " FROM tool_approvals ORDER BY tool_id"
+            )
+            approvals = cur.fetchall()
+
+        self.assertEqual(
+            approvals,
+            [
+                ("gmail", "default", "", ""),
+                ("reddit", "", "", ""),
+            ],
+        )
 
     def test_onboarding_dismissal_admits_a_single_row(self) -> None:
         self.assertEqual(migrate.up(target=41, quiet=True), list(range(1, 42)))

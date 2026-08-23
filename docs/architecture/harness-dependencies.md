@@ -10,12 +10,12 @@ can break when a harness package is upgraded.
 
 | Harness | Package | Pinned version | Runtime id | Adapter |
 | --- | --- | --- | --- | --- |
-| Codex | `@openai/codex` | `0.144.0` | `codex` | `host/runtime/admin_api/codex_app_server.py` |
-| Claude Code | `@anthropic-ai/claude-code` | `2.1.220` | `claude_code` | `host/runtime/admin_api/claude_code.py` |
-| Grok Build | `@xai-official/grok` | `1.0.5` | `grok` | `host/runtime/admin_api/grok_agent.py` |
-| Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/admin_api/hermes_agent.py` |
+| Codex | `@openai/codex` | `0.144.0` | `codex` | `host/runtime/agent_runtime/codex_app_server.py` |
+| Claude Code | `@anthropic-ai/claude-code` | `2.1.220` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
+| Grok Build | `@xai-official/grok` | `1.0.5` | `grok` | `host/runtime/agent_runtime/grok_agent.py` |
+| Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/agent_runtime/hermes_agent.py` |
 
-The `script` runtime (`host/runtime/admin_api/script_runner.py`) is on that
+The `script` runtime (`host/runtime/agent_runtime/script_runner.py`) is on that
 same adapter contract but is not a harness: it runs a bash script from the
 agent home, so it depends on nothing external, pins no version, and appears in
 no row above. Nothing in this document applies to it beyond the shared
@@ -307,15 +307,29 @@ agent's isolation comes from the OS boundaries (dedicated user, nftables,
 policy proxy), not from harness flags, and `--strict-mcp-config` already
 ignores any MCP configuration outside the host-supplied one.
 
-Bootstrap installs the same `host/bootstrap/agent-home/agents_claude.md`
-contents to `/mnt/kern-agent/agent-home/AGENTS.md` and
-`/mnt/kern-agent/agent-home/CLAUDE.md`. That source file must tell agents
-they are running on a Kern host with full local shell/file permissions,
-must not prompt for local approvals, and must use Kern network-policy
-failures as operator allowlist requests. It also contains the one host-global
-Web App API contract used by every runtime and thread; no per-surface prompt is
-appended at process launch. The installed host files are root-owned, readable,
-and immutable.
+Bootstrap installs the same compact
+`host/bootstrap/agent-home/agents_claude.md` contents to
+`/mnt/kern-agent/agent-home/AGENTS.md` and `CLAUDE.md`. That always-loaded core
+orients agents to Kern, states safety and failure-prone invariants, and carries
+a capability index so lazy discovery has a bootstrap. Detailed Web App,
+memory, and schedule contracts remain in the root-owned release tree under
+`/opt/kern-host/host/bootstrap/agent-home/references/`; the core requires an
+agent to read the relevant file before conditional operations. Mandatory
+memory reads and common App and schedule entrypoints remain in the core, so
+routine work never needs a preliminary reference-file read merely to discover
+a route. Keeping the references outside the durable agent home avoids claiming
+or replacing a user-created path during an upgrade. No per-surface prompt is
+appended at process launch.
+
+Kern deliberately does not splice self-memory or swarm page bodies into a new
+provider prompt. The host cannot know which shared pages are relevant before
+seeing the request, and dynamic agent-written bodies would add stale or
+unrelated text while defeating the stable prefix this split protects. The
+forced core instead requires one identity-scoped self-memory read (outside
+schedule threads) and one request-relevant swarm search at execution start;
+the agent then loads only matching bodies. If this ritual later needs stronger
+enforcement, enforce completion of that retrieval handshake rather than
+injecting an unfiltered memory snapshot.
 
 When resuming a thread, Kern appends:
 

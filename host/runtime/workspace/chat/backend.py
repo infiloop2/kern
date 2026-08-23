@@ -20,6 +20,7 @@ from urllib.parse import quote, unquote
 
 from host.runtime.core import db
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
+from host.runtime.workspace.busy_retry import post_with_busy_retry
 from host.session_options import public_session_options, recorded_session_config, session_config_error
 
 
@@ -363,15 +364,13 @@ def _post_with_busy_retry(
     thread already reads as idle — so a single forwarded attempt would surface
     as a failure for an action that simply needs a moment.
     """
-    for attempt in range(SEND_BUSY_RETRIES):
-        try:
-            return call_admin_api("POST", path, host_request)
-        except WorkspaceError as exc:
-            transient = exc.status == HTTPStatus.CONFLICT and SEND_RETRY_MARKER in exc.message
-            if not transient or attempt == SEND_BUSY_RETRIES - 1:
-                raise
-            time.sleep(SEND_BUSY_RETRY_DELAY_SECONDS)
-    raise WorkspaceError(HTTPStatus.CONFLICT, exhausted_message)
+    return post_with_busy_retry(
+        path,
+        host_request,
+        attempts=SEND_BUSY_RETRIES,
+        exhausted_message=exhausted_message,
+        post=call_admin_api,
+    )
 
 
 def _require_sendable_thread(thread_id: str) -> None:
