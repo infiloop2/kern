@@ -2095,7 +2095,7 @@ print(json.dumps({
                         server,
                         "initial",
                         None,
-                        "claude-fable-5",
+                        "claude-fable-5-1",
                         "ultracode",
                         lambda _message: None,
                     )
@@ -2105,7 +2105,7 @@ print(json.dumps({
 
         self.assertIn("--setting-sources", argv)
         self.assertIn("user", argv)
-        self.assertEqual(argv[argv.index("--model") + 1], "claude-fable-5")
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-fable-5-1")
         self.assertEqual(argv[argv.index("--effort") + 1], "ultracode")
         self.assertIn("--strict-mcp-config", argv)
         self.assertEqual(

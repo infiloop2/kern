@@ -164,9 +164,11 @@ RECENT_NETWORK_DENIALS_TOOL: JSONObject = {
     "description": (
         "List this host's most recent denied network requests with each denial's code and "
         "guidance on what would change the outcome. Repeated identical denials collapse into "
-        "one entry with a count and first/last timestamps. Counts cover at most the newest "
-        "1,000 denials, and the result reports when that window was truncated. Use this after "
-        "an HTTP request, git push, or package install failed with a 403 or unclear client error."
+        "one entry with a count and first/last timestamps; a repeat extends its entry without "
+        "shrinking the window, so a polling client cannot hide rarer denials. One call covers "
+        "the newest 1,000 distinct denials, reading at most 20,000 denial records, and the "
+        "result reports when either bound truncated the window. Use this after an HTTP "
+        "request, git push, or package install failed with a 403 or unclear client error."
     ),
     "input_schema": {
         "type": "object",

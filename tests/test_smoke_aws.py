@@ -136,9 +136,15 @@ class AwsSmokeTeardownTests(unittest.TestCase):
             if (method, path) == ("POST", schedules_base):
                 self.assertEqual(body and body.get("interval_minutes"), 7 * 24 * 60)
                 schedule_created = True
-                return {"schedule": {"id": 7, "revision": 1}}
+                return {
+                    "schedule": {
+                        "id": 7,
+                        "revision": 1,
+                        "thread_id": "schedule-7",
+                    }
+                }
             if method == "DELETE" and path == f"{schedules_base}/7?expected_revision=1":
-                return {"ok": True, "revision": 2}
+                return {"ok": True, "revision": 2, "thread_id": "schedule-7"}
             raise AssertionError((method, path, body))
 
         with patch.object(smoke, "_api", side_effect=fake_api):

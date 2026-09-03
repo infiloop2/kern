@@ -52,6 +52,22 @@ GITHUB_ACTIONS_BLOB_APEX = "blob.core.windows.net"
 GITHUB_ACTIONS_BLOB_ACCOUNT_RE = re.compile(r"productionresultssa(?:[0-9]|1[0-9])")
 GITHUB_ACTIONS_BLOB_ROUTE = (("GET", "HEAD"), ())
 AZURE_SAS_SIGNATURE_RE = re.compile(r"[A-Za-z0-9+/]{43}=")
+# Actions names a run and its job with canonical UUIDs in this fixed log path.
+# A UUID's final group is 12 characters, so about 1.6% of them contain a 10-16
+# digit stretch that the destination-agnostic G11 DIGIT_RUN rule reads as a
+# phone, card, or account number. Match only those two provider-owned
+# identifiers, not arbitrary UUIDs elsewhere on the blob host.
+GITHUB_ACTIONS_BLOB_UUID_PATTERN = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+GITHUB_ACTIONS_BLOB_LOG_PATH_RE = re.compile(
+    rf"^(/actions-results/)(?:{GITHUB_ACTIONS_BLOB_UUID_PATTERN})"
+    rf"(/workflow-job-run-)(?:{GITHUB_ACTIONS_BLOB_UUID_PATTERN})"
+    r"(/logs/job/job-logs\.txt)$"
+)
+# Preserve all 36 bytes when masking each UUID so G1 still measures the length
+# of the path that will actually be forwarded upstream.
+GITHUB_ACTIONS_BLOB_NEUTRAL_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 ROUTES = {
     "github.com": (("GET", "HEAD", "POST"), ()),
     "api.github.com": (("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"), ()),
@@ -73,6 +89,19 @@ def _is_github_actions_blob_host(host: str) -> bool:
         return False
     account = lowered[: -len(suffix)]
     return GITHUB_ACTIONS_BLOB_ACCOUNT_RE.fullmatch(account) is not None
+
+
+def _neutralized_github_actions_blob_path(path: str) -> str:
+    match = GITHUB_ACTIONS_BLOB_LOG_PATH_RE.fullmatch(path)
+    if match is None:
+        return path
+    return (
+        match.group(1)
+        + GITHUB_ACTIONS_BLOB_NEUTRAL_UUID
+        + match.group(2)
+        + GITHUB_ACTIONS_BLOB_NEUTRAL_UUID
+        + match.group(3)
+    )
 
 
 def _route(host: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
@@ -192,6 +221,12 @@ def _github_actions_blob_request_denied(
     disabled, require Azure's exact Base64 HMAC-SHA256 signature shape, then
     substitute a neutral value before applying the unchanged full-query guard.
     All non-``sig`` query keys and values retain the standard checks.
+
+    The run and job UUIDs in Actions' fixed job-log path are neutralized the
+    same way, because a digit-heavy one is otherwise an unreadable log. The
+    replacement has the same length as the UUID, so the structural length
+    guard still measures the URL that will be forwarded. UUIDs and digit runs
+    anywhere else in the path retain the unchanged checks.
     """
     try:
         pairs = parse_qsl(
@@ -218,7 +253,10 @@ def _github_actions_blob_request_denied(
         if AZURE_SAS_SIGNATURE_RE.fullmatch(value) is None:
             return "network_policy_denied"
         sanitized.append((key, "signedurlvalue"))
-    return request_param_denial(path, urlencode(sanitized))
+    return request_param_denial(
+        _neutralized_github_actions_blob_path(path),
+        urlencode(sanitized),
+    )
 
 
 def gate_response(

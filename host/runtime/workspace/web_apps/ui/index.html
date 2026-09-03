@@ -12,20 +12,24 @@
       <div class="app-view-mode">
         <span class="app-title-row">
           <strong id="app-title"></strong>
+          <button id="rename-app" class="app-rename-button" type="button" title="Rename app" aria-label="Rename app">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4.5 14.5-.5 2 2-.5 9-9-1.5-1.5-9 9ZM12.5 6.5 14 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
         </span>
+        <span id="app-subtitle" class="app-subtitle" hidden></span>
       </div>
       <div class="app-view-actions">
-        <button id="rename-app" class="app-toolbar-button" type="button" title="Rename app" aria-label="Rename app">
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4.5 14.5-.5 2 2-.5 9-9-1.5-1.5-9 9ZM12.5 6.5 14 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <span>Rename</span>
-        </button>
         <button id="settings-open" class="app-toolbar-button" type="button" aria-label="Agent" aria-expanded="false" aria-controls="settings-popover">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 7.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6Z M16 11V9l-1.8-.5-.6-1.4.9-1.6-1.4-1.4-1.6.9-1.4-.6L9.6 2h-2l-.5 2.4-1.4.6-1.6-.9-1.4 1.4.9 1.6L3 8.5 1.2 9v2l1.8.5.6 1.4-.9 1.6 1.4 1.4 1.6-.9 1.4.6.5 2.4h2l.5-2.4 1.4-.6 1.6.9 1.4-1.4-.9-1.6.6-1.4L16 11Z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/></svg>
           <span>Agent</span>
         </button>
-        <button id="history-toggle" class="app-toolbar-button history-toggle" type="button" title="Show chat history" aria-label="Show chat history" aria-pressed="false" aria-controls="chat-history">
+        <button id="history-toggle" class="app-toolbar-button history-toggle" type="button" title="Show Chat" aria-label="Show Chat" aria-pressed="false" aria-controls="chat-history">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5.5h12v8H8l-3.5 2v-2H4v-8Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 8.5h6M7 10.8h4" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>
-          <span>History</span>
+          <span>Chat</span>
+        </button>
+        <button id="app-memory" class="app-toolbar-button" type="button" title="Open self-memory" aria-label="Open self-memory">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h8.5A1.5 1.5 0 0 1 15 6v9.5l-3-1.8-3 1.8V6H5v9.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+          <span>Memory</span>
         </button>
         <button id="lock-agent-updates" class="app-toolbar-button lock-agent-updates" type="button" aria-label="Lock agent updates" aria-pressed="false" title="Temporarily stop agents from changing this app">
           <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4.5" y="8.5" width="11" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7 8.5V6a3 3 0 0 1 6 0v2.5M10 12v1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -42,46 +46,24 @@
       </div>
     </header>
 
-    <section id="agent-command-surface" class="agent-command-surface" aria-label="App agent" hidden>
-      <footer class="chat-composer" id="chat-composer">
-        <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
-        <div class="composer-row">
-          <button id="attach-file" class="attach-button" aria-label="Attach files" title="Attach up to 10 files (25 MiB each)">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.2 10.8 4.7-4.7a2.4 2.4 0 0 1 3.4 3.4l-6.2 6.2a4 4 0 0 1-5.7-5.7l6.4-6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-          </button>
-          <textarea id="message" rows="1" placeholder="Describe a change"></textarea>
-          <button id="send-message" class="send-button" aria-label="Send message" title="Send">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.2 3.6 13.9 6.3-13.9 6.5 1.9-5.2 6.6-1.2-6.6-1.2-1.9-5.2Z" fill="currentColor"/></svg>
-            <span>Send</span>
-          </button>
-        </div>
-      </footer>
-      <div id="latest-agent-card" class="latest-agent-card" hidden>
-        <span id="latest-agent-kind" class="latest-agent-kind" aria-hidden="true"></span>
-        <div id="latest-agent-message" class="latest-agent-message" role="status"></div>
-        <button id="stop-turn" class="latest-agent-stop" type="button" aria-label="Stop agent" title="Stop agent" hidden>
-          <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="6" y="6" width="8" height="8" rx="1" fill="currentColor"/></svg>
-          <span>Stop agent</span>
-        </button>
-        <button id="latest-agent-dismiss" class="latest-agent-dismiss" type="button" aria-label="Dismiss agent message">×</button>
+    <div id="settings-popover" class="settings-popover" hidden>
+      <div id="agent-settings" class="agent-settings" aria-label="App agent settings" aria-describedby="agent-settings-idle-note">
+        <label><span>Agent</span><select id="runtime" aria-label="App agent"></select></label>
+        <label><span>Model</span><select id="model" aria-label="App model"></select></label>
+        <label><span>Level</span><select id="effort" aria-label="App effort level"></select></label>
+        <span id="agent-settings-idle-note" class="agent-settings-note" role="tooltip">Agent settings can only be changed while the agent is idle. Stop this app's agent first if you want to change them.</span>
       </div>
-      <div id="settings-popover" class="settings-popover" hidden>
-        <div id="agent-settings" class="agent-settings" aria-label="App agent settings" aria-describedby="agent-settings-idle-note">
-          <label><span>Agent</span><select id="runtime" aria-label="App agent"></select></label>
-          <label><span>Model</span><select id="model" aria-label="App model"></select></label>
-          <label><span>Level</span><select id="effort" aria-label="App effort level"></select></label>
-          <span id="agent-settings-idle-note" class="agent-settings-note" role="tooltip">Agent settings can only be changed while the agent is idle. Stop this app's agent first if you want to change them.</span>
-          <span id="agent-session-change-warning" class="agent-settings-note change" role="status" hidden>Changing Agent, Model, or Level starts a new agent session. Some older context may be omitted, and provider cache reads will be invalidated.</span>
-        </div>
-      </div>
-    </section>
+    </div>
 
     <div class="app-canvas">
-      <section id="chat-history" class="chat-history" aria-label="Chat history" hidden>
+      <section id="chat-history" class="chat-history" aria-label="App chat" hidden>
         <div id="chat-history-scroll" class="chat-history-scroll" tabindex="0">
-          <button id="chat-history-more" class="chat-history-more" type="button" hidden>Load earlier messages</button>
+          <div class="chat-history-loader">
+            <button id="chat-history-more" class="chat-history-more" type="button" hidden>Load earlier messages</button>
+          </div>
           <div id="chat-history-list" class="chat-history-list"></div>
           <p id="chat-history-empty" class="chat-history-empty" hidden>No messages yet.</p>
+          <p id="chat-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
         </div>
       </section>
       <div id="generated-host" class="generated-host" hidden></div>
@@ -89,7 +71,7 @@
         <div class="canvas-empty-inner">
           <div class="canvas-empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2.8c.8 5.3 3.9 8.4 9.2 9.2-5.3.8-8.4 3.9-9.2 9.2-.8-5.3-3.9-8.4-9.2-9.2 5.3-.8 8.4-3.9 9.2-9.2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></div>
           <h1 id="empty-title">Build this app</h1>
-          <p id="empty-description">Describe what you want in the command box.</p>
+          <p id="empty-description">Open Chat to tell the agent what to build.</p>
         </div>
       </div>
       <div id="app-update-veil" class="app-update-veil" hidden>
@@ -106,6 +88,30 @@
         </div>
       </div>
     </div>
+
+    <section id="agent-command-surface" class="agent-command-surface" aria-label="App chat composer" hidden>
+      <div id="chat-status" class="chat-status" role="status" hidden></div>
+      <footer class="chat-composer workspace-composer" id="chat-composer">
+        <div id="composer-running" class="composer-running" hidden>
+          <div class="agent-working">
+            <span>Agent is working</span>
+            <span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          </div>
+          <button id="stop-turn" class="danger ghost sm" type="button">Stop</button>
+        </div>
+        <textarea id="message" rows="1" placeholder="Describe a change"></textarea>
+        <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
+        <div class="composer-bar">
+          <button id="attach-file" class="attach-button" aria-label="Attach files" title="Attach up to 10 files (25 MiB each)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.2 10.8 4.7-4.7a2.4 2.4 0 0 1 3.4 3.4l-6.2 6.2a4 4 0 0 1-5.7-5.7l6.4-6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          </button>
+          <button id="send-message" class="send-button" aria-label="Send" title="Send (Enter)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15.5v-11m0 0L5.5 9M10 4.5 14.5 9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </footer>
+      <p class="composer-hint">Enter to send &middot; Shift+Enter for a new line &middot; The agent will run autonomously within the active network policy</p>
+    </section>
   </section>
 
   <button id="recovery-backdrop" class="recovery-backdrop" aria-label="Dismiss Recovery" hidden></button>

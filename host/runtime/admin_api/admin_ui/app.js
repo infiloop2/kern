@@ -88,6 +88,8 @@ const pendingAppUploads = new Map();
 let chatNavArchived = false;
 let webAppsNavArchived = false;
 let chatNavItems = [];
+let activeChatNavItems = [];
+let scheduledAgentNavItems = [];
 let webAppNavItems = [];
 let workspaceNavigationRefreshSequence = 0;
 let workspaceNavigationActionSequence = 0;
@@ -98,8 +100,14 @@ let workspaceInitialization = null;
 window.KernWorkspaceRoots = {};
 
 const workspaceLastSeen = createWorkspaceLastSeen({
+  api,
   currentTab: () => activeTab,
   currentRoute: () => workspaceRouteFromLocation(),
+  getItem: (kind, id) => (
+    kind === "chat"
+      ? [...chatNavItems, ...scheduledAgentNavItems].find(item => item.thread_id === id)
+      : webAppNavItems.find(item => item.app_id === id)
+  ),
   render: () => renderWorkspaceNavigation(),
 });
 
@@ -517,14 +525,14 @@ function workspaceRouteUrl(resource, itemId = null) {
   if (resource === "apps") {
     return itemId ? `#apps/${encodeURIComponent(itemId)}` : "#apps";
   }
-  if (resource === "memory" || resource === "schedules") {
+  if (["memory", "schedules", "scheduled-agents"].includes(resource)) {
     return itemId ? `#${resource}/${encodeURIComponent(itemId)}` : `#${resource}`;
   }
   return "#home";
 }
 
 function workspaceRouteFromLocation() {
-  const match = location.hash.match(/^#(chat|apps|memory|schedules)(?:\/(.+))?$/);
+  const match = location.hash.match(/^#(chat|apps|memory|schedules|scheduled-agents)(?:\/(.+))?$/);
   if (!match) return null;
   try {
     const resource = match[1];
@@ -750,6 +758,15 @@ window.KernHost = {
       workspaceNavigationActionSequence += 1;
     }
   },
+  openWorkspace(resource, itemId = null) {
+    if (resource === "chat") {
+      return itemId ? openWorkspaceChat(itemId) : openWorkspaceNewChat();
+    }
+    if (resource === "apps") {
+      return itemId ? openWorkspaceWebApp(itemId) : openWorkspaceAppLibrary();
+    }
+    return openWorkspaceGlobal(resource, itemId);
+  },
   openAgentFile(path, fallbackPath = "") {
     openHomeView("files");
     return openLinkedAgentFile(path, fallbackPath);
@@ -817,6 +834,7 @@ async function performWorkspaceMount(name, panelId, htmlPath) {
   const shadow = $(panelId).shadowRoot || $(panelId).attachShadow({ mode: "open" });
   addWorkspaceStyle(shadow, "/admin_ui.css");
   addWorkspaceStyle(shadow, "/workspace/rich_text.css");
+  addWorkspaceStyle(shadow, "/workspace/composer.css");
   const assetName = name === "chat" ? "chat" : name === "web-apps" ? "web-apps" : "global";
   addWorkspaceStyle(shadow, `/workspace/${assetName}.css`);
   shadow.append(root);
@@ -849,10 +867,14 @@ async function refreshWorkspaceNavigation() {
   const chatArchived = chatNavArchived;
   const webAppsArchived = webAppsNavArchived;
   let chat;
+  let activeChat;
+  let scheduledAgents;
   let webApps;
   try {
-    [chat, webApps] = await Promise.all([
+    [chat, activeChat, scheduledAgents, webApps] = await Promise.all([
       api("GET", chatArchived ? "/v1/workspace/chat/threads?archived=true" : "/v1/workspace/chat/threads"),
+      chatArchived ? api("GET", "/v1/workspace/chat/threads") : Promise.resolve(null),
+      api("GET", "/v1/workspace/chat/scheduled-agents"),
       api("GET", webAppsArchived ? "/v1/workspace/web-apps/apps?archived=true" : "/v1/workspace/web-apps/apps"),
     ]);
   } catch (error) {
@@ -869,17 +891,16 @@ async function refreshWorkspaceNavigation() {
     || webAppsArchived !== webAppsNavArchived
   ) return;
   chatNavItems = chat.threads || [];
+  activeChatNavItems = (activeChat || chat).threads || [];
+  scheduledAgentNavItems = scheduledAgents.threads || [];
   webAppNavItems = webApps.apps || [];
-  workspaceLastSeen.initialize("chat", chatNavItems, chatNavArchived);
-  workspaceLastSeen.initialize("apps", webAppNavItems, webAppsNavArchived);
-  workspaceLastSeen.initializeArchived("chat", chatNavItems, chatNavArchived);
-  workspaceLastSeen.initializeArchived("apps", webAppNavItems, webAppsNavArchived);
   renderWorkspaceNavigation();
 }
 
 function renderWorkspaceNavigation() {
   renderWorkspaceRows("chat-nav-items", chatNavItems, "open-chat", chatNavArchived);
   renderWorkspaceRows("web-apps-nav-items", webAppNavItems, "open-web-app", webAppsNavArchived);
+  renderWorkspaceRows("scheduled-agents-nav-items", scheduledAgentNavItems, "open-chat", false);
   const chatArchive = document.querySelector('[data-action="show-chat-archive"]');
   const appArchive = document.querySelector('[data-action="show-web-app-archive"]');
   if (chatArchive) {
@@ -890,7 +911,7 @@ function renderWorkspaceNavigation() {
     appArchive.textContent = webAppsNavArchived ? "Active" : "Archived";
     appArchive.setAttribute("aria-pressed", String(webAppsNavArchived));
   }
-  for (const resource of ["memory", "schedules"]) {
+  for (const resource of ["memory"]) {
     $(`tab-workspace-${resource}`).classList.toggle(
       "active-tab",
       activeTab === "workspace-global" && window.KernWorkspaceGlobal?.resource === resource,
@@ -938,7 +959,6 @@ function renderWorkspaceRows(containerId, items, action, archived) {
     const hasChanges = workspaceLastSeen.hasChanges(
       kind === "chat" ? "chat" : "apps",
       item,
-      archived,
     );
     if (hasChanges) {
       const dot = document.createElement("span");
@@ -948,19 +968,18 @@ function renderWorkspaceRows(containerId, items, action, archived) {
       primary.append(dot);
     }
     button.append(primary);
-    if (kind === "chat") {
-      const settings = [runtimeLabel(item.agent_runtime), item.model, item.effort]
-        .filter(Boolean)
-        .join(" · ");
+    const session = kind === "chat" ? item : item.agent_settings || item.session || {};
+    const settings = [runtimeLabel(session.agent_runtime), session.model, session.effort]
+      .filter(Boolean)
+      .join(" · ");
+    if (settings) {
       const meta = document.createElement("span");
       meta.className = "workspace-nav-meta";
       meta.textContent = settings;
       button.append(meta);
-      const detail = settings ? `${item.name || itemId}\n${settings}` : item.name || itemId;
-      button.title = hasChanges ? `${detail}\nNew activity` : detail;
-    } else {
-      button.title = hasChanges ? `${item.name || itemId}\nNew activity` : item.name || itemId;
     }
+    const detail = settings ? `${item.name || itemId}\n${settings}` : item.name || itemId;
+    button.title = hasChanges ? `${detail}\nNew activity` : detail;
     row.append(button);
     if (archived) {
       const restore = document.createElement("button");
@@ -978,8 +997,16 @@ function renderWorkspaceRows(containerId, items, action, archived) {
 }
 
 async function findChatNavItem(threadId) {
+  if (threadId.startsWith("schedule-")) {
+    let thread = scheduledAgentNavItems.find(item => item.thread_id === threadId);
+    if (thread) return { item: thread, archived: false, scheduled: true, items: scheduledAgentNavItems };
+    const response = await api("GET", "/v1/workspace/chat/scheduled-agents");
+    const items = response.threads || [];
+    thread = items.find(item => item.thread_id === threadId);
+    return thread ? { item: thread, archived: false, scheduled: true, items } : null;
+  }
   let thread = chatNavItems.find(item => item.thread_id === threadId);
-  if (thread) return { item: thread, archived: chatNavArchived, items: chatNavItems };
+  if (thread) return { item: thread, archived: chatNavArchived, scheduled: false, items: chatNavItems };
   for (const archived of [false, true]) {
     const response = await api(
       "GET",
@@ -988,7 +1015,7 @@ async function findChatNavItem(threadId) {
     const items = response.threads || [];
     thread = items.find(item => item.thread_id === threadId);
     if (!thread) continue;
-    return { item: thread, archived, items };
+    return { item: thread, archived, scheduled: false, items };
   }
   return null;
 }
@@ -1013,8 +1040,13 @@ async function openWorkspaceChat(threadId, updateHistory = true) {
   const found = await findChatNavItem(threadId);
   if (actionSequence !== workspaceNavigationActionSequence) return;
   if (!found) return false;
-  chatNavArchived = found.archived;
-  chatNavItems = found.items;
+  if (found.scheduled) {
+    scheduledAgentNavItems = found.items;
+  } else {
+    chatNavArchived = found.archived;
+    chatNavItems = found.items;
+    if (!found.archived) activeChatNavItems = chatNavItems;
+  }
   renderWorkspaceNavigation();
   if (!showTab("workspace-chat", actionSequence)) return;
   if (updateHistory) navigateWorkspaceRoute("chat", threadId);
@@ -1059,7 +1091,12 @@ async function openWorkspaceWebApp(appId, updateHistory = true) {
   if (updateHistory) navigateWorkspaceRoute("apps", appId);
   try {
     await window.KernWebApps.open(found.item, webAppsNavArchived, false);
-    markWorkspaceSeen("apps", found.item);
+    // Opening the App canvas acknowledges its rendered revision, but Chat
+    // messages remain unread until the embedded Chat view is actually shown.
+    markWorkspaceSeen("apps", {
+      ...found.item,
+      latest_message_seq: Number(found.item.seen_message_seq) || 0,
+    });
   } catch (error) {
     if (actionSequence === workspaceNavigationActionSequence) throw error;
   }
@@ -1078,6 +1115,9 @@ async function openWorkspaceAppLibrary(updateHistory = true) {
 }
 
 async function restoreWorkspaceRoute(route) {
+  if (route.resource === "schedules") {
+    route = { ...route, resource: "scheduled-agents" };
+  }
   // Direct loads and copied collection URLs start without history state. Make
   // the current entry a real Workspace entry before any asynchronous restore
   // work so opening a Home detail can preserve it for browser Back.

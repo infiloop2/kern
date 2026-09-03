@@ -7,11 +7,12 @@ share `kern-workspace.service`.
 
 ## Operator UI
 
-The admin sidebar has release-owned **Chat**, **Apps**, **Memory**, and
-**Schedules** sections. Chat rows
-represent conversations; App rows represent generated Web App workspaces.
-Each section can create, select, rename, archive, restore, and show running
-state for its own records. Archive is idle-only and retains all durable state.
+The admin sidebar has release-owned **Chat**, **Apps**, **Scheduled agents**,
+and **Memory** sections. Chat rows represent conversations; App rows represent
+generated Web App workspaces; scheduled-agent rows open their persistent
+transcripts in the conversation renderer. The Schedules management view creates
+and edits model and script schedules. Archive applies to Chat and Apps;
+deleting a schedule hides its transcript until the schedule is restored.
 
 The trusted Workspace HTML, CSS, and JavaScript are fixed admin assets mounted
 into Shadow DOM. They are separate source files for maintainability, but are
@@ -23,18 +24,17 @@ revisioned pages with descriptions, lexical search, soft-delete, history, and
 operator restore. Swarm pages also form a `[[page-id]]` link graph; individual
 pages do not participate in that graph. Schedules are also host-global.
 Each definition stores its own agent runtime, model, effort, cadence, and
-message. Every firing creates a fresh `schedule-ID-run-ID` host thread; runs never
-reuse a provider session or overlap another run of the same schedule. The run
-record snapshots the submitted message and runtime configuration alongside that
-thread id; the UI reads agent responses and activity directly from retained host
-events rather than copying them. Definitions validate only bounded
-field shapes when written; runtime availability is checked when each run starts,
-and an unavailable configuration becomes a failed run with a visible error.
-Schedules have no separate pause flag: deleting one stops future occurrences,
-and restoring it schedules the next occurrence from restoration time.
-Agents can read a bounded, newest-first list of retained failures for active
-schedules without receiving prompts, deleted schedules, successful runs, or
-complete event history; the operator UI retains the full run-history surface.
+message and owns one stable `schedule-N` host thread. Every firing submits
+`This is an automated trigger.` plus the saved message through the ordinary
+thread-message path. Model schedules reuse the same conversation and provider
+session, and a firing steers an active turn when that provider supports it.
+The cadence advances after one delivery attempt; there is no retry queue,
+separate run record, success status, or recent-failure API. Failures before the
+host accepts a message are logged operationally; accepted work uses the normal
+thread event path. Deleting a schedule stops future claims while retaining its
+conversation without moving it into Chat; the hidden transcript returns under
+Scheduled agents when restored. An already-claimed firing may still arrive
+once. Restoring it schedules the next occurrence from restoration time.
 
 A schedule may also select the `script` runtime (`bash`/`fixed`), which runs a
 static bash script from the agent home instead of a model turn — recurring work
@@ -42,19 +42,22 @@ that needs no reasoning. Its message field is the script's absolute path, and
 that is the one definition field whose shape depends on the runtime: the
 spelling is validated when the schedule is written (`host/agent_scripts.py`),
 while whether the file exists is decided by the launcher at run time, because
-the Workspace service cannot read the agent's private home. Everything else is
-unchanged — same thread per firing, same run history, same no-overlap rule —
-except that a script run resumes nothing and has a fixed fifteen-minute budget.
-Schedules are the only surface that offers this runtime, and the host enforces
-that rather than relying on it: the send path admits the script runtime only on
-`schedule-*` threads, so a Chat or App thread cannot be rotated onto a runtime
-that would read its next message as a filename.
+the Workspace service cannot read the agent's private home. The time-bounded
+Bash provider executes it with a fixed fifteen-minute budget; combined output
+is an ordinary agent message and a non-zero exit, timeout, or launch failure is
+an ordinary thread error. Its Scheduled agents row opens the persistent Chat
+as a read-only transcript, without composer or self-memory controls. Schedules
+are the only surface that offers this runtime, and the host enforces that rather than relying on it: new script
+sessions are admitted only on stable numeric `schedule-N` identities, so a
+Chat or App thread cannot be rotated onto a runtime that would read its next
+message as a filename.
 
-Workspace retains at most 10,000 memory pages and 100 schedules. Each resource
-keeps its latest 100 revisions; deleted resources remain restorable for 90
-days. Terminal schedule runs remain for 90 days and are also capped to the
-latest 1,000 per schedule. PostgreSQL sequences are monotonic but intentionally
-allow gaps.
+Workspace retains at most 10,000 memory pages and admits at most 100 active
+schedules. Each resource keeps its latest 100 revisions. Deleted memory pages
+and deleted schedule definitions remain restorable for 90 days. A pruned
+schedule definition does not delete its stable host thread; that data follows
+the host's ordinary thread/event retention and remains outside both navigation
+indexes. PostgreSQL sequences are monotonic but intentionally allow gaps.
 
 ## Browser path
 
@@ -106,7 +109,7 @@ mutation. Chat has no agent-callable product API.
 Agents can also list, search, fetch, create, edit, and delete swarm memory
 pages. Individual `app-*`, `thread-*`, and `schedule-*` pages are absent from
 those routes; App and Chat threads reach only their own page through
-self-memory, while schedule self-memory is disabled. Agents perform ordinary
+self-memory, as do persistent model schedule threads. Agents perform ordinary
 CRUD on global schedules. Revision history and restore stay operator-only.
 The host-wide conversation-history tools are read-only and are not a
 Chat product mutation API.
@@ -119,7 +122,7 @@ agent Unix socket, generated Web Apps, and the global schedule runner. All
 tables live in the admin database's `public` schema: Chat uses `chat_threads`;
 Web Apps uses `web_apps` and `web_app_revisions`; global resources use
 `memory_pages`, `memory_page_revisions`, `memory_page_embeddings`,
-`memory_page_links`, `schedules`, `schedule_revisions`, and `schedule_runs`.
+`memory_page_links`, `schedules`, and `schedule_revisions`.
 
 All schema changes live in the single immutable `host/migrations` stream and
 its `schema_migrations` ledger. `kern-admin` owns every table and performs DDL.

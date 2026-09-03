@@ -46,11 +46,19 @@ let selectedThreadRuntime = null;
 let selectedThreadModel = null;
 let selectedThreadEffort = null;
 let selectedThreadArchived = false;
+let selectedThreadScheduleId = null;
+let selectedThreadHasSession = false;
 let showingArchivedThreads = false;
 let showingActivity = false;
 let activityToggleSequence = 0;
 let sessionOptions = {};
 let activeRuntimes = null;
+const DEFAULT_MODELS = Object.freeze({
+  codex: "gpt-5.6-sol",
+  claude_code: "claude-opus-5",
+  grok: "grok-4.6",
+  hermes: "moonshotai.kimi-k2.5",
+});
 // Captured on first render, before any "(not activated)" suffix is applied.
 const RUNTIME_OPTION_LABELS = new Map();
 let pendingAttachments = [];
@@ -95,8 +103,14 @@ const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => runtime === "claude_code" ? "Claude Code" : runtime === "codex" ? "Codex" : runtime === "grok" ? "Grok" : runtime === "hermes" ? "Hermes" : runtime;
 const optionLabel = value => value.split(/[-_]/).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 // Claude Code model ids carry the provider prefix ("claude-opus-5"); the
-// runtime name already says Claude Code, so the pill reads "Opus 5".
-const modelLabel = (runtime, value) => runtime === "codex" ? value : optionLabel(String(value).replace(/^claude-/, ""));
+// runtime name already says Claude Code, so the pill reads "Opus 5". A model
+// point release uses two numeric id segments, rendered as "Fable 5.1" rather
+// than the generic option label's "Fable 5 1".
+const modelLabel = (runtime, value) => {
+  if (runtime === "codex") return value;
+  const model = String(value).replace(/^claude-/, "").replace(/-(\d+)-(\d+)$/, "-$1.$2");
+  return optionLabel(model);
+};
 const esc = value => KernRichText.escapeHtml(value);
 const markdown = value => KernRichText.renderMarkdown(value);
 const escAttr = value => esc(value).replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -230,6 +244,14 @@ function clearDeferredRefreshError() {
 async function refresh() {
   const sequence = ++refreshSequence;
   const archivedView = showingArchivedThreads;
+  const scheduledViewThreadId = selectedThreadScheduleId !== null
+    ? selectedThreadId
+    : null;
+  const indexChanged = () => (
+    scheduledViewThreadId === null
+      ? selectedThreadScheduleId !== null
+      : selectedThreadId !== scheduledViewThreadId || selectedThreadScheduleId === null
+  );
   try {
     // Re-read every refresh: connecting a provider from Home must reach an
     // already-mounted composer without a full page reload. The option matrix
@@ -237,7 +259,7 @@ async function refresh() {
     // any model or effort the operator picked in the meantime alone.
     const firstLoad = !Object.keys(sessionOptions).length;
     const optionResponse = await api("GET", "/session-options");
-    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
+    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || indexChanged()) return;
     if (!optionResponse.session_options || typeof optionResponse.session_options !== "object") {
       throw new Error("Agent Chat returned invalid session options");
     }
@@ -259,10 +281,11 @@ async function refresh() {
         updateComposerActions();
       }
     }
-    // A successful /threads already proves the backend is up; when it is down
-    // the proxy's own 502 ("workspaces backend unavailable") surfaces as the error.
-    const response = await api("GET", archivedView ? "/threads?archived=true" : "/threads");
-    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
+    const indexPath = scheduledViewThreadId !== null
+      ? "/scheduled-agents"
+      : archivedView ? "/threads?archived=true" : "/threads";
+    const response = await api("GET", indexPath);
+    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || indexChanged()) return;
     threads = response.threads || [];
     const selectedThread = threads.find(thread => thread.thread_id === selectedThreadId);
     if (selectedThread) {
@@ -273,11 +296,24 @@ async function refresh() {
       selectedThreadRuntime = selectedThread.agent_runtime;
       selectedThreadModel = selectedThread.model;
       selectedThreadEffort = selectedThread.effort;
+      selectedThreadScheduleId = selectedThread.schedule_id;
+      selectedThreadHasSession = selectedThread.has_session === true;
       if (!keepPendingSessionChange) loadSelectedSessionControls();
-    } else if (selectedThreadId) {
+    } else if (
+      selectedThreadId
+      && (
+        selectedThreadStatus !== "running"
+        || /^schedule-[1-9][0-9]*$/.test(selectedThreadId)
+      )
+    ) {
       const removedThreadId = selectedThreadId;
+      const removedSchedule = selectedThreadScheduleId !== null;
       clearSelectedThread();
       if (window.location.hash === `#chat/${encodeURIComponent(removedThreadId)}`) {
+        if (removedSchedule) {
+          await window.KernHost.openWorkspace("scheduled-agents");
+          return;
+        }
         window.KernHost.navigateWorkspace("chat", null, true);
       }
     }
@@ -288,17 +324,17 @@ async function refresh() {
     if (selectedThreadId) {
       const refreshedThreadId = selectedThreadId;
       const rendered = await refreshSelectedThread();
-      if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
+      if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || indexChanged()) return;
       const visibleThread = threads.find(thread => thread.thread_id === refreshedThreadId);
       if (rendered && selectedThreadId === refreshedThreadId && visibleThread) {
         markSelectedThreadSeen(visibleThread);
       }
     }
-    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads) return;
+    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || indexChanged()) return;
     clearDeferredRefreshError();
     setStatus("", "refresh");
   } catch (error) {
-    if (sequence === refreshSequence && archivedView === showingArchivedThreads) {
+    if (sequence === refreshSequence && archivedView === showingArchivedThreads && !indexChanged()) {
       deferRefreshError(error.message);
     }
   }
@@ -317,7 +353,7 @@ function renderThreads() {
   $("threads").innerHTML = threads.map(thread => {
     const active = thread.status === "running";
     return `
-    <button class="thread-item${thread.thread_id === selectedThreadId ? " selected" : ""}" data-thread-id="${escAttr(thread.thread_id)}" data-name="${escAttr(thread.name)}" data-runtime="${escAttr(thread.agent_runtime)}" data-model="${escAttr(thread.model)}" data-effort="${escAttr(thread.effort)}" data-status="${escAttr(thread.status || "idle")}" data-archived="${thread.archived ? "true" : "false"}">
+    <button class="thread-item${thread.thread_id === selectedThreadId ? " selected" : ""}" data-thread-id="${escAttr(thread.thread_id)}" data-name="${escAttr(thread.name)}" data-runtime="${escAttr(thread.agent_runtime)}" data-model="${escAttr(thread.model)}" data-effort="${escAttr(thread.effort)}" data-status="${escAttr(thread.status || "idle")}" data-archived="${thread.archived ? "true" : "false"}" data-schedule-id="${escAttr(thread.schedule_id ?? "")}" data-has-session="${thread.has_session ? "true" : "false"}">
       <span class="thread-name"><span>${esc(thread.name)}</span>${active ? `<span class="thread-dot running"></span>` : ""}</span>
       <span class="thread-meta">${esc(runtimeLabel(thread.agent_runtime))} &middot; ${esc(modelLabel(thread.agent_runtime, thread.model))}</span>
       <span class="thread-meta">${esc(relativeTime(thread.last_used_at))}</span>
@@ -327,7 +363,8 @@ function renderThreads() {
 
 function updateComposer() {
   const hasThread = selectedThreadId !== null;
-  const readOnly = showingArchivedThreads || selectedThreadArchived;
+  const scriptTranscript = hasThread && selectedThreadRuntime === "script";
+  const readOnly = showingArchivedThreads || selectedThreadArchived || scriptTranscript;
   const running = hasThread && selectedThreadStatus === "running";
   $("thread-title").textContent = hasThread
     ? selectedThreadName || selectedThreadId
@@ -339,12 +376,20 @@ function updateComposer() {
     : "";
   $("thread-subtitle").textContent = subtitle;
   $("thread-subtitle").hidden = !subtitle;
+  const scheduled = selectedThreadScheduleId !== null;
   $("rename-thread").hidden = !hasThread;
+  $("rename-thread").setAttribute(
+    "aria-label",
+    scheduled ? "Rename scheduled agent" : "Rename thread",
+  );
+  $("rename-thread").title = scheduled ? "Rename scheduled agent" : "Rename thread";
+  $("schedule-settings").hidden = !scheduled;
+  $("thread-memory").hidden = !hasThread || scriptTranscript;
   // Clearing is a write, so it follows the composer: hidden while the thread
   // is archived or the archived list is open, and refused while a turn runs.
-  $("clear-memory").hidden = !hasThread || readOnly;
+  $("clear-memory").hidden = !hasThread || !selectedThreadHasSession || readOnly;
   $("clear-memory").disabled = running;
-  $("archive-thread").hidden = !hasThread;
+  $("archive-thread").hidden = !hasThread || scheduled;
   $("archive-thread").textContent = selectedThreadArchived ? "Unarchive" : "Archive";
   updateActivityToggle(hasThread);
   $("composer").hidden = readOnly;
@@ -354,9 +399,9 @@ function updateComposer() {
   $("archived-toggle").textContent = showingArchivedThreads ? "Show active" : "Show archived";
   // Configuration is chosen on the first message and may be changed on the
   // next idle send. The thread id itself is backend-generated, never typed.
-  $("new-task-runtime").hidden = false;
-  $("new-task-model").hidden = false;
-  $("new-task-effort").hidden = false;
+  $("new-task-runtime").hidden = scheduled;
+  $("new-task-model").hidden = scheduled;
+  $("new-task-effort").hidden = scheduled;
   $("composer-running").hidden = !running;
   $("new-task").placeholder = running
     ? selectedThreadRuntime === "hermes"
@@ -528,9 +573,12 @@ function setSessionOptions(preferredModel, preferredEffort) {
     updateComposerActions();
     return;
   }
+  const defaultingNewThread = selectedThreadId === null && !preferredModel;
   const model = preferredModel && modelValues.includes(preferredModel)
     ? preferredModel
-    : modelValues[0];
+    : defaultingNewThread
+      ? (modelValues.includes(DEFAULT_MODELS[runtime]) ? DEFAULT_MODELS[runtime] : modelValues[0])
+      : modelValues[0];
   $("new-task-model").innerHTML = modelValues
     .map(value => `<option value="${esc(value)}">${esc(modelLabel(runtime, value))}</option>`)
     .join("");
@@ -546,7 +594,9 @@ function setSessionOptions(preferredModel, preferredEffort) {
   }
   const effort = preferredEffort && efforts.includes(preferredEffort)
     ? preferredEffort
-    : efforts[0];
+    : defaultingNewThread && efforts.includes("high")
+      ? "high"
+      : efforts[0];
   $("new-task-effort").innerHTML = efforts
     .map(value => `<option value="${esc(value)}">${esc(optionLabel(value))}</option>`)
     .join("");
@@ -686,7 +736,17 @@ async function removeAttachment(selectionId) {
   }
 }
 
-async function showThread(threadId, name, runtime, model, effort, status, archived) {
+async function showThread(
+  threadId,
+  name,
+  runtime,
+  model,
+  effort,
+  status,
+  archived,
+  scheduleId = null,
+  hasSession = true,
+) {
   saveComposerDraft();
   saveSelectedThreadView();
   activityToggleSequence += 1;
@@ -700,6 +760,8 @@ async function showThread(threadId, name, runtime, model, effort, status, archiv
   selectedThreadEffort = effort;
   selectedThreadStatus = status || "idle";
   selectedThreadArchived = archived;
+  selectedThreadScheduleId = scheduleId;
+  selectedThreadHasSession = hasSession;
   window.KernHost.navigateWorkspace("chat", threadId);
   restoreComposerDraft();
   loadSelectedSessionControls();
@@ -716,7 +778,7 @@ async function showThread(threadId, name, runtime, model, effort, status, archiv
 
 function markSelectedThreadSeen(thread) {
   const acknowledgedMessageSeq = threadEvents.reduce((latest, event) => (
-    ["thread.message", "thread.memory_cleared"].includes(event.event_type)
+    ["thread.message", "thread.memory_cleared", "thread.error"].includes(event.event_type)
       ? Math.max(latest, Number(event.seq) || 0)
       : latest
   ), 0);
@@ -1161,7 +1223,7 @@ async function sendMessageUnlocked() {
   const submittedComposerContext = composerContextSequence;
   const changingSession = sessionConfigurationChanged();
   const request = { input_message: "" };
-  if (startingNewThread || changingSession) {
+  if (startingNewThread || changingSession || !selectedThreadHasSession) {
     Object.assign(request, { agent_runtime: runtime, model, effort });
   }
   if (!startingNewThread) request.thread_id = selectedThreadId;
@@ -1227,6 +1289,7 @@ async function sendMessageUnlocked() {
     selectedThreadModel = model;
     selectedThreadEffort = effort;
     selectedThreadStatus = "running";
+    selectedThreadHasSession = true;
     forceScrollBottom = true;
     if (startingNewThread && window.location.hash === "#chat/new") {
       window.KernHost.navigateWorkspace("chat", result.thread_id, true);
@@ -1305,6 +1368,11 @@ function setRenameThreadOpen(open) {
   if (open) {
     if (!selectedThreadId) return;
     renameThreadReturnFocus = chatRoot.activeElement || $("rename-thread");
+    const scheduled = selectedThreadScheduleId !== null;
+    $("rename-thread-eyebrow").textContent = scheduled ? "Scheduled agent" : "Thread";
+    $("rename-thread-title").textContent = scheduled
+      ? "Rename scheduled agent"
+      : "Rename thread";
     $("rename-thread-input").value = selectedThreadName || selectedThreadId;
     $("rename-thread-error").hidden = true;
     overlay.hidden = false;
@@ -1322,7 +1390,9 @@ async function renameSelectedThread() {
   const threadId = selectedThreadId;
   const name = $("rename-thread-input").value.trim();
   if (!name) {
-    $("rename-thread-error").textContent = "Enter a thread name.";
+    $("rename-thread-error").textContent = selectedThreadScheduleId !== null
+      ? "Enter a scheduled agent name."
+      : "Enter a thread name.";
     $("rename-thread-error").hidden = false;
     $("rename-thread-input").focus();
     return;
@@ -1363,6 +1433,8 @@ function clearSelectedThread() {
   selectedThreadEffort = null;
   selectedThreadStatus = "idle";
   selectedThreadArchived = false;
+  selectedThreadScheduleId = null;
+  selectedThreadHasSession = false;
   restoreComposerDraft();
   resetThreadEvents();
   updateComposer();
@@ -1465,6 +1537,8 @@ chatRoot.addEventListener("click", event => {
       thread.dataset.effort,
       thread.dataset.status,
       thread.dataset.archived === "true",
+      thread.dataset.scheduleId ? Number(thread.dataset.scheduleId) : null,
+      thread.dataset.hasSession === "true",
     ).catch(error => setStatus(error.message));
     return;
   }
@@ -1494,6 +1568,14 @@ $("rename-thread-form").addEventListener("submit", event => {
 });
 $("clear-memory").addEventListener("click", () => clearWorkingMemory().catch(error => setStatus(error.message)));
 $("archive-thread").addEventListener("click", () => setSelectedThreadArchived().catch(error => setStatus(error.message)));
+$("schedule-settings").addEventListener("click", () => {
+  if (selectedThreadScheduleId !== null) {
+    void window.KernHost.openWorkspace("scheduled-agents", selectedThreadScheduleId);
+  }
+});
+$("thread-memory").addEventListener("click", () => {
+  if (selectedThreadId) void window.KernHost.openWorkspace("memory", selectedThreadId);
+});
 $("activity-toggle").addEventListener("click", toggleActivity);
 $("load-earlier").addEventListener("click", () => loadOlderThreadEvents().catch(error => setStatus(error.message)));
 $("chat-scroll").addEventListener("scroll", () => {
@@ -1570,6 +1652,11 @@ setSidebarOpen(false);
 window.KernChat = {
   newThread(prompt = "") {
     showingArchivedThreads = false;
+    if (selectedThreadId === null && sendingMessage) {
+      delete composerDrafts[composerDraftKey()];
+      persistComposerDrafts();
+      $("new-task").value = "";
+    }
     startNewThread();
     // An unsent draft is cheap to lose and the starter prompt is what the
     // operator just asked for, so replace it without interrupting them.
@@ -1591,6 +1678,8 @@ window.KernChat = {
       thread.effort,
       thread.status,
       Boolean(thread.archived),
+      thread.schedule_id,
+      thread.has_session === true,
     );
   },
   refresh,

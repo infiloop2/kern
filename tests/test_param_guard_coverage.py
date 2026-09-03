@@ -62,6 +62,7 @@ GUARDED_FIELDS = {
     ("twitterapi_io", "search_tweets", "query"),
     ("twitterapi_io", "search_tweets", "exclude_usernames"),
     ("zoho_mail", "search_messages", "search_key"),
+    ("zoho_mail", "create_folder", "name"),
 }
 
 # (tool_id, action_id, field) -> reason it is deliberately not guarded.
@@ -232,6 +233,12 @@ EXEMPT_FIELDS = {
     ("zoho_mail", "list_messages", "limit"): TYPED,
     ("zoho_mail", "read_message", "folder_id"): TYPED,
     ("zoho_mail", "read_message", "message_id"): TYPED,
+    ("zoho_mail", "create_folder", "parent_folder_id"): TYPED,
+    ("zoho_mail", "move_messages", "message_ids"): TYPED,
+    ("zoho_mail", "move_messages", "destination_folder_id"): TYPED,
+    ("zoho_mail", "move_messages", "source_folder_id"): TYPED,
+    ("zoho_mail", "move_messages", "include_archived"): TYPED,
+    ("zoho_mail", "archive_messages", "message_ids"): TYPED,
     ("zoho_mail", "send_email", "from_address"): TYPED,
     ("zoho_mail", "send_email", "to"): TYPED,
     ("zoho_mail", "send_email", "cc"): TYPED,
@@ -400,6 +407,19 @@ class BehavioralDenialTest(unittest.TestCase):
             connected_api(),
         )
         self.assert_denied(result, "credential")
+
+    def test_zoho_mail_folder_name_denied_before_provider_call(self) -> None:
+        from host.tools import zoho_mail
+        from test_tools_zoho_mail import connected_api
+
+        with patch.object(zoho_mail, "json_request") as request:
+            result = zoho_mail.BUNDLED_TOOL.execute(
+                "create_folder",
+                {"name": "AKIAIOSFODNN7EXAMPLE"},
+                connected_api(),
+            )
+        self.assert_denied(result, "credential")
+        request.assert_not_called()
 
     def test_gmail_page_token_denied(self) -> None:
         from host.tools import gmail

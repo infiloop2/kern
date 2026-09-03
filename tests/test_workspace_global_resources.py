@@ -16,6 +16,7 @@ import pg_harness
 
 from host.runtime.core import db
 from host.runtime.workspace import agent_api, getting_started, memory, schedules
+from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.web_apps import backend as web_apps
 
@@ -24,6 +25,11 @@ SESSION = {
     "agent_runtime": "codex",
     "model": "gpt-5.6-terra",
     "effort": "high",
+}
+SCRIPT_SESSION = {
+    "agent_runtime": "script",
+    "model": "bash",
+    "effort": "fixed",
 }
 
 SCHEDULE_FIELDS = (
@@ -37,6 +43,16 @@ def schedule_update(schedule: dict, **changes: object) -> dict:
     body.update(changes)
     body["expected_revision"] = schedule["revision"]
     return body
+
+
+def thread_events(thread_id: str) -> list[tuple[Any, ...]]:
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT event_type, error_message FROM agent_events"
+            " WHERE thread_id = %s ORDER BY seq",
+            (thread_id,),
+        )
+        return cur.fetchall()
 
 
 class WorkspaceGlobalDatabaseTests(unittest.TestCase):
@@ -65,15 +81,6 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             },
         )
 
-        # Chat writes this row while sending, and it is the Workspace-owned
-        # signal the checklist is allowed to read.
-        with db.transaction() as cur:
-            cur.execute(
-                "INSERT INTO chat_threads (thread_id, archived)"
-                " VALUES ('thread-7', FALSE)"
-            )
-
-        web_apps.create_web_app()
         schedules.create_schedule(
             {
                 "name": "Daily plan",
@@ -85,6 +92,20 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             },
             actor="user",
         )
+        with active:
+            scheduled_only = getting_started.completion_status()
+        self.assertFalse(scheduled_only["chat_created"])
+        self.assertTrue(scheduled_only["schedule_created"])
+
+        # Chat writes this row while sending, and it is the Workspace-owned
+        # signal the checklist is allowed to read. Scheduled agents use their
+        # own index and do not complete this separate step.
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO chat_threads (thread_id, archived)"
+                " VALUES ('thread-7', FALSE)"
+            )
+        web_apps.create_web_app()
 
         with active:
             self.assertEqual(
@@ -994,8 +1015,8 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
         self.assertEqual(stale.exception.status, HTTPStatus.CONFLICT)
 
-    def test_self_memory_accepts_app_and_chat_thread_kinds(self) -> None:
-        for peer_thread_id in ("app-3", "thread-7"):
+    def test_self_memory_accepts_app_chat_and_scheduled_agent_kinds(self) -> None:
+        for peer_thread_id in ("app-3", "thread-7", "schedule-7"):
             with self.subTest(peer_thread_id=peer_thread_id):
                 created = agent_api.dispatch_call(
                     "PUT",
@@ -1010,7 +1031,12 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 self.assertEqual(created["body"]["page"]["page_id"], peer_thread_id)
 
     def test_self_memory_rejects_missing_schedule_and_unrecognized_identities(self) -> None:
-        for peer_thread_id in (None, "schedule-42-run-9", "legacy-thread"):
+        for peer_thread_id in (
+            None,
+            "schedule-42-run-9",
+            "bash-schedule-42-run-9",
+            "legacy-thread",
+        ):
             with self.subTest(peer_thread_id=peer_thread_id):
                 with self.assertRaises(WorkspaceError) as conflict:
                     agent_api.dispatch_call(
@@ -1061,7 +1087,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         self.assertEqual(sorted(results), ["created", "error:409"])
         self.assertEqual(len(memory.list_pages({})["pages"]), 1)
 
-    def test_schedule_run_uses_a_fresh_thread_and_snapshotted_configuration(self) -> None:
+    def test_scheduled_agent_delivers_to_its_persistent_thread_without_a_run(self) -> None:
         schedule = schedules.create_schedule(
             {
                 "name": "Morning review",
@@ -1084,26 +1110,22 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             calls.append((method, path, body))
             return {
                 "status": "accepted",
-                "thread": {"thread_id": "schedule-1-run-1", "status": "running"},
+                "thread": {"thread_id": schedule["thread_id"], "status": "running"},
             }
 
         with patch.object(schedules, "call_admin_api", side_effect=host):
             self.assertEqual(schedules.run_due(due), 1)
-        run = schedules.list_runs(schedule["id"], {})["runs"][0]
-        self.assertEqual(run["thread_id"], "schedule-1-run-1")
-        self.assertEqual(run["status"], "running")
-        self.assertNotIn("message", run)
-        self.assertEqual(
-            schedules.load_run(schedule["id"], run["id"])["message"],
-            "Summarize open work.",
-        )
+        self.assertEqual(schedule["thread_id"], f"schedule-{schedule['id']}")
         self.assertEqual(
             calls,
             [
                 (
                     "POST",
-                    "/v1/threads/schedule-1-run-1/messages",
-                    {"message": "Summarize open work.", **SESSION},
+                    f"/v1/threads/{schedule['thread_id']}/messages",
+                    {
+                        "message": "This is an automated trigger.\n\nSummarize open work.",
+                        **SESSION,
+                    },
                 )
             ],
         )
@@ -1162,6 +1184,57 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         self.assertEqual(sorted(results), ["created", "error:409"])
         self.assertEqual(len(schedules.list_schedules({})["schedules"]), 1)
 
+    def test_deleted_schedule_releases_the_active_schedule_quota(self) -> None:
+        with patch.object(schedules, "MAX_SCHEDULES", 1):
+            removed = schedules.create_schedule(
+                {
+                    "name": "Removed",
+                    "message": "Review work",
+                    "cadence": "interval",
+                    "interval_minutes": 60,
+                    **SESSION,
+                },
+                actor="user",
+            )
+            schedules.delete_schedule(
+                removed["id"], {"expected_revision": ["1"]}, actor="user"
+            )
+            replacement = schedules.create_schedule(
+                {
+                    "name": "Replacement",
+                    "message": "Review work",
+                    "cadence": "interval",
+                    "interval_minutes": 60,
+                    **SESSION,
+                },
+                actor="user",
+            )
+            with self.assertRaises(WorkspaceError) as full:
+                schedules.restore_revision(
+                    removed["id"], 1, {"expected_revision": 2}
+                )
+        self.assertEqual(replacement["name"], "Replacement")
+        self.assertEqual(full.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("1 active schedules", full.exception.message)
+
+    def test_scheduled_agents_do_not_create_chat_thread_rows(self) -> None:
+        schedule = schedules.create_schedule(
+            {
+                "name": "Independent agent",
+                "message": "Review work",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                **SESSION,
+            },
+            actor="user",
+        )
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT 1 FROM chat_threads WHERE thread_id = %s",
+                (schedule["thread_id"],),
+            )
+            self.assertIsNone(cur.fetchone())
+
     def test_schedule_delete_is_the_only_pause_and_restore_reactivates(self) -> None:
         schedule = schedules.create_schedule(
             {
@@ -1178,6 +1251,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             schedule["id"], {"expected_revision": ["1"]}, actor="user"
         )
         self.assertEqual(deleted["revision"], 2)
+        self.assertEqual(deleted["thread_id"], schedule["thread_id"])
         with self.assertRaises(WorkspaceError) as hidden:
             schedules.load_schedule(schedule["id"])
         self.assertEqual(hidden.exception.status, HTTPStatus.NOT_FOUND)
@@ -1187,6 +1261,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         )
         self.assertFalse(restored["deleted"])
         self.assertEqual(restored["revision"], 3)
+        self.assertEqual(restored["thread_id"], schedule["thread_id"])
         self.assertNotIn("enabled", restored)
 
         with self.assertRaises(WorkspaceError) as old_pause_field:
@@ -1197,14 +1272,95 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
         self.assertEqual(old_pause_field.exception.status, HTTPStatus.BAD_REQUEST)
 
-    def test_active_run_blocks_overlap_while_edits_affect_only_future_runs(self) -> None:
+    def test_scheduled_agent_rename_updates_schedule_and_revision_history(self) -> None:
         schedule = schedules.create_schedule(
             {
-                "name": "Review",
-                "message": "First message",
+                "name": "Morning review",
+                "message": "Review open work",
                 "cadence": "interval",
                 "interval_minutes": 60,
                 **SESSION,
+            },
+            actor="user",
+        )
+        renamed = schedules.rename_scheduled_agent(
+            schedule["thread_id"], "Release review"
+        )
+        self.assertEqual(
+            renamed,
+            {"thread_id": schedule["thread_id"], "name": "Release review"},
+        )
+        current = schedules.load_schedule(schedule["id"])
+        self.assertEqual((current["name"], current["revision"]), ("Release review", 2))
+        revisions = schedules.list_revisions(schedule["id"], {})["revisions"]
+        self.assertEqual([item["name"] for item in revisions], ["Release review", "Morning review"])
+
+    def test_deleted_scheduled_agent_cannot_be_renamed(self) -> None:
+        schedule = schedules.create_schedule(
+            {
+                "name": "Morning review",
+                "message": "Review open work",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                **SESSION,
+            },
+            actor="user",
+        )
+        schedules.delete_schedule(
+            schedule["id"], {"expected_revision": ["1"]}, actor="user"
+        )
+
+        with self.assertRaises(WorkspaceError) as error:
+            schedules.rename_scheduled_agent(schedule["thread_id"], "Release review")
+        self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT schedules.name, schedules.revision,"
+                " schedules.deleted_at IS NOT NULL FROM schedules"
+                " WHERE schedules.id = %s",
+                (schedule["id"],),
+            )
+            self.assertEqual(
+                cur.fetchone(),
+                ("Morning review", 2, True),
+            )
+
+    def test_delete_after_claim_can_still_deliver_once(self) -> None:
+        schedule = schedules.create_schedule(
+            {
+                "name": "Cancel claimed work",
+                "message": "Do not deliver after deletion",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                **SESSION,
+            },
+            actor="user",
+        )
+        claimed = schedules._claim_delivery(
+            schedule["id"], datetime(2030, 1, 1, tzinfo=timezone.utc)
+        )
+        self.assertIsNotNone(claimed)
+        schedules.delete_schedule(
+            schedule["id"], {"expected_revision": ["1"]}, actor="user"
+        )
+
+        with patch.object(
+            schedules,
+            "call_admin_api",
+            return_value={"status": "accepted", "thread": {}},
+        ) as host:
+            schedules._deliver_message(claimed)
+
+        host.assert_called_once()
+
+    def test_script_schedule_uses_one_persistent_thread_across_edits(self) -> None:
+        schedule = schedules.create_schedule(
+            {
+                "name": "Review",
+                "message": "/mnt/kern-agent/agent-home/first.sh",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                **SCRIPT_SESSION,
             },
             actor="agent",
         )
@@ -1214,116 +1370,64 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 "UPDATE schedules SET next_run_at = %s WHERE id = %s",
                 ("2026-08-07T09:00:00Z", schedule["id"]),
             )
-        run = schedules._claim_run(schedule["id"], now)
-        assert run is not None
-        schedules._start_run(run["id"])
+        accepted = {
+            "status": "accepted",
+            "thread": {"thread_id": schedule["thread_id"], "status": "running"},
+        }
+        with patch.object(schedules, "call_admin_api", return_value=accepted):
+            self.assertEqual(schedules.run_due(now), 1)
         updated = schedules.update_schedule(
             schedule["id"],
-            schedule_update(schedule, message="Future message"),
+            schedule_update(schedule, message="/mnt/kern-agent/agent-home/future.sh"),
             actor="user",
         )
         self.assertEqual(updated["revision"], 2)
+        self.assertEqual(updated["thread_id"], schedule["thread_id"])
         with db.transaction() as cur:
-            cur.execute(
-                "UPDATE schedules SET next_run_at = %s WHERE id = %s",
-                ("2026-08-07T09:30:00Z", schedule["id"]),
-            )
-        self.assertIsNone(schedules._claim_run(schedule["id"], now))
-        self.assertEqual(run["message"], "First message")
-        schedules.delete_schedule(
-            schedule["id"], {"expected_revision": ["2"]}, actor="user"
-        )
-        self.assertEqual(schedules.load_run(schedule["id"], run["id"])["status"], "running")
+            cur.execute("SELECT to_regclass('public.schedule_runs')")
+            self.assertEqual(cur.fetchone(), (None,))
 
-    def test_active_due_schedules_do_not_starve_later_due_work(self) -> None:
+    def test_due_batch_delivers_each_schedule_through_its_stable_thread(self) -> None:
         created = [
             schedules.create_schedule(
                 {
                     "name": f"Review {index}",
-                    "message": f"Work {index}",
+                    "message": f"/mnt/kern-agent/agent-home/work-{index}.sh",
                     "cadence": "interval",
                     "interval_minutes": 60,
-                    **SESSION,
+                    **SCRIPT_SESSION,
                 },
                 actor="user",
             )
             for index in range(3)
         ]
         with db.transaction() as cur:
-            for index, schedule in enumerate(created[:2], start=90):
-                cur.execute(
-                    "INSERT INTO schedule_runs"
-                    " (schedule_id, thread_id, message, agent_runtime, model, effort,"
-                    " status, scheduled_for)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, 'running', %s)",
-                    (
-                        schedule["id"], f"schedule-{schedule['id']}-run-{index}",
-                        schedule["message"],
-                        SESSION["agent_runtime"],
-                        SESSION["model"], SESSION["effort"], "2026-08-07T09:00:00Z",
-                    ),
-                )
             cur.execute("UPDATE schedules SET next_run_at = '2026-08-07T09:00:00Z'")
 
-        accepted = {
-            "status": "accepted",
-            "thread": {"thread_id": "schedule-3-run-3", "status": "running"},
-        }
+        def accepted(method: str, path: str, body: object = None) -> dict:
+            del method, body
+            return {
+                "status": "accepted",
+                "thread": {"thread_id": path.split("/")[3], "status": "running"},
+            }
+
         with (
             patch.object(schedules, "DUE_BATCH", 2),
-            patch.object(schedules, "call_admin_api", return_value=accepted) as host,
+            patch.object(schedules, "call_admin_api", side_effect=accepted) as host,
         ):
             self.assertEqual(
                 schedules.run_due(datetime(2026, 8, 7, 10, 0, tzinfo=timezone.utc)),
-                1,
+                2,
             )
         self.assertEqual(
-            host.call_args.args[1], "/v1/threads/schedule-3-run-3/messages"
+            [item.args[1] for item in host.call_args_list],
+            [
+                f"/v1/threads/{created[0]['thread_id']}/messages",
+                f"/v1/threads/{created[1]['thread_id']}/messages",
+            ],
         )
 
-    def test_active_run_reconciliation_checks_every_bounded_active_run(self) -> None:
-        created = [
-            schedules.create_schedule(
-                {
-                    "name": f"Review {index}",
-                    "message": f"Work {index}",
-                    "cadence": "interval",
-                    "interval_minutes": 60,
-                    **SESSION,
-                },
-                actor="user",
-            )
-            for index in range(3)
-        ]
-        with db.transaction() as cur:
-            for index, schedule in enumerate(created, start=90):
-                cur.execute(
-                    "INSERT INTO schedule_runs"
-                    " (schedule_id, thread_id, message, agent_runtime, model, effort,"
-                    " status, scheduled_for)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, 'running', %s)",
-                    (
-                        schedule["id"], f"schedule-{schedule['id']}-run-{index}",
-                        schedule["message"],
-                        SESSION["agent_runtime"],
-                        SESSION["model"], SESSION["effort"], "2026-08-07T09:00:00Z",
-                    ),
-                )
-
-        with patch.object(
-            schedules,
-            "call_admin_api",
-            return_value={"thread": {"status": "running"}},
-        ) as host:
-            self.assertEqual(schedules.refresh_active_runs(), 0)
-        observed = [call.args[1] for call in host.call_args_list]
-        self.assertEqual(observed, [
-            "/v1/threads/schedule-1-run-90",
-            "/v1/threads/schedule-2-run-91",
-            "/v1/threads/schedule-3-run-92",
-        ])
-
-    def test_invalid_schedule_configuration_fails_only_when_invoked(self) -> None:
+    def test_invalid_agent_configuration_is_one_failed_delivery_without_a_run(self) -> None:
         with self.assertRaises(WorkspaceError) as oversized:
             schedules.create_schedule(
                 {
@@ -1361,100 +1465,71 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 raise WorkspaceError(HTTPStatus.BAD_REQUEST, "model is no longer offered")
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "thread not found")
 
-        with patch.object(schedules, "call_admin_api", side_effect=host):
+        with patch.object(schedules, "call_admin_api", side_effect=host) as admin:
             self.assertEqual(
                 schedules.run_due(datetime(2026, 8, 7, 10, 0, tzinfo=timezone.utc)),
                 1,
             )
-        run = schedules.list_runs(schedule["id"], {})["runs"][0]
-        self.assertEqual(run["status"], "failed")
-        self.assertEqual(run["error_message"], "model is no longer offered")
+        self.assertEqual(admin.call_count, 1)
+        delivered = schedules.load_schedule(schedule["id"])
+        self.assertEqual(delivered["last_run_at"], "2026-08-07T10:00:00Z")
+        self.assertGreater(delivered["next_run_at"], delivered["last_run_at"])
 
-    def test_agent_recent_failures_are_bounded_paged_and_active_only(self) -> None:
-        active = schedules.create_schedule(
+    def test_scheduled_agent_transport_failure_is_fire_and_forget(self) -> None:
+        schedule = schedules.create_schedule(
             {
-                "name": "Active review",
+                "name": "Retry transport",
                 "message": "Review open work",
                 "cadence": "interval",
                 "interval_minutes": 60,
                 **SESSION,
             },
-            actor="agent",
+            actor="user",
         )
-        deleted = schedules.create_schedule(
+        due_at = "2026-08-07T09:00:00Z"
+        instant = datetime(2026, 8, 7, 10, 0, tzinfo=timezone.utc)
+        with db.transaction() as cur:
+            cur.execute(
+                "UPDATE schedules SET next_run_at = %s WHERE id = %s",
+                (due_at, schedule["id"]),
+            )
+
+        with patch.object(
+            schedules,
+            "call_admin_api",
+            side_effect=WorkspaceError(
+                HTTPStatus.BAD_GATEWAY,
+                "admin unavailable",
+            ),
+        ):
+            self.assertEqual(schedules.run_due(instant), 1)
+        delivered = schedules.load_schedule(schedule["id"])
+        self.assertEqual(delivered["last_run_at"], "2026-08-07T10:00:00Z")
+        self.assertGreater(delivered["next_run_at"], delivered["last_run_at"])
+        self.assertEqual(schedules.run_due(instant), 0)
+        self.assertEqual(thread_events(schedule["thread_id"]), [])
+
+    def test_invalid_schedule_acceptance_is_only_logged(self) -> None:
+        schedule = schedules.create_schedule(
             {
-                "name": "Deleted review",
-                "message": "Review old work",
+                "name": "Invalid response",
+                "message": "Review open work",
                 "cadence": "interval",
                 "interval_minutes": 60,
                 **SESSION,
             },
-            actor="agent",
+            actor="user",
         )
-        schedules.delete_schedule(
-            deleted["id"], {"expected_revision": ["1"]}, actor="agent"
-        )
+        with patch.object(schedules, "call_admin_api", return_value={}):
+            schedules._deliver_message(schedule)
+        self.assertEqual(thread_events(schedule["thread_id"]), [])
 
-        def insert_run(
-            schedule_id: int, suffix: str, status: str, error: str | None
-        ) -> int:
-            with db.transaction() as cur:
-                cur.execute(
-                    "INSERT INTO schedule_runs"
-                    " (schedule_id, thread_id, message, agent_runtime, model, effort,"
-                    " status, error_message, scheduled_for, finished_at)"
-                    " VALUES (%s, %s, 'private prompt', %s, %s, %s, %s, %s,"
-                    " '2026-08-17T10:00:00Z', '2026-08-17T10:01:00Z')"
-                    " RETURNING id",
-                    (
-                        schedule_id,
-                        f"schedule-{schedule_id}-run-{suffix}",
-                        SESSION["agent_runtime"],
-                        SESSION["model"],
-                        SESSION["effort"],
-                        status,
-                        error,
-                    ),
-                )
-                row = cur.fetchone()
-                assert row is not None
-                return int(row[0])
-
-        older_id = insert_run(active["id"], "1", "failed", "older failure")
-        insert_run(active["id"], "2", "succeeded", None)
-        latest_id = insert_run(active["id"], "3", "failed", "x" * 600)
-        insert_run(deleted["id"], "4", "failed", "deleted failure")
-
-        first = schedules.route_agent(
-            "GET", "/agent/schedules/recent-failures", None, {"limit": ["1"]}
-        )
-        self.assertEqual(len(first["failures"]), 1)
-        failure = first["failures"][0]
-        self.assertEqual(failure["id"], latest_id)
-        self.assertEqual(failure["schedule_id"], active["id"])
-        self.assertEqual(failure["schedule_name"], "Active review")
-        self.assertEqual(failure["status"], "failed")
-        self.assertEqual(len(failure["error_message"]), 500)
-        self.assertNotIn("message", failure)
-        self.assertEqual(first["next_before"], latest_id)
-
-        second = schedules.route_agent(
-            "GET",
-            "/agent/schedules/recent-failures",
-            None,
-            {"limit": ["1"], "before": [str(first["next_before"])]},
-        )
-        self.assertEqual([item["id"] for item in second["failures"]], [older_id])
-        self.assertNotIn("next_before", second)
-
-        with self.assertRaises(WorkspaceError) as invalid_query:
+    def test_schedule_failures_have_no_separate_run_api(self) -> None:
+        with self.assertRaises(WorkspaceError) as missing:
             schedules.route_agent(
-                "GET",
-                "/agent/schedules/recent-failures",
-                None,
-                {"status": ["succeeded"]},
+                "GET", "/agent/schedules/recent-failures", None, {}
             )
-        self.assertEqual(invalid_query.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(missing.exception.status, HTTPStatus.NOT_FOUND)
 
     def test_a_script_schedule_carries_a_path_and_rejects_anything_else(self) -> None:
         script_session = {
@@ -1506,8 +1581,8 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 },
                 actor="user",
             )
-        # ...and a model runtime still takes an ordinary prompt.
-        prompted = schedules.update_schedule(
+        # Runtime changes keep the same schedule and persistent thread.
+        converted = schedules.update_schedule(
             schedule["id"],
             {
                 "expected_revision": schedule["revision"],
@@ -1519,7 +1594,8 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             },
             actor="user",
         )
-        self.assertEqual(prompted["message"], "Summarize open work.")
+        self.assertEqual(converted["agent_runtime"], SESSION["agent_runtime"])
+        self.assertEqual(converted["thread_id"], schedule["thread_id"])
 
     def test_a_script_run_submits_the_path_as_the_thread_message(self) -> None:
         schedule = schedules.create_schedule(
@@ -1545,23 +1621,26 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             calls.append((method, path, body))
             return {
                 "status": "accepted",
-                "thread": {"thread_id": "schedule-1-run-1", "status": "running"},
+                "thread": {"thread_id": schedule["thread_id"], "status": "running"},
             }
 
         with patch.object(schedules, "call_admin_api", side_effect=host):
             self.assertEqual(
                 schedules.run_due(datetime(2026, 8, 7, 10, 0, tzinfo=timezone.utc)), 1
             )
-        # A script run is an ordinary schedule run: same fresh thread, same
-        # submission shape, with the path where the prompt would be.
+        # Bash uses the same stable thread and automated-message shape as every
+        # other runtime; the adapter removes the prefix before validating the path.
         self.assertEqual(
             calls,
             [
                 (
                     "POST",
-                    "/v1/threads/schedule-1-run-1/messages",
+                    f"/v1/threads/{schedule['thread_id']}/messages",
                     {
-                        "message": "/mnt/kern-agent/agent-home/scripts/backup.sh",
+                        "message": (
+                            "This is an automated trigger.\n\n"
+                            "/mnt/kern-agent/agent-home/scripts/backup.sh"
+                        ),
                         "agent_runtime": "script",
                         "model": "bash",
                         "effort": "fixed",
@@ -1570,14 +1649,14 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             ],
         )
 
-    def test_schedule_admission_failure_is_terminal_without_retry(self) -> None:
+    def test_script_schedule_admission_failure_is_terminal_without_retry(self) -> None:
         schedule = schedules.create_schedule(
             {
                 "name": "Review",
-                "message": "Work",
+                "message": "/mnt/kern-agent/agent-home/work.sh",
                 "cadence": "daily",
                 "daily_time": "09:00",
-                **SESSION,
+                **SCRIPT_SESSION,
             },
             actor="user",
         )
@@ -1586,52 +1665,23 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 "UPDATE schedules SET next_run_at = %s WHERE id = %s",
                 ("2026-08-07T08:00:00Z", schedule["id"]),
             )
-        run = schedules._claim_run(
-            schedule["id"], datetime(2026, 8, 7, 10, 0, tzinfo=timezone.utc)
+        failure = WorkspaceError(
+            HTTPStatus.BAD_GATEWAY,
+            "response lost",
         )
-        assert run is not None
-        failure = WorkspaceError(HTTPStatus.BAD_GATEWAY, "response lost")
         with patch.object(schedules, "call_admin_api", side_effect=failure) as host:
-            schedules._launch_run(run)
-        self.assertEqual(host.call_count, 1)
-        failed = schedules.load_run(schedule["id"], run["id"])
-        self.assertEqual(failed["status"], "failed")
-        self.assertEqual(failed["error_message"], "response lost")
-
-    def test_run_events_are_fetched_from_the_host_not_copied(self) -> None:
-        schedule = schedules.create_schedule(
-            {
-                "name": "Review",
-                "message": "Work",
-                "cadence": "interval",
-                "interval_minutes": 60,
-                **SESSION,
-            },
-            actor="user",
-        )
-        with db.transaction() as cur:
-            cur.execute(
-                "INSERT INTO schedule_runs"
-                " (schedule_id, thread_id, message, agent_runtime, model, effort,"
-                " status, scheduled_for)"
-                " VALUES (%s, 'schedule-1-run-9', 'Work', %s, %s, %s, 'succeeded', %s)"
-                " RETURNING id",
-                (
-                    schedule["id"], SESSION["agent_runtime"], SESSION["model"],
-                    SESSION["effort"], "2026-08-07T10:00:00Z",
-                ),
-            )
-            run_id = int(cur.fetchone()[0])
-        event = {"seq": 1, "event_type": "thread.message", "payload": {"message": "Done"}}
-        with patch.object(schedules, "call_admin_api", return_value={"events": [event]}) as host:
-            result = schedules.run_events(schedule["id"], run_id, {})
-        self.assertEqual(result, {"events": [event], "retained": True})
-        self.assertIn("/v1/threads/schedule-1-run-9/events", host.call_args.args[1])
-        with patch.object(schedules, "call_admin_api", return_value={"events": []}):
             self.assertEqual(
-                schedules.run_events(schedule["id"], run_id, {}),
-                {"events": [], "retained": False},
+                schedules.run_due(
+                    datetime(2026, 8, 7, 10, 0, tzinfo=timezone.utc)
+                ),
+                1,
             )
+        self.assertEqual(host.call_count, 1)
+        delivered = schedules.load_schedule(schedule["id"])
+        self.assertEqual(delivered["last_run_at"], "2026-08-07T10:00:00Z")
+        with db.transaction() as cur:
+            cur.execute("SELECT to_regclass('public.schedule_runs')")
+            self.assertEqual(cur.fetchone(), (None,))
 
     def test_large_schedule_history_pages_are_rejected_before_serialization(self) -> None:
         schedule = schedules.create_schedule(
@@ -1657,30 +1707,43 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
         self.assertEqual(oversized_id.exception.status, HTTPStatus.BAD_REQUEST)
 
-    def test_terminal_runs_and_deleted_schedules_expire_together(self) -> None:
+    def test_deleted_script_schedule_is_hidden_during_its_restore_window(self) -> None:
         schedule = schedules.create_schedule(
             {
                 "name": "Temporary",
-                "message": "Do temporary work",
+                "message": "/mnt/kern-agent/agent-home/temporary.sh",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                **SCRIPT_SESSION,
+            },
+            actor="user",
+        )
+        schedules.delete_schedule(
+            schedule["id"], {"expected_revision": ["1"]}, actor="user"
+        )
+        retained = schedules.load_schedule(schedule["id"], include_deleted=True)
+        self.assertTrue(retained["deleted"])
+        self.assertEqual(retained["thread_id"], schedule["thread_id"])
+        self.assertNotIn(
+            schedule["thread_id"],
+            chat._recorded_threads(archived=False, scheduled=True),
+        )
+        self.assertNotIn(
+            schedule["thread_id"],
+            chat._recorded_threads(archived=False, scheduled=False),
+        )
+
+    def test_deleted_schedule_definition_is_pruned_after_ninety_days(self) -> None:
+        schedule = schedules.create_schedule(
+            {
+                "name": "Retained agent",
+                "message": "Review work",
                 "cadence": "interval",
                 "interval_minutes": 60,
                 **SESSION,
             },
             actor="user",
         )
-        with db.transaction() as cur:
-            cur.execute(
-                "INSERT INTO schedule_runs"
-                " (schedule_id, thread_id, message, agent_runtime, model, effort,"
-                " status, scheduled_for, finished_at)"
-                " VALUES (%s, 'schedule-1-run-99', 'Do temporary work', %s, %s, %s, 'succeeded',"
-                " '2026-01-01T00:00:00Z',"
-                " '2026-01-01T00:00:00Z')",
-                (
-                    schedule["id"], SESSION["agent_runtime"], SESSION["model"],
-                    SESSION["effort"],
-                ),
-            )
         schedules.delete_schedule(
             schedule["id"], {"expected_revision": ["1"]}, actor="user"
         )
@@ -1690,58 +1753,35 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 " WHERE id = %s",
                 (schedule["id"],),
             )
-        schedules.prune_retained(datetime(2026, 4, 2, tzinfo=timezone.utc))
-        with self.assertRaises(WorkspaceError):
-            schedules.load_schedule(schedule["id"], include_deleted=True)
-
-    def test_fresh_terminal_run_keeps_its_deleted_schedule_until_retention(self) -> None:
-        schedule = schedules.create_schedule(
-            {
-                "name": "Long running",
-                "message": "Finish after deletion",
-                "cadence": "interval",
-                "interval_minutes": 60,
-                **SESSION,
-            },
-            actor="user",
-        )
-        with db.transaction() as cur:
             cur.execute(
-                "INSERT INTO schedule_runs"
-                " (schedule_id, thread_id, message, agent_runtime, model, effort,"
-                " status, scheduled_for, finished_at)"
-                " VALUES (%s, 'schedule-1-run-100', 'Finish after deletion', %s, %s, %s, 'succeeded',"
-                " '2026-01-01T00:00:00Z',"
-                " '2026-04-01T00:00:00Z') RETURNING id",
-                (
-                    schedule["id"], SESSION["agent_runtime"], SESSION["model"],
-                    SESSION["effort"],
-                ),
-            )
-            run_row = cur.fetchone()
-            assert run_row is not None
-            run_id = int(run_row[0])
-        schedules.delete_schedule(
-            schedule["id"], {"expected_revision": ["1"]}, actor="user"
-        )
-        with db.transaction() as cur:
-            cur.execute(
-                "UPDATE schedules SET deleted_at = '2026-01-01T00:00:00Z' WHERE id = %s",
-                (schedule["id"],),
+                "INSERT INTO workspace_seen"
+                " (item_kind, item_id, message_seq, revision)"
+                " VALUES ('chat', %s, 7, 0)",
+                (schedule["thread_id"],),
             )
 
-        schedules.prune_retained(datetime(2026, 4, 2, tzinfo=timezone.utc))
-        self.assertTrue(
-            schedules.load_schedule(schedule["id"], include_deleted=True)["deleted"]
-        )
         self.assertEqual(
-            schedules.load_run(schedule["id"], run_id)["status"], "succeeded"
+            schedules.prune_deleted(datetime(2026, 4, 2, tzinfo=timezone.utc)),
+            1,
         )
-
-        schedules.prune_retained(datetime(2026, 7, 1, tzinfo=timezone.utc))
-        with self.assertRaises(WorkspaceError):
+        with self.assertRaises(WorkspaceError) as missing_schedule:
             schedules.load_schedule(schedule["id"], include_deleted=True)
-
+        self.assertEqual(missing_schedule.exception.status, HTTPStatus.NOT_FOUND)
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT 1 FROM workspace_seen"
+                " WHERE item_kind = 'chat' AND item_id = %s",
+                (schedule["thread_id"],),
+            )
+            self.assertIsNone(cur.fetchone())
+        self.assertNotIn(
+            schedule["thread_id"],
+            chat._recorded_threads(archived=False, scheduled=True),
+        )
+        self.assertNotIn(
+            schedule["thread_id"],
+            chat._recorded_threads(archived=False, scheduled=False),
+        )
 
 class MemorySearchPagingTests(unittest.TestCase):
     """Hybrid paging depth, without a database."""
@@ -2017,21 +2057,12 @@ class WorkspaceIdentityTests(unittest.TestCase):
         with self.assertRaises(WorkspaceError):
             agent_api.dispatch_call("GET", "/agent/memory?unexpected=", None)
 
-    def test_agent_dispatch_exposes_recent_schedule_failures(self) -> None:
-        expected = {"failures": [{"id": 7, "status": "failed"}]}
-        with patch.object(
-            schedules, "route_agent", return_value=expected
-        ) as schedule_route:
-            response = agent_api.dispatch_call(
+    def test_agent_dispatch_has_no_separate_schedule_failure_resource(self) -> None:
+        with self.assertRaises(WorkspaceError) as missing:
+            agent_api.dispatch_call(
                 "GET", "/agent/schedules/recent-failures?limit=5", None
             )
-        self.assertEqual(response, {"status": 200, "body": expected})
-        schedule_route.assert_called_once_with(
-            "GET",
-            "/agent/schedules/recent-failures",
-            None,
-            {"limit": ["5"]},
-        )
+        self.assertEqual(missing.exception.status, HTTPStatus.NOT_FOUND)
 
     def test_agent_can_discover_valid_schedule_session_options(self) -> None:
         response = schedules.route_agent(

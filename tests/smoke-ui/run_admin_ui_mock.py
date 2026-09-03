@@ -65,6 +65,7 @@ UI_ASSETS.update({
     "/workspace/chat.css": (WORKSPACE_DIR / "chat/ui/agent_chat.css", "text/css; charset=utf-8"),
     "/workspace/rich_text.js": (WORKSPACE_DIR / "chat/ui/rich_text.js", "application/javascript; charset=utf-8"),
     "/workspace/rich_text.css": (WORKSPACE_DIR / "chat/ui/rich_text.css", "text/css; charset=utf-8"),
+    "/workspace/composer.css": (WORKSPACE_DIR / "ui/composer.css", "text/css; charset=utf-8"),
     "/workspace/web-apps.html": (WORKSPACE_DIR / "web_apps/ui/index.html", "text/html; charset=utf-8"),
     "/workspace/web-apps.js": (WORKSPACE_DIR / "web_apps/ui/personal_web_app_builder.js", "application/javascript; charset=utf-8"),
     "/workspace/web-apps.css": (WORKSPACE_DIR / "web_apps/ui/personal_web_app_builder.css", "text/css; charset=utf-8"),
@@ -358,7 +359,7 @@ def seed_state() -> None:
             "completed_min": 178,
         },
         {
-            "thread_id": "website-redesign",
+            "thread_id": "thread-4",
             "agent_runtime": "claude_code",
             "status": "completed",
             "input_message": "Audit the marketing site for mobile layout issues and list concrete fixes.",
@@ -372,7 +373,7 @@ def seed_state() -> None:
             "completed_min": 84,
         },
         {
-            "thread_id": "website-redesign",
+            "thread_id": "thread-4",
             "agent_runtime": "claude_code",
             "status": "failed",
             "input_message": "Push the responsive fixes to staging and verify the deploy.",
@@ -722,7 +723,7 @@ def seed_state() -> None:
             "completed_min": 5,
         },
         {
-            "thread_id": "activity-heavy",
+            "thread_id": "thread-5",
             "agent_runtime": "codex",
             "status": "completed",
             "input_message": "Conversation marker before dense activity",
@@ -812,7 +813,7 @@ def seed_state() -> None:
     # More than one host page ensures the browser session log follows the
     # thread-list keyset cursor instead of silently hiding older sessions.
     for index in range(101):
-        thread_id = f"pagination-history-{index:03d}"
+        thread_id = f"thread-{1000 + index}"
         STATE.threads[thread_id] = {
             "thread_id": thread_id,
             "agent_runtime": "codex",
@@ -2057,13 +2058,14 @@ def clear_thread_memory(thread_id: str) -> dict[str, str]:
 
 
 def list_threads(query: dict[str, list[str]]) -> dict[str, Any]:
-    unsupported = sorted(set(query) - {"before", "limit"})
+    unsupported = sorted(set(query) - {"before", "limit", "prefix"})
     if unsupported:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"unsupported thread list query parameter: {unsupported[0]}")
     limit = int((query.get("limit") or ["100"])[0])
     if not 1 <= limit <= 100:
         raise ApiError(HTTPStatus.BAD_REQUEST, "limit must be between 1 and 100")
     before = 0
+    thread_prefix = (query.get("prefix") or [""])[0]
     if query.get("before"):
         cursor = query["before"][0]
         prefix = "thread-page:"
@@ -2072,7 +2074,11 @@ def list_threads(query: dict[str, list[str]]) -> dict[str, Any]:
         before = int(cursor.removeprefix(prefix))
     with STATE.lock:
         progress_running_turns_locked()
-        threads = [STATE.public_thread(thread) for thread in STATE.threads.values()]
+        threads = [
+            STATE.public_thread(thread)
+            for thread in STATE.threads.values()
+            if thread["thread_id"].startswith(thread_prefix)
+        ]
         ordered = sorted(
             threads,
             key=lambda item: (item["last_used_at"], item["agent_runtime"], item["thread_id"]),

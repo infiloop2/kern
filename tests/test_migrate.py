@@ -174,6 +174,125 @@ class MigrateRunnerTests(unittest.TestCase):
         reverted += migrate.down(target=0, quiet=True)
         self.assertEqual(reverted, list(reversed(applied)))
         self.assertEqual(self.table_names(), {"schema_migrations"})
+
+    def test_persistent_schedules_create_threads_and_drop_old_runs(self) -> None:
+        migrate.up(target=46, quiet=True)
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO schedules"
+                " (id, name, message, cadence, interval_minutes, agent_runtime, model, effort,"
+                " next_run_at, created_at, updated_at) VALUES"
+                " (11, 'Agent', 'Review work', 'interval', 60, 'codex',"
+                " 'gpt-5.6-terra', 'high', '2026-09-03T09:00:00Z',"
+                " '2026-09-02T09:00:00Z', '2026-09-02T09:00:00Z'),"
+                " (12, 'Script', '/mnt/kern-agent/agent-home/job.sh', 'interval', 60,"
+                " 'script', 'bash', 'fixed', '2026-09-03T09:00:00Z',"
+                " '2026-09-02T09:00:00Z', '2026-09-02T09:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO schedule_runs"
+                " (schedule_id, thread_id, message, agent_runtime, model, effort, status, scheduled_for)"
+                " VALUES"
+                " (11, 'schedule-11-run-1', 'Review work', 'codex',"
+                " 'gpt-5.6-terra', 'high', 'succeeded', '2026-09-02T08:00:00Z'),"
+                " (12, 'schedule-12-run-2', '/mnt/kern-agent/agent-home/job.sh',"
+                " 'script', 'bash', 'fixed', 'succeeded', '2026-09-02T08:00:00Z'),"
+                " (11, 'schedule-11-run-3', '/mnt/kern-agent/agent-home/old-job.sh',"
+                " 'script', 'bash', 'fixed', 'succeeded', '2026-09-02T07:00:00Z'),"
+                " (12, 'schedule-12-run-4', 'Old model work', 'codex',"
+                " 'gpt-5.6-terra', 'high', 'succeeded', '2026-09-02T07:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO thread_sessions"
+                " (agent_runtime, thread_id, model, effort) VALUES"
+                " ('codex', 'schedule-11-run-1', 'gpt-5.6-terra', 'high'),"
+                " ('script', 'schedule-12-run-2', 'bash', 'fixed'),"
+                " ('script', 'schedule-11-run-3', 'bash', 'fixed'),"
+                " ('codex', 'schedule-12-run-4', 'gpt-5.6-terra', 'high'),"
+                " ('codex', 'schedule-99-run-99', 'gpt-5.6-terra', 'high')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, message, source) VALUES"
+                " ('2026-09-02T08:00:00Z', 'thread.message',"
+                "  'schedule-11-run-1', 'old model run', 'user'),"
+                " ('2026-09-02T08:00:00Z', 'thread.message',"
+                "  'schedule-12-run-2', 'old script run', 'user'),"
+                " ('2026-09-02T07:00:00Z', 'thread.message',"
+                "  'schedule-11-run-3', 'old script run after kind change', 'user'),"
+                " ('2026-09-02T07:00:00Z', 'thread.message',"
+                "  'schedule-12-run-4', 'old model run after kind change', 'user'),"
+                " ('2026-09-02T06:00:00Z', 'thread.message',"
+                "  'schedule-99-run-99', 'old retained run without metadata', 'agent')"
+            )
+
+        self.assertEqual(migrate.up(target=50, quiet=True), [47, 48, 49, 50])
+        with db.transaction() as cur:
+            cur.execute("SELECT id, thread_id FROM schedules ORDER BY id")
+            self.assertEqual(
+                cur.fetchall(),
+                [(11, "schedule-11"), (12, "schedule-12")],
+            )
+            cur.execute("SELECT thread_id, name FROM chat_threads ORDER BY thread_id")
+            self.assertEqual(cur.fetchall(), [])
+            cur.execute(
+                "SELECT conname FROM pg_constraint"
+                " WHERE conrelid = 'schedules'::regclass"
+                " AND conname IN"
+                " ('schedules_thread_id_check', 'schedules_thread_id_fkey')"
+            )
+            self.assertEqual(cur.fetchall(), [("schedules_thread_id_check",)])
+            cur.execute("SELECT to_regclass('public.schedule_runs')")
+            self.assertEqual(cur.fetchone(), (None,))
+            cur.execute("SELECT thread_id FROM thread_sessions ORDER BY thread_id")
+            self.assertEqual(cur.fetchall(), [])
+            cur.execute(
+                "SELECT thread_id, message FROM agent_events ORDER BY thread_id"
+            )
+            self.assertEqual(cur.fetchall(), [])
+            cur.execute(
+                "INSERT INTO thread_sessions"
+                " (agent_runtime, thread_id, model, effort)"
+                " VALUES ('script', 'schedule-12', 'bash', 'fixed')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, message, source)"
+                " VALUES ('2026-09-02T09:00:00Z', 'thread.message',"
+                " 'schedule-12', 'This is an automated trigger.', 'user')"
+            )
+            cur.execute(
+                "INSERT INTO workspace_seen"
+                " (item_kind, item_id, message_seq, revision)"
+                " VALUES ('chat', 'schedule-11', 7, 0)"
+            )
+        self.assertEqual(migrate.down(target=49, quiet=True), [50])
+        with db.transaction() as cur:
+            cur.execute("SELECT thread_id, name FROM chat_threads ORDER BY thread_id")
+            self.assertEqual(
+                cur.fetchall(),
+                [("schedule-11", "Agent"), ("schedule-12", "Script")],
+            )
+        self.assertEqual(migrate.down(target=48, quiet=True), [49])
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_schema = 'public' AND table_name = 'schedules'"
+                " AND column_name = 'thread_id'"
+            )
+            self.assertEqual(cur.fetchall(), [])
+            cur.execute("SELECT thread_id FROM chat_threads")
+            self.assertEqual(cur.fetchall(), [])
+            cur.execute("SELECT thread_id FROM schedule_runs ORDER BY thread_id")
+            self.assertEqual(cur.fetchall(), [])
+            cur.execute("SELECT thread_id FROM thread_sessions ORDER BY thread_id")
+            self.assertEqual(cur.fetchall(), [])
+            cur.execute("SELECT thread_id FROM agent_events ORDER BY thread_id")
+            self.assertEqual(cur.fetchall(), [])
+            cur.execute(
+                "SELECT item_id FROM workspace_seen WHERE item_kind = 'chat'"
+            )
+            self.assertEqual(cur.fetchall(), [])
         with db.transaction() as cur:
             cur.execute(
                 "SELECT schema_name FROM information_schema.schemata"
@@ -214,6 +333,51 @@ class MigrateRunnerTests(unittest.TestCase):
                 ("reddit", "", "", ""),
             ],
         )
+
+    def test_web_app_agent_settings_backfill_linked_sessions_and_require_values(self) -> None:
+        self.assertEqual(migrate.up(target=47, quiet=True), list(range(1, 48)))
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO web_apps"
+                " (app_id, name, archived, revision, created_at, updated_at) VALUES"
+                " ('app-1', 'Linked', FALSE, 0, '2026-01-01T00:00:00Z',"
+                "  '2026-01-01T00:00:00Z'),"
+                " ('app-2', 'Sessionless', TRUE, 0, '2026-01-01T00:00:00Z',"
+                "  '2026-01-01T00:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO thread_sessions"
+                " (agent_runtime, thread_id, model, effort) VALUES"
+                " ('codex', 'app-1', 'gpt-5.6-terra', 'max')"
+            )
+
+        self.assertEqual(migrate.up(target=48, quiet=True), [48])
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT app_id, agent_runtime, agent_model, agent_effort"
+                " FROM web_apps ORDER BY app_id"
+            )
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("app-1", "codex", "gpt-5.6-terra", "max"),
+                    ("app-2", "codex", "gpt-5.6-sol", "high"),
+                ],
+            )
+            cur.execute(
+                "SELECT column_name, is_nullable FROM information_schema.columns"
+                " WHERE table_schema = 'public' AND table_name = 'web_apps'"
+                " AND column_name IN ('agent_runtime', 'agent_model', 'agent_effort')"
+                " ORDER BY column_name"
+            )
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("agent_effort", "NO"),
+                    ("agent_model", "NO"),
+                    ("agent_runtime", "NO"),
+                ],
+            )
 
     def test_onboarding_dismissal_admits_a_single_row(self) -> None:
         self.assertEqual(migrate.up(target=41, quiet=True), list(range(1, 42)))
@@ -964,18 +1128,20 @@ class MigrateRunnerTests(unittest.TestCase):
                         " has_table_privilege('kern-workspace', 'public.chat_threads', 'SELECT'),"
                         " has_table_privilege('kern-workspace', 'public.web_apps', 'UPDATE'),"
                         " has_table_privilege('kern-workspace', 'public.memory_pages', 'INSERT'),"
-                        " has_table_privilege('kern-workspace', 'public.schedule_runs', 'UPDATE'),"
                         " has_table_privilege('kern-workspace',"
                         " 'public.web_app_revisions', 'SELECT'),"
-                        " has_sequence_privilege('kern-workspace',"
-                        " 'public.schedule_runs_id_seq', 'USAGE'),"
                         " has_table_privilege('kern-workspace', 'public.provider_accounts', 'SELECT'),"
                         " has_schema_privilege('kern-workspace', 'public', 'CREATE')"
                     )
                     self.assertEqual(
                         cur.fetchone(),
-                        (True, True, True, True, True, True, False, False),
+                        (True, True, True, True, False, False),
                     )
+                    cur.execute(
+                        "SELECT to_regclass('public.schedule_runs'),"
+                        " to_regclass('public.schedule_runs_id_seq')"
+                    )
+                    self.assertEqual(cur.fetchone(), (None, None))
                     cur.execute(
                         "SELECT name FROM public.chat_threads"
                         " WHERE thread_id = 'thread-9'"

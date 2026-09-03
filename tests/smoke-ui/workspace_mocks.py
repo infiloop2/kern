@@ -94,7 +94,16 @@ def _load_workspace_smoke(workspace_id: str) -> ModuleType | None:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load workspace smoke module: {smoke_path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Workspace mocks can intentionally collaborate across resources (for
+    # example, Chat exposes the stable thread owned by a scheduled agent).
+    # Register the canonical module name before execution just like Python's
+    # import machinery does so those lookups see the same module instance.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
     configure = getattr(module, "configure_mock", None)
     if configure is not None:
         configure(demo_mode=_DEMO_MODE)

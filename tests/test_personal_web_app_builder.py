@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, call, patch
 import pg_harness
 
 from host.runtime.workspace.web_apps import backend
+from host.runtime.workspace import seen
 from host.runtime.core import db
 from host.runtime.deploy import migrate
 from tests.workspaces.web_apps import smoke as builder_mock
@@ -34,6 +35,9 @@ class AgenticWebAppContractTests(unittest.TestCase):
                 "2026-08-18T10:01:00Z",
                 False,
                 False,
+                "codex",
+                "gpt-5.6-terra",
+                "high",
             ),
             {
                 "status": "idle",
@@ -48,6 +52,53 @@ class AgenticWebAppContractTests(unittest.TestCase):
 
         self.assertEqual(summary["latest_event_seq"], 42)
         self.assertEqual(summary["latest_message_seq"], 40)
+        self.assertEqual(
+            summary["agent_settings"],
+            {"agent_runtime": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        )
+
+    def test_agent_settings_migration_backfills_and_requires_complete_values(self) -> None:
+        migration = (MIGRATIONS_DIR / "0048_web_app_agent_settings.sql").read_text()
+        self.assertIn("ADD COLUMN agent_runtime TEXT", migration)
+        self.assertIn("ADD COLUMN agent_model TEXT", migration)
+        self.assertIn("ADD COLUMN agent_effort TEXT", migration)
+        self.assertIn("FROM thread_sessions AS session", migration)
+        self.assertIn("WHERE session.thread_id = app.app_id", migration)
+        self.assertIn("agent_model = 'gpt-5.6-sol'", migration)
+        self.assertIn("ALTER COLUMN agent_runtime SET NOT NULL", migration)
+
+    def test_app_summary_never_exposes_nullable_agent_settings(self) -> None:
+        with self.assertRaises(backend.WorkspaceError) as error:
+            backend._agent_settings_from_values(None, None, None)
+        self.assertEqual(error.exception.status, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def test_app_default_prefers_an_active_runtime_and_named_model(self) -> None:
+        expected_models = {
+            "claude_code": "claude-opus-5",
+            "grok": "grok-4.6",
+            "hermes": "moonshotai.kimi-k2.5",
+        }
+        for runtime, model in expected_models.items():
+            with self.subTest(runtime=runtime), patch.object(
+                backend, "active_agent_runtimes", return_value=[runtime]
+            ):
+                self.assertEqual(
+                    backend.default_app_agent_settings(),
+                    {
+                        "agent_runtime": runtime,
+                        "model": model,
+                        "effort": "high",
+                    },
+                )
+        with patch.object(backend, "active_agent_runtimes", return_value=[]):
+            self.assertEqual(
+                backend.default_app_agent_settings(),
+                {
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-sol",
+                    "effort": "high",
+                },
+            )
 
     def test_fixed_workspace_identity(self) -> None:
         self.assertFalse((APP_DIR / "agent.md").exists())
@@ -79,18 +130,20 @@ class AgenticWebAppContractTests(unittest.TestCase):
         index = (APP_DIR / "ui" / "index.html").read_text()
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
         css = (APP_DIR / "ui" / "personal_web_app_builder.css").read_text()
+        composer_css = (APP_DIR.parent / "ui" / "composer.css").read_text()
         for element_id in (
             'id="app-view"', 'id="app-update-veil"', 'id="archived-app-veil"',
             'id="app-refresh"', 'id="settings-open"', 'id="recovery-open"',
             'id="lock-agent-updates"', 'id="history-toggle"',
-            'id="latest-agent-card"', 'id="latest-agent-message"',
             'id="agent-command-surface"', 'id="rename-app"',
+            'id="app-subtitle"', 'id="composer-running"', 'id="chat-status"',
             'id="app-history-list"', 'id="recovery-drawer"',
             'id="chat-history"', 'id="chat-history-scroll"',
             'id="chat-history-list"', 'id="chat-history-more"',
+            'id="chat-announcer"',
             'id="stop-turn"',
             'id="attach-file"', 'id="attachments"',
-            'id="agent-settings-idle-note"', 'id="agent-session-change-warning"',
+            'id="agent-settings-idle-note"',
         ):
             self.assertIn(element_id, index)
         self.assertNotIn('id="admin-overlay"', index)
@@ -99,10 +152,10 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertNotIn('id="open-chat"', index)
         self.assertNotIn('id="home-view"', index)
         self.assertNotIn('id="workspace-panel"', index)
-        self.assertNotIn('id="chat-status"', index)
-        self.assertNotIn('id="composer-running"', index)
-        self.assertLess(index.index('id="chat-composer"'), index.index('id="latest-agent-card"'))
-        self.assertLess(index.index('id="chat-composer"'), index.index('id="chat-history"'))
+        self.assertNotIn('id="latest-agent-card"', index)
+        self.assertNotIn('id="latest-agent-message"', index)
+        self.assertLess(index.index('id="chat-history"'), index.index('id="chat-composer"'))
+        self.assertIn('class="chat-composer workspace-composer"', index)
         self.assertNotIn('id="revision-label"', index)
         self.assertIn(
             ".agent-settings.active-locked:hover #agent-settings-idle-note",
@@ -116,12 +169,66 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("selectedAppId = null", source)
         self.assertIn("INITIAL_CONVERSATION_EVENT_PAGES = 1", source)
         self.assertIn("conversationViewStates = new Map()", source)
-        self.assertIn('$("latest-agent-message").textContent = latest.message', source)
+        self.assertIn('$("composer-running").hidden = !running', source)
+        self.assertIn('$("agent-command-surface").hidden = !hasApp || readOnly || !historyMode', source)
+        self.assertIn('`${runtimeLabel(runtime)} · ${modelLabel(runtime, model)} · ${optionLabel(effort)}`', source)
         self.assertIn("stopRunningTurn()", source)
         self.assertIn("sessionConfigurationChanged()", source)
-        self.assertIn("!fromGeneratedApp && sessionConfigurationChanged()", source)
+        self.assertIn("|| sessionConfigurationChanged()", source)
         self.assertIn('classList.toggle("sending", composerSending)', source)
-        self.assertIn(".send-button.sending::after", css)
+        self.assertIn(".send-button.sending::after", composer_css)
+        self.assertNotIn(".send-button", css)
+        self.assertNotIn('id="agent-session-change-warning"', index)
+        self.assertIn('closest(".md-open-file")', source)
+        self.assertIn('sender.className = "chat-history-sender"', source)
+        self.assertIn(".attach-button,\n  .send-button", composer_css)
+        self.assertIn("const persistFallback = Boolean(", source)
+        self.assertNotIn("conversationResponse.agent_settings", source)
+        self.assertIn("selectedAgentSettings = app.agent_settings;", source)
+        self.assertIn("selectedAgentSettings = response.app.agent_settings;", source)
+        self.assertIn("runtimeRunnable(savedSettings.agent_runtime)", source)
+        self.assertIn('codex: "gpt-5.6-sol"', source)
+        self.assertIn('claude_code: "claude-opus-5"', source)
+        self.assertIn('hermes: "moonshotai.kimi-k2.5"', source)
+        self.assertIn("await agentSettingsSaveQueue", source)
+        send_message = source.split("async function sendMessage", 1)[1].split(
+            "\nasync function stopRunningTurn", 1
+        )[0]
+        self.assertLess(
+            send_message.index("const submittedSettings = currentAgentSettings();"),
+            send_message.index("await agentSettingsSaveQueue;"),
+        )
+        self.assertLess(
+            send_message.index("const includeSubmittedSettings ="),
+            send_message.index("await agentSettingsSaveQueue;"),
+        )
+        self.assertIn(
+            "sameAgentSettings(settingsFailure.settings, submittedSettings)",
+            send_message,
+        )
+        self.assertIn("body.agent_runtime = submittedSettings.agent_runtime", send_message)
+        self.assertIn("agentSettingsSaveFailures.get(appId)", source)
+        self.assertIn("pendingAgentSettingsByApp.get(appId) || null", source)
+        self.assertIn("appsRefreshSequence += 1;", source)
+        settings_save = source.split("function persistAgentSettings", 1)[1].split(
+            "\nfunction setSessionOptions", 1
+        )[0]
+        self.assertLess(
+            settings_save.index("appsRefreshSequence += 1;"),
+            settings_save.index("pendingAgentSettingsByApp.delete(appId);"),
+        )
+        self.assertIn(
+            "if (selectedAppId === appId) selectedRefreshSequence += 1;",
+            settings_save,
+        )
+        self.assertNotIn("await window.KernHost.refreshNavigation()", settings_save)
+        self.assertIn("void window.KernHost.refreshNavigation().catch(() => {});", source)
+        self.assertIn("selectedAppOutsideActiveIndex || snapshot.status", source)
+        self.assertIn("const settingsKey = selectedAgentSettings", source)
+        activation = source.split("async function refreshRuntimeActivation", 1)[1].split(
+            "\nasync function refresh()", 1
+        )[0]
+        self.assertIn("setSessionOptions(opening.model, opening.effort);\n    persistAgentSettings();", activation)
         self.assertIn('showChatStatus("Stopping…")', source)
         self.assertIn("window.KernHost.chooseFiles", source)
         self.assertIn("window.KernHost.apiUpload", source)
@@ -155,6 +262,14 @@ class AgenticWebAppContractTests(unittest.TestCase):
             load_older,
         )
         self.assertIn("KernRichText.compactActivityEvents(ordered)", source)
+        self.assertIn("const visibleMessageSeq = historyMode", source)
+        self.assertIn("? renderedMessageSeq", source)
+        self.assertIn(": Number(listed?.seen_message_seq) || 0", source)
+        self.assertIn("renderConversationHistory(true);\n    markSelectedAppSeen();", source)
+        self.assertIn('id="chat-announcer" class="sr-only" role="status"', index)
+        self.assertIn("newestAgentSeq > previousNewestAgentSeq", source)
+        self.assertIn('$("chat-announcer").textContent = `Agent:', source)
+        self.assertIn(".sr-only {", css)
         self.assertIn("refreshSequence !== appsRefreshSequence", source)
         self.assertIn("let appSelectionSequence = 0;", source)
         self.assertIn("selectionSequence !== appSelectionSequence", source)
@@ -164,17 +279,6 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("if (focused && typeof focused.blur", source)
         self.assertIn("stopCapabilityWorker();", source)
         self.assertIn("COMPOSER_DRAFTS_STORAGE_KEY", source)
-        self.assertIn("DISMISSED_AGENT_MESSAGES_STORAGE_KEY", source)
-        self.assertIn("setDismissedAgentMessage", source)
-        self.assertIn("const sessionAgentMessageApps = new Set()", source)
-        send_message = source.split("async function sendMessage", 1)[1].split(
-            "\nasync function stopRunningTurn", 1
-        )[0]
-        self.assertLess(
-            send_message.index("sessionAgentMessageApps.add(appId)"),
-            send_message.index("setDismissedAgentMessage"),
-        )
-        self.assertIn("sessionAgentMessageApps.delete(app.app_id)", source)
         self.assertIn("localStorage.setItem", source)
         self.assertIn("/revisions/${revision}/restore", source)
         self.assertIn("applyAppVersion(response.app);", source)
@@ -373,7 +477,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('params.set("scope", state.memoryScope)', source)
         self.assertIn('state.memoryScope === "individual"', source)
 
-    def test_agent_instructions_are_terse_and_current(self) -> None:
+    def test_agent_instructions_are_current(self) -> None:
         agent_home = REPO_ROOT / "host" / "bootstrap" / "agent-home"
         instructions_path = agent_home / "agents_claude.md"
         instructions = instructions_path.read_text()
@@ -398,8 +502,9 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("GET /agent/memory/search?q=words&limit=20", instructions)
         self.assertIn("GET /agent/memory/pages/{page_id}", instructions)
         self.assertIn("GET /agent/apps/{app_id}/state/{meta|ui|data|data/shape}", instructions)
+        self.assertIn("Migrated Apps inherit the configuration", web_apps)
         self.assertIn("POST /agent/apps/{app_id}/actions", instructions)
-        self.assertIn("GET /agent/schedules/recent-failures", instructions)
+        self.assertIn("There is no run/status or separate failure API", instructions)
         self.assertIn("Global schedules", instructions)
         self.assertIn("content is up to 2,000 characters", memory)
         self.assertIn(
@@ -421,12 +526,24 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("/agent/apps/{app_id}/collections/leads/query", web_apps)
         self.assertIn("/agent/apps/{app_id}/collections/leads/actions", web_apps)
         self.assertIn('app.query("leads", request)', web_apps)
-        self.assertIn("communicate primarily by changing the App", web_apps)
+        self.assertNotIn("communicate primarily by changing the App", web_apps)
+        self.assertNotIn("routine chat narration terse", instructions)
+        self.assertNotIn("A terse completion message", web_apps)
         self.assertIn("/agent/apps/{app_id}/state/data/read", web_apps)
         self.assertIn("/agent/apps/{app_id}/state/data/shape", web_apps)
         self.assertIn("/agent/memory/pages/{page_id}", memory)
-        self.assertIn("/agent/schedules/{id}", schedules)
-        self.assertIn("/agent/schedules/recent-failures", schedules)
+        for route in (
+            "GET /agent/schedules?",
+            "GET /agent/schedules/session-options",
+            "GET /agent/schedules/{id}",
+            "POST /agent/schedules",
+            "PUT /agent/schedules/{id}",
+            "DELETE /agent/schedules/{id}",
+        ):
+            self.assertIn(route, schedules)
+        self.assertIn("complete agent-facing schedule routes", schedules)
+        self.assertIn("There are no per-run or\nrecent-failure routes", schedules)
+        self.assertNotIn("GET /agent/schedules/recent-failures", schedules)
         self.assertNotIn("/agent/apps/{app_id}/instructions", web_apps)
         self.assertNotIn("replace_app", web_apps)
         self.assertNotIn("replace_data", web_apps)
@@ -655,6 +772,65 @@ class AgentActionValidationTests(unittest.TestCase):
 
 
 class BrowserRoutingTests(unittest.TestCase):
+    def test_browser_app_creation_rejects_agent_configuration(self) -> None:
+        settings = {
+            "agent_runtime": "codex",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+        }
+        with self.assertRaises(backend.WorkspaceError) as error:
+            backend.route_browser("POST", "/apps", settings)
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+
+    def test_browser_can_save_app_agent_settings_without_sending_a_message(self) -> None:
+        saved = {
+            "app_id": "app-2",
+            "agent_settings": {
+                "agent_runtime": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "high",
+            },
+        }
+        with (
+            patch.object(backend, "_require_writable_web_app"),
+            patch.object(backend, "set_app_agent_settings", return_value=saved) as save,
+        ):
+            response = backend.route_browser(
+                "PUT",
+                "/apps/app-2/agent-settings",
+                saved["agent_settings"],
+            )
+
+        self.assertEqual(response, {"app": saved})
+        save.assert_called_once_with("app-2", saved["agent_settings"])
+
+    def test_seen_marker_is_capped_at_the_current_app_and_thread(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (7,)
+        transaction = MagicMock()
+        transaction.__enter__.return_value = cursor
+        with (
+            patch.object(backend.db, "transaction", return_value=transaction),
+            patch.object(
+                backend,
+                "call_admin_api",
+                return_value={"thread": {"latest_message_seq": 11}},
+            ),
+            patch.object(
+                backend.seen,
+                "save",
+                return_value={"message_seq": 11, "revision": 7},
+            ) as save,
+        ):
+            result = backend.route_browser(
+                "POST",
+                "/apps/app-2/seen",
+                {"message_seq": 99, "revision": 99},
+            )
+
+        self.assertEqual(result, {"seen": {"message_seq": 11, "revision": 7}})
+        save.assert_called_once_with("apps", "app-2", 11, 7)
+
     def test_browser_routes_are_workspace_scoped(self) -> None:
         state = {"revision": 0}
         idle = {"session": None, "status": "idle"}
@@ -793,7 +969,18 @@ class BrowserRoutingTests(unittest.TestCase):
         self.assertEqual(create.call_count, 2)
         create.assert_called_with(actor="agent")
 
-        for body, query in (({"name": "surprise"}, None), (None, {"x": ["1"]})):
+        for body, query in (
+            ({"name": "surprise"}, None),
+            (
+                {
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-sol",
+                    "effort": "high",
+                },
+                None,
+            ),
+            (None, {"x": ["1"]}),
+        ):
             with self.subTest(body=body, query=query), self.assertRaises(
                 backend.WorkspaceError
             ) as error:
@@ -1910,7 +2097,27 @@ class AgenticWebAppDbTests(unittest.TestCase):
             migrate.up(quiet=True)
             self.__class__._migrated = True
         with db.transaction() as cur:
+            cur.execute("DELETE FROM workspace_seen")
             cur.execute("DELETE FROM web_apps")
+
+    def test_workspace_seen_markers_are_monotonic_and_durable(self) -> None:
+        self.assertEqual(
+            seen.save("apps", "app-1", 12, 4),
+            {"message_seq": 12, "revision": 4},
+        )
+        self.assertEqual(
+            seen.save("apps", "app-1", 8, 3),
+            {"message_seq": 12, "revision": 4},
+        )
+        items = [{"app_id": "app-1"}, {"app_id": "app-2"}]
+        seen.add_to_items("apps", items, "app_id")
+        self.assertEqual(
+            items,
+            [
+                {"app_id": "app-1", "seen_message_seq": 12, "seen_revision": 4},
+                {"app_id": "app-2", "seen_message_seq": 0, "seen_revision": 0},
+            ],
+        )
 
     def test_ui_and_data_share_one_optimistic_revision(self) -> None:
         backend.create_web_app()
@@ -2112,6 +2319,37 @@ class AgenticWebAppDbTests(unittest.TestCase):
             ),
             {"ok": True, "revision": 2},
         )
+
+    def test_agent_settings_persist_before_the_next_message(self) -> None:
+        with patch.object(backend, "active_agent_runtimes", return_value=[]):
+            created = backend.create_web_app()
+        self.assertEqual(
+            created["agent_settings"],
+            {
+                "agent_runtime": "codex",
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+            },
+        )
+        settings = {
+            "agent_runtime": "codex",
+            "model": "gpt-5.6-terra",
+            "effort": "high",
+        }
+        with patch.object(
+            backend,
+            "browser_conversation",
+            return_value={"session": None, "status": "idle"},
+        ):
+            saved = backend.set_app_agent_settings("app-1", settings)
+        self.assertEqual(saved["agent_settings"], settings)
+        with patch.object(
+            backend,
+            "call_admin_api",
+            return_value={"threads": [], "next_before": None},
+        ):
+            listed = backend.list_web_apps({})["apps"]
+        self.assertEqual(listed[0]["agent_settings"], settings)
 
     def test_web_app_creation_stops_at_durable_quota(self) -> None:
         with (

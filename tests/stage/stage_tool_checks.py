@@ -533,9 +533,10 @@ class StageToolChecks:
             "zoho_mail_search_messages", {"search_key": "entire:Kern", "limit": "1"}
         )
         folders = folders_result.get("folders")
+        folder_rows = folders if isinstance(folders, list) else []
         first_folder = (
-            folders[0]
-            if isinstance(folders, list) and folders and isinstance(folders[0], dict)
+            folder_rows[0]
+            if folder_rows and isinstance(folder_rows[0], dict)
             else {}
         )
         folder_id = first_folder.get("folder_id")
@@ -573,7 +574,10 @@ class StageToolChecks:
                 "blocks": [{"type": "paragraph", "text": "Stage proposal; never sent."}],
             },
         )
-        return f"{read_count} bounded mailbox read(s) and {len(senders)} sender address(es); send proposal denied"
+        return (
+            f"{read_count} bounded mailbox read(s) and {len(senders)} sender address(es); "
+            "send proposal denied"
+        )
 
     def _check_calendar_live(self) -> str:
         self._successful_tool_call("google_calendar_read_events", {})

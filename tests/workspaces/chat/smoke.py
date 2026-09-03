@@ -5,6 +5,7 @@ from __future__ import annotations
 from http import HTTPStatus
 from pathlib import Path
 import re
+import sys
 import tempfile
 from typing import Any, Callable
 
@@ -14,6 +15,8 @@ from host.session_options import public_session_options
 ApiErrorFactory = Callable[[HTTPStatus, str], Exception]
 HostApi = Callable[[str, str, dict[str, list[str]], Any], dict[str, Any]]
 AGENT_CHAT_EVENT_PAGE = 6
+WEBSITE_THREAD_ID = "thread-4"
+ACTIVITY_THREAD_ID = "thread-5"
 # Agent Chat surfaces a curated set of the host's seeded threads, a lived-in mix
 # of runtimes and turn states: a shipped infra fix (codex, two completed turns),
 # a design audit with a failed deploy (claude_code), an active incident (codex,
@@ -21,15 +24,17 @@ AGENT_CHAT_EVENT_PAGE = 6
 # (claude_code). The app-facing thread id must equal the host thread id, since
 # event and archive routes query the host by it directly.
 AGENT_CHAT_THREADS: dict[str, dict[str, Any]] = {
-    thread_id: {"thread_id": thread_id, "name": thread_id, "archived": False}
-    for thread_id in (
-        "website-redesign",
-        "thread-1",
-        "thread-2",
-        "thread-3",
-        "activity-heavy",
+    thread_id: {"thread_id": thread_id, "name": name, "archived": False}
+    for thread_id, name in (
+        (WEBSITE_THREAD_ID, "website-redesign"),
+        ("thread-1", "thread-1"),
+        ("thread-2", "thread-2"),
+        ("thread-3", "thread-3"),
+        (ACTIVITY_THREAD_ID, "activity-heavy"),
     )
 }
+SEEN_MESSAGE_SEQS: dict[str, int] = {}
+SEEN_INITIALIZED = False
 
 
 DEMO_MODE = False
@@ -63,11 +68,29 @@ def route_workspace_api(
         }
     if method == "GET" and relative == "threads":
         archived = (query.get("archived") or ["false"])[0] == "true"
-        return {"threads": _list_threads(host_api, archived=archived)}
+        return {"threads": _list_threads(host_api, archived=archived, scheduled=False)}
+    if method == "GET" and relative == "scheduled-agents":
+        return {"threads": _list_threads(host_api, archived=False, scheduled=True)}
+    match = re.fullmatch(r"threads/([^/]+)/seen", relative)
+    if method == "POST" and match:
+        thread_id = match.group(1)
+        _require_agent_chat_thread(thread_id, api_error, include_archived=True)
+        requested = body.get("message_seq") if isinstance(body, dict) else None
+        if isinstance(requested, bool) or not isinstance(requested, int) or requested < 0:
+            raise api_error(HTTPStatus.BAD_REQUEST, "invalid message_seq")
+        detail = host_api("GET", f"/v1/threads/{thread_id}", {}, None)["thread"]
+        stored = max(
+            SEEN_MESSAGE_SEQS.get(thread_id, 0),
+            min(requested, int(detail.get("latest_message_seq") or 0)),
+        )
+        SEEN_MESSAGE_SEQS[thread_id] = stored
+        return {"seen": {"message_seq": stored, "revision": 0}}
     match = re.fullmatch(r"threads/([^/]+)/events", relative)
     if method == "GET" and match:
         thread_id = match.group(1)
         _require_agent_chat_thread(thread_id, api_error, include_archived=True)
+        if thread_id in _scheduled_threads():
+            return {"events": []}
         include_activity = (query.get("activity") or ["true"])[0] == "true"
         event_types = [
             "thread.message",
@@ -101,10 +124,18 @@ def route_workspace_api(
         name = body.get("name", "").strip() if isinstance(body, dict) else ""
         if not name or len(name) > 100:
             raise api_error(HTTPStatus.BAD_REQUEST, "invalid thread name")
+        scheduled = _scheduled_threads(include_deleted=True)
+        if thread_id in scheduled:
+            scheduled[thread_id]["name"] = name
+            return {"thread": {"thread_id": thread_id, "name": name}}
         AGENT_CHAT_THREADS[thread_id]["name"] = name
         return {"thread": dict(AGENT_CHAT_THREADS[thread_id])}
     if method == "POST" and relative == "messages":
-        if isinstance(body, dict) and body.get("thread_id") in AGENT_CHAT_THREADS:
+        scheduled = _scheduled_threads()
+        if isinstance(body, dict) and (
+            body.get("thread_id") in AGENT_CHAT_THREADS
+            or body.get("thread_id") in scheduled
+        ):
             thread_id = body["thread_id"]
             _require_agent_chat_thread(thread_id, api_error)
         elif isinstance(body, dict) and "thread_id" not in body:
@@ -117,11 +148,17 @@ def route_workspace_api(
         for field in ("agent_runtime", "model", "effort"):
             if field in body:
                 host_request[field] = body[field]
+        if thread_id in scheduled and not all(field in host_request for field in ("agent_runtime", "model", "effort")):
+            host_request.update({
+                field: scheduled[thread_id][field]
+                for field in ("agent_runtime", "model", "effort")
+            })
         response = host_api("POST", f"/v1/threads/{thread_id}/messages", {}, host_request)
-        AGENT_CHAT_THREADS.setdefault(
-            thread_id,
-            {"thread_id": thread_id, "name": thread_id, "archived": False},
-        )
+        if thread_id not in scheduled:
+            AGENT_CHAT_THREADS.setdefault(
+                thread_id,
+                {"thread_id": thread_id, "name": thread_id, "archived": False},
+            )
         return {"action": response["status"], "thread_id": thread_id}
     match = re.fullmatch(r"threads/([^/]+)/stop", relative)
     if method == "POST" and match:
@@ -156,7 +193,7 @@ def desktop_smoke(page: Any) -> None:
     expect(page.locator("#chat-nav-items")).to_contain_text("website-redesign")
     expect(page.locator("#chat-nav-items")).to_contain_text("thread-1")
     website_nav = page.locator(
-        "#chat-nav-items [data-action='open-chat'][data-item-id='website-redesign']"
+        f"#chat-nav-items [data-action='open-chat'][data-item-id='{WEBSITE_THREAD_ID}']"
     )
     expect(website_nav.locator(".workspace-nav-meta")).to_have_text(
         "Claude Code · claude-opus-5 · high"
@@ -168,9 +205,9 @@ def desktop_smoke(page: Any) -> None:
         "Codex · gpt-5.6-terra · high"
     )
 
-    _open_host_thread(page, "website-redesign")
+    _open_host_thread(page, WEBSITE_THREAD_ID)
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
-    expect(page).to_have_url(re.compile(r"#chat/website-redesign$"))
+    expect(page).to_have_url(re.compile(rf"#chat/{WEBSITE_THREAD_ID}$"))
     # Desktop uses the host sidebar, so the equivalent in-frame control is
     # hidden here; dispatch its registered action directly.
     frame.locator("#new-thread").evaluate("button => button.click()")
@@ -180,12 +217,12 @@ def desktop_smoke(page: Any) -> None:
     page.reload(wait_until="domcontentloaded")
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
-    expect(page).to_have_url(re.compile(r"#chat/website-redesign$"))
+    expect(page).to_have_url(re.compile(rf"#chat/{WEBSITE_THREAD_ID}$"))
     page.evaluate(
-        """() => window.KernHost.api(
+        f"""() => window.KernHost.api(
           "POST",
-          "/v1/workspace/chat/threads/website-redesign/archive",
-          {},
+          "/v1/workspace/chat/threads/{WEBSITE_THREAD_ID}/archive",
+          {{}},
         )"""
     )
     page.evaluate("window.KernChat.refresh()")
@@ -193,22 +230,22 @@ def desktop_smoke(page: Any) -> None:
     expect(page).to_have_url(re.compile(r"#chat/new$"))
     page.locator('[data-action="show-chat-archive"]').click()
     archived_nav = page.locator(
-        "#chat-nav-items [data-action='open-chat'][data-item-id='website-redesign']"
+        f"#chat-nav-items [data-action='open-chat'][data-item-id='{WEBSITE_THREAD_ID}']"
     )
     expect(archived_nav).to_be_visible()
     expect(archived_nav.locator(".workspace-nav-unseen")).to_have_count(0)
     page.locator('[data-action="show-chat-archive"]').click()
     expect(archived_nav).to_have_count(0)
     page.evaluate(
-        """() => window.KernHost.api(
+        f"""() => window.KernHost.api(
           "POST",
-          "/v1/workspace/chat/threads/website-redesign/unarchive",
-          {},
+          "/v1/workspace/chat/threads/{WEBSITE_THREAD_ID}/unarchive",
+          {{}},
         )"""
     )
     page.evaluate("window.KernHost.refreshNavigation()")
-    _open_host_thread(page, "website-redesign")
-    expect(page).to_have_url(re.compile(r"#chat/website-redesign$"))
+    _open_host_thread(page, WEBSITE_THREAD_ID)
+    expect(page).to_have_url(re.compile(rf"#chat/{WEBSITE_THREAD_ID}$"))
     page.get_by_role("button", name="Home", exact=True).click()
     expect(page).to_have_url(re.compile(r"#home$"))
     page.go_back()
@@ -217,7 +254,7 @@ def desktop_smoke(page: Any) -> None:
     frame.locator("#archived-toggle").evaluate("button => button.click()")
     expect(frame.locator(".thread-title")).to_have_text("Archived threads")
     expect(page).to_have_url(re.compile(r"#chat/new$"))
-    _open_host_thread(page, "website-redesign")
+    _open_host_thread(page, WEBSITE_THREAD_ID)
     expect(frame.get_by_role("switch", name="Activity", exact=True)).to_be_visible()
     expect(frame.locator("#new-task-runtime")).to_have_value("claude_code")
     expect(frame.locator("#new-task-runtime")).to_be_enabled()
@@ -229,7 +266,9 @@ def desktop_smoke(page: Any) -> None:
     expect(
         frame.locator("#new-task-runtime option[value='codex']")
     ).to_have_text("Codex")
-    frame.locator("#new-task-model").select_option("claude-fable-5")
+    fable = frame.locator("#new-task-model option[value='claude-fable-5-1']")
+    expect(fable).to_have_text("Fable 5.1")
+    frame.locator("#new-task-model").select_option("claude-fable-5-1")
     expect(frame.locator("#session-change-warning")).to_be_visible()
     expect(frame.locator("#session-change-warning")).to_contain_text(
         "provider cache reads will be invalidated"
@@ -287,7 +326,7 @@ def desktop_smoke(page: Any) -> None:
     _open_host_thread(page, "thread-1")
     expect(frame.locator("#new-task")).to_have_value("")
     frame.locator("#new-task").fill("Thread-one unsent draft")
-    _open_host_thread(page, "website-redesign")
+    _open_host_thread(page, WEBSITE_THREAD_ID)
     expect(frame.locator("#new-task")).to_have_value("Website-specific unsent draft")
     frame.locator("#new-task").fill("")
     _open_host_thread(page, "thread-1")
@@ -401,6 +440,7 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator(".thread-title")).to_have_text("New thread")
     assert len(upload_requests) == 2, "the first Send must stop after the second attachment fails"
     frame.get_by_role("button", name="Send").click()
+    expect(frame.locator("#status")).to_be_hidden()
     expect(frame.locator(".thread-title")).to_have_text(re.compile(r"^thread-[0-9]+$"))
     assert len(upload_requests) == 3, "retry must upload only the unfinished attachment"
     assert sum("reference%20image.png" in url for url in upload_requests) == 1
@@ -498,8 +538,8 @@ def desktop_smoke(page: Any) -> None:
     _toggle_host_chat_archive(page)
     expect(page.locator("#chat-nav-items")).to_contain_text(generated_thread)
     _open_host_thread(page, generated_thread)
-    # A new thread opens on the first offered configuration, however it was
-    # started. The thread open here runs gpt-5.6-luna at max, and neither its
+    # A new thread opens on the first active runtime's named default configuration,
+    # however it was started. The thread open here runs gpt-5.6-luna at max, and neither its
     # model nor its effort may carry into a thread started from the host
     # navigation, which reaches the composer through a different control than
     # the in-frame button.
@@ -507,9 +547,9 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#new-task-effort")).to_have_value("max")
     _start_host_chat(page)
     expect(frame.locator("#new-task-runtime")).to_have_value("codex")
-    expect(frame.locator("#new-task-model")).to_have_value("gpt-5.6-terra")
+    expect(frame.locator("#new-task-model")).to_have_value("gpt-5.6-sol")
     expect(frame.locator("#new-task-effort")).to_have_value("high")
-    # Claude Code offers Opus first, so switching runtimes lands there.
+    # A new thread uses the named default for its runtime.
     frame.locator("#new-task-runtime").select_option("claude_code")
     expect(frame.locator("#new-task-model")).to_have_value("claude-opus-5")
     expect(frame.locator("#new-task-effort")).to_have_value("high")
@@ -611,11 +651,13 @@ def _assert_mobile_header_and_navigation(page: Any, frame: Any) -> None:
     page.locator("#nav-backdrop").click(position={"x": 380, "y": 400})
 
 
-def _open_host_thread(page: Any, name: str) -> None:
+def _open_host_thread(page: Any, thread_id: str) -> None:
     from playwright.sync_api import expect
 
     _open_mobile_host_navigation(page)
-    thread = page.locator("#chat-nav-items .workspace-nav-item", has_text=name)
+    thread = page.locator(
+        f"#chat-nav-items .workspace-nav-item[data-item-id='{thread_id}']"
+    )
     expect(thread).to_be_visible()
     thread.click()
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
@@ -847,7 +889,7 @@ def _assert_activity_visibility_toggle(page: Any, frame: Any, turn: Any) -> None
     # prompt can appear in the initial view only when filtering happens before
     # the backend applies its six-event page limit.
     toggle.click()
-    _open_host_thread(page, "activity-heavy")
+    _open_host_thread(page, ACTIVITY_THREAD_ID)
     expect(frame.locator("#thread-detail")).to_contain_text(
         "Conversation marker before dense activity"
     )
@@ -1206,13 +1248,15 @@ def _generate_thread_id() -> str:
     return f"thread-{max(numbers, default=0) + 1}"
 
 
-def _list_threads(host_api: HostApi, *, archived: bool = False) -> list[dict[str, Any]]:
+def _list_threads(
+    host_api: HostApi, *, archived: bool = False, scheduled: bool = False
+) -> list[dict[str, Any]]:
     """Mirror the real backend's paged host-summary join.
 
     The host contributes session config and live status; the app contributes
     names, archive state, and the ownership set.
     """
-    recorded = {
+    recorded = {} if scheduled else {
         thread_id: thread
         for thread_id, thread in AGENT_CHAT_THREADS.items()
         if thread["archived"] == archived
@@ -1221,7 +1265,10 @@ def _list_threads(host_api: HostApi, *, archived: bool = False) -> list[dict[str
     seen_before: set[str] = set()
     before: str | None = None
     while True:
-        query = {"limit": ["100"]}
+        query = {
+            "limit": ["100"],
+            "prefix": ["schedule-" if scheduled else "thread-"],
+        }
         if before is not None:
             query["before"] = [before]
         page = host_api("GET", "/v1/threads", query, None)
@@ -1238,11 +1285,59 @@ def _list_threads(host_api: HostApi, *, archived: bool = False) -> list[dict[str
             **summary,
             "name": recorded[summary["thread_id"]]["name"],
             "archived": archived,
+            "schedule_id": None,
+            "next_run_at": None,
+            "has_session": True,
         }
         for summary in summaries
         if summary["thread_id"] in recorded
     ]
+    summaries_by_id = {summary["thread_id"]: summary for summary in summaries}
+    if scheduled:
+        for thread_id, schedule in _scheduled_threads().items():
+            summary = summaries_by_id.get(thread_id)
+            has_session = summary is not None
+            threads.append({
+                **(summary or {
+                    "thread_id": thread_id,
+                    "agent_runtime": schedule["agent_runtime"],
+                    "model": schedule["model"],
+                    "effort": schedule["effort"],
+                    "status": "idle",
+                    "last_used_at": schedule["created_at"],
+                    "latest_event_seq": 0,
+                    "latest_message_seq": 0,
+                }),
+                "name": schedule["name"],
+                "archived": False,
+                "schedule_id": schedule["id"],
+                "next_run_at": schedule["next_run_at"],
+                "has_session": has_session,
+            })
+    global SEEN_INITIALIZED
+    if not SEEN_INITIALIZED:
+        for thread in threads:
+            SEEN_MESSAGE_SEQS[thread["thread_id"]] = int(
+                thread.get("latest_message_seq") or 0
+            )
+        # Leave one seeded thread behind its current message so the host-shell
+        # smoke can exercise the durable unread and mark-seen flow.
+        SEEN_MESSAGE_SEQS["thread-1"] = 0
+        SEEN_INITIALIZED = True
+    for thread in threads:
+        thread["seen_message_seq"] = SEEN_MESSAGE_SEQS.get(thread["thread_id"], 0)
     return sorted(threads, key=lambda item: item["last_used_at"], reverse=True)
+
+
+def _scheduled_threads(*, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
+    module = sys.modules.get("kern_smoke_global")
+    schedules = getattr(module, "SCHEDULES", {}) if module is not None else {}
+    return {
+        schedule["thread_id"]: schedule
+        for schedule in schedules.values()
+        if schedule.get("thread_id")
+        and (include_deleted or not schedule.get("deleted"))
+    }
 
 
 def _require_agent_chat_thread(
@@ -1252,6 +1347,8 @@ def _require_agent_chat_thread(
     include_archived: bool = False,
 ) -> None:
     thread = AGENT_CHAT_THREADS.get(thread_id)
+    if thread is None and thread_id in _scheduled_threads(include_deleted=True):
+        return
     if thread is None or (thread["archived"] and not include_archived):
         raise api_error(HTTPStatus.NOT_FOUND, "thread not found")
 

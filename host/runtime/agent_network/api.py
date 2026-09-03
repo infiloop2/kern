@@ -74,9 +74,19 @@ def _list_network_integrations() -> dict[str, Any]:
 
 # A repeating denial (a polling client retrying the same blocked request) can
 # push everything else out of the feed within the hour, so identical denials
-# collapse into one counted entry. The scan is bounded so a flood cannot turn
-# one tool call into an unbounded table walk.
-_DENIAL_SCAN_LIMIT = 1000
+# collapse into one counted entry. Only the first occurrence of an identity
+# consumes the distinct budget — repeats merely extend their entry — so a
+# poller flood cannot age rare one-off denials out of the tool's reach. The
+# row bound still keeps one tool call from becoming an unbounded table walk.
+_DENIAL_DISTINCT_SCAN_LIMIT = 1000
+_DENIAL_ROW_SCAN_LIMIT = 20_000
+# The scan pages at its own size rather than the admin API's EVENT_PAGE_LIMIT,
+# which is a UI page size and the cap on an admin request's limit parameter.
+# network_events_decision_seq_idx serves this query as an ordered range scan,
+# so page size only trades round trips against the size of one materialized
+# page: 100 rows would cost 200 round trips to reach the row bound, while a
+# page as large as the bound would hold the whole flood in memory at once.
+_DENIAL_PAGE_SIZE = 1000
 
 _DENIAL_IDENTITY_FIELDS = ("protocol", "method", "host", "port", "path", "query", "reason_code")
 
@@ -92,17 +102,19 @@ def _recent_network_denials(tool_input: Any) -> dict[str, Any]:
     denials: list[dict[str, Any]] = []
     collapsed: dict[tuple[Any, ...], dict[str, Any]] = {}
     cursor: int | None = None
-    scanned = 0
-    while scanned < _DENIAL_SCAN_LIMIT:
+    distinct = 0
+    rows = 0
+    while distinct < _DENIAL_DISTINCT_SCAN_LIMIT and rows < _DENIAL_ROW_SCAN_LIMIT:
         page = state.page_network_events_before(
             cursor,
             decision="denied",
-            limit=min(state.EVENT_PAGE_LIMIT, _DENIAL_SCAN_LIMIT - scanned),
+            limit=min(_DENIAL_PAGE_SIZE, _DENIAL_ROW_SCAN_LIMIT - rows),
         )
         if not page:
             break
         for event in page:
-            scanned += 1
+            rows += 1
+            cursor = event["seq"]
             identity = tuple(event.get(field) for field in _DENIAL_IDENTITY_FIELDS)
             existing = collapsed.get(identity)
             if existing is not None:
@@ -110,8 +122,7 @@ def _recent_network_denials(tool_input: Any) -> dict[str, Any]:
                 # Pages are newest-first, so this occurrence is the oldest yet.
                 existing["first_timestamp"] = event["timestamp"]
                 continue
-            if len(denials) >= limit:
-                continue
+            distinct += 1
             entry = {
                 key: event[key]
                 for key in ("timestamp", "protocol", "method", "host", "port", "path", "query")
@@ -124,11 +135,19 @@ def _recent_network_denials(tool_input: Any) -> dict[str, Any]:
                 reason = catalog.get(code)
                 if reason is not None:
                     entry["guidance"] = reason.guidance
+            # Track identities past the display limit too, so their repeats
+            # collapse instead of re-charging the distinct budget.
             collapsed[identity] = entry
-            denials.append(entry)
-        cursor = page[-1]["seq"]
+            if len(denials) < limit:
+                denials.append(entry)
+            if distinct >= _DENIAL_DISTINCT_SCAN_LIMIT:
+                # Stop on the exact event that exhausts the budget. Finishing
+                # the page would admit up to a page of further identities and
+                # make both the scan depth and the counts depend on where the
+                # budget happened to fall within a page.
+                break
     truncated = (
-        scanned == _DENIAL_SCAN_LIMIT
+        (distinct >= _DENIAL_DISTINCT_SCAN_LIMIT or rows >= _DENIAL_ROW_SCAN_LIMIT)
         and bool(state.page_network_events_before(cursor, decision="denied", limit=1))
     )
     return {

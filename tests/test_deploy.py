@@ -2370,11 +2370,11 @@ class DeployUnitTests(unittest.TestCase):
 
         accepted = forwarded(
             "--thread-scope",
-            "schedule-3-run-7",
+            "schedule-3",
             "/mnt/kern-agent/agent-home/scripts/backup.sh",
         )
         self.assertEqual(accepted.returncode, 0)
-        self.assertIn("--unit kern-agent-thread-schedule-3-run-7", accepted.stdout)
+        self.assertIn("--unit kern-agent-thread-schedule-3", accepted.stdout)
         self.assertIn("runuser -u kern-agent", accepted.stdout)
         # The path reaches bash as one positional argument, never as part of a
         # command string, so its spelling cannot become syntax.

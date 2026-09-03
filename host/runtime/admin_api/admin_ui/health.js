@@ -124,7 +124,7 @@ export async function refreshHealth() {
       <div class="stat-history-title">Stats</div>
       <div class="stat-history-grid">
         ${historyStat("Threads", history.threads, "All agent threads recorded on this host.")}
-        ${historyStat("User messages", history.messages, "Messages sent by the user on this host.")}
+        ${historyStat("Inbound messages", history.messages, "Messages sent to agents on this host.")}
         ${historyStat("Agent activity", history.activities, "Agent messages, tool calls, commands, reasoning, and other recorded agent work.")}
       </div>
     </div>`);

@@ -364,6 +364,40 @@ class ConfigTests(unittest.TestCase):
                 signed_query,
             )
         )
+        # A real job-log download: the path carries run and job UUIDs, and the
+        # job one ends in an 11-digit run that DIGIT_RUN would otherwise read
+        # as a phone or account number, making that log unreadable.
+        job_log_path = (
+            "/actions-results/4f9841da-8399-4637-ae0d-6d00ffb7c316"
+            "/workflow-job-run-3ff561e6-7b9b-5c33-a2b5-e93806060046"
+            "/logs/job/job-logs.txt"
+        )
+        self.assertTrue(
+            request_allowed(controls, "GET", actions_blob, job_log_path, signed_query)
+        )
+        # Only the run and job UUIDs in the fixed log path are neutralized. A
+        # UUID elsewhere, a bare digit run, or a malformed UUID still denies.
+        for denied_path in (
+            "/unrelated/call-aaaaaaaa-aaaa-aaaa-aaaa-a4155552671a.txt",
+            "/actions-results/4f9841da-8399-4637-ae0d-6d00ffb7c316/call-4155552671/log.txt",
+            "/actions-results/3ff561e6-7b9b-5c33-e93806060046/log.txt",  # group dropped
+            "/actions-results/3ff561e67b9b5c33a2b5-e93806060046/log.txt",  # groups merged
+        ):
+            with self.subTest(path=denied_path):
+                self.assertFalse(
+                    request_allowed(controls, "GET", actions_blob, denied_path, signed_query)
+                )
+        # Masking preserves both UUIDs' original length, so it cannot pull an
+        # oversized request below G1's 1,024-byte limit.
+        oversized_query = signed_query.replace(
+            "&sig=", f"&note={'+'.join(['seaside'] * 106)}&sig="
+        )
+        self.assertEqual(
+            network_integrations.request_denied(
+                controls, "GET", actions_blob, job_log_path, oversized_query, [], b""
+            ),
+            "request_param_too_large",
+        )
         self.assertTrue(request_allowed(controls, "GET", "pypi.org", "/simple/pkg"))
         self.assertTrue(request_allowed(controls, "GET", "registry.npmjs.org", "/pkg"))
 
@@ -676,6 +710,23 @@ class PolicyTests(unittest.TestCase):
         ):
             with self.subTest(read=f"{host}{path}"):
                 self.assertIsNone(github_request_denied(policy, "GET", host, path, "", b""))
+        # Tying a workflow run to an exact pushed commit is the normal way to
+        # check CI, so a 40-hex head_sha must not read as a personal identifier.
+        for head_sha in (
+            "2ae2700023629add7b710e3e4487689d94f9d5bd",
+            "b552ddf69a1210e4debb90a7a10457761105022c",
+        ):
+            with self.subTest(head_sha=head_sha):
+                self.assertIsNone(
+                    github_request_denied(
+                        policy,
+                        "GET",
+                        "api.github.com",
+                        "/repos/infiversehq/infiverse/actions/runs",
+                        f"head_sha={head_sha}&per_page=20",
+                        b"",
+                    )
+                )
         # Git fetch (upload-pack) on any repo is a read; compare views with
         # cross-repo fork-network refs are just reads too now.
         self.assertIsNone(

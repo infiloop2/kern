@@ -72,23 +72,44 @@ def connected_api(*, expires_at: int = FRESH_EXPIRES_AT) -> FakeHostAPI:
 
 
 class ZohoMailToolTests(unittest.TestCase):
-    def test_manifest_is_narrow_and_approval_gates_send(self) -> None:
+    def test_manifest_is_narrow_and_only_sending_requires_approval(self) -> None:
         tool = ZohoMailTool()
         self.assertEqual(tool.manifest.connection, "oauth")
         self.assertEqual(
             [action.id for action in tool.manifest.actions],
-            ["search_messages", "list_folders", "list_senders", "list_messages", "read_message", "send_email"],
+            [
+                "search_messages",
+                "list_folders",
+                "list_senders",
+                "list_messages",
+                "read_message",
+                "create_folder",
+                "move_messages",
+                "archive_messages",
+                "send_email",
+            ],
         )
+        create = tool.manifest.action("create_folder")
+        move = tool.manifest.action("move_messages")
+        archive = tool.manifest.action("archive_messages")
         send = tool.manifest.action("send_email")
+        assert create is not None
+        assert move is not None
+        assert archive is not None
         assert send is not None
+        self.assertEqual(create.approval, "direct")
+        self.assertEqual(move.approval, "direct")
+        self.assertEqual(archive.approval, "direct")
         self.assertEqual(send.approval, "operator")
         self.assertEqual(set(zoho_mail.ZOHO_OAUTH_SCOPES), {
             "ZohoMail.accounts.READ",
             "ZohoMail.folders.READ",
+            "ZohoMail.folders.CREATE",
             "ZohoMail.messages.READ",
             "ZohoMail.messages.CREATE",
+            "ZohoMail.messages.UPDATE",
         })
-        self.assertTrue(all("DELETE" not in scope and "UPDATE" not in scope for scope in zoho_mail.ZOHO_OAUTH_SCOPES))
+        self.assertTrue(all("DELETE" not in scope for scope in zoho_mail.ZOHO_OAUTH_SCOPES))
         self.assertIn("attachments", tool.manifest.agent_notes)
 
         rich_input = {
@@ -146,6 +167,128 @@ class ZohoMailToolTests(unittest.TestCase):
             "type": "Inbox",
             "imap_access": True,
         })
+
+    def test_create_folder_executes_directly_and_returns_folder_id(self) -> None:
+        calls: list[tuple[str, str, JSONObject | None]] = []
+
+        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            calls.append((method, url, kwargs.get("body")))
+            if url.endswith("/folders") and method == "POST":
+                self.assertEqual(kwargs["body"], {"folderName": "TraderHand"})
+                return {
+                    "status": {"code": 201, "description": "Created"},
+                    "data": {
+                        "folderId": "9000000002099",
+                        "folderName": "TraderHand",
+                        "path": "/TraderHand",
+                        "folderType": "Inbox",
+                        "imapAccess": True,
+                    },
+                }
+            raise AssertionError((method, url))
+
+        with patch.object(zoho_mail, "json_request", fake_json_request):
+            result = ZohoMailTool().execute(
+                "create_folder", {"name": " TraderHand "}, connected_api()
+            )
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["folder"]["folder_id"], "9000000002099")
+        self.assertEqual(calls, [(
+            "POST",
+            "https://mail.zoho.eu/api/accounts/2560636000000008002/folders",
+            {"folderName": "TraderHand"},
+        )])
+        spec = zoho_mail.MANIFEST.action("create_folder")
+        assert spec is not None
+        self.assertEqual(tools_host.validate_against_schema(result.result, spec.output_schema), "")
+
+    def test_move_messages_resolves_destination_and_executes_directly(self) -> None:
+        destination = {
+            "folderId": "9000000002099",
+            "folderName": "Upwork",
+            "path": "/Upwork",
+            "folderType": "Inbox",
+            "imapAccess": True,
+        }
+        calls: list[tuple[str, str, JSONObject | None]] = []
+
+        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            calls.append((method, url, kwargs.get("body")))
+            if url.endswith("/folders") and method == "GET":
+                return success(cast(list[JSONValue], [cast(JSONObject, destination)]))
+            if url.endswith("/updatemessage") and method == "PUT":
+                self.assertEqual(
+                    kwargs["body"],
+                    {
+                        "mode": "moveMessage",
+                        "destfolderId": "9000000002099",
+                        "messageId": ["101", "102"],
+                        "isArchive": False,
+                        "isFolderSpecific": True,
+                        "folderId": "9000000002014",
+                    },
+                )
+                return success(cast(JSONObject, {}))
+            raise AssertionError((method, url))
+
+        with patch.object(zoho_mail, "json_request", fake_json_request):
+            result = ZohoMailTool().execute(
+                "move_messages",
+                {
+                    "message_ids": ["101", "102"],
+                    "destination_folder_id": "9000000002099",
+                    "source_folder_id": "9000000002014",
+                },
+                connected_api(),
+            )
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["moved_message_ids"], ["101", "102"])
+        self.assertEqual(result.result["destination_folder_id"], "9000000002099")
+        self.assertEqual(calls[-1][0], "PUT")
+
+    def test_archive_messages_executes_directly_without_folder_id(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            seen.update(method=method, url=url, body=kwargs.get("body"))
+            return success(cast(JSONObject, {}))
+
+        with patch.object(zoho_mail, "json_request", fake_json_request):
+            result = ZohoMailTool().execute(
+                "archive_messages", {"message_ids": ["101", "102"]}, connected_api()
+            )
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(seen, {
+            "method": "PUT",
+            "url": "https://mail.zoho.eu/api/accounts/2560636000000008002/updatemessage",
+            "body": {"mode": "archiveMails", "messageId": ["101", "102"]},
+        })
+        self.assertEqual(result.result["archived_message_ids"], ["101", "102"])
+        spec = zoho_mail.MANIFEST.action("archive_messages")
+        assert spec is not None
+        self.assertEqual(tools_host.validate_against_schema(result.result, spec.output_schema), "")
+
+    def test_mailbox_organization_rejects_invalid_names_and_ids_before_mutation(self) -> None:
+        invalid_cases = (
+            ("create_folder", {"name": "bad/folder"}),
+            (
+                "move_messages",
+                {"message_ids": ["101", "101"], "destination_folder_id": "9000000002099"},
+            ),
+            (
+                "move_messages",
+                {"message_ids": ["../101"], "destination_folder_id": "9000000002099"},
+            ),
+            ("archive_messages", {"message_ids": ["101", "101"]}),
+            ("archive_messages", {"message_ids": ["101"], "folder_id": "1"}),
+        )
+        for action, tool_input in invalid_cases:
+            with self.subTest(action=action, tool_input=tool_input), patch.object(
+                zoho_mail, "json_request"
+            ) as request:
+                result = ZohoMailTool().execute(action, tool_input, connected_api())
+            assert isinstance(result, ActionFailed)
+            request.assert_not_called()
 
     def test_list_senders_returns_live_verified_addresses_with_default_first(self) -> None:
         account = dict(ACCOUNT)
@@ -224,8 +367,16 @@ class ZohoMailToolTests(unittest.TestCase):
         assert isinstance(result, ActionFailed)
         request.assert_not_called()
 
-    def test_read_message_combines_metadata_and_plaintext_body(self) -> None:
+    def test_read_message_combines_metadata_plaintext_and_original_html(self) -> None:
         urls: list[str] = []
+        raw_html = (
+            "<style>secret style</style><p>Hello <b>Akshay</b></p><script>bad()</script>"
+            "<div><a href='https://jobs.example/openings/123?from=email&amp;role=eng'>"
+            "Next<style>hidden label</style><br><b>step</b></a></div>"
+            "<a href='javascript:alert(1)'>Unsafe</a>"
+            "<a href='https://jobs.example/openings/456'><img alt='Platform role'></a>"
+            "<a href='https://jobs.example/openings/789' aria-label='Data role'></a>"
+        )
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             urls.append(url)
@@ -241,7 +392,7 @@ class ZohoMailToolTests(unittest.TestCase):
             if url.endswith("/content"):
                 return success({
                     "messageId": "1709876190693100009",
-                    "content": "<style>secret style</style><p>Hello <b>Akshay</b></p><script>bad()</script><div>Next step</div>",
+                    "content": raw_html,
                 })
             raise AssertionError(url)
 
@@ -256,8 +407,37 @@ class ZohoMailToolTests(unittest.TestCase):
         message = result.result["zoho_message"]
         assert isinstance(message, dict)
         self.assertEqual(message["subject"], "Proposal & next steps")
-        self.assertEqual(message["content"], "Hello Akshay\nNext step")
+        self.assertEqual(message["content"], "Hello Akshay\nNext\nstep\nUnsafe")
         self.assertFalse(message["content_truncated"])
+        self.assertEqual(message["content_html"], raw_html)
+        self.assertFalse(message["content_html_truncated"])
+        read = zoho_mail.MANIFEST.action("read_message")
+        assert read is not None
+        self.assertEqual(
+            tools_host.validate_against_schema(result.result, read.output_schema, path="result"),
+            "",
+        )
+
+    def test_read_message_bounds_original_html(self) -> None:
+        raw_html = "<div>" + "x" * zoho_mail.MAX_MESSAGE_HTML_CHARS + "</div>"
+
+        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            if url.endswith("/details"):
+                return success({"messageId": "1", "folderId": "2"})
+            if url.endswith("/content"):
+                return success({"content": raw_html})
+            raise AssertionError(url)
+
+        with patch.object(zoho_mail, "json_request", fake_json_request):
+            result = ZohoMailTool().execute(
+                "read_message", {"folder_id": "2", "message_id": "1"}, connected_api()
+            )
+
+        assert isinstance(result, ActionExecuted)
+        message = result.result["zoho_message"]
+        assert isinstance(message, dict)
+        self.assertEqual(len(message["content_html"]), zoho_mail.MAX_MESSAGE_HTML_CHARS)
+        self.assertTrue(message["content_html_truncated"])
 
     def test_send_queues_exact_message_then_executes_after_approval(self) -> None:
         api = connected_api()
@@ -595,7 +775,9 @@ class ZohoMailCredentialFlowTests(unittest.TestCase):
         )
         self.assertTrue(result["authorization_url"].startswith("https://accounts.zoho.eu/oauth/v2/auth?"))
         self.assertIn("access_type=offline", result["authorization_url"])
+        self.assertIn("ZohoMail.folders.CREATE", result["authorization_url"])
         self.assertIn("ZohoMail.messages.CREATE", result["authorization_url"])
+        self.assertIn("ZohoMail.messages.UPDATE", result["authorization_url"])
         self.assertIn("state=", result["authorization_url"])
 
     def test_complete_connect_exchanges_code_and_saves_mailbox(self) -> None:

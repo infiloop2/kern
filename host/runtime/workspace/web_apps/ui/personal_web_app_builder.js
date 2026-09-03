@@ -30,17 +30,22 @@ const WORKSPACE_API_TIMEOUT_MS = 12000;
 const AGENT_DELIVERY_TIMEOUT_MS = 60 * 1000;
 const COMPOSER_DRAFTS_STORAGE_KEY = "kern.agentic-web-app.composer-drafts.v1";
 const COMPOSER_DRAFT_LIMIT = 50;
-const DISMISSED_AGENT_MESSAGES_STORAGE_KEY = "kern.agentic-web-app.dismissed-agent-messages.v1";
-const DISMISSED_AGENT_MESSAGE_LIMIT = 50;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 let requestCounter = 0;
 const localFiles = new Map();
 let sessionOptions = {};
 let activeRuntimes = null;
+const DEFAULT_MODELS = Object.freeze({
+  codex: "gpt-5.6-sol",
+  claude_code: "claude-opus-5",
+  grok: "grok-4.6",
+  hermes: "moonshotai.kimi-k2.5",
+});
 let apps = [];
 let selectedAppId = null;
 let selectedAppName = null;
+let selectedAgentSettings = null;
 let selectedAgentUpdatesLocked = false;
 let agentUpdateLockBusy = false;
 let selectedAppOutsideActiveIndex = false;
@@ -65,7 +70,6 @@ let appsRefreshSequence = 0;
 let appSelectionSequence = 0;
 let createAppPromise = null;
 const messageBusyApps = new Set();
-const sessionAgentMessageApps = new Set();
 let selectedRefreshSequence = 0;
 let establishedSession = null;
 let establishedSessionKey = "";
@@ -74,18 +78,29 @@ const attachmentActivities = new Map();
 let panelRefreshSequence = 0;
 let recoveryPoints = [];
 let runtimeStatusSequence = 0;
-let dismissedAgentMessageKey = null;
-let transientAgentStatus = null;
 let renameAppReturnFocus = null;
 let historyMode = false;
 let historyLoadingOlder = false;
 let historyRenderedAppId = null;
 let historyRenderedEntryKey = "";
+let historyRenderedNewestAgentSeq = 0;
+let agentSettingsSaveQueue = Promise.resolve();
+const pendingAgentSettingsByApp = new Map();
+const agentSettingsSaveFailures = new Map();
 
 const webAppsRoot = window.KernWorkspaceRoots["web-apps"];
 const $ = id => webAppsRoot.querySelector(`#${CSS.escape(id)}`);
 const composerDrafts = loadComposerDrafts();
-const dismissedAgentMessages = loadDismissedAgentMessages();
+const runtimeLabel = runtime => ({
+  claude_code: "Claude Code", codex: "Codex", grok: "Grok", hermes: "Hermes",
+})[runtime] || runtime;
+const optionLabel = value => String(value)
+  .split(/[-_]/)
+  .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+  .join(" ");
+const modelLabel = (runtime, value) => runtime === "codex"
+  ? value
+  : optionLabel(String(value).replace(/^claude-/, ""));
 
 function loadComposerDrafts() {
   try {
@@ -128,42 +143,6 @@ function clearComposerDraft(appId, submittedDraft) {
   delete composerDrafts[key];
   persistComposerDrafts();
   return true;
-}
-
-function loadDismissedAgentMessages() {
-  try {
-    const stored = JSON.parse(
-      localStorage.getItem(DISMISSED_AGENT_MESSAGES_STORAGE_KEY) || "{}"
-    );
-    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
-    return Object.fromEntries(
-      Object.entries(stored).filter(([, key]) => typeof key === "string")
-    );
-  } catch (_error) {
-    return {};
-  }
-}
-
-function persistDismissedAgentMessages() {
-  try {
-    localStorage.setItem(
-      DISMISSED_AGENT_MESSAGES_STORAGE_KEY,
-      JSON.stringify(dismissedAgentMessages),
-    );
-  } catch (_error) {
-    // Dismissal persistence is best-effort when browser storage is unavailable.
-  }
-}
-
-function setDismissedAgentMessage(appId, key) {
-  if (!appId) return;
-  delete dismissedAgentMessages[appId];
-  if (key) dismissedAgentMessages[appId] = key;
-  while (Object.keys(dismissedAgentMessages).length > DISMISSED_AGENT_MESSAGE_LIMIT) {
-    delete dismissedAgentMessages[Object.keys(dismissedAgentMessages)[0]];
-  }
-  persistDismissedAgentMessages();
-  if (selectedAppId === appId) dismissedAgentMessageKey = key || null;
 }
 
 function api(method, path, body, timeoutMs = WORKSPACE_API_TIMEOUT_MS) {
@@ -805,8 +784,8 @@ function syncCanvasState() {
   const firstRun = !snapshot.session;
   $("empty-title").textContent = firstRun ? "Build this app" : "Your app will appear here";
   $("empty-description").textContent = firstRun
-    ? "Describe what you want in the command box."
-    : "Tell the agent what to build next in the command box.";
+    ? "Open Chat to tell the agent what to build."
+    : "Open Chat to tell the agent what to build next.";
 }
 
 function eventPayload(element, action = element.dataset.action, draggedValue = "") {
@@ -1669,10 +1648,10 @@ async function restoreRevision(revision) {
 // --- Chat --------------------------------------------------------------------
 
 function showChatStatus(message, error = false) {
-  transientAgentStatus = message
-    ? { key: "transient", kind: error ? "error" : "agent", message }
-    : null;
-  renderChat();
+  const status = $("chat-status");
+  status.textContent = message;
+  status.classList.toggle("error", Boolean(message && error));
+  status.hidden = !message;
 }
 
 function renderAttachments() {
@@ -1805,17 +1784,27 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
     if (fromGeneratedApp) showRuntimeStatus("Agent is already starting");
     return;
   }
-  sessionAgentMessageApps.add(appId);
   if (!fromGeneratedApp) saveComposerDraft();
-  setDismissedAgentMessage(appId, conversationEntries()
-    .filter(entry => ["agent", "error", "stopped"].includes(entry.kind))
-    .at(-1)?.key || null);
-  $("latest-agent-card").hidden = true;
   messageBusyApps.add(appId);
   setSessionOptions();
+  // Everything below can outlive the selected App while it waits for the
+  // settings PUT or file uploads. Keep this send tied to the App and controls
+  // the operator submitted, never whatever becomes globally selected later.
+  const submittedSettings = currentAgentSettings();
+  const includeSubmittedSettings = !snapshot.session || sessionConfigurationChanged();
   showChatStatus("");
   if (fromGeneratedApp) showRuntimeStatus("Sending to agent…");
   try {
+    // A selector change saves independently of sending. Preserve ordering so
+    // the message cannot race ahead of the settings it is meant to use.
+    await agentSettingsSaveQueue;
+    const settingsFailure = agentSettingsSaveFailures.get(appId);
+    if (
+      settingsFailure
+      && sameAgentSettings(settingsFailure.settings, submittedSettings)
+    ) {
+      throw settingsFailure.error;
+    }
     for (const [index, attachment] of attachments.entries()) {
       if (attachment.file) continue;
       setAttachmentActivity(
@@ -1842,13 +1831,10 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
         : "Please review the uploaded files.")}\n\n${fileReferences}`
       : message;
     const body = { content };
-    if (
-      !snapshot.session
-      || (!fromGeneratedApp && sessionConfigurationChanged())
-    ) {
-      body.agent_runtime = $("runtime").value;
-      body.model = $("model").value;
-      body.effort = $("effort").value;
+    if (includeSubmittedSettings) {
+      body.agent_runtime = submittedSettings.agent_runtime;
+      body.model = submittedSettings.model;
+      body.effort = submittedSettings.effort;
     }
     const resource = fromGeneratedApp ? "runtime/agent-requests" : "messages";
     await api(
@@ -1909,32 +1895,7 @@ async function stopRunningTurn() {
 
 function renderChat() {
   const running = snapshot.status === "running";
-  let latest = transientAgentStatus;
-  if (!latest && selectedAppId && sessionAgentMessageApps.has(selectedAppId)) {
-    latest = conversationEntries()
-      .filter(entry => ["agent", "error", "stopped"].includes(entry.kind))
-      .at(-1);
-  }
-  if (running && (!latest || latest.key === dismissedAgentMessageKey)) {
-    latest = { key: "running", kind: "agent", message: "Agent is working" };
-  }
-  if (historyMode) {
-    latest = running
-      ? { key: "running", kind: "agent", message: "Agent is working" }
-      : null;
-  }
-  const card = $("latest-agent-card");
-  if (!latest || latest.key === dismissedAgentMessageKey) {
-    card.hidden = true;
-  } else {
-    $("latest-agent-kind").className = `latest-agent-kind ${latest.kind}`;
-    $("latest-agent-kind").textContent = latest.kind === "error" ? "!" : "✦";
-    $("latest-agent-message").textContent = latest.message;
-    card.className = `latest-agent-card ${latest.kind}`;
-    card.hidden = false;
-  }
-  $("stop-turn").hidden = !running;
-  $("latest-agent-dismiss").hidden = running;
+  $("composer-running").hidden = !running;
   renderConversationHistory();
   syncAgentSettings(snapshot.session);
 }
@@ -1946,12 +1907,14 @@ function conversationEntries() {
     if (event.event_type === "thread.error") {
       entries.push({
         key: `event-${event.seq}`,
+        seq: Number(event.seq) || 0,
         kind: "error",
         message: payload.error_message || "The agent stopped because of an error.",
       });
     } else if (event.event_type === "thread.stopped") {
       entries.push({
         key: `event-${event.seq}`,
+        seq: Number(event.seq) || 0,
         kind: "stopped",
         message: "Agent stopped",
       });
@@ -1963,6 +1926,7 @@ function conversationEntries() {
       const fromUser = payload.source === "user";
       entries.push({
         key: `event-${event.seq}`,
+        seq: Number(event.seq) || 0,
         kind: fromUser ? "user" : "agent",
         message: payload.message,
       });
@@ -1979,30 +1943,42 @@ function renderConversationHistory(forceBottom = false) {
     scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48
   );
   const entries = conversationEntries();
+  const newestAgentEntry = entries.reduce((latest, entry) => (
+    entry.kind === "agent" && entry.seq > (latest?.seq || 0) ? entry : latest
+  ), null);
+  const previousNewestAgentSeq = historyRenderedNewestAgentSeq;
+  const newestAgentSeq = newestAgentEntry?.seq || 0;
   const entryKey = entries.map(entry => entry.key).join("\0");
   if (appChanged || entryKey !== historyRenderedEntryKey) {
     const nodes = entries.map(entry => {
       const item = document.createElement("article");
       item.className = `chat-history-entry ${entry.kind}`;
-      const author = document.createElement("strong");
-      author.className = "chat-history-author";
-      author.textContent = entry.kind === "user"
-        ? "You"
-        : entry.kind === "agent"
-          ? "Agent"
-          : "System";
+      const sender = document.createElement("span");
+      sender.className = "chat-history-sender";
+      sender.textContent = `${entry.kind === "user" ? "You" : entry.kind === "agent" ? "Agent" : "System"}:`;
       const message = document.createElement("div");
       message.className = "chat-history-message";
       // Thread messages are intentionally shown exactly as recorded. This keeps
       // host-added Web App context visible instead of silently rewriting history.
-      message.textContent = entry.message;
-      item.append(author, message);
+      if (entry.kind === "agent") {
+        message.classList.add("md-content");
+        message.innerHTML = KernRichText.renderMarkdown(entry.message);
+      } else {
+        message.textContent = entry.message;
+      }
+      item.append(sender, message);
       return item;
     });
     list.replaceChildren(...nodes);
     historyRenderedAppId = selectedAppId;
     historyRenderedEntryKey = entryKey;
   }
+  if (appChanged) {
+    $("chat-announcer").textContent = "";
+  } else if (historyMode && newestAgentSeq > previousNewestAgentSeq) {
+    $("chat-announcer").textContent = `Agent: ${newestAgentEntry.message}`;
+  }
+  historyRenderedNewestAgentSeq = newestAgentSeq;
   $("chat-history-empty").hidden = entries.length !== 0;
   const pageState = activeConversationEventPage();
   const more = $("chat-history-more");
@@ -2062,13 +2038,16 @@ function setHistoryMode(open) {
   const toggle = $("history-toggle");
   toggle.classList.toggle("active", historyMode);
   toggle.setAttribute("aria-pressed", String(historyMode));
-  toggle.setAttribute("aria-label", historyMode ? "Show app" : "Show chat history");
-  toggle.title = historyMode ? "Show app" : "Show chat history";
-  toggle.querySelector("span").textContent = historyMode ? "App" : "History";
+  toggle.setAttribute("aria-label", historyMode ? "Show app" : "Show Chat");
+  toggle.title = historyMode ? "Show app" : "Show Chat";
+  toggle.querySelector("span").textContent = historyMode ? "App" : "Chat";
   $("chat-history").hidden = !historyMode;
+  $("agent-command-surface").hidden = !historyMode || selectedAppOutsideActiveIndex;
+  $("chat-composer").hidden = !historyMode || selectedAppOutsideActiveIndex;
   if (historyMode) {
     closeAdmin();
     renderConversationHistory(true);
+    markSelectedAppSeen();
   }
   renderChat();
 }
@@ -2166,6 +2145,64 @@ function sessionConfigurationChanged() {
   );
 }
 
+function currentAgentSettings() {
+  return {
+    agent_runtime: $("runtime").value,
+    model: $("model").value,
+    effort: $("effort").value,
+  };
+}
+
+function sameAgentSettings(left, right) {
+  return Boolean(left && right) && (
+    left.agent_runtime === right.agent_runtime
+    && left.model === right.model
+    && left.effort === right.effort
+  );
+}
+
+function persistAgentSettings() {
+  if (!selectedAppId || selectedAppOutsideActiveIndex || snapshot.status === "running") return;
+  const appId = selectedAppId;
+  const settings = currentAgentSettings();
+  if (!settings.agent_runtime || !settings.model || !settings.effort) return;
+  selectedAgentSettings = settings;
+  pendingAgentSettingsByApp.set(appId, settings);
+  agentSettingsSaveFailures.delete(appId);
+  const listed = apps.find(app => app.app_id === appId);
+  if (listed) listed.agent_settings = { ...settings };
+  agentSettingsSaveQueue = agentSettingsSaveQueue.then(async () => {
+    try {
+      const response = await api(
+        "PUT",
+        `/apps/${encodeURIComponent(appId)}/agent-settings`,
+        settings,
+      );
+      const latest = sameAgentSettings(pendingAgentSettingsByApp.get(appId), settings);
+      if (latest) {
+        // A /apps request that began before this PUT can otherwise arrive
+        // afterward and restore the old values once the optimistic marker is
+        // gone. Fence those reads before releasing the marker.
+        appsRefreshSequence += 1;
+        if (selectedAppId === appId) selectedRefreshSequence += 1;
+        pendingAgentSettingsByApp.delete(appId);
+        if (selectedAppId === appId) {
+          selectedAgentSettings = response.app.agent_settings;
+        }
+        agentSettingsSaveFailures.delete(appId);
+        // Sidebar freshness must not hold the settings queue (or sending) open.
+        void window.KernHost.refreshNavigation().catch(() => {});
+      }
+    } catch (error) {
+      if (sameAgentSettings(pendingAgentSettingsByApp.get(appId), settings)) {
+        pendingAgentSettingsByApp.delete(appId);
+        agentSettingsSaveFailures.set(appId, { settings, error });
+        if (selectedAppId === appId) showRuntimeStatus(error.message, "error");
+      }
+    }
+  });
+}
+
 function setSessionOptions(preferredModel = null, preferredEffort = null) {
   const runtimeSelect = $("runtime");
   const modelSelect = $("model");
@@ -2190,7 +2227,7 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
     modelValues.push(establishedSession.model);
   }
   const currentModel = preferredModel || modelSelect.value;
-  modelSelect.replaceChildren(...modelValues.map(value => new Option(value, value)));
+  modelSelect.replaceChildren(...modelValues.map(value => new Option(modelLabel(runtime, value), value)));
   modelSelect.value = modelValues.includes(currentModel)
     ? currentModel
     : modelValues[0] || "";
@@ -2204,7 +2241,7 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
     efforts.push(establishedSession.effort);
   }
   const currentEffort = preferredEffort || effortSelect.value;
-  effortSelect.replaceChildren(...efforts.map(value => new Option(value, value)));
+  effortSelect.replaceChildren(...efforts.map(value => new Option(optionLabel(value), value)));
   effortSelect.value = efforts.includes(currentEffort)
     ? currentEffort
     : efforts[0] || "";
@@ -2217,9 +2254,6 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
   if (!activeSettingsLock) {
     $("agent-settings").classList.remove("show-lock-note");
   }
-  $("agent-session-change-warning").hidden = (
-    settingsLocked || !sessionConfigurationChanged()
-  );
   const activeBlock = running && establishedSession?.agent_runtime === "hermes";
   const hasOversizedAttachment = pendingAttachments.some(
     attachment => attachment.size_bytes > ATTACHMENT_MAX_BYTES,
@@ -2247,9 +2281,9 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
   $("send-message").setAttribute("aria-busy", String(composerSending));
   $("send-message").setAttribute(
     "aria-label",
-    composerSending ? "Sending message" : "Send message",
+    composerSending ? "Sending message" : "Send",
   );
-  $("send-message").title = composerSending ? "Sending message" : "Send";
+  $("send-message").title = composerSending ? "Sending message" : "Send (Enter)";
   $("attach-file").disabled = (
     !selectedAppId
     || messageBusyApps.has(selectedAppId)
@@ -2257,6 +2291,18 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
     || attachmentBusy
     || pendingAttachments.length >= ATTACHMENT_LIMIT
   );
+  syncAppSubtitle();
+}
+
+function syncAppSubtitle() {
+  const runtime = $("runtime").value;
+  const model = $("model").value;
+  const effort = $("effort").value;
+  const subtitle = selectedAppId && runtime && model && effort
+    ? `${runtimeLabel(runtime)} · ${modelLabel(runtime, model)} · ${optionLabel(effort)}`
+    : "";
+  $("app-subtitle").textContent = subtitle;
+  $("app-subtitle").hidden = !subtitle;
 }
 
 // Two different questions. Null active runtimes means the host could not
@@ -2265,8 +2311,7 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
 
 // Can it be shown as the selection? Only a session the app actually ran with
 // keeps its runtime here after that provider is turned off, so the settings
-// still show the truth. An unconfigured app has no such claim: it opens on a
-// fallback nobody chose, which must not be dressed up as usable.
+// still show the truth. A sessionless app instead moves to a runnable default.
 function runtimeSelectable(runtime) {
   if (!Array.isArray(activeRuntimes)) return true;
   if (establishedSession && runtime === establishedSession.agent_runtime) return true;
@@ -2282,12 +2327,11 @@ function runtimeRunnable(runtime) {
 }
 
 function setRuntimeOptions(preferredRuntime = null) {
-  const labels = { codex: "Codex", claude_code: "Claude Code", grok: "Grok", hermes: "Hermes" };
   const current = preferredRuntime || $("runtime").value;
   const runtimes = Object.keys(sessionOptions);
   if (current && !runtimes.includes(current)) runtimes.push(current);
   $("runtime").replaceChildren(...runtimes.map(value => {
-    const label = labels[value] || value;
+    const label = runtimeLabel(value);
     const available = runtimeSelectable(value);
     const option = new Option(available ? label : `${label} (not activated)`, value);
     option.disabled = !available;
@@ -2298,10 +2342,23 @@ function setRuntimeOptions(preferredRuntime = null) {
 
 function defaultSessionConfig() {
   const offered = Object.keys(sessionOptions);
-  const runtime = offered.find(runtimeRunnable) || offered[0] || "";
+  const active = Array.isArray(activeRuntimes) ? activeRuntimes : [];
+  const runtime = (
+    offered.find(value => active.includes(value))
+    || (offered.includes("codex") ? "codex" : offered[0])
+    || ""
+  );
   const models = sessionOptions[runtime] || {};
-  const model = Object.keys(models)[0] || "";
-  const effort = (models[model] || [])[0] || "";
+  const modelValues = Object.keys(models);
+  const model = (
+    modelValues.includes(DEFAULT_MODELS[runtime])
+      ? DEFAULT_MODELS[runtime]
+      : modelValues[0]
+  ) || "";
+  const efforts = models[model] || [];
+  const effort = efforts.includes("high")
+    ? "high"
+    : efforts[0] || "";
   return { agent_runtime: runtime, model, effort };
 }
 
@@ -2311,18 +2368,28 @@ function syncAgentSettings(task) {
     model: String(task.model || ""),
     effort: String(task.effort || ""),
   } : null;
-  const key = next ? `${next.agent_runtime}\0${next.model}\0${next.effort}` : "open";
+  const sessionKey = next ? `${next.agent_runtime}\0${next.model}\0${next.effort}` : "open";
+  const settingsKey = selectedAgentSettings
+    ? `${selectedAgentSettings.agent_runtime}\0${selectedAgentSettings.model}\0${selectedAgentSettings.effort}`
+    : "default";
+  const key = `${sessionKey}\0${settingsKey}`;
   if (key === establishedSessionKey) return;
   establishedSession = next;
   establishedSessionKey = key;
-  // An app with no session is unconfigured, and opens on the first offered
-  // configuration the way Agent Chat opens a new thread. Leaving the
-  // selectors as they stand would carry the previously opened app's runtime
-  // and model into this one, so a first message sent without visiting the
-  // settings would start a session the operator never chose.
-  const opening = next || defaultSessionConfig();
+  const savedSettings = selectedAppId ? selectedAgentSettings : null;
+  const opening = (
+    savedSettings && (next || runtimeRunnable(savedSettings.agent_runtime))
+      ? savedSettings
+      : next || defaultSessionConfig()
+  );
+  const persistFallback = Boolean(
+    selectedAppId && !next && !sameAgentSettings(savedSettings, opening)
+  );
   setRuntimeOptions(opening.agent_runtime || null);
   setSessionOptions(opening.model || null, opening.effort || null);
+  // A sessionless App whose saved provider was deactivated moves to the first
+  // runnable default and persists that replacement before its first message.
+  if (persistFallback) persistAgentSettings();
 }
 
 function syncWorkspaceControls() {
@@ -2331,17 +2398,17 @@ function syncWorkspaceControls() {
   if (!hasApp) historyMode = false;
   $("app-title").textContent = selectedAppName || "";
   $("app-view-toolbar").hidden = !hasApp;
-  $("agent-command-surface").hidden = !hasApp || readOnly;
-  $("chat-composer").hidden = !hasApp || readOnly;
+  $("agent-command-surface").hidden = !hasApp || readOnly || !historyMode;
+  $("chat-composer").hidden = !hasApp || readOnly || !historyMode;
   $("rename-app").disabled = !hasApp || readOnly;
   $("settings-open").disabled = !hasApp || readOnly;
   const historyToggle = $("history-toggle");
   historyToggle.disabled = !hasApp;
   historyToggle.classList.toggle("active", historyMode);
   historyToggle.setAttribute("aria-pressed", String(historyMode));
-  historyToggle.setAttribute("aria-label", historyMode ? "Show app" : "Show chat history");
-  historyToggle.title = historyMode ? "Show app" : "Show chat history";
-  historyToggle.querySelector("span").textContent = historyMode ? "App" : "History";
+  historyToggle.setAttribute("aria-label", historyMode ? "Show app" : "Show Chat");
+  historyToggle.title = historyMode ? "Show app" : "Show Chat";
+  historyToggle.querySelector("span").textContent = historyMode ? "App" : "Chat";
   $("chat-history").hidden = !historyMode;
   const lockButton = $("lock-agent-updates");
   lockButton.disabled = !hasApp || readOnly || agentUpdateLockBusy;
@@ -2443,13 +2510,13 @@ function markSelectedAppSeen() {
       ? Math.max(latest, Number(event.seq) || 0)
       : latest
   ), 0);
+  const visibleMessageSeq = historyMode
+    ? renderedMessageSeq
+    : Number(listed?.seen_message_seq) || 0;
   window.KernHost.markWorkspaceSeen("apps", {
     app_id: selectedAppId,
     last_used_at: listed?.last_used_at || snapshot.app?.updated_at || "",
-    latest_message_seq: Math.max(
-      Number(listed?.latest_message_seq) || 0,
-      renderedMessageSeq,
-    ),
+    latest_message_seq: visibleMessageSeq,
     revision: renderedRevision,
   });
 }
@@ -2501,15 +2568,14 @@ function clearSelectedApp() {
   appSelectionSequence += 1;
   selectedRefreshSequence += 1;
   panelRefreshSequence += 1;
-  if (selectedAppId) sessionAgentMessageApps.delete(selectedAppId);
   selectedAppId = null;
   selectedAppName = null;
+  selectedAgentSettings = null;
   selectedAgentUpdatesLocked = false;
   agentUpdateLockBusy = false;
   selectedAppOutsideActiveIndex = false;
+  showChatStatus("");
   recoveryPoints = [];
-  dismissedAgentMessageKey = null;
-  transientAgentStatus = null;
   restoreComposerDraft();
   snapshot = { app: null, session: null, status: "idle" };
   conversationEvents = [];
@@ -2529,20 +2595,22 @@ async function showApp(app, outsideActiveIndex = false, updateHistory = true) {
   saveComposerDraft();
   saveSelectedConversationView();
   appSelectionSequence += 1;
-  if (selectedAppId !== app.app_id) clearPendingAttachments();
+  if (selectedAppId !== app.app_id) {
+    clearPendingAttachments();
+    historyMode = false;
+  }
   stopCapabilityWorker();
   revokeBundleUrl();
   selectedRefreshSequence += 1;
   panelRefreshSequence += 1;
-  sessionAgentMessageApps.delete(app.app_id);
   selectedAppId = app.app_id;
   selectedAppName = app.name;
+  selectedAgentSettings = app.agent_settings;
   selectedAgentUpdatesLocked = Boolean(app.agent_updates_locked);
   selectedAppOutsideActiveIndex = outsideActiveIndex;
+  showChatStatus("");
   if (updateHistory) window.KernHost.navigateWorkspace("apps", app.app_id);
   recoveryPoints = [];
-  dismissedAgentMessageKey = dismissedAgentMessages[app.app_id] || null;
-  transientAgentStatus = null;
   restoreComposerDraft();
   restoreConversationView(app);
   renderedRevision = -1;
@@ -2565,6 +2633,9 @@ async function refreshSelectedApp(appId = selectedAppId) {
   ]);
   if (appId !== selectedAppId || selectedRefreshSequence !== refreshSequence) return;
   const listedSession = apps.find(app => app.app_id === appId)?.session || null;
+  const listedSettings = apps.find(app => app.app_id === appId)?.agent_settings;
+  const pendingSettings = pendingAgentSettingsByApp.get(appId) || null;
+  selectedAgentSettings = pendingSettings || listedSettings || selectedAgentSettings;
   const next = {
     app: stateResponse.app,
     // A fixed host session outlives retained history. The app index reads it
@@ -2613,15 +2684,14 @@ async function refreshRuntimeActivation(refreshSequence) {
   const nextActive = Array.isArray(options.active_runtimes) ? options.active_runtimes : null;
   if (JSON.stringify(nextActive) === JSON.stringify(activeRuntimes)) return;
   activeRuntimes = nextActive;
-  // An unconfigured app opens on a fallback nobody chose. If activation has
-  // since made a different runtime usable, move onto it and rebuild the model
-  // and effort with it, so connecting a provider makes an already-mounted app
-  // runnable without reopening it. An established session is left alone: its
-  // recorded configuration is a fact about what the app ran with.
+  // If a sessionless App's saved runtime becomes unavailable, move it onto the
+  // first runnable default. An established session is left alone because its
+  // recorded configuration remains a fact about what the App ran with.
   if (!establishedSession && !runtimeRunnable($("runtime").value)) {
     const opening = defaultSessionConfig();
     setRuntimeOptions(opening.agent_runtime || null);
     setSessionOptions(opening.model, opening.effort);
+    persistAgentSettings();
     return;
   }
   setRuntimeOptions($("runtime").value || null);
@@ -2801,6 +2871,14 @@ async function initialize() {
 
 webAppsRoot.addEventListener("click", event => {
   const closest = selector => event.target.closest && event.target.closest(selector);
+  const fileButton = closest(".md-open-file");
+  if (fileButton) {
+    window.KernHost.openAgentFile(
+      fileButton.dataset.filePath || "",
+      fileButton.dataset.fallbackPath || "",
+    ).catch(error => showChatStatus(error.message, true));
+    return;
+  }
   const linkButton = closest(".md-copy-link");
   if (linkButton) {
     requestHostCopy(linkButton.dataset.copyHref || "").then(() => {
@@ -2844,6 +2922,9 @@ $("rename-app-form").addEventListener("submit", event => {
 });
 $("lock-agent-updates").addEventListener("click", () => toggleAgentUpdateLock().catch(error => showRuntimeStatus(error.message, "error")));
 $("history-toggle").addEventListener("click", () => setHistoryMode(!historyMode));
+$("app-memory").addEventListener("click", () => {
+  if (selectedAppId) void window.KernHost.openWorkspace("memory", selectedAppId);
+});
 $("chat-history-more").addEventListener("click", () => {
   void loadOlderConversationEvents();
 });
@@ -2866,21 +2947,18 @@ document.addEventListener("click", event => {
 $("recovery-open").addEventListener("click", () => setRecoveryOpen($("recovery-drawer").hidden));
 $("recovery-close").addEventListener("click", () => setRecoveryOpen(false));
 $("recovery-backdrop").addEventListener("click", () => setRecoveryOpen(false));
-$("latest-agent-dismiss").addEventListener("click", () => {
-  if (transientAgentStatus) {
-    transientAgentStatus = null;
-    renderChat();
-    return;
-  }
-  sessionAgentMessageApps.delete(selectedAppId);
-  setDismissedAgentMessage(selectedAppId, conversationEntries()
-    .filter(entry => ["agent", "error", "stopped"].includes(entry.kind))
-    .at(-1)?.key || null);
-  $("latest-agent-card").hidden = true;
+$("runtime").addEventListener("change", () => {
+  setSessionOptions();
+  persistAgentSettings();
 });
-$("runtime").addEventListener("change", () => setSessionOptions());
-$("model").addEventListener("change", () => setSessionOptions($("model").value));
-$("effort").addEventListener("change", () => setSessionOptions());
+$("model").addEventListener("change", () => {
+  setSessionOptions($("model").value);
+  persistAgentSettings();
+});
+$("effort").addEventListener("change", () => {
+  setSessionOptions();
+  persistAgentSettings();
+});
 $("agent-settings").addEventListener("mouseenter", () => {
   if ($("agent-settings").classList.contains("active-locked")) {
     $("agent-settings").classList.add("show-lock-note");

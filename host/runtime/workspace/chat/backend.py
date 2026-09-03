@@ -21,12 +21,20 @@ from urllib.parse import quote, unquote
 from host.runtime.core import db
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
 from host.runtime.workspace.busy_retry import post_with_busy_retry
-from host.session_options import public_session_options, recorded_session_config, session_config_error
+from host.runtime.workspace import seen
+from host.session_options import (
+    SCRIPT_RUNTIME,
+    public_session_options,
+    recorded_session_config,
+    session_config_error,
+)
 
 
 MAX_REQUEST_BODY_BYTES = 128 * 1024
 RUNTIME_OPTIONS = {"codex", "claude_code", "grok", "hermes"}
-THREAD_ID_RE = re.compile(r"thread-([1-9][0-9]*)")
+THREAD_ID_RE = re.compile(r"(?:thread|schedule)-[1-9][0-9]*")
+GENERATED_THREAD_ID_RE = re.compile(r"thread-([1-9][0-9]*)")
+SCHEDULE_THREAD_ID_RE = re.compile(r"schedule-[1-9][0-9]*")
 # Keep each proxy response comfortably below the fixed 1 MiB bridge cap.
 # Six 120 KiB event text budgets leave more than 300 KiB for JSON envelopes
 # and bounded activity metadata. Full messages remain stored by the host.
@@ -100,11 +108,27 @@ def route_browser(
                 raise WorkspaceError(HTTPStatus.BAD_REQUEST, "archived must be true or false")
             archived = archived_values[0] == "true"
         return list_chat_threads(archived=archived)
+    if method == "GET" and path == "/scheduled-agents":
+        if query:
+            raise WorkspaceError(
+                HTTPStatus.BAD_REQUEST,
+                f"unsupported scheduled-agent query parameter: {sorted(query)[0]}",
+            )
+        return list_scheduled_agent_threads()
     if method == "GET" and path.startswith("/threads/") and path.endswith("/events"):
         parts = path.strip("/").split("/")
         if len(parts) != 3:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "route not found")
         return list_chat_thread_events(_chat_thread_id(_path_segment(parts[1])), query or {})
+    if method == "POST" and path.startswith("/threads/") and path.endswith("/seen"):
+        parts = path.strip("/").split("/")
+        if len(parts) != 3:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "route not found")
+        return {
+            "seen": mark_chat_thread_seen(
+                _chat_thread_id(_path_segment(parts[1])), body
+            )
+        }
     if (
         method == "POST"
         and path.startswith("/threads/")
@@ -172,82 +196,176 @@ def route_browser(
 
 
 def list_chat_threads(*, archived: bool = False) -> dict[str, Any]:
-    """The thread index: one bulk host call joined against Chat's own
-    thread bookkeeping. A prefix-filtered host `GET /v1/threads` returns
-    session config and live status for this product's direct thread ids, so the
-    index costs one socket round trip regardless of thread count.
+    """Return ordinary Chat threads joined with live host state."""
+    return _list_indexed_threads(prefix="thread-", archived=archived, scheduled=False)
 
-    A thread is shown only when it is unarchived and known to the host: the
-    host row appears with the thread's first message, so a name reservation
-    whose send never went through stays invisible. The host stays the source
-    of truth for runtime/model/effort and live status; Chat contributes
-    names and archive state."""
-    recorded = _recorded_threads(archived=archived)
-    summaries = _host_thread_summaries()
-    chat_threads = [
-        _chat_thread_summary(
-            summary,
-            name=recorded[summary["thread_id"]],
-            archived=archived,
-        )
-        for summary in summaries
+
+def list_scheduled_agent_threads() -> dict[str, Any]:
+    """Return active schedules joined with their stable host threads.
+
+    A schedule is visible before its first delivery because its saved
+    configuration is sufficient to open the transcript. Deleted schedules are
+    deliberately absent: schedule transcripts never move into Chat.
+    """
+    return _list_indexed_threads(prefix="schedule-", archived=False, scheduled=True)
+
+
+def _list_indexed_threads(
+    *, prefix: str, archived: bool, scheduled: bool
+) -> dict[str, Any]:
+    recorded = _recorded_threads(archived=archived, scheduled=scheduled)
+    summaries = {
+        summary.get("thread_id"): summary
+        for summary in _host_thread_summaries(prefix)
         if isinstance(summary, dict) and summary.get("thread_id") in recorded
-    ]
+    }
+    chat_threads = []
+    for thread_id, metadata in recorded.items():
+        summary = summaries.get(thread_id)
+        has_session = summary is not None
+        if summary is None:
+            if not scheduled:
+                continue
+            summary = _pre_session_schedule_summary(thread_id, metadata)
+        chat_threads.append(
+            _chat_thread_summary(
+                summary,
+                metadata=metadata,
+                archived=archived,
+                has_session=has_session,
+            )
+        )
     chat_threads.sort(key=lambda item: str(item.get("last_used_at") or ""), reverse=True)
+    seen.add_to_items("chat", chat_threads, "thread_id")
     return {"threads": chat_threads}
 
 
-def _host_thread_summaries() -> list[dict[str, Any]]:
+def mark_chat_thread_seen(thread_id: str, body: Any) -> dict[str, int]:
+    """Advance only through the newest message the browser actually rendered."""
+    _require_chat_thread(thread_id, include_archived=True)
+    requested, _ = seen.request_marker(body, include_revision=False)
+    try:
+        response = call_admin_api("GET", f"/v1/threads/{quote(thread_id, safe='')}")
+    except WorkspaceError as exc:
+        if not (
+            exc.status == HTTPStatus.NOT_FOUND
+            and SCHEDULE_THREAD_ID_RE.fullmatch(thread_id) is not None
+        ):
+            raise
+        current = 0
+    else:
+        thread = response.get("thread")
+        if not isinstance(thread, dict):
+            raise WorkspaceError(
+                HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread detail"
+            )
+        current = max(0, int(thread.get("latest_message_seq") or 0))
+    return seen.save("chat", thread_id, min(requested, current))
+
+
+def _pre_session_schedule_summary(
+    thread_id: str,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Show a scheduled agent before its first host thread event."""
+    return {
+        "thread_id": thread_id,
+        "agent_runtime": metadata["agent_runtime"],
+        "model": metadata["model"],
+        "effort": metadata["effort"],
+        "status": "idle",
+        "last_used_at": metadata["created_at"],
+        "latest_event_seq": 0,
+        "latest_message_seq": 0,
+    }
+
+
+def _host_thread_summaries(prefix: str) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     before: str | None = None
     seen_cursors: set[str] = set()
     while True:
-        path = f"/v1/threads?limit={THREAD_LIST_PAGE}&prefix=thread-"
+        path = f"/v1/threads?limit={THREAD_LIST_PAGE}&prefix={prefix}"
         if before is not None:
             path += f"&before={quote(before, safe='')}"
         response = call_admin_api("GET", path)
         page = response.get("threads")
-        if not isinstance(page, list) or not all(isinstance(item, dict) for item in page):
-            raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread list")
+        if not isinstance(page, list) or not all(
+            isinstance(item, dict) for item in page
+        ):
+            raise WorkspaceError(
+                HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread list"
+            )
         summaries.extend(page)
         next_before = response.get("next_before")
         if next_before is None:
-            return summaries
+            break
         if (
             not isinstance(next_before, str)
             or not next_before
             or next_before in seen_cursors
         ):
-            raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread cursor")
+            raise WorkspaceError(
+                HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread cursor"
+            )
         seen_cursors.add(next_before)
         before = next_before
+    return summaries
 
 
-def _recorded_threads(*, archived: bool) -> dict[str, str]:
-    """Threads in one archive state mapped to their display names. Threads
-    without a custom name keep showing their stable host id."""
-    with db.transaction() as cur:
-        cur.execute(
-            "SELECT thread_id, COALESCE(name, thread_id) FROM chat_threads WHERE archived = %s",
-            (archived,),
+def _recorded_threads(
+    *, archived: bool, scheduled: bool
+) -> dict[str, dict[str, Any]]:
+    """Return the database-owned members and metadata for one thread index."""
+    if scheduled:
+        query = (
+            "SELECT thread_id, name, id, agent_runtime, model, effort,"
+            " next_run_at, created_at FROM schedules"
+            " WHERE deleted_at IS NULL"
         )
+        params: tuple[Any, ...] = ()
+    else:
+        query = (
+            "SELECT thread_id, COALESCE(name, thread_id),"
+            " NULL, NULL, NULL, NULL, NULL, NULL FROM chat_threads"
+            " WHERE archived = %s"
+        )
+        params = (archived,)
+    with db.transaction() as cur:
+        cur.execute(query, params)
         rows = cur.fetchall()
-    return {thread_id: name for thread_id, name in rows}
+    return {
+        str(row[0]): {
+            "name": str(row[1]),
+            "schedule_id": int(row[2]) if row[2] is not None else None,
+            "agent_runtime": row[3],
+            "model": row[4],
+            "effort": row[5],
+            "next_run_at": row[6],
+            "created_at": row[7],
+        }
+        for row in rows
+    }
 
 
 def _chat_thread_summary(
     summary: dict[str, Any],
     *,
-    name: str,
+    metadata: dict[str, Any],
     archived: bool,
+    has_session: bool,
 ) -> dict[str, Any]:
     runtime, model, effort = _host_thread_session_config(summary)
+    if metadata["schedule_id"] is not None:
+        runtime = metadata["agent_runtime"]
+        model = metadata["model"]
+        effort = metadata["effort"]
     status = summary.get("status")
     if status not in {"idle", "running"}:
         raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread summary")
     return {
         "thread_id": _required_response_text(summary.get("thread_id"), "thread_id"),
-        "name": name,
+        "name": metadata["name"],
         "agent_runtime": runtime,
         "model": model,
         "effort": effort,
@@ -256,6 +374,9 @@ def _chat_thread_summary(
         "latest_event_seq": max(0, int(summary.get("latest_event_seq") or 0)),
         "latest_message_seq": max(0, int(summary.get("latest_message_seq") or 0)),
         "status": status,
+        "schedule_id": metadata["schedule_id"],
+        "next_run_at": metadata["next_run_at"],
+        "has_session": has_session,
     }
 
 
@@ -306,7 +427,15 @@ def list_chat_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict
                 f"{cursor_name} must be a non-negative integer",
             )
         path += f"&{cursor_name}={cursor}"
-    response = call_admin_api("GET", path)
+    try:
+        response = call_admin_api("GET", path)
+    except WorkspaceError as exc:
+        if (
+            exc.status == HTTPStatus.NOT_FOUND
+            and SCHEDULE_THREAD_ID_RE.fullmatch(thread_id) is not None
+        ):
+            return {"events": []}
+        raise
     events = response.get("events")
     if not isinstance(events, list):
         raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid event list")
@@ -333,12 +462,20 @@ def send_chat_message(body: Any) -> dict[str, Any]:
         # the same per-thread delivery lock as every existing conversation.
         thread_id = _reserve_generated_thread_id()
     with _message_send_lock(thread_id):
-        _require_sendable_thread(thread_id)
+        schedule_config = _require_sendable_thread(thread_id)
         host_request: dict[str, Any] = {"message": message}
-        for field in ("agent_runtime", "model", "effort"):
-            if field in body:
-                host_request[field] = body[field]
-        _requested_session_config(body)
+        if schedule_config is None:
+            for field in ("agent_runtime", "model", "effort"):
+                if field in body:
+                    host_request[field] = body[field]
+            _requested_session_config(body)
+        else:
+            if schedule_config["agent_runtime"] == SCRIPT_RUNTIME:
+                raise WorkspaceError(
+                    HTTPStatus.CONFLICT,
+                    "Bash schedule transcripts are read-only",
+                )
+            host_request.update(schedule_config)
         response = _send_with_busy_retry(thread_id, host_request)
         status = response.get("status")
         if status != "accepted":
@@ -373,11 +510,22 @@ def _post_with_busy_retry(
     )
 
 
-def _require_sendable_thread(thread_id: str) -> None:
-    """Ensure Chat's thread row exists and is not archived before the host
-    call. The caller holds this thread's message lock, and archive/unarchive
-    updates take the same lock, so the archived state checked here cannot
-    change before the host send completes."""
+def _require_sendable_thread(thread_id: str) -> dict[str, str] | None:
+    """Ensure the Workspace resource exists and accepts operator messages."""
+    if SCHEDULE_THREAD_ID_RE.fullmatch(thread_id) is not None:
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT agent_runtime, model, effort FROM schedules"
+                " WHERE thread_id = %s AND deleted_at IS NULL",
+                (thread_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "active schedule not found")
+        return {"agent_runtime": row[0], "model": row[1], "effort": row[2]}
+
+    # The caller holds this thread's message lock, and archive/unarchive takes
+    # the same lock, so the archived state cannot change before the host send.
     with db.transaction() as cur:
         cur.execute("LOCK TABLE chat_threads IN SHARE ROW EXCLUSIVE MODE")
         cur.execute(
@@ -386,7 +534,10 @@ def _require_sendable_thread(thread_id: str) -> None:
             " ON CONFLICT (thread_id) DO NOTHING",
             (thread_id, MAX_CHAT_THREADS),
         )
-        cur.execute("SELECT archived FROM chat_threads WHERE thread_id = %s FOR UPDATE", (thread_id,))
+        cur.execute(
+            "SELECT archived FROM chat_threads WHERE thread_id = %s FOR UPDATE",
+            (thread_id,),
+        )
         row = cur.fetchone()
         if row is None:
             raise WorkspaceError(
@@ -395,9 +546,14 @@ def _require_sendable_thread(thread_id: str) -> None:
             )
         if row[0]:
             raise WorkspaceError(HTTPStatus.CONFLICT, "archived threads are read-only")
+        return None
 
 
 def set_chat_thread_archived(thread_id: str, *, archived: bool) -> dict[str, Any]:
+    if SCHEDULE_THREAD_ID_RE.fullmatch(thread_id) is not None:
+        raise WorkspaceError(
+            HTTPStatus.CONFLICT, "schedule transcripts cannot be archived"
+        )
     if archived:
         _require_chat_thread(thread_id, include_archived=True)
         response = call_admin_api(
@@ -450,6 +606,16 @@ def rename_chat_thread(thread_id: str, body: Any) -> dict[str, Any]:
             HTTPStatus.BAD_REQUEST,
             f"name must be at most {THREAD_NAME_MAX_CHARS} characters",
         )
+    if SCHEDULE_THREAD_ID_RE.fullmatch(thread_id) is not None:
+        # Imported lazily to avoid making the two Workspace route modules
+        # depend on each other during service startup.
+        from host.runtime.workspace import schedules
+
+        name = schedules.validate_schedule_name(name)
+        renamed = schedules.rename_scheduled_agent(thread_id, name)
+        if renamed is None:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "active schedule not found")
+        return renamed
     with db.transaction() as cur:
         cur.execute(
             "UPDATE chat_threads SET name = %s WHERE thread_id = %s"
@@ -487,7 +653,7 @@ def _reserve_generated_thread_id() -> str:
             numbers = [
                 int(match.group(1))
                 for (thread_id,) in rows
-                if (match := THREAD_ID_RE.fullmatch(thread_id)) is not None
+                if (match := GENERATED_THREAD_ID_RE.fullmatch(thread_id)) is not None
             ]
             candidate = f"thread-{max(numbers, default=0) + 1}"
             cur.execute(
@@ -501,14 +667,19 @@ def _reserve_generated_thread_id() -> str:
 
 def _require_chat_thread(thread_id: str, *, include_archived: bool = False) -> None:
     with db.transaction() as cur:
-        query = "SELECT 1 FROM chat_threads WHERE thread_id = %s"
-        if not include_archived:
-            query += " AND archived = FALSE"
+        if SCHEDULE_THREAD_ID_RE.fullmatch(thread_id) is not None:
+            query = (
+                "SELECT 1 FROM schedules"
+                " WHERE thread_id = %s AND deleted_at IS NULL"
+            )
+        else:
+            query = "SELECT 1 FROM chat_threads WHERE thread_id = %s"
+            if not include_archived:
+                query += " AND archived = FALSE"
         cur.execute(query, (thread_id,))
         row = cur.fetchone()
     if not row:
         raise WorkspaceError(HTTPStatus.NOT_FOUND, "thread not found")
-
 
 def _requested_session_config(body: dict[str, Any]) -> tuple[str, str, str] | None:
     fields = ("agent_runtime", "model", "effort")

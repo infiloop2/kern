@@ -26,6 +26,7 @@ from urllib.parse import quote, unquote
 from host.constants import MAX_WORKSPACE_RESPONSE_BODY_BYTES
 from host.runtime.core import db
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
+from host.runtime.workspace import seen
 from host.runtime.workspace.busy_retry import post_with_busy_retry
 from host.runtime.workspace.web_apps import collections as collection_store
 from host.runtime.workspace.web_apps.collections import (
@@ -51,7 +52,12 @@ from host.runtime.workspace.web_apps.data_shape import (
     data_shape,
     utf8_length as _utf8_length,
 )
-from host.session_options import public_session_options, recorded_session_config, session_config_error
+from host.session_options import (
+    DEFAULT_INTERACTIVE_MODELS,
+    public_session_options,
+    recorded_session_config,
+    session_config_error,
+)
 
 
 APP_ID_RE = re.compile(r"app-([1-9][0-9]*)")
@@ -111,7 +117,8 @@ STATE_COLUMNS = (
     "revision, html, css, javascript, data_json, updated_at, agent_updates_locked"
 )
 SUMMARY_COLUMNS = (
-    "app_id, name, revision, created_at, updated_at, archived, agent_updates_locked"
+    "app_id, name, revision, created_at, updated_at, archived, agent_updates_locked,"
+    " agent_runtime, agent_model, agent_effort"
 )
 AGENT_UPDATES_LOCKED_MESSAGE = (
     "The user has locked agent updates for this app. Do not change the app now; "
@@ -161,7 +168,16 @@ def _route_browser(
     if method == "GET" and path == "/apps":
         return list_web_apps(query or {})
     if method == "POST" and path == "/apps":
+        if body not in (None, {}):
+            raise WorkspaceError(
+                HTTPStatus.BAD_REQUEST,
+                "app creation accepts no fields",
+            )
         return {"app": create_web_app()}
+
+    match = re.fullmatch(r"/apps/([^/]+)/seen", path)
+    if method == "POST" and match:
+        return {"seen": mark_web_app_seen(_path_segment(match.group(1)), body)}
 
     match = re.fullmatch(r"/apps/([^/]+)/(state|conversation)", path)
     if method == "GET" and match:
@@ -210,6 +226,12 @@ def _route_browser(
         app_id = _path_segment(match.group(1))
         _require_writable_web_app(app_id)
         return {"app": set_agent_updates_locked(app_id, body)}
+
+    match = re.fullmatch(r"/apps/([^/]+)/agent-settings", path)
+    if method == "PUT" and match:
+        app_id = _path_segment(match.group(1))
+        _require_writable_web_app(app_id)
+        return {"app": set_app_agent_settings(app_id, body)}
 
     match = re.fullmatch(r"/apps/([^/]+)/(archive|unarchive)", path)
     if method == "POST" and match:
@@ -365,7 +387,40 @@ def _list_web_apps(archived: bool | None) -> dict[str, Any]:
         key=lambda app: str(app.get("last_used_at") or app["updated_at"]),
         reverse=True,
     )
+    seen.add_to_items("apps", apps, "app_id")
     return {"apps": apps}
+
+
+def mark_web_app_seen(app_id: str, body: Any) -> dict[str, int]:
+    """Advance through the App revision and messages rendered by the browser."""
+    requested_message, requested_revision = seen.request_marker(
+        body, include_revision=True
+    )
+    with db.transaction() as cur:
+        cur.execute("SELECT revision FROM web_apps WHERE app_id = %s", (app_id,))
+        row = cur.fetchone()
+    if row is None:
+        raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
+    current_message = 0
+    if requested_message:
+        try:
+            response = call_admin_api("GET", f"/v1/threads/{quote(app_id, safe='')}")
+        except WorkspaceError as exc:
+            if exc.status != HTTPStatus.NOT_FOUND:
+                raise
+        else:
+            thread = response.get("thread")
+            if not isinstance(thread, dict):
+                raise WorkspaceError(
+                    HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread detail"
+                )
+            current_message = max(0, int(thread.get("latest_message_seq") or 0))
+    return seen.save(
+        "apps",
+        app_id,
+        min(requested_message, current_message),
+        min(requested_revision, max(0, int(row[0]))),
+    )
 
 
 def _host_thread_summaries() -> list[dict[str, Any]]:
@@ -427,15 +482,57 @@ def _web_app_summary(
         "latest_event_seq": latest_event_seq,
         "latest_message_seq": latest_message_seq,
         "session": session,
+        "agent_settings": _agent_settings_from_values(row[7], row[8], row[9]),
         "status": status,
         "archived": bool(row[5]),
         "agent_updates_locked": bool(row[6]),
     }
 
 
+def _agent_settings_from_values(
+    runtime: Any, model: Any, effort: Any
+) -> dict[str, str]:
+    if not all(isinstance(value, str) and value for value in (runtime, model, effort)):
+        raise WorkspaceError(
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            "stored app agent settings are invalid",
+        )
+    return {"agent_runtime": runtime, "model": model, "effort": effort}
+
+
+def _validated_agent_settings(body: Any) -> dict[str, str]:
+    request = _required_object(body, "agent settings request")
+    fields = {"agent_runtime", "model", "effort"}
+    _require_keys(request, fields, required=fields)
+    runtime = _required_text(request.get("agent_runtime"), "agent_runtime")
+    model = request.get("model")
+    effort = request.get("effort")
+    error = session_config_error(runtime, model, effort)
+    if error is not None:
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, error)
+    assert isinstance(model, str) and isinstance(effort, str)
+    return {"agent_runtime": runtime, "model": model, "effort": effort}
+
+
+def default_app_agent_settings() -> dict[str, str]:
+    options = public_session_options()
+    active = set(active_agent_runtimes() or ())
+    runtime = next((name for name in options if name in active), "codex")
+    if runtime not in options:
+        runtime = next(iter(options))
+    models = options[runtime]
+    model = DEFAULT_INTERACTIVE_MODELS.get(runtime)
+    if model not in models:
+        model = next(iter(models))
+    efforts = models[model]
+    effort = "high" if "high" in efforts else efforts[0]
+    return {"agent_runtime": runtime, "model": model, "effort": effort}
+
+
 def create_web_app(*, actor: str = "user") -> dict[str, Any]:
     # Match Agent Chat's allocator. The insert reserves an id across concurrent
     # creators, and every existing id remains counted so one is never reused.
+    settings = default_app_agent_settings()
     while True:
         now = _utc_now()
         with db.transaction() as cur:
@@ -460,11 +557,20 @@ def create_web_app(*, actor: str = "user") -> dict[str, Any]:
             cur.execute(
                 "INSERT INTO web_apps"
                 " (app_id, name, revision, html,"
-                " css, javascript, data_json, created_at, updated_at)"
-                " VALUES (%s, %s, 0, '', '', '', '{}', %s, %s)"
+                " css, javascript, data_json, created_at, updated_at,"
+                " agent_runtime, agent_model, agent_effort)"
+                " VALUES (%s, %s, 0, '', '', '', '{}', %s, %s, %s, %s, %s)"
                 " ON CONFLICT (app_id) DO NOTHING"
                 f" RETURNING {SUMMARY_COLUMNS}",
-                (app_id, app_id, now, now),
+                (
+                    app_id,
+                    app_id,
+                    now,
+                    now,
+                    settings["agent_runtime"],
+                    settings["model"],
+                    settings["effort"],
+                ),
             )
             row = cur.fetchone()
             if row is not None:
@@ -521,6 +627,33 @@ def set_agent_updates_locked(app_id: str, body: Any) -> dict[str, Any]:
             "UPDATE web_apps SET agent_updates_locked = %s WHERE app_id = %s"
             f" RETURNING {SUMMARY_COLUMNS}",
             (locked, app_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
+    return _web_app_summary(row, None)
+
+
+def set_app_agent_settings(app_id: str, body: Any) -> dict[str, Any]:
+    settings = _validated_agent_settings(body)
+    if browser_conversation(app_id)["status"] == "running":
+        raise WorkspaceError(
+            HTTPStatus.CONFLICT,
+            "agent settings can only be changed while the app agent is idle",
+        )
+    now = _utc_now()
+    with db.transaction() as cur:
+        cur.execute(
+            "UPDATE web_apps SET agent_runtime = %s, agent_model = %s,"
+            " agent_effort = %s, updated_at = %s WHERE app_id = %s"
+            f" RETURNING {SUMMARY_COLUMNS}",
+            (
+                settings["agent_runtime"],
+                settings["model"],
+                settings["effort"],
+                now,
+                app_id,
+            ),
         )
         row = cur.fetchone()
     if row is None:

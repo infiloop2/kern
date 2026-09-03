@@ -54,7 +54,7 @@ class AgentChatBackendTests(unittest.TestCase):
                     },
                     "claude_code": {
                         "claude-opus-5": ["high", "max", "ultracode"],
-                        "claude-fable-5": ["high", "max", "ultracode"],
+                        "claude-fable-5-1": ["high", "max", "ultracode"],
                         "claude-sonnet-5": ["high", "max", "ultracode"],
                     },
                     "grok": {
@@ -72,6 +72,17 @@ class AgentChatBackendTests(unittest.TestCase):
             },
         )
 
+    def test_scheduled_agents_have_a_separate_index_route(self) -> None:
+        expected = {"threads": [{"thread_id": "schedule-7"}]}
+        with patch.object(
+            backend, "list_scheduled_agent_threads", return_value=expected
+        ) as listed:
+            status, body = self._request("GET", "/scheduled-agents")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body, expected)
+        listed.assert_called_once_with()
+
     def test_event_page_reserves_bridge_space_for_metadata(self) -> None:
         text_budget = backend.THREAD_EVENT_PAGE * backend.THREAD_EVENT_MESSAGE_BYTES
         self.assertLessEqual(
@@ -81,11 +92,13 @@ class AgentChatBackendTests(unittest.TestCase):
 
     def test_composer_uses_send_button_spinner_without_process_phases(self) -> None:
         source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
-        css = (CHAT_DIR / "ui" / "agent_chat.css").read_text()
+        surface_css = (CHAT_DIR / "ui" / "agent_chat.css").read_text()
+        css = (CHAT_DIR.parent / "ui" / "composer.css").read_text()
         self.assertNotIn('attachmentActivity = "Sending…"', source)
         self.assertIn('sendButton.classList.toggle("sending", selectedSending)', source)
         self.assertIn("sendingMessageThreadKey === composerDraftKey()", source)
         self.assertIn(".send-button.sending::after", css)
+        self.assertNotIn(".send-button", surface_css)
         self.assertIn('attachmentActivity = "Stopping…"', source)
         self.assertNotIn("Waiting for agent to start", source)
         self.assertEqual(
@@ -120,7 +133,7 @@ class AgentChatBackendTests(unittest.TestCase):
         self.assertFalse(second.is_alive())
 
     def test_composer_hint_is_centered_under_the_composer(self) -> None:
-        css = (CHAT_DIR / "ui" / "agent_chat.css").read_text()
+        css = (CHAT_DIR.parent / "ui" / "composer.css").read_text()
         hint = css.split(".composer-hint {", 1)[1].split("}", 1)[0]
         self.assertIn("text-align: center;", hint)
         self.assertIn("padding: 0 0.6rem;", hint)
@@ -157,6 +170,10 @@ class AgentChatBackendTests(unittest.TestCase):
 
     def test_composer_restores_the_new_thread_draft_on_startup(self) -> None:
         source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
+        self.assertIn('codex: "gpt-5.6-sol"', source)
+        self.assertIn('claude_code: "claude-opus-5"', source)
+        self.assertIn('hermes: "moonshotai.kimi-k2.5"', source)
+        self.assertIn('defaultingNewThread && efforts.includes("high")', source)
         startup = source.rsplit("setSessionOptions();", 1)[1]
         self.assertLess(
             startup.index("restoreComposerDraft();"),
@@ -194,7 +211,10 @@ class AgentChatBackendTests(unittest.TestCase):
     def test_composer_omits_unchanged_session_configuration(self) -> None:
         source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
         self.assertIn("const changingSession = sessionConfigurationChanged();", source)
-        self.assertIn("if (startingNewThread || changingSession)", source)
+        self.assertIn(
+            "if (startingNewThread || changingSession || !selectedThreadHasSession)",
+            source,
+        )
         self.assertIn("const preservingRecordedSession =", source)
         self.assertNotIn(
             'const request = { input_message: "", agent_runtime: runtime, model, effort };',
@@ -207,7 +227,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "thread": {"thread_id": "thread-7", "status": "running"},
         }
         with (
-            patch("host.runtime.workspace.chat.backend._require_sendable_thread") as require,
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread", return_value=None) as require,
             patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=response) as admin_call,
         ):
             self.assertEqual(
@@ -235,6 +255,68 @@ class AgentChatBackendTests(unittest.TestCase):
             },
         )
 
+    def test_scheduled_agent_send_uses_its_saved_session_configuration(self) -> None:
+        response = {
+            "status": "accepted",
+            "thread": {"thread_id": "schedule-7", "status": "running"},
+        }
+        saved = {
+            "agent_runtime": "codex",
+            "model": "gpt-5.6-terra",
+            "effort": "max",
+        }
+        with (
+            patch(
+                "host.runtime.workspace.chat.backend._require_sendable_thread",
+                return_value=saved,
+            ),
+            patch(
+                "host.runtime.workspace.chat.backend.call_admin_api",
+                return_value=response,
+            ) as admin_call,
+        ):
+            result = backend.send_chat_message(
+                {
+                    "input_message": "manual follow-up",
+                    "thread_id": "schedule-7",
+                    "agent_runtime": "hermes",
+                    "model": "ignored",
+                    "effort": "ignored",
+                }
+            )
+
+        self.assertEqual(result["thread_id"], "schedule-7")
+        admin_call.assert_called_once_with(
+            "POST",
+            "/v1/threads/schedule-7/messages",
+            {"message": "manual follow-up", **saved},
+        )
+
+    def test_bash_schedule_transcript_rejects_manual_messages(self) -> None:
+        saved = {
+            "agent_runtime": "script",
+            "model": "bash",
+            "effort": "fixed",
+        }
+        with (
+            patch(
+                "host.runtime.workspace.chat.backend._require_sendable_thread",
+                return_value=saved,
+            ),
+            patch("host.runtime.workspace.chat.backend.call_admin_api") as admin_call,
+            self.assertRaises(backend.WorkspaceError) as error,
+        ):
+            backend.send_chat_message(
+                {
+                    "input_message": "manual follow-up",
+                    "thread_id": "schedule-7",
+                }
+            )
+
+        self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("read-only", error.exception.message)
+        admin_call.assert_not_called()
+
     def test_send_without_thread_id_reserves_the_next_successive_name(self) -> None:
         request = {
             "input_message": "start",
@@ -248,7 +330,7 @@ class AgentChatBackendTests(unittest.TestCase):
         }
         with (
             patch("host.runtime.workspace.chat.backend._reserve_generated_thread_id", return_value="thread-4") as reserve,
-            patch("host.runtime.workspace.chat.backend._require_sendable_thread") as require,
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread", return_value=None) as require,
             patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=response) as admin_call,
         ):
             self.assertEqual(
@@ -274,7 +356,7 @@ class AgentChatBackendTests(unittest.TestCase):
         # a path, so it is rejected here rather than at the adapter, and never
         # reaches the host.
         with (
-            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread", return_value=None),
             patch("host.runtime.workspace.chat.backend.call_admin_api") as admin_call,
             self.assertRaises(backend.WorkspaceError) as rejected,
         ):
@@ -300,7 +382,7 @@ class AgentChatBackendTests(unittest.TestCase):
             with self.subTest(message=message):
                 busy = backend.WorkspaceError(HTTPStatus.CONFLICT, message)
                 with (
-                    patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+                    patch("host.runtime.workspace.chat.backend._require_sendable_thread", return_value=None),
                     patch(
                         "host.runtime.workspace.chat.backend.call_admin_api",
                         side_effect=(busy, busy, {"status": "accepted"}),
@@ -320,7 +402,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "the agent is finishing; retry shortly",
         )
         with (
-            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread", return_value=None),
             patch("host.runtime.workspace.chat.backend.call_admin_api", side_effect=busy) as admin_call,
             patch("host.runtime.workspace.busy_retry.RETRY_DELAY_SECONDS", 0),
             self.assertRaises(backend.WorkspaceError) as error,
@@ -337,7 +419,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "Hermes cannot accept another message while running; wait for it to finish",
         )
         with (
-            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread", return_value=None),
             patch("host.runtime.workspace.chat.backend.call_admin_api", side_effect=conflict) as admin_call,
             self.assertRaises(backend.WorkspaceError) as error,
         ):
@@ -348,7 +430,7 @@ class AgentChatBackendTests(unittest.TestCase):
 
     def test_send_rejects_an_invalid_host_send_status(self) -> None:
         with (
-            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread", return_value=None),
             patch(
                 "host.runtime.workspace.chat.backend.call_admin_api",
                 return_value={"status": "bogus"},
@@ -381,7 +463,7 @@ class AgentChatBackendTests(unittest.TestCase):
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
-        cursor.fetchone.return_value = (False,)
+        cursor.fetchone.return_value = (False, None, None, None)
         with (
             patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
             patch("host.runtime.workspace.chat.backend._require_chat_thread"),
@@ -399,9 +481,53 @@ class AgentChatBackendTests(unittest.TestCase):
         self.assertIn("ON CONFLICT (thread_id) DO NOTHING", insert.args[0])
         self.assertEqual(insert.args[1], ("thread-1", backend.MAX_CHAT_THREADS))
 
+    def test_unowned_schedule_id_is_rejected_from_the_schedule_index(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchone.return_value = None
+        with (
+            patch(
+                "host.runtime.workspace.chat.backend.db.transaction",
+                return_value=transaction,
+            ),
+            self.assertRaises(backend.WorkspaceError) as error,
+        ):
+            backend._require_sendable_thread("schedule-7")
+
+        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
+        query = cursor.execute.call_args.args[0]
+        self.assertIn("FROM schedules", query)
+        self.assertNotIn("chat_threads", query)
+        self.assertFalse(
+            any(
+                "INSERT INTO chat_threads" in item.args[0]
+                for item in cursor.execute.call_args_list
+            )
+        )
+
+    def test_schedule_routes_require_an_active_schedule(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchone.return_value = None
+        with (
+            patch(
+                "host.runtime.workspace.chat.backend.db.transaction",
+                return_value=transaction,
+            ),
+            self.assertRaises(backend.WorkspaceError) as error,
+        ):
+            backend._require_chat_thread("schedule-7", include_archived=True)
+
+        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
+        query = cursor.execute.call_args.args[0]
+        self.assertIn("FROM schedules", query)
+        self.assertIn("deleted_at IS NULL", query)
+
     def test_chat_session_options_must_be_provided_together(self) -> None:
         with (
-            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread", return_value=None),
             patch("host.runtime.workspace.chat.backend.call_admin_api") as admin_call,
             self.assertRaises(backend.WorkspaceError) as error,
         ):
@@ -419,7 +545,7 @@ class AgentChatBackendTests(unittest.TestCase):
 
     def test_host_send_errors_pass_through_unchanged(self) -> None:
         with (
-            patch("host.runtime.workspace.chat.backend._require_sendable_thread"),
+            patch("host.runtime.workspace.chat.backend._require_sendable_thread", return_value=None),
             patch(
                 "host.runtime.workspace.chat.backend.call_admin_api",
                 side_effect=backend.WorkspaceError(HTTPStatus.BAD_REQUEST, "session configuration required"),
@@ -487,14 +613,11 @@ class AgentChatBackendTests(unittest.TestCase):
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
-        # thread-orphan is known to the host but has no Chat thread row (its
-        # reservation was archived or never recorded here); it must stay out
-        # of the index even though the host returns a summary for it.
         cursor.fetchall.return_value = [
-            ("thread-1", "Customer launch"),
-            ("thread-2", "thread-2"),
+            ("thread-1", "Customer launch", None, None, None, None, None, None),
+            ("thread-2", "thread-2", None, None, None, None, None, None),
         ]
-        first_page = {
+        host_summaries = {
             "threads": [
                 {
                     "thread_id": "thread-1",
@@ -506,19 +629,6 @@ class AgentChatBackendTests(unittest.TestCase):
                     "latest_message_seq": 10,
                     "status": "running",
                 },
-                {
-                    "thread_id": "thread-orphan",
-                    "agent_runtime": "codex",
-                    "model": "gpt-5.6-sol",
-                    "effort": "high",
-                    "last_used_at": "2026-07-17T12:00:00Z",
-                    "status": "idle",
-                },
-            ],
-            "next_before": "next-token",
-        }
-        second_page = {
-            "threads": [
                 {
                     "thread_id": "thread-2",
                     "agent_runtime": "claude_code",
@@ -533,18 +643,23 @@ class AgentChatBackendTests(unittest.TestCase):
             patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
             patch(
                 "host.runtime.workspace.chat.backend.call_admin_api",
-                side_effect=(first_page, second_page),
+                return_value=host_summaries,
             ) as admin_call,
+            patch.object(backend.seen, "add_to_items") as add_seen,
         ):
             response = backend.list_chat_threads()
 
         self.assertEqual(
-            admin_call.call_args_list,
-            [
-                call("GET", "/v1/threads?limit=100&prefix=thread-"),
-                call("GET", "/v1/threads?limit=100&prefix=thread-&before=next-token"),
-            ],
+            [item.args[1] for item in admin_call.call_args_list],
+            ["/v1/threads?limit=100&prefix=thread-"],
         )
+        recorded_query = next(
+            item.args[0]
+            for item in cursor.execute.call_args_list
+            if "FROM chat_threads" in item.args[0]
+        )
+        self.assertIn("COALESCE(name, thread_id)", recorded_query)
+        self.assertNotIn("schedules", recorded_query)
         # Only threads recorded by Chat, newest-first by last_used_at.
         self.assertEqual(
             [thread["thread_id"] for thread in response["threads"]],
@@ -557,12 +672,13 @@ class AgentChatBackendTests(unittest.TestCase):
         self.assertEqual(first["latest_message_seq"], 10)
         self.assertFalse(first["archived"])
         self.assertEqual(response["threads"][1]["status"], "idle")
+        add_seen.assert_called_once_with("chat", response["threads"], "thread_id")
 
     def test_list_chat_threads_can_select_archived_threads(self) -> None:
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
-        cursor.fetchall.return_value = [("thread-1", "thread-1")]
+        cursor.fetchall.return_value = [("thread-1", "thread-1", None, None, None, None, None, None)]
         summaries = {
             "threads": [{
                 "thread_id": "thread-1",
@@ -576,6 +692,7 @@ class AgentChatBackendTests(unittest.TestCase):
         with (
             patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
             patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=summaries),
+            patch.object(backend.seen, "add_to_items"),
         ):
             response = backend.list_chat_threads(archived=True)
 
@@ -586,13 +703,91 @@ class AgentChatBackendTests(unittest.TestCase):
         )
         self.assertEqual(archived_query.args[1], (True,))
 
+    def test_scheduled_agent_is_visible_before_delivery_but_hidden_after_deletion(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        active_row = (
+            "schedule-7", "Morning review", 7, "codex",
+            "gpt-5.6-terra", "high", "2026-07-18T09:00:00Z",
+            "2026-07-17T09:00:00Z",
+        )
+        cursor.fetchall.return_value = [active_row]
+
+        def host(_method: str, path: str, _body: object = None) -> dict:
+            if path.startswith("/v1/threads?limit="):
+                return {"threads": []}
+            if path == "/v1/threads/schedule-7":
+                raise backend.WorkspaceError(HTTPStatus.NOT_FOUND, "thread not found")
+            raise AssertionError(path)
+
+        with (
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch(
+                "host.runtime.workspace.chat.backend.call_admin_api",
+                side_effect=host,
+            ),
+            patch.object(backend.seen, "add_to_items"),
+        ):
+            active = backend.list_scheduled_agent_threads()["threads"][0]
+
+        self.assertEqual(active["schedule_id"], 7)
+        self.assertEqual(active["thread_id"], "schedule-7")
+        self.assertFalse(active["has_session"])
+        recorded_query = next(
+            item.args[0]
+            for item in cursor.execute.call_args_list
+            if "FROM schedules" in item.args[0]
+        )
+        self.assertIn("SELECT thread_id, name, id,", recorded_query)
+        self.assertIn("deleted_at IS NULL", recorded_query)
+        self.assertNotIn("chat_threads", recorded_query)
+
+        cursor.fetchall.return_value = []
+        with (
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch(
+                "host.runtime.workspace.chat.backend.call_admin_api",
+                side_effect=host,
+            ),
+            patch.object(backend.seen, "add_to_items"),
+        ):
+            removed = backend.list_scheduled_agent_threads()["threads"]
+
+        self.assertEqual(removed, [])
+
+    def test_script_schedule_is_offered_as_a_persistent_transcript(self) -> None:
+        metadata = {
+            "schedule-7": {
+                "name": "Nightly backup",
+                "schedule_id": 7,
+                "agent_runtime": "script",
+                "model": "bash",
+                "effort": "fixed",
+                "next_run_at": "2026-07-18T09:00:00Z",
+                "created_at": "2026-07-17T09:00:00Z",
+            }
+        }
+        with (
+            patch.object(backend, "_recorded_threads", return_value=metadata),
+            patch.object(backend, "_host_thread_summaries", return_value=[]),
+            patch.object(backend.seen, "add_to_items"),
+        ):
+            response = backend.list_scheduled_agent_threads()
+
+        thread = response["threads"][0]
+        self.assertEqual(thread["thread_id"], "schedule-7")
+        self.assertEqual(thread["schedule_id"], 7)
+        self.assertEqual(thread["agent_runtime"], "script")
+        self.assertFalse(thread["has_session"])
+
     def test_list_chat_threads_keeps_threads_on_a_superseded_model(self) -> None:
         # A thread started under an earlier catalog stays listed with the model
         # it recorded; the option matrix only gates what may be created.
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
-        cursor.fetchall.return_value = [("thread-1", "thread-1")]
+        cursor.fetchall.return_value = [("thread-1", "thread-1", None, None, None, None, None, None)]
         summaries = {
             "threads": [
                 {
@@ -608,6 +803,7 @@ class AgentChatBackendTests(unittest.TestCase):
         with (
             patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
             patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=summaries),
+            patch.object(backend.seen, "add_to_items"),
         ):
             response = backend.list_chat_threads()
 
@@ -617,7 +813,7 @@ class AgentChatBackendTests(unittest.TestCase):
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
-        cursor.fetchall.return_value = [("thread-1", "thread-1")]
+        cursor.fetchall.return_value = [("thread-1", "thread-1", None, None, None, None, None, None)]
         summaries = {
             "threads": [{
                 "thread_id": "thread-1",
@@ -658,6 +854,49 @@ class AgentChatBackendTests(unittest.TestCase):
             "&since=2",
         )
         self.assertEqual(response, events)
+
+    def test_seen_marker_is_capped_at_the_current_host_message(self) -> None:
+        with (
+            patch.object(backend, "_require_chat_thread") as require,
+            patch.object(
+                backend,
+                "call_admin_api",
+                return_value={"thread": {"latest_message_seq": 12}},
+            ),
+            patch.object(
+                backend.seen,
+                "save",
+                return_value={"message_seq": 12, "revision": 0},
+            ) as save,
+        ):
+            result = backend.mark_chat_thread_seen("thread-1", {"message_seq": 99})
+
+        self.assertEqual(result["message_seq"], 12)
+        require.assert_called_once_with("thread-1", include_archived=True)
+        save.assert_called_once_with("chat", "thread-1", 12)
+
+    def test_pre_session_schedule_seen_marker_stays_at_zero(self) -> None:
+        with (
+            patch.object(backend, "_require_chat_thread"),
+            patch.object(
+                backend,
+                "call_admin_api",
+                side_effect=backend.WorkspaceError(
+                    HTTPStatus.NOT_FOUND, "thread not found"
+                ),
+            ),
+            patch.object(
+                backend.seen,
+                "save",
+                return_value={"message_seq": 0, "revision": 0},
+            ) as save,
+        ):
+            result = backend.mark_chat_thread_seen(
+                "schedule-7", {"message_seq": 99}
+            )
+
+        self.assertEqual(result["message_seq"], 0)
+        save.assert_called_once_with("chat", "schedule-7", 0)
 
     def test_list_chat_thread_events_opens_latest_and_pages_before(self) -> None:
         events = {"events": [{"seq": 5, "thread_id": "thread-1", "event_type": "thread.message"}]}
@@ -752,6 +991,22 @@ class AgentChatBackendTests(unittest.TestCase):
 
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
 
+    def test_schedule_owned_thread_without_a_session_has_empty_events(self) -> None:
+        missing = backend.WorkspaceError(HTTPStatus.NOT_FOUND, "thread not found")
+        with (
+            patch("host.runtime.workspace.chat.backend._require_chat_thread"),
+            patch(
+                "host.runtime.workspace.chat.backend.call_admin_api",
+                side_effect=missing,
+            ),
+        ):
+            response = backend.list_chat_thread_events(
+                "schedule-7",
+                {},
+            )
+
+        self.assertEqual(response, {"events": []})
+
     def test_stop_route_proxies_to_the_host_thread_stop(self) -> None:
         with (
             patch("host.runtime.workspace.chat.backend._require_chat_thread") as require,
@@ -807,12 +1062,21 @@ class AgentChatBackendTests(unittest.TestCase):
             [(True, "thread-1"), (False, "thread-1")],
         )
 
+    def test_schedule_transcripts_cannot_be_archived(self) -> None:
+        with self.assertRaises(backend.WorkspaceError) as error:
+            backend.archive_chat_thread("schedule-7")
+
+        self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+        self.assertEqual(error.exception.message, "schedule transcripts cannot be archived")
+
     def test_thread_can_be_renamed_without_changing_its_id(self) -> None:
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
         cursor.fetchone.return_value = ("thread-1", "Release planning")
-        with patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction):
+        with patch(
+            "host.runtime.workspace.chat.backend.db.transaction", return_value=transaction
+        ):
             self.assertEqual(
                 backend.rename_chat_thread("thread-1", {"name": "  Release planning  "}),
                 {"thread_id": "thread-1", "name": "Release planning"},
@@ -823,6 +1087,39 @@ class AgentChatBackendTests(unittest.TestCase):
             if "UPDATE chat_threads SET name" in item.args[0]
         )
         self.assertEqual(update.args[1], ("Release planning", "thread-1"))
+
+    def test_scheduled_agent_rename_updates_its_schedule(self) -> None:
+        expected = {"thread_id": "schedule-7", "name": "Release planning"}
+        with patch(
+            "host.runtime.workspace.schedules.rename_scheduled_agent",
+            return_value=expected,
+        ) as rename:
+            self.assertEqual(
+                backend.rename_chat_thread(
+                    "schedule-7", {"name": " Release planning "}
+                ),
+                expected,
+            )
+        rename.assert_called_once_with("schedule-7", "Release planning")
+
+    def test_orphaned_schedule_thread_cannot_be_renamed(self) -> None:
+        with patch(
+            "host.runtime.workspace.schedules.rename_scheduled_agent",
+            return_value=None,
+        ), self.assertRaises(backend.WorkspaceError) as error:
+            backend.rename_chat_thread("schedule-7", {"name": "Release planning"})
+
+        self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
+
+    def test_scheduled_agent_rename_rejects_multiline_names(self) -> None:
+        with patch(
+            "host.runtime.workspace.schedules.rename_scheduled_agent"
+        ) as rename, self.assertRaises(backend.WorkspaceError) as error:
+            backend.rename_chat_thread("schedule-7", {"name": "Release\nplanning"})
+
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertIn("one line", error.exception.message)
+        rename.assert_not_called()
 
     def test_thread_name_must_be_nonempty_and_bounded(self) -> None:
         for name in ("   ", "x" * (backend.THREAD_NAME_MAX_CHARS + 1)):

@@ -87,14 +87,14 @@ export function renderGettingStarted() {
       <div>
         <p class="getting-started-eyebrow">Get started</p>
         <h2 id="getting-started-title">${allComplete ? "You've explored every feature" : "Explore what Kern can do"}</h2>
-        <p>${allComplete ? "Chat, Apps, and Schedules are all in play. Keep building on them from the sidebar." : "Four short tasks walk you through each of Kern's core features."}</p>
+        <p>${allComplete ? "Chat, Apps, and scheduled work are all in play. Keep building on them from the sidebar." : "Four short tasks walk you through each of Kern's core features."}</p>
       </div>
       <div class="getting-started-progress-copy"><strong>${esc(completed)}</strong><span>/ ${esc(steps.length)}</span></div>
     </div>
     <progress class="getting-started-progress" aria-label="${esc(progressLabel)}" max="${esc(steps.length)}" value="${esc(completed)}"></progress>
     <div class="getting-started-steps">${steps.map(stepRow).join("")}</div>
     <div class="getting-started-finish">
-      <span>${allComplete ? "Nice work. You can return to Apps and Schedules from the sidebar anytime." : "Dismiss this whenever you like."}</span>
+      <span>${allComplete ? "Nice work. You can return to Apps and scheduled work from the sidebar anytime." : "Dismiss this whenever you like."}</span>
       <button class="ghost sm" data-action="dismiss-getting-started">Dismiss checklist</button>
     </div>
   `);

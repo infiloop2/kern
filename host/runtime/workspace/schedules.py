@@ -1,4 +1,4 @@
-"""Host-global scheduled agent work with one fresh host thread per run."""
+"""Recurring messages delivered into persistent schedule threads."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import threading
 from typing import Any
 from urllib.parse import quote
 
-from host.agent_scripts import script_path_error
+from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX, script_path_error
 from host.runtime.core import db, host_errors
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
 from host.runtime.workspace.query import one as _one
@@ -26,8 +26,7 @@ DEFAULT_PAGE_LIMIT = 40
 MAX_PAGE_LIMIT = 100
 MAX_REVISION_PAGE_LIMIT = 10
 REVISION_RETAINED = 100
-RUN_RETAINED = 1000
-RETAIN_DAYS = 90
+DELETED_RETAIN_DAYS = 90
 DUE_BATCH = 10
 POLL_SECONDS = 30
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -39,17 +38,7 @@ _SCHEDULER_WAKE = threading.Event()
 SCHEDULE_COLUMNS = (
     "id, name, message, cadence, interval_minutes, daily_time, agent_runtime,"
     " model, effort, revision, deleted_at, last_run_at, next_run_at,"
-    " created_at, updated_at"
-)
-RUN_COLUMNS = (
-    "id, schedule_id, thread_id, message, agent_runtime, model, effort, status,"
-    " error_message, scheduled_for, finished_at"
-)
-QUALIFIED_RUN_COLUMNS = (
-    "schedule_runs.id, schedule_runs.schedule_id, schedule_runs.thread_id,"
-    " schedule_runs.message, schedule_runs.agent_runtime, schedule_runs.model,"
-    " schedule_runs.effort, schedule_runs.status, schedule_runs.error_message,"
-    " schedule_runs.scheduled_for, schedule_runs.finished_at"
+    " created_at, updated_at, thread_id"
 )
 
 
@@ -92,23 +81,6 @@ def route_browser(
                 _positive_id(match.group(1)), _positive_id(match.group(2)), body
             )
         }
-    match = re.fullmatch(rf"/schedules/{ID_CAPTURE}/runs", path)
-    if match and method == "GET":
-        return list_runs(_positive_id(match.group(1)), query)
-    match = re.fullmatch(rf"/schedules/{ID_CAPTURE}/runs/{ID_CAPTURE}", path)
-    if match and method == "GET":
-        return {
-            "run": load_run(
-                _positive_id(match.group(1)), _positive_id(match.group(2))
-            )
-        }
-    match = re.fullmatch(
-        rf"/schedules/{ID_CAPTURE}/runs/{ID_CAPTURE}/events", path
-    )
-    if match and method == "GET":
-        return run_events(
-            _positive_id(match.group(1)), _positive_id(match.group(2)), query
-        )
     raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule route not found")
 
 
@@ -130,8 +102,6 @@ def route_agent(
             return list_active_schedules(query)
         if method == "POST":
             return {"schedule": create_schedule(body, actor="agent")}
-    if path == "/agent/schedules/recent-failures" and method == "GET":
-        return list_recent_failures(query)
     match = re.fullmatch(rf"/agent/schedules/{ID_CAPTURE}", path)
     if match:
         schedule_id = _positive_id(match.group(1))
@@ -214,24 +184,30 @@ def create_schedule(body: Any, *, actor: str) -> dict[str, Any]:
         # observe the last free quota slot. Edits and scheduler claims remain
         # independently row-locked.
         cur.execute("LOCK TABLE schedules IN SHARE ROW EXCLUSIVE MODE")
-        cur.execute("SELECT COUNT(*) FROM schedules")
+        cur.execute("SELECT COUNT(*) FROM schedules WHERE deleted_at IS NULL")
         count_row = cur.fetchone()
         assert count_row is not None
         if int(count_row[0]) >= MAX_SCHEDULES:
             raise WorkspaceError(
-                HTTPStatus.CONFLICT, f"Workspace already retains {MAX_SCHEDULES} schedules"
+                HTTPStatus.CONFLICT, f"Workspace already has {MAX_SCHEDULES} active schedules"
             )
+        cur.execute("SELECT nextval('schedules_id_seq')")
+        id_row = cur.fetchone()
+        assert id_row is not None
+        schedule_id = int(id_row[0])
+        thread_id = f"schedule-{schedule_id}"
         cur.execute(
             "INSERT INTO schedules"
-            " (name, message, cadence, interval_minutes, daily_time, agent_runtime,"
-            " model, effort, revision, deleted_at, next_run_at, created_at, updated_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, NULL, %s, %s, %s)"
+            " (id, name, message, cadence, interval_minutes, daily_time, agent_runtime,"
+            " model, effort, revision, deleted_at, next_run_at, created_at, updated_at,"
+            " thread_id)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, NULL, %s, %s, %s, %s)"
             f" RETURNING {SCHEDULE_COLUMNS}",
             (
-                fields["name"], fields["message"], fields["cadence"],
+                schedule_id, fields["name"], fields["message"], fields["cadence"],
                 fields["interval_minutes"], fields["daily_time"],
                 fields["agent_runtime"], fields["model"], fields["effort"],
-                next_run, now_ts, now_ts,
+                next_run, now_ts, now_ts, thread_id,
             ),
         )
         row = cur.fetchone()
@@ -294,6 +270,40 @@ def update_schedule(schedule_id: int, body: Any, *, actor: str) -> dict[str, Any
     return _schedule_row(changed)
 
 
+def rename_scheduled_agent(
+    thread_id: str, name: str, *, actor: str = "user"
+) -> dict[str, Any] | None:
+    """Rename an active schedule and record the change as one revision."""
+    now_ts = _utc_now()
+    with db.transaction() as cur:
+        cur.execute(
+            f"SELECT {SCHEDULE_COLUMNS} FROM schedules"
+            " WHERE thread_id = %s FOR UPDATE",
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        current = _schedule_row(row)
+        if current["deleted"]:
+            raise WorkspaceError(
+                HTTPStatus.CONFLICT, "deleted scheduled agents cannot be renamed"
+            )
+        revision = current["revision"] + 1
+        cur.execute(
+            "UPDATE schedules SET name = %s, revision = %s, updated_at = %s"
+            " WHERE id = %s"
+            f" RETURNING {SCHEDULE_COLUMNS}",
+            (name, revision, now_ts, current["id"]),
+        )
+        changed_row = cur.fetchone()
+        assert changed_row is not None
+        changed = _schedule_row(changed_row)
+        _insert_revision(cur, changed, actor, now_ts)
+        _prune_revisions(cur, current["id"])
+    return {"thread_id": thread_id, "name": name}
+
+
 def delete_schedule(
     schedule_id: int, query: dict[str, list[str]], *, actor: str
 ) -> dict[str, Any]:
@@ -322,7 +332,7 @@ def delete_schedule(
         assert changed is not None
         _insert_revision(cur, _schedule_row(changed), actor, now)
         _prune_revisions(cur, schedule_id)
-    return {"ok": True, "revision": revision}
+    return {"ok": True, "revision": revision, "thread_id": current["thread_id"]}
 
 
 def list_revisions(schedule_id: int, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -370,6 +380,10 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
     now = datetime.now(timezone.utc)
     now_ts = _format_ts(now)
     with db.transaction() as cur:
+        # A restore can transition a deleted definition back to active. Use
+        # the same table-level admission lock as create so the active limit
+        # cannot be bypassed by racing restores and creates.
+        cur.execute("LOCK TABLE schedules IN SHARE ROW EXCLUSIVE MODE")
         cur.execute(
             f"SELECT {SCHEDULE_COLUMNS} FROM schedules WHERE id = %s FOR UPDATE",
             (schedule_id,),
@@ -397,6 +411,15 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
         fields = _validated_fields(fields)
         new_revision = expected + 1
         deleted_at = now_ts if source[8] else None
+        if current["deleted"] and deleted_at is None:
+            cur.execute("SELECT COUNT(*) FROM schedules WHERE deleted_at IS NULL")
+            count_row = cur.fetchone()
+            assert count_row is not None
+            if int(count_row[0]) >= MAX_SCHEDULES:
+                raise WorkspaceError(
+                    HTTPStatus.CONFLICT,
+                    f"Workspace already has {MAX_SCHEDULES} active schedules",
+                )
         next_run = _format_ts(_next_run(fields, now))
         cur.execute(
             "UPDATE schedules SET name = %s, message = %s, cadence = %s,"
@@ -419,109 +442,6 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
     return _schedule_row(changed)
 
 
-def list_runs(schedule_id: int, query: dict[str, list[str]]) -> dict[str, Any]:
-    _reject_query_keys(query, {"before", "limit"}, "schedule runs")
-    before = _optional_positive_int(query, "before")
-    limit = _limit(query)
-    clause = " AND id < %s" if before is not None else ""
-    params: list[Any] = [schedule_id]
-    if before is not None:
-        params.append(before)
-    with db.transaction() as cur:
-        cur.execute("SELECT 1 FROM schedules WHERE id = %s", (schedule_id,))
-        if cur.fetchone() is None:
-            raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule not found")
-        cur.execute(
-            f"SELECT {RUN_COLUMNS} FROM schedule_runs WHERE schedule_id = %s{clause}"
-            " ORDER BY id DESC LIMIT %s",
-            (*params, limit + 1),
-        )
-        rows = cur.fetchall()
-    more = len(rows) > limit
-    rows = rows[:limit]
-    response: dict[str, Any] = {"runs": [_run_summary(_run_row(row)) for row in rows]}
-    if more and rows:
-        response["next_before"] = rows[-1][0]
-    return response
-
-
-def list_recent_failures(query: dict[str, list[str]]) -> dict[str, Any]:
-    """Return retained failed runs for schedules that are still active."""
-    _reject_query_keys(query, {"before", "limit"}, "recent schedule failures")
-    before = _optional_positive_int(query, "before")
-    limit = _limit(query)
-    clause = " AND schedule_runs.id < %s" if before is not None else ""
-    params: list[Any] = []
-    if before is not None:
-        params.append(before)
-    with db.transaction() as cur:
-        cur.execute(
-            f"SELECT {QUALIFIED_RUN_COLUMNS}, schedules.name"
-            " FROM schedule_runs JOIN schedules ON schedules.id = schedule_runs.schedule_id"
-            " WHERE schedules.deleted_at IS NULL AND schedule_runs.status = 'failed'"
-            f"{clause} ORDER BY schedule_runs.id DESC LIMIT %s",
-            (*params, limit + 1),
-        )
-        rows = cur.fetchall()
-    more = len(rows) > limit
-    rows = rows[:limit]
-    failures = []
-    for row in rows:
-        failure = _run_summary(_run_row(row[:11]))
-        failure["schedule_name"] = row[11]
-        failures.append(failure)
-    response: dict[str, Any] = {"failures": failures}
-    if more and rows:
-        response["next_before"] = rows[-1][0]
-    return response
-
-
-def load_run(schedule_id: int, run_id: int) -> dict[str, Any]:
-    with db.transaction() as cur:
-        cur.execute(
-            f"SELECT {RUN_COLUMNS} FROM schedule_runs WHERE schedule_id = %s AND id = %s",
-            (schedule_id, run_id),
-        )
-        row = cur.fetchone()
-    if row is None:
-        raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule run not found")
-    return _run_row(row)
-
-
-def run_events(
-    schedule_id: int, run_id: int, query: dict[str, list[str]]
-) -> dict[str, Any]:
-    run = load_run(schedule_id, run_id)
-    _reject_query_keys(query, {"before", "since"}, "schedule run events")
-    before = _optional_non_negative_int(query, "before")
-    since = _optional_non_negative_int(query, "since")
-    if before is not None and since is not None:
-        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "before and since cannot be combined")
-    path = (
-        f"/v1/threads/{quote(run['thread_id'], safe='')}/events"
-        "?limit=20&message_bytes=32768&event_type=thread.message"
-        "&event_type=thread.error&event_type=thread.stopped"
-    )
-    if before is not None:
-        path += f"&before={before}"
-    if since is not None:
-        path += f"&since={since}"
-    try:
-        response = call_admin_api("GET", path)
-    except WorkspaceError as exc:
-        if exc.status == HTTPStatus.NOT_FOUND:
-            return {"events": [], "retained": False}
-        raise
-    events = response.get("events")
-    if not isinstance(events, list):
-        raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid events")
-    # Every admitted schedule thread records its user message. A terminal run
-    # whose newest display-event page is empty has therefore outlived the
-    # host's retained event window even if its lightweight thread row remains.
-    retained = bool(events) or run["status"] in {"pending", "running"}
-    return {"events": events, "retained": retained}
-
-
 def run_due(now: datetime | None = None) -> int:
     instant = now or datetime.now(timezone.utc)
     now_ts = _format_ts(instant)
@@ -529,93 +449,21 @@ def run_due(now: datetime | None = None) -> int:
         cur.execute(
             "SELECT schedules.id FROM schedules"
             " WHERE deleted_at IS NULL AND next_run_at <= %s"
-            " AND NOT EXISTS (SELECT 1 FROM schedule_runs"
-            "   WHERE schedule_runs.schedule_id = schedules.id"
-            "   AND schedule_runs.status IN ('pending', 'running'))"
             " ORDER BY next_run_at, schedules.id LIMIT %s",
             (now_ts, DUE_BATCH),
         )
         candidates = [int(row[0]) for row in cur.fetchall()]
-    launched = 0
+    delivered = 0
     for schedule_id in candidates:
-        run = _claim_run(schedule_id, instant)
-        if run is None:
+        delivery = _claim_delivery(schedule_id, instant)
+        if delivery is None:
             continue
-        _launch_run(run)
-        launched += 1
-    return launched
+        _deliver_message(delivery)
+        delivered += 1
+    return delivered
 
 
-def refresh_active_runs() -> int:
-    # At most one run per schedule can be active, and schedules are globally
-    # capped, so scanning every active run is already bounded.
-    with db.transaction() as cur:
-        cur.execute(
-            f"SELECT {RUN_COLUMNS} FROM schedule_runs"
-            " WHERE status IN ('pending', 'running') ORDER BY id"
-        )
-        rows = cur.fetchall()
-    changed = 0
-    for row in rows:
-        run = _run_row(row)
-        try:
-            response = call_admin_api(
-                "GET", f"/v1/threads/{quote(run['thread_id'], safe='')}"
-            )
-            thread = response.get("thread")
-            if not isinstance(thread, dict) or thread.get("status") not in {"idle", "running"}:
-                raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread")
-            if thread["status"] == "running":
-                if run["status"] == "pending":
-                    _start_run(run["id"])
-                    changed += 1
-                continue
-            terminal = call_admin_api(
-                "GET",
-                f"/v1/threads/{quote(run['thread_id'], safe='')}/events"
-                "?limit=10&message_bytes=32768&event_type=thread.error&event_type=thread.stopped",
-            ).get("events")
-            if not isinstance(terminal, list):
-                raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid events")
-        except WorkspaceError as exc:
-            if exc.status == HTTPStatus.NOT_FOUND:
-                if run["status"] == "pending":
-                    _finish_run(
-                        run["id"],
-                        "failed",
-                        "schedule launch was interrupted before the host thread was created",
-                    )
-                else:
-                    _finish_run(
-                        run["id"],
-                        "failed",
-                        "schedule host thread is no longer available",
-                    )
-                changed += 1
-            # Once a launch was accepted, a transient admin outage must not
-            # declare the run terminal: the agent may still be active. Retry
-            # observation on the next scheduler pass to preserve no-overlap.
-            continue
-        if run["status"] == "pending":
-            _start_run(run["id"])
-        status = "succeeded"
-        error = None
-        if terminal:
-            latest = terminal[-1]
-            event_type = latest.get("event_type") if isinstance(latest, dict) else None
-            if event_type == "thread.stopped":
-                status = "stopped"
-            elif event_type == "thread.error":
-                status = "failed"
-                payload = latest.get("payload") if isinstance(latest, dict) else None
-                if isinstance(payload, dict) and isinstance(payload.get("error_message"), str):
-                    error = payload["error_message"][:4000]
-        _finish_run(run["id"], status, error)
-        changed += 1
-    return changed
-
-
-def _claim_run(schedule_id: int, now: datetime) -> dict[str, Any] | None:
+def _claim_delivery(schedule_id: int, now: datetime) -> dict[str, Any] | None:
     now_ts = _format_ts(now)
     with db.transaction() as cur:
         cur.execute(
@@ -628,93 +476,41 @@ def _claim_run(schedule_id: int, now: datetime) -> dict[str, Any] | None:
             return None
         schedule = _schedule_row(row)
         cur.execute(
-            "SELECT 1 FROM schedule_runs WHERE schedule_id = %s"
-            " AND status IN ('pending', 'running')",
-            (schedule_id,),
-        )
-        if cur.fetchone() is not None:
-            return None
-        cur.execute(
-            "WITH allocated AS (SELECT nextval('schedule_runs_id_seq') AS id)"
-            " INSERT INTO schedule_runs"
-            " (id, schedule_id, thread_id, message, agent_runtime, model, effort, status, scheduled_for)"
-            " SELECT id, %s, 'schedule-' || %s::text || '-run-' || id::text,"
-            " %s, %s, %s, %s, 'pending', %s"
-            " FROM allocated"
-            f" RETURNING {RUN_COLUMNS}",
-            (
-                schedule_id, schedule_id, schedule["message"], schedule["agent_runtime"],
-                schedule["model"], schedule["effort"], schedule["next_run_at"],
-            ),
-        )
-        run_row = cur.fetchone()
-        assert run_row is not None
-        cur.execute(
             "UPDATE schedules SET next_run_at = %s, last_run_at = %s WHERE id = %s",
             (_format_ts(_next_run(schedule, now)), now_ts, schedule_id),
         )
-    return _run_row(run_row)
+    return schedule
 
 
-def _launch_run(run: dict[str, Any]) -> None:
+def _deliver_message(schedule: dict[str, Any]) -> None:
+    thread_id = schedule["thread_id"]
+    assert isinstance(thread_id, str)
     body = {
-        "message": run["message"],
-        "agent_runtime": run["agent_runtime"],
-        "model": run["model"],
-        "effort": run["effort"],
+        "message": AUTOMATED_TRIGGER_PREFIX + schedule["message"],
+        "agent_runtime": schedule["agent_runtime"],
+        "model": schedule["model"],
+        "effort": schedule["effort"],
     }
     try:
         response = call_admin_api(
-            "POST", f"/v1/threads/{quote(run['thread_id'], safe='')}/messages", body
+            "POST", f"/v1/threads/{quote(thread_id, safe='')}/messages", body
         )
-        thread = response.get("thread")
-        if response.get("status") != "accepted" or not isinstance(thread, dict):
-            raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid acceptance")
     except WorkspaceError as exc:
-        # Occurrences are attempted once. Capacity, configuration, transport,
-        # and host failures are visible in run history and are never queued or
-        # retried behind the operator's back.
-        _finish_run(run["id"], "failed", exc.message[:4000])
+        host_errors.report_warning(
+            "workspace.scheduler.delivery",
+            exc,
+            context={"thread_id": thread_id},
+            kind="scheduled_delivery_failed",
+        )
         return
-    _start_run(run["id"])
-
-
-def _start_run(run_id: int) -> None:
-    with db.transaction() as cur:
-        cur.execute(
-            "UPDATE schedule_runs SET status = 'running'"
-            " WHERE id = %s AND status = 'pending'",
-            (run_id,),
-        )
-
-
-def _finish_run(run_id: int, status: str, error: str | None) -> None:
-    now = _utc_now()
-    with db.transaction() as cur:
-        cur.execute(
-            "UPDATE schedule_runs SET status = %s, error_message = %s, finished_at = %s"
-            " WHERE id = %s AND status IN ('pending', 'running')",
-            (status, error, now, run_id),
-        )
-
-
-def prune_retained(now: datetime | None = None) -> None:
-    cutoff = _format_ts((now or datetime.now(timezone.utc)) - timedelta(days=RETAIN_DAYS))
-    with db.transaction() as cur:
-        cur.execute(
-            "DELETE FROM schedule_runs WHERE status NOT IN ('pending', 'running')"
-            " AND (finished_at < %s OR id IN ("
-            "   SELECT id FROM schedule_runs AS older"
-            "   WHERE older.schedule_id = schedule_runs.schedule_id"
-            "   ORDER BY id DESC OFFSET %s"
-            " ))",
-            (cutoff, RUN_RETAINED),
-        )
-        cur.execute(
-            "DELETE FROM schedules WHERE deleted_at IS NOT NULL AND deleted_at < %s"
-            " AND NOT EXISTS (SELECT 1 FROM schedule_runs"
-            " WHERE schedule_runs.schedule_id = schedules.id)",
-            (cutoff,),
+    if response.get("status") != "accepted" or not isinstance(
+        response.get("thread"), dict
+    ):
+        host_errors.report_warning(
+            "workspace.scheduler.delivery",
+            "host admin returned invalid acceptance",
+            context={"thread_id": thread_id},
+            kind="scheduled_delivery_failed",
         )
 
 
@@ -723,7 +519,6 @@ def scheduler_loop() -> None:
         _SCHEDULER_WAKE.wait(POLL_SECONDS)
         _SCHEDULER_WAKE.clear()
         try:
-            refresh_active_runs()
             run_due()
         except Exception as exc:
             host_errors.report_unexpected("workspace.scheduler", exc)
@@ -736,27 +531,12 @@ def _schedule_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "model": row[7], "effort": row[8], "revision": row[9],
         "deleted": row[10] is not None, "last_run_at": row[11],
         "next_run_at": row[12], "created_at": row[13], "updated_at": row[14],
-    }
-
-
-def _run_row(row: tuple[Any, ...]) -> dict[str, Any]:
-    return {
-        "id": row[0], "schedule_id": row[1], "thread_id": row[2],
-        "message": row[3], "agent_runtime": row[4], "model": row[5],
-        "effort": row[6], "status": row[7], "error_message": row[8],
-        "scheduled_for": row[9], "finished_at": row[10],
+        "thread_id": row[15],
     }
 
 
 def _schedule_summary(schedule: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in schedule.items() if key != "message"}
-
-
-def _run_summary(run: dict[str, Any]) -> dict[str, Any]:
-    summary = {key: value for key, value in run.items() if key != "message"}
-    if isinstance(summary["error_message"], str):
-        summary["error_message"] = summary["error_message"][:500]
-    return summary
 
 
 def _insert_revision(cur: Any, schedule: dict[str, Any], actor: str, now: str) -> None:
@@ -783,10 +563,37 @@ def _prune_revisions(cur: Any, schedule_id: int) -> None:
     )
 
 
-def _validated_fields(value: dict[str, Any]) -> dict[str, Any]:
-    name = value.get("name")
+def prune_deleted(now: datetime | None = None) -> int:
+    """Remove schedule definitions after their 90-day restore window."""
+    cutoff = _format_ts(
+        (now or datetime.now(timezone.utc)) - timedelta(days=DELETED_RETAIN_DAYS)
+    )
+    with db.transaction() as cur:
+        cur.execute(
+            "WITH pruned AS ("
+            " DELETE FROM schedules"
+            " WHERE deleted_at IS NOT NULL AND deleted_at < %s"
+            " RETURNING thread_id"
+            "), cleared_markers AS ("
+            " DELETE FROM workspace_seen USING pruned"
+            " WHERE workspace_seen.item_kind = 'chat'"
+            " AND workspace_seen.item_id = pruned.thread_id"
+            " RETURNING workspace_seen.item_id"
+            ") SELECT COUNT(*) FROM pruned",
+            (cutoff,),
+        )
+        row = cur.fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def validate_schedule_name(name: Any) -> str:
     if not isinstance(name, str) or not name.strip() or len(name) > MAX_NAME_CHARS or "\n" in name or "\r" in name:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"name must be one line of at most {MAX_NAME_CHARS} characters")
+    return name
+
+
+def _validated_fields(value: dict[str, Any]) -> dict[str, Any]:
+    name = validate_schedule_name(value.get("name"))
     message = value.get("message")
     if not isinstance(message, str) or not message.strip() or len(message) > MAX_MESSAGE_CHARS:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"message must be between 1 and {MAX_MESSAGE_CHARS} characters")

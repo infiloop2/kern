@@ -10,9 +10,9 @@ identity or page id into the self-memory request.
 
 ## Self-memory
 
-- `GET /agent/self/memory` reads the current Chat or App thread's page. A 404
-  means none exists and is not an error. Schedule threads receive 409 because
-  self-memory is not enabled for them.
+- `GET /agent/self/memory` reads the current Chat, App, or persistent model
+  schedule's page. A 404 means none exists and is not an error. Bash schedule
+  transcripts do not expose self-memory controls.
 - `PUT /agent/self/memory` uses
   `{"description":"when this is useful","content":"...","expected_revision":N}`.
   Use revision `0` to create the page and the current revision to edit it.

@@ -613,7 +613,7 @@ Send message request fields:
 | --- | --- | --- | --- |
 | `message` | Yes | string | Message for the agent runtime. Must be 1 to 50,000 characters. The host handles idle and running threads; callers use the same operation for both. |
 | `agent_runtime` | New thread or configuration change | enum | Runtime for the thread: `codex`, `claude_code`, `grok`, or `hermes`. Supply it together with `model` and `effort`. On an existing thread, a matching triple resumes or steers the current provider session; a different triple starts a fresh provider session only while the thread is idle. |
-| `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-5.6-terra`, `gpt-5.6-sol`, or `gpt-5.6-luna`; Claude Code accepts `claude-opus-5`, `claude-fable-5`, or `claude-sonnet-5`; Grok accepts `grok-4.6`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, or `moonshotai.kimi-k2.5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
+| `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-5.6-terra`, `gpt-5.6-sol`, or `gpt-5.6-luna`; Claude Code accepts `claude-opus-5`, `claude-fable-5-1`, or `claude-sonnet-5`; Grok accepts `grok-4.6`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, or `moonshotai.kimi-k2.5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
 | `effort` | New thread or configuration change | enum | Effort for this session. Codex accepts `high`, `max`, or `ultra`, except Luna accepts only `high` or `max`. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Grok accepts `xhigh` or `high`. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
 
 The path's `thread_id` must be a lowercase slug of at most 64 characters
@@ -1302,11 +1302,12 @@ session and proxies JSON plus query parameters to the single workspace
 listener without forwarding cookies or authorization headers. It adds the
 fixed backend path prefix and no identity header.
 
-Chat backend paths include `/threads`, `/threads/{thread_id}`, messages, events,
-stop, rename, archive, and unarchive. Web App backend paths include `/apps`,
+Chat backend paths include `/threads` for `thread-*` Chat navigation,
+`/scheduled-agents` for active `schedule-*` navigation, thread messages,
+events, stop, rename, archive, and unarchive. Web App backend paths include `/apps`,
 state/conversation/messages, whole-App revisions/restore, runtime actions, stop, rename,
 archive, and unarchive. Global Memory and Schedules expose ordinary CRUD plus
-operator-only deleted/history/restore and schedule-run views. Validation and
+operator-only deleted/history/restore views. Validation and
 response envelopes are owned by the Workspace service.
 
 Trusted UI assets are served at `/workspace/...` and mounted by the admin page in

@@ -13,6 +13,7 @@ from unittest.mock import patch
 import test_admin_api as admin_api_tests
 
 from host.runtime.admin_api import service as admin_api
+from host.runtime.admin_api import threads as thread_api
 from host.runtime.admin_api import workspace_api as workspace_admin_api
 from host.runtime.core import pgclient
 
@@ -102,6 +103,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("mounting = performWorkspaceMount(name, panelId, htmlPath);", app)
         self.assertIn("window.KernWorkspaceRoots[name] = shadow;", app)
         self.assertNotIn("window.KernWorkspaceRoots[name] = root;", app)
+        self.assertIn('addWorkspaceStyle(shadow, "/workspace/composer.css");', app)
         # Each shadow host and root must be allowed to shrink below its
         # intrinsic content height. Otherwise a long conversation expands the
         # whole mounted surface instead of scrolling inside its own pane.
@@ -178,48 +180,57 @@ class AdminUiStaticTests(unittest.TestCase):
             root / "host/runtime/workspace/web_apps/ui/personal_web_app_builder.js"
         ).read_text()
 
-        self.assertIn('const STORAGE_KEY = "kern.workspace-last-seen.v2";', last_seen)
-        self.assertIn(
-            'workspaceLastSeen.initialize("chat", chatNavItems, chatNavArchived);',
-            app,
-        )
-        self.assertIn(
-            'workspaceLastSeen.initialize("apps", webAppNavItems, webAppsNavArchived);',
-            app,
-        )
-        initialize_seen = last_seen.split("function initialize(kind", 1)[1].split(
-            "function initializeArchived", 1
-        )[0]
-        self.assertIn("state.active[kind]", initialize_seen)
-        self.assertNotIn("chatNavArchived || webAppsNavArchived", initialize_seen)
-        mark_seen = last_seen.split("function markSeen", 1)[1].split(
-            'window.addEventListener("storage"', 1
-        )[0]
-        self.assertNotIn("state.active", mark_seen)
+        self.assertIn('localStorage.removeItem("kern.workspace-last-seen.v2")', last_seen)
+        self.assertNotIn("localStorage.getItem", last_seen)
+        self.assertNotIn("localStorage.setItem", last_seen)
+        self.assertIn('api("POST", path, marker)', last_seen)
+        self.assertIn("Number(item.seen_message_seq)", last_seen)
+        self.assertIn("Number(item.seen_revision)", last_seen)
         self.assertIn("Number(item.latest_message_seq)", last_seen)
         self.assertNotIn("Number(item.latest_event_seq)", last_seen)
-        self.assertIn("current.activity > (Number(seen.activity) || 0)", last_seen)
-        self.assertIn("current.revision > (Number(seen.revision) || 0)", last_seen)
-        self.assertIn("state = mergeState(loadState(), state)", last_seen)
-        self.assertIn('workspaceLastSeen.initializeArchived("chat", chatNavItems, chatNavArchived)', app)
-        self.assertIn('workspaceLastSeen.initializeArchived("apps", webAppNavItems, webAppsNavArchived)', app)
+        self.assertNotIn("Number(listed.latest_message_seq)", last_seen)
+        self.assertIn("current.message_seq > (Number(item.seen_message_seq) || 0)", last_seen)
+        self.assertIn("current.revision > (Number(item.seen_revision) || 0)", last_seen)
+        self.assertIn("const pending = new Set();", last_seen)
+        self.assertIn('kind === "chat"', app)
+        self.assertIn("[...chatNavItems, ...scheduledAgentNavItems].find", app)
+        find_chat = app.split("async function findChatNavItem", 1)[1].split(
+            "async function openWorkspaceNewChat", 1
+        )[0]
+        self.assertIn('threadId.startsWith("schedule-")', find_chat)
+        self.assertIn("scheduledAgentNavItems.find", find_chat)
+        self.assertIn("chatNavItems.find", find_chat)
+        self.assertIn('api("GET", "/v1/workspace/chat/scheduled-agents")', find_chat)
+        self.assertNotIn("workspaceLastSeen.initialize", app)
         self.assertIn('dot.setAttribute("aria-label", "New activity")', app)
         self.assertIn("document.visibilityState !== \"visible\"", last_seen)
         open_chat = app.split("async function openWorkspaceChat", 1)[1].split(
             "async function findWebAppNavItem", 1
         )[0]
         self.assertNotIn('markWorkspaceSeen("chat"', open_chat)
+        refresh_chat = chat.split("async function refresh()", 1)[1].split(
+            "\nfunction renderThreads", 1
+        )[0]
+        self.assertIn(
+            'await window.KernHost.openWorkspace("scheduled-agents");',
+            refresh_chat,
+        )
+        open_app = app.split("async function openWorkspaceWebApp", 1)[1].split(
+            "async function openWorkspaceAppLibrary", 1
+        )[0]
+        self.assertIn("Number(found.item.seen_message_seq) || 0", open_app)
         self.assertIn('window.KernHost.markWorkspaceSeen("chat", {', chat)
         self.assertIn("latest_message_seq: acknowledgedMessageSeq", chat)
         self.assertIn(
-            '["thread.message", "thread.memory_cleared"].includes(event.event_type)',
+            '["thread.message", "thread.memory_cleared", "thread.error"].includes(event.event_type)',
             chat,
         )
         self.assertIn("markSelectedThreadSeen({ thread_id: threadId });", chat)
         self.assertIn("const refreshedThreadId = selectedThreadId;", chat)
         self.assertIn("if (rendered && selectedThreadId === refreshedThreadId && visibleThread)", chat)
         self.assertIn('window.KernHost.markWorkspaceSeen("apps", {', web_apps)
-        self.assertIn("Number(listed?.latest_message_seq) || 0", web_apps)
+        self.assertIn("? renderedMessageSeq", web_apps)
+        self.assertIn("Number(listed?.seen_message_seq) || 0", web_apps)
         self.assertIn("renderedMessageSeq", web_apps)
         self.assertIn('event.event_type === "thread.message"', web_apps)
         self.assertIn("revision: renderedRevision", web_apps)
@@ -295,6 +306,14 @@ class AdminUiStaticTests(unittest.TestCase):
         ).read_text()
         self.assertIn('id="activity-toggle"', activity_markup)
         self.assertIn('aria-checked="false" title="Show agent activity"', activity_markup)
+        self.assertLess(
+            activity_markup.index('id="activity-toggle"'),
+            activity_markup.index('id="schedule-settings"'),
+        )
+        self.assertLess(
+            activity_markup.index('id="schedule-settings"'),
+            activity_markup.index('id="thread-memory"'),
+        )
         self.assertIn(".chat-app.activity-hidden .thread-activity", stylesheet)
         self.assertIn('class="thread-entry thread-activity"', script)
         self.assertIn('querySelectorAll(".thread-entry:not(.thread-activity)")', script)
@@ -313,6 +332,91 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn('"task.updated"', script)
         self.assertNotIn("task-steer-input", script)
         self.assertNotIn("task.output_message", script)
+
+    def test_scheduled_agent_navigation_opens_management_without_a_plus(self) -> None:
+        root = Path(__file__).parents[1]
+        script = (
+            root / "host/runtime/workspace/chat/ui/agent_chat.js"
+        ).read_text()
+        stylesheet = (
+            root / "host/runtime/workspace/chat/ui/agent_chat.css"
+        ).read_text()
+        admin_html = (
+            root / "host/runtime/admin_api/admin_ui/index.html"
+        ).read_text()
+        admin_script = (
+            root / "host/runtime/admin_api/admin_ui/app.js"
+        ).read_text()
+        workspace_html = (
+            root / "host/runtime/workspace/ui/index.html"
+        ).read_text()
+        self.assertIn(
+            'id="scheduled-agents-nav-title" class="sidebar-section-title workspace-nav-title-button"',
+            admin_html,
+        )
+        self.assertIn('data-resource="scheduled-agents"', admin_html)
+        scheduled_section = admin_html.split(
+            'aria-labelledby="scheduled-agents-nav-title"', 1
+        )[1].split('<div class="sidebar-divider"', 1)[0]
+        self.assertNotIn("workspace-nav-new", scheduled_section)
+        self.assertIn(
+            'id="schedule-save" class="soft-primary"', workspace_html
+        )
+        self.assertIn(
+            'route = { ...route, resource: "scheduled-agents" };',
+            admin_script,
+        )
+        self.assertIn(
+            'api("GET", "/v1/workspace/chat/scheduled-agents")',
+            admin_script,
+        )
+        workspace_script = (
+            root / "host/runtime/workspace/ui/workspace.js"
+        ).read_text()
+        save_schedule = workspace_script.split(
+            "async function saveSchedule(event)", 1
+        )[1].split("\n  async function", 1)[0]
+        self.assertIn(
+            "Schedule saved, but Chat could not be opened", save_schedule
+        )
+        self.assertLess(
+            save_schedule.index("state.selected = response.schedule;"),
+            save_schedule.index("await window.KernHost.refreshNavigation();"),
+        )
+        self.assertEqual(
+            save_schedule.count(
+                "if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;"
+            ),
+            3,
+        )
+        delete_schedule = workspace_script.split(
+            "async function deleteSchedule()", 1
+        )[1].split("\n  function", 1)[0]
+        self.assertIn(
+            "Schedule moved to Deleted, but navigation could not refresh",
+            delete_schedule,
+        )
+        self.assertLess(
+            delete_schedule.index('status("Schedule moved to Deleted", "success");'),
+            delete_schedule.index("await window.KernHost.refreshNavigation();"),
+        )
+        self.assertEqual(
+            delete_schedule.count(
+                "if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;"
+            ),
+            3,
+        )
+        new_item = workspace_script.split(
+            "function newItem(prefilledMemoryId", 1
+        )[1].split("\n  async function", 1)[0]
+        self.assertLess(
+            new_item.index('setFormDisabled($("schedule-form"), true);'),
+            new_item.index("void ensureSessionOptions().then"),
+        )
+        self.assertGreater(
+            new_item.index('setFormDisabled($("schedule-form"), false);'),
+            new_item.index("syncSessionSelectors();"),
+        )
         self.assertIn(
             "`/threads/${encodeURIComponent(threadId)}/events${suffix}`",
             script,
@@ -883,9 +987,9 @@ class AdminUiStaticTests(unittest.TestCase):
         favicon_src = '/favicon.svg'
         self.assertIn(f'<img class="brand-mark" width="30" height="30" src="{favicon_src}" alt="">', html)
         self.assertIn(f'<img class="login-mark" width="44" height="44" src="{favicon_src}" alt="">', html)
-        # Home owns integration and diagnostic navigation. Memory and
-        # Schedules remain first-class Workspace destinations.
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 3)
+        # Home owns integration and diagnostic navigation. Memory remains a
+        # first-class destination; Schedules is the titled section below Apps.
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 2)
         self.assertIn('/favicon.svg', html)
         self.assertIn('/favicon.ico', html)
         self.assertIn('/admin_ui.css', html)
@@ -2468,7 +2572,6 @@ class AdminUiStaticTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(admin_api.ApiError):
                 admin_api._thread_list_prefix({"prefix": [invalid]})
 
-
     def test_shared_route_requires_a_valid_explicit_principal(self) -> None:
         with self.assertRaises(TypeError):
             admin_api.route("GET", "/v1/health", {}, None)  # type: ignore[call-arg]
@@ -2498,7 +2601,7 @@ class AdminUiStaticTests(unittest.TestCase):
             "/v1/threads/thread-custom/messages",
             "/v1/threads/app-17/messages",
             "/v1/threads/app-custom/messages",
-            "/v1/threads/schedule-17-run-23/messages",
+            "/v1/threads/schedule-17/messages",
             "/v1/threads/schedule-custom/messages",
         )
         principals = (

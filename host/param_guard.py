@@ -275,7 +275,7 @@ def _find_pattern_denial(
         if _GOV_ID_NEAR_KEYWORD_RE.search(value):
             return _pii("GOV_ID_KEYWORD", "a government identity document number")
         # G11 DIGIT_RUN - bare digit runs with no keyword context.
-        if _DIGIT_RUN_RE.search(value):
+        if _has_bare_digit_run(value):
             return _pii("DIGIT_RUN", f"an unbroken run of {MIN_BARE_DIGIT_RUN}-{MAX_BARE_DIGIT_RUN} digits (phone-, card-, or account-number length)")
     # G5 UNNATURAL_TOKEN - scored gibberish check, run last in code because
     # everything with a more specific shape should be named first.
@@ -638,6 +638,23 @@ _GOV_ID_NEAR_KEYWORD_RE = re.compile(
 # separator-formatted financial numbers are caught by the checksummed rules,
 # and valid 17-19 digit cards still fail Luhn+issuer first.
 _DIGIT_RUN_RE = re.compile(r"(?<!\d)\d{10,16}(?!\d)")
+
+# A full git object id is 40 lowercase hex characters, and roughly one in five
+# contains a 10+ digit stretch, so querying GitHub by head_sha (the normal way
+# to tie a workflow run to an exact commit) was denied as PII. Exempt only the
+# full 40-character shape: it is what the GitHub API requires, and a run of
+# 10-16 digits is still bare everywhere else, including inside a shorter
+# alphanumeric token where a card or account number could hide. A 40-digit
+# token cannot reach this rule at all, so no letter is required here.
+_GIT_OBJECT_ID_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{40}(?![0-9A-Za-z])")
+
+
+def _has_bare_digit_run(value: str) -> bool:
+    commit_spans = [match.span() for match in _GIT_OBJECT_ID_RE.finditer(value)]
+    return any(
+        not any(start <= run.start() and run.end() <= end for start, end in commit_spans)
+        for run in _DIGIT_RUN_RE.finditer(value)
+    )
 
 
 # --- G4 UNNATURAL_TOKEN ------------------------------------------------
