@@ -24,6 +24,7 @@ from host.runtime.admin_api import service
 from host.runtime.agent_runtime import orchestrator, provider_account_trust
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.core import db, state
+from host.runtime.workspace import schedules
 from host.network_integrations.claude import guard as claude_guard
 from host.network_integrations.claude.manifest import ClaudeIntegration
 
@@ -591,10 +592,10 @@ class OrchestratorTests(unittest.TestCase):
         # Hermes, so a second message waits instead of steering.
         server = FakeServer()
         server.started = 1
-        self.register_live_turn("script", "schedule-1-run-1", server)
+        self.register_live_turn("script", "schedule-1", server)
         with self.assertRaises(ApiError) as caught:
             orchestrator.steer_live_turn(
-                "schedule-1-run-1", "script", "/mnt/kern-agent/agent-home/other.sh"
+                "schedule-1", "script", "/mnt/kern-agent/agent-home/other.sh"
             )
         self.assertEqual(caught.exception.status.value, 409)
         self.assertIn("Script cannot accept another message", caught.exception.message)
@@ -608,11 +609,57 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(orchestrator.refresh_runtime_status("script"), "active")
         self.assertEqual(orchestrator.runtime_status("script"), "active")
         # And it is admissible on that status alone, with no login to await.
-        turn = self.admit("schedule-2-run-1", runtime="script")
+        turn = self.admit("schedule-2", runtime="script")
         self.assertEqual(turn.runtime_type, "script")
         self.assertIs(
             orchestrator._provider_module("script"), orchestrator.script_runner
         )
+
+    def test_script_provider_failure_is_an_ordinary_thread_error(self) -> None:
+        failure = orchestrator.script_runner.ScriptRunError(
+            "script exited with status 2"
+        )
+        schedule = schedules.create_schedule(
+            {
+                "name": "Failing script",
+                "message": "/mnt/kern-agent/agent-home/failing.sh",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                "agent_runtime": "script",
+                "model": "bash",
+                "effort": "fixed",
+            },
+            actor="user",
+        )
+        thread_id = schedule["thread_id"]
+        self.assertEqual(orchestrator.refresh_runtime_status("script"), "active")
+        with (
+            patch.object(orchestrator.script_runner, "ScriptSession", FakeServer),
+            patch.object(
+                orchestrator.script_runner, "run_turn", side_effect=failure
+            ),
+        ):
+            self.send_message(
+                thread_id,
+                "This is an automated trigger.\n\n"
+                "/mnt/kern-agent/agent-home/failing.sh",
+                runtime="script",
+            )
+            self.wait_until_idle(thread_id)
+
+        events = thread_events(thread_id)
+        self.assertEqual(
+            event_summary(events),
+            [
+                (
+                    "thread.message",
+                    "This is an automated trigger.\n\n"
+                    "/mnt/kern-agent/agent-home/failing.sh",
+                ),
+                ("thread.error", None),
+            ],
+        )
+        self.assertEqual(events[-1]["payload"]["error_message"], str(failure))
 
     def test_direct_steers_do_not_accumulate_in_a_host_mailbox(self) -> None:
         model, effort = DEFAULT_SESSION["codex"]
@@ -1035,7 +1082,7 @@ class OrchestratorTests(unittest.TestCase):
                 {
                     "message": "hi",
                     "agent_runtime": "claude_code",
-                    "model": "claude-fable-5",
+                    "model": "claude-fable-5-1",
                     "effort": "ultracode",
                 },
             )
@@ -1044,7 +1091,7 @@ class OrchestratorTests(unittest.TestCase):
             self.wait_until_idle("thread-chat")
 
         self.assertEqual(seen, [None, "claude-session-1"])
-        self.assertEqual(seen_config, [("claude-fable-5", "ultracode")] * 2)
+        self.assertEqual(seen_config, [("claude-fable-5-1", "ultracode")] * 2)
         self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "claude-session-1")
 
     def test_grok_runtime_records_and_resumes_its_acp_session(self) -> None:

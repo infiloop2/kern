@@ -536,20 +536,21 @@ def desktop_smoke(page, url: str) -> None:
     expect(stats.locator(".stat-history-title")).to_have_text("Stats")
     expect(stats.locator(".history-stat-value")).to_have_text(["24", "1,286", "9,431"])
     expect(stats.locator(".history-stat-label")).to_have_text(
-        ["Threads", "User messages", "Agent activity"]
+        ["Threads", "Inbound messages", "Agent activity"]
     )
     expect(page.locator("#panel-home").get_by_role("button", name="Reboot host")).to_be_visible()
     expect(page.locator("#home-hero")).to_have_count(0)
     expect(page.get_by_role("button", name="New chat", exact=True)).to_be_visible()
     expect(page.get_by_role("button", name="New app", exact=True)).to_be_visible()
-    # Home is the single administration destination. Chat and Apps remain
-    # first-class workspace sections, without a second diagnostic nav tree.
+    # Home is the single administration destination. Chat, Apps, and scheduled
+    # agents remain first-class workspace sections.
     headings = page.locator("#sidebar .sidebar-section-title:visible")
-    expect(headings).to_have_count(2)
+    expect(headings).to_have_count(3)
     expect(headings.nth(0)).to_have_text("Chat")
     expect(headings.nth(1)).to_have_text("Apps")
-    # Home plus the two first-class global Workspace resources.
-    expect(page.locator("#sidebar .tab-button")).to_have_count(3)
+    expect(headings.nth(2)).to_have_text("Scheduled agents")
+    # Home and Memory are tabs; Schedules is the section heading above.
+    expect(page.locator("#sidebar .tab-button")).to_have_count(2)
     expect(
         page.locator("#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']")
     ).to_be_visible()
@@ -571,17 +572,9 @@ def desktop_smoke(page, url: str) -> None:
         raise AssertionError(f"Home sidebar could not scroll to its lower controls: {sidebar_scroll}")
     if original_viewport:
         page.set_viewport_size(original_viewport)
-    # Last-seen markers survive reloads, announce fresh activity, and clear
-    # only after the selected thread has rendered its current event stream.
-    page.evaluate(
-        """() => {
-          const key = "kern.workspace-last-seen.v2";
-          const state = JSON.parse(localStorage.getItem(key));
-          state.chat["thread-1"] = { activity: 0 };
-          localStorage.setItem(key, JSON.stringify(state));
-        }"""
-    )
-    page.reload(wait_until="domcontentloaded")
+    # The mock starts this thread behind its current backend marker. Opening it
+    # clears the dot only after the current event stream has rendered; reload
+    # then proves the cleared state is durable and not browser-local.
     thread_one_nav = page.locator(
         "#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']"
     )
@@ -592,6 +585,8 @@ def desktop_smoke(page, url: str) -> None:
     page.get_by_role("button", name="Home", exact=True).click()
     page.reload(wait_until="domcontentloaded")
     expect(thread_one_nav.locator(".workspace-nav-unseen")).to_have_count(0)
+    if page.evaluate("() => Object.keys(localStorage).some(key => key.includes('last-seen'))"):
+        raise AssertionError("workspace read markers must not be stored in localStorage")
     page.get_by_role("button", name="New chat", exact=True).click()
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
     expect(page.locator("#panel-workspace-chat").locator(".chat-app")).to_be_visible()
@@ -1524,11 +1519,21 @@ def mobile_smoke(page, url: str) -> None:
     install_coach = page.locator("#ios-install-coach")
     expect(install_coach).to_be_visible()
     expect(install_coach.locator("img")).to_have_attribute("src", "/icons/kern-180.png")
-    install_coach.get_by_role("button", name="Show me how").click()
-    install_dialog = page.get_by_role("dialog", name="Add Kern to your Home Screen")
+    show_install_guide = install_coach.get_by_role("button", name="Show me how")
+    show_install_guide.click()
+    install_dialog = page.get_by_role("dialog", name="Run your agent from your phone")
     expect(install_dialog).to_be_visible()
-    expect(install_dialog).to_contain_text("Tap Share")
+    close_install_guide = install_dialog.get_by_role("button", name="Close install instructions")
+    expect(close_install_guide).to_be_focused()
+    expect(install_dialog.locator(".ios-install-visual")).to_be_visible()
+    expect(install_dialog).to_contain_text("Tap Share in your browser")
     expect(install_dialog).to_contain_text("Add to Home Screen")
+    close_install_guide.press("Enter")
+    expect(install_dialog).to_be_hidden()
+    expect(install_coach).to_be_visible()
+    expect(show_install_guide).to_be_focused()
+    show_install_guide.click()
+    expect(install_dialog).to_be_visible()
     install_dialog.get_by_role("button", name="Got it").click()
     expect(install_coach).to_be_hidden()
     # On a phone the three usage boxes collapse behind a single pill so an open

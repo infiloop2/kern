@@ -21,6 +21,8 @@
     sequence: 0,
   };
 
+  const isScheduleResource = () => state.resource === "scheduled-agents";
+
   function status(message = "", kind = "") {
     $("global-status").textContent = message;
     $("global-status").className = `global-status${kind ? ` ${kind}` : ""}`;
@@ -40,7 +42,8 @@
   }
 
   async function open(resource, itemId = null) {
-    if (!new Set(["memory", "schedules"]).has(resource)) return;
+    if (!new Set(["memory", "schedules", "scheduled-agents"]).has(resource)) return;
+    if (resource === "schedules") resource = "scheduled-agents";
     state.resource = resource;
     if (resource === "memory") {
       state.memoryScope = itemId && /^(?:app|thread|schedule)-/.test(itemId)
@@ -50,11 +53,15 @@
     state.deleted = false;
     state.selected = null;
     state.creating = false;
-    $("global-title").textContent = resource === "memory" ? "Memory" : "Schedules";
+    $("global-title").textContent = resource === "memory"
+      ? "Memory"
+      : "Schedules";
     $("global-intro").textContent = resource === "memory"
       ? "Swarm memory shared across agent threads."
-      : "Recurring work, each run in a fresh independent agent thread.";
-    $("global-new").textContent = resource === "memory" ? "New page" : "New schedule";
+      : "Recurring messages delivered to model agents or time-bounded Bash scripts.";
+    $("global-new").textContent = resource === "memory"
+      ? "New page"
+      : "New schedule";
     $("memory-search-wrap").hidden = resource !== "memory";
     $("memory-scope-toggle").hidden = resource !== "memory";
     renderMemoryScope();
@@ -63,7 +70,16 @@
     await loadItems(false);
     if (itemId !== null) {
       if (window.location.hash !== openingRoute) return undefined;
-      return selectItem(String(itemId), true);
+      const selected = await selectItem(String(itemId), true);
+      if (
+        resource === "memory"
+        && selected === false
+        && /^(?:app|thread|schedule)-/.test(String(itemId))
+      ) {
+        newItem(String(itemId));
+        return true;
+      }
+      return selected;
     }
     return true;
   }
@@ -187,7 +203,8 @@
     try {
       const response = await api("GET", path);
       if (sequence !== state.sequence) return;
-      state.selected = response[state.resource === "memory" ? "page" : "schedule"];
+      const selected = response[state.resource === "memory" ? "page" : "schedule"];
+      state.selected = selected;
       renderList();
       if (state.resource === "memory") await renderMemory(sequence);
       else await renderSchedule(sequence);
@@ -208,16 +225,19 @@
     window.KernHost.navigateWorkspace(state.resource);
   }
 
-  function newItem() {
+  function newItem(prefilledMemoryId = "") {
     state.selected = null;
     state.creating = true;
-    window.KernHost.navigateWorkspace(state.resource);
+    window.KernHost.navigateWorkspace(
+      state.resource,
+      prefilledMemoryId || null,
+    );
     $("global-empty").hidden = true;
     if (state.resource === "memory") {
       $("schedule-form").hidden = true;
       $("memory-form").hidden = false;
       $("memory-page-id").disabled = false;
-      $("memory-page-id").value = "";
+      $("memory-page-id").value = prefilledMemoryId;
       $("memory-description").value = "";
       $("memory-content").value = "";
       resizeTextarea("memory-content");
@@ -230,18 +250,24 @@
       $("memory-history").replaceChildren();
       $("memory-delete").hidden = true;
       setFormDisabled($("memory-form"), false);
-      $("memory-page-id").focus();
+      (prefilledMemoryId ? $("memory-description") : $("memory-page-id")).focus();
     } else {
       $("memory-form").hidden = true;
       $("schedule-form").hidden = false;
-      setFormDisabled($("schedule-form"), false);
+      setFormDisabled($("schedule-form"), true);
       resetScheduleForm();
-      $("schedule-meta").textContent = "New global schedule";
+      $("schedule-meta").textContent = "New schedule";
       $("schedule-history").replaceChildren();
-      $("schedule-runs").replaceChildren();
       $("schedule-delete").hidden = true;
-      void ensureSessionOptions().then(() => syncSessionSelectors());
-      $("schedule-name").focus();
+      void ensureSessionOptions().then(() => {
+        if (!state.creating || !isScheduleResource()) return;
+        syncSessionSelectors();
+        setFormDisabled($("schedule-form"), false);
+        $("schedule-name").focus();
+      }).catch(error => {
+        if (!state.creating || !isScheduleResource()) return;
+        status(error.message || "Could not load schedule options", "error");
+      });
     }
     renderList();
   }
@@ -399,13 +425,15 @@
     $("schedule-interval").value = schedule.interval_minutes || 60;
     $("schedule-time").value = schedule.daily_time || "09:00";
     syncCadence();
-    $("schedule-meta").textContent = `Schedule ${schedule.id} · revision ${schedule.revision} · next ${relativeTime(schedule.next_run_at)} · last run ${relativeTime(schedule.last_run_at)}`;
+    const script = schedule.agent_runtime === SCRIPT_RUNTIME;
+    $("global-title").textContent = script ? "Script schedule" : "Scheduled agent";
+    $("global-intro").textContent = script
+      ? "Recurring message executed by the time-bounded Bash runtime."
+      : "Persistent agent receiving one recurring automated message.";
+    $("schedule-meta").textContent = `Next ${relativeTime(schedule.next_run_at)} · last delivery ${relativeTime(schedule.last_run_at)}`;
     $("schedule-delete").hidden = schedule.deleted;
     setFormDisabled($("schedule-form"), schedule.deleted);
-    const [history, runs] = await Promise.all([
-      api("GET", `/schedules/${schedule.id}/revisions?limit=10`),
-      api("GET", `/schedules/${schedule.id}/runs?limit=40`),
-    ]);
+    const history = await api("GET", `/schedules/${schedule.id}/revisions?limit=10`);
     if (sequence !== state.sequence) return;
     renderHistory(
       $("schedule-history"),
@@ -414,7 +442,6 @@
       false,
       history.next_before,
     );
-    renderRuns(runs.runs || [], false, runs.next_before);
   }
 
   // Kern runs the script runtime itself, so it is never an operator-connected
@@ -481,6 +508,12 @@
     return `Every ${schedule.interval_minutes} minutes`;
   }
 
+  function scheduleOperationIsCurrent(operationSequence, operationRoute) {
+    return operationSequence === state.sequence
+      && isScheduleResource()
+      && window.location.hash === operationRoute;
+  }
+
   async function saveSchedule(event) {
     event.preventDefault();
     const operationSequence = state.sequence;
@@ -502,13 +535,23 @@
         ...body,
         expected_revision: state.selected.revision,
       });
-      if (
-        operationSequence !== state.sequence
-        || state.resource !== "schedules"
-        || window.location.hash !== operationRoute
-      ) return;
+      if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;
       state.creating = false;
       state.selected = response.schedule;
+      if (response.schedule.thread_id) {
+        try {
+          await window.KernHost.refreshNavigation();
+          if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;
+          await window.KernHost.openWorkspace("chat", response.schedule.thread_id);
+        } catch (error) {
+          if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;
+          status(
+            `Schedule saved, but Chat could not be opened: ${error.message || "unavailable"}`,
+            "error",
+          );
+        }
+        return;
+      }
       await loadItems(false);
       if (window.location.hash !== operationRoute) return;
       await selectItem(String(response.schedule.id));
@@ -524,16 +567,23 @@
     const operationRoute = window.location.hash;
     try {
       await api("DELETE", `/schedules/${state.selected.id}?expected_revision=${state.selected.revision}`);
-      if (
-        operationSequence !== state.sequence
-        || state.resource !== "schedules"
-        || window.location.hash !== operationRoute
-      ) return;
+      if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;
       state.selected = null;
       hideForms();
-      window.KernHost.navigateWorkspace("schedules");
-      await loadItems(false);
       status("Schedule moved to Deleted", "success");
+      try {
+        await window.KernHost.refreshNavigation();
+      } catch (error) {
+        if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;
+        status(
+          `Schedule moved to Deleted, but navigation could not refresh: ${error.message || "unavailable"}`,
+          "error",
+        );
+        return;
+      }
+      if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;
+      window.KernHost.navigateWorkspace("scheduled-agents");
+      await loadItems(false);
     } catch (error) {
       status(error.message || "Could not delete schedule", "error");
     }
@@ -605,7 +655,7 @@
     if (!state.selected || !confirm(`Restore revision ${revision}?`)) return;
     const operationSequence = state.sequence;
     const operationRoute = window.location.hash;
-    const selectedResource = resource === "memory" ? "memory" : "schedules";
+    const selectedResource = state.resource;
     const base = resource === "memory"
       ? `/memory/pages/${encodeURIComponent(state.selected.page_id)}`
       : `/schedules/${state.selected.id}`;
@@ -628,152 +678,6 @@
     }
   }
 
-  function renderRuns(runs, append = false, nextBefore = null) {
-    const container = $("schedule-runs");
-    container.querySelector("[data-load-runs]")?.remove();
-    if (!append) container.replaceChildren();
-    if (!runs.length && !append) {
-      const empty = document.createElement("span");
-      empty.className = "global-list-description";
-      empty.textContent = "No runs yet.";
-      container.append(empty);
-      return;
-    }
-    for (const run of runs) {
-      const row = document.createElement("div");
-      row.className = "run-row";
-      const head = document.createElement("div");
-      head.className = "history-row-head";
-      const title = document.createElement("strong");
-      title.textContent = run.thread_id;
-      const badge = document.createElement("span");
-      badge.className = `run-status ${run.status}`;
-      badge.textContent = run.status;
-      const events = document.createElement("button");
-      events.className = "ghost sm";
-      events.type = "button";
-      events.dataset.runEvents = String(run.id);
-      events.textContent = "Messages";
-      head.append(title, badge, events);
-      const copy = document.createElement("div");
-      copy.className = "run-copy";
-      copy.textContent = `${run.agent_runtime}/${run.model}/${run.effort} · ${relativeTime(run.scheduled_for)}${run.error_message ? `\n${run.error_message}` : ""}`;
-      const eventList = document.createElement("div");
-      eventList.className = "run-events";
-      eventList.dataset.runEventList = String(run.id);
-      eventList.hidden = true;
-      row.append(head, copy, eventList);
-      container.append(row);
-    }
-    if (nextBefore) {
-      const more = document.createElement("button");
-      more.className = "ghost sm";
-      more.type = "button";
-      more.dataset.loadRuns = "true";
-      more.dataset.before = String(nextBefore);
-      more.textContent = "Load earlier runs";
-      container.append(more);
-    }
-  }
-
-  async function loadEarlierRuns(button) {
-    if (!state.selected) return;
-    const scheduleId = state.selected.id;
-    button.disabled = true;
-    try {
-      const response = await api(
-        "GET",
-        `/schedules/${state.selected.id}/runs?limit=40&before=${button.dataset.before}`,
-      );
-      if (state.resource !== "schedules" || state.selected?.id !== scheduleId) return;
-      renderRuns(response.runs || [], true, response.next_before);
-    } catch (error) {
-      button.disabled = false;
-      status(error.message || "Could not load earlier runs", "error");
-    }
-  }
-
-  async function toggleRunEvents(runId) {
-    const container = root.querySelector(`[data-run-event-list="${CSS.escape(String(runId))}"]`);
-    if (!container) return;
-    if (!container.hidden) {
-      container.hidden = true;
-      return;
-    }
-    container.hidden = false;
-    container.textContent = "Loading…";
-    const scheduleId = state.selected?.id;
-    try {
-      const response = await api("GET", `/schedules/${scheduleId}/runs/${runId}/events`);
-      if (state.resource !== "schedules" || state.selected?.id !== scheduleId) return;
-      container.replaceChildren();
-      if (!response.events.length) {
-        container.textContent = response.retained ? "No messages." : "Conversation is no longer retained.";
-        return;
-      }
-      appendRunEventMessages(container, response.events);
-      addEarlierRunEventsButton(container, runId, response.events);
-    } catch (error) {
-      container.textContent = error.message || "Could not load run messages.";
-    }
-  }
-
-  function appendRunEventMessages(container, events, before = null) {
-    const fragment = document.createDocumentFragment();
-    for (const event of events) {
-      const message = document.createElement("div");
-      const source = event.payload?.source || "agent";
-      message.className = `run-message ${source}`;
-      message.dataset.eventSeq = String(event.seq);
-      message.textContent = event.payload?.message || event.payload?.error_message || "Run stopped.";
-      fragment.append(message);
-    }
-    if (before) before.after(fragment);
-    else container.append(fragment);
-  }
-
-  function addEarlierRunEventsButton(container, runId, events) {
-    if (events.length < 20) return;
-    const oldest = Math.min(...events.map(event => Number(event.seq)).filter(Number.isFinite));
-    if (!Number.isFinite(oldest)) return;
-    const button = document.createElement("button");
-    button.className = "ghost sm run-earlier";
-    button.type = "button";
-    button.dataset.runEarlier = String(runId);
-    button.dataset.before = String(oldest);
-    button.textContent = "Load earlier messages";
-    container.prepend(button);
-  }
-
-  async function loadEarlierRunEvents(button) {
-    if (!state.selected) return;
-    const scheduleId = state.selected.id;
-    const runId = Number(button.dataset.runEarlier);
-    const before = Number(button.dataset.before);
-    button.disabled = true;
-    try {
-      const response = await api(
-        "GET",
-        `/schedules/${scheduleId}/runs/${runId}/events?before=${before}`,
-      );
-      if (state.resource !== "schedules" || state.selected?.id !== scheduleId) return;
-      if (!response.events.length) {
-        button.remove();
-        return;
-      }
-      appendRunEventMessages(button.parentElement, response.events, button);
-      const oldest = Math.min(...response.events.map(event => Number(event.seq)).filter(Number.isFinite));
-      if (response.events.length < 20 || !Number.isFinite(oldest)) button.remove();
-      else {
-        button.dataset.before = String(oldest);
-        button.disabled = false;
-      }
-    } catch (error) {
-      button.disabled = false;
-      status(error.message || "Could not load earlier run messages", "error");
-    }
-  }
-
   root.addEventListener("click", event => {
     const target = event.target instanceof Element ? event.target : null;
     if (!target) return;
@@ -781,16 +685,10 @@
     if (item) void selectItem(item.dataset.itemId);
     const restore = target.closest("button[data-restore-resource]");
     if (restore) void restoreRevision(restore.dataset.restoreResource, Number(restore.dataset.restoreRevision));
-    const run = target.closest("button[data-run-events]");
-    if (run) void toggleRunEvents(Number(run.dataset.runEvents));
-    const earlier = target.closest("button[data-run-earlier]");
-    if (earlier) void loadEarlierRunEvents(earlier);
     const history = target.closest("button[data-load-history]");
     if (history) void loadEarlierHistory(history);
-    const runs = target.closest("button[data-load-runs]");
-    if (runs) void loadEarlierRuns(runs);
   });
-  $("global-new").addEventListener("click", newItem);
+  $("global-new").addEventListener("click", () => newItem());
   root.addEventListener("click", event => {
     const target = event.target instanceof Element ? event.target.closest("button[data-memory-scope]") : null;
     if (target) setMemoryScope(target.dataset.memoryScope);

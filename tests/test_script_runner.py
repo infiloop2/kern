@@ -10,7 +10,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from host import agent_scripts
-from host.agent_scripts import SCRIPT_TIMEOUT_SECONDS, script_path_error
+from host.agent_scripts import (
+    AUTOMATED_TRIGGER_PREFIX,
+    SCRIPT_TIMEOUT_SECONDS,
+    script_path_error,
+)
 from host.runtime.agent_runtime import script_runner, thread_scope
 
 
@@ -127,6 +131,23 @@ class ScriptSessionTests(unittest.TestCase):
         # Nothing to resume: the orchestrator reads the empty id as "no
         # provider session to persist", so every run starts fresh.
         self.assertEqual(session_id, "")
+
+    def test_automated_trigger_prefix_is_removed_before_running_the_path(self) -> None:
+        path = self.write_script("echo scheduled\n")
+        messages: list[str] = []
+        server = script_runner.ScriptSession(LAUNCHER, thread_id="schedule-4")
+
+        session_id, output = script_runner.run_turn(
+            server,
+            AUTOMATED_TRIGGER_PREFIX + path,
+            None,
+            "bash",
+            "fixed",
+            messages.append,
+        )
+
+        self.assertEqual((session_id, output), ("", "scheduled"))
+        self.assertEqual(messages, ["scheduled"])
 
     def test_standard_error_is_interleaved_with_standard_output(self) -> None:
         _session_id, output, _messages = self.run_script(
@@ -270,8 +291,8 @@ class ScriptSessionTests(unittest.TestCase):
             return real_popen(argv, **kwargs)  # type: ignore[arg-type]
 
         with patch.object(subprocess, "Popen", side_effect=record):
-            self.run_script("echo ok\n", thread_id="schedule-4-run-9")
-        self.assertEqual(recorded[0][-3:-1], ["--thread-scope", "schedule-4-run-9"])
+            self.run_script("echo ok\n", thread_id="schedule-4")
+        self.assertEqual(recorded[0][-3:-1], ["--thread-scope", "schedule-4"])
         self.assertTrue(recorded[0][-1].endswith("/job.sh"))
 
     def test_a_rejected_start_kills_the_run_instead_of_finishing_it(self) -> None:
@@ -336,18 +357,18 @@ class ScriptSessionTests(unittest.TestCase):
 
     def test_close_stops_the_thread_scope_under_the_production_launcher(self) -> None:
         server = script_runner.ScriptSession(
-            script_runner.DEFAULT_COMMAND, thread_id="schedule-1-run-1"
+            script_runner.DEFAULT_COMMAND, thread_id="schedule-1"
         )
         with patch.object(subprocess, "run") as runner:
             runner.return_value = subprocess.CompletedProcess([], 0)
             server.close()
         self.assertEqual(
             runner.call_args.args[0],
-            [*thread_scope.STOP_COMMAND, "schedule-1-run-1"],
+            [*thread_scope.STOP_COMMAND, "schedule-1"],
         )
 
     def test_close_does_not_stop_a_scope_for_a_test_command(self) -> None:
-        server = script_runner.ScriptSession(LAUNCHER, thread_id="schedule-1-run-1")
+        server = script_runner.ScriptSession(LAUNCHER, thread_id="schedule-1")
         with patch.object(subprocess, "run") as runner:
             server.close()
         runner.assert_not_called()

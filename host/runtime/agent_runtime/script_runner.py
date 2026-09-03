@@ -3,17 +3,20 @@
 This is the runtime for scheduled automation that needs no model — a backup, a
 sync, a health check. It satisfies the same adapter contract as the model
 runtimes (``account_status`` plus a session object with
-``start``/``run``/``interrupt``/``close``), so a script run is an ordinary host
-thread: it is admitted through the orchestrator, appears in run history, is
-stoppable, and is torn down through the same per-thread systemd scope.
+``start``/``run``/``interrupt``/``close``), so a script firing is an ordinary
+turn in its schedule's persistent host thread: it is admitted through the
+orchestrator, is stoppable, and is torn down through the same per-thread
+systemd scope.
 
 What differs is deliberate and small:
 
-- The turn's message is the script's absolute path, not a prompt. The path
+- The turn's automated message contains the script's absolute path, not a
+  prompt. The path
   contract lives in ``host.agent_scripts`` because the workspace validates the
   same spelling when a schedule is saved.
-- There is no session to resume. Each run starts a fresh process, so the
-  adapter reports no provider session id and every run is independent.
+- There is no provider session to resume. Each firing starts a fresh process,
+  even though its messages and errors remain in the persistent schedule
+  thread.
 - There is no steering channel; the orchestrator rejects a second message
   while a script turn is live.
 - The turn budget is fixed at ``SCRIPT_TIMEOUT_SECONDS``. The launcher applies
@@ -36,7 +39,12 @@ import subprocess
 import threading
 from typing import Any, Callable, cast
 
-from host.agent_scripts import AGENT_HOME, SCRIPT_TIMEOUT_SECONDS, script_path_error
+from host.agent_scripts import (
+    AGENT_HOME,
+    AUTOMATED_TRIGGER_PREFIX,
+    SCRIPT_TIMEOUT_SECONDS,
+    script_path_error,
+)
 from host.runtime.agent_runtime import thread_scope
 from host.runtime.agent_runtime.harness import subprocess_cwd
 
@@ -51,8 +59,8 @@ TRUNCATION_NOTICE = "[earlier output omitted]\n"
 READ_CHUNK_BYTES = 64 * 1024
 # How long the reader may keep draining after the process itself has exited.
 OUTPUT_DRAIN_SECONDS = 5
-# A failing run reports a short excerpt in the thread error; the full output is
-# already recorded as the run's agent message.
+# A failing firing reports a short excerpt in the thread error; the full output
+# is already recorded as the thread's agent message.
 MAX_ERROR_CHARS = 500
 
 
@@ -155,11 +163,14 @@ class ScriptSession:
         effort: str,
         on_message: Callable[[str | dict[str, Any]], None],
     ) -> tuple[str, str]:
-        # A script run carries no model selection and resumes no session; both
+        # A script firing carries no model selection and resumes no session; both
         # are part of the shared runtime contract and are recorded on the turn
         # for history, not consulted here.
         del session_id, model, effort
-        script_path = input_message.strip()
+        script_path = input_message
+        if script_path.startswith(AUTOMATED_TRIGGER_PREFIX):
+            script_path = script_path[len(AUTOMATED_TRIGGER_PREFIX):]
+        script_path = script_path.strip()
         error = script_path_error(script_path)
         if error is not None:
             raise ScriptRunError(error)

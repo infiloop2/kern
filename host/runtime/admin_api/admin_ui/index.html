@@ -63,16 +63,40 @@
 <div id="ios-install-overlay" class="ios-install-overlay" hidden>
   <button class="ios-install-backdrop" data-action="close-ios-install" aria-label="Close install instructions"></button>
   <section class="ios-install-dialog" role="dialog" aria-modal="true" aria-labelledby="ios-install-dialog-title">
-    <img width="64" height="64" src="/icons/kern-180.png" alt="">
-    <div>
-      <p class="eyebrow">One-time setup</p>
-      <h2 id="ios-install-dialog-title">Add Kern to your Home Screen</h2>
-      <p class="muted">It will open in its own full-screen window with the Kern icon.</p>
+    <header class="ios-install-dialog-head">
+      <span class="ios-install-dialog-brand" aria-hidden="true"><img width="48" height="48" src="/icons/kern-180.png" alt=""></span>
+      <div class="ios-install-dialog-copy">
+        <p class="eyebrow">Install Kern</p>
+        <h2 id="ios-install-dialog-title">Run your agent from your phone</h2>
+        <p>One tap from your Home Screen, in its own full-screen window.</p>
+      </div>
+      <button id="ios-install-close" class="ghost icon-button ios-install-close" type="button" data-action="close-ios-install" aria-label="Close install instructions">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
+    </header>
+    <div class="ios-install-visual" aria-hidden="true">
+      <div class="ios-install-visual-page">
+        <span class="ios-install-visual-kern"><img width="30" height="30" src="/icons/kern-180.png" alt=""><span><strong>Kern</strong><small>Your agent is ready</small></span></span>
+        <span class="ios-install-visual-status">Online</span>
+      </div>
+      <div class="ios-install-visual-sheet">
+        <div class="ios-install-visual-apps">
+          <span><i class="ios-install-visual-app messages"></i><small>Messages</small></span>
+          <span><i class="ios-install-visual-app mail"></i><small>Mail</small></span>
+          <span><i class="ios-install-visual-app copy"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="10" height="10" rx="2"/><path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"/></svg></i><small>Copy</small></span>
+        </div>
+        <span class="ios-install-visual-add"><span>Add to Home Screen</span><i><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M12 7v10M7 12h10"/></svg></i></span>
+      </div>
+      <div class="ios-install-visual-action">
+        <span>Find Share in your browser</span>
+        <i class="ios-install-visual-share"><svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4 4 4M6 11v8h12v-8"/></svg></i>
+      </div>
+      <svg class="ios-install-visual-arrow" viewBox="0 0 70 70"><path d="M62 64C61 34 43 17 10 13"/><path d="m17 6-9 7 8 8"/></svg>
     </div>
     <ol class="ios-install-steps">
-      <li><span class="ios-install-step-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4 4 4M6 11v8h12v-8"/></svg></span><span><strong>Tap Share</strong><small>Use the square-with-arrow button in your browser.</small></span></li>
-      <li><span class="ios-install-step-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 8v8M8 12h8"/></svg></span><span><strong>Choose Add to Home Screen</strong><small>You may need to scroll down in the Share menu.</small></span></li>
-      <li><span class="ios-install-step-number" aria-hidden="true">3</span><span><strong>Tap Add</strong><small>Kern will appear on your Home Screen.</small></span></li>
+      <li><span class="ios-install-step-number" aria-hidden="true">1</span><span>Tap <strong>Share</strong> in your browser <span class="ios-install-inline-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4 4 4M6 11v8h12v-8"/></svg></span></span></li>
+      <li><span class="ios-install-step-number" aria-hidden="true">2</span><span>Choose <strong>Add to Home Screen</strong> <span class="ios-install-inline-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M12 7v10M7 12h10"/></svg></span></span></li>
+      <li><span class="ios-install-step-number" aria-hidden="true">3</span><span>Tap <strong>Add</strong> to finish</span></li>
     </ol>
     <button id="ios-install-done" class="primary block" data-action="dismiss-ios-install">Got it</button>
   </section>
@@ -138,14 +162,17 @@
         <div id="web-apps-nav-items" class="workspace-nav-items"></div>
       </div>
       <div class="sidebar-divider" aria-hidden="true"></div>
+      <div class="sidebar-section workspace-nav-section" aria-labelledby="scheduled-agents-nav-title">
+        <div class="workspace-nav-head">
+          <button id="scheduled-agents-nav-title" class="sidebar-section-title workspace-nav-title-button" data-action="open-workspace-global" data-resource="scheduled-agents">Scheduled agents</button>
+        </div>
+        <div id="scheduled-agents-nav-items" class="workspace-nav-items"></div>
+      </div>
+      <div class="sidebar-divider" aria-hidden="true"></div>
       <div class="sidebar-section" aria-label="Workspace knowledge and automation">
         <button id="tab-workspace-memory" class="tab-button" data-action="open-workspace-global" data-resource="memory">
           <svg width="19" height="19" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h8.5A1.5 1.5 0 0 1 15 6v9.5l-3-1.8-3 1.8V6H5v9.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
           <span>Memory</span>
-        </button>
-        <button id="tab-workspace-schedules" class="tab-button" data-action="open-workspace-global" data-resource="schedules">
-          <svg width="19" height="19" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 6.5V10l2.5 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-          <span>Schedules</span>
         </button>
       </div>
     </nav>

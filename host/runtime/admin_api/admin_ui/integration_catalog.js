@@ -112,7 +112,7 @@ export const MANAGED_INTEGRATIONS = {
           title: "How long Anthropic retains it",
           description: "Personal conversations remain until you delete them; Anthropic says deletion removes them from history immediately and from backend storage within 30 days.",
           points: [
-            { label: "Covered Models", text: "Anthropic designates its most capable models, including Fable 5, as Covered Models with an extra safety measure: prompts and outputs are kept for 30 days on every plan, even with model improvement off. After 30 days they are deleted automatically unless a safety investigation or legal obligation requires longer." },
+            { label: "Covered Models", text: "Anthropic designates its most capable models, including Fable 5.1, as Covered Models with an extra safety measure: prompts and outputs are kept for 30 days on every plan, even with model improvement off. After 30 days they are deleted automatically unless a safety investigation or legal obligation requires longer." },
             { label: "Safety flags", text: "Anthropic may retain flagged inputs and outputs for up to 2 years and trust-and-safety classification scores for up to 7 years." },
             { label: "Feedback and de-identified data", text: "Feedback may be kept for 5 years; anonymized or de-identified data may be kept longer." },
           ],

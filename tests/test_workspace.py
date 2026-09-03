@@ -355,7 +355,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_workspace_service_owns_workspace_storage_maintenance(self) -> None:
         with (
             patch.object(service.memory, "prune_deleted") as prune_memory,
-            patch.object(service.schedules, "prune_retained") as prune_schedules,
+            patch.object(service.schedules, "prune_deleted") as prune_schedules,
             patch.object(service.web_apps, "prune_revisions") as prune_apps,
         ):
             service.maintain_storage()

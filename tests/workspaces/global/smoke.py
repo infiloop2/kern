@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
+import json
 import re
 import threading
 from typing import Any
@@ -20,23 +21,19 @@ MEMORY: dict[str, dict[str, Any]] = {}
 MEMORY_HISTORY: dict[str, list[dict[str, Any]]] = {}
 SCHEDULES: dict[int, dict[str, Any]] = {}
 SCHEDULE_HISTORY: dict[int, list[dict[str, Any]]] = {}
-RUNS: dict[int, list[dict[str, Any]]] = {}
 NEXT_SCHEDULE_ID = 1
-NEXT_RUN_ID = 1
 DEMO_MODE = False
 
 
 def configure_mock(*, demo_mode: bool = False) -> None:
-    global NEXT_SCHEDULE_ID, NEXT_RUN_ID, DEMO_MODE
+    global NEXT_SCHEDULE_ID, DEMO_MODE
     DEMO_MODE = demo_mode
     with LOCK:
         MEMORY.clear()
         MEMORY_HISTORY.clear()
         SCHEDULES.clear()
         SCHEDULE_HISTORY.clear()
-        RUNS.clear()
         NEXT_SCHEDULE_ID = 1
-        NEXT_RUN_ID = 1
         if demo_mode:
             _seed_demo()
 
@@ -98,38 +95,6 @@ def route_workspace_api(
         restore_schedule = re.fullmatch(r"schedules/([1-9][0-9]*)/revisions/([1-9][0-9]*)/restore", relative)
         if restore_schedule and method == "POST":
             return {"schedule": _restore_schedule(int(restore_schedule.group(1)), int(restore_schedule.group(2)), body, api_error)}
-        runs_match = re.fullmatch(r"schedules/([1-9][0-9]*)/runs", relative)
-        if runs_match and method == "GET":
-            return {
-                "runs": [
-                    _run_summary(item)
-                    for item in reversed(RUNS.get(int(runs_match.group(1)), []))
-                ]
-            }
-        run_match = re.fullmatch(
-            r"schedules/([1-9][0-9]*)/runs/([1-9][0-9]*)", relative
-        )
-        if run_match and method == "GET":
-            run = next(
-                (
-                    item
-                    for item in RUNS.get(int(run_match.group(1)), [])
-                    if item["id"] == int(run_match.group(2))
-                ),
-                None,
-            )
-            if run is None:
-                raise api_error(HTTPStatus.NOT_FOUND, "schedule run not found")
-            return {"run": {key: deepcopy(value) for key, value in run.items() if key != "events"}}
-        events_match = re.fullmatch(r"schedules/([1-9][0-9]*)/runs/([1-9][0-9]*)/events", relative)
-        if events_match and method == "GET":
-            run = next(
-                (item for item in RUNS.get(int(events_match.group(1)), []) if item["id"] == int(events_match.group(2))),
-                None,
-            )
-            if run is None:
-                raise api_error(HTTPStatus.NOT_FOUND, "schedule run not found")
-            return {"events": deepcopy(run["events"]), "retained": True}
     raise api_error(HTTPStatus.NOT_FOUND, "global Workspace route not found")
 
 
@@ -341,7 +306,12 @@ def _list_schedules(query: dict[str, list[str]], api_error: Any) -> dict[str, An
     before = _translate(api_error, schedule_backend._optional_positive_int, query, "before")
     limit = _translate(api_error, schedule_backend._limit, query)
     rows = sorted(
-        (deepcopy(item) for item in SCHEDULES.values() if item["deleted"] == deleted and (before is None or item["id"] < before)),
+        (
+            deepcopy(item)
+            for item in SCHEDULES.values()
+            if item["deleted"] == deleted
+            and (before is None or item["id"] < before)
+        ),
         key=lambda item: item["id"],
         reverse=True,
     )
@@ -362,21 +332,14 @@ def _revision(schedule: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _run_summary(run: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: deepcopy(value)
-        for key, value in run.items()
-        if key not in {"events", "message"}
-    }
-
-
 def _create_schedule(body: Any, api_error: Any) -> dict[str, Any]:
-    global NEXT_SCHEDULE_ID, NEXT_RUN_ID
+    global NEXT_SCHEDULE_ID
     fields = _schedule_fields(body, api_error)
-    if len(SCHEDULES) >= schedule_backend.MAX_SCHEDULES:
+    active_count = sum(not schedule["deleted"] for schedule in SCHEDULES.values())
+    if active_count >= schedule_backend.MAX_SCHEDULES:
         raise api_error(
             HTTPStatus.CONFLICT,
-            f"Workspace already retains {schedule_backend.MAX_SCHEDULES} schedules",
+            f"Workspace already has {schedule_backend.MAX_SCHEDULES} active schedules",
         )
     schedule_id = NEXT_SCHEDULE_ID
     NEXT_SCHEDULE_ID += 1
@@ -387,24 +350,10 @@ def _create_schedule(body: Any, api_error: Any) -> dict[str, Any]:
         "id": schedule_id, **fields, "revision": 1,
         "deleted": False,
         "last_run_at": now, "next_run_at": next_run, "created_at": now, "updated_at": now,
+        "thread_id": f"schedule-{schedule_id}",
     }
     SCHEDULES[schedule_id] = schedule
     SCHEDULE_HISTORY[schedule_id] = [_revision(schedule)]
-    run_id = NEXT_RUN_ID
-    NEXT_RUN_ID += 1
-    RUNS[schedule_id] = [{
-        "id": run_id, "schedule_id": schedule_id,
-        "thread_id": f"schedule-{schedule_id}-run-{run_id}",
-        "message": schedule["message"],
-        "agent_runtime": schedule["agent_runtime"], "model": schedule["model"],
-        "effort": schedule["effort"],
-        "status": "succeeded", "error_message": None,
-        "scheduled_for": now, "finished_at": now,
-        "events": [
-            {"seq": 1, "event_type": "thread.message", "payload": {"source": "user", "message": schedule["message"]}},
-            {"seq": 2, "event_type": "thread.message", "payload": {"source": "agent", "message": "Scheduled work completed."}},
-        ],
-    }]
     return deepcopy(schedule)
 
 
@@ -434,7 +383,11 @@ def _delete_schedule(schedule_id: int, query: dict[str, list[str]], api_error: A
     schedule["deleted"] = True
     schedule["updated_at"] = _now()
     SCHEDULE_HISTORY[schedule_id].append(_revision(schedule))
-    return {"ok": True, "revision": schedule["revision"]}
+    return {
+        "ok": True,
+        "revision": schedule["revision"],
+        "thread_id": schedule["thread_id"],
+    }
 
 
 def _restore_schedule(schedule_id: int, revision: int, body: Any, api_error: Any) -> dict[str, Any]:
@@ -459,7 +412,7 @@ def _restore_schedule(schedule_id: int, revision: int, body: Any, api_error: Any
 
 
 def _seed_demo() -> None:
-    global NEXT_SCHEDULE_ID, NEXT_RUN_ID
+    global NEXT_SCHEDULE_ID
     now = datetime.now(timezone.utc)
     older = schedule_backend._format_ts(now - timedelta(days=2))
     recent = schedule_backend._format_ts(now - timedelta(minutes=18))
@@ -506,15 +459,17 @@ def _seed_demo() -> None:
             "cadence": "daily", "interval_minutes": None, "daily_time": "09:00",
             "agent_runtime": "codex", "model": "gpt-5.6-terra", "effort": "high",
             "revision": 2, "deleted": False,
+            "thread_id": "schedule-1",
             "last_run_at": schedule_backend._format_ts(daily_last),
             "next_run_at": schedule_backend._format_ts(daily_next),
             "created_at": older, "updated_at": schedule_backend._format_ts(daily_finished),
         },
         {
-            "id": 2, "name": "Dependency watch", "message": "Check dependency advisories and report actionable changes.",
+            "id": 2, "name": "Dependency snapshot", "message": "/mnt/kern-agent/agent-home/scripts/dependency-snapshot.sh",
             "cadence": "interval", "interval_minutes": 360, "daily_time": None,
-            "agent_runtime": "claude_code", "model": "claude-sonnet-4-5", "effort": "high",
+            "agent_runtime": "script", "model": "bash", "effort": "fixed",
             "revision": 1, "deleted": False, "last_run_at": recent,
+            "thread_id": "schedule-2",
             "next_run_at": schedule_backend._format_ts(interval_next),
             "created_at": older, "updated_at": recent,
         },
@@ -522,26 +477,7 @@ def _seed_demo() -> None:
     for schedule in schedules:
         SCHEDULES[schedule["id"]] = schedule
         SCHEDULE_HISTORY[schedule["id"]] = [_revision(schedule)]
-    RUNS[1] = [{
-        "id": 1, "schedule_id": 1, "thread_id": "schedule-1-run-1", "agent_runtime": "codex",
-        "message": schedules[0]["message"],
-        "model": "gpt-5.6-terra", "effort": "high", "status": "succeeded", "error_message": None,
-        "scheduled_for": schedule_backend._format_ts(daily_last),
-        "finished_at": schedule_backend._format_ts(daily_finished),
-        "events": [
-            {"seq": 1, "event_type": "thread.message", "payload": {"source": "user", "message": schedules[0]["message"]}},
-            {"seq": 2, "event_type": "thread.message", "payload": {"source": "agent", "message": "No blocking release issues found. Two dependency updates remain optional."}},
-        ],
-    }]
-    RUNS[2] = [{
-        "id": 2, "schedule_id": 2, "thread_id": "schedule-2-run-2", "agent_runtime": "claude_code",
-        "message": schedules[1]["message"],
-        "model": "claude-sonnet-4-5", "effort": "high", "status": "failed",
-        "error_message": "configured model is not currently available", "scheduled_for": recent,
-        "finished_at": recent, "events": [],
-    }]
     NEXT_SCHEDULE_ID = 3
-    NEXT_RUN_ID = 3
 
 
 def desktop_smoke(page: Any) -> None:
@@ -609,11 +545,12 @@ def desktop_smoke(page: Any) -> None:
     expect(surface.locator("#global-list")).to_contain_text("release-preferences")
     expect(surface.locator("#global-list")).not_to_contain_text("thread-7")
 
-    page.get_by_role("button", name="Schedules", exact=True).click()
+    page.get_by_role("button", name="Scheduled agents", exact=True).click()
     expect(surface.locator("#global-title")).to_have_text("Schedules")
-    expect(page).to_have_url(re.compile(r"#schedules$"))
+    expect(page).to_have_url(re.compile(r"#scheduled-agents$"))
     surface.get_by_role("button", name="New schedule", exact=True).click()
     expect(surface.locator("#schedule-enabled")).to_have_count(0)
+    expect(surface.locator("#schedule-runs-section")).to_have_count(0)
     surface.locator("#schedule-name").fill("Morning review")
     schedule_message = surface.locator("#schedule-message")
     schedule_message.fill("Summarize open release work.\n" + "unbroken-schedule-message-" * 24)
@@ -628,41 +565,230 @@ def desktop_smoke(page: Any) -> None:
         raise AssertionError(f"schedule message should grow instead of scrolling: {dimensions}")
     if dimensions["scrollWidth"] > dimensions["clientWidth"] + 1:
         raise AssertionError(f"schedule message should wrap instead of scrolling: {dimensions}")
-    # The script runtime reads this field as a path, so the form has to say so
-    # before the operator types a prompt into it.
     expect(surface.locator("#schedule-message-label")).to_have_text("Message")
-    surface.locator("#schedule-runtime").select_option("script")
-    expect(surface.locator("#schedule-message-label")).to_have_text("Script path")
-    expect(surface.locator("#schedule-model")).to_have_value("bash")
-    expect(surface.locator("#schedule-effort")).to_have_value("fixed")
-    surface.locator("#schedule-runtime").select_option("codex")
-    expect(surface.locator("#schedule-message-label")).to_have_text("Message")
+    expect(surface.locator("#schedule-runtime option[value='script']")).to_have_count(1)
     # A provider the operator has not activated stays visible but unusable.
-    # Kern runs the script runtime itself, so it is never gated.
     hermes = surface.locator("#schedule-runtime option[value='hermes']")
     expect(hermes).to_have_text("hermes (not activated)")
     if not hermes.evaluate("option => option.disabled"):
         raise AssertionError("a deactivated runtime must not be selectable")
-    if surface.locator("#schedule-runtime option[value='script']").evaluate(
-        "option => option.disabled"
-    ):
-        raise AssertionError("the script runtime must never be gated")
     surface.locator("#schedule-cadence").select_option("daily")
     surface.locator("#schedule-time").fill("09:00")
     surface.get_by_role("button", name="Save schedule", exact=True).click()
-    expect(surface.locator("#global-list")).to_contain_text("Morning review")
-    expect(page).to_have_url(re.compile(r"#schedules/1$"))
-    page.reload(wait_until="domcontentloaded")
+    chat = page.locator("#panel-workspace-chat")
+    expect(chat).to_be_visible()
+    expect(chat.locator("#thread-title")).to_have_text("Morning review")
+    expect(page.locator("#scheduled-agents-nav-items")).to_contain_text("Morning review")
+    expect(page).to_have_url(re.compile(r"#chat/schedule-1$"))
+    expect(chat.locator("#schedule-settings")).to_be_visible()
+    expect(chat.locator("#thread-memory")).to_be_visible()
+    expect(chat.locator("#new-task-runtime")).to_be_hidden()
+    expect(chat.locator("#archive-thread")).to_be_hidden()
+    chat.get_by_role("button", name="Rename scheduled agent", exact=True).click()
+    chat.locator("#rename-thread-input").fill("Daily release review")
+    chat.locator("#rename-thread-save").click()
+    expect(chat.locator("#thread-title")).to_have_text("Daily release review")
+    expect(page.locator("#scheduled-agents-nav-items")).to_contain_text(
+        "Daily release review"
+    )
+    chat.locator("#schedule-settings").click()
     expect(surface).to_be_visible()
-    expect(surface.locator("#schedule-name")).to_have_value("Morning review")
-    expect(page).to_have_url(re.compile(r"#schedules/1$"))
+    expect(surface.locator("#global-title")).to_have_text("Scheduled agent")
+    expect(surface.locator("#schedule-name")).to_have_value("Daily release review")
+    expect(surface.locator("#schedule-runs-section")).to_have_count(0)
+    expect(page).to_have_url(re.compile(r"#scheduled-agents/1$"))
+    page.evaluate("""() => {
+      window.__kernSavedRefreshNavigation = window.KernHost.refreshNavigation;
+      window.KernHost.refreshNavigation = async () => {
+        throw new Error("navigation unavailable");
+      };
+    }""")
+    surface.get_by_role("button", name="Save schedule", exact=True).click()
+    expect(surface.locator("#global-status")).to_contain_text(
+        "Schedule saved, but Chat could not be opened: navigation unavailable"
+    )
+    expect(surface.locator("#schedule-name")).to_have_value("Daily release review")
+    page.evaluate("""() => {
+      window.KernHost.refreshNavigation = window.__kernSavedRefreshNavigation;
+      delete window.__kernSavedRefreshNavigation;
+    }""")
+    page.evaluate("""() => {
+      window.__kernSavedRefreshNavigation = window.KernHost.refreshNavigation;
+      window.__kernDelayedRefreshStarted = false;
+      window.KernHost.refreshNavigation = () => new Promise(resolve => {
+        window.__kernDelayedRefreshStarted = true;
+        window.__kernReleaseDelayedRefresh = resolve;
+      });
+    }""")
+    surface.get_by_role("button", name="Save schedule", exact=True).click()
+    page.wait_for_function("() => window.__kernDelayedRefreshStarted === true")
+    page.get_by_role("button", name="Memory", exact=True).click()
+    expect(page).to_have_url(re.compile(r"#memory$"))
+    page.evaluate("window.__kernReleaseDelayedRefresh()")
+    expect(page).to_have_url(re.compile(r"#memory$"))
+    page.evaluate("""() => {
+      window.KernHost.refreshNavigation = window.__kernSavedRefreshNavigation;
+      delete window.__kernSavedRefreshNavigation;
+      delete window.__kernDelayedRefreshStarted;
+      delete window.__kernReleaseDelayedRefresh;
+    }""")
+    page.evaluate("window.location.hash = '#schedules/1'")
+    expect(page).to_have_url(re.compile(r"#scheduled-agents/1$"))
+    page.go_back()
+    expect(page).to_have_url(re.compile(r"#memory$"))
+    page.go_forward()
+    expect(page).to_have_url(re.compile(r"#scheduled-agents/1$"))
+    expect(surface.locator("#global-title")).to_have_text("Scheduled agent")
+
+    trigger_message = "This is an automated trigger.\n\nSummarize open release work."
+    chat_index = page.evaluate(
+        "() => window.KernHost.api('GET', '/v1/workspace/chat/scheduled-agents')"
+    )
+    scheduled_item = next(
+        item for item in chat_index["threads"] if item["thread_id"] == "schedule-1"
+    )
+    scheduled_item["latest_event_seq"] = 1
+    scheduled_item["latest_message_seq"] = 1
+    scheduled_item["seen_message_seq"] = 0
+    scheduled_item["status"] = "running"
+    index_body = json.dumps(chat_index)
+    event_body = json.dumps({
+        "events": [{
+            "seq": 1,
+            "timestamp": "2026-08-07T10:00:00Z",
+            "event_type": "thread.message",
+            "thread_id": "schedule-1",
+            "payload": {"message": trigger_message, "source": "user"},
+        }],
+    })
+
+    def unread_schedule_index(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=index_body)
+
+    def scheduled_events(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json", body=event_body)
+
+    def mark_schedule_seen(route: Any) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"seen":{"message_seq":1,"revision":0}}',
+        )
+
+    page.route("**/v1/workspace/chat/scheduled-agents", unread_schedule_index)
+    page.route("**/v1/workspace/chat/threads/schedule-1/events*", scheduled_events)
+    page.route("**/v1/workspace/chat/threads/schedule-1/seen", mark_schedule_seen)
+    page.evaluate("window.KernHost.refreshNavigation()")
+    scheduled_row = page.locator(
+        "#scheduled-agents-nav-items [data-action='open-chat'][data-item-id='schedule-1']"
+    )
+    expect(scheduled_row.locator(".workspace-nav-unseen")).to_have_count(1)
+    scheduled_row.click()
+    expect(chat.locator("#thread-detail")).to_contain_text(trigger_message)
+    expect(scheduled_row.locator(".workspace-nav-unseen")).to_have_count(0)
+    page.unroute("**/v1/workspace/chat/scheduled-agents", unread_schedule_index)
+    page.unroute("**/v1/workspace/chat/threads/schedule-1/events*", scheduled_events)
+    page.unroute("**/v1/workspace/chat/threads/schedule-1/seen", mark_schedule_seen)
+
+    schedule_before_switch = page.evaluate(
+        "() => window.KernHost.api('GET', '/v1/workspace/schedules/1')"
+    )["schedule"]
+    script_update = {
+        key: schedule_before_switch[key]
+        for key in (
+            "name", "message", "cadence", "interval_minutes", "daily_time",
+            "agent_runtime", "model", "effort",
+        )
+    }
+    script_update["expected_revision"] = schedule_before_switch["revision"]
+    script_update.update({
+        "message": "/mnt/kern-agent/agent-home/scripts/release-review.sh",
+        "agent_runtime": "script",
+        "model": "bash",
+        "effort": "fixed",
+    })
+    page.evaluate(
+        "body => window.KernHost.api('PUT', '/v1/workspace/schedules/1', body)",
+        script_update,
+    )
+    page.evaluate("window.KernChat.refresh()")
+    expect(chat.locator("#thread-title")).to_have_text("Daily release review")
+    expect(chat.locator("#composer")).to_be_hidden()
+    expect(chat.locator("#thread-memory")).to_be_hidden()
+    expect(page).to_have_url(re.compile(r"#chat/schedule-1$"))
+    model_update = {
+        **script_update,
+        "message": schedule_before_switch["message"],
+        "agent_runtime": schedule_before_switch["agent_runtime"],
+        "model": schedule_before_switch["model"],
+        "effort": schedule_before_switch["effort"],
+        "expected_revision": script_update["expected_revision"] + 1,
+    }
+    page.evaluate(
+        "body => window.KernHost.api('PUT', '/v1/workspace/schedules/1', body)",
+        model_update,
+    )
+
+    page.get_by_role("button", name="Scheduled agents", exact=True).click()
+    expect(surface.locator("#global-title")).to_have_text("Schedules")
+    expect(page).to_have_url(re.compile(r"#scheduled-agents$"))
+    surface.get_by_role("button", name="New schedule", exact=True).click()
+    surface.locator("#schedule-runtime").select_option("script")
+    surface.locator("#schedule-name").fill("Dependency snapshot")
+    surface.locator("#schedule-message").fill(
+        "/mnt/kern-agent/agent-home/scripts/dependency-snapshot.sh"
+    )
+    expect(surface.locator("#schedule-message-label")).to_have_text("Script path")
+    expect(surface.locator("#schedule-runtime")).to_have_value("script")
+    expect(surface.locator("#schedule-model")).to_have_value("bash")
+    expect(surface.locator("#schedule-effort")).to_have_value("fixed")
+    surface.locator("#schedule-cadence").select_option("daily")
+    surface.locator("#schedule-time").fill("09:00")
+    surface.get_by_role("button", name="Save schedule", exact=True).click()
+    expect(page).to_have_url(re.compile(r"#chat/schedule-2$"))
+    expect(chat.locator("#thread-title")).to_have_text("Dependency snapshot")
+    expect(chat.locator("#composer")).to_be_hidden()
+    expect(chat.locator("#thread-memory")).to_be_hidden()
+    expect(page.locator("#scheduled-agents-nav-items")).to_contain_text(
+        "Dependency snapshot"
+    )
+    page.get_by_role("button", name="Scheduled agents", exact=True).click()
+    surface.locator("[data-item-id='2']").click()
+    expect(surface.locator("#schedule-name")).to_have_value("Dependency snapshot")
+    expect(page).to_have_url(re.compile(r"#scheduled-agents/2$"))
     surface.get_by_role("button", name="Cancel", exact=True).click()
     expect(surface.locator("#global-empty")).to_be_visible()
-    expect(page).to_have_url(re.compile(r"#schedules$"))
+    expect(page).to_have_url(re.compile(r"#scheduled-agents$"))
+    surface.locator("[data-item-id='2']").click()
+    expect(surface.locator("#global-title")).to_have_text("Script schedule")
+    expect(page.locator("#scheduled-agents-nav-items")).to_contain_text(
+        "Dependency snapshot"
+    )
+
     surface.locator("[data-item-id='1']").click()
-    expect(surface.locator("#schedule-runs")).to_contain_text("schedule-1-run-1")
-    surface.get_by_role("button", name="Messages", exact=True).click()
-    expect(surface.locator("#schedule-runs")).to_contain_text("Scheduled work completed.")
+    expect(surface.locator("#global-title")).to_have_text("Scheduled agent")
+    page.evaluate("""() => {
+      window.__kernSavedRefreshNavigation = window.KernHost.refreshNavigation;
+      window.KernHost.refreshNavigation = async () => {
+        throw new Error("navigation unavailable");
+      };
+    }""")
+    page.once("dialog", lambda dialog: dialog.accept())
+    surface.get_by_role("button", name="Delete", exact=True).click()
+    expect(surface.locator("#global-status")).to_contain_text(
+        "Schedule moved to Deleted, but navigation could not refresh: navigation unavailable"
+    )
+    page.evaluate("""() => {
+      window.KernHost.refreshNavigation = window.__kernSavedRefreshNavigation;
+      delete window.__kernSavedRefreshNavigation;
+    }""")
+    page.evaluate("() => window.KernHost.refreshNavigation()")
+    expect(page.locator("#scheduled-agents-nav-items")).not_to_contain_text(
+        "Daily release review"
+    )
+    expect(page.locator("#chat-nav-items")).not_to_contain_text(
+        "Daily release review"
+    )
 
     # A slow item fetch cannot overwrite a newer host-level navigation after
     # the operator has left the global Workspace panel.

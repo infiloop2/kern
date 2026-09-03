@@ -92,10 +92,12 @@ def dispatch_call(
             )
         if peer_thread_id is None:
             raise WorkspaceError(HTTPStatus.CONFLICT, "agent thread identity is unavailable")
-        if peer_thread_id.startswith("schedule-"):
+        if peer_thread_id.startswith("schedule-") and re.fullmatch(
+            r"schedule-[1-9][0-9]*", peer_thread_id
+        ) is None:
             raise WorkspaceError(
                 HTTPStatus.CONFLICT,
-                "self-memory is not enabled for schedule threads",
+                "self-memory is unavailable for this schedule identity",
             )
         self_page_id = memory.individual_page_id(peer_thread_id)
         if method == "GET":

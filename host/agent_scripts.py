@@ -25,6 +25,7 @@ import re
 
 
 AGENT_HOME = "/mnt/kern-agent/agent-home"
+AUTOMATED_TRIGGER_PREFIX = "This is an automated trigger.\n\n"
 SCRIPT_TIMEOUT_SECONDS = 15 * 60
 # The launcher gives the scope a slightly longer life than the admin API gives
 # the turn, so the host-side timeout is normally the one that fires and reports

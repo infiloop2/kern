@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from host.session_options import (
+    DEFAULT_INTERACTIVE_MODELS,
     INTERACTIVE_SESSION_OPTIONS,
     SCRIPT_SESSION_OPTIONS,
     SESSION_OPTIONS,
@@ -14,6 +15,21 @@ from host.session_options import (
 
 
 class SessionOptionsTests(unittest.TestCase):
+    def test_interactive_defaults_are_explicit_and_selectable(self) -> None:
+        self.assertEqual(
+            DEFAULT_INTERACTIVE_MODELS,
+            {
+                "codex": "gpt-5.6-sol",
+                "claude_code": "claude-opus-5",
+                "grok": "grok-4.6",
+                "hermes": "moonshotai.kimi-k2.5",
+            },
+        )
+        for runtime, model in DEFAULT_INTERACTIVE_MODELS.items():
+            with self.subTest(runtime=runtime):
+                self.assertIn(model, INTERACTIVE_SESSION_OPTIONS[runtime])
+                self.assertIn("high", INTERACTIVE_SESSION_OPTIONS[runtime][model])
+
     def test_exposes_only_the_operator_session_options(self) -> None:
         self.assertEqual(
             INTERACTIVE_SESSION_OPTIONS,
@@ -25,7 +41,7 @@ class SessionOptionsTests(unittest.TestCase):
                 },
                 "claude_code": {
                     "claude-opus-5": ("high", "max", "ultracode"),
-                    "claude-fable-5": ("high", "max", "ultracode"),
+                    "claude-fable-5-1": ("high", "max", "ultracode"),
                     "claude-sonnet-5": ("high", "max", "ultracode"),
                 },
                 "grok": {
@@ -78,21 +94,21 @@ class SessionOptionsTests(unittest.TestCase):
 
     def test_rejects_cross_runtime_and_luna_ultra_combinations(self) -> None:
         self.assertIsNone(session_config_error("codex", "gpt-5.6-sol", "ultra"))
-        self.assertIsNone(session_config_error("claude_code", "claude-fable-5", "ultracode"))
+        self.assertIsNone(session_config_error("claude_code", "claude-fable-5-1", "ultracode"))
         self.assertIsNotNone(session_config_error("codex", "gpt-5.6-luna", "ultra"))
         self.assertIsNotNone(session_config_error("codex", "claude-opus-5", "high"))
-        self.assertIsNotNone(session_config_error("claude_code", "claude-fable-5", "ultra"))
+        self.assertIsNotNone(session_config_error("claude_code", "claude-fable-5-1", "ultra"))
         self.assertIsNotNone(session_config_error("unsupported", "deepseek.v3.2", "max"))
         self.assertIsNone(session_config_error("hermes", "deepseek.v3.2", "high"))
         self.assertIsNotNone(session_config_error("hermes", "deepseek.v3.2", "max"))
         self.assertIsNone(session_config_error("grok", "grok-4.6", "xhigh"))
         self.assertIsNotNone(session_config_error("grok", "grok-4.6", "max"))
 
-    def test_rejects_the_superseded_claude_code_aliases(self) -> None:
-        # The aliases are no longer offered, so they cannot start a thread or
-        # run new work on one.
-        for alias in ("opus", "fable", "sonnet"):
-            self.assertIsNotNone(session_config_error("claude_code", alias, "high"))
+    def test_rejects_the_superseded_claude_code_models(self) -> None:
+        # Aliases and earlier exact ids remain readable from recorded sessions,
+        # but cannot start a thread or run new work on one.
+        for model in ("opus", "fable", "sonnet", "claude-fable-5"):
+            self.assertIsNotNone(session_config_error("claude_code", model, "high"))
 
     def test_recorded_config_accepts_any_model_and_checks_only_the_shape(self) -> None:
         # The read path: a recorded configuration may predate the matrix, so
@@ -120,7 +136,7 @@ class SessionOptionsTests(unittest.TestCase):
         options = public_session_options()
         self.assertEqual(options["codex"]["gpt-5.6-luna"], ["high", "max"])
         self.assertEqual(
-            options["claude_code"]["claude-fable-5"],
+            options["claude_code"]["claude-fable-5-1"],
             ["high", "max", "ultracode"],
         )
         self.assertEqual(options["grok"]["grok-4.6"], ["xhigh", "high"])

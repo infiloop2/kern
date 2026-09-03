@@ -10,7 +10,7 @@ The script runtime is part of the same matrix but is offered only where a
 schedule is configured: it runs a static bash script instead of a model turn,
 so it has nothing to say in a conversation and cannot build a Web App. Its
 model and effort are the single fixed pair below, which keeps one shape —
-runtime, model, effort — across schedules, threads, and run history rather
+runtime, model, effort — across schedules and threads rather
 than making every reader special-case a runtime with no model.
 """
 
@@ -37,7 +37,7 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     # run no further tasks; their rows are preserved, not migrated.
     "claude_code": {
         "claude-opus-5": ("high", "max", "ultracode"),
-        "claude-fable-5": ("high", "max", "ultracode"),
+        "claude-fable-5-1": ("high", "max", "ultracode"),
         "claude-sonnet-5": ("high", "max", "ultracode"),
     },
     # Grok Build's subscription runtime exposes one pinned model in the
@@ -51,6 +51,15 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
         "qwen.qwen3-coder-next": ("high",),
         "moonshotai.kimi-k2.5": ("high",),
     },
+}
+
+# Defaults are named deliberately rather than inferred from catalog order.
+# Model ordering is presentation, not a capability ranking.
+DEFAULT_INTERACTIVE_MODELS: dict[str, str] = {
+    "codex": "gpt-5.6-sol",
+    "claude_code": "claude-opus-5",
+    "grok": "grok-4.6",
+    "hermes": "moonshotai.kimi-k2.5",
 }
 
 SCRIPT_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {

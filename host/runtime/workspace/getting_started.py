@@ -51,7 +51,7 @@ def completion_status() -> dict[str, bool]:
         # but it is host-owned and this role has no grant on it. Chat writes a
         # `chat_threads` row while sending, so a rejected send can still count;
         # for a checklist that is a better trade than reaching across the
-        # database permission boundary.
+        # database permission boundary. Scheduled agents have their own index.
         cur.execute(
             "SELECT"
             " EXISTS (SELECT 1 FROM chat_threads),"

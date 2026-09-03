@@ -54,15 +54,15 @@ The categories are:
 | `host_diagnostics` | retention | Newest 10,000 coalesced error and warning rows, with at most 99 rows of amortization slack. |
 | `admin_passkey_config` | fixed | Singleton. |
 | `admin_passkeys` | fixed | Exactly zero or one administrator passkey; reset precedes replacement. |
+| `workspace_seen` | retention | At most one read marker per retained Chat, Web App, or schedule. Schedule markers are removed when their deleted definitions leave the 90-day restore window; Chat and App markers remain bounded by their product quotas. |
 | `chat_threads` | quota | At most 10,000 durable Chat thread records; no age-based deletion. |
 | `web_apps` | quota | At most 100 durable Web Apps; no age-based deletion. |
 | `memory_pages` | quota | At most 10,000 retained pages; deleted pages are removed after 90 days. |
 | `memory_page_revisions` | retention | Newest 100 revisions per retained page; cascades with its page. |
 | `memory_page_embeddings` | quota | At most one current derived vector per retained page and model; soft deletion removes it and page deletion also cascades. |
 | `memory_page_links` | quota | At most 100 current outgoing links per retained swarm page; source-page deletion cascades. |
-| `schedules` | quota | At most 100 retained schedules; deleted schedules are removed after 90 days once runs are gone. |
+| `schedules` | quota | At most 100 active schedules. Deleted definitions remain restorable for 90 days, then are removed independently of their stable `schedule-N` host thread. |
 | `schedule_revisions` | retention | Newest 100 revisions per retained schedule; cascades with its schedule. |
-| `schedule_runs` | retention | Active run plus terminal runs newer than 90 days, capped to newest 1,000 per schedule. |
 | `web_app_revisions` | retention | Newest 5 exact revisions, then one recovery point per four-hour interval during the first day and one per day from day two through day seven, capped at 17 revisions; cascades with its quota-bounded App. |
 
 When adding or renaming a table, update this inventory in the same change.

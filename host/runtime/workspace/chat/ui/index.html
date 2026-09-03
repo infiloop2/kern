@@ -44,6 +44,8 @@
             <span class="activity-switch-thumb"></span>
           </span>
         </button>
+        <button class="ghost sm" id="schedule-settings" hidden>Schedule</button>
+        <button class="ghost sm" id="thread-memory" aria-label="Open self-memory" hidden>Memory</button>
         <button class="ghost sm" id="clear-memory" aria-label="Clear working memory" title="Start the agent fresh without deleting this thread" hidden>Clear</button>
         <button class="ghost sm" id="archive-thread" hidden>Archive</button>
       </div>
@@ -56,7 +58,7 @@
     </div>
     <footer class="composer-dock" id="composer-dock">
       <div id="status" class="app-status" hidden></div>
-      <div class="composer" id="composer">
+      <div class="composer workspace-composer" id="composer">
         <div id="composer-running" class="composer-running" hidden>
           <div class="agent-working">
             <span>Agent is working</span>
@@ -100,7 +102,7 @@
     <button id="rename-thread-backdrop" class="rename-backdrop" type="button" aria-label="Cancel rename"></button>
     <form id="rename-thread-form" class="rename-sheet" role="dialog" aria-modal="true" aria-labelledby="rename-thread-title">
       <div class="rename-sheet-head">
-        <div><span class="rename-eyebrow">Thread</span><h2 id="rename-thread-title">Rename thread</h2></div>
+        <div><span id="rename-thread-eyebrow" class="rename-eyebrow">Thread</span><h2 id="rename-thread-title">Rename thread</h2></div>
         <button id="rename-thread-close" class="icon-button quiet" type="button" aria-label="Cancel rename">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
         </button>

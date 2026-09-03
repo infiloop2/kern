@@ -203,6 +203,7 @@ WORKSPACE_UI_ASSETS = {
     "/workspace/chat.css": (RUNTIME_DIR.parent / "workspace/chat/ui/agent_chat.css", "text/css; charset=utf-8"),
     "/workspace/rich_text.js": (RUNTIME_DIR.parent / "workspace/chat/ui/rich_text.js", "application/javascript; charset=utf-8"),
     "/workspace/rich_text.css": (RUNTIME_DIR.parent / "workspace/chat/ui/rich_text.css", "text/css; charset=utf-8"),
+    "/workspace/composer.css": (RUNTIME_DIR.parent / "workspace/ui/composer.css", "text/css; charset=utf-8"),
     "/workspace/web-apps.html": (RUNTIME_DIR.parent / "workspace/web_apps/ui/index.html", "text/html; charset=utf-8"),
     "/workspace/web-apps.js": (RUNTIME_DIR.parent / "workspace/web_apps/ui/personal_web_app_builder.js", "application/javascript; charset=utf-8"),
     "/workspace/web-apps.css": (RUNTIME_DIR.parent / "workspace/web_apps/ui/personal_web_app_builder.css", "text/css; charset=utf-8"),
@@ -243,14 +244,14 @@ UNTRUSTED_FILE_SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
 }
 PRODUCT_THREAD_ID_RE = re.compile(
-    r"(?=^[a-z0-9-]{1,64}$)^(?:app|thread|schedule)-[a-z0-9-]+$"
+    r"(?=^[a-z0-9-]{1,64}$)^(?:app-[a-z0-9-]+|thread-[a-z0-9-]+|"
+    r"schedule-[1-9][0-9]*)$"
 )
 PRODUCT_THREAD_PREFIX_RE = re.compile(
     r"(?=^[a-z0-9-]{1,64}$)^(?:app|thread|schedule)-[a-z0-9-]*$"
 )
-# Scheduled runs are the one kind of thread that may run a script instead of a
-# conversation; the send path enforces that on the thread id itself.
-SCHEDULE_THREAD_PREFIX = "schedule-"
+# Schedule threads are the one kind that may run a script instead of a model;
+# the send path enforces that on the stable thread id itself.
 UTC_TIMESTAMP_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 RFC3339_TIMESTAMP_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
@@ -1481,8 +1482,7 @@ def prune_state() -> None:
         )
         # Threads with retained events keep their canonical row; unreferenced
         # mappings use the ordinary per-runtime LRU cap. Every runtime that can
-        # own a thread is pruned, not just the ones with a provider account: a
-        # frequent script schedule creates a session row per firing.
+        # own a thread is pruned, including the time-bounded script runtime.
         for runtime_type in sorted(AGENT_RUNTIMES):
             state.prune_thread_sessions(cur, runtime_type, THREAD_MAP_LIMIT)
     tools_host.maintain_approvals()

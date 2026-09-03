@@ -36,7 +36,7 @@ MOCK_LOCK = threading.RLock()
 TURN_DEADLINES: dict[str, float] = {}
 DEFAULT_SESSION = {
     "agent_runtime": "codex",
-    "model": "gpt-5.6-terra",
+    "model": "gpt-5.6-sol",
     "effort": "high",
 }
 RUNTIME_LABELS = {
@@ -255,6 +255,30 @@ def _route_workspace_api(
         if workspace is None:
             raise builder_backend.WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
         resource = app_match.group(2)
+        if method == "POST" and resource == "seen":
+            request = builder_backend._required_object(body, "seen marker")
+            message_seq = request.get("message_seq")
+            revision = request.get("revision")
+            if any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in (message_seq, revision)
+            ):
+                raise builder_backend.WorkspaceError(
+                    HTTPStatus.BAD_REQUEST, "invalid seen marker"
+                )
+            summary = _app_summary(workspace)
+            workspace["seen_message_seq"] = max(
+                workspace["seen_message_seq"],
+                min(message_seq, summary["latest_message_seq"]),
+            )
+            workspace["seen_revision"] = max(
+                workspace["seen_revision"],
+                min(revision, summary["revision"]),
+            )
+            return {"seen": {
+                "message_seq": workspace["seen_message_seq"],
+                "revision": workspace["seen_revision"],
+            }}
         if method == "GET" and resource == "state":
             app = copy.deepcopy(workspace["app"])
             app["agent_updates_locked"] = bool(workspace["agent_updates_locked"])
@@ -279,6 +303,7 @@ def _route_workspace_api(
         if method == "GET" and resource == "conversation":
             return {
                 "session": copy.deepcopy(workspace["session"]),
+                "agent_settings": copy.deepcopy(workspace["agent_settings"]),
                 "status": _workspace_status(workspace),
             }
         if method == "GET" and resource == "conversation/events":
@@ -289,6 +314,8 @@ def _route_workspace_api(
             return {"app": _rename_app(workspace, body)}
         if method == "PUT" and resource == "agent-updates":
             return {"app": _set_agent_updates_locked(workspace, body)}
+        if method == "PUT" and resource == "agent-settings":
+            return {"app": _set_agent_settings(workspace, body)}
         if method == "POST" and resource in {"archive", "unarchive"}:
             return {"app": _set_archived(workspace, resource == "archive")}
         if method == "POST" and resource == "stop":
@@ -358,9 +385,12 @@ def _app_summary(workspace: dict[str, Any]) -> dict[str, Any]:
             default=0,
         ),
         "session": copy.deepcopy(workspace["session"]),
+        "agent_settings": copy.deepcopy(workspace["agent_settings"]),
         "status": _workspace_status(workspace),
         "archived": bool(workspace["archived"]),
         "agent_updates_locked": bool(workspace["agent_updates_locked"]),
+        "seen_message_seq": int(workspace["seen_message_seq"]),
+        "seen_revision": int(workspace["seen_revision"]),
     }
 
 
@@ -384,13 +414,40 @@ def _create_app() -> dict[str, Any]:
         "turn": None,
         "events": [],
         "session": None,
+        "agent_settings": copy.deepcopy(DEFAULT_SESSION),
         "archived": False,
         "agent_updates_locked": False,
+        "seen_message_seq": 0,
+        "seen_revision": 0,
         "history": [],
         "history_seq": 0,
     }
     WORKSPACES[app_id] = workspace
     _record_history(workspace, "created", "user")
+    return _app_summary(workspace)
+
+
+def _set_agent_settings(workspace: dict[str, Any], body: Any) -> dict[str, Any]:
+    if workspace["turn"] is not None:
+        raise builder_backend.WorkspaceError(
+            HTTPStatus.CONFLICT,
+            "agent settings can only be changed while the app agent is idle",
+        )
+    request = builder_backend._required_object(body, "agent settings request")
+    fields = {"agent_runtime", "model", "effort"}
+    builder_backend._require_keys(request, fields, required=fields)
+    runtime = builder_backend._required_text(request.get("agent_runtime"), "agent_runtime")
+    model = request.get("model")
+    effort = request.get("effort")
+    error = builder_backend.session_config_error(runtime, model, effort)
+    if error is not None:
+        raise builder_backend.WorkspaceError(HTTPStatus.BAD_REQUEST, error)
+    workspace["agent_settings"] = {
+        "agent_runtime": runtime,
+        "model": model,
+        "effort": effort,
+    }
+    workspace["last_used_at"] = _now()
     return _app_summary(workspace)
 
 
@@ -654,6 +711,8 @@ def _create_message(
             raise builder_backend.WorkspaceError(HTTPStatus.BAD_REQUEST, error)
         assert isinstance(model, str) and isinstance(effort, str)
         requested = {"agent_runtime": runtime, "model": model, "effort": effort}
+    elif workspace["agent_settings"] is not None:
+        requested = copy.deepcopy(workspace["agent_settings"])
     session = workspace["session"]
     if session is not None:
         if requested is not None and requested != session:
@@ -873,7 +932,9 @@ def _open_host_app(page: Any, name: str) -> None:
     app = page.locator("#web-apps-nav-items .workspace-nav-item", has_text=name)
     expect(app).to_be_visible()
     app.click()
-    expect(page.locator("#panel-workspace-web-apps")).to_be_visible()
+    frame = page.locator("#panel-workspace-web-apps")
+    expect(frame).to_be_visible()
+    expect(frame.locator("#app-title")).to_have_text(name)
 
 
 def _start_host_app(page: Any, *, wait_for_selection: bool = True) -> None:
@@ -919,8 +980,9 @@ def stylesheet_fallback_smoke(page: Any) -> None:
     """)
     _start_host_app(page)
     frame = page.locator("#panel-workspace-web-apps")
+    frame.get_by_role("button", name="Show Chat", exact=True).click()
     frame.locator("#message").fill("Build a small weekly focus dashboard.")
-    frame.get_by_role("button", name="Send message", exact=True).click()
+    frame.get_by_role("button", name="Send", exact=True).click()
     expect(frame.locator(".dashboard")).to_be_visible(timeout=20_000)
     expect(frame.locator(".dashboard")).to_have_css("display", "grid")
     stylesheet = frame.locator("#generated-host").evaluate(
@@ -961,8 +1023,9 @@ def worker_startup_smoke(page: Any) -> None:
     }""")
     _start_host_app(page)
     frame = page.locator("#panel-workspace-web-apps")
+    frame.get_by_role("button", name="Show Chat", exact=True).click()
     frame.locator("#message").fill("Build a small weekly focus dashboard.")
-    frame.get_by_role("button", name="Send message", exact=True).click()
+    frame.get_by_role("button", name="Send", exact=True).click()
     page.wait_for_function(
         "() => globalThis.__kernCapabilityRenderCount > 0", timeout=20_000
     )
@@ -1014,11 +1077,16 @@ def desktop_smoke(page: Any) -> None:
     _start_host_app(page)
     frame = page.locator("#panel-workspace-web-apps")
     expect(frame.locator("#app-view")).to_be_visible()
+    expect(frame.locator("#chat-announcer")).to_have_attribute("role", "status")
+    expect(frame.locator("#chat-announcer")).to_have_attribute("aria-live", "polite")
     expect(frame.locator("#admin-overlay")).to_have_count(0)
-    expect(frame.locator("#message")).to_be_visible()
+    expect(frame.locator("#message")).to_be_hidden()
     expect(frame.locator("#app-title")).to_have_text(re.compile(r"^app-[0-9]+$"))
     first_app = frame.locator("#app-title").inner_text().strip()
     expect(page).to_have_url(re.compile(rf"#apps/{re.escape(first_app)}$"))
+    expect(page.locator(
+        f"#web-apps-nav-items .workspace-nav-item[data-item-id='{first_app}'] .workspace-nav-meta"
+    )).to_have_text("Codex · gpt-5.6-sol · high")
     page.reload(wait_until="domcontentloaded")
     expect(page.locator("#panel-workspace-web-apps")).to_be_visible()
     expect(frame.locator("#app-title")).to_have_text(first_app)
@@ -1059,12 +1127,25 @@ def desktop_smoke(page: Any) -> None:
     frame.locator("#settings-open").click()
     expect(frame.locator("#settings-popover")).to_be_visible()
     expect(frame.locator("#runtime")).to_have_value("codex")
-    expect(frame.locator("#model")).to_have_value("gpt-5.6-terra")
+    expect(frame.locator("#model")).to_have_value("gpt-5.6-sol")
     expect(frame.locator("#effort")).to_have_value("high")
     frame.locator("#runtime").select_option("grok")
     expect(frame.locator("#model")).to_have_value("grok-4.6")
     expect(frame.locator("#effort option")).to_have_count(2)
+    app_sidebar_meta = page.locator(
+        f"#web-apps-nav-items .workspace-nav-item[data-item-id='{first_app}'] .workspace-nav-meta"
+    )
+    expect(app_sidebar_meta).to_have_text("Grok · grok-4.6 · high")
     frame.locator("#runtime").select_option("codex")
+    expect(frame.locator("#app-subtitle")).to_have_text(
+        "Codex · gpt-5.6-terra · High"
+    )
+    expect(frame.locator("#agent-command-surface")).to_be_hidden()
+    expect(frame.locator("#chat-history")).to_be_hidden()
+    frame.get_by_role("button", name="Show Chat", exact=True).click()
+    expect(frame.locator("#chat-history")).to_be_visible()
+    expect(frame.locator("#agent-command-surface")).to_be_visible()
+    expect(frame.locator("#message")).to_be_visible()
 
     with page.expect_file_chooser() as chooser:
         frame.get_by_role("button", name="Attach files").click()
@@ -1075,49 +1156,29 @@ def desktop_smoke(page: Any) -> None:
     })
     expect(frame.locator("#attachments")).to_contain_text("weekly-focus.txt")
     frame.locator("#message").fill("Build a small weekly focus dashboard.")
-    frame.get_by_role("button", name="Send message", exact=True).click()
+    frame.get_by_role("button", name="Send", exact=True).click()
     expect(frame.locator("#runtime")).to_be_disabled()
-    expect(frame.locator("#latest-agent-card")).to_be_visible()
-    expect(frame.locator("#latest-agent-message")).to_have_text(INTERIM_AGENT_MESSAGE)
-    frame.get_by_role("button", name="Show chat history", exact=True).click()
-    expect(frame.locator("#chat-history")).to_be_visible()
     expect(frame.locator("#chat-history-list")).to_contain_text(
         "Build a small weekly focus dashboard."
     )
+    user_message = frame.locator(".chat-history-entry.user .chat-history-message").last
+    user_box = user_message.bounding_box()
+    if not user_box or user_box["width"] < 40:
+        raise AssertionError(f"Web App Chat user bubble collapsed: {user_box}")
+    expect(frame.locator("#chat-history")).to_have_css("border-top-width", "0px")
     expect(frame.locator("#chat-history-list")).to_contain_text(INTERIM_AGENT_MESSAGE)
+    expect(frame.locator("#chat-announcer")).to_have_text(
+        f"Agent: {INTERIM_AGENT_MESSAGE}"
+    )
     expect(frame.locator("#chat-history-list")).not_to_contain_text(
         "Inspecting app workspace"
     )
-    # History does not duplicate completed output in the compact status card,
-    # but a running turn keeps its Stop affordance available.
-    expect(frame.locator("#latest-agent-message")).to_have_text("Agent is working")
+    # Chat uses the same in-composer working and Stop treatment as Agent Chat.
+    expect(frame.locator("#composer-running")).to_be_visible()
     expect(frame.locator("#stop-turn")).to_be_visible()
     frame.get_by_role("button", name="Show app", exact=True).click()
     expect(frame.locator("#chat-history")).to_be_hidden()
-    expect(frame.locator("#latest-agent-message")).to_have_text(INTERIM_AGENT_MESSAGE)
-    send_box = frame.locator("#send-message").bounding_box()
-    stop_box = frame.locator("#stop-turn").bounding_box()
-    if not send_box or not stop_box:
-        raise AssertionError("Send or Stop agent is not visible during agent work")
-    send_right = send_box["x"] + send_box["width"]
-    stop_right = stop_box["x"] + stop_box["width"]
-    if abs(send_right - stop_right) > 2 or abs(send_box["height"] - stop_box["height"]) > 2:
-        raise AssertionError(
-            f"Send and Stop agent are not aligned: send={send_box}, stop={stop_box}"
-        )
-    composer_box = frame.locator(".composer-row").bounding_box()
-    if not composer_box:
-        raise AssertionError("Composer row is not visible")
-    send_top_gap = send_box["y"] - composer_box["y"]
-    send_bottom_gap = (
-        composer_box["y"] + composer_box["height"]
-        - send_box["y"] - send_box["height"]
-    )
-    if send_top_gap < 3 or send_bottom_gap < 3:
-        raise AssertionError(
-            "Send should have equivalent vertical breathing room: "
-            f"send={send_box}, composer={composer_box}"
-        )
+    expect(frame.locator("#agent-command-surface")).to_be_hidden()
     expect(frame.locator(".dashboard")).to_be_visible(timeout=20_000)
     expect(frame.locator(".dashboard")).to_have_css("display", "grid")
     expect(frame.locator(".dashboard")).to_have_css("max-width", "768px")
@@ -1136,9 +1197,16 @@ def desktop_smoke(page: Any) -> None:
     if not hermes.evaluate("option => option.disabled"):
         raise AssertionError("a deactivated runtime must not be selectable")
     expect(frame.locator("#runtime option[value='codex']")).to_have_text("Codex")
-    expect(frame.locator("#latest-agent-card")).to_be_visible()
-    frame.get_by_role("button", name="Dismiss agent message", exact=True).click()
-    expect(frame.locator("#latest-agent-card")).to_be_hidden()
+    hidden_chat_nav = page.locator(
+        f"#web-apps-nav-items [data-action='open-web-app'][data-item-id='{first_app}']"
+    )
+    # The final agent reply landed after switching back to the App canvas. It
+    # stays unread until the operator actually opens this App's Chat view.
+    expect(hidden_chat_nav.locator(".workspace-nav-unseen")).to_be_visible()
+    frame.get_by_role("button", name="Show Chat", exact=True).click()
+    expect(frame.locator("#chat-history-list")).to_contain_text(INTERIM_AGENT_MESSAGE)
+    expect(frame.locator("#composer-running")).to_be_hidden()
+    expect(hidden_chat_nav.locator(".workspace-nav-unseen")).to_have_count(0)
     # A revision written while the App is not visible gets the quiet host-nav
     # marker. Opening the App renders that revision before clearing the mark.
     current_revision = page.evaluate(
@@ -1175,7 +1243,7 @@ def desktop_smoke(page: Any) -> None:
     # inheriting whatever the previously opened app was set to.
     frame.locator("#settings-open").click()
     frame.locator("#runtime").select_option("claude_code")
-    frame.locator("#model").select_option("claude-fable-5")
+    frame.locator("#model").select_option("claude-fable-5-1")
     frame.locator("#effort").select_option("ultracode")
     # _start_host_app waits for the new app to be selected, which is what
     # closes the popover left open above. Toggling before that lands would
@@ -1188,20 +1256,13 @@ def desktop_smoke(page: Any) -> None:
     # while it is still opening and leave it open.
     expect(frame.locator("#settings-popover")).to_be_visible()
     expect(frame.locator("#runtime")).to_have_value("codex")
-    expect(frame.locator("#model")).to_have_value("gpt-5.6-terra")
+    expect(frame.locator("#model")).to_have_value("gpt-5.6-sol")
     expect(frame.locator("#effort")).to_have_value("high")
     frame.locator("#settings-open").click()
     expect(frame.locator("#settings-popover")).to_be_hidden()
     _open_host_app(page, "app-1")
-    expect(frame.locator("#latest-agent-card")).to_be_hidden()
-    # A fresh Web Apps mount suppresses retained agent output even when
-    # browser storage did not keep the dismissal key.
-    page.evaluate(
-        "localStorage.removeItem('kern.agentic-web-app.dismissed-agent-messages.v1')"
-    )
-    page.reload(wait_until="domcontentloaded")
-    _open_host_app(page, "app-1")
-    expect(frame.locator("#latest-agent-card")).to_be_hidden()
+    expect(frame.locator("#agent-command-surface")).to_be_hidden()
+    expect(frame.locator("#latest-agent-card")).to_have_count(0)
 
     lock_updates = frame.locator("#lock-agent-updates")
     lock_updates.click()
@@ -1286,6 +1347,7 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#runtime-status")).to_have_text("App restored")
     frame.get_by_role("button", name="Close Recovery", exact=True).click()
 
+    frame.get_by_role("button", name="Show Chat", exact=True).click()
     frame.locator("#message").fill("Keep this unsent human draft.")
     _start_host_app(page)
     expect(frame.locator("#message")).to_have_value("")
@@ -1375,7 +1437,8 @@ def mobile_smoke(page: Any) -> None:
     # multi-frame stability check.
     first.dispatch_event("click")
     frame = page.locator("#panel-workspace-web-apps")
-    expect(frame.locator("#message")).to_be_visible()
+    expect(frame.locator("#message")).to_be_hidden()
+    expect(frame.locator("#agent-command-surface")).to_be_hidden()
     expect(frame.locator("#admin-overlay")).to_have_count(0)
     expect(frame.locator("#app-title")).to_be_visible()
     toolbar_overflow = frame.locator("#app-view-toolbar").evaluate(
@@ -1397,6 +1460,17 @@ def mobile_smoke(page: Any) -> None:
     if vertical_offset > 2:
         raise AssertionError(
             f"mobile Web App title and actions are not on one row: title={title_box}, actions={actions_box}"
+        )
+    frame.get_by_role("button", name="Show Chat", exact=True).click()
+    expect(frame.locator("#message")).to_be_visible()
+    composer_touch_heights = frame.locator(
+        "#attach-file, #send-message"
+    ).evaluate_all(
+        "elements => elements.map(element => element.getBoundingClientRect().height)"
+    )
+    if any(height < 43 for height in composer_touch_heights):
+        raise AssertionError(
+            f"mobile App Chat controls are too short: {composer_touch_heights}"
         )
     canvas_box = frame.locator(".app-canvas").bounding_box()
     composer_box = frame.locator("#agent-command-surface").bounding_box()
@@ -1476,7 +1550,7 @@ def mobile_smoke(page: Any) -> None:
     frame.get_by_role("button", name="Recovery", exact=True).click()
     expect(frame.locator("#recovery-drawer")).to_be_visible()
     controls = frame.locator(
-        "#settings-open, #lock-agent-updates, #recovery-open, #archive-app, #recovery-close, #send-message"
+        "#rename-app, #settings-open, #lock-agent-updates, #recovery-open, #archive-app, #recovery-close"
     )
     touch_heights = controls.evaluate_all(
         "elements => elements.map(element => element.getBoundingClientRect().height)"

@@ -43,15 +43,15 @@ export function showIPhoneInstallGuide(trigger) {
   $("ios-install-coach").hidden = true;
   $("ios-install-overlay").hidden = false;
   document.body.classList.add("install-guide-open");
-  $("ios-install-done").focus();
+  $("ios-install-close").focus();
 }
 
 export function closeIPhoneInstallGuide() {
   $("ios-install-overlay").hidden = true;
   document.body.classList.remove("install-guide-open");
+  if (shouldOfferIPhoneInstall()) $("ios-install-coach").hidden = false;
   if (iosInstallReturnFocus?.isConnected) iosInstallReturnFocus.focus();
   iosInstallReturnFocus = null;
-  if (shouldOfferIPhoneInstall()) $("ios-install-coach").hidden = false;
 }
 
 export function dismissIPhoneInstall() {

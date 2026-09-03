@@ -84,8 +84,10 @@ ZOHO_DATA_CENTERS: dict[str, tuple[str, str]] = {
 ZOHO_OAUTH_SCOPES = (
     "ZohoMail.accounts.READ",
     "ZohoMail.folders.READ",
+    "ZohoMail.folders.CREATE",
     "ZohoMail.messages.READ",
     "ZohoMail.messages.CREATE",
+    "ZohoMail.messages.UPDATE",
 )
 REQUIRED_ZOHO_SCOPES = frozenset(ZOHO_OAUTH_SCOPES)
 ZOHO_RECONNECT_MESSAGE = "Zoho Mail is no longer connected. Please reconnect the tool."
@@ -93,7 +95,10 @@ ZOHO_SEND_ACTION_TYPE = "zoho_mail_propose_send"
 DEFAULT_TOKEN_LIFETIME_SECONDS = 3600
 MAX_MESSAGE_RESULTS = 50
 MAX_FOLDER_RESULTS = 200
+MAX_FOLDER_NAME_CHARS = 100
+MAX_MOVE_MESSAGE_IDS = 50
 MAX_MESSAGE_CONTENT_CHARS = 64_000
+MAX_MESSAGE_HTML_CHARS = 256_000
 MAX_BODY_CHARS = 40_000
 MAX_HTML_BODY_CHARS = 80_000
 MAX_SUBJECT_CHARS = 500
@@ -101,6 +106,7 @@ MAX_RECIPIENTS_PER_FIELD = 50
 MAX_LINK_URL_CHARS = 2_048
 MAX_APPROVAL_PAYLOAD_BYTES = 64 * 1024
 ID_RE = re.compile(r"^[0-9]{1,30}$")
+FOLDER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]*$")
 EMAIL_RE = re.compile(r"^[^@\s,<>]+@[^@\s,<>]+\.[^@\s,<>]+$")
 HTML_TAG_RE = re.compile(r"<[A-Za-z][^>]*>")
 
@@ -122,6 +128,15 @@ MESSAGE_PROPERTIES: JSONObject = {
 }
 MESSAGE_SCHEMA: JSONObject = outputs.obj(MESSAGE_PROPERTIES, list(MESSAGE_PROPERTIES))
 
+FOLDER_PROPERTIES: JSONObject = {
+    "folder_id": outputs.text("Zoho folder id; pass to list_messages or move_messages."),
+    "name": outputs.text("Folder name."),
+    "path": outputs.text("Full folder path, e.g. /Inbox/Receipts."),
+    "type": outputs.text("Folder kind Zoho reports, e.g. Inbox or Sent."),
+    "imap_access": outputs.boolean("The folder is exposed over IMAP."),
+}
+FOLDER_SCHEMA: JSONObject = outputs.obj(FOLDER_PROPERTIES, list(FOLDER_PROPERTIES))
+
 SEARCH_MESSAGES_OUTPUT_SCHEMA: JSONObject = outputs.obj(
     {
         "message": outputs.text("How many messages the search returned."),
@@ -133,19 +148,7 @@ SEARCH_MESSAGES_OUTPUT_SCHEMA: JSONObject = outputs.obj(
 LIST_FOLDERS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
     {
         "message": outputs.text("How many folders were returned."),
-        "folders": outputs.array_of(
-            outputs.obj(
-                {
-                    "folder_id": outputs.text("Zoho folder id; pass to list_messages and read_message."),
-                    "name": outputs.text("Folder name."),
-                    "path": outputs.text("Full folder path, e.g. /Inbox/Receipts."),
-                    "type": outputs.text("Folder kind Zoho reports, e.g. Inbox or Sent."),
-                    "imap_access": outputs.boolean("The folder is exposed over IMAP."),
-                },
-                ["folder_id", "name", "path", "type", "imap_access"],
-            ),
-            "Every folder in the connected mailbox.",
-        ),
+        "folders": outputs.array_of(FOLDER_SCHEMA, "Every folder in the connected mailbox."),
     },
     ["message", "folders"],
 )
@@ -176,11 +179,39 @@ READ_MESSAGE_OUTPUT_SCHEMA: JSONObject = outputs.obj(
                 **MESSAGE_PROPERTIES,
                 "content": outputs.text(f"Message body as plain text, HTML stripped, up to {MAX_MESSAGE_CONTENT_CHARS} characters."),
                 "content_truncated": outputs.boolean("The body was longer than the cap and was clipped."),
+                "content_html": outputs.text(
+                    f"Original message content as Zoho returned it, including HTML markup and URLs, up to {MAX_MESSAGE_HTML_CHARS} characters."
+                ),
+                "content_html_truncated": outputs.boolean(
+                    "The original message content was longer than the HTML cap and was clipped."
+                ),
             },
-            [*MESSAGE_PROPERTIES, "content", "content_truncated"],
+            [*MESSAGE_PROPERTIES, "content", "content_truncated", "content_html", "content_html_truncated"],
         ),
     },
     ["message", "zoho_message"],
+)
+CREATE_FOLDER_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the folder was created."),
+        "folder": FOLDER_SCHEMA,
+    },
+    ["message", "folder"],
+)
+MOVE_MESSAGES_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the messages were moved."),
+        "destination_folder_id": outputs.text("The destination folder id."),
+        "moved_message_ids": outputs.array_of({"type": "string"}, "Message ids that were moved."),
+    },
+    ["message", "destination_folder_id", "moved_message_ids"],
+)
+ARCHIVE_MESSAGES_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that the messages were archived."),
+        "archived_message_ids": outputs.array_of({"type": "string"}, "Message ids that were archived."),
+    },
+    ["message", "archived_message_ids"],
 )
 INLINE_SEGMENT_SCHEMA: JSONObject = {
     "oneOf": [
@@ -275,7 +306,7 @@ MANIFEST = ToolManifest(
     display_name="Zoho Mail",
     description=(
         "Connect one Zoho Mail mailbox and let your agent list, search, and read email, "
-        "and send safely rendered rich HTML or plaintext messages with your approval."
+        "organize it by creating folders, moving or archiving messages, and send safely rendered email with your approval."
     ),
     connection="oauth",
     actions=(
@@ -338,10 +369,11 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="read_message",
-            description="Read one Zoho Mail message's metadata and body using its folder and message ids.",
+            description="Read one Zoho Mail message's metadata, plaintext body, and original HTML content using its folder and message ids.",
             data_policy=(
                 "Read-only. Sends only the folder and message ids to the connected Zoho Mail account. "
-                "The message metadata and plaintext body enter active model context. Runs directly with no approval."
+                "The message metadata, plaintext body, and bounded original HTML enter active model context. "
+                "Runs directly with no approval."
             ),
             input_schema=_schema(
                 {
@@ -351,6 +383,82 @@ MANIFEST = ToolManifest(
                 ["folder_id", "message_id"],
             ),
             output_schema=READ_MESSAGE_OUTPUT_SCHEMA,
+        ),
+        ActionSpec(
+            id="create_folder",
+            description="Create a mailbox folder directly, optionally under an existing parent folder.",
+            data_policy=(
+                "Changes the mailbox directly with no approval. The guarded folder name and optional numeric parent "
+                "folder id go to the connected Zoho Mail account."
+            ),
+            input_schema=_schema(
+                {
+                    "name": {
+                        "type": "string",
+                        "description": "Unique folder name using letters, numbers, spaces, hyphens, or underscores.",
+                    },
+                    "parent_folder_id": {
+                        "type": "string",
+                        "description": "Optional numeric parent folder id returned by list_folders; omit for a top-level folder.",
+                    },
+                },
+                ["name"],
+            ),
+            output_schema=CREATE_FOLDER_OUTPUT_SCHEMA,
+        ),
+        ActionSpec(
+            id="move_messages",
+            description="Move up to 50 messages directly into one existing folder.",
+            data_policy=(
+                "Changes the mailbox directly with no approval. The exact numeric message ids, destination folder id, "
+                "and optional source-folder/archive constraints go to the connected Zoho Mail account."
+            ),
+            input_schema=_schema(
+                {
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": MAX_MOVE_MESSAGE_IDS,
+                        "description": "Numeric Zoho message ids returned by search_messages or list_messages.",
+                    },
+                    "destination_folder_id": {
+                        "type": "string",
+                        "description": "Numeric destination folder id returned by list_folders.",
+                    },
+                    "source_folder_id": {
+                        "type": "string",
+                        "description": "Optional numeric source folder id; when present, only matching messages in that folder move.",
+                    },
+                    "include_archived": {
+                        "type": "boolean",
+                        "description": "Whether the move may include archived messages (default false).",
+                    },
+                },
+                ["message_ids", "destination_folder_id"],
+            ),
+            output_schema=MOVE_MESSAGES_OUTPUT_SCHEMA,
+        ),
+        ActionSpec(
+            id="archive_messages",
+            description="Archive up to 50 processed messages directly so they no longer remain in active folders.",
+            data_policy=(
+                "Changes the mailbox directly with no approval. The exact numeric message ids go to the connected "
+                "Zoho Mail account and are archived; this action does not delete messages."
+            ),
+            input_schema=_schema(
+                {
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": MAX_MOVE_MESSAGE_IDS,
+                        "description": "Numeric Zoho message ids returned by search_messages or list_messages.",
+                    },
+                },
+                ["message_ids"],
+            ),
+            output_schema=ARCHIVE_MESSAGES_OUTPUT_SCHEMA,
         ),
         ActionSpec(
             id="send_email",
@@ -391,15 +499,16 @@ MANIFEST = ToolManifest(
     ),
     protections=(
         "Mailbox reads stay inside the one Zoho account connected by the operator.",
-        "Sending waits for explicit operator approval of the sender, all recipients, subject, and body preview.",
+        "Folder creation, message moves, and archiving run directly with strict names and numeric ids; sending still waits for explicit operator approval.",
         "Rich messages are rendered only from typed blocks: text is escaped, links require http/https, and raw HTML, images, scripts, styles, and tracking elements are not accepted.",
         "Kern stores OAuth tokens in its encrypted credential store; the agent never receives the tokens or OAuth client secret.",
-        "The OAuth grant can read accounts, folders, and messages and create messages; it cannot delete mail or reorganize the mailbox.",
+        "The OAuth grant can read accounts, folders, and messages, create folders and messages, and move or archive messages; it cannot delete mail or create mailbox filters.",
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(
         "Kern uses Zoho's OAuth 2.0 authorization-code flow with offline access and refreshes one-hour access tokens. API and token endpoints are pinned to the configured Zoho data centre.",
-        "Outgoing HTML is deterministically rendered from structured blocks with escaped text and validated links; plaintext remains available. Incoming HTML is converted to bounded plaintext before it enters model context; provider response objects and links are not passed through wholesale.",
+        "Folder creation uses ZohoMail.folders.CREATE. Message moves and archives use ZohoMail.messages.UPDATE. These organization actions run directly; folder names pass the outbound parameter guard and ids must use Zoho's numeric id grammar.",
+        "Outgoing HTML is deterministically rendered from structured blocks with escaped text and validated links; plaintext remains available. Incoming message content is returned both as bounded plaintext and as up to 256,000 characters of the original HTML so the agent can inspect links and structure without a lossy parser.",
         PARAM_GUARD_TECHNICAL_DETAIL,
     ),
     setup_steps=(
@@ -441,7 +550,7 @@ MANIFEST = ToolManifest(
             title="Enable and connect the mailbox",
             description=(
                 "Enable Zoho Mail, choose Connect, sign in to the mailbox Kern may use, and approve the requested account, "
-                "folder, read-message, and create-message permissions. Confirm Kern shows the expected mailbox address."
+                "folder read/create and message read/create/update permissions. Confirm Kern shows the expected mailbox address."
             ),
             link_url="https://www.zoho.com/mail/help/api/using-oauth-2.html",
             link_label="View Zoho Mail OAuth documentation",
@@ -456,7 +565,7 @@ MANIFEST = ToolManifest(
                         label="Reads",
                         text=(
                             "Search text, paging values, and message or folder ids go to Zoho Mail. Returned folder metadata, "
-                            "message summaries, headers, and bounded plaintext bodies enter active model context."
+                            "message summaries, headers, bounded plaintext bodies, and bounded original HTML enter active model context."
                         ),
                     ),
                     DataSummaryPoint(
@@ -464,6 +573,13 @@ MANIFEST = ToolManifest(
                         text=(
                             "Only after approval, the sender, To/Cc/Bcc recipients, subject, chosen format, and rendered body "
                             "go to Zoho Mail and then to the named recipients."
+                        ),
+                    ),
+                    DataSummaryPoint(
+                        label="Mailbox changes",
+                        text=(
+                            "Without approval, a guarded new-folder name and optional parent id, or selected message ids and "
+                            "a destination folder id, go to Zoho Mail to create, move, or archive."
                         ),
                     ),
                 ),
@@ -500,9 +616,14 @@ MANIFEST = ToolManifest(
     agent_notes=(
         "Use list_senders to discover the current default sender and verified aliases before setting from_address. "
         "Use list_folders before list_messages. read_message needs both folder_id and message_id from a list or search result. "
+        "Its content_html field preserves the original message markup and URLs for comprehensive agent-side parsing. "
         "search_messages accepts Zoho syntax such as sender:alice@example.com::has:attachment. Sending defaults to safe HTML "
         "rendered from paragraph, heading, list, rich-text, link, and divider blocks; set mail_format to plaintext when needed. "
-        "Raw HTML, attachments, replies, drafts, deletes, and mailbox organization are not implemented."
+        "Use list_folders to obtain destination folder ids; create_folder also returns the new folder id. create_folder, "
+        "move_messages, and archive_messages run directly without approval, so archive only after processing succeeds. "
+        "Zoho filter creation has no documented Mail API, so recurring organization must be done by a schedule that searches, "
+        "moves, and archives messages. Raw HTML sending, attachments, "
+        "replies, drafts, and deletes are not implemented."
     ),
 )
 
@@ -580,6 +701,7 @@ def _api_request(
     what: str,
     query: Mapping[str, str] | None = None,
     body: JSONObject | None = None,
+    success_codes: frozenset[int] = frozenset({200}),
 ) -> JSONObject:
     _, _, mail_base = _oauth_urls(data_center)
     url = f"{mail_base}/api{path}"
@@ -600,7 +722,7 @@ def _api_request(
     status_code = status.get("code") if isinstance(status, dict) else None
     if isinstance(status_code, str) and status_code.isascii() and status_code.isdecimal():
         status_code = int(status_code)
-    if status_code != 200:
+    if status_code not in success_codes:
         raise RuntimeError(f"Zoho Mail {what} did not succeed.")
     return response
 
@@ -616,6 +738,44 @@ def _required_id(tool_input: JSONObject, field: str) -> str:
     if not value:
         raise ToolInputValidationError(f"Zoho Mail tool_input.{field} must be a numeric id string.")
     return value
+
+
+def _optional_id(tool_input: JSONObject, field: str) -> str:
+    value = tool_input.get(field)
+    if value is None:
+        return ""
+    normalized = _id_value(value)
+    if not normalized:
+        raise ToolInputValidationError(f"Zoho Mail tool_input.{field} must be a numeric id string.")
+    return normalized
+
+
+def _message_ids(value: object) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_MOVE_MESSAGE_IDS:
+        raise ToolInputValidationError(
+            f"Zoho Mail tool_input.message_ids must contain 1-{MAX_MOVE_MESSAGE_IDS} numeric id strings."
+        )
+    normalized = [_id_value(item) for item in value]
+    if any(not item for item in normalized) or len(set(normalized)) != len(normalized):
+        raise ToolInputValidationError(
+            "Zoho Mail tool_input.message_ids must contain unique numeric id strings."
+        )
+    return normalized
+
+
+def _folder_name(value: object) -> str:
+    if not isinstance(value, str):
+        raise ToolInputValidationError("Zoho Mail tool_input.name must be a folder name string.")
+    normalized = " ".join(value.strip().split())
+    if (
+        not normalized
+        or len(normalized) > MAX_FOLDER_NAME_CHARS
+        or not FOLDER_NAME_RE.fullmatch(normalized)
+    ):
+        raise ToolInputValidationError(
+            f"Zoho Mail tool_input.name must contain 1-{MAX_FOLDER_NAME_CHARS} letters, numbers, spaces, hyphens, or underscores."
+        )
+    return normalized
 
 
 def _data_list(response: JSONObject, *, what: str) -> list[JSONObject]:
@@ -1026,10 +1186,143 @@ def _read_message(access_token: str, data_center: str, tool_input: JSONObject, a
     if not isinstance(details, dict) or not isinstance(content_data, dict):
         raise RuntimeError("Zoho Mail message read returned invalid data.")
     summary = _message_summary(cast(JSONObject, details))
-    content, truncated = _message_text(content_data.get("content"))
+    raw_content = content_data.get("content")
+    content, truncated = _message_text(raw_content)
+    content_html = raw_content if isinstance(raw_content, str) else ""
     summary["content"] = content
     summary["content_truncated"] = truncated
+    summary["content_html"] = content_html[:MAX_MESSAGE_HTML_CHARS]
+    summary["content_html_truncated"] = len(content_html) > MAX_MESSAGE_HTML_CHARS
     return {"message": "Zoho Mail message loaded.", "zoho_message": summary}
+
+
+def _folder_by_id(access_token: str, data_center: str, account_id: str, folder_id: str) -> JSONObject:
+    response = _api_request(
+        access_token,
+        data_center,
+        "GET",
+        f"/accounts/{account_id}/folders",
+        what="folder lookup",
+    )
+    for record in _data_list(response, what="folder lookup")[:MAX_FOLDER_RESULTS]:
+        if _id_value(record.get("folderId")) == folder_id:
+            return _folder_summary(record)
+    raise ToolInputValidationError(f"Zoho Mail folder {folder_id} was not found in the connected mailbox.")
+
+
+def _create_folder(
+    access_token: str,
+    data_center: str,
+    account_id: str,
+    tool_input: JSONObject,
+    api: HostAPI,
+) -> JSONObject:
+    if set(tool_input) - {"name", "parent_folder_id"}:
+        raise ToolInputValidationError("Zoho Mail create_folder only supports name and parent_folder_id.")
+    name = _folder_name(tool_input.get("name"))
+    name = api.outbound.guard_request_parameter_string(name, allow_identifiers=True)
+    parent_folder_id = _optional_id(tool_input, "parent_folder_id")
+    body: JSONObject = {"folderName": name}
+    if parent_folder_id:
+        body["parentFolderId"] = parent_folder_id
+    response = _api_request(
+        access_token,
+        data_center,
+        "POST",
+        f"/accounts/{account_id}/folders",
+        what="folder creation",
+        body=body,
+        success_codes=frozenset({200, 201}),
+    )
+    data = response.get("data")
+    if not isinstance(data, dict):
+        raise RuntimeError("Zoho Mail folder creation returned invalid data.")
+    folder = _folder_summary(cast(JSONObject, data))
+    folder_id = str(folder.get("folder_id") or "")
+    if not folder_id:
+        raise RuntimeError("Zoho Mail folder creation returned no folder id.")
+    return {
+        "message": f'Created Zoho Mail folder "{name}" ({folder_id}).',
+        "folder": folder,
+    }
+
+
+def _move_messages(
+    access_token: str,
+    data_center: str,
+    account_id: str,
+    tool_input: JSONObject,
+) -> JSONObject:
+    if set(tool_input) - {
+        "message_ids",
+        "destination_folder_id",
+        "source_folder_id",
+        "include_archived",
+    }:
+        raise ToolInputValidationError(
+            "Zoho Mail move_messages only supports message_ids, destination_folder_id, source_folder_id, and include_archived."
+        )
+    message_ids = _message_ids(tool_input.get("message_ids"))
+    destination_folder_id = _required_id(tool_input, "destination_folder_id")
+    source_folder_id = _optional_id(tool_input, "source_folder_id")
+    include_archived = tool_input.get("include_archived", False)
+    if not isinstance(include_archived, bool):
+        raise ToolInputValidationError("Zoho Mail tool_input.include_archived must be a boolean.")
+    if source_folder_id and source_folder_id == destination_folder_id:
+        raise ToolInputValidationError("Zoho Mail source and destination folders must be different.")
+    destination = _folder_by_id(
+        access_token, data_center, account_id, destination_folder_id
+    )
+    destination_name = str(destination.get("name") or destination_folder_id)
+    destination_path = str(destination.get("path") or "")
+    move: JSONObject = {
+        "mode": "moveMessage",
+        "destfolderId": destination_folder_id,
+        "messageId": cast(list[JSONValue], message_ids),
+        "isArchive": include_archived,
+    }
+    if source_folder_id:
+        move["isFolderSpecific"] = True
+        move["folderId"] = source_folder_id
+    _api_request(
+        access_token,
+        data_center,
+        "PUT",
+        f"/accounts/{account_id}/updatemessage",
+        what="message move",
+        body=move,
+    )
+    location = destination_name
+    if destination_path:
+        location = f"{destination_name} ({destination_path})"
+    return {
+        "message": f'Moved {len(message_ids)} Zoho Mail message(s) to "{location}".',
+        "destination_folder_id": destination_folder_id,
+        "moved_message_ids": cast(list[JSONValue], message_ids),
+    }
+
+
+def _archive_messages(
+    access_token: str,
+    data_center: str,
+    account_id: str,
+    tool_input: JSONObject,
+) -> JSONObject:
+    if set(tool_input) != {"message_ids"}:
+        raise ToolInputValidationError("Zoho Mail archive_messages requires only message_ids.")
+    message_ids = _message_ids(tool_input.get("message_ids"))
+    _api_request(
+        access_token,
+        data_center,
+        "PUT",
+        f"/accounts/{account_id}/updatemessage",
+        what="message archive",
+        body={"mode": "archiveMails", "messageId": cast(list[JSONValue], message_ids)},
+    )
+    return {
+        "message": f"Archived {len(message_ids)} Zoho Mail message(s).",
+        "archived_message_ids": cast(list[JSONValue], message_ids),
+    }
 
 
 def _email_field(tool_input: JSONObject, field: str, *, required: bool) -> str:
@@ -1265,9 +1558,13 @@ def _send_proposal(tool_input: JSONObject, account: ConnectionAccount, account_r
     return {"message": message, "summary": summary}
 
 
-def _approval_payload(proposal: JSONObject, account: ConnectionAccount) -> JSONObject:
+def _approval_payload(
+    proposal: JSONObject,
+    account: ConnectionAccount,
+    action_type: str,
+) -> JSONObject:
     payload: JSONObject = {
-        "action_type": ZOHO_SEND_ACTION_TYPE,
+        "action_type": action_type,
         "tool_id": MANIFEST.tool_id,
         "zoho_account": {"id": account["id"], "label": account["label"]},
         "proposal": proposal,
@@ -1275,7 +1572,7 @@ def _approval_payload(proposal: JSONObject, account: ConnectionAccount) -> JSONO
     serialized = json.dumps(payload, separators=(",", ":"), allow_nan=False)
     if len(serialized.encode("utf-8")) > MAX_APPROVAL_PAYLOAD_BYTES:
         raise ToolInputValidationError(
-            "Zoho Mail message is too large to queue for approval; shorten the body or recipient fields."
+            "Zoho Mail action is too large to queue for approval; reduce the requested content or message ids."
         )
     return payload
 
@@ -1307,10 +1604,38 @@ class ZohoMailTool:
                 return ActionExecuted(_list_messages(access_token, data_center, tool_input, api))
             if action == "read_message":
                 return ActionExecuted(_read_message(access_token, data_center, tool_input, api))
+            if action == "create_folder":
+                return ActionExecuted(
+                    _create_folder(
+                        access_token,
+                        data_center,
+                        _connected_account_id(api),
+                        tool_input,
+                        api,
+                    )
+                )
+            if action == "move_messages":
+                return ActionExecuted(
+                    _move_messages(
+                        access_token,
+                        data_center,
+                        _connected_account_id(api),
+                        tool_input,
+                    )
+                )
+            if action == "archive_messages":
+                return ActionExecuted(
+                    _archive_messages(
+                        access_token,
+                        data_center,
+                        _connected_account_id(api),
+                        tool_input,
+                    )
+                )
             if action == "send_email":
                 account, account_record = ZOHO_CREDENTIALS.refresh_account(api, access_token, data_center)
                 proposal = _send_proposal(tool_input, account, account_record)
-                payload = _approval_payload(proposal, account)
+                payload = _approval_payload(proposal, account, ZOHO_SEND_ACTION_TYPE)
                 approval = api.approvals.request(
                     action_id=action,
                     summary=str(proposal["summary"]),
@@ -1332,19 +1657,20 @@ class ZohoMailTool:
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
         try:
             payload = approval.payload
-            if payload.get("action_type") != ZOHO_SEND_ACTION_TYPE or approval.action_id != "send_email":
+            action_type = payload.get("action_type")
+            if approval.action_id != "send_email" or action_type != ZOHO_SEND_ACTION_TYPE:
                 return ActionFailed("Zoho Mail approval payload is invalid.")
             proposal = payload.get("proposal")
             approved_account = payload.get("zoho_account")
             if not isinstance(proposal, dict) or not isinstance(approved_account, dict):
                 return ActionFailed("Zoho Mail approval payload is invalid.")
-            message = proposal.get("message")
-            if not isinstance(message, dict):
-                return ActionFailed("Zoho Mail approval payload is invalid.")
             access_token, data_center, _ = ZOHO_CREDENTIALS.access_context(api)
             current_account, account_record = ZOHO_CREDENTIALS.refresh_account(api, access_token, data_center)
             if approved_account.get("id") != current_account["id"]:
                 return ActionFailed("Zoho Mail account changed after approval. Please queue a new approval.")
+            message = proposal.get("message")
+            if not isinstance(message, dict):
+                return ActionFailed("Zoho Mail approval payload is invalid.")
             from_address = message.get("fromAddress")
             if not isinstance(from_address, str) or from_address.lower() not in _account_addresses(account_record):
                 return ActionFailed("Zoho Mail sender changed after approval. Please queue a new approval.")
@@ -1363,7 +1689,7 @@ class ZohoMailTool:
         except ProviderWarning:
             raise
         except Exception as exc:
-            return ActionFailed(str(exc) or "Zoho Mail send failed after approval.")
+            return ActionFailed(str(exc) or "Zoho Mail action failed after approval.")
 
 
 BUNDLED_TOOL = ZohoMailTool()

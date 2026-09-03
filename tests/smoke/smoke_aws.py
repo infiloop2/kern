@@ -340,6 +340,12 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("list_senders", {}),
         ("list_messages", {"folder_id": "1", "limit": "1"}),
         ("read_message", {"folder_id": "1", "message_id": "1"}),
+        ("create_folder", {"name": "Kern Smoke"}),
+        (
+            "move_messages",
+            {"message_ids": ["1"], "destination_folder_id": "2"},
+        ),
+        ("archive_messages", {"message_ids": ["1"]}),
         (
             "send_email",
             {
@@ -1507,6 +1513,7 @@ class AwsSmoke:
             not isinstance(created_schedule, dict)
             or not isinstance(created_schedule.get("id"), int)
             or created_schedule.get("revision") != 1
+            or created_schedule.get("thread_id") != f"schedule-{created_schedule.get('id')}"
         ):
             raise AssertionError(
                 f"Workspace schedule create returned invalid data: {created_schedule}"
@@ -1521,7 +1528,11 @@ class AwsSmoke:
         deleted_schedule = self._api(
             "DELETE", f"{schedules_base}/{schedule_id}?expected_revision=1"
         )
-        if deleted_schedule != {"ok": True, "revision": 2}:
+        if deleted_schedule != {
+            "ok": True,
+            "revision": 2,
+            "thread_id": created_schedule["thread_id"],
+        }:
             raise AssertionError(
                 f"Workspace schedule delete returned invalid data: {deleted_schedule}"
             )

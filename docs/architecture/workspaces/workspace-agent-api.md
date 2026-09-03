@@ -139,7 +139,6 @@ Global routes are:
 /agent/memory/search?q=...
 /agent/memory/pages/{page_id}
 /agent/schedules[?limit=...&before=...]
-/agent/schedules/recent-failures[?limit=...&before=...]
 /agent/schedules/session-options
 /agent/schedules/{schedule_id}
 ```
@@ -147,32 +146,38 @@ Global routes are:
 `GET` and `PUT /agent/self/memory` resolve the page id exclusively from the
 kernel-attributed peer thread. They delegate to the ordinary memory page load
 and save behavior, including 404, optimistic revision checks, and size limits;
-the request has no identity or page-id field. `schedule-*` peers receive 409
-because self-memory is not enabled for schedule runs.
+the request has no identity or page-id field. Chat, App, and persistent model
+schedule threads all use this same identity-derived self-memory path.
 
 Memory page ids beginning with `app-`, `thread-`, or `schedule-` form the
 individual-memory namespace. Agent index, search, and direct page routes expose
-only swarm memory and return 404 for direct access to an individual page. App
-and Chat threads reach only their identity-derived page through self-memory;
-`schedule-*` pages remain individual despite the schedule self-memory guard.
+only swarm memory and return 404 for direct access to an individual page. App,
+Chat, and persistent model schedule threads reach only their identity-derived
+page through self-memory. `schedule-*` pages remain individual.
 The browser API accepts `scope=swarm|individual` on memory index and search,
 defaulting to `swarm`, so the operator UI can display the namespaces
 separately. Existing pages keep their ids and are classified in place by this
 prefix rule; the distinction makes the prior individual-memory convention an
 enforced API boundary.
 
-The recent-failures route returns retained failed-run summaries for active
-schedules, newest first. Summaries include the schedule name, thread id,
-runtime selection, timestamps, and a bounded error message, but never the
-snapshotted prompt. Deleted schedules remain browser-only. This gives agents a
-direct health signal without exposing complete run history or retained thread
-events.
+Every schedule owns one stable `schedule-N` thread. A firing submits its saved
+message through the ordinary thread-message path with an automated-trigger
+prefix, then advances the cadence after that single attempt. Model schedules
+reuse their conversation and provider context; a firing steers an active turn
+when the provider supports steering. Script schedules run the saved path under
+the bounded Bash provider. Output is an ordinary agent message and delivery or
+execution failures after acceptance are ordinary `thread.error` events.
+Failures before host acceptance are logged operationally and do not create a
+thread event. There is no retry queue, run record, run-status API, or
+recent-failures route. Bash schedule threads remain visible as read-only
+transcripts under Scheduled agents; they do not expose manual messaging or
+self-memory controls.
 
 Memory and schedule writes use an `expected_revision` compare-and-swap so
 parallel agents cannot silently overwrite each other. Agents have ordinary
-CRUD plus bounded recent failure summaries; the browser-only API exposes
-deleted resources, revision history, restoration, complete schedule run
-history, and retained host-thread events. Memory
+CRUD; the browser-only API exposes deleted resources, revision history, and
+restoration. The stable schedule conversation uses the ordinary Chat event
+API. Memory
 list/search responses are paginated and omit page bodies. Swarm page content
 may link to another swarm page as `[[page-id]]`; Kern maintains a derived link
 index without a separate graph database. Individual pages are excluded from
@@ -188,9 +193,9 @@ fallback ranking mode and asks the caller to retry if hybrid inference becomes
 unavailable instead of silently changing order.
 
 Schedule `PUT` replaces the complete definition. Runtime/model/effort values
-are stored as bounded strings and checked by the host only when a run starts;
-an unavailable configuration is recorded in run history rather than rejected
-when the definition is edited.
+are stored as bounded strings and checked by the host only when delivery starts;
+an unavailable configuration is logged as a failed delivery attempt rather
+than being rejected when the definition is edited.
 
 The agent socket obtains its peer PID and UID through `SO_PEERCRED`.
 `GET /agent/identity` and the self-memory alias read the peer's cgroup and

@@ -163,18 +163,77 @@ class NetworkIntrospectionTests(unittest.TestCase):
         )
         self.assertEqual(denials[0]["count"], 2)
 
-    def test_denial_result_marks_a_bounded_scan_as_truncated(self) -> None:
+    def test_denial_result_marks_a_bounded_row_scan_as_truncated(self) -> None:
         for _ in range(4):
             state.append_network_event(
                 "https", "GET", "poll.example.com", 443, "/v1/bundle", "", False,
                 "host_not_allowed",
             )
 
-        with patch.object(network_introspection_api, "_DENIAL_SCAN_LIMIT", 3):
+        with patch.object(network_introspection_api, "_DENIAL_ROW_SCAN_LIMIT", 3):
             result = network_introspection_api.call_action("recent_network_denials", {})
 
         self.assertTrue(result["result"]["truncated"])
         self.assertEqual(result["result"]["denials"][0]["count"], 3)
+
+    def test_denial_result_marks_a_bounded_distinct_scan_as_truncated(self) -> None:
+        for host in ("older.example.com", "newer.example.com"):
+            state.append_network_event(
+                "https", "CONNECT", host, 443, "", "", False, "host_not_allowed"
+            )
+
+        with patch.object(network_introspection_api, "_DENIAL_DISTINCT_SCAN_LIMIT", 1), \
+                patch.object(network_introspection_api, "_DENIAL_PAGE_SIZE", 1):
+            result = network_introspection_api.call_action("recent_network_denials", {})
+
+        self.assertTrue(result["result"]["truncated"])
+        self.assertEqual(
+            [denial["host"] for denial in result["result"]["denials"]],
+            ["newer.example.com"],
+        )
+
+    def test_distinct_budget_stops_inside_the_page_that_exhausts_it(self) -> None:
+        for index in range(6):
+            state.append_network_event(
+                "https", "CONNECT", f"host{index}.example.com", 443, "", "", False,
+                "host_not_allowed",
+            )
+
+        with patch.object(network_introspection_api, "_DENIAL_DISTINCT_SCAN_LIMIT", 2), \
+                patch.object(network_introspection_api, "_DENIAL_PAGE_SIZE", 6):
+            result = network_introspection_api.call_action("recent_network_denials", {})
+
+        # The budget is exhausted four rows into the single page; the rest of
+        # that page must not be admitted just because it was already fetched.
+        self.assertEqual(
+            [denial["host"] for denial in result["result"]["denials"]],
+            ["host5.example.com", "host4.example.com"],
+        )
+        self.assertTrue(result["result"]["truncated"])
+
+    def test_repeat_denials_do_not_consume_the_distinct_scan_budget(self) -> None:
+        state.append_network_event(
+            "https", "CONNECT", "rare.example.com", 443, "", "", False,
+            "host_not_allowed",
+        )
+        for _ in range(network_introspection_api._DENIAL_DISTINCT_SCAN_LIMIT):
+            state.append_network_event(
+                "https", "GET", "poll.example.com", 443, "/v1/bundle", "", False,
+                "host_not_allowed",
+            )
+
+        result = network_introspection_api.call_action("recent_network_denials", {})
+
+        denials = result["result"]["denials"]
+        self.assertEqual(
+            [denial["host"] for denial in denials],
+            ["poll.example.com", "rare.example.com"],
+        )
+        self.assertEqual(
+            denials[0]["count"], network_introspection_api._DENIAL_DISTINCT_SCAN_LIMIT
+        )
+        self.assertEqual(denials[1]["count"], 1)
+        self.assertFalse(result["result"]["truncated"])
 
     def test_limit_validation_and_socket_peer_gate(self) -> None:
         for bad in (0, 101, "5", True):

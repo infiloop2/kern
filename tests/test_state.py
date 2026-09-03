@@ -243,6 +243,14 @@ class StateStorageTests(unittest.TestCase):
             seed_thread(cur, "thread-1", last_used_at="2026-06-08T00:00:02Z")
             seed_thread(cur, "thread-2", last_used_at="2026-06-08T00:00:02Z")
             seed_thread(cur, "app-1", last_used_at="2026-06-08T00:00:03Z")
+            seed_thread(
+                cur,
+                "schedule-1",
+                runtime="script",
+                model="bash",
+                effort="fixed",
+                last_used_at="2026-06-08T00:00:04Z",
+            )
 
         first = state.page_thread_summaries(
             None,
@@ -260,7 +268,6 @@ class StateStorageTests(unittest.TestCase):
             thread_prefix="thread-",
         )
         self.assertEqual([row["thread_id"] for row in second], ["thread-1"])
-
     def test_every_session_option_satisfies_the_thread_constraint(self) -> None:
         # The thread_sessions_options_check constraint must track the
         # operator-facing option matrix exactly: a combination the API offers

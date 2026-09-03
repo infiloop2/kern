@@ -6,14 +6,19 @@ complete route and runtime reference.
 
 Web Apps have immutable ids such as `app-1`, separate from editable display
 names. `GET /agent/apps` lists active and archived apps, including each App's
+complete `agent_settings` (`agent_runtime`, `model`, and `effort`) and
 `agent_updates_locked` state. Any agent may read an App by id and may update an
 active, unlocked App; archived and agent-locked Apps are read-only. Use the id
 the operator gives you, or list Apps and confirm the immutable id; never choose
-an App from its editable name alone.
+an App from its editable name alone. Migrated Apps inherit the configuration of
+their linked host thread, or the pinned Codex default if they have no thread.
 
 Create a new App with `POST /agent/apps` without a request body, but only when
-the operator explicitly asks you to create one. The response contains the new
-immutable `app_id`; use it for every subsequent read and write.
+the operator explicitly asks you to create one. App creation never accepts an
+agent configuration from the browser or an agent. The backend selects and
+persists the first active runtime, its named default model, and High effort (or
+Codex when none is active). The response contains the new immutable `app_id`
+and complete `agent_settings`; use the id for every subsequent read and write.
 
 ## State reads
 
@@ -117,9 +122,3 @@ compatibility mode or `app.read(path)` in targeted mode. In targeted mode
 `null`; read again when the resulting stored branch is needed. A worker turn
 is terminated after three seconds; durable state belongs in App data or a
 collection, never worker memory.
-
-When working in an `app-*` thread, communicate primarily by changing the App's
-interface or data. Do not narrate routine implementation work in Chat; send a
-brief message only when blocked, when operator input is required, or when an
-error or important limitation must be visible. A terse completion message is
-acceptable.

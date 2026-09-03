@@ -298,6 +298,19 @@ class FindDenialTest(unittest.TestCase):
         self.assertIsNone(find_denial("order 48291365 status"))
         self.assertIsNone(find_denial("year 2026 review"))
         self.assertIsNone(find_denial("zip 90210"))
+        # A 40-hex git object id carries a digit stretch that is not a phone or
+        # account number. Its shape is still machine-like, so it clears this
+        # rule and is left to UNNATURAL_TOKEN, which callers like GitHub waive.
+        for commit in (
+            "2ae2700023629add7b710e3e4487689d94f9d5bd",
+            "b552ddf69a1210e4debb90a7a10457761105022c",
+        ):
+            self.assertIsNone(find_denial(commit, allow_machine_tokens=True))
+            self.assertEqual(find_denial(commit).guard, "UNNATURAL_TOKEN")
+        # The exemption is the full commit shape only: a digit run hidden in
+        # any other alphanumeric token still denies.
+        self.assert_guard("sale4829134881234", "DIGIT_RUN")
+        self.assert_guard("2ae2700023629add", "DIGIT_RUN")  # hex, but not 40 long
 
     def test_public_wallet_addresses_are_exempt_but_keys_are_not(self) -> None:
         # The exemption masks address-shaped tokens only; everything around

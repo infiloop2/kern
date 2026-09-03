@@ -15,15 +15,15 @@ from host.runtime.admin_api.errors import ApiError
 from host.runtime.admin_api.request_params import clip_json_encoded_text as _clip_json_encoded_text, one as _one
 from host.runtime.core import state
 from host.runtime.core.state import utc_now
-from host.session_options import session_config_error
+from host.session_options import SCRIPT_RUNTIME, session_config_error
 
 PRODUCT_THREAD_ID_RE = re.compile(
-    r"(?=^[a-z0-9-]{1,64}$)^(?:app|thread|schedule)-[a-z0-9-]+$"
+    r"(?=^[a-z0-9-]{1,64}$)^(?:(?:app|thread)-[a-z0-9-]+|schedule-[1-9][0-9]*)$"
 )
 PRODUCT_THREAD_PREFIX_RE = re.compile(
-    r"(?=^[a-z0-9-]{1,64}$)^(?:app|thread|schedule)-[a-z0-9-]*$"
+    r"(?=^[a-z0-9-]{1,64}$)^(?:(?:app|thread)-[a-z0-9-]*|schedule-(?:[1-9][0-9]*)?)$"
 )
-SCHEDULE_THREAD_PREFIX = "schedule-"
+SCHEDULE_AGENT_THREAD_ID_RE = re.compile(r"schedule-[1-9][0-9]*")
 MESSAGE_LIMIT = 50_000
 THREAD_HANDOFF_MESSAGE_CHARACTER_LIMIT = 100_000
 THREAD_HANDOFF_ACTIVITY_CHARACTER_LIMIT = 150_000
@@ -206,15 +206,17 @@ def send_thread_message(
     thread_id: str,
     body: Any,
 ) -> dict[str, Any]:
-    """The one write path for agent work: start a turn on an idle thread
-    (creating the thread on its first message) or steer the thread's running
-    turn. There is no queue — a message that cannot run now is rejected with
-    a retry hint and the caller decides."""
+    """Start or steer one turn through the ordinary thread path."""
     if PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None:
         raise ApiError(
             HTTPStatus.BAD_REQUEST,
             "thread_id must start with app-, thread-, or schedule-",
         )
+    if (
+        SCHEDULE_AGENT_THREAD_ID_RE.fullmatch(thread_id) is not None
+        and not state.schedule_thread_is_owned(thread_id)
+    ):
+        raise ApiError(HTTPStatus.NOT_FOUND, "schedule thread is not reserved")
     message = _message(body)
     with _thread_send_lock(thread_id):
         session_config = state.thread_session_config(thread_id)
@@ -242,10 +244,13 @@ def send_thread_message(
                 session_change_activity = None
                 handoff_events: list[dict[str, Any]] = []
                 missing_provider_context = (
-                    session_config is not None
+                    agent_runtime != SCRIPT_RUNTIME
+                    and session_config is not None
                     and not session_config.get("provider_session_id")
                 )
-                if switching_session or missing_provider_context:
+                if agent_runtime != SCRIPT_RUNTIME and (
+                    switching_session or missing_provider_context
+                ):
                     handoff_events = state.recent_thread_handoff_events(
                         cur,
                         thread_id,
@@ -421,6 +426,7 @@ def list_threads(
         response["next_before"] = _encode_thread_list_cursor(page[-1])
     return response
 
+
 def _public_thread(
     thread_id: str,
     agent_runtime: str,
@@ -459,6 +465,7 @@ def _message(body: Any) -> str:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"message must be at most {MESSAGE_LIMIT} characters")
     return value
 
+
 def _agent_runtime(body: dict[str, Any]) -> str:
     value = body.get("agent_runtime")
     if not isinstance(value, str) or value not in AGENT_RUNTIMES:
@@ -471,11 +478,10 @@ def _runs_scripts(thread_id: str) -> bool:
     The script runtime reads a thread's message as a path to a bash script
     rather than as conversation, so a Chat or App thread rotated onto it would
     start treating the user's next sentence as a filename. The Workspace
-    surfaces already refuse to offer it, but this is the executor: the boundary
-    is enforced here, on the one thing a direct caller cannot forge, so a send
-    that bypasses those surfaces cannot rotate a product thread onto it either.
+    surfaces already refuse to offer it, but this is the executor: the
+    boundary is enforced here on the schedule namespace.
     """
-    return thread_id.startswith(SCHEDULE_THREAD_PREFIX)
+    return thread_id.startswith("schedule-")
 
 def _session_config(
     body: dict[str, Any], runtime: str, *, allow_script: bool
@@ -699,6 +705,7 @@ def _thread_list_prefix(query: dict[str, list[str]]) -> str | None:
             "prefix must start with app-, thread-, or schedule-",
         )
     return prefix
+
 
 def _encode_thread_list_cursor(thread: dict[str, Any]) -> str:
     raw = json.dumps(

@@ -63,7 +63,9 @@ def page_thread_summaries(
             " ORDER BY seq DESC LIMIT 1), 0),"
             " COALESCE((SELECT seq FROM agent_events"
             " WHERE agent_events.thread_id = thread_sessions.thread_id"
-            " AND event_type = 'thread.message'"
+            " AND (event_type = 'thread.message'"
+            " OR (event_type = 'thread.error'"
+            " AND thread_sessions.thread_id ~ '^schedule-[1-9][0-9]*$'))"
             " ORDER BY seq DESC LIMIT 1), 0)"
             f" FROM thread_sessions{where}"
             " ORDER BY COALESCE(last_used_at, '') DESC, thread_id DESC LIMIT %s",
@@ -93,6 +95,13 @@ def page_thread_summaries(
         ]
 
 
+def schedule_thread_is_owned(thread_id: str) -> bool:
+    """Whether the persistent schedule namespace has reserved this numeric id."""
+    with _read() as cur:
+        cur.execute("SELECT 1 FROM schedules WHERE thread_id = %s", (thread_id,))
+        return cur.fetchone() is not None
+
+
 def latest_thread_event_seqs(thread_id: str) -> tuple[int, int]:
     """Newest retained event and message sequences from one database snapshot."""
     with db.transaction() as cur:
@@ -101,8 +110,10 @@ def latest_thread_event_seqs(thread_id: str) -> tuple[int, int]:
             " COALESCE((SELECT seq FROM agent_events WHERE thread_id = %s"
             " ORDER BY seq DESC LIMIT 1), 0),"
             " COALESCE((SELECT seq FROM agent_events WHERE thread_id = %s"
-            " AND event_type = 'thread.message' ORDER BY seq DESC LIMIT 1), 0)",
-            (thread_id, thread_id),
+            " AND (event_type = 'thread.message'"
+            " OR (event_type = 'thread.error' AND %s ~ '^schedule-[1-9][0-9]*$'))"
+            " ORDER BY seq DESC LIMIT 1), 0)",
+            (thread_id, thread_id, thread_id),
         )
         row = cur.fetchone()
     return (int(row[0]), int(row[1])) if row is not None else (0, 0)

@@ -59,6 +59,7 @@ DEFAULT_SESSION_OPTIONS = {
     "codex": ("gpt-5.6-terra", "high"),
     "claude_code": ("claude-opus-5", "high"),
     "hermes": ("deepseek.v3.2", "high"),
+    "script": ("bash", "fixed"),
 }
 
 
@@ -1444,6 +1445,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             ("/workspace/chat.js", "application/javascript", "window.KernHost"),
             ("/workspace/rich_text.css", "text/css", ".md-content"),
             ("/workspace/rich_text.js", "application/javascript", "renderMarkdown"),
+            ("/workspace/composer.css", "text/css", ".workspace-composer"),
         ):
             request = urllib.request.Request(f"{self.base_url}{asset_path}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -2243,7 +2245,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         seed_thread_session(
             "thread-claude-options",
             "claude_code",
-            model="claude-fable-5",
+            model="claude-fable-5-1",
             effort="ultracode",
         )
         with patch.object(
@@ -2270,14 +2272,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "claude turn",
                     "agent_runtime": "claude_code",
-                    "model": "claude-fable-5",
+                    "model": "claude-fable-5-1",
                     "effort": "ultracode",
                 },
             )
             self.assertEqual(status, 200)
             self.assertEqual(
                 (claude["thread"]["model"], claude["thread"]["effort"]),
-                ("claude-fable-5", "ultracode"),
+                ("claude-fable-5-1", "ultracode"),
             )
 
         invalid = [
@@ -2591,10 +2593,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # it accepts the configuration a script schedule submits — the
         # conversational surfaces do their own gating on the way in.
         set_runtime_statuses(codex="active", claude_code="active", script="active")
-        with patch.object(orchestrator, "launch_turn") as launch:
+        with (
+            patch.object(state, "schedule_thread_is_owned", return_value=True),
+            patch.object(orchestrator, "launch_turn") as launch,
+        ):
             _, accepted = self.request(
                 "POST",
-                "/v1/threads/schedule-5-run-2/messages",
+                "/v1/threads/schedule-5/messages",
                 {
                     "message": "/mnt/kern-agent/agent-home/scripts/backup.sh",
                     "agent_runtime": "script",
@@ -2611,20 +2616,73 @@ class AdminApiIntegrationTests(unittest.TestCase):
             launch_message, "/mnt/kern-agent/agent-home/scripts/backup.sh"
         )
         self.assertIsNone(provider_session_id)
-        stored = state.thread_session_config("schedule-5-run-2")
+        stored = state.thread_session_config("schedule-5")
         self.assertEqual(stored["agent_runtime"], "script")
 
         for fields in (
             {"agent_runtime": "script", "model": "python", "effort": "fixed"},
             {"agent_runtime": "script", "model": "bash", "effort": "high"},
         ):
-            with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
+            with (
+                self.subTest(fields=fields),
+                patch.object(state, "schedule_thread_is_owned", return_value=True),
+                self.assertRaises(urllib.error.HTTPError) as error,
+            ):
                 self.request(
                     "POST",
-                    "/v1/threads/schedule-6-run-1/messages",
+                    "/v1/threads/schedule-6/messages",
                     {"message": "/mnt/kern-agent/agent-home/backup.sh", **fields},
                 )
             self.assertEqual(error.exception.code, 400)
+
+    def test_repeated_script_firing_is_not_rewritten_as_a_model_handoff(self) -> None:
+        set_runtime_statuses(script="active")
+        seed_thread_session("schedule-7", "script")
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur,
+                "thread.message",
+                "schedule-7",
+                {"message": "earlier output", "source": "agent"},
+            )
+        message = (
+            "This is an automated trigger.\n\n"
+            "/mnt/kern-agent/agent-home/scripts/backup.sh"
+        )
+        with (
+            patch.object(state, "schedule_thread_is_owned", return_value=True),
+            patch.object(orchestrator, "launch_turn") as launch,
+        ):
+            self.request(
+                "POST",
+                "/v1/threads/schedule-7/messages",
+                {
+                    "message": message,
+                    "agent_runtime": "script",
+                    "model": "bash",
+                    "effort": "fixed",
+                },
+            )
+
+        _turn, launch_message, provider_session_id = launch.call_args.args
+        self.assertEqual(launch_message, message)
+        self.assertIsNone(provider_session_id)
+
+    def test_unowned_numeric_schedule_thread_cannot_be_created(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request(
+                "POST",
+                "/v1/threads/schedule-999/messages",
+                {
+                    "message": "unowned",
+                    "agent_runtime": "codex",
+                    "model": "gpt-5.6-terra",
+                    "effort": "high",
+                },
+            )
+        self.assertEqual(error.exception.code, 404)
+        self.assertIsNone(state.thread_session_config("schedule-999"))
+        self.assertEqual(state.latest_thread_event_seqs("schedule-999"), (0, 0))
 
     def test_only_schedule_threads_can_run_the_script_runtime(self) -> None:
         # A Chat or App thread rotated onto the script runtime would start
@@ -2659,23 +2717,27 @@ class AdminApiIntegrationTests(unittest.TestCase):
             state.thread_session_config("thread-rotatable")["agent_runtime"], "codex"
         )
 
-    def test_thread_on_a_superseded_model_can_switch_to_an_offered_model(self) -> None:
+    def test_thread_on_superseded_fable_5_can_switch_to_an_offered_model(self) -> None:
         seed_thread_session(
-            "thread-legacy-alias-thread",
+            "thread-fable-5-thread",
             "claude_code",
-            model="opus",
+            model="claude-fable-5",
             effort="high",
             last_used_at="2026-06-08T00:00:01Z",
         )
 
         for fields in (
             {},
-            {"agent_runtime": "claude_code", "model": "opus", "effort": "high"},
+            {
+                "agent_runtime": "claude_code",
+                "model": "claude-fable-5",
+                "effort": "high",
+            },
         ):
             with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
                 self.request(
                     "POST",
-                    "/v1/threads/thread-legacy-alias-thread/messages",
+                    "/v1/threads/thread-fable-5-thread/messages",
                     {"message": "follow up", **fields},
                 )
             self.assertEqual(error.exception.code, 409)
@@ -2684,7 +2746,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with patch.object(orchestrator, "launch_turn"):
             _, switched = self.request(
                 "POST",
-                "/v1/threads/thread-legacy-alias-thread/messages",
+                "/v1/threads/thread-fable-5-thread/messages",
                 {
                     "message": "continue on a current model",
                     "agent_runtime": "codex",
@@ -2700,17 +2762,17 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # threads.
         _, threads = self.request("GET", "/v1/threads")
         listed = {thread["thread_id"]: thread for thread in threads["threads"]}
-        self.assertEqual(listed["thread-legacy-alias-thread"]["model"], "gpt-5.6-terra")
-        self.assertEqual(listed["thread-legacy-alias-thread"]["status"], "running")
+        self.assertEqual(listed["thread-fable-5-thread"]["model"], "gpt-5.6-terra")
+        self.assertEqual(listed["thread-fable-5-thread"]["status"], "running")
 
         with self.assertRaises(admin_api.ApiError) as new_thread_error:
             self.workspace_request(
                 "POST",
-                "/v1/threads/thread-new-alias-thread/messages",
+                "/v1/threads/thread-new-fable-5/messages",
                 {
                     "message": "new thread",
                     "agent_runtime": "claude_code",
-                    "model": "opus",
+                    "model": "claude-fable-5",
                     "effort": "high",
                 },
             )
@@ -2922,11 +2984,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
                     cur, "claude_code", f"thread-claude-chat-{n}", f"session_{n}",
                     f"2026-06-09T{n // 60:02d}:{n % 60:02d}:00Z", "claude-opus-5", "high",
                 )
-                # A script schedule creates a session row per firing, so the
-                # cap has to reach every runtime that can own a thread — not
-                # only the ones with a provider account.
+                # Script schedules use the same stable schedule thread shape,
+                # and their runtime participates in the same bounded map.
                 state.save_thread_session(
-                    cur, "script", f"schedule-1-run-{n}", None,
+                    cur, "script", f"schedule-{n + 1}", None,
                     f"2026-06-10T{n // 60:02d}:{n % 60:02d}:00Z", "bash", "fixed",
                 )
             state.append_agent_event(
@@ -2942,10 +3003,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         remaining = {thread["thread_id"] for thread in state.page_thread_summaries(None, 100)}
         codex_history = {thread for thread in remaining if thread.startswith("thread-codex-chat-")}
         claude_history = {thread for thread in remaining if thread.startswith("thread-claude-chat-")}
-        script_history = {thread for thread in remaining if thread.startswith("schedule-1-run-")}
+        script_history = {
+            thread for thread in remaining
+            if thread.startswith("schedule-")
+        }
         self.assertEqual(
             script_history,
-            {f"schedule-1-run-{n}" for n in range(5, map_limit + 5)},
+            {f"schedule-{n + 1}" for n in range(5, map_limit + 5)},
         )
         self.assertEqual(
             codex_history,
@@ -3255,7 +3319,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('ADMIN_UI_DIR / "favicon.svg"', api)
         self.assertIn('ADMIN_UI_DIR / "manifest.webmanifest"', api)
         self.assertIn('ADMIN_UI_DIR / "service-worker.js"', api)
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 3)
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 2)
         self.assertNotIn('id="tab-processes"', html)
         self.assertNotIn('id="tab-host-diagnostics"', html)
         self.assertIn('data-action="open-home-view" data-view="processes"', html)
