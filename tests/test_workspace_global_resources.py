@@ -177,6 +177,147 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
         self.assertEqual(conflict.exception.status, HTTPStatus.CONFLICT)
 
+    def test_turn_recall_always_includes_self_and_caps_total_pages(self) -> None:
+        memory.save_page(
+            "thread-7",
+            {
+                "description": "Personal repository preference",
+                "content": "Always use the assigned worktree.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        for index in range(6):
+            memory.save_page(
+                f"browser-{index}",
+                {
+                    "description": f"Browser screenshot workflow {index}",
+                    "content": "Use the durable browser test stack.",
+                    "expected_revision": 0,
+                },
+                actor="agent",
+            )
+
+        with patch.object(
+            memory.embedding_client,
+            "embed_texts",
+            side_effect=memory.embedding_client.EmbeddingError("offline"),
+        ):
+            recalled = memory.route_browser(
+                "POST",
+                "/memory/recall",
+                {
+                    "thread_id": "thread-7",
+                    "message": "Browser screenshot workflow",
+                },
+                {},
+            )
+
+        self.assertEqual(len(recalled["pages"]), memory.MAX_RECALLED_PAGES)
+        self.assertEqual(recalled["pages"][0]["page_id"], "thread-7")
+        self.assertEqual(recalled["pages"][0]["scope"], "self")
+        self.assertTrue(
+            all(page["scope"] == "swarm" for page in recalled["pages"][1:])
+        )
+        self.assertTrue(all("content" in page for page in recalled["pages"]))
+
+    def test_turn_recall_does_not_inject_weak_or_popular_fallbacks(self) -> None:
+        memory.save_page(
+            "playwright-browser",
+            {
+                "description": "Browser screenshot guide",
+                "content": "Use the durable Playwright installation.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+
+        with patch.object(
+            memory.embedding_client,
+            "embed_texts",
+            side_effect=memory.embedding_client.EmbeddingError("offline"),
+        ):
+            recalled = memory.recall_pages(
+                {
+                    "thread_id": "thread-8",
+                    "message": "Investigate Playwright mobile screenshots",
+                }
+            )
+
+        self.assertEqual(recalled, {"pages": []})
+
+    def test_turn_recall_keeps_self_when_swarm_search_changes(self) -> None:
+        memory.save_page(
+            "thread-9",
+            {
+                "description": "Personal repository preference",
+                "content": "Always use the assigned worktree.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        with patch.object(
+            memory,
+            "_search_pages",
+            side_effect=WorkspaceError(HTTPStatus.CONFLICT, "search changed"),
+        ), patch.object(memory.host_errors, "report_warning") as warning:
+            recalled = memory.recall_pages(
+                {"thread_id": "thread-9", "message": "Review the repository"}
+            )
+        self.assertEqual(len(recalled["pages"]), 1)
+        self.assertEqual(recalled["pages"][0]["page_id"], "thread-9")
+        self.assertEqual(recalled["pages"][0]["scope"], "self")
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.kwargs["kind"], "memory_recall_degraded")
+
+    def test_turn_recall_skips_a_page_changed_after_ranking(self) -> None:
+        ranked = {
+            "page_id": "browser-guide",
+            "description": "Browser workflow",
+            "revision": 1,
+        }
+        changed = {
+            **ranked,
+            "content": "Unrelated replacement content.",
+            "revision": 2,
+        }
+        original_load = memory.load_page
+
+        def load(page_id: str) -> dict[str, Any]:
+            return changed if page_id == "browser-guide" else original_load(page_id)
+
+        with (
+            patch.object(memory, "_search_pages", return_value={"pages": [ranked]}),
+            patch.object(memory, "load_page", side_effect=load),
+            patch.object(memory.host_errors, "report_warning") as warning,
+        ):
+            recalled = memory.recall_pages(
+                {"thread_id": "thread-10", "message": "Browser workflow"}
+            )
+        self.assertEqual(recalled, {"pages": []})
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.kwargs["kind"], "memory_recall_degraded")
+
+    def test_turn_recall_keeps_self_for_a_nul_search_message(self) -> None:
+        memory.save_page(
+            "thread-11",
+            {
+                "description": "Personal repository preference",
+                "content": "Always use the assigned worktree.",
+                "expected_revision": 0,
+            },
+            actor="agent",
+        )
+        with patch.object(memory.host_errors, "report_warning") as warning:
+            recalled = memory.recall_pages(
+                {"thread_id": "thread-11", "message": "search\x00task"}
+            )
+        self.assertEqual(len(recalled["pages"]), 1)
+        self.assertEqual(recalled["pages"][0]["page_id"], "thread-11")
+        self.assertEqual(recalled["pages"][0]["scope"], "self")
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.kwargs["kind"], "memory_recall_degraded")
+
     def test_memory_links_follow_source_updates_deletes_and_restores(self) -> None:
         def stored_links() -> list[tuple[str, str]]:
             with db.transaction() as cur:

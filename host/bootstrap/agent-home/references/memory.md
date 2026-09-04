@@ -1,10 +1,11 @@
 # Memory Workspace reference
 
 Read this file before writing or maintaining self-memory or swarm memory. The
-always-loaded host guide defines the mandatory startup retrieval and the trust
-model.
+always-loaded host guide defines automatic turn-start recall and the trust
+model. That recall is not comprehensive; search again as new needs emerge.
 
 `GET /agent/identity` returns the current thread's immutable host identity.
+Automatic turn-start context includes that identity with recalled memory pages.
 Kern resolves self-memory from that host-authenticated identity; never put an
 identity or page id into the self-memory request.
 

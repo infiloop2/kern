@@ -38,6 +38,7 @@ class SessionOptionsTests(unittest.TestCase):
                     "gpt-5.6-terra": ("high", "max", "ultra"),
                     "gpt-5.6-sol": ("high", "max", "ultra"),
                     "gpt-5.6-luna": ("high", "max"),
+                    "gpt-6-astra": ("high", "max", "ultra"),
                 },
                 "claude_code": {
                     "claude-opus-5": ("high", "max", "ultracode"),
@@ -135,6 +136,7 @@ class SessionOptionsTests(unittest.TestCase):
     def test_public_options_are_json_facing_copies(self) -> None:
         options = public_session_options()
         self.assertEqual(options["codex"]["gpt-5.6-luna"], ["high", "max"])
+        self.assertEqual(options["codex"]["gpt-6-astra"], ["high", "max", "ultra"])
         self.assertEqual(
             options["claude_code"]["claude-fable-5-1"],
             ["high", "max", "ultracode"],
@@ -143,6 +145,9 @@ class SessionOptionsTests(unittest.TestCase):
         options["codex"]["gpt-5.6-luna"].append("invalid")
         schedule_session_options()["script"]["bash"].append("invalid")
         self.assertEqual(SESSION_OPTIONS["codex"]["gpt-5.6-luna"], ("high", "max"))
+        self.assertEqual(
+            SESSION_OPTIONS["codex"]["gpt-6-astra"], ("high", "max", "ultra")
+        )
         self.assertEqual(SESSION_OPTIONS["script"]["bash"], ("fixed",))
 
 

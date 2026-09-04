@@ -28,7 +28,7 @@ import pg_harness
 
 from host.config import parse_network_controls
 from host.network_integrations.github.push_gate import pending as github_pending_push
-from host.runtime.admin_api import workspace_proxy as workspace_api_proxy, workspace_api as workspace_admin_api, service as admin_api, github_credential, tools_client as tools_admin_api
+from host.runtime.admin_api import workspace_proxy as workspace_api_proxy, workspace_api as workspace_admin_api, service as admin_api, threads as admin_threads, github_credential, tools_client as tools_admin_api
 from host.runtime.agent_runtime import orchestrator
 from host.runtime.tools import api as tools_api
 from host.runtime.core.network_policy import load_policy
@@ -639,6 +639,26 @@ class AdminApiClientDisconnectTests(unittest.TestCase):
         report.assert_not_called()
 
 
+class ThreadAdmissionHelpersTests(unittest.TestCase):
+    def test_memory_context_carries_the_immutable_thread_identity(self) -> None:
+        context = admin_threads._memory_context_message(
+            "app-7",
+            [
+                {
+                    "page_id": "app-7",
+                    "scope": "self",
+                    "description": "App preferences",
+                    "content": "Use the compact view.",
+                    "revision": 1,
+                }
+            ],
+        )
+
+        self.assertIsInstance(context, str)
+        self.assertIn('"identity": {"thread_id": "app-7"}', context)
+        self.assertIn('"page_id": "app-7"', context)
+
+
 class AdminApiIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
@@ -681,6 +701,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.mock_reconcile = self.reconcile_patch.start()
         self.addCleanup(self.reconcile_patch.stop)
+        self.memory_recall_patch = patch.object(
+            workspace_api_proxy, "recall_memory", return_value={"pages": []}
+        )
+        self.mock_memory_recall = self.memory_recall_patch.start()
+        self.addCleanup(self.memory_recall_patch.stop)
         self.base_url = start_admin_http_server(self)
 
     def request(self, method: str, path: str, body: object | None = None, auth: bool = True):
@@ -1520,6 +1545,74 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(body, {"status": "ok"})
         self.assertEqual(captured["request"][1], "/getting-started")
 
+        self.memory_recall_patch.stop()
+        recall_message = chr(0xD800) + "💡 recall"
+        with patch("host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection", FakeConnection):
+            body = workspace_api_proxy.recall_memory(
+                "thread-7", recall_message
+            )
+        self.assertEqual(body, {"status": "ok"})
+        self.assertEqual(
+            captured["connect"][2],
+            workspace_api_proxy.RECALL_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(captured["request"][1], "/memory/recall")
+        recalled = json.loads(captured["request"][2])
+        self.assertEqual(recalled["thread_id"], "thread-7")
+        self.assertEqual(recalled["message"], recall_message)
+
+    def test_workspace_proxy_normalizes_incomplete_responses(self) -> None:
+        self.memory_recall_patch.stop()
+
+        class FakeConnection:
+            def __init__(self, _host: str, _port: int, timeout: int) -> None:
+                del timeout
+
+            def request(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def getresponse(self) -> Any:
+                raise http.client.IncompleteRead(b"partial")
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch(
+                "host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection",
+                FakeConnection,
+            ),
+            self.assertRaises(admin_api.ApiError) as error,
+        ):
+            workspace_api_proxy.recall_memory("thread-7", "hello")
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_GATEWAY)
+
+    def test_workspace_recall_timeout_is_distinct(self) -> None:
+        self.memory_recall_patch.stop()
+
+        class FakeConnection:
+            def __init__(self, _host: str, _port: int, timeout: int) -> None:
+                del timeout
+
+            def request(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def getresponse(self) -> Any:
+                raise TimeoutError
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch(
+                "host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection",
+                FakeConnection,
+            ),
+            self.assertRaises(admin_api.ApiError) as error,
+        ):
+            workspace_api_proxy.recall_memory("thread-7", "hello")
+        self.assertEqual(error.exception.status, HTTPStatus.GATEWAY_TIMEOUT)
+
     def test_admin_router_dispatches_getting_started_to_workspace(self) -> None:
         expected = {
             "chat_created": False,
@@ -2131,6 +2224,70 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(listed["threads"][0]["thread_id"], "thread-t1")
         self.assertEqual(listed["threads"][0]["status"], "running")
 
+    def test_message_injects_recalled_memory_without_changing_stored_text(self) -> None:
+        seed_thread_session("thread-t1")
+        self_page = {
+            "page_id": "thread-t1",
+            "scope": "self",
+            "description": "Use the assigned worktree",
+            "content": "Use agent-9.",
+            "revision": 2,
+        }
+        swarm_page = {
+            "page_id": "playwright-browser",
+            "scope": "swarm",
+            "description": "Read before browser screenshots",
+            "content": "Use the durable Playwright stack.",
+            "revision": 4,
+        }
+        self.mock_memory_recall.return_value = {"pages": [self_page, swarm_page]}
+
+        with patch.object(orchestrator, "launch_turn") as launch:
+            self.request(
+                "POST",
+                "/v1/threads/thread-t1/messages",
+                {"message": "Take mobile screenshots"},
+            )
+
+        self.mock_memory_recall.assert_called_once_with(
+            "thread-t1", "Take mobile screenshots"
+        )
+        launch_message = launch.call_args.args[1]
+        self.assertIn("Kern host context", launch_message)
+        self.assertIn("likely relevant to this task", launch_message)
+        self.assertIn("selection is not comprehensive", launch_message)
+        self.assertIn("search Kern memory", launch_message)
+        self.assertIn('"identity": {"thread_id": "thread-t1"}', launch_message)
+        self.assertIn('"page_id": "thread-t1"', launch_message)
+        self.assertIn('"page_id": "playwright-browser"', launch_message)
+        self.assertTrue(launch_message.endswith("Take mobile screenshots"))
+
+        _, events = self.request("GET", "/v1/threads/thread-t1/events")
+        self.assertEqual(len(events["events"]), 1)
+        self.assertEqual(
+            events["events"][0]["payload"],
+            {"message": "Take mobile screenshots", "source": "user"},
+        )
+
+    def test_memory_recall_timeout_warns_and_does_not_block_the_turn(self) -> None:
+        seed_thread_session("thread-t1")
+        self.mock_memory_recall.side_effect = admin_api.ApiError(
+            HTTPStatus.GATEWAY_TIMEOUT, "workspaces backend timed out"
+        )
+
+        with (
+            patch.object(orchestrator, "launch_turn") as launch,
+            patch.object(admin_threads.host_errors, "report_warning") as warning,
+        ):
+            self.request(
+                "POST", "/v1/threads/thread-t1/messages", {"message": "continue"}
+            )
+
+        self.assertEqual(launch.call_args.args[1], "continue")
+        self.mock_memory_recall.assert_called_once()
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.kwargs["kind"], "memory_recall_timeout")
+
     def test_message_steers_running_turn_without_a_host_mailbox(self) -> None:
         seed_thread_session("thread-t1")
         with patch.object(
@@ -2139,6 +2296,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.request(
                 "POST", "/v1/threads/thread-t1/messages", {"message": "start"}
             )
+            self.mock_memory_recall.reset_mock()
             _, first = self.request("POST", "/v1/threads/thread-t1/messages", {"message": "s1"})
             _, second = self.request("POST", "/v1/threads/thread-t1/messages", {"message": "s2"})
             _, third = self.request("POST", "/v1/threads/thread-t1/messages", {"message": "s3"})
@@ -2147,6 +2305,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(third["status"], "accepted")
         turn = orchestrator._LIVE["codex:thread-t1"]
         self.assertEqual(turn.server.messages, ["s1", "s2", "s3"])
+        self.mock_memory_recall.assert_not_called()
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
@@ -2190,7 +2349,6 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "Claude Code runtime is deactivated; enable its provider",
             error.exception.read().decode(),
         )
-
         # The rejected messages recorded no events on the existing threads.
         self.assertEqual(self.request("GET", "/v1/threads/thread-t1/events")[1]["events"], [])
         self.assertEqual(self.request("GET", "/v1/threads/thread-t2/events")[1]["events"], [])
@@ -2323,6 +2481,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 (body["agent_runtime"], body["model"], body["effort"]),
             )
 
+            self.mock_memory_recall.reset_mock()
             for fields in (
                 {"model": "gpt-5.6-sol", "effort": "high"},
                 {"model": "gpt-5.6-terra", "effort": "max"},
@@ -2333,7 +2492,6 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 self.assertIn(
                     "can change only while the thread is idle", error.exception.read().decode()
                 )
-
             with self.assertRaises(urllib.error.HTTPError) as partial_error:
                 self.request(
                     "POST", path, {"message": "partial conflict", "model": "gpt-5.6-terra"}
