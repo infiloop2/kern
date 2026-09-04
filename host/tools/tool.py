@@ -10,6 +10,7 @@ See docs/architecture/tools/tool-contract.md for the full specification.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, TypedDict
 
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI
@@ -105,6 +106,24 @@ class CredentialFlow(Protocol):
         ...
 
 
+class ToolServiceError(RuntimeError):
+    """A redacted managed-service failure safe to return to an operator."""
+
+
+class ToolService(Protocol):
+    """Small lifecycle boundary for a manifest-declared tool service."""
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def operator(
+        self,
+        operation: str,
+        enabled: Callable[[], bool],
+    ) -> JSONObject: ...
+
+
 class Tool(Protocol):
     """A loadable tool package.
 
@@ -118,7 +137,7 @@ class Tool(Protocol):
 
     @property
     def credentials(self) -> CredentialFlow | None:
-        """The tool's connect flow, or None when ``connection == "enable_only"``."""
+        """The OAuth flow, or None for enable-only and service-backed tools."""
         ...
 
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:

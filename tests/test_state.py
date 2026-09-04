@@ -1118,6 +1118,7 @@ class StateStorageTests(unittest.TestCase):
         self.assertEqual(len(tool_seqs), 5)
         self.assertEqual(tool_seqs, sorted(tool_seqs, reverse=True))
 
+
     def test_network_event_url_fields_are_size_capped(self) -> None:
         # The agent's own request stream feeds this log; without field caps a
         # hostile client could turn the row cap into unbounded disk growth.

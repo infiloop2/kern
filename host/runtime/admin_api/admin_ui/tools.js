@@ -1,11 +1,11 @@
 // Bundled tools UI for the focused Home integration page. The selected tool
-// shows its status and enable/disable controls, OAuth connection,
+// shows its status and enable/disable controls, OAuth or linked-device connection,
 // configuration, and pending approvals alongside its manifest-backed guide.
 // Direct actions return immediately; approval-gated actions queue an operator
 // decision in that tool's Approvals section. Tool state is fetched from
-// /v1/tools and rendered on tab entry and after actions only, never on the
-// poll timer, so half-typed config survives; a tool's approvals load when its
-// row is expanded and refresh on the poll while it stays open.
+// /v1/tools and rendered on tab entry and after actions. The poll timer checks
+// an expanded active linked device and repaints only when its status changes;
+// a tool's approvals load when its row is expanded and refresh while open.
 
 import { api } from "./api.js";
 import { $, badge, esc, formatUnixTime, inlineMessage, notice, replaceIntegrationRows, setHtml } from "./helpers.js";
@@ -67,6 +67,12 @@ function renderToolRow(tool) {
       ? `<span class="status active">${connections.length} account${connections.length === 1 ? "" : "s"} connected</span>`
       : `<span class="status">not connected</span>`);
   }
+  if (tool.connection === "whatsapp_linked_device") {
+    const linked = tool.connection_status || {};
+    chips.push(linked.connected
+      ? `<span class="status active">connected</span>`
+      : `<span class="status">${esc(linked.status || "not connected")}</span>`);
+  }
   return `
     <section class="integration-row${expanded ? " expanded" : ""}" data-tool-row="${esc(tool.tool_id)}">
       <div class="integration-summary">
@@ -90,6 +96,11 @@ function renderToolRow(tool) {
           <div class="detail-card-head"><h3>Connection</h3></div>
           ${renderToolConnections(tool, connections)}
         </div>` : ""}
+        ${tool.connection === "whatsapp_linked_device" ? `
+        <div class="detail-card">
+          <div class="detail-card-head"><h3>Linked device</h3></div>
+          ${renderLinkedDeviceConnection(tool)}
+        </div>` : ""}
         ${tool.config.length ? `
         <div class="detail-card">
           <div class="detail-card-head"><h3>Configuration</h3></div>
@@ -103,6 +114,43 @@ function renderToolRow(tool) {
         </div>
       </div>
     </section>`;
+}
+
+function renderLinkedDeviceConnection(tool) {
+  const connection = tool.connection_status || {};
+  const account = connection.account || {};
+  const retainedData = connection.retained_data === true;
+  const reconnecting = connection.status === "connecting" && Boolean(account.id || account.label);
+  const qr = typeof connection.qr_data_url === "string" && connection.qr_data_url.startsWith("data:image/png;base64,")
+    ? connection.qr_data_url : "";
+  const summary = connection.connected
+    ? `Connected as <span class="connection-identity">${esc(account.label || account.id || "WhatsApp account")}</span>. The gateway reconnects automatically after host restarts.`
+    : connection.status === "suspended"
+      ? `Linked as <span class="connection-identity">${esc(account.label || account.id || "WhatsApp account")}</span>. The session is retained, but the gateway is stopped while this integration is disabled.`
+    : connection.status === "qr"
+      ? "On your phone, open WhatsApp > Settings > Linked devices > Link a device, then scan this QR code."
+    : reconnecting
+      ? `Reconnecting <span class="connection-identity">${esc(account.label || account.id || "WhatsApp account")}</span>. No QR code is needed.`
+    : connection.status === "connecting"
+      ? "Starting WhatsApp. The QR code will appear here when it is ready."
+      : esc(connection.error || "No WhatsApp account is linked.");
+  return `
+    <p class="connection-summary">${summary}</p>
+    ${qr ? `<div class="linked-device-qr"><img src="${esc(qr)}" alt="WhatsApp linked-device QR code"></div>` : ""}
+    ${connection.status === "connecting" && !reconnecting ? `<div class="linked-device-qr linked-device-qr-loading" role="status">Waiting for QR code…</div>` : ""}
+    <div class="integration-account-actions">
+      ${connection.connected || connection.status === "suspended"
+        ? `<button class="ghost sm" data-action="refresh-linked-device" data-tool="${esc(tool.tool_id)}">Refresh status</button>
+           <button class="danger ghost sm" data-action="disconnect-linked-device" data-tool="${esc(tool.tool_id)}">Disconnect</button>`
+        : reconnecting
+          ? `<button class="ghost sm" data-action="refresh-linked-device" data-tool="${esc(tool.tool_id)}">Refresh status</button>
+             <button class="danger ghost sm" data-action="disconnect-linked-device" data-tool="${esc(tool.tool_id)}">Disconnect</button>`
+        : connection.status === "connecting"
+          ? `<button class="primary sm" disabled>Waiting for QR code…</button>
+             ${retainedData ? `<button class="danger ghost sm" data-action="disconnect-linked-device" data-tool="${esc(tool.tool_id)}">Disconnect</button>` : ""}`
+          : `<button class="primary sm" data-action="${connection.status === "qr" ? "refresh-linked-device" : "connect-linked-device"}" data-tool="${esc(tool.tool_id)}"${tool.enabled ? "" : " disabled"}>${connection.status === "qr" ? "Check status / refresh QR" : "Link device"}</button>
+             ${connection.status === "qr" || retainedData ? `<button class="danger ghost sm" data-action="disconnect-linked-device" data-tool="${esc(tool.tool_id)}">Disconnect</button>` : ""}`}
+    </div>`;
 }
 
 // The OAuth connection line mirrors the provider linked-account line in the
@@ -155,7 +203,10 @@ export async function setToolEnabled(toolId, enabled) {
     await api("POST", `/v1/tools/${encodeURIComponent(toolId)}/${enabled ? "enable" : "disable"}`, {});
     await refreshTools();
     toolsMessage(toolId, `${label} ${enabled ? "enabled" : "disabled"}.`);
-  } catch (error) { toolsMessage(toolId, error.message, true); }
+  } catch (error) {
+    try { await refreshTools(); } catch (_refreshError) { /* keep the original action error */ }
+    toolsMessage(toolId, error.message, true);
+  }
 }
 
 export async function saveToolConfig(toolId, key) {
@@ -199,6 +250,63 @@ export async function disconnectTool(toolId, connectionId) {
   } catch (error) { toolsMessage(toolId, error.message, true); }
 }
 
+export async function connectLinkedDevice(toolId) {
+  const tool = tools.find(entry => entry.tool_id === toolId);
+  const previousConnection = tool?.connection_status;
+  try {
+    if (tool) {
+      tool.connection_status = {
+        ...(tool.connection_status || {}),
+        status: "connecting",
+        connected: false,
+        error: "",
+      };
+      renderToolsPreservingConfigInputs();
+    }
+    toolsMessage(toolId, "The QR code will appear below in Linked device.");
+    const response = await api("POST", `/v1/tools/${encodeURIComponent(toolId)}/service/connect`, {});
+    if (tool) {
+      tool.connection_status = response;
+      renderToolsPreservingConfigInputs();
+    } else {
+      await refreshTools();
+    }
+    if (response.status === "qr") {
+      toolsMessage(toolId, "Scan the QR code shown below in Linked device with the WhatsApp account you want Kern to use.");
+    } else if (response.status === "connected") {
+      toolsMessage(toolId, "WhatsApp connected.");
+    } else if (response.status === "connecting") {
+      toolsMessage(toolId, "WhatsApp is still connecting. This page will show the QR code when it is ready.");
+    } else {
+      toolsMessage(toolId, response.error || "WhatsApp is not connected. Retry linking.", true);
+    }
+  } catch (error) {
+    if (tool) {
+      tool.connection_status = previousConnection || {};
+      renderToolsPreservingConfigInputs();
+    }
+    toolsMessage(toolId, error.message, true);
+  }
+}
+
+export async function refreshLinkedDevice(toolId) {
+  try {
+    toolsMessage(toolId, "");
+    await api("POST", `/v1/tools/${encodeURIComponent(toolId)}/service/status`, {});
+    await refreshTools();
+  } catch (error) { toolsMessage(toolId, error.message, true); }
+}
+
+export async function disconnectLinkedDevice(toolId) {
+  if (!confirm("Disconnect WhatsApp? Kern will log out the linked device and delete its local session keys and cached messages.")) return;
+  try {
+    toolsMessage(toolId, "");
+    await api("POST", `/v1/tools/${encodeURIComponent(toolId)}/service/disconnect`, {});
+    await refreshTools();
+    toolsMessage(toolId, "WhatsApp disconnected and local linked-device data deleted.");
+  } catch (error) { toolsMessage(toolId, error.message, true); }
+}
+
 // Finish a tool OAuth connect after the provider redirected back to
 // /oauth/callback?code=...&state=... — the tool id was stashed before leaving.
 // app.js preserves the callback query before replacing the callback URL and
@@ -238,6 +346,37 @@ export async function completeToolConnect(callbackSearch = location.search) {
 // poll tick.
 export async function refreshExpandedToolApprovals() {
   await Promise.all([...expandedTools].map(toolId => loadToolApprovals(toolId).catch(() => {})));
+}
+
+function renderToolsPreservingConfigInputs() {
+  const values = [...document.querySelectorAll('input[id^="tool-config-"]')]
+    .map(input => [input.id, input.value]);
+  renderTools();
+  for (const [id, value] of values) {
+    const input = document.getElementById(id);
+    if (input) input.value = value;
+  }
+}
+
+export async function refreshExpandedLinkedDevices() {
+  for (const toolId of expandedTools) {
+    const tool = tools.find(entry => entry.tool_id === toolId);
+    const current = tool?.connection_status || {};
+    const cleanupPending = current.status === "disconnected" && current.retained_data === true;
+    if (
+      tool?.connection !== "whatsapp_linked_device"
+      || (!current.connected && !["connecting", "qr"].includes(current.status) && !cleanupPending)
+    ) continue;
+    try {
+      const status = await api("POST", `/v1/tools/${encodeURIComponent(toolId)}/service/status`, {});
+      if (JSON.stringify(status) === JSON.stringify(current)) continue;
+      tool.connection_status = status;
+      renderToolsPreservingConfigInputs();
+      if (status.connected && !current.connected) {
+        toolsMessage(toolId, "WhatsApp linked successfully.");
+      }
+    } catch (_error) { /* the visible action retains explicit retry/error feedback */ }
+  }
 }
 
 async function loadToolApprovals(toolId) {

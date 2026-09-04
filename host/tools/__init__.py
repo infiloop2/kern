@@ -37,6 +37,8 @@ from host.tools.tool import (
     OAuthStartConnectParams,
     OAuthStartConnectResult,
     Tool,
+    ToolService,
+    ToolServiceError,
 )
 from host.tools.host_api import (
     ApprovalRecord,
@@ -83,5 +85,7 @@ __all__ = [
     "StreamingAsset",
     "StreamingAssetError",
     "Tool",
+    "ToolService",
+    "ToolServiceError",
     "ToolManifest",
 ]

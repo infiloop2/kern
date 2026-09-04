@@ -298,6 +298,7 @@ for directory in (
     pgdata,
     proxy_state,
     tools_state,
+    tools_state / "whatsapp",
     agent_home,
     agent_home / ".tmp",
     agent_home / ".codex",
@@ -430,14 +431,96 @@ chmod -R a+rX /opt/kern-host
 chmod 644 /opt/kern-host/VERSION
 }
 
-# apt-get with a bounded lock wait and download retries. -q keeps one line per
-# action, so a slow mirror or lock wait is visible in the deploy log instead of
-# indistinguishable from a hang; the lock timeout turns leftover contention
-# into a loud failure after five minutes instead of a silent unbounded wait.
-# Languages=none skips the ~8 MB of Translation indexes apt fetches by default
-# (2026-07-27 a degraded regional mirror priced every critical-path megabyte).
+# Fail the initial regional-mirror update quickly: it is safe to restart and
+# its only purpose is to populate package indexes. Package installs keep the
+# longer limits because terminating dpkg or a legitimate large download after
+# one minute would be unsafe. The archive fallback also keeps the longer limits
+# so a slow but working global mirror does not make the deployment brittle.
+APT_ARCHIVE_FALLBACK_ACTIVE=false
+APT_COMMAND_TIMEOUT=300s
+APT_ACQUIRE_RETRIES=2
+APT_ACQUIRE_TIMEOUT=20
+APT_REGIONAL_UPDATE_COMMAND_TIMEOUT=60s
+APT_REGIONAL_UPDATE_ACQUIRE_RETRIES=0
+APT_REGIONAL_UPDATE_ACQUIRE_TIMEOUT=10
+
+apt_get_once() {
+  local command_timeout="$1" acquire_retries="$2" acquire_timeout="$3"
+  shift 3
+  timeout --signal=TERM --kill-after=30s "$command_timeout" \
+    apt-get -q \
+      -o DPkg::Lock::Timeout=300 \
+      -o Acquire::Retries="$acquire_retries" \
+      -o Acquire::http::Timeout="$acquire_timeout" \
+      -o Acquire::https::Timeout="$acquire_timeout" \
+      -o Acquire::Languages=none \
+      -o APT::Update::Error-Mode=any \
+      "$@"
+}
+
+has_ec2_ubuntu_archive_source() {
+  local source_file
+  local -a source_files
+  shopt -s nullglob
+  source_files=(
+    /etc/apt/sources.list
+    /etc/apt/sources.list.d/*.list
+    /etc/apt/sources.list.d/*.sources
+  )
+  shopt -u nullglob
+  for source_file in "${source_files[@]}"; do
+    if grep -Eq '^[[:space:]]*(deb|URIs:).*https?://[^/]*\.ec2\.archive\.ubuntu\.com/ubuntu' "$source_file"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+switch_to_ubuntu_archive_fallback() {
+  local changed=false source_file
+  local -a source_files
+  shopt -s nullglob
+  source_files=(
+    /etc/apt/sources.list
+    /etc/apt/sources.list.d/*.list
+    /etc/apt/sources.list.d/*.sources
+  )
+  shopt -u nullglob
+  for source_file in "${source_files[@]}"; do
+    if grep -Eq '^[[:space:]]*(deb|URIs:).*https?://[^/]*\.ec2\.archive\.ubuntu\.com/ubuntu' "$source_file"; then
+      sed -i -E \
+        's#https?://[^/]*\.ec2\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+        "$source_file"
+      changed=true
+    fi
+  done
+  [[ "$changed" == true ]]
+}
+
 apt_get() {
-  apt-get -q -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::Languages=none "$@"
+  local command_timeout="$APT_COMMAND_TIMEOUT"
+  local acquire_retries="$APT_ACQUIRE_RETRIES"
+  local acquire_timeout="$APT_ACQUIRE_TIMEOUT"
+  if [[ "$APT_ARCHIVE_FALLBACK_ACTIVE" == false && "${1:-}" == "update" ]] \
+    && has_ec2_ubuntu_archive_source; then
+    command_timeout="$APT_REGIONAL_UPDATE_COMMAND_TIMEOUT"
+    acquire_retries="$APT_REGIONAL_UPDATE_ACQUIRE_RETRIES"
+    acquire_timeout="$APT_REGIONAL_UPDATE_ACQUIRE_TIMEOUT"
+  fi
+
+  if apt_get_once "$command_timeout" "$acquire_retries" "$acquire_timeout" "$@"; then
+    return 0
+  fi
+  if [[ "$APT_ARCHIVE_FALLBACK_ACTIVE" == true ]] || ! switch_to_ubuntu_archive_fallback; then
+    return 1
+  fi
+
+  APT_ARCHIVE_FALLBACK_ACTIVE=true
+  echo "apt-get failed against the regional EC2 Ubuntu mirror; retrying via archive.ubuntu.com" >&2
+  if [[ "${1:-}" != "update" ]]; then
+    apt_get_once "$APT_COMMAND_TIMEOUT" "$APT_ACQUIRE_RETRIES" "$APT_ACQUIRE_TIMEOUT" update
+  fi
+  apt_get_once "$APT_COMMAND_TIMEOUT" "$APT_ACQUIRE_RETRIES" "$APT_ACQUIRE_TIMEOUT" "$@"
 }
 
 # Install pgvector from the two architecture-specific packages committed with
@@ -798,6 +881,18 @@ curl -fsSLo /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${N
 tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner
 rm -f /tmp/node.tar.xz
 
+echo "== installing host Node dependencies =="
+install -d -m 755 -o root -g root /usr/local/lib/kern-node
+install -m 0644 -o root -g root \
+  /opt/kern-host/host/npm/package.json \
+  /opt/kern-host/host/npm/package-lock.json \
+  /usr/local/lib/kern-node/
+npm ci --prefix /usr/local/lib/kern-node --omit=dev --no-fund --no-audit --loglevel=error
+chown -R root:root /usr/local/lib/kern-node
+# bootstrap's umask is 077, but kern-tools must be able to traverse and read
+# these root-owned dependencies without being able to modify them.
+chmod -R u=rwX,go=rX /usr/local/lib/kern-node
+
 echo "== installing Codex CLI =="
 npm install -g --no-fund --no-audit --loglevel=error "@openai/codex@${CODEX_CLI_VERSION}"
 echo "== installing Claude Code CLI =="
@@ -1147,6 +1242,7 @@ DURABLE_PATH_OWNERSHIP="
 /mnt/kern-admin/proxy-state/network_proxy_ca.crt kern-proxy:kern-proxy 644
 /mnt/kern-admin/tools-state kern-tools:kern-tools 700
 /mnt/kern-admin/tools-state/assets kern-tools:kern-tools 700
+/mnt/kern-admin/tools-state/whatsapp kern-tools:kern-tools 700
 "
 
 apply_durable_ownership() {
@@ -1170,7 +1266,9 @@ apply_durable_ownership() {
 d /mnt/kern-agent/agent-home/.tmp 0700 kern-agent kern-agent 1d -
 TMPFILES
   systemd-tmpfiles --create --clean /etc/tmpfiles.d/kern-agent.conf
-  systemctl enable --now systemd-tmpfiles-clean.timer
+  # systemd-tmpfiles-clean.timer is a static dependency of timers.target. It
+  # reads this rule on its normal schedule; Kern must not enable, start, or gate
+  # bootstrap on the transient state of that system-owned timer.
   # No initial network policy is seeded: a missing policy row is the
   # fail-closed empty default (deny everything).
 }
@@ -1227,6 +1325,10 @@ runuser -u kern-agent -- test -x /usr/local/bin/codex
 runuser -u kern-agent -- test -x /usr/local/bin/claude
 runuser -u kern-agent -- test -x /usr/local/bin/grok
 runuser -u kern-agent -- test -x /usr/local/lib/hermes-venv/bin/python
+runuser -u kern-tools -- test -r /usr/local/lib/kern-node/node_modules || {
+  echo "Host Node dependencies are not readable by kern-tools" >&2
+  exit 1
+}
 # Assert the decompressed binary is the pinned one and that the agent can run
 # it. A non-root writer here would mean the install above fell back to the
 # trampoline's agent-home path, which is exactly what it must not do.
@@ -1403,6 +1505,11 @@ RuntimeDirectoryMode=0755
 Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.tools.service
 ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-tools
+KillMode=mixed
+# A gateway request can hold its adapter lock for 40s, then bounded child
+# termination can take 2s. Leave enough time for that request to unwind and
+# the parent's final 2s cache-flush RPC before systemd kills the child cgroup.
+TimeoutStopSec=60s
 Restart=always
 RestartSec=3
 

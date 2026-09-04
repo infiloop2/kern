@@ -262,9 +262,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
             load_older,
         )
         self.assertIn("KernRichText.compactActivityEvents(ordered)", source)
-        self.assertIn("const visibleMessageSeq = historyMode", source)
-        self.assertIn("? renderedMessageSeq", source)
-        self.assertIn(": Number(listed?.seen_message_seq) || 0", source)
+        self.assertIn("Number(listed?.seen_message_seq) || 0", source)
+        self.assertNotIn("const renderedMessageSeq = conversationEvents.reduce", source)
         self.assertIn("renderConversationHistory(true);\n    markSelectedAppSeen();", source)
         self.assertIn('id="chat-announcer" class="sr-only" role="status"', index)
         self.assertIn("newestAgentSeq > previousNewestAgentSeq", source)

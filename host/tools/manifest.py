@@ -23,7 +23,9 @@ from host.tools.json_types import JSONObject
 #   storage.
 # - "enable_only": no operator credentials; the operator just enables/disables the
 #   tool and it runs on deployment configuration (e.g. a service API key).
-ConnectionKind = Literal["oauth", "enable_only"]
+# - "whatsapp_linked_device": a WhatsApp or WhatsApp Business account linked
+#   through the operator-only QR flow.
+ConnectionKind = Literal["oauth", "enable_only", "whatsapp_linked_device"]
 ApprovalKind = Literal["direct", "operator"]
 
 # Tool and action ids are used in credential/config partitions, approval
@@ -177,6 +179,10 @@ class ToolManifest:
     actions: tuple[ActionSpec, ...]
     connection: ConnectionKind
     data_summary: DataSummary
+    # Optional ``module:attribute`` reference to the tool-owned service whose
+    # lifecycle follows enablement. The host invokes only the small ToolService
+    # contract and does not know which provider or child process implements it.
+    service: str = ""
     config: tuple[ConfigRequirement, ...] = ()
     # Short, concrete safeguards for the summary popover and full guide.
     protections: tuple[str, ...] = ()
@@ -202,6 +208,18 @@ class ToolManifest:
             raise ValueError(
                 "ToolManifest.tool_id must be 1-64 characters: lowercase ASCII letter first, "
                 "then only lowercase ASCII letters, digits, or underscore."
+            )
+        if self.service and (
+            self.service.count(":") != 1
+            or not all(part and all(segment.isidentifier() for segment in part.split("."))
+                       for part in self.service.split(":"))
+        ):
+            raise ValueError(
+                f"ToolManifest.service must be a module:attribute reference for {self.tool_id}."
+            )
+        if self.connection == "whatsapp_linked_device" and not self.service:
+            raise ValueError(
+                f"ToolManifest.service is required for {self.tool_id}'s WhatsApp linked-device flow."
             )
         seen_actions: set[str] = set()
         for spec in self.actions:

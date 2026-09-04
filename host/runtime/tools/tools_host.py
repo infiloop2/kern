@@ -37,6 +37,7 @@ from host.tools import (
     StreamingAsset,
     Tool,
     ToolManifest,
+    ToolService,
 )
 from host.tools.host_api import AssetMetadata, ConnectionAccount
 from host.tools.manifest import ActionSpec, TOOL_ID_RE
@@ -132,8 +133,27 @@ def _bundled_tool_map(tools: tuple[Tool, ...]) -> dict[str, Tool]:
                 f"{tool_id}: connection={tool.manifest.connection!r} disagrees with"
                 f" credentials={'set' if tool.credentials is not None else 'None'}"
             )
+        if tool.manifest.service and tool.credentials is not None:
+            raise RuntimeError(
+                f"{tool_id}: a manifest service and OAuth credentials cannot both be set"
+            )
         bundled[tool_id] = tool
     return bundled
+
+
+def tool_service(tool: Tool) -> ToolService | None:
+    """Load the service implementation named by a trusted bundled manifest."""
+    reference = tool.manifest.service
+    if not reference:
+        return None
+    module_name, attribute = reference.split(":", 1)
+    service = getattr(importlib.import_module(module_name), attribute, None)
+    if service is None or any(
+        not callable(getattr(service, method, None))
+        for method in ("start", "stop", "operator")
+    ):
+        raise RuntimeError(f"{tool.manifest.tool_id}: invalid manifest service {reference!r}")
+    return cast(ToolService, service)
 
 
 

@@ -274,6 +274,7 @@ class ToolRegistryTests(unittest.TestCase):
                 "gmail",
                 "google_calendar",
                 "google_search_console",
+                "h3max",
                 "ibkr",
                 "instagram",
                 "instagram_discovery",

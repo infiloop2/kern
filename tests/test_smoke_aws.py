@@ -728,6 +728,11 @@ class WorkflowSmokeTests(unittest.TestCase):
             stage,
         )
         self.assertIn("steps.upgrade_stage.outcome == 'failure' && steps.start_current.outcome != 'success'", stage)
+        self.assertIn("2>&1 > kern-stage.json | tee stage-upgrade.log >&2", stage)
+        self.assertIn("2>&1 > kern-stage.json | tee stage-recover.log >&2", stage)
+        self.assertNotIn("> >(tee stage-", stage)
+        self.assertIn("first_deploy=true", stage)
+        self.assertIn("else\n              exit 1", stage)
         self.assertIn("python3 -m host.cli.start", stage_start)
         self.assertIn("python3 -m host.cli.stop", stage_stop)
         # The CLI takes flags and prints its result to stdout; the workflows

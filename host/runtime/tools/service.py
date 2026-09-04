@@ -22,10 +22,23 @@ directory, indexed only in memory and addressed by tool-scoped opaque ids.
 
 from __future__ import annotations
 
+import signal
+from types import FrameType
+
+from host.runtime.core import host_errors, state
 from host.runtime.tools import api as tools_api, tools_host
+from host.tools import ToolServiceError
+
+
+def _terminate_on_signal(_signum: int, _frame: FrameType | None) -> None:
+    # Python's default SIGTERM action exits immediately without unwinding the
+    # try/finally below. Raising SystemExit lets the parent flush and stop its
+    # child before systemd's mixed-mode stop escalates to the whole cgroup.
+    raise SystemExit(0)
 
 
 def main() -> int:
+    signal.signal(signal.SIGTERM, _terminate_on_signal)
     # This service executes approved actions, so it owns their crash recovery:
     # an approval stuck in 'approved' when this service last stopped had its
     # single execute_approved call interrupted, so mark it failed before serving
@@ -33,7 +46,32 @@ def main() -> int:
     # than in admin startup, avoids racing a live execution when only the admin
     # service restarts.
     tools_host.recover_interrupted_approvals()
-    tools_api.serve_forever()
+    services = [
+        (tool.manifest.tool_id, tools_host.tool_service(tool))
+        for tool in tools_host.BUNDLED_TOOLS.values()
+        if tool.manifest.service
+    ]
+    try:
+        enabled = state.enabled_tool_ids()
+        for tool_id, service in services:
+            if tool_id not in enabled or service is None:
+                continue
+            try:
+                service.start()
+            except ToolServiceError as exc:
+                # Other tools remain available; the service's operator status
+                # surfaces its bounded error and a later request retries.
+                host_errors.report_warning(
+                    "tools.service.start",
+                    exc,
+                    context={"tool_id": tool_id},
+                    kind="tool_service_start_failed",
+                )
+        tools_api.serve_forever()
+    finally:
+        for _tool_id, service in reversed(services):
+            if service is not None:
+                service.stop()
     return 0
 
 

@@ -1,0 +1,9 @@
+{
+  "name": "kern-host-node-dependencies",
+  "version": "1.15.0",
+  "private": true,
+  "dependencies": {
+    "baileys": "7.0.0-rc13",
+    "qrcode": "1.5.4"
+  }
+}

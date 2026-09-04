@@ -9,7 +9,9 @@ lives in `host/`.
 
 Each Kern host is for one operator. Config is partitioned by `tool_id`;
 OAuth credentials use `(tool_id, connection_id)`, and approvals snapshot the
-selected connection plus its non-secret provider account identity.
+selected connection plus its non-secret provider account identity. WhatsApp is
+the one linked-device integration: its host-owned gateway snapshots the linked
+account id inside each approval payload instead.
 
 ## Where tool code runs, and its internet access
 
@@ -330,6 +332,51 @@ drifts from the code fails the pull request check before it can reach a host.
   `GET /v1/tools/events/<seq>` loads one event's arguments only when the
   operator expands it. Config values and OAuth callback parameters never enter
   the argument field.
+
+### WhatsApp linked-device adapter
+
+WhatsApp's Web protocol needs a long-lived listener rather than a stateless
+request/response call. Its manifest names the existing gateway through the
+small tool-service interface, so the generic `kern-tools` entry point starts
+and stops declared services without importing WhatsApp or branching on its
+tool id. The WhatsApp service supervises one private Node child running
+`host/tools/whatsapp/gateway.mjs`. The child exposes no network listener: Python
+talks to it over inherited stdin/stdout, operator QR/status/disconnect requests
+arrive only through the admin-peer `/operator/.../service/...` routes,
+and agent calls reach only the fixed package actions. QR data is never returned
+by an agent action.
+
+The adapter uses the fixed `/mnt/kern-admin/tools-state/whatsapp` directory
+(mode 0700) on the encrypted durable admin volume and rejects a symlink there.
+Before opening a socket, it fetches WhatsApp Web's current client revision from
+WhatsApp itself instead of relying on Baileys' bundled revision, which can become
+too old for WhatsApp to accept during device registration.
+It starts after boot when WhatsApp is enabled; Enable requests immediate startup,
+and a later request retries if that attempt fails.
+One lock serializes enable/disable, requests, and process lifecycle.
+Baileys reconnects from those keys without another QR scan. Disable stops the
+child but retains its registered session and cache, and the admin UI keeps
+Disconnect available in that suspended state. Before terminating the child,
+the supervisor asks it to flush any pending debounced cache write. The systemd
+unit signals the Python parent first and reserves bounded time before killing
+the remaining cgroup. Its 60-second stop deadline exceeds the gateway's
+40-second request deadline plus bounded child termination and final cache-flush
+RPC, so an in-flight request cannot make systemd kill the child before that
+graceful path runs.
+Disconnect, QR rendering, remote logout handling, reconnect behavior, session
+and cache formats, and messaging rules remain WhatsApp-specific. Disconnect
+invalidates any in-flight reconnect, unbinds and drains credential writes, and
+gives remote logout a bounded ten-second window. The Python supervisor then
+stops the child and deletes both keys and cache from the fixed host-owned path,
+so a missing, broken, or stalled adapter cannot prevent authoritative local
+deletion. Connection status is live adapter state rather than a second durable
+host state machine or audit stream: the admin UI refreshes it while linking or
+while the integration is open. If the child exits unexpectedly, the small
+Python supervisor exits and systemd restarts the tools service. Reads return
+the local cache directly. A send
+is one direct-recipient plain-text approval whose payload snapshots account id,
+E.164 recipient, and exact text; execution rechecks the linked account before
+calling WhatsApp.
 
 ## Operator flow
 

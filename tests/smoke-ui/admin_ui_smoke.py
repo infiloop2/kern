@@ -1449,6 +1449,31 @@ def tools_smoke(page, url: str) -> None:
             expect(profile.locator(".guide-action-parameters").last).to_contain_text("integer or null")
             profile.locator(".guide-action-contract > summary").click()
 
+    open_home_integration(page, "tool:whatsapp")
+    whatsapp_row = page.locator("#tools [data-tool-row='whatsapp']")
+    whatsapp_row.get_by_role("button", name="Enable", exact=True).click()
+    connect_url = "**/v1/tools/whatsapp/service/connect"
+    page.route(
+        connect_url,
+        lambda route: route.fulfill(
+            status=502,
+            content_type="application/json",
+            body='{"error":{"message":"mock WhatsApp link failure"}}',
+        ),
+    )
+    whatsapp_row.get_by_role("button", name="Link device", exact=True).click()
+    expect(whatsapp_row).to_contain_text("mock WhatsApp link failure")
+    expect(whatsapp_row.get_by_role("button", name="Link device", exact=True)).to_be_enabled()
+    page.unroute(connect_url)
+    whatsapp_row.get_by_role("button", name="Link device", exact=True).click()
+    expect(whatsapp_row).to_contain_text("QR code shown below in Linked device")
+    expect(whatsapp_row.get_by_alt_text("WhatsApp linked-device QR code")).to_be_visible()
+    whatsapp_row.get_by_role("button", name="Check status / refresh QR", exact=True).click()
+    expect(whatsapp_row).to_contain_text("scan this QR code")
+    page.once("dialog", lambda dialog: dialog.accept())
+    whatsapp_row.get_by_role("button", name="Disconnect", exact=True).click()
+    expect(whatsapp_row).to_contain_text("No WhatsApp account is linked")
+
     open_home_integration(page, "tool:gmail")
     gmail_row = page.locator("#tools [data-tool-row='gmail']")
     expect(gmail_row).to_contain_text("1 account connected")

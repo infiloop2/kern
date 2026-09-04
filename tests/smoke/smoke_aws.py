@@ -197,6 +197,12 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
     ),
     "brave_search": (("search_web", {"query": "Kern"}),),
     "web_fetch": (("fetch_page", {"url": "https://example.com/"}),),
+    "whatsapp": (
+        ("connection_status", {}),
+        ("list_chats", {"limit": 1}),
+        ("read_messages", {"chat_id": "+447700900123", "limit": 1}),
+        ("send_message", {"recipient": "+447700900123", "text": "Kern smoke; never sent."}),
+    ),
     "gmail": (
         ("search_messages", {}),
         ("read_message", {"message_id": "smoke-message"}),
@@ -260,6 +266,11 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
                 "sitemap_url": "https://example.com/sitemap.xml",
             },
         ),
+    ),
+    "h3max": (
+        ("generate_video", {"prompt": "Kern smoke"}),
+        ("get_task", {"task_id": "text_00000000-0000-4000-8000-000000000000"}),
+        ("save_video", {"task_id": "text_00000000-0000-4000-8000-000000000000"}),
     ),
     "ibkr": (
         ("get_accounts", {}),
@@ -3517,12 +3528,15 @@ class AwsSmoke:
                 }
                 name = f"{tool_id}_{action_id}"
                 response, parsed = shim_bundled_call(tool_id, action_id, arguments)
-                # Polymarket and Web Fetch need no credential or config, so
-                # they must execute on the fresh host rather than fail closed.
-                if tool_id in ("polymarket", "web_fetch"):
+                # Polymarket and Web Fetch need no credential or config. The
+                # three WhatsApp local-state reads are also valid while no
+                # account is linked; only its send must fail closed.
+                direct_without_connection = tool_id == "whatsapp" and action_id != "send_message"
+                if tool_id in ("polymarket", "web_fetch") or direct_without_connection:
                     if response.get("isError") or not isinstance(parsed, dict):
                         raise AssertionError(f"credential-free {name} failed: {response} {parsed}")
-                    public_results[action_id] = parsed
+                    if tool_id == "polymarket":
+                        public_results[action_id] = parsed
                 else:
                     content = response.get("content") or [{}]
                     text = str(content[0].get("text", "")) if isinstance(content[0], dict) else ""
