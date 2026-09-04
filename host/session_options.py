@@ -28,6 +28,7 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
         "gpt-5.6-terra": ("high", "max", "ultra"),
         "gpt-5.6-sol": ("high", "max", "ultra"),
         "gpt-5.6-luna": ("high", "max"),
+        "gpt-6-astra": ("high", "max", "ultra"),
     },
     # Claude Code also accepts the unversioned aliases (opus, fable, sonnet),
     # but an alias re-points to a new model generation whenever the pinned CLI

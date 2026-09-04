@@ -34,6 +34,7 @@ DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 100
 MAX_REVISION_PAGE_LIMIT = 50
 MAX_SEARCH_BYTES = 200
+MAX_RECALLED_PAGES = 5
 MAX_CURSOR_BYTES = 512
 SEMANTIC_CANDIDATES = 200
 EXACT_CANDIDATES = 50
@@ -85,6 +86,13 @@ def route_browser(
         return list_pages(query)
     if path == "/memory/search" and method == "GET":
         return search_pages(query)
+    if path == "/memory/recall" and method == "POST":
+        if query:
+            raise WorkspaceError(
+                HTTPStatus.BAD_REQUEST,
+                "memory recall does not accept query parameters",
+            )
+        return recall_pages(body)
     match = re.fullmatch(r"/memory/pages/([^/]+)", path)
     if match:
         page_id = _page_id(match.group(1))
@@ -200,6 +208,88 @@ def search_swarm_pages(query: dict[str, list[str]]) -> dict[str, Any]:
         record_top_hit=True,
         semantic=True,
     )
+
+
+def recall_pages(body: Any) -> dict[str, Any]:
+    """Return bounded turn-start context without weak or popular fallbacks."""
+    request = _object(body, "memory recall request")
+    _require_keys(request, {"thread_id", "message"}, {"thread_id", "message"})
+    thread_id = individual_page_id(request["thread_id"])
+    message = request["message"]
+    if not isinstance(message, str):
+        raise WorkspaceError(
+            HTTPStatus.BAD_REQUEST,
+            "message must be a string",
+        )
+
+    pages: list[dict[str, Any]] = []
+    try:
+        pages.append({**load_page(thread_id), "scope": "self"})
+    except WorkspaceError as exc:
+        if exc.status != HTTPStatus.NOT_FOUND:
+            raise
+
+    if "\x00" in message:
+        host_errors.report_warning(
+            "workspace.memory_recall",
+            "swarm recall skipped for a NUL-containing query",
+            context={"thread_id": thread_id, "phase": "query"},
+            kind="memory_recall_degraded",
+        )
+        return {"pages": pages}
+
+    remaining = MAX_RECALLED_PAGES - len(pages)
+    query = _recall_query(message)
+    if not query:
+        return {"pages": pages}
+    try:
+        matches = _search_pages(
+            {"q": [query], "limit": [str(remaining)]},
+            scope="swarm",
+            record_top_hit=False,
+            semantic=True,
+        )
+    except (WorkspaceError, pgclient.Error, OSError) as exc:
+        host_errors.report_warning(
+            "workspace.memory_recall",
+            exc,
+            context={"thread_id": thread_id, "phase": "swarm_search"},
+            kind="memory_recall_degraded",
+        )
+        return {"pages": pages}
+    # Weak token overlap and popularity are useful discovery fallbacks for an
+    # agent that can judge them. Automatic context keeps a higher bar.
+    summaries = [] if matches.get("match_mode") == "weak" else matches.get("pages", [])
+    for summary in summaries:
+        if not isinstance(summary, dict) or not isinstance(summary.get("page_id"), str):
+            continue
+        try:
+            page = load_page(summary["page_id"])
+        except (WorkspaceError, pgclient.Error, OSError) as exc:
+            host_errors.report_warning(
+                "workspace.memory_recall",
+                exc,
+                context={"thread_id": thread_id, "phase": "swarm_load"},
+                kind="memory_recall_degraded",
+            )
+            return {"pages": pages}
+        if page.get("revision") != summary.get("revision"):
+            host_errors.report_warning(
+                "workspace.memory_recall",
+                "swarm page changed after recall ranking",
+                context={"thread_id": thread_id, "phase": "swarm_load"},
+                kind="memory_recall_degraded",
+            )
+            continue
+        pages.append({**page, "scope": "swarm"})
+    return {"pages": pages}
+
+
+def _recall_query(message: str) -> str:
+    encoded = message.strip().encode("utf-8", errors="ignore")
+    if len(encoded) <= MAX_SEARCH_BYTES:
+        return message.strip()
+    return encoded[:MAX_SEARCH_BYTES].decode("utf-8", errors="ignore").strip()
 
 
 def _search_pages(

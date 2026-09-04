@@ -20,6 +20,7 @@ from host.runtime.core import host_errors
 
 
 PROXY_TIMEOUT_SECONDS = WORKSPACE_ADMIN_API_TIMEOUT_SECONDS + 10
+RECALL_TIMEOUT_SECONDS = 3
 ROUTE_PREFIXES = {
     "/v1/workspace/getting-started": "/getting-started",
     "/v1/workspace/chat": "/chat",
@@ -27,6 +28,23 @@ ROUTE_PREFIXES = {
     "/v1/workspace/memory": "/memory",
     "/v1/workspace/schedules": "/schedules",
 }
+
+
+def recall_memory(
+    thread_id: str,
+    message: str,
+) -> dict[str, Any]:
+    """Fetch Workspace-owned context for one newly admitted model turn."""
+    return _proxy(
+        "POST",
+        "/memory/recall",
+        {},
+        {
+            "thread_id": thread_id,
+            "message": message,
+        },
+        timeout_seconds=RECALL_TIMEOUT_SECONDS,
+    )
 
 
 def route_request(
@@ -47,6 +65,8 @@ def _proxy(
     path: str,
     query: dict[str, list[str]],
     body: Any,
+    *,
+    timeout_seconds: float = PROXY_TIMEOUT_SECONDS,
 ) -> Any:
     encoded = None if body is None else json.dumps(body, sort_keys=True).encode()
     headers: dict[str, str] = {}
@@ -61,12 +81,16 @@ def _proxy(
     conn: http.client.HTTPConnection | None = None
     try:
         conn = http.client.HTTPConnection(
-            LOOPBACK, WORKSPACE_PORT, timeout=PROXY_TIMEOUT_SECONDS
+            LOOPBACK, WORKSPACE_PORT, timeout=timeout_seconds
         )
         conn.request(method, target, body=encoded, headers=headers)
         response = conn.getresponse()
         raw = response.read(MAX_WORKSPACE_RESPONSE_BODY_BYTES + 1)
-    except OSError as exc:
+    except TimeoutError as exc:
+        raise ApiError(
+            HTTPStatus.GATEWAY_TIMEOUT, "workspaces backend timed out"
+        ) from exc
+    except (OSError, http.client.HTTPException) as exc:
         raise ApiError(
             HTTPStatus.BAD_GATEWAY, "workspaces backend unavailable"
         ) from exc

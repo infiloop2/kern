@@ -497,7 +497,11 @@ class AgenticWebAppContractTests(unittest.TestCase):
             instructions.index("Swarm memory (global memory)"),
         )
         self.assertIn("GET /agent/self/memory", instructions)
-        self.assertIn("first request in each execution", instructions)
+        self.assertIn("Before each model turn", instructions)
+        self.assertIn("five-page total turn-start limit", instructions)
+        self.assertIn("This is not comprehensive", instructions)
+        self.assertNotIn("mandatory startup retrieval", instructions + memory)
+        self.assertNotIn("Perform the startup retrieval", instructions)
         self.assertIn("GET /agent/memory/search?q=words&limit=20", instructions)
         self.assertIn("GET /agent/memory/pages/{page_id}", instructions)
         self.assertIn("GET /agent/apps/{app_id}/state/{meta|ui|data|data/shape}", instructions)

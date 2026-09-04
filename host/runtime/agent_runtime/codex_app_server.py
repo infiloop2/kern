@@ -824,7 +824,7 @@ def run_turn(
         try:
             thread = server.call(
                 "thread/resume",
-                # Codex 0.144.0 exposes effort only on turn/start; its
+                # Codex 0.153.3 exposes effort only on turn/start; its
                 # thread/resume schema accepts the sticky model and refreshed
                 # developer instructions, but no effort.
                 {

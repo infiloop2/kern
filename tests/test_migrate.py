@@ -175,6 +175,85 @@ class MigrateRunnerTests(unittest.TestCase):
         self.assertEqual(reverted, list(reversed(applied)))
         self.assertEqual(self.table_names(), {"schema_migrations"})
 
+    def test_astra_model_migration_allows_sessions_and_rolls_back_active_settings(self) -> None:
+        self.assertEqual(migrate.up(target=50, quiet=True), list(range(1, 51)))
+        with self.assertRaises(Exception):
+            with db.transaction() as cur:
+                cur.execute(
+                    "INSERT INTO thread_sessions"
+                    " (agent_runtime, thread_id, model, effort)"
+                    " VALUES ('codex', 'thread-astra', 'gpt-6-astra', 'ultra')"
+                )
+
+        self.assertEqual(migrate.up(target=51, quiet=True), [51])
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO web_apps"
+                " (app_id, name, archived, revision, agent_runtime, agent_model, agent_effort,"
+                " created_at, updated_at) VALUES"
+                " ('app-51', 'Astra App', FALSE, 0, 'codex', 'gpt-6-astra', 'ultra',"
+                " '2026-09-04T00:00:00Z', '2026-09-04T00:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO schedules"
+                " (id, thread_id, name, message, cadence, interval_minutes, agent_runtime,"
+                " model, effort, next_run_at, created_at, updated_at) VALUES"
+                " (51, 'schedule-51', 'Astra Schedule', 'Run with Astra', 'interval', 60,"
+                " 'codex', 'gpt-6-astra', 'ultra', '2026-09-04T01:00:00Z',"
+                " '2026-09-04T00:00:00Z', '2026-09-04T00:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO schedule_revisions"
+                " (schedule_id, revision, name, message, cadence, interval_minutes,"
+                " agent_runtime, model, effort, deleted, actor, created_at) VALUES"
+                " (51, 1, 'Astra Schedule', 'Run with Astra', 'interval', 60,"
+                " 'codex', 'gpt-6-astra', 'ultra', FALSE, 'user',"
+                " '2026-09-04T00:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO thread_sessions"
+                " (agent_runtime, thread_id, provider_session_id, model, effort) VALUES"
+                " ('codex', 'thread-astra', 'provider-chat', 'gpt-6-astra', 'ultra'),"
+                " ('codex', 'app-51', 'provider-app', 'gpt-6-astra', 'ultra'),"
+                " ('codex', 'schedule-51', 'provider-schedule', 'gpt-6-astra', 'ultra')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, message, source)"
+                " VALUES ('2026-09-04T00:00:00Z', 'thread.message',"
+                " 'thread-astra', 'Astra transcript', 'agent')"
+            )
+
+        self.assertEqual(migrate.down(target=50, quiet=True), [51])
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT thread_id, model, effort, provider_session_id"
+                " FROM thread_sessions ORDER BY thread_id"
+            )
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("app-51", "gpt-5.6-sol", "high", None),
+                    ("schedule-51", "gpt-5.6-sol", "high", None),
+                    ("thread-astra", "gpt-5.6-sol", "high", None),
+                ],
+            )
+            cur.execute(
+                "SELECT agent_runtime, agent_model, agent_effort"
+                " FROM web_apps WHERE app_id = 'app-51'"
+            )
+            self.assertEqual(cur.fetchone(), ("codex", "gpt-5.6-sol", "high"))
+            cur.execute(
+                "SELECT agent_runtime, model, effort FROM schedules WHERE id = 51"
+            )
+            self.assertEqual(cur.fetchone(), ("codex", "gpt-5.6-sol", "high"))
+            cur.execute(
+                "SELECT model, effort FROM schedule_revisions WHERE schedule_id = 51"
+            )
+            self.assertEqual(cur.fetchone(), ("gpt-6-astra", "ultra"))
+            cur.execute("SELECT message FROM agent_events WHERE thread_id = 'thread-astra'")
+            self.assertEqual(cur.fetchall(), [("Astra transcript",)])
+
     def test_persistent_schedules_create_threads_and_drop_old_runs(self) -> None:
         migrate.up(target=46, quiet=True)
         with db.transaction() as cur:

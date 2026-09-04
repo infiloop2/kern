@@ -10,7 +10,7 @@ can break when a harness package is upgraded.
 
 | Harness | Package | Pinned version | Runtime id | Adapter |
 | --- | --- | --- | --- | --- |
-| Codex | `@openai/codex` | `0.144.0` | `codex` | `host/runtime/agent_runtime/codex_app_server.py` |
+| Codex | `@openai/codex` | `0.153.3` | `codex` | `host/runtime/agent_runtime/codex_app_server.py` |
 | Claude Code | `@anthropic-ai/claude-code` | `2.1.258` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
 | Grok Build | `@xai-official/grok` | `1.0.5` | `grok` | `host/runtime/agent_runtime/grok_agent.py` |
 | Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/agent_runtime/hermes_agent.py` |
@@ -78,8 +78,8 @@ Expected methods:
 | `turn/start` | Accepts `threadId`, text input, and the selected `model` and `effort`. Returns `turn.id`. It may emit notifications before the response. |
 | `turn/steer` | Accepts `threadId`, `expectedTurnId`, and text input. The submitting API request waits for its JSON-RPC response; `no active turn` is returned to the caller as a retryable `409`, not retained by a host mailbox. |
 
-The pinned Codex catalog must advertise `gpt-5.6-terra` and `gpt-5.6-sol`
-with `high`, `max`, and `ultra`, plus `gpt-5.6-luna` with `high` and `max`.
+The pinned Codex catalog must advertise `gpt-5.6-terra`, `gpt-5.6-sol`, and
+`gpt-6-astra` with `high`, `max`, and `ultra`, plus `gpt-5.6-luna` with `high` and `max`.
 Kern intentionally exposes only that small subset; the API rejects
 unsupported pairs before a message is accepted.
 
