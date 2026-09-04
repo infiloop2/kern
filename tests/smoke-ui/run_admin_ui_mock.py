@@ -102,7 +102,11 @@ PASSWORD = "dev"
 MOCK_SESSIONS: set[str] = set()
 FAILED_UPLOADS_ONCE: set[str] = set()
 THREAD_RE = re.compile(r"^/v1/threads/([^/]+)(?:/(messages|stop|clear-memory|events))?$")
-TOOL_ACTION_RE = re.compile(r"^/v1/tools/([a-z0-9_]+)/(enable|disable|oauth_connect/start|oauth_connect/complete|oauth_connect/disconnect)$")
+TOOL_ACTION_RE = re.compile(
+    r"^/v1/tools/([a-z0-9_]+)/"
+    r"(enable|disable|oauth_connect/start|oauth_connect/complete|oauth_connect/disconnect|"
+    r"service/connect|service/status|service/disconnect)$"
+)
 GITHUB_PENDING_PUSH_RE = re.compile(r"^/v1/network-tools/github-pending-pushes/([a-z0-9]+)/(approve|reject)$")
 TOOL_APPROVALS_LIST_RE = re.compile(r"^/v1/tools/([a-z0-9_]+)/approvals$")
 TOOL_APPROVAL_RE = re.compile(r"^/v1/tools/([a-z0-9_]+)/approvals/([^/]+)/(approve|deny)$")
@@ -110,6 +114,10 @@ TOOL_APPROVAL_GET_RE = re.compile(r"^/v1/tools/([a-z0-9_]+)/approvals/([^/]+)$")
 TOOL_CONFIG_RE = re.compile(r"^/v1/tools/([a-z0-9_]+)/config$")
 TOOL_EVENT_RE = re.compile(r"^/v1/tools/events/([1-9][0-9]*)$")
 MOCK_OAUTH_CODE = "mock-auth-code"
+MOCK_LINKED_DEVICE_QR = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 # RUNTIMES is the task-session matrix. Every connected agent runtime is
 # selectable in the demo, including Grok's ACP turn adapter.
 RUNTIMES = ("codex", "claude_code", "grok", "hermes")
@@ -187,6 +195,7 @@ class MockState:
     # Config is scoped per tool: tool_id -> set of configured keys.
     tool_config: dict[str, set[str]] = field(default_factory=dict)
     tool_connections: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    tool_linked_devices: dict[str, dict[str, Any]] = field(default_factory=dict)
     tool_approvals: list[dict[str, Any]] = field(default_factory=list)
     tool_events: list[dict[str, Any]] = field(default_factory=list)
     next_approval_number: int = 1
@@ -1433,6 +1442,12 @@ def list_tools() -> dict[str, Any]:
                     {"connected": True, "account": connections[0]["account"]}
                     if connections else {"connected": False}
                 )
+            elif manifest.connection == "whatsapp_linked_device":
+                entry["connection_status"] = dict(STATE.tool_linked_devices.get(tool_id) or {
+                    "status": "disabled" if tool_id not in STATE.tool_enabled else "disconnected",
+                    "connected": False, "retained_data": False, "account": None,
+                    "qr_data_url": "", "error": "",
+                })
             entries.append(entry)
     return {"tools": entries}
 
@@ -1468,6 +1483,31 @@ def tool_action(tool_id: str, operation: str, body: Any) -> dict[str, Any]:
         if operation == "disable":
             STATE.tool_enabled.discard(tool_id)
             return {"tool_id": tool_id, "enabled": False}
+        if manifest.connection == "whatsapp_linked_device":
+            if operation == "service/connect":
+                if tool_id not in STATE.tool_enabled:
+                    raise ApiError(HTTPStatus.CONFLICT, f"{tool_id} is not enabled")
+                status = {
+                    "status": "qr", "connected": False, "retained_data": True,
+                    "account": None,
+                    "qr_data_url": MOCK_LINKED_DEVICE_QR,
+                    "error": "",
+                }
+                STATE.tool_linked_devices[tool_id] = status
+                return dict(status)
+            if operation == "service/status":
+                return dict(STATE.tool_linked_devices.get(tool_id) or {
+                    "status": "disabled" if tool_id not in STATE.tool_enabled else "disconnected",
+                    "connected": False, "retained_data": False, "account": None,
+                    "qr_data_url": "", "error": "",
+                })
+            if operation == "service/disconnect":
+                status = {
+                    "status": "disconnected", "connected": False, "retained_data": False,
+                    "account": None, "qr_data_url": "", "error": "",
+                }
+                STATE.tool_linked_devices[tool_id] = status
+                return dict(status)
         if manifest.connection != "oauth":
             raise ApiError(HTTPStatus.CONFLICT, f"{tool_id} has no connect flow")
         if tool_id not in STATE.tool_enabled:

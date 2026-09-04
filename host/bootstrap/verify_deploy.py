@@ -119,9 +119,17 @@ PATH_FACTS: tuple[PathFact, ...] = (
         0o700,
         True,
     ),
+    (
+        "/mnt/kern-admin/tools-state/whatsapp",
+        "kern-tools",
+        "kern-tools",
+        0o700,
+        True,
+    ),
     ("/opt/kern-host", "root", "root", 0o755, True),
     ("/opt/kern-host/VERSION", "root", "root", 0o644, False),
     ("/usr/local/lib/kern-host", "root", "root", 0o755, True),
+    ("/usr/local/lib/kern-node", "root", "root", 0o755, True),
     ("/usr/local/lib/kern-embedding-venv", "root", "root", 0o755, True),
     ("/usr/local/share/kern-embedding-models", "root", "root", 0o755, True),
     (

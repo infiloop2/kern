@@ -1200,9 +1200,9 @@ def desktop_smoke(page: Any) -> None:
     hidden_chat_nav = page.locator(
         f"#web-apps-nav-items [data-action='open-web-app'][data-item-id='{first_app}']"
     )
-    # The final agent reply landed after switching back to the App canvas. It
-    # stays unread until the operator actually opens this App's Chat view.
-    expect(hidden_chat_nav.locator(".workspace-nav-unseen")).to_be_visible()
+    # App Chat messages do not drive the App navigation marker. Only a newer
+    # App revision should create a blue dot in this list.
+    expect(hidden_chat_nav.locator(".workspace-nav-unseen")).to_have_count(0)
     frame.get_by_role("button", name="Show Chat", exact=True).click()
     expect(frame.locator("#chat-history-list")).to_contain_text(INTERIM_AGENT_MESSAGE)
     expect(frame.locator("#composer-running")).to_be_hidden()

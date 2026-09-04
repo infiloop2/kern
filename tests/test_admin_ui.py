@@ -88,6 +88,25 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn("setInterval", api)
         self.assertNotIn("markSessionActivity", app)
 
+    def test_linked_device_connect_message_follows_returned_status(self) -> None:
+        tools = (
+            Path(__file__).parents[1]
+            / "host/runtime/admin_api/admin_ui/tools.js"
+        ).read_text()
+        self.assertIn('if (response.status === "qr")', tools)
+        self.assertIn('else if (response.status === "connected")', tools)
+        self.assertIn('else if (response.status === "connecting")', tools)
+        self.assertIn('response.error || "WhatsApp is not connected.', tools)
+        self.assertIn('The QR code will appear below in Linked device.', tools)
+        self.assertIn('const reconnecting = connection.status === "connecting"', tools)
+        self.assertIn('No QR code is needed.', tools)
+        self.assertNotIn('Clear local data', tools)
+        self.assertNotIn('Cancel and clear', tools)
+        self.assertIn(
+            'current.status === "disconnected" && current.retained_data === true',
+            tools,
+        )
+
     def test_workspace_mounts_are_single_flight_and_query_the_whole_shadow_tree(self) -> None:
         root = Path(__file__).parents[1]
         app = (root / "host/runtime/admin_api/admin_ui/app.js").read_text()
@@ -189,8 +208,9 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("Number(item.latest_message_seq)", last_seen)
         self.assertNotIn("Number(item.latest_event_seq)", last_seen)
         self.assertNotIn("Number(listed.latest_message_seq)", last_seen)
-        self.assertIn("current.message_seq > (Number(item.seen_message_seq) || 0)", last_seen)
-        self.assertIn("current.revision > (Number(item.seen_revision) || 0)", last_seen)
+        self.assertIn('if (kind === "apps")', last_seen)
+        self.assertIn("return current.revision > (Number(item.seen_revision) || 0)", last_seen)
+        self.assertIn("return current.message_seq > (Number(item.seen_message_seq) || 0)", last_seen)
         self.assertIn("const pending = new Set();", last_seen)
         self.assertIn('kind === "chat"', app)
         self.assertIn("[...chatNavItems, ...scheduledAgentNavItems].find", app)
@@ -229,10 +249,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("const refreshedThreadId = selectedThreadId;", chat)
         self.assertIn("if (rendered && selectedThreadId === refreshedThreadId && visibleThread)", chat)
         self.assertIn('window.KernHost.markWorkspaceSeen("apps", {', web_apps)
-        self.assertIn("? renderedMessageSeq", web_apps)
         self.assertIn("Number(listed?.seen_message_seq) || 0", web_apps)
-        self.assertIn("renderedMessageSeq", web_apps)
-        self.assertIn('event.event_type === "thread.message"', web_apps)
         self.assertIn("revision: renderedRevision", web_apps)
         self.assertIn(".workspace-nav-unseen {", admin_css)
 
@@ -812,6 +829,30 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('${tool.enabled ? "" : " disabled"}>${connections.length', tools_js)
         self.assertIn(".connection-summary {", css)
         self.assertIn("color: var(--text-dim);", css)
+
+    def test_expanded_linked_device_is_polled_until_qr_flow_finishes(self) -> None:
+        runtime = Path(__file__).parents[1] / "host/runtime/admin_api"
+        app_js = (runtime / "admin_ui" / "app.js").read_text()
+        tools_js = (runtime / "admin_ui" / "tools.js").read_text()
+
+        self.assertIn("refreshExpandedLinkedDevices", app_js)
+        self.assertIn(
+            '!current.connected && !["connecting", "qr"].includes(current.status)',
+            tools_js,
+        )
+        self.assertIn("/service/status`, {}", tools_js)
+        self.assertIn(
+            "if (JSON.stringify(status) === JSON.stringify(current)) continue;",
+            tools_js,
+        )
+        self.assertIn("tool.connection_status = status;", tools_js)
+        self.assertIn("renderToolsPreservingConfigInputs();", tools_js)
+        self.assertIn('input[id^="tool-config-"]', tools_js)
+        self.assertIn("input.value = value;", tools_js)
+        self.assertIn("status.connected && !current.connected", tools_js)
+        self.assertIn(
+            "try { await refreshTools(); } catch (_refreshError)", tools_js
+        )
 
     def test_mobile_navigation_uses_an_accessible_drawer(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api"

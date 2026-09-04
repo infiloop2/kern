@@ -616,7 +616,10 @@ integration directly enforces:
 As with Python packages, only `GET` and `HEAD` are allowed — read-only by
 construction, no publishing. npm metadata and Node.js distribution URL values
 take the parameter guard. npm tarball paths under
-`/-/` remain exempt because they are provider-returned. Request headers are not
+`/-/` remain exempt because they are provider-returned. The exact public
+package metadata path `/token-types` skips path scanning because its name is a
+credential-language false positive, while its query values remain guarded.
+Request headers are not
 inspected: credential headers are removed, `User-Agent` is replaced with a
 fixed host value, and the rest are forwarded as sent.
 

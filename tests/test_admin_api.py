@@ -3426,7 +3426,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("recheckGithubAudit", ui)
         self.assertIn("refreshPendingGithubPushes", ui)
         self.assertIn('"network": {', ui)
-        self.assertIn("tick: [refreshPendingGithubPushes, refreshExpandedToolApprovals]", ui)
+        self.assertIn(
+            "tick: [refreshPendingGithubPushes, refreshExpandedToolApprovals, "
+            "refreshExpandedLinkedDevices]",
+            ui,
+        )
         self.assertIn("audit-banner", ui)
         self.assertIn("repoAuditSummary", ui)
         self.assertIn('data-action="toggle-github-repo-audit"', ui)

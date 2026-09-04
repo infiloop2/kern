@@ -2505,18 +2505,10 @@ function applyPendingAppVersion() {
 function markSelectedAppSeen() {
   if (!selectedAppId || renderedRevision < 0) return;
   const listed = apps.find(app => app.app_id === selectedAppId);
-  const renderedMessageSeq = conversationEvents.reduce((latest, event) => (
-    event.event_type === "thread.message"
-      ? Math.max(latest, Number(event.seq) || 0)
-      : latest
-  ), 0);
-  const visibleMessageSeq = historyMode
-    ? renderedMessageSeq
-    : Number(listed?.seen_message_seq) || 0;
   window.KernHost.markWorkspaceSeen("apps", {
     app_id: selectedAppId,
     last_used_at: listed?.last_used_at || snapshot.app?.updated_at || "",
-    latest_message_seq: visibleMessageSeq,
+    latest_message_seq: Number(listed?.seen_message_seq) || 0,
     revision: renderedRevision,
   });
 }

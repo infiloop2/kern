@@ -1629,6 +1629,11 @@ class DeployUnitTests(unittest.TestCase):
         self.assertNotIn("KERN_APP_AGENT_CHAT_UID", bootstrap)
         self.assertNotIn("kern-agent-workspace", bootstrap)
         self.assertIn("ExecStart=/usr/bin/python3 -m host.runtime.workspace.service", bootstrap)
+        tools_unit = bootstrap.split(
+            "cat > /etc/systemd/system/kern-tools.service", 1
+        )[1].split("\nUNIT", 1)[0]
+        self.assertIn("KillMode=mixed", tools_unit)
+        self.assertIn("TimeoutStopSec=60s", tools_unit)
         self.assertIn("RuntimeDirectory=kern-workspace", bootstrap)
         self.assertIn("fastembed==${FASTEMBED_VERSION}", bootstrap)
         self.assertIn("specific_model_path=os.environ[", bootstrap)
@@ -1810,6 +1815,27 @@ class DeployUnitTests(unittest.TestCase):
         # The sudoers drop-in is validated at write time, not at first use.
         self.assertIn("visudo -c -q -f /etc/sudoers.d/kern-host", bootstrap)
         self.assertTrue(bootstrap.rstrip().endswith("\nmain"))
+
+    def test_rendered_bootstrap_bounds_apt_and_falls_back_from_ec2_mirror(self) -> None:
+        bootstrap = render._render_bootstrap()
+
+        self.assertIn("APT_COMMAND_TIMEOUT=300s", bootstrap)
+        self.assertIn("APT_ACQUIRE_RETRIES=2", bootstrap)
+        self.assertIn("APT_ACQUIRE_TIMEOUT=20", bootstrap)
+        self.assertIn("APT_REGIONAL_UPDATE_COMMAND_TIMEOUT=60s", bootstrap)
+        self.assertIn("APT_REGIONAL_UPDATE_ACQUIRE_RETRIES=0", bootstrap)
+        self.assertIn("APT_REGIONAL_UPDATE_ACQUIRE_TIMEOUT=10", bootstrap)
+        self.assertIn("has_ec2_ubuntu_archive_source", bootstrap)
+        self.assertIn(
+            'APT_ARCHIVE_FALLBACK_ACTIVE" == false && "${1:-}" == "update" ]] \\\n'
+            "    && has_ec2_ubuntu_archive_source",
+            bootstrap,
+        )
+        self.assertIn('timeout --signal=TERM --kill-after=30s "$command_timeout"', bootstrap)
+        self.assertIn("APT::Update::Error-Mode=any", bootstrap)
+        self.assertIn("switch_to_ubuntu_archive_fallback", bootstrap)
+        self.assertIn("http://archive.ubuntu.com/ubuntu", bootstrap)
+        self.assertIn("APT_ARCHIVE_FALLBACK_ACTIVE=true", bootstrap)
 
     def test_rendered_bootstrap_reads_the_nested_grok_platform_payload(self) -> None:
         bootstrap = render._render_bootstrap()
@@ -2077,7 +2103,40 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap,
         )
         self.assertIn("systemd-tmpfiles --create --clean", bootstrap)
-        self.assertIn("systemd-tmpfiles-clean.timer", bootstrap)
+        self.assertNotIn(
+            "systemctl enable --now systemd-tmpfiles-clean.timer",
+            bootstrap,
+        )
+        self.assertNotIn(
+            "systemctl start systemd-tmpfiles-clean.timer",
+            bootstrap,
+        )
+        self.assertNotIn(
+            "systemctl is-active --quiet systemd-tmpfiles-clean.timer",
+            bootstrap,
+        )
+
+    def test_host_node_dependencies_are_readable_but_not_writable_by_tools(self) -> None:
+        bootstrap = render._render_bootstrap()
+        self.assertIn(
+            "/opt/kern-host/host/npm/package-lock.json",
+            bootstrap,
+        )
+        self.assertIn(
+            "npm ci --prefix /usr/local/lib/kern-node --omit=dev",
+            bootstrap,
+        )
+        self.assertNotIn("WHATSAPP_BAILEYS_VERSION", bootstrap)
+        self.assertNotIn("WHATSAPP_QRCODE_VERSION", bootstrap)
+        self.assertIn(
+            "chmod -R u=rwX,go=rX /usr/local/lib/kern-node",
+            bootstrap,
+        )
+        self.assertIn(
+            "runuser -u kern-tools -- test -r "
+            "/usr/local/lib/kern-node/node_modules",
+            bootstrap,
+        )
 
     def test_rendered_helper_scripts_have_valid_shell_syntax(self) -> None:
         for name in (

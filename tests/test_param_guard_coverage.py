@@ -39,6 +39,12 @@ GUARDED_FIELDS = {
     ("gmail", "list_drafts", "page_token"),
     ("gmail", "list_drafts", "query"),
     ("google_search_console", "inspect_url", "inspection_url"),
+    ("h3max", "generate_video", "prompt"),
+    ("h3max", "generate_video", "image_url"),
+    ("h3max", "generate_video", "end_image_url"),
+    ("h3max", "generate_video", "reference_image_urls"),
+    ("h3max", "generate_video", "reference_video_urls"),
+    ("h3max", "generate_video", "reference_audio_urls"),
     ("instagram_discovery", "search_reels", "query"),
     ("instagram_discovery", "search_hashtag", "hashtag"),
     ("instagram_discovery", "get_reels_by_audio", "cursor"),
@@ -124,6 +130,13 @@ EXEMPT_FIELDS = {
     ("google_search_console", "inspect_url", "language_code"): TYPED,
     ("google_search_console", "submit_sitemap", "site_url"): TYPED,
     ("google_search_console", "submit_sitemap", "sitemap_url"): APPROVAL_GATED,
+    ("h3max", "generate_video", "resolution"): TYPED,
+    ("h3max", "generate_video", "aspect_ratio"): TYPED,
+    ("h3max", "generate_video", "duration_seconds"): TYPED,
+    ("h3max", "generate_video", "prompt_expansion_mode"): TYPED,
+    ("h3max", "generate_video", "seed"): TYPED,
+    ("h3max", "get_task", "task_id"): TYPED,
+    ("h3max", "save_video", "task_id"): TYPED,
     ("ibkr", "get_positions", "account_id"): TYPED,
     ("ibkr", "get_account_summary", "account_id"): TYPED,
     ("ibkr", "get_trades", "account_id"): TYPED,
@@ -221,6 +234,11 @@ EXEMPT_FIELDS = {
     ("twitter", "post_tweet", "text"): APPROVAL_GATED,
     ("twitter", "post_tweet", "in_reply_to_tweet_id"): TYPED,
     ("twitter", "post_tweet", "quote_tweet_id"): TYPED,
+    ("whatsapp", "list_chats", "limit"): TYPED,
+    ("whatsapp", "read_messages", "chat_id"): TYPED,
+    ("whatsapp", "read_messages", "limit"): TYPED,
+    ("whatsapp", "send_message", "recipient"): TYPED,
+    ("whatsapp", "send_message", "text"): APPROVAL_GATED,
     ("twitterapi_io", "search_tweets", "query_type"): TYPED,
     ("twitterapi_io", "search_tweets", "max_results"): TYPED,
     ("twitterapi_io", "search_tweets", "lookback_hours"): TYPED,
@@ -527,6 +545,53 @@ class BehavioralDenialTest(unittest.TestCase):
                 {"image_url": "https://x.example.com/c?d=alice@example.com"}, "image_url", api
             )
 
+    def test_h3max_prompt_and_every_reference_url_are_denied(self) -> None:
+        from host.tools import h3max
+
+        api = FakeHostAPI()
+        with self.assertRaises(ParamGuardDenied):
+            h3max._generation_request(api, {"prompt": "ssn 219-09-9999 poster"})
+        for field in (
+            "image_url",
+            "end_image_url",
+            "reference_image_urls",
+            "reference_video_urls",
+            "reference_audio_urls",
+        ):
+            with self.subTest(field=field), self.assertRaises(ParamGuardDenied):
+                if field == "end_image_url":
+                    tool_input = {
+                        "prompt": "x",
+                        "image_url": "https://x.example.com/start.jpg",
+                        field: "https://x.example.com/end?d=alice@example.com",
+                    }
+                elif field.startswith("reference_"):
+                    tool_input = {
+                        "prompt": "x",
+                        field: ["https://x.example.com/media?d=alice@example.com"],
+                    }
+                    if field == "reference_audio_urls":
+                        tool_input["reference_image_urls"] = [
+                            "https://x.example.com/start.jpg"
+                        ]
+                else:
+                    tool_input = {
+                        "prompt": "x",
+                        field: "https://x.example.com/media?d=alice@example.com",
+                    }
+                h3max._generation_request(api, tool_input)
+
+        # Nested decoding of query/path values must not turn an apparently
+        # harmless public URL into a secret-bearing provider fetch.
+        with self.assertRaises(ParamGuardDenied):
+            h3max._generation_request(
+                api,
+                {
+                    "prompt": "x",
+                    "image_url": "https://x.example.com/media?owner=alice%2540example.com",
+                },
+            )
+
     def test_twitter_search_query_denied(self) -> None:
         from host.tools import twitter
 
@@ -636,6 +701,21 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         deny = guard.request_denied
         self.assertIsNone(
             deny(self.config, "GET", "registry.npmjs.org", "/%40babel%2fcore", "", [], b"")
+        )
+        self.assertIsNone(
+            deny(self.config, "GET", "registry.npmjs.org", "/token-types", "", [], b"")
+        )
+        self.assertEqual(
+            deny(
+                self.config,
+                "GET",
+                "registry.npmjs.org",
+                "/token-types",
+                "value=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+                [],
+                b"",
+            ),
+            "request_param_secret_denied",
         )
         self.assertEqual(
             deny(self.config, "GET", "registry.npmjs.org", "/pkg-AKIAIOSFODNN7EXAMPLE", "", [], b""),

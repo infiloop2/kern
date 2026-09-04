@@ -15,6 +15,7 @@ on:
           - gmail
           - google_calendar
           - google_search_console
+          - h3max
           - ibkr
           - instagram
           - instagram_discovery
@@ -27,6 +28,7 @@ on:
           - seedance
           - twitter
           - web_fetch
+          - whatsapp
           - twitterapi_io
           - zoho_mail
           - claude
@@ -130,9 +132,11 @@ jobs:
           set -euo pipefail
           version="$(cat VERSION)"
           same_version_failure=false
+          # Redirection order sends stderr through the synchronous tee pipeline
+          # while keeping the command's JSON stdout in the result file.
           if ! python3 -m host.cli.upgrade \
             --agent-name kern-stage \
-            > kern-stage.json 2> >(tee stage-upgrade.log >&2); then
+            2>&1 > kern-stage.json | tee stage-upgrade.log >&2; then
             if grep -F "tagged with version ${version}; upgrade requires preserved state older than target VERSION ${version}" stage-upgrade.log >/dev/null \
               || grep -F "upgrade requires admin state version lower than local VERSION; state=${version}, local=${version}" stage-upgrade.log >/dev/null; then
               same_version_failure=true
@@ -170,11 +174,22 @@ jobs:
           set -euo pipefail
           # If upgrade failed and no already-current instance was found,
           # recover recreates one from preserved volumes. Deploy is only for
-          # the first stage run.
+          # the first stage run: an operational recovery failure must remain
+          # the reported failure instead of falling through to deploy.
+          first_deploy=false
+          # Keep recovery progress live, but finish writing its diagnostic log
+          # before classifying the failure below.
           if ! python3 -m host.cli.recover \
             --agent-name kern-stage \
             --allow-upgrade \
-            > kern-stage.json; then
+            2>&1 > kern-stage.json | tee stage-recover.log >&2; then
+            if grep -F "recover requires existing admin and agent data volumes for kern-stage; found none, missing admin, agent" stage-recover.log >/dev/null; then
+              first_deploy=true
+            else
+              exit 1
+            fi
+          fi
+          if [[ "${first_deploy}" == true ]]; then
             admin_password_sha256="$(printf %s "$KERN_STAGE_ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)"
             python3 -m host.cli.deploy \
               --agent-name kern-stage \
@@ -206,6 +221,7 @@ jobs:
           # See docs/development/persistent-aws-stage.md.
           KERN_STAGE_APIFY_API_TOKEN: ${{ secrets.KERN_STAGE_APIFY_API_TOKEN }}
           KERN_STAGE_BRAVE_SEARCH_API_KEY: ${{ secrets.KERN_STAGE_BRAVE_SEARCH_API_KEY }}
+          KERN_STAGE_H3MAX_FAL_KEY: ${{ secrets.KERN_STAGE_H3MAX_FAL_KEY }}
           KERN_STAGE_IBKR_OAUTH_CONSUMER_KEY: ${{ secrets.KERN_STAGE_IBKR_OAUTH_CONSUMER_KEY }}
           KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN }}
           KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN_SECRET: ${{ secrets.KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN_SECRET }}

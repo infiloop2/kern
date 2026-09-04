@@ -53,6 +53,7 @@ from host.runtime.core.unix_socket_service import (
     peer_uids,
 )
 from host.runtime.tools import assets as tool_assets, tools_host
+from host.tools import ToolServiceError
 from host.tools import OpenedStreamingAsset, StreamingAssetError
 from host.tools.shared.web import ProviderWarning, UnmappedProviderError
 
@@ -332,6 +333,10 @@ class OperatorError(Exception):
 OPERATOR_START_RE = re.compile(r"^/operator/tools/([a-z0-9_]{1,64})/oauth_connect/start$")
 OPERATOR_COMPLETE_RE = re.compile(r"^/operator/tools/([a-z0-9_]{1,64})/oauth_connect/complete$")
 OPERATOR_DISCONNECT_RE = re.compile(r"^/operator/tools/([a-z0-9_]{1,64})/oauth_connect/disconnect$")
+OPERATOR_SERVICE_RE = re.compile(
+    r"^/operator/tools/([a-z0-9_]{1,64})/service/"
+    r"(status|connect|disconnect|enable|disable)$"
+)
 OPERATOR_DECIDE_RE = re.compile(
     r"^/operator/tools/([a-z0-9_]{1,64})/approvals/([A-Za-z0-9._:-]{1,128})/(approve|deny)$"
 )
@@ -504,6 +509,19 @@ def _operator_decide(
         raise OperatorError(HTTPStatus.CONFLICT, str(exc)) from exc
 
 
+def _operator_service(tool_id: str, operation: str) -> dict[str, Any]:
+    tool = tools_host.BUNDLED_TOOLS.get(tool_id)
+    if tool is None:
+        raise OperatorError(HTTPStatus.NOT_FOUND, f"unknown tool: {tool_id}")
+    service = tools_host.tool_service(tool)
+    if service is None:
+        raise OperatorError(HTTPStatus.CONFLICT, f"{tool_id} has no managed service")
+    try:
+        return dict(service.operator(operation, lambda: tool_id in state.enabled_tool_ids()))
+    except ToolServiceError as exc:
+        raise OperatorError(HTTPStatus.BAD_GATEWAY, str(exc)) from exc
+
+
 def handle_operator(
     path: str,
     body: Any,
@@ -520,6 +538,9 @@ def handle_operator(
     disconnect = OPERATOR_DISCONNECT_RE.fullmatch(path)
     if disconnect:
         return _operator_disconnect(disconnect.group(1), body, asset_store)
+    service = OPERATOR_SERVICE_RE.fullmatch(path)
+    if service:
+        return _operator_service(service.group(1), service.group(2))
     decide = OPERATOR_DECIDE_RE.fullmatch(path)
     if decide:
         return _operator_decide(

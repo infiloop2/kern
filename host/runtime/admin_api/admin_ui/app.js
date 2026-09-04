@@ -30,9 +30,10 @@ import {
   selectIntegrationDetail, toggleGithubRepoAudit,
 } from "./network.js";
 import {
-  completeToolConnect, connectTool, decideToolApproval, disconnectTool,
-  refreshExpandedToolApprovals, refreshTools, saveToolConfig, setToolEnabled,
-  selectToolDetail,
+  completeToolConnect, connectLinkedDevice, connectTool, decideToolApproval,
+  disconnectLinkedDevice, disconnectTool,
+  refreshExpandedLinkedDevices, refreshExpandedToolApprovals, refreshTools, saveToolConfig, setToolEnabled,
+  selectToolDetail, refreshLinkedDevice,
 } from "./tools.js";
 import {
   copyCallbackUri, dismissCallbackCopyFeedback, openConnectionGuide, refreshConnectionGuide,
@@ -639,7 +640,7 @@ const tabRefreshers = {
   "files": { enter: [ensureFilesLoaded], tick: [refreshFiles] },
   "network": {
     enter: [loadPolicy, refreshTools, refreshExpandedToolApprovals, refreshConnectionGuide],
-    tick: [refreshPendingGithubPushes, refreshExpandedToolApprovals],
+    tick: [refreshPendingGithubPushes, refreshExpandedToolApprovals, refreshExpandedLinkedDevices],
   },
 };
 
@@ -1091,8 +1092,7 @@ async function openWorkspaceWebApp(appId, updateHistory = true) {
   if (updateHistory) navigateWorkspaceRoute("apps", appId);
   try {
     await window.KernWebApps.open(found.item, webAppsNavArchived, false);
-    // Opening the App canvas acknowledges its rendered revision, but Chat
-    // messages remain unread until the embedded Chat view is actually shown.
+    // App navigation tracks rendered revisions, not embedded Chat messages.
     markWorkspaceSeen("apps", {
       ...found.item,
       latest_message_seq: Number(found.item.seen_message_seq) || 0,
@@ -1269,6 +1269,9 @@ document.addEventListener("click", event => {
     "save-tool-config": () => saveToolConfig(button.dataset.tool, button.dataset.key),
     "connect-tool": () => connectTool(button.dataset.tool, button.dataset.connection || ""),
     "disconnect-tool": () => disconnectTool(button.dataset.tool, button.dataset.connection || ""),
+    "connect-linked-device": () => connectLinkedDevice(button.dataset.tool),
+    "refresh-linked-device": () => refreshLinkedDevice(button.dataset.tool),
+    "disconnect-linked-device": () => disconnectLinkedDevice(button.dataset.tool),
     "decide-approval": () => decideToolApproval(button.dataset.tool, button.dataset.approvalId, button.dataset.decision),
     "copy-callback-uri": () => copyCallbackUri(button),
   };

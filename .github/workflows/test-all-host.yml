@@ -20,6 +20,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify locked host Node dependencies
+        shell: bash
+        run: |
+          npm ci --prefix host/npm --omit=dev --ignore-scripts --no-fund --no-audit
+
       - name: Build CI sandbox image
         shell: bash
         run: |

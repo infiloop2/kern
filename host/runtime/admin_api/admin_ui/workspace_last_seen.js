@@ -12,8 +12,10 @@ function itemMarker(kind, item = {}) {
 }
 
 function hasAdvanced(kind, current, item = {}) {
-  return current.message_seq > (Number(item.seen_message_seq) || 0)
-    || (kind === "apps" && current.revision > (Number(item.seen_revision) || 0));
+  if (kind === "apps") {
+    return current.revision > (Number(item.seen_revision) || 0);
+  }
+  return current.message_seq > (Number(item.seen_message_seq) || 0);
 }
 
 export function createWorkspaceLastSeen({ api, currentTab, currentRoute, getItem, render }) {

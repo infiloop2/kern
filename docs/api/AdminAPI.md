@@ -1329,6 +1329,9 @@ POST /v1/tools/{tool_id}/disable
 POST /v1/tools/{tool_id}/oauth_connect/start
 POST /v1/tools/{tool_id}/oauth_connect/complete
 POST /v1/tools/{tool_id}/oauth_connect/disconnect
+POST /v1/tools/{tool_id}/service/status
+POST /v1/tools/{tool_id}/service/connect
+POST /v1/tools/{tool_id}/service/disconnect
 GET  /v1/tools/{tool_id}/approvals
 GET  /v1/tools/{tool_id}/approvals/{approval_id}
 POST /v1/tools/{tool_id}/approvals/{approval_id}/approve
@@ -1346,18 +1349,21 @@ Tool endpoints:
 
 | Method | Path | Request | Response | Behavior |
 | --- | --- | --- | --- | --- |
-| `GET` | `/v1/tools` | none | Tool list response | Lists every bundled tool with its manifest (actions with per-action data policy, config requirements), enablement, per-tool config status, and OAuth connection accounts. Responses never include config values, tokens, or client secrets. |
+| `GET` | `/v1/tools` | none | Tool list response | Lists every bundled tool with its manifest (actions with per-action data policy, config requirements), enablement, per-tool config status, and connection state. Responses never include config values, tokens, client secrets, or linked-device session keys. |
 | `PUT` | `/v1/tools/{tool_id}/config` | `{"key", "value"}` | `{"tool_id", "key", "set"}` | Sets one config value declared by that tool's manifest. Config is scoped per tool (a repeated key name holds an independent value per tool) and every value is a secret: write-only, stored encrypted at rest (secretbox); an empty `value` clears the key. `400` when `key` is not declared by `{tool_id}`. |
-| `POST` | `/v1/tools/{tool_id}/enable` | none | `{"tool_id", "enabled"}` | Enables the tool for agent calls. Not gated on config: a tool can be enabled with partial or no config set (per-key config status is reported by `GET /v1/tools`); an action that needs an unset key fails when the tool reads it. |
-| `POST` | `/v1/tools/{tool_id}/disable` | none | `{"tool_id", "enabled"}` | Disables the tool. Stored connections and credentials are kept; use disconnect to remove them. |
+| `POST` | `/v1/tools/{tool_id}/enable` | none | `{"tool_id", "enabled"}` | Enables the tool for agent calls. Not gated on config: a tool can be enabled with partial or no config set (per-key config status is reported by `GET /v1/tools`); an action that needs an unset key fails when the tool reads it. For WhatsApp this also requests immediate linked-device listener startup; if startup fails, enablement remains committed and a later request or service restart retries it. |
+| `POST` | `/v1/tools/{tool_id}/disable` | none | `{"tool_id", "enabled"}` | Disables the tool. Stored connections and credentials are kept; use disconnect to remove them. For WhatsApp this stops the listener while retaining its local session and cache. |
 | `POST` | `/v1/tools/{tool_id}/oauth_connect/start` | `{"redirect_uri", "connection_id"?}` | `{"authorization_url", "state", "connection_id"}` | Starts the tool's OAuth connect flow (OAuth tools only, `409` otherwise or when disabled). Omit `connection_id` to connect another account; Kern generates the opaque connection id returned in the response. Pass an existing id to reconnect that account. Preserve the returned id for `complete`. The UI uses `<admin origin>/oauth/callback` as the redirect URI; register that URL with the OAuth provider. Reached over SSH-forwarded localhost it is a loopback URL such as `http://localhost:7443/oauth/callback` (providers accept loopback without HTTPS); reached over a Cloudflare Tunnel hostname it is that HTTPS origin's `/oauth/callback`. Building the URL needs no egress and runs in the admin service; the later code exchange (`oauth_connect/complete`) runs in the dedicated tools service. |
 | `POST` | `/v1/tools/{tool_id}/oauth_connect/complete` | `{"code", "state", "redirect_uri", "connection_id"}` | `{"account": {...}, "connection_id"}` | Completes the OAuth flow for the connection id returned by `start` and stores tokens in that connection's credential store. Returns the connected `account` (see `ConnectionAccount` below); `400` for a missing connection id or invalid/expired `state`. |
 | `POST` | `/v1/tools/{tool_id}/oauth_connect/disconnect` | `{"connection_id"}` | `{"tool_id", "connected": false, "connection_id"}` | Revokes third-party tokens where possible and deletes only the selected connection. |
+| `POST` | `/v1/tools/{tool_id}/service/status` | none | Service status | Returns operator-only connection state for a manifest-declared service. For WhatsApp this may include a short-lived QR data URL while enabled, or `suspended` when a registered session is retained while disabled; agent tool actions never receive it. |
+| `POST` | `/v1/tools/{tool_id}/service/connect` | none | Service status | Asks the tool-owned service to connect. For WhatsApp this starts or resumes the linked-device session and waits briefly for either a QR code or a connected state. Requires the tool to be enabled. |
+| `POST` | `/v1/tools/{tool_id}/service/disconnect` | none | Service status | Asks the tool-owned service to disconnect. For WhatsApp this logs out the linked device and deletes its durable session keys and bounded local message cache. Available even while the tool is disabled. |
 | `GET` | `/v1/tools/{tool_id}/approvals` | none | Approval list response | Lists `{tool_id}`'s action approvals as a bounded working set: pending first (so open decisions surface at the top), then newest decided ones as bounded history. Approvals are addressed under their tool so the operator UI shows each tool's approvals in its own row. Payload is omitted from the list; fetch it per approval. The paginated audit trail is `/v1/tools/events`. |
 | `GET` | `/v1/tools/{tool_id}/approvals/{approval_id}` | none | `{"approval"}` | The full approval record for `{approval_id}`, including its (up to 64 KiB) payload. `404` when `{approval_id}` is not an approval of `{tool_id}`. |
 | `POST` | `/v1/tools/{tool_id}/approvals/{approval_id}/approve` | none | `{"approval", "result"}` | Approves a pending approval and immediately executes the recorded payload exactly once; the response carries the terminal approval record (`executed` or `failed`) and the execution result. `404` when `{approval_id}` is not an approval of `{tool_id}`; `409` when it is not pending. |
 | `POST` | `/v1/tools/{tool_id}/approvals/{approval_id}/deny` | none | `{"approval"}` | Denies a pending approval; terminal. `404` when `{approval_id}` is not an approval of `{tool_id}`; `409` when it is not pending. |
-| `GET` | `/v1/tools/events` | `?before=&limit=` | `{"events": [...]}` | The tool audit log, newest first: tool calls, approval decisions, connect/disconnect, enable/disable, and config set/clear events. Pages with the same `before` (an event `seq`) and `limit` cursor model as `/v1/events` and `/v1/network/events`. |
+| `GET` | `/v1/tools/events` | `?before=&limit=` | `{"events": [...]}` | The tool audit log, newest first: tool calls, approval decisions, OAuth connect/disconnect, enable/disable, and config set/clear events. Linked-device session changes are live connection state rather than durable audit events. Pages with the same `before` (an event `seq`) and `limit` cursor model as `/v1/events` and `/v1/network/events`. |
 | `GET` | `/v1/tools/events/{seq}` | none | `{"event": {...}}` | Loads one tool event with its exact action `arguments`. The paginated list returns only `has_arguments`, so live refreshes do not repeatedly transfer up to 64 KiB per event. `404` when `{seq}` does not exist. |
 
 Tool list response:
@@ -1458,7 +1464,7 @@ tool. Each tool object has:
 | --- | --- |
 | `tool_id` | Stable package identifier; keys config, credentials, approvals, and audit records. |
 | `display_name`, `description` | Operator-facing name and one-line summary from the manifest. |
-| `connection` | `oauth` (operator third-party auth) or `enable_only` (deployment key only). |
+| `connection` | `oauth` (operator third-party auth), `enable_only` (deployment key only), or `whatsapp_linked_device` (WhatsApp QR linking). |
 | `enabled` | Whether the operator has enabled the tool for agent calls. |
 | `actions[]` | Each action's stable `id`, `description`, per-action `data_policy`, `approval` (`direct` or `operator`), `input_schema`, `output_schema`, and `returns_asset`. Both schemas name every field and close every object (`additionalProperties: false`). `output_schema` is empty `{}` exactly for the actions that return no JSON result: an approval-gated one, which returns a user-visible message, and a `returns_asset` one, whose whole result is a file streamed into the agent workspace. A field the provider may not supply is declared as a `oneOf` union with `{"type": "null"}`. |
 | `config[]` | This tool's declared config keys with `description` and `set`. All config is secret and scoped per tool; values are never returned (see `PUT /v1/tools/{tool_id}/config`). |
@@ -1466,7 +1472,7 @@ tool. Each tool object has:
 | `setup_steps[]` | Ordered provider-side and Kern setup steps. A step may include a provider documentation link and a local audited screenshot with alt text; `show_callback`/`show_config` render this host's OAuth callback URI or the tool's config keys inside that step. |
 | `data_summary` | The operator-facing data story as exactly four `cards`, in order: what leaves this host, where it can go, what the third party can do with it, and how long it retains it. Each card has a `description` and/or labeled `points`, plus authoritative policy `links`. |
 | `connected_accounts` | OAuth tools only: every connected account as `{"connection_id", "account": ConnectionAccount}`. `connection_id` is an opaque host-generated slot identifier used by agent calls and OAuth lifecycle endpoints; it is not derived from an email or provider id. Never contains tokens or client secrets. |
-| `connection_status` | Transitional aggregate for older clients: `{"connected": bool, "account"?: ConnectionAccount}` using the first connection when present. New clients use `connected_accounts`. |
+| `connection_status` | OAuth tools: transitional aggregate `{"connected": bool, "account"?: ConnectionAccount}` using the first connection. Linked-device tools: current supervised-session state and, only on the operator API, a pending QR data URL when linking. |
 
 `ConnectionAccount` is the explicit connected-account structure every OAuth tool
 returns and the host stores/displays: `{"id", "label", "scopes"}` — `id` is the
@@ -1544,7 +1550,7 @@ Tool event summary (from `/v1/tools/events`):
 | `action_id` | string | The manifest action id (`ActionSpec.id`) for a call; `oauth_connect` for a connect/disconnect, `enablement` for an enable/disable, or `config` for a config change. |
 | `connection_id` | string | The selected host connection for an OAuth event; empty for enable-only tools and pre-profile audit history. |
 | `account_id`, `account_label` | string | Non-secret provider identity snapshotted for the event; empty where no account identity was available. |
-| `outcome` | string | For a tool call: `executed`, `pending_approval`, or `failed`. For an approval decision: `executed`, `failed`, or `denied`. For a connection change: `connected` or `disconnected`. For an enablement change: `enabled` or `disabled`. For a config change: `set` or `cleared`. |
+| `outcome` | string | For a tool call: `executed`, `pending_approval`, or `failed`. For an approval decision: `executed`, `failed`, or `denied`. For an OAuth connection change: `connected` or `disconnected`. For an enablement change: `enabled` or `disabled`. For a config change: `set` or `cleared`. |
 | `detail` | string | Short context string: an error message, the related `approval_id`, the connected account label, or the config key that changed. May be empty. |
 | `has_arguments` | boolean | `true` for an accepted tool call or approval decision, including calls whose exact argument object is `{}`. `false` for config, enablement, and connection lifecycle events. |
 

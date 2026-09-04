@@ -49,7 +49,16 @@ class Tool(Protocol):
 ```
 
 `credentials` is non-`None` exactly when `manifest.connection == "oauth"` and
-`None` when `connection == "enable_only"`.
+`None` for `enable_only` and `whatsapp_linked_device`. A WhatsApp linked-device session is a
+host-owned supervised process; the tool package still receives no storage path
+or session key.
+
+An integration that needs a long-lived host process may declare one trusted
+`module:attribute` service reference in its manifest. The referenced object has
+only `start`, `stop`, and `operator` methods. Kern follows that declaration when
+the tool is enabled and when an operator calls its `/service/...` routes; the
+generic host does not import or branch on WhatsApp. Process supervision,
+provider status, and filesystem cleanup remain inside the declared service.
 
 `JSONObject` and `JSONValue` are plain JSON, defined once and reused for every
 value that crosses the tool/host boundary:
@@ -72,7 +81,7 @@ reads. Enablement is a host policy, not part of this contract; this host does no
 gate it on config.
 
 ```python
-ConnectionKind = Literal["oauth", "enable_only"]
+ConnectionKind = Literal["oauth", "enable_only", "whatsapp_linked_device"]
 ApprovalKind = Literal["direct", "operator"]
 
 @dataclass(frozen=True)
@@ -84,6 +93,11 @@ class ActionSpec:
     output_schema: JSONObject = {}          # required unless the action returns no JSON result
     approval: ApprovalKind = "direct"
     returns_asset: bool = False             # the whole result is one streamed file
+
+@dataclass(frozen=True)
+class ToolManifest:
+    # ...identity, actions, connection, and operator-facing metadata...
+    service: str = ""                       # optional trusted module:attribute
 
 @dataclass(frozen=True)
 class ConfigRequirement:
@@ -358,12 +372,14 @@ generic `StreamingAsset` result instead and never enters this staged-asset store
 
 ### Credentials
 
-OAuth tools are the only tools that persist state, and all they persist is a
+OAuth tool packages are the only packages that persist state, and all they persist is a
 connected-account credential. Instead of a generic key/value store, the host
 exposes a purpose-built typed service containing the one `StoredCredential`
 selected for that call. A package cannot enumerate or switch the host's
 connections; connection discovery and selection are host concerns. Enable-only
-tools never touch it.
+tools and linked-device packages never touch it. The latter call only a
+host-provided private gateway whose lifecycle and storage are outside this
+portable package contract.
 
 ```python
 class ConnectionAccount(TypedDict):

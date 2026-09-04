@@ -25,6 +25,12 @@ ROUTES = {
     "nodejs.org": (("GET", "HEAD"), (r"^/dist(?:/.*)?$",)),
 }
 
+# Public package names are normally scanned because registry lookup paths can
+# encode attacker-readable data. This exact dependency name is a false positive
+# for the guard's credential-language rule; keep the exception static and scan
+# its query string normally.
+PUBLIC_PACKAGE_PATH_EXCEPTIONS = frozenset({"/token-types"})
+
 
 def host_allowed(config: ManagedIntegration, host: str) -> bool:
     del config
@@ -64,4 +70,6 @@ def request_denied(
         # Tarball URLs (/<pkg>/-/<pkg>-<version>.tgz) are provider-returned after
         # metadata resolution, not agent-authored names.
         return None
+    if path in PUBLIC_PACKAGE_PATH_EXCEPTIONS:
+        return request_param_denial("", query)
     return request_param_denial(path, query)

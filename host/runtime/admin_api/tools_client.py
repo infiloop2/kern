@@ -88,7 +88,8 @@ def _tools_operator_request(path: str, body: Any = None) -> Any:
 TOOL_APPROVAL_LIST_LIMIT = tools_host.PENDING_APPROVAL_LIMIT
 TOOL_PATH_RE = re.compile(
     r"^/v1/tools/([a-z0-9_]{1,64})/"
-    r"(enable|disable|oauth_connect/start|oauth_connect/complete|oauth_connect/disconnect)$"
+    r"(enable|disable|oauth_connect/start|oauth_connect/complete|oauth_connect/disconnect|"
+    r"service/status|service/connect|service/disconnect)$"
 )
 # Approvals are addressed under their tool so the operator UI shows each tool's
 # approvals in its own row rather than one unified list.
@@ -204,6 +205,17 @@ def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> 
             if connections
             else {"connected": False}
         )
+    elif manifest.service:
+        try:
+            entry["connection_status"] = _tools_operator_request(
+                f"/operator/tools/{manifest.tool_id}/service/status"
+            )
+        except ApiError as exc:
+            entry["connection_status"] = {
+                "status": "unavailable",
+                "connected": False,
+                "error": exc.message,
+            }
     return entry
 
 
@@ -236,8 +248,15 @@ def put_tool_config(tool_id: str, body: Any) -> dict[str, Any]:
 
 
 def tool_action_route(tool_id: str, operation: str, body: Any) -> Any:
-    _bundled_tool(tool_id)  # 404 for unknown tools before any dispatch
+    tool = _bundled_tool(tool_id)  # 404 for unknown tools before any dispatch
     if operation == "enable":
+        if tool.manifest.service:
+            with state.mutation() as cur:
+                state.set_tool_enabled(cur, tool_id, True)
+            state.record_tool_event(tool_id, "enablement", "enabled", "")
+            return _tools_operator_request(
+                f"/operator/tools/{tool_id}/service/enable", body
+            )
         # Enablement is not gated on config: a tool may be enabled with partial or
         # no config (its per-tool config status is visible in the listing), and an
         # action that needs a key that is not set fails when the tool reads it.
@@ -246,11 +265,18 @@ def tool_action_route(tool_id: str, operation: str, body: Any) -> Any:
         state.record_tool_event(tool_id, "enablement", "enabled", "")
         return {"tool_id": tool_id, "enabled": True}
     if operation == "disable":
+        if tool.manifest.service:
+            with state.mutation() as cur:
+                state.set_tool_enabled(cur, tool_id, False)
+            state.record_tool_event(tool_id, "enablement", "disabled", "")
+            return _tools_operator_request(
+                f"/operator/tools/{tool_id}/service/disable", body
+            )
         with state.mutation() as cur:
             state.set_tool_enabled(cur, tool_id, False)
         state.record_tool_event(tool_id, "enablement", "disabled", "")
         return {"tool_id": tool_id, "enabled": False}
-    # The connect flows are tool-owned OAuth, invoked from the admin UI (the only
+    # The connect flows are operator-only, invoked from the admin UI (the only
     # exposed API: the browser callback lands on /oauth/callback here). The admin
     # service reverse-proxies the whole flow to the tools service verbatim, the
     # same way it reverse-proxies workspace requests, so no OAuth tool code

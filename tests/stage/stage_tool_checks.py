@@ -132,10 +132,9 @@ class StageToolChecks:
             item["key"] for item in entry.get("config", []) if not item.get("set")
         ]
         connected = (entry.get("connection_status") or {}).get("connected") is True
-        if entry.get("enabled") and not missing_config and (
-            manifest.connection != "oauth" or connected
-        ):
-            state = "connected" if manifest.connection == "oauth" else "configured"
+        needs_connection = manifest.connection in {"oauth", "whatsapp_linked_device"}
+        if entry.get("enabled") and not missing_config and (not needs_connection or connected):
+            state = "connected" if needs_connection else "configured"
             print(f"  [credential ok] {tool_id}: enabled and {state}", flush=True)
             return []
         problems: list[str] = []
@@ -148,8 +147,9 @@ class StageToolChecks:
             else:
                 env_names = [f"KERN_STAGE_{key}" for key in missing_config]
                 problems.append(f"set config via {', '.join(env_names)} or the admin UI")
-        if manifest.connection == "oauth" and not connected:
-            problems.append("connect its stage account once in the admin UI")
+        if needs_connection and not connected:
+            verb = "link" if manifest.connection == "whatsapp_linked_device" else "connect"
+            problems.append(f"{verb} its stage account once in the admin UI")
         if not entry.get("enabled"):
             problems.append("enable the tool")
         return [f"{tool_id}: {'; '.join(problems)}"]
@@ -158,7 +158,7 @@ class StageToolChecks:
         """Apply enable-only provider config from Actions secrets when present."""
         for tool_id in tool_ids:
             manifest = BUNDLED_TOOLS[tool_id].manifest
-            if manifest.connection == "oauth":
+            if manifest.connection in {"oauth", "whatsapp_linked_device"}:
                 continue
             for requirement in manifest.config:
                 value = os.environ.get(f"KERN_STAGE_{requirement.key}", "")
@@ -173,7 +173,7 @@ class StageToolChecks:
             for entry in self._api("GET", "/v1/tools")["tools"]
         }
         for tool_id in tool_ids:
-            if BUNDLED_TOOLS[tool_id].manifest.connection == "oauth":
+            if BUNDLED_TOOLS[tool_id].manifest.connection in {"oauth", "whatsapp_linked_device"}:
                 continue
             entry = listing[tool_id]
             if all(item.get("set") for item in entry.get("config", [])):
@@ -362,11 +362,13 @@ class StageToolChecks:
             "gmail": self._check_gmail_live,
             "google_calendar": self._check_calendar_live,
             "google_search_console": self._check_search_console_live,
+            "h3max": self._check_h3max_live,
             "instagram_discovery": self._check_instagram_discovery_live,
             "polymarket": self._check_polymarket_live,
             "reddit": self._check_reddit_live,
             "twitter": self._check_twitter_live,
             "twitterapi_io": self._check_twitterapi_io_live,
+            "whatsapp": self._check_whatsapp_live,
             "openai_images": self._check_openai_images_live,
             "runway": self._check_runway_live,
             "seedance": self._check_seedance_live,
@@ -456,6 +458,15 @@ class StageToolChecks:
                     raise
                 print("    [provider retry] brave_search HTTP 5xx; retrying once", flush=True)
         raise AssertionError("unreachable")
+
+    def _check_whatsapp_live(self) -> str:
+        status = self._successful_tool_call("whatsapp_connection_status", {})
+        if status.get("connected") is not True:
+            raise CredentialUnavailable("linked WhatsApp device is not connected")
+        chats = self._successful_tool_call("whatsapp_list_chats", {"limit": 1})
+        rows = chats.get("chats")
+        count = len(rows) if isinstance(rows, list) else 0
+        return f"linked-device status and bounded local chat cache read completed ({count} chat(s))"
 
     def _check_gmail_live(self) -> str:
         unique_title = f"Kern stage check {os.urandom(4).hex()}"
@@ -871,6 +882,24 @@ class StageToolChecks:
         if not result.get("isError") or "not found" not in lowered:
             raise AssertionError(
                 f"Seedance authenticated task probe was unexpected: "
+                f"isError={result.get('isError')}, message={text}"
+            )
+        return "authenticated missing-task probe completed without generation spend"
+
+    def _check_h3max_live(self) -> str:
+        # A completed render spends account credit; a syntactically valid UUID
+        # that cannot exist proves the API key reaches fal's queue without spend.
+        name = "h3max_get_task"
+        result, text = self._shim_tool_response(
+            name,
+            {"task_id": "text_00000000-0000-4000-8000-000000000000"},
+        )
+        lowered = text.lower()
+        if "rejected the configured api key" in lowered or "denied the request" in lowered:
+            raise CredentialUnavailable(f"{name}: {text}")
+        if not result.get("isError") or "not found" not in lowered:
+            raise AssertionError(
+                f"H3 Max authenticated task probe was unexpected: "
                 f"isError={result.get('isError')}, message={text}"
             )
         return "authenticated missing-task probe completed without generation spend"
