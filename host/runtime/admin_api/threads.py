@@ -49,6 +49,7 @@ THREAD_DISPLAY_EVENT_TYPES = frozenset({
 })
 _RUNTIME_USAGE_KEYS = {
     "codex": "codex_usage",
+    "codex-2": "codex_usage",
     "claude_code": "claude_usage",
     "grok": "grok_usage",
     "hermes": "bedrock_usage",

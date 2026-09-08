@@ -302,6 +302,8 @@ for directory in (
     agent_home,
     agent_home / ".tmp",
     agent_home / ".codex",
+    agent_home / ".codex" / "skills",
+    agent_home / ".codex-2",
     agent_home / ".claude",
     agent_home / ".hermes",
 ):
@@ -320,6 +322,7 @@ for path in (
     agent_home / "AGENTS.md",
     agent_home / "CLAUDE.md",
     agent_home / ".codex" / "config.toml",
+    agent_home / ".codex-2" / "config.toml",
     agent_home / ".claude" / "settings.json",
     agent_home / ".hermes" / "config.yaml",
     agent_home / ".hermes" / ".env",
@@ -1255,6 +1258,8 @@ apply_durable_ownership() {
   install -d -m 700 -o kern-agent -g kern-agent \
     "$AGENT_HOME_PATH/.tmp" \
     "$AGENT_HOME_PATH/.codex" \
+    "$AGENT_HOME_PATH/.codex/skills" \
+    "$AGENT_HOME_PATH/.codex-2" \
     "$AGENT_HOME_PATH/.claude" \
     "$AGENT_HOME_PATH/.grok" \
     "$AGENT_HOME_PATH/.hermes"
@@ -1281,6 +1286,7 @@ for managed_agent_file in \
   "$AGENT_HOME_PATH/AGENTS.md" \
   "$AGENT_HOME_PATH/CLAUDE.md" \
   "$AGENT_HOME_PATH/.codex/config.toml" \
+  "$AGENT_HOME_PATH/.codex-2/config.toml" \
   "$AGENT_HOME_PATH/.claude/settings.json" \
   "$AGENT_HOME_PATH/.hermes/config.yaml" \
   "$AGENT_HOME_PATH/.hermes/.env"; do
@@ -1289,13 +1295,19 @@ done
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/agents_claude.md" "$AGENT_HOME_PATH/AGENTS.md"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/agents_claude.md" "$AGENT_HOME_PATH/CLAUDE.md"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.codex/config.toml" "$AGENT_HOME_PATH/.codex/config.toml"
+install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.codex/config.toml" "$AGENT_HOME_PATH/.codex-2/config.toml"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.claude/settings.json" "$AGENT_HOME_PATH/.claude/settings.json"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.hermes/config.yaml" "$AGENT_HOME_PATH/.hermes/config.yaml"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.hermes/.env" "$AGENT_HOME_PATH/.hermes/.env"
+if [ ! -e "$AGENT_HOME_PATH/.codex-2/skills" ] && [ ! -L "$AGENT_HOME_PATH/.codex-2/skills" ]; then
+  ln -s ../.codex/skills "$AGENT_HOME_PATH/.codex-2/skills"
+  chown -h kern-agent:kern-agent "$AGENT_HOME_PATH/.codex-2/skills"
+fi
 chattr +i \
   "$AGENT_HOME_PATH/AGENTS.md" \
   "$AGENT_HOME_PATH/CLAUDE.md" \
   "$AGENT_HOME_PATH/.codex/config.toml" \
+  "$AGENT_HOME_PATH/.codex-2/config.toml" \
   "$AGENT_HOME_PATH/.claude/settings.json" \
   "$AGENT_HOME_PATH/.hermes/config.yaml" \
   "$AGENT_HOME_PATH/.hermes/.env"

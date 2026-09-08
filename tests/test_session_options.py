@@ -20,6 +20,7 @@ class SessionOptionsTests(unittest.TestCase):
             DEFAULT_INTERACTIVE_MODELS,
             {
                 "codex": "gpt-5.6-sol",
+                "codex-2": "gpt-5.6-sol",
                 "claude_code": "claude-opus-5",
                 "grok": "grok-4.6",
                 "hermes": "moonshotai.kimi-k2.5",
@@ -35,6 +36,12 @@ class SessionOptionsTests(unittest.TestCase):
             INTERACTIVE_SESSION_OPTIONS,
             {
                 "codex": {
+                    "gpt-5.6-terra": ("high", "max", "ultra"),
+                    "gpt-5.6-sol": ("high", "max", "ultra"),
+                    "gpt-5.6-luna": ("high", "max"),
+                    "gpt-6-astra": ("high", "max", "ultra"),
+                },
+                "codex-2": {
                     "gpt-5.6-terra": ("high", "max", "ultra"),
                     "gpt-5.6-sol": ("high", "max", "ultra"),
                     "gpt-5.6-luna": ("high", "max"),

@@ -2555,7 +2555,7 @@ class OrchestratorTests(unittest.TestCase):
 
         parked = _Parked()
         with orchestrator.codex_app_server._login_lock:
-            orchestrator.codex_app_server._parked_login = orchestrator.codex_app_server._ParkedLogin(
+            orchestrator.codex_app_server._parked_logins["codex"] = orchestrator.codex_app_server._ParkedLogin(
                 server=parked, login_id="relogin"  # type: ignore[arg-type]
             )
         try:
@@ -2568,7 +2568,7 @@ class OrchestratorTests(unittest.TestCase):
 
             self.assertTrue(parked.closed)
             with orchestrator.codex_app_server._login_lock:
-                self.assertIsNone(orchestrator.codex_app_server._parked_login)
+                self.assertIsNone(orchestrator.codex_app_server._parked_logins.get("codex"))
             self.assertIsNone(state.oauth_login("codex"))
         finally:
             orchestrator.codex_app_server.close_login_server()
@@ -2936,10 +2936,10 @@ class OrchestratorTests(unittest.TestCase):
             orchestrator.reconcile_runtime_status_after_policy_change()
 
         # The disabled runtime deactivates directly (no provider probe, no
-        # refresh serialization); only the enabled one is refreshed, in the
-        # background.
-        self.assertEqual(calls, ["codex"])
-        self.assertEqual(background, [("codex",)])
+        # refresh serialization); only the two OpenAI-backed runtimes are
+        # refreshed by the one background batch.
+        self.assertEqual(calls, ["codex", "codex-2"])
+        self.assertEqual(background, [("codex", "codex-2")])
         self.assertEqual(orchestrator.runtime_status("claude_code"), "deactivated")
 
     # -- Hermes (AWS Bedrock) lifecycle -----------------------------------------------
@@ -3259,7 +3259,7 @@ class StartBackgroundLoopsOrderTests(unittest.TestCase):
             with self.assertRaises(StopLoop):
                 orchestrator.runtime_status_loop()
 
-        self.assertEqual(polled, ["codex", "claude_code", "grok", "hermes"])
+        self.assertEqual(polled, ["codex", "codex-2", "claude_code", "grok", "hermes"])
         for runtime_type in orchestrator.UNMANAGED_RUNTIMES:
             self.assertNotIn(runtime_type, polled)
 

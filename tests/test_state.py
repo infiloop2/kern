@@ -30,6 +30,7 @@ from host.runtime.core.state import (
     read_openai_account,
     read_proxy_claude_account_id,
     read_proxy_openai_account_id,
+    read_proxy_openai_account_ids,
     read_proxy_xai_account_id,
     save_config,
     save_claude_account,
@@ -1604,6 +1605,27 @@ class StateStorageTests(unittest.TestCase):
         save_openai_account(None)
 
         self.assertEqual(read_openai_account(), {})
+
+    def test_second_codex_account_and_proxy_pin_are_independent(self) -> None:
+        save_openai_account({"account_id": "acct-1", "planType": "pro"})
+        save_openai_account(
+            {"account_id": "acct-2", "planType": "plus"},
+            runtime_type="codex-2",
+        )
+        save_proxy_openai_account_id("acct-1")
+        save_proxy_openai_account_id("acct-2", runtime_type="codex-2")
+
+        self.assertEqual(read_openai_account()["account_id"], "acct-1")
+        self.assertEqual(
+            read_openai_account(runtime_type="codex-2")["account_id"],
+            "acct-2",
+        )
+        self.assertEqual(read_proxy_openai_account_id(), "acct-1")
+        self.assertEqual(
+            read_proxy_openai_account_id(runtime_type="codex-2"),
+            "acct-2",
+        )
+        self.assertEqual(read_proxy_openai_account_ids(), {"acct-1", "acct-2"})
 
     def test_config_replaces_wholesale(self) -> None:
         hash_1 = "1" * 64

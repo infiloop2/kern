@@ -93,6 +93,23 @@ HARNESSES: dict[str, HarnessAdapter] = {
             server, message, session_id, model, effort, on_message
         ),
     ),
+    "codex-2": ModuleHarnessAdapter(
+        "codex-2", "Codex 2", "openai", "codex-2", True, False, False,
+        (codex_app_server.CodexAppServerError,),
+        codex_app_server,
+        lambda force: codex_app_server.account_status(
+            runtime_type="codex-2", force_provider_probe=force
+        ),
+        lambda thread_id, on_ready, on_session_id: codex_app_server.CodexAppServer(
+            runtime_type="codex-2",
+            thread_id=thread_id,
+            on_ready=on_ready,
+            on_session_id=on_session_id,
+        ),
+        lambda server, message, session_id, model, effort, on_message, finish: codex_app_server.run_turn(
+            server, message, session_id, model, effort, on_message
+        ),
+    ),
     "claude_code": ModuleHarnessAdapter(
         "claude_code", "Claude Code", "claude", "claude", True, True, False,
         (claude_code.ClaudeCodeError,),

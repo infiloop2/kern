@@ -7,7 +7,9 @@ import { $, esc, inlineCode, setHtml } from "./helpers.js";
 import { CUSTOM_DOMAIN_GUIDE, MANAGED_INTEGRATIONS } from "./integration_catalog.js";
 
 let selectedGuideId = "openai";
-let loadedGuides = [];
+// Managed integrations are static, so their detail pages can open immediately
+// while the bundled-tool catalog is still loading.
+let loadedGuides = allGuides([]);
 let copyFeedbackTimer = null;
 let copyFeedbackGeneration = 0;
 

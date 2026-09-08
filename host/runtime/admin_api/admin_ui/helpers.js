@@ -5,16 +5,20 @@ export const $ = id => document.getElementById(id);
 
 export const RUNTIME_PROVIDERS = {
   codex: { label: "Codex", provider: "openai", providerLabel: "OpenAI" },
+  "codex-2": { label: "Codex 2", provider: "openai", providerLabel: "OpenAI" },
   claude_code: { label: "Claude Code", provider: "claude", providerLabel: "Claude" },
   grok: { label: "Grok", provider: "xai", providerLabel: "Grok" },
   hermes: { label: "Hermes", provider: "bedrock", providerLabel: "AWS Bedrock" },
 };
 
 export function providerRuntime(provider) {
-  for (const [runtime, meta] of Object.entries(RUNTIME_PROVIDERS)) {
-    if (meta.provider === provider) return runtime;
-  }
-  return null;
+  return providerRuntimes(provider)[0] || null;
+}
+
+export function providerRuntimes(provider) {
+  return Object.entries(RUNTIME_PROVIDERS)
+    .filter(([, meta]) => meta.provider === provider)
+    .map(([runtime]) => runtime);
 }
 
 export function runtimeLabel(runtime) {

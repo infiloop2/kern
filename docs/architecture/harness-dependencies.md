@@ -10,7 +10,7 @@ can break when a harness package is upgraded.
 
 | Harness | Package | Pinned version | Runtime id | Adapter |
 | --- | --- | --- | --- | --- |
-| Codex | `@openai/codex` | `0.153.3` | `codex` | `host/runtime/agent_runtime/codex_app_server.py` |
+| Codex | `@openai/codex` | `0.153.3` | `codex`, `codex-2` | `host/runtime/agent_runtime/codex_app_server.py` |
 | Claude Code | `@anthropic-ai/claude-code` | `2.1.258` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
 | Grok Build | `@xai-official/grok` | `1.0.5` | `grok` | `host/runtime/agent_runtime/grok_agent.py` |
 | Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/agent_runtime/hermes_agent.py` |
@@ -53,6 +53,10 @@ If any of those properties changes, the runtime status poller, turn threads,
 network guards, or privilege boundary can fail.
 
 ## Codex harness expectations
+
+Kern exposes two fixed Codex runtimes. `codex` uses `.codex`; `codex-2` uses
+`.codex-2`. They share the root-owned config, skills, package, launcher, and
+OpenAI network integration, but keep auth and provider sessions separate.
 
 ### Process interface
 
@@ -114,7 +118,7 @@ app-server Kern started; the account id itself is read from the login
 tokens through `read-codex-account-id` (the provider-signed `chatgpt_account_id`
 claim) promptly after completion. An active `account/read` result by itself is
 not operator approval for the stored device-code flow. The residual window
-between the CLI writing `~/.codex/auth.json` and that read matches the Claude
+between the CLI writing the selected runtime's `auth.json` and that read matches the Claude
 first-capture path, and the linked account is shown to the operator once pinned.
 The resulting OpenAI provider account row is tagged with
 `operator_approval: "codex_device_login"`; rows without that marker are
@@ -122,10 +126,12 @@ legacy/unapproved state and never publish a proxy pin.
 
 `account/read` is not assumed to expose the ChatGPT account id. Kern reads
 the account id through `read-codex-account-id`, which parses a small part of
-Codex auth state at:
+Codex auth state at `.codex/auth.json` for `codex` and `.codex-2/auth.json` for
+`codex-2`:
 
 ```text
 ~/.codex/auth.json
+~/.codex-2/auth.json
 ```
 
 Supported account-id sources, in order:

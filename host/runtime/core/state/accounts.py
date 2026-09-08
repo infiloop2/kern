@@ -45,13 +45,35 @@ def set_oauth_login(cur: Any, key: str, data: dict[str, Any] | None) -> None:
 
 # -- provider account records ---------------------------------------------------------
 
-
-def save_openai_account(account: dict[str, Any] | None, cur: Any = None) -> None:
-    _save_provider_account("openai", account if account is not None else {"account_id": None}, cur)
+OPENAI_PROVIDER_KEYS = {"codex": "openai", "codex-2": "openai-2"}
 
 
-def read_openai_account(cur: Any = None) -> dict[str, Any]:
-    value = _read_provider_account("openai", cur)
+def openai_provider_key(runtime_type: str) -> str:
+    try:
+        return OPENAI_PROVIDER_KEYS[runtime_type]
+    except KeyError as exc:
+        raise ValueError(f"unsupported Codex runtime: {runtime_type}") from exc
+
+
+def save_openai_account(
+    account: dict[str, Any] | None,
+    cur: Any = None,
+    *,
+    runtime_type: str = "codex",
+) -> None:
+    _save_provider_account(
+        openai_provider_key(runtime_type),
+        account if account is not None else {"account_id": None},
+        cur,
+    )
+
+
+def read_openai_account(
+    cur: Any = None,
+    *,
+    runtime_type: str = "codex",
+) -> dict[str, Any]:
+    value = _read_provider_account(openai_provider_key(runtime_type), cur)
     return value if isinstance(value, dict) else {}
 
 

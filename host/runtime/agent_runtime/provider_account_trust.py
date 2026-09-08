@@ -62,29 +62,37 @@ class _TokenAnchoredProvider(NamedTuple):
     error: type[Exception]
 
 
-# The adapter entries below are deliberately written as lambdas rather than as
-# direct function references: a reference captured here would bind the adapter
-# function once, at import, so anything that later replaces the module
-# attribute — including the tests that stand in for a provider CLI — would be
-# silently ignored. The lambdas resolve through the module on every call.
-_TOKEN_ANCHORED: dict[str, _TokenAnchoredProvider] = {
-    "codex": _TokenAnchoredProvider(
+def _codex_anchor(runtime_type: str) -> _TokenAnchoredProvider:
+    return _TokenAnchoredProvider(
         approval=OPENAI_OPERATOR_APPROVAL,
-        read_account=lambda cur=None: read_openai_account(cur),
-        save_account=lambda account, cur=None: save_openai_account(account, cur),
+        read_account=lambda cur=None: read_openai_account(cur, runtime_type=runtime_type),
+        save_account=lambda account, cur=None: save_openai_account(
+            account, cur, runtime_type=runtime_type
+        ),
         save_proxy_account_id=lambda account_id, cur=None: state.save_proxy_openai_account_id(
-            account_id, cur
+            account_id, cur, runtime_type=runtime_type
         ),
         usage_key="codex_usage",
         read_completed_login_account_id=(
-            lambda login_id: codex_app_server.read_completed_device_login_account_id(login_id)
+            lambda login_id: codex_app_server.read_completed_device_login_account_id(
+                login_id, runtime_type
+            )
         ),
-        clear_live_validation=lambda: codex_app_server.clear_live_validation_failure(),
+        clear_live_validation=lambda: codex_app_server.clear_live_validation_failure(runtime_type),
         close_completed_login_server=(
-            lambda login_id: codex_app_server.close_completed_login_server(login_id)
+            lambda login_id: codex_app_server.close_completed_login_server(login_id, runtime_type)
         ),
         error=codex_app_server.CodexAppServerError,
-    ),
+    )
+
+
+# The adapter entries deliberately use lambdas: resolving provider modules on
+# each call preserves the test seams that replace CLI functions after import.
+_TOKEN_ANCHORED: dict[str, _TokenAnchoredProvider] = {
+    **{
+        runtime_type: _codex_anchor(runtime_type)
+        for runtime_type in codex_app_server.CODEX_RUNTIME_TYPES
+    },
     "grok": _TokenAnchoredProvider(
         approval=XAI_OPERATOR_APPROVAL,
         read_account=lambda cur=None: read_xai_account(cur),
@@ -215,7 +223,7 @@ def _active_account_value(runtime_type: str, status: str, account: Any) -> dict[
         return None
     if isinstance(account, dict):
         return account
-    if runtime_type == "codex" and isinstance(account, str) and account:
+    if runtime_type in codex_app_server.CODEX_RUNTIME_TYPES and isinstance(account, str) and account:
         return {"account_id": account}
     return None
 
@@ -491,7 +499,7 @@ def _trusted_active_account(
 
 # The provider name shown to the operator when their linked account is the
 # problem. It names the account they would go and fix, not the runtime.
-_ACCOUNT_PROVIDER_LABELS = {"codex": "OpenAI", "grok": "xAI"}
+_ACCOUNT_PROVIDER_LABELS = {"codex": "OpenAI", "codex-2": "OpenAI", "grok": "xAI"}
 
 
 def _trusted_token_account(cur: Any, runtime_type: str, account: dict[str, Any]) -> dict[str, Any]:

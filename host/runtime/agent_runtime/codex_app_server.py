@@ -8,7 +8,7 @@ short-lived servers, and each turn runs on a fresh server that resumes
 its provider thread by id.
 
 A device-code login only completes while the app-server that started it keeps
-polling, so ``start_device_login`` parks its server in ``_parked_login``. The
+polling, so ``start_device_login`` parks its server in ``_parked_logins``. The
 status poller is the sole reader of that parked server: it drives the login
 forward and records the completion on the parked record for the orchestrator
 to capture. The parked server lives until the orchestrator captures the
@@ -46,10 +46,11 @@ from typing import IO, Any, Callable
 
 from host.runtime.agent_runtime import agent_activity, thread_scope
 from host.runtime.agent_runtime.harness import ProviderTurnFinishing
-from host.runtime.core.state import read_proxy_openai_account_id
+from host.runtime.core.state import OPENAI_PROVIDER_KEYS, read_proxy_openai_account_id
 
 DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-codex-app-server"]
 DEFAULT_ACCOUNT_ID_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/read-codex-account-id"]
+CODEX_RUNTIME_TYPES = tuple(OPENAI_PROVIDER_KEYS)
 AGENT_CWD = "/mnt/kern-agent/agent-home"
 ACCOUNT_ID_HELPER_TIMEOUT_SECONDS = 10
 CLIENT_VERSION = "v1.0"
@@ -66,7 +67,7 @@ PROCESS_EXIT_TIMEOUT_SECONDS = 3
 
 @dataclass
 class _ParkedLogin:
-    """The single parked device-login flow: its polling app-server, the login
+    """One runtime's parked device-login flow: its polling app-server, the login
     id it serves, and — once the poller observes completion — the trusted
     account id read at that moment (None records a failed read, which fails
     closed at capture)."""
@@ -77,15 +78,15 @@ class _ParkedLogin:
     account_id: str | None = field(default=None)
 
 
-_parked_login: _ParkedLogin | None = None
+_parked_logins: dict[str, _ParkedLogin] = {}
 _login_lock = threading.Lock()
 
-# The last live credential-validation failure: (status, error_message, recorded
-# monotonic time). An awaiting_login verdict is final until an operator login
+# Each runtime's last live credential-validation failure: (status,
+# error_message, recorded monotonic time). An awaiting_login verdict is final until an operator login
 # completes or the linked account is reset; any other failure is retried after
 # LIVE_VALIDATION_RETRY_SECONDS. In-memory on purpose: a restart revalidates
 # once from scratch.
-_live_validation_failure: tuple[str, str | None, float] | None = None
+_live_validation_failures: dict[str, tuple[str, str | None, float]] = {}
 
 
 class CodexAppServerError(RuntimeError):
@@ -124,8 +125,17 @@ class CodexAppServer:
         thread_id: str | None = None,
         on_ready: Callable[[], bool] | None = None,
         on_session_id: Callable[[str], None] | None = None,
+        *,
+        runtime_type: str = "codex",
     ) -> None:
-        self._command = command or DEFAULT_COMMAND
+        if runtime_type not in CODEX_RUNTIME_TYPES:
+            raise ValueError(f"unsupported Codex runtime: {runtime_type}")
+        self.runtime_type = runtime_type
+        self._command = (
+            [*DEFAULT_COMMAND, "--runtime", runtime_type]
+            if command is None
+            else command
+        )
         # Kept for the kill path: close() stops this thread's systemd scope by
         # name. The launcher folds the id into _command below as the run flag.
         self._thread_id = thread_id
@@ -477,53 +487,66 @@ def _client_info() -> dict[str, dict[str, str]]:
     return {"clientInfo": {"name": "kern-host", "version": CLIENT_VERSION}}
 
 
-def account_status(*, force_provider_probe: bool = False) -> tuple[str, str | None, dict[str, Any] | None]:
+def account_status(
+    *, runtime_type: str = "codex", force_provider_probe: bool = False
+) -> tuple[str, str | None, dict[str, Any] | None]:
     """Return (status, detail, account metadata). detail is set only for "error"."""
     # Bounded timeouts: only the background poller calls this, but a Codex
     # app-server that cannot start (e.g. its startup traffic is denied by a
     # restrictive policy) must not wedge the poller — it resolves to "error"
     # with a detail until conditions improve. The init timeout leaves room for
     # a cold Node start on a small instance.
-    login_server = _current_login_server()
+    login_server = _current_login_server(runtime_type)
     if login_server is not None:
-        return _login_server_status(login_server, force_provider_probe=force_provider_probe)
+        return _login_server_status(
+            login_server,
+            force_provider_probe=force_provider_probe,
+        )
 
-    server = CodexAppServer()
+    server = CodexAppServer(runtime_type=runtime_type)
     try:
         server.start(init_timeout=45)
-        return _account_status_from_server(server, force_provider_probe=force_provider_probe)
+        return _account_status_from_server(
+            server,
+            force_provider_probe=force_provider_probe,
+        )
     except CodexAppServerError as exc:
         return _codex_status_error(exc, server)
     finally:
         server.close()
 
 
-def _current_login_server() -> "CodexAppServer | None":
+def _current_login_server(runtime_type: str = "codex") -> "CodexAppServer | None":
     with _login_lock:
-        parked = _parked_login
+        parked = _parked_logins.get(runtime_type)
     if parked is None:
         return None
     if parked.server.alive():
         return parked.server
-    dead_server = _pop_parked(lambda p: p.server is parked.server)
+    dead_server = _pop_parked(runtime_type, lambda p: p.server is parked.server)
     if dead_server is not None:
         dead_server.close()
     return None
 
 
 def _login_server_status(
-    server: "CodexAppServer", *, force_provider_probe: bool = False
+    server: "CodexAppServer",
+    *,
+    force_provider_probe: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     # The status poller is the only reader of the parked login server, so it also
     # drains the account/login/completed notifications that
     # read_completed_device_login_account_id later looks up. collect is
     # destructive, so record whatever completed before returning.
-    status = _account_status_from_server(server, force_provider_probe=force_provider_probe)
+    status = _account_status_from_server(
+        server,
+        force_provider_probe=force_provider_probe,
+    )
     completed = server.collect_completed_logins()
     if completed:
         # Fresh credentials were just written, so the remembered verdict about
         # the previous credential no longer applies; revalidate from scratch.
-        clear_live_validation_failure()
+        clear_live_validation_failure(server.runtime_type)
         # Capture the trusted account id now, at the moment completion is first
         # observed, so an agent that later swaps the (agent-writable) auth file
         # cannot get a different account anchored under the operator-approved
@@ -531,11 +554,11 @@ def _login_server_status(
         # capture, so the operator re-logs in rather than trusting whatever
         # tokens appear on a later cycle.
         try:
-            account_id = read_codex_account_id()
+            account_id = read_codex_account_id(runtime_type=server.runtime_type)
         except CodexAppServerError:
             account_id = None
         with _login_lock:
-            parked = _parked_login
+            parked = _parked_logins.get(server.runtime_type)
             if parked is not None and parked.server is server and parked.login_id in completed:
                 parked.completed = True
                 parked.account_id = account_id
@@ -543,15 +566,18 @@ def _login_server_status(
 
 
 def _account_status_from_server(
-    server: "CodexAppServer", *, force_provider_probe: bool = False
+    server: "CodexAppServer",
+    *,
+    force_provider_probe: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
+    runtime_type = server.runtime_type
     try:
         result = server.call("account/read", {"refreshToken": False}, timeout=15)
         if not isinstance(result, dict):
             raise CodexAppServerError("Codex account/read returned invalid result")
         account = result.get("account")
         if account:
-            account_id = read_codex_account_id()
+            account_id = read_codex_account_id(runtime_type=runtime_type)
             if account_id:
                 account_metadata = _safe_account_metadata(account if isinstance(account, dict) else {})
                 account_metadata["account_id"] = account_id
@@ -563,11 +589,17 @@ def _account_status_from_server(
                     # usage endpoint; that still classifies as a readable
                     # account, never a forced refresh: unpinned credentials
                     # settle through the operator-approval flow instead.
-                    if _live_validation_failure is None and read_proxy_openai_account_id() is None:
+                    failure = _live_validation_failures.get(runtime_type)
+                    proxy_account_id = read_proxy_openai_account_id(
+                        runtime_type=runtime_type
+                    )
+                    if failure is None and proxy_account_id is None:
                         rate_limits = {}
                     else:
                         return _validated_status_after_usage_failure(
-                            server, account_id, force_provider_probe=force_provider_probe
+                            server,
+                            account_id,
+                            force_provider_probe=force_provider_probe,
                         )
                 if rate_limits:
                     account_metadata["codex_usage"] = rate_limits
@@ -579,7 +611,10 @@ def _account_status_from_server(
 
 
 def _validated_status_after_usage_failure(
-    server: "CodexAppServer", account_id: str, *, force_provider_probe: bool = False
+    server: "CodexAppServer",
+    account_id: str,
+    *,
+    force_provider_probe: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     """Validate a pinned credential whose live usage read failed.
 
@@ -592,8 +627,8 @@ def _validated_status_after_usage_failure(
     LIVE_VALIDATION_RETRY_SECONDS. An explicit operator refresh bypasses that
     memory. Without it the five-second non-active poll would force a token
     refresh on every cycle."""
-    global _live_validation_failure
-    failure = _live_validation_failure
+    runtime_type = server.runtime_type
+    failure = _live_validation_failures.get(runtime_type)
     if not force_provider_probe and failure is not None and (
         failure[0] == "awaiting_login" or time.monotonic() - failure[2] < LIVE_VALIDATION_RETRY_SECONDS
     ):
@@ -604,9 +639,9 @@ def _validated_status_after_usage_failure(
             raise CodexAppServerError("Codex refreshed account/read returned invalid result")
         refreshed_account = refreshed.get("account")
         if not refreshed_account:
-            _live_validation_failure = ("awaiting_login", None, time.monotonic())
+            _live_validation_failures[runtime_type] = ("awaiting_login", None, time.monotonic())
             return "awaiting_login", None, None
-        refreshed_account_id = read_codex_account_id()
+        refreshed_account_id = read_codex_account_id(runtime_type=runtime_type)
         if not refreshed_account_id:
             raise CodexAppServerError(
                 "Codex refreshed account/read returned an account without a supported account id"
@@ -615,20 +650,19 @@ def _validated_status_after_usage_failure(
             raise CodexAppServerError("Codex account changed during credential refresh")
     except CodexAppServerError as exc:
         status, error_message, account = _codex_status_error(exc, server)
-        _live_validation_failure = (status, error_message, time.monotonic())
+        _live_validation_failures[runtime_type] = (status, error_message, time.monotonic())
         return status, error_message, account
-    _live_validation_failure = None
+    _live_validation_failures.pop(runtime_type, None)
     account_metadata = _safe_account_metadata(refreshed_account if isinstance(refreshed_account, dict) else {})
     account_metadata["account_id"] = refreshed_account_id
     return "active", None, account_metadata
 
 
-def clear_live_validation_failure() -> None:
+def clear_live_validation_failure(runtime_type: str = "codex") -> None:
     """Forget the remembered live-validation verdict. Called when an operator
     login completes or the linked account is reset: both replace the credential
     the verdict was about."""
-    global _live_validation_failure
-    _live_validation_failure = None
+    _live_validation_failures.pop(runtime_type, None)
 
 
 def _codex_status_error(
@@ -711,10 +745,19 @@ def _safe_rate_limits_metadata(value: Any) -> dict[str, Any]:
     return {"rate_limits": rate_limits} if rate_limits else {}
 
 
-def read_codex_account_id(command: list[str] | None = None) -> str | None:
+def read_codex_account_id(
+    command: list[str] | None = None, *, runtime_type: str = "codex"
+) -> str | None:
+    if runtime_type not in CODEX_RUNTIME_TYPES:
+        raise ValueError(f"unsupported Codex runtime: {runtime_type}")
+    selected_command = (
+        [*DEFAULT_ACCOUNT_ID_COMMAND, runtime_type]
+        if command is None
+        else command
+    )
     try:
         proc = subprocess.run(
-            command or DEFAULT_ACCOUNT_ID_COMMAND,
+            selected_command,
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -729,9 +772,8 @@ def read_codex_account_id(command: list[str] | None = None) -> str | None:
     return account_id or None
 
 
-def start_device_login() -> CodexLogin:
-    global _parked_login
-    server = CodexAppServer()
+def start_device_login(runtime_type: str = "codex") -> CodexLogin:
+    server = CodexAppServer(runtime_type=runtime_type)
     server.start()
     try:
         result = server.call("account/login/start", {"type": "chatgptDeviceCode"}, timeout=30)
@@ -741,8 +783,8 @@ def start_device_login() -> CodexLogin:
         server.close()
         raise
     with _login_lock:
-        old = _parked_login
-        _parked_login = _ParkedLogin(server=server, login_id=result["loginId"])
+        old = _parked_logins.get(runtime_type)
+        _parked_logins[runtime_type] = _ParkedLogin(server=server, login_id=result["loginId"])
     if old is not None:
         old.server.close()
     return CodexLogin(
@@ -752,21 +794,24 @@ def start_device_login() -> CodexLogin:
     )
 
 
-def _pop_parked(match: Callable[[_ParkedLogin], bool]) -> "CodexAppServer | None":
+def _pop_parked(
+    runtime_type: str, match: Callable[[_ParkedLogin], bool]
+) -> "CodexAppServer | None":
     """Unpark and return the login server if the parked record matches, else
-    None. The single record plus this one unpark path keeps the parked-login
-    invariant structural: there is never more than one, and every close first
+    None. The per-runtime record plus this one unpark path keeps the parked-login
+    invariant structural: there is never more than one per runtime, and every close first
     proves it is closing the record it meant to."""
-    global _parked_login
     with _login_lock:
-        parked = _parked_login
+        parked = _parked_logins.get(runtime_type)
         if parked is None or not match(parked):
             return None
-        _parked_login = None
+        _parked_logins.pop(runtime_type, None)
     return parked.server
 
 
-def read_completed_device_login_account_id(login_id: str) -> str | None:
+def read_completed_device_login_account_id(
+    login_id: str, runtime_type: str = "codex"
+) -> str | None:
     """Return the completed operator device login's account id.
 
     A stored OAuth row means the operator saw a device code, not that the login
@@ -784,7 +829,7 @@ def read_completed_device_login_account_id(login_id: str) -> str | None:
     once pinned.
     """
     with _login_lock:
-        parked = _parked_login
+        parked = _parked_logins.get(runtime_type)
         if parked is None or parked.login_id != login_id or not parked.completed:
             return None
         account_id = parked.account_id
@@ -793,16 +838,21 @@ def read_completed_device_login_account_id(login_id: str) -> str | None:
     return account_id
 
 
-def close_login_server() -> None:
-    server = _pop_parked(lambda parked: True)
+def login_server_parked(runtime_type: str = "codex") -> bool:
+    """Whether a live app-server is still driving this device login."""
+    return _current_login_server(runtime_type) is not None
+
+
+def close_login_server(runtime_type: str = "codex") -> None:
+    server = _pop_parked(runtime_type, lambda parked: True)
     if server is not None:
         server.close()
 
 
-def close_completed_login_server(login_id: str) -> None:
+def close_completed_login_server(login_id: str, runtime_type: str = "codex") -> None:
     """Close the parked login server for a captured login, unless a newer login
     has replaced it under a different login id."""
-    server = _pop_parked(lambda parked: parked.login_id == login_id)
+    server = _pop_parked(runtime_type, lambda parked: parked.login_id == login_id)
     if server is not None:
         server.close()
 
@@ -888,7 +938,7 @@ def run_turn(
             )
             command_output_emit_count[item_id] = count + 1
         update = agent_activity.activity(
-            "codex",
+            server.runtime_type,
             item_id,
             "command",
             "started",
@@ -943,7 +993,7 @@ def run_turn(
                     emit_command_output(item_id, now)
         elif method == "item/started":
             item = params.get("item", {})
-            rich_activity = _codex_item_activity(item, "started")
+            rich_activity = _codex_item_activity(item, "started", server.runtime_type)
             if rich_activity is not None:
                 on_message(rich_activity)
         elif method == "item/completed":
@@ -968,7 +1018,7 @@ def run_turn(
                 )
                 if item_id and command_output_parts.get(item_id):
                     emit_command_output(item_id, time.monotonic())
-                rich_activity = _codex_item_activity(item, "completed")
+                rich_activity = _codex_item_activity(item, "completed", server.runtime_type)
                 if rich_activity is not None:
                     # Streaming already persisted this command output under the
                     # same activity id. Do not store the aggregated duplicate;
@@ -1002,15 +1052,23 @@ def run_turn(
             raise CodexAppServerError(error.get("message", "Codex turn failed"))
 
 
-def _codex_item_activity(item: Any, phase: str) -> dict[str, Any] | None:
+def _codex_item_activity(
+    item: Any,
+    phase: str,
+    provider: str = "codex",
+) -> dict[str, Any] | None:
     """Fail-soft boundary for provider-owned ThreadItem payloads."""
     try:
-        return _codex_item_activity_unchecked(item, phase)
+        return _codex_item_activity_unchecked(item, phase, provider)
     except Exception:
         return None
 
 
-def _codex_item_activity_unchecked(item: Any, phase: str) -> dict[str, Any] | None:
+def _codex_item_activity_unchecked(
+    item: Any,
+    phase: str,
+    provider: str,
+) -> dict[str, Any] | None:
     """Normalize Codex ThreadItems without coupling Agent Chat to its schema."""
     if not isinstance(item, dict):
         return None
@@ -1082,7 +1140,7 @@ def _codex_item_activity_unchecked(item: Any, phase: str) -> dict[str, Any] | No
     if isinstance(detail, (dict, list)):
         detail = agent_activity.json_text(detail)
     return agent_activity.activity(
-        "codex",
+        provider,
         activity_id,
         kind,
         phase,

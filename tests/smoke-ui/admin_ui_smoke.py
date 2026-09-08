@@ -603,11 +603,11 @@ def desktop_smoke(page, url: str) -> None:
     # The phone-only collapse pill stays out of the way on a wide viewport; the
     # boxes sit inline in the top bar.
     expect(page.locator(".runtime-overview-toggle")).to_be_hidden()
-    # Before any login there is no usage: all four rings (5h and weekly for
-    # Codex and Claude Code) render the unavailable "--" form rather than 0%.
+    # Before any login there is no usage: all six rings (5h and weekly for
+    # both Codex runtimes and Claude Code) render the unavailable "--" form rather than 0%.
     # Bedrock billing is reconciliation metadata in the provider details, not
     # a primary toolbar value.
-    expect(page.locator("#runtime-overview .usage-ring.unavailable")).to_have_count(4)
+    expect(page.locator("#runtime-overview .usage-ring.unavailable")).to_have_count(6)
     # Grok has no ring at all: xAI publishes no pool figure for a subscription
     # account, so its box carries a neutral note rather than an empty ring that
     # would imply a number is coming.
@@ -624,12 +624,14 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.get_by_role("button", name="Start Codex login")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Claude login")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Grok login")).to_have_count(0)
-    page.locator("#runtime-overview .runtime-summary", has_text="Codex").click()
+    page.locator("#runtime-overview .runtime-summary[data-runtime='codex']").click()
     expect(page.locator("#panel-network")).to_be_visible()
     disabled_openai_row = page.locator(".integration-row[data-integration]", has_text="OpenAI")
     expect(disabled_openai_row.locator(".integration-details")).to_be_visible()
     title_box = disabled_openai_row.locator(".integration-title").bounding_box()
-    account_card_box = disabled_openai_row.locator(".integration-details .detail-card").bounding_box()
+    account_card_box = disabled_openai_row.locator(
+        ".integration-details .detail-card"
+    ).first.bounding_box()
     if not title_box or not account_card_box or abs(title_box["x"] - account_card_box["x"]) > 2:
         raise AssertionError("expanded integration content is not aligned with the row title after the chevron")
     expect(disabled_openai_row).not_to_contain_text("No account linked yet")
@@ -639,11 +641,11 @@ def desktop_smoke(page, url: str) -> None:
 
     # Workspace actions that return to Home must also update the route. A
     # reload must not resurrect the integration that was open before the chat.
-    page.locator("#runtime-overview .runtime-summary[data-provider='openai']").click()
+    page.locator("#runtime-overview .runtime-summary[data-runtime='codex']").click()
     page.locator("#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']").click()
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
     expect(page).to_have_url(re.compile(r"#chat/thread-1$"))
-    page.locator("#runtime-overview .runtime-summary[data-provider='openai']").click()
+    page.locator("#runtime-overview .runtime-summary[data-runtime='codex']").click()
     expect(page.locator("#integration-detail-title")).to_have_text("OpenAI")
     page.go_back()
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
@@ -830,7 +832,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(openai_guide.get_by_role("heading", name="Connection", exact=True)).to_have_count(1)
     expect(openai_guide.locator(":scope > .guide-section").nth(1).locator(":scope > p")).to_have_count(0)
     expect(openai_guide).not_to_contain_text("Connection steps")
-    expect(openai_guide).to_contain_text("enter the displayed device code to complete sign-in")
+    expect(openai_guide).to_contain_text("enter its displayed device code")
     expect(openai_guide).to_contain_text("any host data available to Codex can go to OpenAI")
     expect(openai_guide).to_contain_text("Cached web search keeps the search query and surrounding context within OpenAI")
     expect(openai_guide).to_contain_text("What OpenAI can do with it")
@@ -970,7 +972,7 @@ def desktop_smoke(page, url: str) -> None:
         "  return false;"
         "}"
     )
-    page.locator("#runtime-overview .runtime-summary[data-provider='openai']").click()
+    page.locator("#runtime-overview .runtime-summary[data-runtime='codex']").click()
     expect(page.locator("#integration-detail-title")).to_have_text("OpenAI")
     detail_scroll_y = page.evaluate("window.scrollY")
     if detail_scroll_y > 24:
@@ -1283,10 +1285,16 @@ def desktop_smoke(page, url: str) -> None:
     # provider detail pages before exercising provider login.
     open_home_integration(page, "openai")
     openai_row = page.locator(".integration-row[data-integration='openai']")
-    expect(openai_row.get_by_role("button", name="Start Codex login")).to_be_visible()
-    expect(openai_row.get_by_role("button", name="Start Codex login")).to_be_enabled()
-    page.get_by_role("button", name="Start Codex login").click()
-    expect(openai_row.locator(".provider-oauth")).to_contain_text("MOCK-CODEX")
+    codex_card = openai_row.locator(
+        ".detail-card:has(.integration-account[data-runtime='codex'])"
+    )
+    codex_2_card = openai_row.locator(
+        ".detail-card:has(.integration-account[data-runtime='codex-2'])"
+    )
+    expect(codex_card.get_by_role("button", name="Start Codex login", exact=True)).to_be_visible()
+    expect(codex_card.get_by_role("button", name="Start Codex login", exact=True)).to_be_enabled()
+    codex_card.get_by_role("button", name="Start Codex login", exact=True).click()
+    expect(codex_card.locator("[data-provider-oauth='codex']")).to_contain_text("MOCK-CODEX")
     # The mock completes the device login out of band a couple of seconds
     # after it starts, like the real flow; the dashboard notices on its own
     # 5-second poll, so allow two poll rounds for the flip to render.
@@ -1298,13 +1306,18 @@ def desktop_smoke(page, url: str) -> None:
         timeout=12000,
     ):
         pass
-    expect(openai_row.get_by_role("button", name="Start Codex login")).to_have_count(0, timeout=12000)
-    expect(openai_row).to_contain_text("connected: akshay@infiloop.io")
-    expect(openai_row).to_contain_text("Connected account")
-    expect(openai_row.locator(".connection-summary")).to_be_visible()
-    expect(openai_row.locator(".connection-summary b")).to_have_count(0)
-    expect(openai_row.get_by_role("button", name="Disconnect")).to_be_visible()
-    codex_summary = page.locator("#runtime-overview .runtime-summary", has_text="Codex")
+    expect(
+        codex_card.get_by_role("button", name="Start Codex login", exact=True)
+    ).to_have_count(0, timeout=12000)
+    expect(openai_row.locator("[data-provider-status='openai']")).to_contain_text(
+        "1 of 2 connected · login required"
+    )
+    expect(codex_card).to_contain_text("Connected account")
+    expect(codex_card).to_contain_text("akshay@infiloop.io")
+    expect(codex_card.locator(".connection-summary")).to_be_visible()
+    expect(codex_card.locator(".connection-summary b")).to_have_count(0)
+    expect(codex_card.get_by_role("button", name="Disconnect", exact=True)).to_be_visible()
+    codex_summary = page.locator("#runtime-overview .runtime-summary[data-runtime='codex']")
     expect(codex_summary).to_contain_text("active")
     expect(codex_summary.locator(".usage-ring text")).to_have_text(["8", "84"])
     # A healthy 5h window (no threshold class) beside a near-full weekly window
@@ -1318,6 +1331,24 @@ def desktop_smoke(page, url: str) -> None:
     # state — active included.
     expect(codex_summary).to_have_attribute("data-action", "open-provider")
     expect(codex_summary).to_have_attribute("data-provider", "openai")
+
+    # Codex 2 has its own login and account while sharing the OpenAI card and
+    # network integration with Codex.
+    expect(codex_2_card.get_by_role("button", name="Start Codex 2 login", exact=True)).to_be_visible()
+    codex_2_card.get_by_role("button", name="Start Codex 2 login", exact=True).click()
+    expect(codex_2_card.locator("[data-provider-oauth='codex-2']")).to_contain_text(
+        "MOCK-CODEX-2"
+    )
+    expect(
+        codex_2_card.get_by_role("button", name="Start Codex 2 login", exact=True)
+    ).to_have_count(0, timeout=12000)
+    expect(openai_row).to_contain_text("2 connected")
+    expect(openai_row).to_contain_text("codex_2@example.invalid")
+    codex_2_summary = page.locator(
+        "#runtime-overview .runtime-summary[data-runtime='codex-2']"
+    )
+    expect(codex_2_summary).to_contain_text("active")
+    expect(codex_2_summary.locator(".usage-ring text")).to_have_text(["8", "84"])
 
     page.locator("#panel-network .home-back").click()
     with page.expect_response(lambda response: "/v1/agent-processes" in response.url):
@@ -1402,8 +1433,10 @@ def assert_runtime_summaries_do_not_magnify(page) -> None:
     """Provider summaries retain their size when a desktop pointer hovers."""
     from playwright.sync_api import expect
 
-    for runtime in ("Codex", "Claude Code", "Hermes"):
-        summary = page.locator("#runtime-overview .runtime-summary", has_text=runtime)
+    for runtime in ("codex", "codex-2", "claude_code", "hermes"):
+        summary = page.locator(
+            f"#runtime-overview .runtime-summary[data-runtime='{runtime}']"
+        )
         expect(summary).to_have_css("transform", "none")
         summary.hover()
         expect(summary).to_have_css("transform", "none")
@@ -1578,8 +1611,8 @@ def mobile_smoke(page, url: str) -> None:
     expect(page.locator("#runtime-overview .runtime-refresh")).to_be_hidden()
     # Both subscription runtimes are active by now (the desktop pass logged them in);
     # Claude Code carries the extra model-week ring.
-    for runtime, rings in (("Codex", 2), ("Claude Code", 3)):
-        summary = page.locator("#runtime-overview .runtime-summary", has_text=runtime)
+    for runtime, rings in (("codex", 2), ("codex-2", 2), ("claude_code", 3)):
+        summary = page.locator(f"#runtime-overview .runtime-summary[data-runtime='{runtime}']")
         expect(summary).to_be_visible()
         expect(summary.locator(".usage-ring")).to_have_count(rings)
         for index in range(rings):

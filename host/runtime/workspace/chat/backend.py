@@ -31,7 +31,7 @@ from host.session_options import (
 
 
 MAX_REQUEST_BODY_BYTES = 128 * 1024
-RUNTIME_OPTIONS = {"codex", "claude_code", "grok", "hermes"}
+RUNTIME_OPTIONS = {"codex", "codex-2", "claude_code", "grok", "hermes"}
 THREAD_ID_RE = re.compile(r"(?:thread|schedule)-[1-9][0-9]*")
 GENERATED_THREAD_ID_RE = re.compile(r"thread-([1-9][0-9]*)")
 SCHEDULE_THREAD_ID_RE = re.compile(r"schedule-[1-9][0-9]*")

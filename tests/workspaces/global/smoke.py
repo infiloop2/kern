@@ -567,11 +567,9 @@ def desktop_smoke(page: Any) -> None:
         raise AssertionError(f"schedule message should wrap instead of scrolling: {dimensions}")
     expect(surface.locator("#schedule-message-label")).to_have_text("Message")
     expect(surface.locator("#schedule-runtime option[value='script']")).to_have_count(1)
-    # A provider the operator has not activated stays visible but unusable.
+    # A provider the operator has not activated is omitted from the selector.
     hermes = surface.locator("#schedule-runtime option[value='hermes']")
-    expect(hermes).to_have_text("hermes (not activated)")
-    if not hermes.evaluate("option => option.disabled"):
-        raise AssertionError("a deactivated runtime must not be selectable")
+    expect(hermes).to_have_count(0)
     surface.locator("#schedule-cadence").select_option("daily")
     surface.locator("#schedule-time").fill("09:00")
     surface.get_by_role("button", name="Save schedule", exact=True).click()

@@ -3,7 +3,7 @@
 // with per-repository audits, and the GitHub credential controls.
 
 import { api } from "./api.js";
-import { $, badge, bedrockUsage, claudeUsage, codexUsage, esc, formatTokenCount, formatUnixTime, inlineMessage, objectValue, providerRuntime, replaceIntegrationRows, runtimeLabel, RUNTIME_PROVIDERS, setHtml } from "./helpers.js";
+import { $, badge, bedrockUsage, claudeUsage, codexUsage, esc, formatTokenCount, formatUnixTime, inlineMessage, objectValue, providerRuntime, providerRuntimes, replaceIntegrationRows, runtimeLabel, RUNTIME_PROVIDERS, setHtml } from "./helpers.js";
 import { providerAccounts, refreshHealth, refreshProviderAccounts, runtimeRecords } from "./health.js";
 import { MANAGED_INTEGRATIONS } from "./integration_catalog.js";
 
@@ -205,16 +205,17 @@ function integrationDetailsHtml(name, enabled) {
     return accountCard;
   }
   if (name === "openai" || name === "claude" || name === "xai") {
-    const accountCard = `
+    const accountCard = runtime => `
       <div class="detail-card">
-        <div class="detail-card-head"><h3>Account</h3></div>
-        <div class="integration-account" data-provider="${esc(name)}"></div>
-        <div class="provider-oauth" data-provider-oauth="${esc(name)}"></div>
+        <div class="detail-card-head"><h3>${name === "openai" ? esc(runtimeLabel(runtime)) : "Account"}</h3></div>
+        <div class="integration-account" data-provider="${esc(name)}" data-runtime="${esc(runtime)}"></div>
+        <div class="provider-oauth" data-provider-oauth="${esc(runtime)}"></div>
       </div>`;
+    const accountCards = providerRuntimes(name).map(accountCard).join("");
     // Claude offers a web-search toggle; xAI deliberately does not, because
     // Grok's server-side search has no shape this host can allow.
-    if (name === "claude" && enabled) return `${accountCard}${webSearchCard(name)}`;
-    return accountCard;
+    if (name === "claude" && enabled) return `${accountCards}${webSearchCard(name)}`;
+    return accountCards;
   }
   if (name === "github") {
     return `
@@ -237,22 +238,44 @@ export function renderIntegrationAccounts() {
       setHtml(node, "");
       continue;
     }
-    const account = providerAccounts().find(entry => entry.provider === provider) || {};
-    const runtime = providerRuntime(provider);
-    const record = runtimeRecords().find(entry => entry.type === runtime) || { status: account.status || "loading" };
+    const accounts = providerAccounts().filter(entry => entry.provider === provider);
+    const runtimes = providerRuntimes(provider);
+    const records = runtimes.map(runtime => {
+      const account = accounts.find(entry => entry.agent_runtime === runtime) || accounts[0] || {};
+      return runtimeRecords().find(entry => entry.type === runtime) || { status: account.status || "loading" };
+    });
+    const activeCount = records.filter(record => record.status === "active").length;
+    const activeAccount = accounts.find(account => account.status === "active") || {};
     const identity = provider === BEDROCK_INTEGRATION
-      ? (account.arn || account.account_id)
-      : (account.email || account.account_id);
-    setHtml(node, record.status === "active" && identity
-      ? `<span class="status active">connected: <span class="chip-label">${esc(identity)}</span></span>`
-      : record.status === "awaiting_login"
+      ? (activeAccount.arn || activeAccount.account_id)
+      : (activeAccount.email || activeAccount.account_id);
+    const status = records.find(record => record.status === "error")?.status
+      || records.find(record => record.status === "awaiting_login")?.status
+      || records.find(record => record.status !== "active")?.status
+      || records[0]?.status
+      || "not-connected";
+    const partialStatus = {
+      error: "connection error",
+      awaiting_login: "login required",
+      loading: "checking connection",
+    }[status] || "not connected";
+    setHtml(node, activeCount === records.length
+      ? activeCount === 1 && identity
+        ? `<span class="status active">connected: <span class="chip-label">${esc(identity)}</span></span>`
+        : `<span class="status active">${activeCount} connected</span>`
+      : activeCount
+        ? `<span class="status ${esc(status)}">${activeCount} of ${records.length} connected &middot; ${partialStatus}</span>`
+      : status === "awaiting_login"
         ? `<span class="status awaiting_login">${provider === BEDROCK_INTEGRATION ? "credentials required" : "login required"}</span>`
-        : badge(record.status || "not-connected"));
+        : badge(status));
   }
   for (const node of document.querySelectorAll(".integration-account[data-provider]")) {
     const provider = node.dataset.provider;
-    const account = providerAccounts().find(entry => entry.provider === provider) || {};
-    const runtime = providerRuntime(provider);
+    const runtime = node.dataset.runtime || providerRuntime(provider);
+    const account = providerAccounts().find(entry => (
+      entry.provider === provider
+      && (provider === BEDROCK_INTEGRATION || entry.agent_runtime === runtime)
+    )) || {};
     const runtimeLabel = RUNTIME_PROVIDERS[runtime].label;
     const record = runtimeRecords().find(entry => entry.type === runtime) || { status: account.status || "loading" };
     const enabled = objectValue(objectValue(activeNetworkPolicy.network_integrations)[provider]).enabled === true;
@@ -270,14 +293,14 @@ export function renderIntegrationAccounts() {
     const summary = !enabled && !linked && provider !== BEDROCK_INTEGRATION
       ? ""
       : record.status === "active" && identity
-        ? `Connected account: <span class="connection-identity">${esc(identity)}</span> &middot; only this account is allowed through the proxy${codingDataSummary}${zdrSummary}.`
+        ? `Connected account: <span class="connection-identity">${esc(identity)}</span> &middot; this account is allowed through the proxy${codingDataSummary}${zdrSummary}.`
         : identity
           ? `Linked account: <span class="connection-identity">${esc(identity)}</span> &middot; ${provider === BEDROCK_INTEGRATION ? "enable Bedrock to activate Hermes." : "sign in again to reconnect it."}`
           : provider === BEDROCK_INTEGRATION && bedrockCredentialMetadata.connected
             ? `AWS credential stored: <span class="connection-identity">${esc(bedrockCredentialMetadata.access_key_id || "linked")}</span>. Enable Bedrock to activate Hermes.`
             : provider === BEDROCK_INTEGRATION
               ? "No AWS credential stored yet. Connect a dedicated IAM access key; ensure it has at least these permissions: bedrock:InvokeModel and bedrock:InvokeModelWithResponseStream (required IAM policy). The operator key never enters an agent process."
-            : "No account linked yet. The first login links the account it signs in to, and only that account is then allowed through the proxy.";
+            : "No account linked yet. The first login links the account it signs in to and allows it through the proxy.";
     const guidance = record.status === "error"
       ? `<p class="provider-error">${esc(record.error_message || "The last runtime check failed.")}</p>`
       : !enabled
@@ -295,9 +318,9 @@ export function renderIntegrationAccounts() {
       ${guidance}
       <span class="provider-account-actions">
         ${canLogin ? `<button class="sm" data-action="start-login" data-runtime="${esc(runtime)}">Start ${esc(runtimeLabel)} login</button>` : ""}
-        ${(provider === BEDROCK_INTEGRATION ? bedrockCredentialMetadata.connected : identity) ? `<button class="ghost sm" data-action="reset-linked-account" data-provider="${esc(provider)}">${provider === BEDROCK_INTEGRATION ? "Disconnect AWS" : "Disconnect"}</button>` : ""}
+        ${(provider === BEDROCK_INTEGRATION ? bedrockCredentialMetadata.connected : identity) ? `<button class="ghost sm" data-action="reset-linked-account" data-runtime="${esc(runtime)}">${provider === BEDROCK_INTEGRATION ? "Disconnect AWS" : "Disconnect"}</button>` : ""}
       </span>`);
-    const oauth = document.querySelector(`[data-provider-oauth="${provider}"]`);
+    const oauth = document.querySelector(`[data-provider-oauth="${runtime}"]`);
     if (oauth && record.status === "active") setHtml(oauth, "");
   }
 }
@@ -413,14 +436,15 @@ function providerUsageBox(provider, account) {
   return "";
 }
 
-export async function resetLinkedAccount(provider) {
+export async function resetLinkedAccount(runtime) {
+  const provider = RUNTIME_PROVIDERS[runtime]?.provider;
+  if (!provider) return;
   const label = MANAGED_INTEGRATIONS[provider] ? MANAGED_INTEGRATIONS[provider].label : provider;
   const sharedBedrock = provider === BEDROCK_INTEGRATION;
   const message = sharedBedrock
     ? "Disconnect the AWS Bedrock account? This fails running Hermes tasks and clears its credential. Hermes cannot reach Bedrock until credentials are connected again."
     : `Disconnect the linked ${label} account? This clears local ${label} auth and fails running tasks that use it. The agent cannot reach ${label} until a new login links an account.`;
   if (!confirm(message)) return;
-  const runtime = providerRuntime(provider);
   try {
     if (sharedBedrock) {
       await api("DELETE", "/v1/agent-runtime/bedrock-credentials");
@@ -435,13 +459,13 @@ export async function resetLinkedAccount(provider) {
 
 export async function setIntegrationEnabled(name, enabled) {
   const label = MANAGED_INTEGRATIONS[name].label;
-  const runtime = providerRuntime(name);
+  const affectedRuntimes = providerRuntimes(name).map(runtimeLabel).join(" and ");
   const dropsRepositories = !enabled && name === "github" && githubRepositories(activeNetworkPolicy).length > 0;
   // Disabling re-publishes the policy, which cuts the integration off from any
-  // agent work already running against it. Name the affected runtime when the
-  // integration is an inference provider (Codex/Claude Code/Hermes).
-  const disclosure = runtime
-    ? `This immediately fails any running ${runtimeLabel(runtime)} work, which loses its ${label} access mid-task.`
+  // agent work already running against it. Name every affected runtime when
+  // the integration is an inference provider.
+  const disclosure = affectedRuntimes
+    ? `This immediately fails any running ${affectedRuntimes} work, which loses its ${label} access mid-task.`
     : `This immediately fails any running agent work that is using ${label}.`;
   const prompt = dropsRepositories
     ? `Disable the ${label} integration and remove its write repositories? ${disclosure}`

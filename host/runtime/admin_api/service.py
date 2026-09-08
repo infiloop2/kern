@@ -114,12 +114,14 @@ from host.runtime.admin_api.runtime_accounts import (
     current_agent_accounts,
     current_bedrock_credentials,
     current_claude_oauth_login,
+    current_codex_2_oauth_login,
     current_codex_oauth_login,
     current_grok_oauth_login,
     disconnect_bedrock_credentials,
     refresh_agent_runtime_accounts,
     reset_linked_account,
     start_claude_oauth_login,
+    start_codex_2_oauth_login,
     start_codex_oauth_login,
     start_grok_oauth_login,
 )
@@ -1099,6 +1101,8 @@ _ROUTES: tuple[_Route, ...] = (
     ),
     _Route("POST", "/v1/agent-runtime/codex-oauth-login", lambda request: start_codex_oauth_login()),
     _Route("GET", "/v1/agent-runtime/codex-oauth-login", lambda request: current_codex_oauth_login()),
+    _Route("POST", "/v1/agent-runtime/codex-2-oauth-login", lambda request: start_codex_2_oauth_login()),
+    _Route("GET", "/v1/agent-runtime/codex-2-oauth-login", lambda request: current_codex_2_oauth_login()),
     _Route("POST", "/v1/agent-runtime/claude-oauth-login", lambda request: start_claude_oauth_login()),
     _Route("GET", "/v1/agent-runtime/claude-oauth-login", lambda request: current_claude_oauth_login()),
     _Route(
@@ -1364,6 +1368,7 @@ def _health_issues(
     issues: list[dict[str, str]] = []
     integration_labels = {
         "codex": "Codex",
+        "codex-2": "Codex 2",
         "claude_code": "Claude Code",
         "hermes": "AWS Bedrock",
     }
@@ -1568,6 +1573,7 @@ def _bounded_embedding_batch(
 # token counters (_bedrock_live_usage), never stored on the account row.
 _RUNTIME_USAGE_KEYS = {
     "codex": "codex_usage",
+    "codex-2": "codex_usage",
     "claude_code": "claude_usage",
     "grok": "grok_usage",
 }

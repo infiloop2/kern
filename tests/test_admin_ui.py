@@ -822,7 +822,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 'const record = runtimeRecords().find(entry => entry.type === runtime) || '
                 '{ status: account.status || "loading" };'
             ),
-            2,
+            1,
         )
         self.assertIn('tool.connection === "oauth" && (tool.enabled || connected)', tools_js)
         self.assertIn('${tool.enabled ? "" : " disabled"}>Reconnect</button>', tools_js)

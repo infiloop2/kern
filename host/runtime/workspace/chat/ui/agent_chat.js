@@ -55,6 +55,7 @@ let sessionOptions = {};
 let activeRuntimes = null;
 const DEFAULT_MODELS = Object.freeze({
   codex: "gpt-5.6-sol",
+  "codex-2": "gpt-5.6-sol",
   claude_code: "claude-opus-5",
   grok: "grok-4.6",
   hermes: "moonshotai.kimi-k2.5",
@@ -100,14 +101,16 @@ let renameThreadReturnFocus = null;
 const chatRoot = window.KernWorkspaceRoots.chat;
 const $ = id => chatRoot.querySelector(`#${CSS.escape(id)}`);
 const composerDrafts = loadComposerDrafts();
-const runtimeLabel = runtime => runtime === "claude_code" ? "Claude Code" : runtime === "codex" ? "Codex" : runtime === "grok" ? "Grok" : runtime === "hermes" ? "Hermes" : runtime;
+const runtimeLabel = runtime => ({
+  claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", grok: "Grok", hermes: "Hermes",
+})[runtime] || runtime;
 const optionLabel = value => value.split(/[-_]/).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 // Claude Code model ids carry the provider prefix ("claude-opus-5"); the
 // runtime name already says Claude Code, so the pill reads "Opus 5". A model
 // point release uses two numeric id segments, rendered as "Fable 5.1" rather
 // than the generic option label's "Fable 5 1".
 const modelLabel = (runtime, value) => {
-  if (runtime === "codex") return value;
+  if (runtime === "codex" || runtime === "codex-2") return value;
   const model = String(value).replace(/^claude-/, "").replace(/-(\d+)-(\d+)$/, "-$1.$2");
   return optionLabel(model);
 };
@@ -496,19 +499,6 @@ function clearActivityAnchorSpace() {
   $("thread-detail").style.removeProperty("--activity-anchor-space");
 }
 
-// Two different questions. Null active runtimes means the host could not say,
-// so neither gate applies: an unknown status must never hide a usable provider
-// or block sending.
-
-// Can it be shown as the selection? A thread keeps its recorded runtime here
-// even after deactivation, so the composer still shows what it actually ran
-// with instead of silently rewriting history.
-function runtimeSelectable(runtime) {
-  if (!Array.isArray(activeRuntimes)) return true;
-  if (selectedThreadId !== null && runtime === selectedThreadRuntime) return true;
-  return activeRuntimes.includes(runtime);
-}
-
 // Can the host actually run it? A deactivated runtime is refused on admission,
 // so a recorded one gets no exemption here: displaying it is honest, offering
 // to send on it is not.
@@ -523,9 +513,13 @@ function applyRuntimeAvailability() {
     if (!RUNTIME_OPTION_LABELS.has(option.value)) {
       RUNTIME_OPTION_LABELS.set(option.value, option.textContent);
     }
-    const available = runtimeSelectable(option.value);
+    const available = runtimeRunnable(option.value);
+    const visible = available || (
+      selectedThreadId !== null && option.value === selectedThreadRuntime
+    );
     const label = RUNTIME_OPTION_LABELS.get(option.value);
     option.disabled = !available;
+    option.hidden = !visible;
     option.textContent = available ? label : `${label} (not activated)`;
   }
   // The markup opens on the first runtime, and activation arrives later. A

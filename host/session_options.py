@@ -23,13 +23,16 @@ SCRIPT_RUNTIME = "script"
 SCRIPT_MODEL = "bash"
 SCRIPT_EFFORT = "fixed"
 
+_CODEX_SESSION_OPTIONS = {
+    "gpt-5.6-terra": ("high", "max", "ultra"),
+    "gpt-5.6-sol": ("high", "max", "ultra"),
+    "gpt-5.6-luna": ("high", "max"),
+    "gpt-6-astra": ("high", "max", "ultra"),
+}
+
 INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
-    "codex": {
-        "gpt-5.6-terra": ("high", "max", "ultra"),
-        "gpt-5.6-sol": ("high", "max", "ultra"),
-        "gpt-5.6-luna": ("high", "max"),
-        "gpt-6-astra": ("high", "max", "ultra"),
-    },
+    "codex": _CODEX_SESSION_OPTIONS,
+    "codex-2": _CODEX_SESSION_OPTIONS,
     # Claude Code also accepts the unversioned aliases (opus, fable, sonnet),
     # but an alias re-points to a new model generation whenever the pinned CLI
     # is upgraded, silently moving existing threads across generations. The
@@ -58,6 +61,7 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
 # Model ordering is presentation, not a capability ranking.
 DEFAULT_INTERACTIVE_MODELS: dict[str, str] = {
     "codex": "gpt-5.6-sol",
+    "codex-2": "gpt-5.6-sol",
     "claude_code": "claude-opus-5",
     "grok": "grok-4.6",
     "hermes": "moonshotai.kimi-k2.5",

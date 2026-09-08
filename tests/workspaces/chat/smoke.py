@@ -258,9 +258,11 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.get_by_role("switch", name="Activity", exact=True)).to_be_visible()
     expect(frame.locator("#new-task-runtime")).to_have_value("claude_code")
     expect(frame.locator("#new-task-runtime")).to_be_enabled()
-    # A provider the operator has not activated stays visible but unusable.
+    # A provider the operator has not activated is hidden and unusable.
     hermes = frame.locator("#new-task-runtime option[value='hermes']")
     expect(hermes).to_have_text("Hermes (not activated)")
+    if not hermes.evaluate("option => option.hidden"):
+        raise AssertionError("a deactivated runtime must be hidden")
     if not hermes.evaluate("option => option.disabled"):
         raise AssertionError("a deactivated runtime must not be selectable")
     expect(

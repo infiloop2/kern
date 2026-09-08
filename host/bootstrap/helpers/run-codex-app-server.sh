@@ -13,15 +13,34 @@ cd /mnt/kern-agent/agent-home
 # kern-agent-thread-<thread_id>.scope. The name comes from this root helper and
 # is validated as a host thread id. Web App API targeting is explicit and
 # independent of this process scope.
+runtime=codex
 unit_args=()
-if [ "${1:-}" = "--thread-scope" ]; then
-  if ! [[ "${2:-}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
-    echo "invalid --thread-scope thread id: ${2:-<missing>}" >&2
-    exit 64
-  fi
-  unit_args=(--unit "kern-agent-thread-$2")
-  shift 2
-fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --runtime)
+      if [ "${2:-}" != "codex" ] && [ "${2:-}" != "codex-2" ]; then
+        echo "invalid Codex runtime: ${2:-<missing>}" >&2
+        exit 64
+      fi
+      runtime="$2"
+      shift 2
+      ;;
+    --thread-scope)
+      if ! [[ "${2:-}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+        echo "invalid --thread-scope thread id: ${2:-<missing>}" >&2
+        exit 64
+      fi
+      unit_args=(--unit "kern-agent-thread-$2")
+      shift 2
+      ;;
+    *)
+      echo "usage: run-codex-app-server [--runtime codex|codex-2] [--thread-scope thread-id]" >&2
+      exit 64
+      ;;
+  esac
+done
+
+codex_home="/mnt/kern-agent/agent-home/.$runtime"
 exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   "${unit_args[@]}" \
   --property=BindsTo=kern-admin-api.service \
@@ -31,6 +50,7 @@ exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   --property=TasksMax=1024 \
   /usr/sbin/runuser -u kern-agent -- env \
   HOME=/mnt/kern-agent/agent-home \
+  CODEX_HOME="$codex_home" \
   TMPDIR=/mnt/kern-agent/agent-home/.tmp \
   HTTP_PROXY=http://127.0.0.1:@PROXY_PORT@ \
   HTTPS_PROXY=http://127.0.0.1:@PROXY_PORT@ \

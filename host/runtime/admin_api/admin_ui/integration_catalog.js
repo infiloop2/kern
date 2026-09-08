@@ -7,12 +7,12 @@ export const MANAGED_INTEGRATIONS = {
     label: "OpenAI",
     summary: "Connect your OpenAI subscription and let your agent use Codex for tasks and cached web search.",
     protections: [
-      "The linked OpenAI account is pinned. Authenticated traffic for another account is denied until you explicitly disconnect and log in again.",
+      "Each Codex login adds that OpenAI account to the host's approved set. Authenticated traffic for any other account is denied until you explicitly connect it to a Codex runtime.",
       "Live browsing and remote tool servers are blocked. Codex can use only OpenAI's cached web search.",
     ],
     setupSteps: [
       { title: "Enable OpenAI", description: "On Home, open OpenAI under Integrations and choose Enable." },
-      { title: "Start the Codex login", description: "In Account, choose Start Codex login. In the OpenAI browser sign-in, use the subscription you want this host to use and enter the displayed device code to complete sign-in." },
+      { title: "Connect each Codex runtime", description: "Start Codex login and Codex 2 login separately. Use the subscription you want for each runtime and enter its displayed device code." },
       { title: "Verify the linked account", description: "Return to Kern and wait for the row to show connected with the expected email or account id. That identity is now the operator-approved account anchor." },
     ],
     dataSummary: {
@@ -57,7 +57,7 @@ export const MANAGED_INTEGRATIONS = {
       ],
     },
     capabilities: [
-      { name: "Codex model access", description: "Runs Codex tasks through the models and usage limits available to the linked OpenAI subscription." },
+      { name: "Codex model access", description: "Runs Codex and Codex 2 tasks through the models and usage limits available to their linked OpenAI subscriptions." },
       { name: "Cached web search", description: "Lets Codex search OpenAI's existing index or cache. Kern denies request forms that would let OpenAI fetch live external pages for the request." },
     ],
     controls: [

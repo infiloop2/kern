@@ -120,16 +120,18 @@ MOCK_LINKED_DEVICE_QR = (
 )
 # RUNTIMES is the task-session matrix. Every connected agent runtime is
 # selectable in the demo, including Grok's ACP turn adapter.
-RUNTIMES = ("codex", "claude_code", "grok", "hermes")
-CONNECTION_RUNTIMES = ("codex", "claude_code", "grok", "hermes")
+RUNTIMES = ("codex", "codex-2", "claude_code", "grok", "hermes")
+CONNECTION_RUNTIMES = ("codex", "codex-2", "claude_code", "grok", "hermes")
 PROVIDER_BY_RUNTIME = {
     "codex": "openai",
+    "codex-2": "openai",
     "claude_code": "claude",
     "grok": "xai",
     "hermes": "bedrock",
 }
 RUNTIME_LABELS = {
     "codex": "Codex",
+    "codex-2": "Codex 2",
     "claude_code": "Claude Code",
     "grok": "Grok",
     "hermes": "Hermes",
@@ -145,6 +147,7 @@ PROGRESS_SCRIPT = [
 # Provider traffic emitted alongside progress milestones, keyed by runtime.
 PROVIDER_TRAFFIC = {
     "codex": ("api.openai.com", "/v1/responses"),
+    "codex-2": ("api.openai.com", "/v1/responses"),
     "claude_code": ("api.anthropic.com", "/v1/messages"),
     "grok": ("cli-chat-proxy.grok.com", "/v1/responses"),
     "hermes": ("bedrock-runtime.us-east-1.amazonaws.com", "/model/qwen.qwen3-coder-next/converse-stream"),
@@ -180,10 +183,13 @@ class MockState:
         default_factory=lambda: {"network_integrations": {}}
     )
     logged_in: dict[str, bool] = field(
-        default_factory=lambda: {"codex": False, "claude_code": False, "grok": False}
+        default_factory=lambda: {
+            "codex": False, "codex-2": False, "claude_code": False, "grok": False
+        }
     )
     github_credential: dict[str, Any] | None = None
     codex_oauth: dict[str, str] = field(default_factory=dict)
+    codex_2_oauth: dict[str, str] = field(default_factory=dict)
     claude_oauth: dict[str, str] = field(default_factory=dict)
     grok_oauth: dict[str, str] = field(default_factory=dict)
     bedrock_access_key_id: str | None = None
@@ -1265,6 +1271,8 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
         return app_response
     if path == "/v1/agent-runtime/codex-oauth-login":
         return oauth("codex", method)
+    if path == "/v1/agent-runtime/codex-2-oauth-login":
+        return oauth("codex-2", method)
     if path == "/v1/agent-runtime/claude-oauth-login":
         return oauth("claude_code", method)
     if path == "/v1/agent-runtime/grok-oauth-login":
@@ -1629,17 +1637,18 @@ def agent_accounts() -> dict[str, Any]:
         complete_due_device_logins_locked()
         checked_at = STATE.now()
         accounts: list[dict[str, Any]] = []
-        for runtime in ("codex", "claude_code", "grok"):
+        for runtime in ("codex", "codex-2", "claude_code", "grok"):
             if runtime == "hermes":
                 continue
             status = STATE.runtime_status(runtime)
-            if runtime == "codex":
+            if runtime in {"codex", "codex-2"}:
                 account = {"agent_runtime": runtime, "provider": "openai", "status": status}
+                suffix = "" if runtime == "codex" else "_2"
                 if status == "active":
                     account.update(
                         {
-                            "account_id": "acct_mock_openai",
-                            "email": "akshay@infiloop.io",
+                            "account_id": f"acct_mock_openai{suffix}",
+                            "email": "akshay@infiloop.io" if runtime == "codex" else "codex_2@example.invalid",
                             "plan_type": "pro",
                             # Deliberately mixed so the top bar shows every
                             # ring state at once: a healthy 5h window resetting
@@ -1666,7 +1675,10 @@ def agent_accounts() -> dict[str, Any]:
                 elif STATE.logged_in.get(runtime):
                     # The account anchor outlives sessions and deactivation:
                     # identity stays visible while the runtime is not active.
-                    account.update({"account_id": "acct_mock_openai", "email": "akshay@infiloop.io"})
+                    account.update({
+                        "account_id": f"acct_mock_openai{suffix}",
+                        "email": "akshay@infiloop.io" if runtime == "codex" else "codex_2@example.invalid",
+                    })
             elif runtime == "claude_code":
                 account = {"agent_runtime": runtime, "provider": "claude", "status": status}
                 if status == "active":
@@ -1765,15 +1777,22 @@ def oauth(runtime: str, method: str) -> dict[str, str]:
     with STATE.lock:
         status = STATE.runtime_status(runtime)
         if status == "deactivated":
-            provider = {"codex": "OpenAI", "claude_code": "Claude", "grok": "xAI"}[runtime]
+            provider = {
+                "codex": "OpenAI", "codex-2": "OpenAI",
+                "claude_code": "Claude", "grok": "xAI",
+            }[runtime]
             raise ApiError(HTTPStatus.CONFLICT, f"{runtime_label(runtime)} OAuth login is unavailable while {provider} provider access is disabled")
         if status != "awaiting_login":
             raise ApiError(HTTPStatus.CONFLICT, f"{runtime_label(runtime)} OAuth login is only available while awaiting_login")
-    if runtime in {"codex", "grok"}:
+    if runtime in {"codex", "codex-2", "grok"}:
         if method not in {"GET", "POST"}:
             raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
         with STATE.lock:
-            oauth_record = STATE.codex_oauth if runtime == "codex" else STATE.grok_oauth
+            oauth_record = {
+                "codex": STATE.codex_oauth,
+                "codex-2": STATE.codex_2_oauth,
+                "grok": STATE.grok_oauth,
+            }[runtime]
             if method == "GET" and not oauth_record:
                 raise ApiError(
                     HTTPStatus.NOT_FOUND,
@@ -1788,10 +1807,10 @@ def oauth(runtime: str, method: str) -> dict[str, str]:
                 # same poll can render and immediately wipe mid-assertion.
                 oauth_record = {
                     "status": "awaiting_login",
-                    "device_code": "MOCK-CODEX" if runtime == "codex" else "MOCK-GROK",
+                    "device_code": "MOCK-CODEX-2" if runtime == "codex-2" else "MOCK-CODEX" if runtime == "codex" else "MOCK-GROK",
                     "login_url": (
                         "https://auth.openai.com/activate"
-                        if runtime == "codex"
+                        if runtime in {"codex", "codex-2"}
                         else "https://accounts.x.ai/oauth2/device?user_code=MOCK-GROK"
                     ),
                     "expires_at": expires,
@@ -1799,6 +1818,8 @@ def oauth(runtime: str, method: str) -> dict[str, str]:
                 }
                 if runtime == "codex":
                     STATE.codex_oauth = oauth_record
+                elif runtime == "codex-2":
+                    STATE.codex_2_oauth = oauth_record
                 else:
                     STATE.grok_oauth = oauth_record
             return {key: value for key, value in oauth_record.items() if not key.startswith("_")}
@@ -1877,7 +1898,7 @@ def disconnect_bedrock_credentials() -> dict[str, str]:
 
 
 def reset_linked_account(body: Any) -> dict[str, str]:
-    oauth_runtimes = ("codex", "claude_code", "grok")
+    oauth_runtimes = ("codex", "codex-2", "claude_code", "grok")
     if not isinstance(body, dict) or body.get("agent_runtime") not in oauth_runtimes:
         raise ApiError(HTTPStatus.BAD_REQUEST, "agent_runtime must be one of " + ", ".join(oauth_runtimes))
     runtime = body["agent_runtime"]
@@ -1888,6 +1909,8 @@ def reset_linked_account(body: Any) -> dict[str, str]:
         STATE.add_agent_event("agent_runtime.linked_account_reset", None, {"agent_runtime": runtime})
         if runtime == "codex":
             STATE.codex_oauth = {}
+        elif runtime == "codex-2":
+            STATE.codex_2_oauth = {}
         elif runtime == "claude_code":
             STATE.claude_oauth = {}
         else:
@@ -1896,7 +1919,10 @@ def reset_linked_account(body: Any) -> dict[str, str]:
 
 
 def runtime_label(runtime: str) -> str:
-    return {"codex": "Codex", "claude_code": "Claude", "grok": "Grok", "hermes": "Hermes"}[runtime]
+    return {
+        "codex": "Codex", "codex-2": "Codex 2", "claude_code": "Claude",
+        "grok": "Grok", "hermes": "Hermes",
+    }[runtime]
 
 
 def thread_route(
@@ -2608,6 +2634,7 @@ def replace_policy(body: Any) -> dict[str, Any]:
         previous_repositories = previous_github.get("write_repositories") or []
         STATE.policy = parsed
         STATE.codex_oauth = {}
+        STATE.codex_2_oauth = {}
         STATE.claude_oauth = {}
         STATE.grok_oauth = {}
         for runtime in CONNECTION_RUNTIMES:
@@ -2674,7 +2701,10 @@ def decide_github_pending_push(push_id: str, decision: str) -> dict[str, Any]:
 
 def complete_due_device_logins_locked() -> None:
     """Complete pending device logins once their mock approval window passes."""
-    for runtime, attribute in (("codex", "codex_oauth"), ("grok", "grok_oauth")):
+    for runtime, attribute in (
+        ("codex", "codex_oauth"), ("codex-2", "codex_2_oauth"),
+        ("grok", "grok_oauth"),
+    ):
         record = getattr(STATE, attribute)
         if (
             not record
@@ -2803,7 +2833,9 @@ def seed_demo_state() -> None:
             },
         },
     }
-    STATE.logged_in.update({"codex": True, "claude_code": True, "grok": True})
+    STATE.logged_in.update({
+        "codex": True, "codex-2": True, "claude_code": True, "grok": True,
+    })
     STATE.github_credential = {
         "mode": "app",
         "app_id": "12345",

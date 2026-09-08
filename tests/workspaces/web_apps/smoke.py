@@ -1191,11 +1191,9 @@ def desktop_smoke(page: Any) -> None:
             f"generated app should have one sanitized stylesheet, got {generated_sheet_count}"
         )
     expect(frame.locator("#runtime")).to_be_enabled()
-    # A provider the operator has not activated stays visible but unusable.
+    # A provider the operator has not activated is omitted from the selector.
     hermes = frame.locator("#runtime option[value='hermes']")
-    expect(hermes).to_have_text("Hermes (not activated)")
-    if not hermes.evaluate("option => option.disabled"):
-        raise AssertionError("a deactivated runtime must not be selectable")
+    expect(hermes).to_have_count(0)
     expect(frame.locator("#runtime option[value='codex']")).to_have_text("Codex")
     hidden_chat_nav = page.locator(
         f"#web-apps-nav-items [data-action='open-web-app'][data-item-id='{first_app}']"
