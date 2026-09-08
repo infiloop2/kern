@@ -17,6 +17,7 @@ from host.runtime.core.state._base import (
     utc_now,
 )
 from host.runtime.core.state.events import _page_before, _prune_events
+from host.runtime.core.state.accounts import OPENAI_PROVIDER_KEYS, openai_provider_key
 
 # -- network policy and proxy account pins (admin writes, proxy reads) ---------------
 
@@ -247,13 +248,30 @@ def save_network_policy(controls: dict[str, Any], updated_at: str) -> None:
                 )
 
 
-def save_proxy_openai_account_id(account_id: str | None, cur: Any = None) -> None:
-    _save_proxy_account_id("openai", account_id, cur)
+def save_proxy_openai_account_id(
+    account_id: str | None,
+    cur: Any = None,
+    *,
+    runtime_type: str = "codex",
+) -> None:
+    _save_proxy_account_id(openai_provider_key(runtime_type), account_id, cur)
 
 
-def read_proxy_openai_account_id() -> str | None:
-    value = _read_proxy_pin("openai").get("account_id")
+def read_proxy_openai_account_id(*, runtime_type: str = "codex") -> str | None:
+    value = _read_proxy_pin(openai_provider_key(runtime_type)).get("account_id")
     return value if isinstance(value, str) and value else None
+
+
+def read_proxy_openai_account_ids() -> set[str]:
+    provider_keys = tuple(OPENAI_PROVIDER_KEYS.values())
+    placeholders = ", ".join("%s" for _ in provider_keys)
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT account_id FROM proxy_provider_pins"
+            f" WHERE provider IN ({placeholders}) AND account_id IS NOT NULL",
+            provider_keys,
+        )
+        return {str(row[0]) for row in cur.fetchall() if row[0]}
 
 
 def save_proxy_claude_account_id(account_id: str | None, cur: Any = None) -> None:

@@ -22,7 +22,7 @@ from typing import Any
 
 from host.network_integrations.base import AccountAttestor, ManagedIntegration
 from host.runtime.core.network_policy import decode_body, normalized_path, route_allowed
-from host.runtime.core.state import read_proxy_openai_account_id
+from host.runtime.core.state import read_proxy_openai_account_ids
 
 # Codex standalone web search endpoints (code-mode models search here instead
 # of declaring a Responses web_search tool). The request must opt into cached
@@ -80,8 +80,8 @@ def request_denied(
         return "network_policy_denied"
     if lowered_host not in GUARDED_HOSTS:
         return None
-    account_id = read_proxy_openai_account_id()
-    if not account_id:
+    account_ids = read_proxy_openai_account_ids()
+    if not account_ids:
         return "openai_account_unavailable"
     # The header must be present AND match. A missing header is a denial:
     # otherwise the agent omits it and OpenAI resolves the account from the
@@ -89,7 +89,8 @@ def request_denied(
     presented = [value for key, value in headers if key.lower() == "chatgpt-account-id"]
     if not presented:
         return "openai_account_header_required"
-    if any(value != account_id for value in presented):
+    account_id = presented[0]
+    if account_id not in account_ids or any(value != account_id for value in presented):
         return "openai_account_mismatch"
     denial = _token_account_denial(headers, account_id)
     if denial is not None:

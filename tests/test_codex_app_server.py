@@ -363,7 +363,9 @@ class FakeLoginServer:
         account_error: str | None = None,
         completed: set[str] | None = None,
         alive: bool = True,
+        runtime_type: str = "codex",
     ) -> None:
+        self.runtime_type = runtime_type
         self.account = account
         self.account_error = account_error
         self.is_alive = alive
@@ -401,14 +403,14 @@ class FakeLoginServer:
 
 def park_login(server: Any, login_id: str = "login-x") -> None:
     with codex_app_server_module._login_lock:
-        codex_app_server_module._parked_login = codex_app_server_module._ParkedLogin(
+        codex_app_server_module._parked_logins["codex"] = codex_app_server_module._ParkedLogin(
             server=server, login_id=login_id  # type: ignore[arg-type]
         )
 
 
 def parked_server() -> Any:
     with codex_app_server_module._login_lock:
-        parked = codex_app_server_module._parked_login
+        parked = codex_app_server_module._parked_logins.get("codex")
     return parked.server if parked is not None else None
 
 
@@ -453,11 +455,13 @@ class CodexAppServerTests(unittest.TestCase):
 
     def setUp(self) -> None:
         # The live-validation verdict is a process-global memo; isolate tests.
-        codex_app_server_module.clear_live_validation_failure()
-        self.addCleanup(codex_app_server_module.clear_live_validation_failure)
+        for runtime in ("codex", "codex-2"):
+            codex_app_server_module.clear_live_validation_failure(runtime)
+            self.addCleanup(codex_app_server_module.clear_live_validation_failure, runtime)
 
     def tearDown(self) -> None:
-        codex_app_server_module.close_login_server()
+        for runtime in ("codex", "codex-2"):
+            codex_app_server_module.close_login_server(runtime)
 
     def account_status_with_result(
         self,
@@ -497,6 +501,21 @@ class CodexAppServerTests(unittest.TestCase):
         )
         self.assertEqual(
             codex_app_server_module.CodexAppServer(command=["/bin/echo"])._command, ["/bin/echo"]
+        )
+
+    def test_second_runtime_selects_its_separate_codex_home(self) -> None:
+        server = codex_app_server_module.CodexAppServer(
+            runtime_type="codex-2", thread_id="thread-2"
+        )
+        self.assertEqual(
+            server._command,
+            [
+                *codex_app_server_module.DEFAULT_COMMAND,
+                "--runtime",
+                "codex-2",
+                "--thread-scope",
+                "thread-2",
+            ],
         )
 
     def test_close_stops_the_thread_scope_under_the_production_launcher(self) -> None:
@@ -723,9 +742,9 @@ class CodexAppServerTests(unittest.TestCase):
                 self.account_status_with_result(result, rate_limits_error=True),
                 (status, error_message, None),
             )
-            failure = codex_app_server_module._live_validation_failure
+            failure = codex_app_server_module._live_validation_failures.get("codex")
             assert failure is not None
-            codex_app_server_module._live_validation_failure = (
+            codex_app_server_module._live_validation_failures["codex"] = (
                 failure[0],
                 failure[1],
                 failure[2] - codex_app_server_module.LIVE_VALIDATION_RETRY_SECONDS - 1,
@@ -835,7 +854,11 @@ class CodexAppServerTests(unittest.TestCase):
         new_server = FakeLoginServer(None)
         park_login(new_server)
 
-        self.assertIsNone(codex_app_server_module._pop_parked(lambda parked: parked.server is old_server))
+        self.assertIsNone(
+            codex_app_server_module._pop_parked(
+                "codex", lambda parked: parked.server is old_server
+            )
+        )
 
         self.assertIs(parked_server(), new_server)
         self.assertFalse(old_server.closed)
@@ -849,6 +872,21 @@ class CodexAppServerTests(unittest.TestCase):
 
         self.assertTrue(server.closed)
         self.assertIsNone(parked_server())
+
+    def test_close_login_server_is_scoped_to_one_codex_runtime(self) -> None:
+        first = FakeLoginServer(None)
+        second = FakeLoginServer(None)
+        with codex_app_server_module._login_lock:
+            codex_app_server_module._parked_logins.update({
+                "codex": codex_app_server_module._ParkedLogin(first, "login-1"),
+                "codex-2": codex_app_server_module._ParkedLogin(second, "login-2"),
+            })
+
+        codex_app_server_module.close_login_server("codex-2")
+
+        self.assertFalse(first.closed)
+        self.assertTrue(second.closed)
+        self.assertIs(parked_server(), first)
 
     def test_close_completed_login_server_ignores_a_newer_login_id(self) -> None:
         new_login = FakeLoginServer(None)
@@ -1296,7 +1334,10 @@ for line in sys.stdin:
 
     def test_run_turn_emits_started_live_output_and_completed_activity(self) -> None:
         events = []
-        with CodexAppServer([sys.executable, "-u", "-c", FAKE_ACTIVITY_SERVER]) as server:
+        with CodexAppServer(
+            [sys.executable, "-u", "-c", FAKE_ACTIVITY_SERVER],
+            runtime_type="codex-2",
+        ) as server:
             _, output = run_turn(
                 server,
                 "test it",
@@ -1308,6 +1349,7 @@ for line in sys.stdin:
 
         activity = [event for event in events if isinstance(event, dict)]
         self.assertEqual([event["phase"] for event in activity], ["started", "started", "completed"])
+        self.assertEqual({event["provider"] for event in activity}, {"codex-2"})
         self.assertTrue(activity[1]["append_output"])
         self.assertEqual(activity[1]["output"], "test is running\n")
         self.assertEqual(activity[2]["status"], "exit 0")

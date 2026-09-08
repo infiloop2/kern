@@ -21,7 +21,7 @@ EXACT_DOMAIN_RE = re.compile(r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 # Membership here means the host manages the runtime. What an interactive
 # thread may select is the narrower model matrix in `host/session_options.py`;
 # script remains schedule-only there.
-AGENT_RUNTIMES = {"codex", "claude_code", "grok", "hermes", "script"}
+AGENT_RUNTIMES = {"codex", "codex-2", "claude_code", "grok", "hermes", "script"}
 
 
 class ConfigError(ValueError):

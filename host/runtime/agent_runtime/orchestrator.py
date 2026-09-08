@@ -452,7 +452,7 @@ def reconcile_runtime_status_after_policy_change() -> None:
     CLI checks.
     """
     enabled: list[str] = []
-    for runtime_type in ("codex", "claude_code", "grok", "hermes"):
+    for runtime_type in ("codex", "codex-2", "claude_code", "grok", "hermes"):
         if not runtime_network_enabled(runtime_type):
             _mark_runtime_deactivated(runtime_type)
         else:
@@ -536,8 +536,8 @@ def _close_login_flow(runtime_type: str) -> None:
     # Best-effort: the pending OAuth record is already gone, so a parked login
     # process that resists closing is inert; never fail the caller over it.
     try:
-        if runtime_type == "codex":
-            codex_app_server.close_login_server()
+        if runtime_type in codex_app_server.CODEX_RUNTIME_TYPES:
+            codex_app_server.close_login_server(runtime_type)
         elif runtime_type == "grok":
             grok_agent.close_login_server()
         elif runtime_type == "claude_code":
@@ -575,7 +575,7 @@ def runtime_status_loop() -> None:
     # of that: its status comes from a constant, so a poll would re-publish an
     # unchangeable value and open an empty transaction to do it.
     # ``start_background_loops`` publishes those runtimes once instead.
-    refresh_targets = ("codex", "claude_code", "grok", "hermes")
+    refresh_targets = ("codex", "codex-2", "claude_code", "grok", "hermes")
     next_check_at = {runtime_type: 0.0 for runtime_type in refresh_targets}
     while True:
         now = time.monotonic()

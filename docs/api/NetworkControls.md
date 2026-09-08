@@ -107,8 +107,8 @@ Manual rules also cannot set provider-specific guard configuration.
 
 ## OpenAI Integration
 
-When `network_integrations.openai.enabled` is `true`, Codex turns can
-run after Codex OAuth login. The OpenAI integration directly enforces:
+When `network_integrations.openai.enabled` is `true`, Codex and Codex 2 turns
+can run after their separate OAuth logins. The OpenAI integration directly enforces:
 
 ```json
 {
@@ -126,12 +126,21 @@ run after Codex OAuth login. The OpenAI integration directly enforces:
 
 The OpenAI external URL request guard (cache-only web search, no remote MCP)
 and account guard are always applied to the
-managed API/data-plane domains. The host infers the OpenAI account id from
-Codex login status instead of accepting it in config. OpenAI data-plane
-requests are denied until that inferred account id is available;
+managed API/data-plane domains. The host infers each approved OpenAI account id
+from its Codex runtime's login status instead of accepting it in config. OpenAI
+data-plane requests are denied unless their header and OAuth token identify one
+of those approved accounts;
 `auth.openai.com` stays available for login. Disabling the integration
-deactivates the Codex runtime, clears the account pin, closes live runtime
+deactivates both Codex runtimes, clears both account pins, closes live runtime
 processes, and fails running Codex turns.
+
+Both Codex runtimes use the same local network proxy and Unix service account,
+so the approved account ids form one OpenAI allowlist. Runtime selection chooses
+which Codex home and OAuth login the launcher uses during normal operation; it
+is not a security boundary between the two subscriptions. Code already running
+as `kern-agent` can read both Codex homes. Enforcing hostile separation between
+the accounts would require separate OS identities and independently authenticated
+proxy paths rather than this shared-proxy design.
 
 ## Claude Integration
 

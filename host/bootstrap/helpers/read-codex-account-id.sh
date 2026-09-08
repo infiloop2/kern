@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exec /usr/sbin/runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home /usr/bin/python3 - <<'PY'
+
+runtime="${1:-codex}"
+if [ "$runtime" != "codex" ] && [ "$runtime" != "codex-2" ]; then
+  echo "usage: read-codex-account-id [codex|codex-2]" >&2
+  exit 2
+fi
+
+codex_home="/mnt/kern-agent/agent-home/.$runtime"
+
+exec /usr/sbin/runuser -u kern-agent -- env HOME=/mnt/kern-agent/agent-home CODEX_HOME="$codex_home" /usr/bin/python3 - <<'PY'
 import base64
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -20,7 +30,7 @@ def jwt_payload(token):
         return {}
 
 
-auth_path = Path.home() / ".codex" / "auth.json"
+auth_path = Path(os.environ["CODEX_HOME"]) / "auth.json"
 try:
     auth = json.loads(auth_path.read_text())
 except FileNotFoundError:

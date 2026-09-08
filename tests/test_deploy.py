@@ -2020,6 +2020,11 @@ class DeployUnitTests(unittest.TestCase):
         # Root rewrites the managed database config inside the postgres-owned
         # data directory; those slots (and every data-dir path component) are
         # sanitized against planted symlinks first.
+        self.assertIn('agent_home / ".codex" / "skills",', bootstrap)
+        self.assertLess(
+            bootstrap.index('agent_home / ".codex" / "skills",'),
+            bootstrap.index('"$AGENT_HOME_PATH/.codex/skills"'),
+        )
         self.assertIn('pgdata / "postgresql.conf",', bootstrap)
         self.assertIn('pgdata / "pg_hba.conf",', bootstrap)
         self.assertIn('pgdata = admin_mount / "postgres" / os.environ["PG_MAJOR"] / "main"', bootstrap)
@@ -2115,6 +2120,15 @@ class DeployUnitTests(unittest.TestCase):
             "systemctl is-active --quiet systemd-tmpfiles-clean.timer",
             bootstrap,
         )
+
+    def test_secondary_codex_runtime_shares_primary_skills_before_services_start(self) -> None:
+        bootstrap = render._render_bootstrap()
+        skills_directory = '"$AGENT_HOME_PATH/.codex/skills"'
+        skills_link = 'ln -s ../.codex/skills "$AGENT_HOME_PATH/.codex-2/skills"'
+
+        self.assertIn(skills_directory, bootstrap)
+        self.assertIn(skills_link, bootstrap)
+        self.assertLess(bootstrap.index(skills_link), bootstrap.index("\n  start_services\n"))
 
     def test_host_node_dependencies_are_readable_but_not_writable_by_tools(self) -> None:
         bootstrap = render._render_bootstrap()

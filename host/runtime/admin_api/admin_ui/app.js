@@ -1229,7 +1229,7 @@ document.addEventListener("click", event => {
       openHomeIntegration(button.dataset.provider);
     },
     "start-login": () => startLogin(runtime),
-    "reset-linked-account": () => resetLinkedAccount(button.dataset.provider),
+    "reset-linked-account": () => resetLinkedAccount(button.dataset.runtime),
     "complete-claude-login": () => completeClaudeLogin(),
     "refresh-provider-usage": () => refreshProviderUsage(),
     "toggle-runtime-overview": () => toggleRuntimeOverview(),

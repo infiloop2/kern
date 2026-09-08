@@ -1476,7 +1476,9 @@ class OpenAIAccountBindingTests(unittest.TestCase):
     ACCOUNT = "acct-pinned"
 
     def deny(self, headers, *, method="POST", path="/v1/responses", body=b"") -> str | None:
-        with patch.object(openai_guard, "read_proxy_openai_account_id", return_value=self.ACCOUNT):
+        with patch.object(
+            openai_guard, "read_proxy_openai_account_ids", return_value={self.ACCOUNT}
+        ):
             return openai_guard.request_denied(
                 object(), method, "api.openai.com", path, "", headers, body
             )
@@ -1487,6 +1489,23 @@ class OpenAIAccountBindingTests(unittest.TestCase):
     def test_matching_account_and_token_pass(self) -> None:
         headers = [self.pinned(), ("Authorization", openai_bearer(self.ACCOUNT))]
         self.assertIsNone(self.deny(headers))
+
+    def test_either_approved_codex_account_passes(self) -> None:
+        second = "acct-second"
+        headers = [
+            ("ChatGPT-Account-ID", second),
+            ("Authorization", openai_bearer(second)),
+        ]
+        with patch.object(
+            openai_guard,
+            "read_proxy_openai_account_ids",
+            return_value={self.ACCOUNT, second},
+        ):
+            self.assertIsNone(
+                openai_guard.request_denied(
+                    object(), "POST", "api.openai.com", "/v1/responses", "", headers, b""
+                )
+            )
 
     def test_foreign_token_account_is_denied(self) -> None:
         headers = [self.pinned(), ("Authorization", openai_bearer("acct-attacker"))]

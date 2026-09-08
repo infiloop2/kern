@@ -218,6 +218,7 @@ function renderRuntimeOverview() {
   // The top toolbar has one box per agent runtime.
   const boxes = [
     subscriptionSummary("codex"),
+    subscriptionSummary("codex-2"),
     subscriptionSummary("claude_code"),
     grokSummary("grok"),
     bedrockSummary("hermes", bedrockAccount),
@@ -279,7 +280,7 @@ function runtimeSummaryCard(runtime, usageHtml, usageSummaryText, extraClass) {
   // credentials and integration settings for an active one.
   const summaryLabel = `${meta.label}: ${statusText}${runningLabel}; ${usageSummaryText}. Open provider settings`;
   return `
-      <button class="${cls}" data-action="open-provider" data-provider="${esc(meta.provider)}" aria-label="${esc(summaryLabel)}">${inner}</button>`;
+      <button class="${cls}" data-action="open-provider" data-provider="${esc(meta.provider)}" data-runtime="${esc(runtime)}" aria-label="${esc(summaryLabel)}">${inner}</button>`;
 }
 
 // A subscription runtime (Codex, Claude Code): usage is quota windows, drawn as
@@ -456,8 +457,9 @@ function usageRing(label, window) {
 // for approval itself, so the host has nothing to submit back. Claude is the
 // odd one out and keeps its own branch below.
 const DEVICE_LOGINS = {
-  codex: { provider: "openai", label: "Codex", path: "/v1/agent-runtime/codex-oauth-login" },
-  grok: { provider: "xai", label: "Grok", path: "/v1/agent-runtime/grok-oauth-login" },
+  codex: { provider: "openai", label: "Codex" },
+  "codex-2": { provider: "openai", label: "Codex 2" },
+  grok: { provider: "xai", label: "Grok" },
 };
 
 async function showOauth(start, runtime) {
@@ -468,11 +470,11 @@ async function showOauth(start, runtime) {
   // The card target is re-queried after each await: the 5-second poll can
   // re-render the provider card while the request is in flight, and writing
   // into the detached old node would silently drop the login card.
-  if (!document.querySelector(`[data-provider-oauth="${provider}"]`)) return;
+  if (!document.querySelector(`[data-provider-oauth="${runtime}"]`)) return;
   try {
     if (runtime === "claude_code") {
       const login = await api(start ? "POST" : "GET", "/v1/agent-runtime/claude-oauth-login");
-      const target = document.querySelector(`[data-provider-oauth="${provider}"]`);
+      const target = document.querySelector(`[data-provider-oauth="${runtime}"]`);
       if (!target) return;
       setHtml(target, `<div class="oauth-card">
         <span>Claude Code login: open
@@ -481,8 +483,8 @@ async function showOauth(start, runtime) {
         <button class="primary sm" data-action="complete-claude-login">Submit code</button></div>`);
       return;
     }
-    const login = await api(start ? "POST" : "GET", device.path);
-    const target = document.querySelector(`[data-provider-oauth="${provider}"]`);
+    const login = await api(start ? "POST" : "GET", `/v1/agent-runtime/${runtime}-oauth-login`);
+    const target = document.querySelector(`[data-provider-oauth="${runtime}"]`);
     if (!target) return;
     setHtml(target, `<div class="oauth-card">
       <span>${esc(device.label)} login: enter code <b>${esc(login.device_code)}</b> at

@@ -197,7 +197,7 @@ and show up in the same agent slice.
 
 - Every message names a client-chosen `thread_id` beginning with `app-`,
   `thread-`, or `schedule-`. The first message also
-  names an `agent_runtime` (`codex`, `claude_code`, `grok`, or `hermes`) and one
+  names an `agent_runtime` (`codex`, `codex-2`, `claude_code`, `grok`, or `hermes`) and one
   allowed model/effort pair, which binds all four values and starts a runtime
   conversation. Later messages
   may omit the runtime, model, and effort; the host loads the thread's fixed

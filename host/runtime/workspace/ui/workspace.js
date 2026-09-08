@@ -7,6 +7,10 @@
   // The one runtime whose schedule message is a path, not a prompt
   // (host/session_options.py, host/agent_scripts.py).
   const SCRIPT_RUNTIME = "script";
+  const runtimeLabel = runtime => ({
+    codex: "Codex", "codex-2": "Codex 2", claude_code: "Claude Code",
+    grok: "Grok", hermes: "Hermes", script: "Script",
+  })[runtime] || runtime;
   const SCRIPT_PATH_PLACEHOLDER = "/mnt/kern-agent/agent-home/scripts/nightly-backup.sh";
   const state = {
     resource: "memory",
@@ -166,7 +170,7 @@
       description.className = "global-list-description";
       description.textContent = state.resource === "memory"
         ? item.description
-        : `${cadenceLabel(item)} · ${item.agent_runtime} / ${item.model} / ${item.effort}`;
+        : `${cadenceLabel(item)} · ${runtimeLabel(item.agent_runtime)} / ${item.model} / ${item.effort}`;
       const meta = document.createElement("span");
       meta.className = "global-list-meta";
       meta.textContent = state.resource === "memory"
@@ -445,17 +449,20 @@
   }
 
   // Kern runs the script runtime itself, so it is never an operator-connected
-  // provider and is never gated. Unknown activation gates nothing, and a saved
-  // schedule keeps its own runtime selectable after that provider is turned off.
+  // provider and is never gated. Unknown activation gates nothing. A saved
+  // schedule keeps its old runtime visible after deactivation, but disabled.
   function scheduleRuntimeUnavailable(value, current) {
-    if (value === SCRIPT_RUNTIME || value === current) return false;
+    if (value === SCRIPT_RUNTIME) return false;
     if (!Array.isArray(state.activeRuntimes)) return false;
     return !state.activeRuntimes.includes(value);
   }
 
   function syncSessionSelectors(runtime, model, effort) {
     if (!state.sessionOptions) return;
-    const runtimes = Object.keys(state.sessionOptions);
+    const allRuntimes = Object.keys(state.sessionOptions);
+    const runtimes = allRuntimes.filter(value => (
+      !scheduleRuntimeUnavailable(value, runtime) || value === runtime
+    ));
     const chosen = runtime
       || runtimes.find(value => !scheduleRuntimeUnavailable(value, null))
       || runtimes[0];
@@ -489,7 +496,9 @@
     for (const value of values) {
       const option = document.createElement("option");
       option.value = value;
-      const label = value.replaceAll("_", " ");
+      const label = select.id === "schedule-runtime"
+        ? runtimeLabel(value)
+        : value.replaceAll("_", " ");
       option.disabled = Boolean(unavailable && unavailable(value));
       option.textContent = option.disabled ? `${label} (not activated)` : label;
       option.selected = value === selected;
@@ -609,7 +618,7 @@
       copy.className = "history-copy";
       copy.textContent = resource === "memory"
         ? `${revision.description}\n${revision.content}`
-        : `${revision.name} · ${cadenceLabel(revision)} · ${revision.agent_runtime}/${revision.model}/${revision.effort}`;
+        : `${revision.name} · ${cadenceLabel(revision)} · ${runtimeLabel(revision.agent_runtime)}/${revision.model}/${revision.effort}`;
       head.append(label, restore);
       row.append(head, copy);
       container.append(row);

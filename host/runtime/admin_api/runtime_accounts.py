@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from http import HTTPStatus
 import re
 import threading
@@ -21,7 +22,11 @@ from host.runtime.admin_api.errors import ApiError
 from host.runtime.admin_api.threads import _account_response_metadata
 from host.runtime.core import state
 from host.runtime.core.root_helpers import HelperTimedOut, run_root_helper as _run_root_helper
-from host.runtime.core.state import read_claude_account, read_openai_account, read_xai_account
+from host.runtime.core.state import (
+    read_claude_account,
+    read_openai_account,
+    read_xai_account,
+)
 
 OAUTH_LOGIN_LOCK_TIMEOUT_SECONDS = 5
 OAUTH_LOGIN_STATUSES = ("awaiting_login", "error")
@@ -36,8 +41,8 @@ def _minutes_from_now(minutes: int) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + minutes * 60))
 
 
-def _mint_codex_login() -> tuple[dict[str, str], dict[str, str]]:
-    login = codex_app_server.start_device_login()
+def _mint_codex_login(runtime_type: str) -> tuple[dict[str, str], dict[str, str]]:
+    login = codex_app_server.start_device_login(runtime_type)
     response = {
         "status": "awaiting_login",
         "device_code": login.user_code,
@@ -121,8 +126,19 @@ _OAUTH_LOGIN_FLOWS = {
         display="Codex",
         provider="OpenAI",
         response_keys=("status", "device_code", "login_url", "expires_at"),
-        mint=_mint_codex_login,
+        mint=partial(_mint_codex_login, "codex"),
         close=lambda: codex_app_server.close_login_server(),
+        parked=lambda: codex_app_server.login_server_parked("codex"),
+    ),
+    "codex-2": _OAuthLoginFlow(
+        runtime_type="codex-2",
+        oauth_key="codex-2",
+        display="Codex 2",
+        provider="OpenAI",
+        response_keys=("status", "device_code", "login_url", "expires_at"),
+        mint=partial(_mint_codex_login, "codex-2"),
+        close=lambda: codex_app_server.close_login_server("codex-2"),
+        parked=lambda: codex_app_server.login_server_parked("codex-2"),
     ),
     "claude_code": _OAuthLoginFlow(
         runtime_type="claude_code",
@@ -166,11 +182,10 @@ def _start_oauth_login(flow: _OAuthLoginFlow) -> dict[str, str]:
         _require_oauth_login_available(flow)
         oauth = state.oauth_login(flow.oauth_key)
         if oauth and flow.parked is not None and not flow.parked():
-            # The row outlived the process that can complete it. Grok's device
-            # flow is driven by the CLI holding the long-running authenticate
-            # request, and an admin API restart stops that scope through
-            # BindsTo, so returning the row would hand the operator a code
-            # nobody is exchanging until it expires. Drop it and mint again.
+            # The row outlived the process that can complete it. Device flows
+            # are driven by a parked CLI process, and an admin API restart
+            # stops that scope through BindsTo, so returning the row would hand
+            # the operator a dead code until it expires. Drop it and mint again.
             with state.mutation() as cur:
                 state.set_oauth_login(cur, flow.oauth_key, None)
             oauth = None
@@ -211,6 +226,14 @@ def start_codex_oauth_login() -> dict[str, str]:
 
 def current_codex_oauth_login() -> dict[str, str]:
     return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["codex"])
+
+
+def start_codex_2_oauth_login() -> dict[str, str]:
+    return _start_oauth_login(_OAUTH_LOGIN_FLOWS["codex-2"])
+
+
+def current_codex_2_oauth_login() -> dict[str, str]:
+    return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["codex-2"])
 
 
 def start_claude_oauth_login() -> dict[str, str]:
@@ -361,7 +384,12 @@ def reset_linked_account(body: Any) -> dict[str, str]:
 
 # The clear-agent-auth helper is named for the provider whose files it
 # removes, not for the runtime that uses them.
-_AGENT_AUTH_HELPER_RUNTIMES = {"codex": "codex", "claude_code": "claude", "grok": "grok"}
+_AGENT_AUTH_HELPER_RUNTIMES = {
+    "codex": "codex",
+    "codex-2": "codex-2",
+    "claude_code": "claude",
+    "grok": "grok",
+}
 
 
 def _clear_local_agent_auth(runtime_type: str) -> None:
@@ -385,8 +413,8 @@ def _clear_local_agent_auth(runtime_type: str) -> None:
         raise ApiError(HTTPStatus.CONFLICT, message)
 
 
-AGENT_RUNTIME_TYPES = ("codex", "claude_code", "grok", "hermes")
-OAUTH_RUNTIME_TYPES = ("codex", "claude_code", "grok")
+AGENT_RUNTIME_TYPES = ("codex", "codex-2", "claude_code", "grok", "hermes")
+OAUTH_RUNTIME_TYPES = ("codex", "codex-2", "claude_code", "grok")
 
 
 def current_agent_accounts() -> dict[str, Any]:
@@ -394,6 +422,7 @@ def current_agent_accounts() -> dict[str, Any]:
     return {
         "accounts": [
             _current_agent_account(statuses, "codex"),
+            _current_agent_account(statuses, "codex-2"),
             _current_agent_account(statuses, "claude_code"),
             _current_agent_account(statuses, "grok"),
             _current_bedrock_account(statuses),
@@ -437,8 +466,8 @@ def _current_agent_account(statuses: dict[str, dict[str, Any]], runtime_type: st
         if account.get("operator_approval") != orchestrator.XAI_OPERATOR_APPROVAL:
             account = {}
     else:
-        response = {"agent_runtime": "codex", "provider": "openai", "status": status}
-        account = read_openai_account()
+        response = {"agent_runtime": runtime_type, "provider": "openai", "status": status}
+        account = read_openai_account(runtime_type=runtime_type)
         if account.get("operator_approval") != orchestrator.OPENAI_OPERATOR_APPROVAL:
             account = {}
     return _account_response_tail(response, account, status, runtime_type)

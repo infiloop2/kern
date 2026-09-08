@@ -38,6 +38,7 @@ let sessionOptions = {};
 let activeRuntimes = null;
 const DEFAULT_MODELS = Object.freeze({
   codex: "gpt-5.6-sol",
+  "codex-2": "gpt-5.6-sol",
   claude_code: "claude-opus-5",
   grok: "grok-4.6",
   hermes: "moonshotai.kimi-k2.5",
@@ -92,13 +93,13 @@ const webAppsRoot = window.KernWorkspaceRoots["web-apps"];
 const $ = id => webAppsRoot.querySelector(`#${CSS.escape(id)}`);
 const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => ({
-  claude_code: "Claude Code", codex: "Codex", grok: "Grok", hermes: "Hermes",
+  claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", grok: "Grok", hermes: "Hermes",
 })[runtime] || runtime;
 const optionLabel = value => String(value)
   .split(/[-_]/)
   .map(part => part.charAt(0).toUpperCase() + part.slice(1))
   .join(" ");
-const modelLabel = (runtime, value) => runtime === "codex"
+const modelLabel = (runtime, value) => runtime === "codex" || runtime === "codex-2"
   ? value
   : optionLabel(String(value).replace(/^claude-/, ""));
 
@@ -2305,19 +2306,6 @@ function syncAppSubtitle() {
   $("app-subtitle").hidden = !subtitle;
 }
 
-// Two different questions. Null active runtimes means the host could not
-// report activation, so neither gate applies: an unknown status must never
-// hide a usable provider or block sending.
-
-// Can it be shown as the selection? Only a session the app actually ran with
-// keeps its runtime here after that provider is turned off, so the settings
-// still show the truth. A sessionless app instead moves to a runnable default.
-function runtimeSelectable(runtime) {
-  if (!Array.isArray(activeRuntimes)) return true;
-  if (establishedSession && runtime === establishedSession.agent_runtime) return true;
-  return activeRuntimes.includes(runtime);
-}
-
 // Can the host actually run it? A deactivated runtime is refused on admission,
 // so an established session gets no exemption here: displaying its recorded
 // configuration is honest, offering to send another message on it is not.
@@ -2328,11 +2316,13 @@ function runtimeRunnable(runtime) {
 
 function setRuntimeOptions(preferredRuntime = null) {
   const current = preferredRuntime || $("runtime").value;
-  const runtimes = Object.keys(sessionOptions);
+  const runtimes = Object.keys(sessionOptions).filter(value => (
+    runtimeRunnable(value) || value === current
+  ));
   if (current && !runtimes.includes(current)) runtimes.push(current);
   $("runtime").replaceChildren(...runtimes.map(value => {
     const label = runtimeLabel(value);
-    const available = runtimeSelectable(value);
+    const available = runtimeRunnable(value);
     const option = new Option(available ? label : `${label} (not activated)`, value);
     option.disabled = !available;
     return option;

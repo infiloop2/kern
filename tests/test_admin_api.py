@@ -57,6 +57,7 @@ def save_approved_openai_account(account_id: str, **extra: Any) -> None:
 # which configuration a thread runs.
 DEFAULT_SESSION_OPTIONS = {
     "codex": ("gpt-5.6-terra", "high"),
+    "codex-2": ("gpt-5.6-terra", "high"),
     "claude_code": ("claude-opus-5", "high"),
     "hermes": ("deepseek.v3.2", "high"),
     "script": ("bash", "fixed"),
@@ -3623,7 +3624,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('leftEnabled ? -1 : 1', ui)
         self.assertIn('leftLabel.localeCompare(rightLabel', ui)
         self.assertIn("Integration guide", ui)
-        self.assertIn("Authenticated traffic for another account is denied", ui)
+        self.assertIn("Authenticated traffic for any other account is denied", ui)
         self.assertIn("writes work only for the repositories you configure", ui)
         self.assertNotIn("iconTile", ui)
         self.assertNotIn('class="icon-tile"', html)
@@ -4646,6 +4647,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         "account_id": "acct_smoke",
                         "email": "codex@example.com",
                     },
+                    {"agent_runtime": "codex-2", "provider": "openai", "status": "loading"},
                     {
                         "agent_runtime": "claude_code",
                         "provider": "claude",
@@ -4681,7 +4683,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, body = self.request("GET", "/v1/agent-runtime/account")
 
         self.assertEqual(
-            body["accounts"][1], {"agent_runtime": "claude_code", "provider": "claude", "status": "awaiting_login"}
+            body["accounts"][2], {"agent_runtime": "claude_code", "provider": "claude", "status": "awaiting_login"}
         )
 
     def test_agent_accounts_return_provider_records(self) -> None:
@@ -4731,6 +4733,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                             },
                         },
                     },
+                    {"agent_runtime": "codex-2", "provider": "openai", "status": "loading"},
                     {"agent_runtime": "claude_code", "provider": "claude", "status": "awaiting_login"},
                     {"agent_runtime": "grok", "provider": "xai", "status": "loading"},
                     {
@@ -4821,6 +4824,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             {
                 "accounts": [
                     {"agent_runtime": "codex", "provider": "openai", "status": "deactivated"},
+                    {"agent_runtime": "codex-2", "provider": "openai", "status": "loading"},
                     {
                         "agent_runtime": "claude_code",
                         "provider": "claude",
@@ -4862,7 +4866,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, body = self.request("GET", "/v1/agent-runtime/account")
 
         self.assertEqual(
-            body["accounts"][2],
+            body["accounts"][3],
             {
                 "agent_runtime": "grok",
                 "provider": "xai",
@@ -4889,7 +4893,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, body = self.request("GET", "/v1/agent-runtime/account")
 
         self.assertEqual(
-            body["accounts"][1]["claude_usage"],
+            body["accounts"][2]["claude_usage"],
             {
                 "current_session_used_percent": 0,
                 "weekly_used_percent": 0,
@@ -4907,7 +4911,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         refresh.assert_called_once_with("claude_code", force_provider_probe=True)
         self.assertEqual(
-            [account["provider"] for account in body["accounts"]], ["openai", "claude", "xai", "bedrock"]
+            [account["provider"] for account in body["accounts"]],
+            ["openai", "openai", "claude", "xai", "bedrock"],
         )
 
     def test_agent_runtime_refresh_endpoint_forces_requested_bedrock_runtime(self) -> None:
@@ -4939,6 +4944,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             [(call.args[0], call.kwargs) for call in refresh.call_args_list],
             [
                 ("codex", {"force_provider_probe": True}),
+                ("codex-2", {"force_provider_probe": True}),
                 ("claude_code", {"force_provider_probe": True}),
                 ("grok", {"force_provider_probe": True}),
                 ("hermes", {"force_provider_probe": True}),
@@ -4957,6 +4963,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             [(entry.args[0], entry.kwargs) for entry in refresh.call_args_list],
             [
                 ("codex", {"force_provider_probe": True}),
+                ("codex-2", {"force_provider_probe": True}),
                 ("claude_code", {"force_provider_probe": True}),
                 ("grok", {"force_provider_probe": True}),
                 ("hermes", {"force_provider_probe": False}),
@@ -5539,12 +5546,53 @@ class AdminApiIntegrationTests(unittest.TestCase):
             user_code="CODE-1",
         )
 
-        with patch("host.runtime.admin_api.service.codex_app_server.start_device_login", return_value=login) as start:
+        with (
+            patch(
+                "host.runtime.admin_api.service.codex_app_server.start_device_login",
+                return_value=login,
+            ) as start,
+            patch(
+                "host.runtime.admin_api.service.codex_app_server.login_server_parked",
+                return_value=True,
+            ),
+        ):
             first = admin_api.start_codex_oauth_login()
             second = admin_api.start_codex_oauth_login()
 
         self.assertEqual(first, second)
         self.assertEqual(start.call_count, 1)
+
+    def test_codex_2_oauth_start_discards_a_login_whose_server_is_gone(self) -> None:
+        set_runtime_statuses(**{"codex-2": "awaiting_login"})
+        logins = [
+            admin_api.codex_app_server.CodexLogin(
+                login_id=f"login-{index}",
+                verification_url="https://example.com/device",
+                user_code=f"CODE-{index}",
+            )
+            for index in (1, 2)
+        ]
+
+        with (
+            patch(
+                "host.runtime.admin_api.service.codex_app_server.start_device_login",
+                side_effect=logins,
+            ) as start,
+            patch(
+                "host.runtime.admin_api.service.codex_app_server.login_server_parked",
+                return_value=False,
+            ),
+        ):
+            first = admin_api.start_codex_2_oauth_login()
+            second = admin_api.start_codex_2_oauth_login()
+            with self.assertRaises(admin_api.ApiError) as absent:
+                admin_api.current_codex_2_oauth_login()
+
+        self.assertEqual(first["device_code"], "CODE-1")
+        self.assertEqual(second["device_code"], "CODE-2")
+        self.assertEqual(start.call_count, 2)
+        self.assertEqual(absent.exception.status, HTTPStatus.NOT_FOUND)
+        self.assertEqual(state.oauth_login("codex-2")["login_id"], "login-2")
 
     def test_claude_oauth_start_reuses_existing_login(self) -> None:
         save_policy(

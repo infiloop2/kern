@@ -1,7 +1,7 @@
 """OpenAI managed integration: static contract.
 
-Opens the OpenAI/ChatGPT domains for the Codex runtime, pinned to the
-configured account and restricted to cache-backed web retrieval (the guard
+Opens the OpenAI/ChatGPT domains for the Codex runtimes, restricted to the
+approved accounts and cache-backed web retrieval (the guard
 denies any request that would make OpenAI reach an external URL with request
 data).
 """
@@ -21,32 +21,32 @@ MANIFEST = IntegrationManifest(
     integration_id="openai",
     display_name="OpenAI",
     description=(
-        "Codex runtime access to the OpenAI API and ChatGPT backend, pinned to the "
-        "configured account. Web content may be retrieved cache-backed only: live web "
+        "Codex runtime access to the OpenAI API and ChatGPT backend, restricted to the "
+        "approved accounts. Web content may be retrieved cache-backed only: live web "
         "search, hosted browsing/code tools, and remote MCP servers are denied."
     ),
     owned_apexes=("openai.com", "chatgpt.com"),
     denial_reasons=(
         DenialReason(
             "openai_account_unavailable",
-            "The pinned OpenAI account id is not available yet (Codex login has not completed "
-            "on this host), so account-guarded requests fail closed. Complete the Codex login "
+            "No approved OpenAI account id is available yet (neither Codex login has completed "
+            "on this host), so account-guarded requests fail closed. Complete a Codex login "
             "or ask the operator to check the agent provider status.",
         ),
         DenialReason(
             "openai_account_header_required",
-            "Requests to this domain must carry the chatgpt-account-id header matching the "
-            "configured account. Use the managed Codex runtime, which sends it automatically.",
+            "Requests to this domain must carry the chatgpt-account-id header matching an "
+            "approved account. Use a managed Codex runtime, which sends it automatically.",
         ),
         DenialReason(
             "openai_account_mismatch",
-            "The chatgpt-account-id header does not match the account configured on this host. "
-            "Only the configured OpenAI account may be used.",
+            "The chatgpt-account-id header does not match an account approved on this host. "
+            "Only an approved OpenAI account may be used.",
         ),
         DenialReason(
             "openai_token_account_mismatch",
-            "The Authorization credential is not a single ChatGPT OAuth bearer token for the "
-            "account configured on this host, so the request failed closed. Use the managed "
+            "The Authorization credential is not a single ChatGPT OAuth bearer token for "
+            "an account approved on this host, so the request failed closed. Use the managed "
             "Codex runtime's credential; platform sk- keys and other accounts' tokens are "
             "denied.",
         ),
