@@ -22,17 +22,17 @@ import {
 import { refreshAgentProcesses } from "./processes.js";
 import { agentLog, hostDiagnosticLog, netLog, toolLog, toggleHostDiagnosticFilter, toggleNetDeniedFilter } from "./logs.js";
 import {
-  addDomainRule, addGithubRepo, approveGithubPush, deleteGithubCredential,
-  loadPolicy, recheckGithubAudit, rejectGithubPush, removeDomainRule,
+  addDomainRule, addGithubRepo, deleteGithubCredential,
+  loadPolicy, recheckGithubAudit, removeDomainRule,
   removeGithubRepo, resetLinkedAccount, connectBedrockCredentials, setProviderWebSearch, setGithubBlockMainPushes,
   setGithubCredential, setGithubRequireApproval,
-  setIntegrationEnabled, refreshPendingGithubPushes, toggleGithubCredentialMode,
+  setIntegrationEnabled, toggleGithubCredentialMode,
   selectIntegrationDetail, toggleGithubRepoAudit,
 } from "./network.js";
 import {
-  completeToolConnect, connectLinkedDevice, connectTool, decideToolApproval,
+  completeToolConnect, connectLinkedDevice, connectTool,
   disconnectLinkedDevice, disconnectTool,
-  refreshExpandedLinkedDevices, refreshExpandedToolApprovals, refreshTools, saveToolConfig, setToolEnabled,
+  refreshExpandedLinkedDevices, refreshTools, saveToolConfig, setToolEnabled,
   selectToolDetail, refreshLinkedDevice,
 } from "./tools.js";
 import {
@@ -46,6 +46,7 @@ import {
   closeIPhoneInstallGuide, dismissIPhoneInstall, hideIPhoneInstallUi,
   isIPhoneStandalone, scheduleIPhoneInstallCoach, showIPhoneInstallGuide,
 } from "./install.js";
+import { refreshApprovals, pollApprovalBadge, pollApprovals, changeApprovalView, changeApprovalPage, decideApproval, decideVisibleApprovals } from "./approvals.js";
 import { createWorkspaceLastSeen } from "./workspace_last_seen.js";
 
 // Panel navigation is pushState within one document, and every panel decides
@@ -78,8 +79,8 @@ let operatorScrolledSincePanelOpen = false;
 for (const event of ["wheel", "touchmove", "keydown"]) {
   window.addEventListener(event, () => { operatorScrolledSincePanelOpen = true; }, { passive: true });
 }
-const staticTabs = ["home", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics"];
-const homeDetailTabs = new Set(staticTabs.filter(name => name !== "home"));
+const staticTabs = ["home", "approvals", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics"];
+const homeDetailTabs = new Set(staticTabs.filter(name => !["home", "approvals"].includes(name)));
 const MOBILE_NAV_QUERY = "(max-width: 860px)";
 let mobileNavOpen = false;
 let uploadPickerOpen = false;
@@ -464,7 +465,7 @@ function showTab(name, workspaceActionSequence = null) {
   $("panel-workspace-global").hidden = name !== "workspace-global";
   renderWorkspaceNavigation();
   setMobileNavOpen(false, closeDrawer);
-  const opensAtTop = viewportPanelOpen || name === "home" || homeDetailTabs.has(name);
+  const opensAtTop = viewportPanelOpen || name === "approvals" || name === "home" || homeDetailTabs.has(name);
   const openSequence = ++panelOpenSequence;
   if (opensAtTop) {
     operatorScrolledSincePanelOpen = false;
@@ -491,11 +492,13 @@ function showTab(name, workspaceActionSequence = null) {
 }
 
 function homeRouteUrl(view = "home", guideId = "") {
+  if (view === "approvals") return "#approvals";
   if (view === "network" && guideId) return `#home/integrations/${encodeURIComponent(guideId)}`;
   return view === "home" ? "#home" : `#home/${encodeURIComponent(view)}`;
 }
 
 function homeRouteFromLocation() {
+  if (location.hash === "#approvals") return { view: "approvals", guideId: "" };
   const integrationMatch = location.hash.match(/^#home\/integrations\/(.+)$/);
   if (integrationMatch) {
     try {
@@ -619,6 +622,7 @@ function openPasskeyGuidance() {
 // only, never on the tick (that would wipe half-typed values); expanded
 // approvals carry no inputs and also refresh on the tick.
 const tabRefreshers = {
+  approvals: { enter: [refreshApprovals], tick: [pollApprovals] },
   "home": { enter: [refreshConnectionGuide], tick: [] },
   "agent-log": {
     enter: [() => agentLog.showFirstPage()],
@@ -639,8 +643,8 @@ const tabRefreshers = {
   "processes": { enter: [refreshAgentProcesses], tick: [refreshAgentProcesses] },
   "files": { enter: [ensureFilesLoaded], tick: [refreshFiles] },
   "network": {
-    enter: [loadPolicy, refreshTools, refreshExpandedToolApprovals, refreshConnectionGuide],
-    tick: [refreshPendingGithubPushes, refreshExpandedToolApprovals, refreshExpandedLinkedDevices],
+    enter: [loadPolicy, refreshTools, refreshConnectionGuide],
+    tick: [refreshExpandedLinkedDevices],
   },
 };
 
@@ -732,7 +736,9 @@ function showApp() {
         recordHomeRoute(locationRoute.view, locationRoute.guideId, true);
       }
       const route = history.state?.kernHomeRoute;
-      if (route && route !== "home" && homeDetailTabs.has(route)) {
+      if (route === "approvals") {
+        showTab("approvals");
+      } else if (route && route !== "home" && homeDetailTabs.has(route)) {
         openHomeView(route, history.state.guideId || "", false);
       } else {
         showTab("home");
@@ -745,6 +751,8 @@ function showApp() {
   appStarted = true;
   tick();
   setInterval(tick, 5000);
+  void refreshOrSkip(pollApprovalBadge);
+  setInterval(() => refreshOrSkip(pollApprovalBadge), 3000);
 }
 
 window.KernHost = {
@@ -1220,7 +1228,16 @@ document.addEventListener("click", event => {
       if (actionSequence !== workspaceNavigationActionSequence) return;
       backToHome(actionSequence);
     },
-    "show-tab": () => button.dataset.tab === "home" ? backToHome() : showTab(button.dataset.tab),
+    "approval-refresh": () => refreshApprovals(),
+    "approval-view": () => changeApprovalView(button.dataset.view),
+    "approval-page": () => changeApprovalPage(Number(button.dataset.page)),
+    "approval-decide": () => decideApproval(button.dataset.key, button.dataset.decision),
+    "approval-bulk": () => decideVisibleApprovals(button.dataset.decision),
+    "show-tab": () => {
+      if (button.dataset.tab === "home") return backToHome();
+      if (button.dataset.tab === "approvals") recordHomeRoute("approvals");
+      showTab(button.dataset.tab);
+    },
     "open-home-view": () => openHomeView(button.dataset.view),
     "open-home-integration": () => openHomeIntegration(button.dataset.guide),
     "home-back": () => backToHome(),
@@ -1262,8 +1279,6 @@ document.addEventListener("click", event => {
     "tool-page": () => toolLog.showPage(button.dataset.page).catch(() => {}),
     "host-diagnostic-page": () => hostDiagnosticLog.showPage(button.dataset.page).catch(() => {}),
     "toggle-host-diagnostic-filter": () => toggleHostDiagnosticFilter(),
-    "approve-github-push": () => approveGithubPush(button.dataset.id),
-    "reject-github-push": () => rejectGithubPush(button.dataset.id),
     "enable-tool": () => setToolEnabled(button.dataset.tool, true),
     "disable-tool": () => setToolEnabled(button.dataset.tool, false),
     "save-tool-config": () => saveToolConfig(button.dataset.tool, button.dataset.key),
@@ -1272,7 +1287,6 @@ document.addEventListener("click", event => {
     "connect-linked-device": () => connectLinkedDevice(button.dataset.tool),
     "refresh-linked-device": () => refreshLinkedDevice(button.dataset.tool),
     "disconnect-linked-device": () => disconnectLinkedDevice(button.dataset.tool),
-    "decide-approval": () => decideToolApproval(button.dataset.tool, button.dataset.approvalId, button.dataset.decision),
     "copy-callback-uri": () => copyCallbackUri(button),
   };
   const handler = actions[action];
@@ -1310,7 +1324,9 @@ window.addEventListener("popstate", event => {
     return;
   }
   const route = event.state?.kernHomeRoute;
-  if (route && route !== "home" && homeDetailTabs.has(route)) {
+  if (route === "approvals") {
+    showTab("approvals");
+  } else if (route && route !== "home" && homeDetailTabs.has(route)) {
     openHomeView(route, event.state.guideId || "", false);
   } else {
     showTab("home");

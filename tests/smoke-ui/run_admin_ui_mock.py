@@ -1288,6 +1288,30 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
             return disconnect_bedrock_credentials()
     if path == "/v1/agent-runtime/reset-linked-account" and method == "POST":
         return reset_linked_account(body)
+    if method == "GET" and path == "/v1/approvals":
+        view = query.get("view", ["pending"])[0]
+        with STATE.lock:
+            rows = []
+            for approval in STATE.tool_approvals:
+                tool = BUNDLED_TOOLS[approval["tool_id"]]
+                rows.append({**{k: v for k, v in approval.items() if k != "payload"},
+                             "id": approval["approval_id"], "kind": "tool",
+                             "source": tool.manifest.display_name,
+                             "updated_at": approval["decided_at"] or approval["created_at"]})
+            for push in STATE.github_pending_pushes:
+                rows.append({**push, "kind": "github_push", "source": "GitHub",
+                             "summary": f"Push to {push['owner']}/{push['repo']}",
+                             "created_at": push["requested_at"],
+                             "updated_at": push.get("resolved_at", push["requested_at"])})
+            pending_count = sum(row["status"] == "pending" for row in rows)
+            history_count = len(rows) - pending_count
+            rows = [row for row in rows if (row["status"] == "pending") == (view == "pending")]
+            rows.sort(key=lambda row: row["created_at" if view == "pending" else "updated_at"], reverse=True)
+            pages = max(1, math.ceil(len(rows) / 10))
+            page = min(max(1, int(query.get("page", ["1"])[0])), pages)
+            return {"items": rows[(page-1)*10:page*10], "page": page, "pages": pages,
+                    "total": len(rows), "page_size": 10,
+                    "pending_count": pending_count, "history_count": history_count}
     if method == "GET" and path == "/v1/threads":
         return list_threads(query)
     thread_match = THREAD_RE.fullmatch(path)
@@ -2689,6 +2713,7 @@ def decide_github_pending_push(push_id: str, decision: str) -> dict[str, Any]:
             raise ApiError(HTTPStatus.NOT_FOUND, f"unknown pending push: {push_id}")
         if push["status"] != "pending":
             raise ApiError(HTTPStatus.CONFLICT, f"push-{push_id} is already {push['status']}")
+        push["resolved_at"] = int(time.time())
         if decision == "approve":
             push["status"] = "approved"
             STATE.add_network_event(

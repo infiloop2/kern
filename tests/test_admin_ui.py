@@ -1030,7 +1030,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn(f'<img class="login-mark" width="44" height="44" src="{favicon_src}" alt="">', html)
         # Home owns integration and diagnostic navigation. Memory remains a
         # first-class destination; Schedules is the titled section below Apps.
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 2)
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 3)
         self.assertIn('/favicon.svg', html)
         self.assertIn('/favicon.ico', html)
         self.assertIn('/admin_ui.css', html)
@@ -1506,6 +1506,7 @@ class AdminUiStaticTests(unittest.TestCase):
             limit=admin_api.CONVERSATION_SEMANTIC_CANDIDATES + 1,
             before=None,
             max_seq=10**12,
+            exclude_automated_triggers=False,
         )
         self.assertEqual(response["matches"][0]["role"], "assistant")
         self.assertTrue(response["matches"][0]["excerpt_truncated"])
@@ -1559,6 +1560,29 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertEqual(first_call.kwargs["from_timestamp"], "2026-07-01T00:00:00Z")
         self.assertEqual(first_call.kwargs["sources"], ("agent",))
         self.assertEqual(search.call_args_list[1].kwargs["before"], None)
+
+    def test_conversation_search_passes_automated_trigger_filter_before_ranking(self) -> None:
+        with (
+            patch.object(
+                admin_api.state, "search_thread_messages", return_value=[]
+            ) as text_search,
+            patch.object(
+                admin_api.embedding_client,
+                "embed_texts",
+                side_effect=admin_api.embedding_client.EmbeddingError("offline"),
+            ),
+        ):
+            admin_api.search_conversation_history(
+                {
+                    "query": "operator correction",
+                    "roles": ["user"],
+                    "exclude_automated_triggers": True,
+                }
+            )
+
+        self.assertTrue(
+            text_search.call_args.kwargs["exclude_automated_triggers"]
+        )
 
     def test_legacy_rank_cursor_stays_on_plain_lexical_pagination(self) -> None:
         row = {
@@ -1623,6 +1647,21 @@ class AdminUiStaticTests(unittest.TestCase):
         fingerprint = admin_api._conversation_search_fingerprint(
             ["deployment"], None, None, None, ["user", "assistant"]
         )
+        filtered_fingerprint = admin_api._conversation_search_fingerprint(
+            ["deployment"], None, None, None, ["user", "assistant"], True
+        )
+        self.assertNotEqual(fingerprint, filtered_fingerprint)
+        filtered_cursor = admin_api._encode_conversation_search_cursor(
+            filtered_fingerprint,
+            True,
+            {"rank": 1.0, "seq": 2},
+        )
+        with self.assertRaises(admin_api.ApiError) as filtered_reuse:
+            admin_api.search_conversation_history(
+                {"query": "deployment", "cursor": filtered_cursor}
+            )
+        self.assertIn("different search filters", filtered_reuse.exception.message)
+
         oversized_cursor = admin_api._encode_conversation_search_cursor(
             fingerprint,
             True,
@@ -1697,6 +1736,7 @@ class AdminUiStaticTests(unittest.TestCase):
             {"query": "ok", "thread_id": "../thread-1"},
             {"query": "ok", "thread_id": "legacy-thread"},
             {"query": "ok", "roles": ["user", {"role": "assistant"}]},
+            {"query": "ok", "exclude_automated_triggers": 1},
             {"query": "ok", "limit": float("nan")},
             {"query": "ok", "limit": 10**5_000},
             {"query": "ok", "unexpected": {"deeply": ["nested"]}},
@@ -1954,6 +1994,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "thread_id": None,
                 "sources": ("user", "agent"),
                 "max_seq": 10**12,
+                "exclude_automated_triggers": False,
             },
         )
         self.assertEqual(

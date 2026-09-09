@@ -54,6 +54,7 @@ from host.session_options import session_config_error
 # workspace_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
 # object and reads its attributes only at request time, never during import.
+from host.runtime.admin_api import approvals as approvals_admin_api
 from host.runtime.admin_api import admin_auth, admin_passkeys, workspace_api as workspace_admin_api, workspace_proxy, github_credential, github_repo_audit, tools_client as tools_admin_api, upgrade_check
 from host.runtime.agent_runtime import (
     agent_activity,
@@ -378,6 +379,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._handle("GET")
 
+    def do_HEAD(self) -> None:
+        self._handle("HEAD")
+
     def do_POST(self) -> None:
         self._handle("POST")
 
@@ -392,6 +396,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle(self, method: str) -> None:
         try:
+            path = urlparse(self.path)
             # Classify the request once, before static assets or auth routes.
             # The resulting immutable context owns every SSH-forward/public
             # distinction used below. Its hostname loader is not called for the
@@ -403,11 +408,21 @@ class Handler(BaseHTTPRequestHandler):
                 host_values=self.headers.get_all("Host") or [],
                 public_hostname_loader=state.load_cloudflare_hostname,
             )
-            path = urlparse(self.path)
             if not admin_auth.route_is_available(
                 self._auth_context, method, path.path
             ):
                 raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
+            # Like UI assets, approved media is public after transport validation.
+            # A separate random capability grants access to one staged asset.
+            if (
+                method in {"GET", "HEAD"}
+                and self._auth_context.is_public_https
+                and not path.query
+                and not path.fragment
+                and (match := re.fullmatch(r"/tool-media/([A-Za-z0-9_-]{43})", path.path))
+            ):
+                tools_admin_api.send_tool_media(self, match.group(1), head=method == "HEAD")
+                return
             if method == "GET" and path.path in UI_ASSETS:
                 if path.path == "/workspace/capability-worker-sandbox.js":
                     self._send_capability_worker()
@@ -1140,6 +1155,13 @@ _ROUTES: tuple[_Route, ...] = (
         _agent_events_route,
         query_keys=frozenset({"before", "limit"}),
         query_label="event",
+    ),
+    _Route(
+        "GET", "/v1/approvals",
+        lambda request: approvals_admin_api.list_approvals(request.query),
+        operator_only=True,
+        query_keys=frozenset({"view", "page"}),
+        query_label="approval list",
     ),
     _Route("GET", "/v1/network/policy", lambda request: network_policy.network_policy_response()),
     _Route("PUT", "/v1/network/policy", lambda request: replace_network_policy(request.body)),

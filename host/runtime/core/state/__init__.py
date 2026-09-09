@@ -11,6 +11,7 @@ from host.runtime.core.state.events import *
 from host.runtime.core.state.network import *
 from host.runtime.core.state.threads import *
 from host.runtime.core.state.tools import *
+from host.runtime.core.state.approvals import *
 
 # A few diagnostic/test seams have historically been addressed through the
 # state facade even though they are private implementation helpers.

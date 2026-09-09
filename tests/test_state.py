@@ -824,6 +824,50 @@ class StateStorageTests(unittest.TestCase):
         self.assertNotIn(hostile, search_sql)
         self.assertEqual(parameters[0], hostile)
 
+    def test_conversation_search_can_exclude_only_saved_schedule_prompts(self) -> None:
+        automated = "This is an automated trigger.\n\nRemember this correction"
+        with state.mutation() as cur:
+            prompt = state.append_agent_event(
+                cur, "thread.message", "schedule-7",
+                {"message": automated, "source": "user"},
+            )
+            kept = [
+                state.append_agent_event(
+                    cur, "thread.message", thread_id,
+                    {"message": message, "source": source},
+                )
+                for thread_id, source, message in (
+                    ("schedule-7", "user", "Remember this correction"),
+                    ("schedule-7", "user", "This is an automated trigger. Remember this correction"),
+                    ("schedule-7", "user", "This is an automated trigger.\nRemember this correction"),
+                    ("schedule-7", "agent", automated),
+                    ("thread-1", "user", automated),
+                )
+            ]
+        seqs = (prompt, *kept)
+        vector = [1.0] + [0.0] * 383
+        state.store_thread_message_embeddings("test-model", [(seq, vector) for seq in seqs])
+        for exclude in (False, True):
+            expected = set(kept if exclude else seqs)
+            lexical = state.search_thread_messages(
+                ("remember correction",), from_timestamp=None, to_timestamp=None,
+                thread_id=None, sources=("user", "agent"), limit=10, before=None,
+                exclude_automated_triggers=exclude,
+            )
+            semantic = state.search_thread_messages_semantic(
+                vector, "test-model", from_timestamp=None, to_timestamp=None,
+                thread_id=None, sources=("user", "agent"), limit=10, minimum_similarity=0.5,
+                exclude_automated_triggers=exclude,
+            )
+            frozen = state.thread_messages_by_seqs(
+                seqs, from_timestamp=None, to_timestamp=None,
+                thread_id=None, sources=("user", "agent"), max_seq=max(seqs),
+                exclude_automated_triggers=exclude,
+            )
+            for mode, rows in (("lexical", lexical), ("semantic", semantic), ("frozen", frozen)):
+                with self.subTest(mode=mode, exclude=exclude):
+                    self.assertEqual({row["seq"] for row in rows}, expected)
+
     def test_conversation_semantic_index_covers_every_host_thread(self) -> None:
         with state.mutation() as cur:
             first = state.append_agent_event(

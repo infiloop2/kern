@@ -139,6 +139,10 @@
         <svg width="19" height="19" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10.2 10 4l7 6.2M5.2 9.2V16h3.2v-3.6h3.2V16h3.2V9.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span>Home</span>
       </button>
+      <button id="tab-approvals" class="tab-button" data-action="show-tab" data-tab="approvals">
+        <svg width="19" height="19" viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="3" width="12" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m7 10 2 2 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Approvals</span><span id="approval-nav-count" class="approval-count" hidden></span>
+      </button>
       <div class="sidebar-divider" aria-hidden="true"></div>
       <div class="sidebar-section workspace-nav-section" aria-labelledby="chat-nav-title">
         <div class="workspace-nav-head">
@@ -241,6 +245,19 @@
         </section>
       </div>
 
+    <div id="panel-approvals" class="tab-panel" hidden>
+      <section class="approvals-page">
+        <div class="approvals-heading"><div><h1>Approvals</h1><p class="muted">Your review queue across tools and integrations.</p></div><button class="ghost" data-action="approval-refresh">Refresh</button></div>
+        <div class="approval-controls">
+          <div id="approval-tabs" class="approval-tabs" aria-label="Approval views"></div>
+          <div id="approval-toolbar" class="approval-toolbar"></div>
+        </div>
+        <p id="approval-updates" class="muted" hidden>New activity is available. Refresh to update this page.</p>
+        <div id="approval-feedback" role="status" aria-live="polite"></div>
+        <div id="approval-list" aria-label="Approval requests"></div>
+        <nav id="approval-pagination" class="approval-pagination" aria-label="Approval pages"></nav>
+      </section>
+    </div>
       <div id="panel-workspace-chat" class="tab-panel workspace-panel" hidden></div>
       <div id="panel-workspace-web-apps" class="tab-panel workspace-panel" hidden></div>
       <div id="panel-workspace-global" class="tab-panel workspace-panel" hidden></div>
@@ -373,9 +390,9 @@
                 <button data-action="disable-github-require-approval">Disable</button>
               </span>
             </div>
-            <p class="muted">A push that changes any <code>.github/</code> path is held for operator approval below instead of reaching GitHub. Clean pushes are unaffected.</p>
+            <p class="muted">A push that changes any <code>.github/</code> path is held for review on the Approvals page instead of reaching GitHub. Clean pushes are unaffected.</p>
             <span id="github-require-approval-status" class="muted"></span>
-            <div id="github-pending-pushes"></div>
+
           </div>
           <div class="detail-card">
             <div class="detail-card-head">

@@ -154,6 +154,15 @@ class MemoryAssets:
     def open(self, asset_id: str):
         yield io.BytesIO(self.records[asset_id][1])
 
+    @contextmanager
+    def _approved_execution(self, public_hostname=None):
+        yield
+
+    @contextmanager
+    def public_asset_url(self, asset_id: str):
+        self.describe(asset_id)
+        yield "https://kern.example/tool-media/" + "A" * 43
+
     def delete(self, asset_id: str) -> None:
         self.records.pop(asset_id, None)
 

@@ -13,12 +13,16 @@ and host-generated connection id; approval records snapshot that selection.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import importlib
+import ipaddress
 import json
+import re
 from pathlib import Path
 import time
-from typing import Any, Mapping, cast
+import threading
+from typing import Any, Iterator, Mapping, cast
 
 from host.param_guard import OutboundGuardService
 from host.runtime.core import host_errors, state
@@ -299,10 +303,29 @@ class HostApprovals:
         return _approval_record(record)
 
 
+def _public_media_hostname(hostname: str) -> bool:
+    # Only the configured Cloudflare hostname is used, never a caller URL.
+    # Reject local names and IP literals even if configuration was malformed.
+    try:
+        ipaddress.ip_address(hostname)
+        return False
+    except ValueError:
+        pass
+    name = hostname.lower()
+    if (len(name) > 253 or "." not in name or name.rsplit(".", 1)[-1].isdigit()
+            or name.endswith((".localhost", ".local", ".internal", ".lan", ".home", ".invalid", ".test"))):
+        return False
+    return all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in name.split("."))
+
+
 class HostAssets:
     """Tool-scoped view of the tools service's private staged assets."""
 
     def __init__(self, tool_id: str, store: tool_assets.ToolAssetStore) -> None:
+        self._approved = False
+        self._public_hostname: str | None = None
+        self._approval_lock = threading.Lock()
+        self._grants: set[str] = set()
         self._tool_id = tool_id
         self._store = store
 
@@ -314,6 +337,42 @@ class HostAssets:
 
     def delete(self, asset_id: str) -> None:
         self._store.delete(self._tool_id, asset_id)
+
+    @contextmanager
+    def _approved_execution(self, public_hostname: str | None) -> Iterator[None]:
+        """Host-owned lifetime: retained APIs/contexts lose authority on exit."""
+        with self._approval_lock:
+            self._approved = True
+            self._public_hostname = public_hostname
+        try:
+            yield
+        finally:
+            with self._approval_lock:
+                self._approved = False
+                self._public_hostname = None
+                for token in self._grants:
+                    self._store.revoke_asset_grant(token)
+                self._grants.clear()
+
+    @contextmanager
+    def public_asset_url(self, asset_id: str) -> Iterator[str]:
+        with self._approval_lock:
+            if not self._approved:
+                raise ValueError("Public asset access requires an approved tool action.")
+            # Supplied by the authenticated admin delegation, never an agent.
+            # The tools database role cannot read operator_connections.
+            hostname = self._public_hostname
+            if not hostname or not _public_media_hostname(hostname):
+                raise ValueError("Public asset access requires a Cloudflare HTTPS hostname. SSH, localhost and IP addresses are not supported. Configure Home > Connections.")
+            token = self._store.create_asset_grant(self._tool_id, asset_id)
+            self._grants.add(token)
+        try:
+            yield f"https://{hostname}/tool-media/{token}"
+        finally:
+            with self._approval_lock:
+                self._store.revoke_asset_grant(token)
+                self._grants.discard(token)
+
 
 def _approval_record(record: dict[str, Any]) -> ApprovalRecord:
     status: ApprovalStatus = record["status"]
@@ -579,7 +638,8 @@ def finish_streaming_action(streaming: StreamingAction, error: str | None = None
 
 
 def _execute_approved(
-    record: dict[str, Any], asset_store: tool_assets.ToolAssetStore | None = None
+    record: dict[str, Any], public_hostname: str | None,
+    asset_store: tool_assets.ToolAssetStore | None = None,
 ) -> dict[str, Any]:
     """Run one approved action and audit the outcome. Never raises: any
     failure (tool disabled since queueing, config unset, tool exception)
@@ -595,10 +655,9 @@ def _execute_approved(
                 "The account selected for this approval is no longer connected. "
                 "Queue the action again."
             )
-        result: Any = tool.execute_approved(
-            _approval_record(record),
-            host_api_for(tool, connection, asset_store=asset_store),
-        )
+        api = host_api_for(tool, connection, asset_store=asset_store)
+        with api.assets._approved_execution(public_hostname):
+            result: Any = tool.execute_approved(_approval_record(record), api)
     except (
         ConnectionAccountChangedError,
         ToolCallError,
@@ -755,6 +814,7 @@ def _audit(
 def decide_approval(
     approval_id: str,
     decision: str,
+    public_hostname: str | None,
     asset_store: tool_assets.ToolAssetStore | None = None,
 ) -> dict[str, Any]:
     """Apply an operator decision. Approving runs ``execute_approved`` at most
@@ -781,7 +841,7 @@ def decide_approval(
     # The transition above is the at-most-once gate; the record handed to the
     # tool carries the state the transition just wrote.
     result_json = _execute_approved(
-        record | {"status": "approved", "decided_at": now}, asset_store
+        record | {"status": "approved", "decided_at": now}, public_hostname, asset_store
     )
     outcome = "executed" if result_json["status"] == "executed" else "failed"
     # The stored result is the outcome's single text per the contract: the

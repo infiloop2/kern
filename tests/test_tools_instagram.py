@@ -11,7 +11,7 @@ from host.tools.json_types import JSONObject
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
 from host.tools import instagram
 from host.tools.instagram import InstagramTool
-from host.tools.shared.web import WebRequestError
+from host.tools.shared.web import ProviderWarning, WebRequestError
 from host.tools.tool import OAuthCompleteConnectResult
 
 from test_tools import FakeHostAPI, assert_matches_output_schema, FRESH_EXPIRES_AT
@@ -213,11 +213,7 @@ class InstagramReelTests(unittest.TestCase):
 
         with (
             patch.object(instagram, "json_request", fake_pending),
-            patch.object(
-                instagram,
-                "stream_request_bytes",
-                side_effect=AssertionError("video must not upload before approval"),
-            ),
+            patch.object(api.assets, "public_asset_url", side_effect=AssertionError("no grant before approval")),
         ):
             pending = InstagramTool().execute(
                 "post_reel", {"video_asset_id": asset_id, "caption": "Local"}, api
@@ -234,8 +230,8 @@ class InstagramReelTests(unittest.TestCase):
             if "/me?" in url:
                 return dict(ME_RESPONSE)
             if "/media?" in url and method == "POST":
-                self.assertIn("upload_type=resumable", url)
-                self.assertNotIn("video_url=", url)
+                self.assertNotIn("upload_type=", url)
+                self.assertIn("video_url=https%3A%2F%2Fkern.example%2Ftool-media%2F", url)
                 return {"id": "9990002", "uri": "https://rupload.facebook.com/ig-api-upload/x"}
             if "/9990002?" in url:
                 return {"status_code": "FINISHED"}
@@ -243,22 +239,9 @@ class InstagramReelTests(unittest.TestCase):
                 return {"id": "180000001"}
             raise AssertionError(url)
 
-        streamed: dict[str, Any] = {}
-
-        def fake_stream(method: str, url: str, **kwargs: Any) -> bytes:
-            streamed.update(method=method, url=url, **kwargs)
-            self.assertEqual(kwargs["body"].read(), b"video")
-            return b""
-
-        with (
-            patch.object(instagram, "json_request", fake_execute),
-            patch.object(instagram, "stream_request_bytes", fake_stream),
-        ):
+        with patch.object(instagram, "json_request", fake_execute):
             result = InstagramTool().execute_approved(record, api)
         assert isinstance(result, ApprovalExecuted)
-        self.assertEqual(streamed["url"], "https://rupload.facebook.com/ig-api-upload/x")
-        self.assertEqual(streamed["headers"]["Authorization"], "OAuth ig-access")
-        self.assertEqual(streamed["headers"]["offset"], "0")
         # The agent-facing workspace file remains; this internal approval spool
         # copy is consumed after Meta accepts it.
         self.assertNotIn(asset_id, api.assets.records)
@@ -286,31 +269,37 @@ class InstagramReelTests(unittest.TestCase):
         assert isinstance(wrong_type, ActionFailed)
         self.assertIn("MP4 or MOV", wrong_type.error)
 
-    def test_execute_approved_rejects_non_meta_upload_origin_before_sending_token(self) -> None:
+    def test_changed_asset_is_rejected_before_container_or_public_grant(self) -> None:
         api = connected_api()
-        asset_id = api.assets.add(filename="reel.mp4", media_type="video/mp4", data=b"video")
-
+        asset_id = api.assets.add(data=b"original")
         with patch.object(instagram, "json_request", return_value=dict(ME_RESPONSE)):
             pending = InstagramTool().execute("post_reel", {"video_asset_id": asset_id}, api)
-        assert isinstance(pending, ActionPendingApproval)
-        approved_record = api.approvals.approve(pending.approval_id)
+        record = api.approvals.approve(pending.approval_id)
+        api.assets.add(asset_id=asset_id, data=b"changed")
+        with (patch.object(instagram, "json_request", return_value=dict(ME_RESPONSE)) as request,
+              patch.object(api.assets, "public_asset_url") as grant):
+            result = InstagramTool().execute_approved(record, api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("no longer matches", result.error)
+        self.assertEqual(request.call_count, 1)  # Identity refresh only.
+        grant.assert_not_called()
 
-        def fake_execute(method: str, url: str, **kwargs: Any) -> JSONObject:
-            if "/me?" in url:
-                return dict(ME_RESPONSE)
-            if "/media?" in url:
-                return {"id": "9990001", "uri": "https://attacker.example/upload"}
-            raise AssertionError(url)
-
-        with (
-            patch.object(instagram, "json_request", fake_execute),
-            patch.object(instagram, "stream_request_bytes") as stream,
-        ):
-            result = InstagramTool().execute_approved(approved_record, api)
-        assert isinstance(result, ActionFailed)
-        self.assertIn("resumable video upload URI", result.error)
-        stream.assert_not_called()
-        self.assertIn(asset_id, api.assets.records)
+    def test_container_http_error_escapes_to_host_diagnostics_without_secrets(self) -> None:
+        api = connected_api()
+        asset_id = api.assets.add()
+        with patch.object(instagram, "json_request", return_value=dict(ME_RESPONSE)):
+            pending = InstagramTool().execute("post_reel", {"video_asset_id": asset_id}, api)
+        record = api.approvals.approve(pending.approval_id)
+        error = WebRequestError("failed", status=400, body=(
+            b'{"error":{"code":100,"error_subcode":2207009,"message":"ig-access private-url"}}'))
+        with (patch.object(instagram, "json_request", side_effect=[dict(ME_RESPONSE), error]),
+              self.assertRaises(ProviderWarning) as caught):
+            InstagramTool().execute_approved(record, api)
+        self.assertEqual(caught.exception.operation, "Reel container")
+        self.assertEqual(caught.exception.status, 400)
+        self.assertIn("2207009", caught.exception.response_body)
+        self.assertNotIn("ig-access", caught.exception.response_body)
+        self.assertNotIn("private-url", str(caught.exception))
 
     def test_execute_approved_creates_polls_and_publishes(self) -> None:
         api = connected_api()
@@ -336,8 +325,8 @@ class InstagramReelTests(unittest.TestCase):
                 return dict(ME_RESPONSE)
             if "/media?" in url and method == "POST":
                 self.assertIn("media_type=REELS", url)
-                self.assertIn("upload_type=resumable", url)
-                self.assertNotIn("video_url=", url)
+                self.assertNotIn("upload_type=", url)
+                self.assertIn("video_url=https%3A%2F%2Fkern.example%2Ftool-media%2F", url)
                 return {"id": "9990001", "uri": "https://rupload.facebook.com/ig-api-upload/x"}
             if "/9990001?" in url:
                 return {"status_code": "IN_PROGRESS"} if len([c for c in calls if "/9990001?" in c]) == 1 else {"status_code": "FINISHED"}
@@ -348,7 +337,6 @@ class InstagramReelTests(unittest.TestCase):
 
         with (
             patch.object(instagram, "json_request", fake_execute),
-            patch.object(instagram, "stream_request_bytes", return_value=b""),
             patch.object(instagram.time, "sleep"),
         ):
             result = InstagramTool().execute_approved(approved_record, api)
@@ -396,12 +384,10 @@ class InstagramReelTests(unittest.TestCase):
 
         with (
             patch.object(instagram, "json_request", fake_execute),
-            patch.object(instagram, "stream_request_bytes", return_value=b""),
             patch.object(instagram.time, "sleep"),
         ):
-            result = InstagramTool().execute_approved(approved_record, api)
-        assert isinstance(result, ActionFailed)
-        self.assertIn("could not process the video", result.error)
+            with self.assertRaisesRegex(ProviderWarning, "could not process the video"):
+                InstagramTool().execute_approved(approved_record, api)
         self.assertIn(asset_id, api.assets.records)
 
     def test_execute_approved_fails_when_account_changed(self) -> None:

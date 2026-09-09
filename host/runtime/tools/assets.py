@@ -30,10 +30,9 @@ MAX_IMAGE_BYTES = 200_000_000
 MIN_IMAGE_BYTES = 512
 MAX_STAGED_ASSETS = 20
 MAX_TOTAL_BYTES = 1_000_000_000
-# Assets expire 26h after staging. This gives promptly-created 24h approvals a
-# buffer for the hourly approval sweep; an approval created near asset expiry
-# can outlive the bytes and then fails closed when decided.
+# An approval can outlive its asset and then fails closed when decided.
 ASSET_TTL_SECONDS = 26 * 3600
+PUBLIC_MEDIA_TTL_SECONDS = 15 * 60
 ASSET_ID_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 ALLOWED_VIDEO_TYPES = {
     "video/mp4": frozenset({".mp4"}),
@@ -71,6 +70,7 @@ class ToolAssetStore:
         self._root = root
         self._records: dict[str, _AssetRecord] = {}
         self._lock = threading.Lock()
+        self._public_asset_grants: dict[str, tuple[str, str, int]] = {}
         if clean_start:
             self._clean_start()
 
@@ -102,6 +102,9 @@ class ToolAssetStore:
             record.path.unlink(missing_ok=True)
 
     def _cleanup_locked(self, now: int) -> None:
+        for token, (_, asset_id, expires) in tuple(self._public_asset_grants.items()):
+            if expires <= now or asset_id not in self._records:
+                self._public_asset_grants.pop(token, None)
         for asset_id, record in tuple(self._records.items()):
             if record.metadata.expires_at <= now:
                 self._remove_locked(asset_id)
@@ -229,3 +232,38 @@ class ToolAssetStore:
             record = self._records.get(asset_id)
             if record is not None and record.tool_id == tool_id:
                 self._remove_locked(asset_id)
+
+    def create_asset_grant(self, tool_id: str, asset_id: str) -> str:
+        """Expose one private image or video only during approved execution.
+
+        A separate random capability is never the agent-visible staging id.
+        Restart, timeout, deletion and context exit all invalidate the grant.
+        """
+        with self._lock:
+            record = self._locked_record(tool_id, asset_id)
+            if record.metadata.media_type not in ALLOWED_VIDEO_TYPES and record.metadata.media_type not in ALLOWED_IMAGE_TYPES:
+                raise AssetError("Public media must be a supported image or video.")
+            token = secrets.token_urlsafe(32)
+            self._public_asset_grants[token] = (tool_id, asset_id, min(
+                record.metadata.expires_at, int(time.time()) + PUBLIC_MEDIA_TTL_SECONDS,
+            ))
+        return token
+
+    def revoke_asset_grant(self, token: str) -> None:
+        with self._lock:
+            self._public_asset_grants.pop(token, None)
+
+    @contextmanager
+    def open_asset_grant(self, token: str) -> Iterator[tuple[AssetMetadata, BinaryIO]]:
+        with self._lock:
+            self._cleanup_locked(int(time.time()))
+            grant = self._public_asset_grants.get(token)
+            if grant is None:
+                raise AssetError("Unknown media.")
+            record = self._locked_record(grant[0], grant[1])
+            # Open under the lock so revocation/cleanup cannot swap the file.
+            source = record.path.open("rb")
+        try:
+            yield record.metadata, source
+        finally:
+            source.close()

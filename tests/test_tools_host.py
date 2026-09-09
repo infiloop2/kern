@@ -560,7 +560,7 @@ class HostAPIScopeTests(ToolsHostTestCase):
                 "create_post",
                 {"subreddit": "kern", "title": "Test", "kind": "self", "text": "Body"},
             )
-            decided = tools_host.decide_approval(queued["approval_id"], "approve")
+            decided = tools_host.decide_approval(queued["approval_id"], "approve", public_hostname=None)
 
         self.assertEqual(decided["approval"]["status"], "executed")
         self.assertEqual(decided["result"]["message"], "Published test value.")
@@ -626,7 +626,7 @@ class ExecuteActionTests(ToolsHostTestCase):
         approval = state.tool_approval(queued["approval_id"])
         self.assertEqual(approval["connection_id"], "connection_second")
         self.assertEqual(approval["account_id"], "acct-2")
-        tools_host.decide_approval(queued["approval_id"], "approve")
+        tools_host.decide_approval(queued["approval_id"], "approve", public_hostname=None)
         self.assertEqual(
             tools_host.HostCredentials(
                 "fake_notes", _connection("connection_second")
@@ -666,7 +666,7 @@ class ExecuteActionTests(ToolsHostTestCase):
         }
         state.put_tool_credential("fake_notes", replacement, connection_id)
 
-        decision = tools_host.decide_approval(queued["approval_id"], "approve")
+        decision = tools_host.decide_approval(queued["approval_id"], "approve", public_hostname=None)
 
         self.assertEqual(decision["approval"]["status"], "failed")
         self.assertIn("no longer connected", decision["result"]["error"])
@@ -886,14 +886,14 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
             with self.subTest(returned=type(returned).__name__):
                 approval_id = self.queue_write("hello")
                 with patch.object(FakeTool, "execute_approved", return_value=returned):
-                    decision = tools_host.decide_approval(approval_id, "approve")
+                    decision = tools_host.decide_approval(approval_id, "approve", public_hostname=None)
                 self.assertEqual(decision["approval"]["status"], "failed")
                 self.assertIn(expected, decision["result"]["error"])
                 self.assertIn(expected, state.tool_approval(approval_id)["result"])
 
     def test_approve_executes_once_and_records_the_outcome(self) -> None:
         approval_id = self.queue_write("hello")
-        decision = tools_host.decide_approval(approval_id, "approve")
+        decision = tools_host.decide_approval(approval_id, "approve", public_hostname=None)
         self.assertEqual(decision["approval"]["status"], "executed")
         self.assertEqual(decision["result"], {"status": "executed", "message": "Wrote the note (5 chars)."})
         self.assertEqual(state.tool_approval(approval_id)["result"], "Wrote the note (5 chars).")
@@ -902,22 +902,22 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
             {"text": "hello"},
         )
         with self.assertRaisesRegex(tools_host.ToolCallError, "not pending"):
-            tools_host.decide_approval(approval_id, "approve")
+            tools_host.decide_approval(approval_id, "approve", public_hostname=None)
 
     def test_deny_is_terminal_and_never_executes(self) -> None:
         approval_id = self.queue_write("secret")
-        decision = tools_host.decide_approval(approval_id, "deny")
+        decision = tools_host.decide_approval(approval_id, "deny", public_hostname=None)
         self.assertEqual(decision["approval"]["status"], "denied")
         self.assertEqual(
             tools_host.HostCredentials("fake_notes", _connection()).load()["secret"],
             {"text": ""},
         )
         with self.assertRaisesRegex(tools_host.ToolCallError, "not pending"):
-            tools_host.decide_approval(approval_id, "deny")
+            tools_host.decide_approval(approval_id, "deny", public_hostname=None)
 
     def test_audit_log_records_the_call_and_the_approval_decision(self) -> None:
         approval_id = self.queue_write("hello")
-        tools_host.decide_approval(approval_id, "approve")
+        tools_host.decide_approval(approval_id, "approve", public_hostname=None)
         # Newest first: the executed decision, then the queued write call.
         events = state.page_tool_events_before(None)
         self.assertEqual([(e["tool_id"], e["action_id"], e["outcome"]) for e in events], [
@@ -941,17 +941,17 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
 
     def test_failed_execution_spends_the_approval(self) -> None:
         approval_id = self.queue_write("fail")
-        decision = tools_host.decide_approval(approval_id, "approve")
+        decision = tools_host.decide_approval(approval_id, "approve", public_hostname=None)
         self.assertEqual(decision["approval"]["status"], "failed")
         self.assertEqual(decision["result"]["status"], "failed")
         self.assertEqual(state.tool_approval(approval_id)["result"], "Note write failed.")
         self.assertEqual(state.page_tool_events_before(None)[0]["detail"], f"{approval_id}: Note write failed.")
         with self.assertRaisesRegex(tools_host.ToolCallError, "not pending"):
-            tools_host.decide_approval(approval_id, "approve")
+            tools_host.decide_approval(approval_id, "approve", public_hostname=None)
 
     def test_crashing_execution_spends_the_approval(self) -> None:
         approval_id = self.queue_write("raise")
-        decision = tools_host.decide_approval(approval_id, "approve")
+        decision = tools_host.decide_approval(approval_id, "approve", public_hostname=None)
         self.assertEqual(decision["approval"]["status"], "failed")
         self.assertEqual(decision["result"], {"status": "failed", "error": "Tool call failed.", "reconnect_required": False})
         self.assertEqual(state.tool_approval(approval_id)["status"], "failed")
@@ -960,9 +960,9 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
 
     def test_unknown_approval_is_rejected(self) -> None:
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown approval"):
-            tools_host.decide_approval("approval_999", "approve")
+            tools_host.decide_approval("approval_999", "approve", public_hostname=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown approval"):
-            tools_host.decide_approval("not-an-id", "deny")
+            tools_host.decide_approval("not-an-id", "deny", public_hostname=None)
 
     def test_restart_recovery_spends_interrupted_approvals(self) -> None:
         approval_id = self.queue_write("hello")

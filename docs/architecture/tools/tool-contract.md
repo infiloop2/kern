@@ -361,9 +361,25 @@ class Assets(Protocol):
     def describe(self, asset_id: str) -> AssetMetadata: ...
     def open(self, asset_id: str) -> AbstractContextManager[BinaryIO]: ...
     def delete(self, asset_id: str) -> None: ...
+    def public_asset_url(self, asset_id: str) -> AbstractContextManager[str]: ...
 ```
 
 Tool packages receive neither a storage path nor cross-tool lookup.
+
+`public_asset_url` is available only during host-authorized approved execution.
+Staging and ordinary tool calls cannot expose bytes. The context temporarily
+serves a tool-owned staged JPEG, PNG, WebP, MP4 or MOV through a separate
+random capability on the configured Cloudflare HTTPS hostname. SSH-only, localhost and IP configurations
+fail with an actionable error. The host invalidates the API and revokes any outstanding links when the approved
+callback exits, including retained or unclosed contexts. Context exit revokes
+the link on success or failure;
+links expire within 15 minutes, and staged images and videos expire after 26 hours.
+`delete` removes the staged copy and invalidates its links. Only Instagram uses
+this API initially, for Reel videos; its action still rejects images. Other asset
+types, including SVG and HTML, cannot be exposed. The tool must hold the context
+until the provider has finished fetching, then exit it before publishing. Never return or log the URL.
+Other tools must retain their upload flow unless their approved action can
+safely bound the provider fetch inside this context.
 
 An approval payload that references an input asset binds its filename, encoded
 byte size, and SHA-256; execution verifies those values before data-out. Assets

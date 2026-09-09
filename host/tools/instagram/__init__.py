@@ -40,12 +40,11 @@ from host.tools.shared.oauth2 import (
     verify_state,
 )
 from host.tools.shared.web import (
-    UnmappedProviderError,
+    ProviderWarning,
     WebRequestError,
     encode_query,
     json_request,
     known_provider_transport_error,
-    stream_request_bytes,
     transport_or_unmapped_provider_error,
     unmapped_provider_error,
 )
@@ -149,8 +148,9 @@ MANIFEST = ToolManifest(
             description="Queue approval to publish one Reel to the connected Instagram account using a video from the agent workspace. Nothing reaches Instagram before approval; this action does not discover media.",
             data_policy=(
                 "Publishes a video as a Reel on the connected Instagram account, publicly "
-                "visible per the account's settings. After approval, the tools service uploads "
-                "the privately staged video bytes to Meta. Queued for explicit approval; nothing reaches "
+                "visible per the account's settings. After approval, Meta fetches "
+                "the privately staged video through a temporary link on your public Kern address. "
+                "Queued for explicit approval; nothing reaches "
                 "Instagram until you approve. The proposal and sanitized publication outcome "
                 "are available to the active model; staged binary video is not model context."
             ),
@@ -218,7 +218,7 @@ MANIFEST = ToolManifest(
                 title="What leaves this host",
                 points=(
                     DataSummaryPoint(label="Reads", text="Only the connected account id and bounded field and limit parameters; reads cover your own professional account, not other accounts."),
-                    DataSummaryPoint(label="Publishing", text="A Reel reaches Meta only after your approval, and sends the caption and video uploaded from the agent workspace."),
+                    DataSummaryPoint(label="Publishing", text="After approval, Meta receives the caption and fetches the staged video through a temporary link on your public Kern address."),
                 ),
             ),
             DataSummaryCard(
@@ -282,7 +282,19 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
         message = f"Instagram API returned HTTP {exc.status} for the {what} request."
     else:
         return transport_or_unmapped_provider_error("Instagram", what, exc)
-    return RuntimeError(message)
+    # Only structured codes enter diagnostics: provider text can echo tokens,
+    # captions or the temporary video URL.
+    details: dict[str, int] = {}
+    try:
+        error = json.loads(exc.body).get("error", {})
+        for key in ("code", "error_subcode"):
+            value = error.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                details[key] = value
+    except (ValueError, AttributeError, TypeError):
+        pass
+    return ProviderWarning("Instagram", what, message, status=exc.status,
+                           body=json.dumps(details).encode() if details else b"")
 
 
 def _connect_web_error(exc: WebRequestError, what: str) -> Exception:
@@ -654,75 +666,53 @@ def _reel_summary(proposal: JSONObject, account_label: str) -> str:
 
 
 def _publish_reel(access_token: str, user_id: str, proposal: JSONObject, api: HostAPI) -> str:
-    create_params = {
-        "media_type": "REELS",
-        "share_to_feed": "true" if proposal.get("share_to_feed") else "false",
-        "access_token": access_token,
-    }
     video_asset = proposal.get("video_asset")
-    if not isinstance(video_asset, dict):
+    if not isinstance(video_asset, dict) or not isinstance(video_asset.get("asset_id"), str):
         raise RuntimeError("Instagram approval payload has no staged video asset.")
-    create_params["upload_type"] = "resumable"
-    caption = str(proposal.get("caption") or "")
-    if caption:
-        create_params["caption"] = caption
-    try:
-        created = json_request(
-            "POST",
-            _graph_url(f"/{user_id}/media", create_params),
-            failure_message="Instagram media container creation failed.",
-            invalid_response_message="Instagram media container creation returned an invalid response.",
-        )
-    except WebRequestError as exc:
-        raise _mapped_web_error(exc, "Reel container") from exc
-    container_id = created.get("id")
-    if not isinstance(container_id, str) or not MEDIA_ID_RE.fullmatch(container_id):
-        raise RuntimeError("Instagram did not return a media container id.")
-    upload_uri = created.get("uri")
     asset_id = video_asset.get("asset_id")
-    if not isinstance(upload_uri, str) or not _is_meta_upload_uri(upload_uri):
-        raise RuntimeError("Instagram did not return a resumable video upload URI.")
     if not isinstance(asset_id, str):
         raise RuntimeError("Instagram approval payload has an invalid video asset id.")
     metadata = api.assets.describe(asset_id)
-    if (
-        video_asset.get("filename") != metadata.filename
-        or video_asset.get("media_type") != metadata.media_type
-        or video_asset.get("size_bytes") != metadata.size_bytes
-        or video_asset.get("sha256") != metadata.sha256
-    ):
+    if any(video_asset.get(key) != getattr(metadata, key)
+           for key in ("filename", "media_type", "size_bytes", "sha256")):
         raise RuntimeError("Staged video no longer matches the approved asset.")
-    with api.assets.open(asset_id) as source:
+    # Instagram Login uses video_url. Meta documents resumable uploads only
+    # for Facebook Login for Business. The host grants access after approval.
+    with api.assets.public_asset_url(asset_id) as video_url:
+        create_params = {
+            "media_type": "REELS",
+            "share_to_feed": "true" if proposal.get("share_to_feed") else "false",
+            "access_token": access_token,
+            "video_url": video_url,
+        }
+        caption = str(proposal.get("caption") or "")
+        if caption:
+            create_params["caption"] = caption
         try:
-            stream_request_bytes(
-                "POST",
-                upload_uri,
-                headers={
-                    "Authorization": f"OAuth {access_token}",
-                    "Content-Type": metadata.media_type,
-                    "offset": "0",
-                    "file_size": str(metadata.size_bytes),
-                },
-                body=source,
-                content_length=metadata.size_bytes,
-                failure_message="Instagram resumable video upload failed.",
-                timeout=120,
+            created = json_request(
+                "POST", _graph_url(f"/{user_id}/media", create_params),
+                failure_message="Instagram media container creation failed.",
+                invalid_response_message="Instagram media container creation returned an invalid response.",
             )
         except WebRequestError as exc:
-            raise _mapped_web_error(exc, "Reel upload") from exc
-    for _ in range(PUBLISH_POLL_ATTEMPTS):
-        status = _graph_get(access_token, f"/{container_id}", {"fields": "status_code"}, what="container status")
-        status_code = status.get("status_code")
-        if status_code == "FINISHED":
-            break
-        if status_code in {"ERROR", "EXPIRED"}:
-            raise RuntimeError("Instagram could not process the video (container status ERROR).")
-        time.sleep(PUBLISH_POLL_DELAY_SECONDS)
-    else:
-        raise RuntimeError(
-            "Instagram is still processing the video; the approval was spent. "
-            "Queue a new approval and try again (long videos take a while)."
-        )
+            raise _mapped_web_error(exc, "Reel container") from exc
+        container_id = created.get("id")
+        if not isinstance(container_id, str) or not MEDIA_ID_RE.fullmatch(container_id):
+            raise RuntimeError("Instagram did not return a media container id.")
+        for _ in range(PUBLISH_POLL_ATTEMPTS):
+            status = _graph_get(access_token, f"/{container_id}", {"fields": "status_code"}, what="container status")
+            status_code = status.get("status_code")
+            if status_code == "FINISHED":
+                break
+            if status_code in {"ERROR", "EXPIRED"}:
+                raise ProviderWarning("Instagram", "container processing",
+                                      f"Instagram could not process the video (container status {status_code}).")
+            time.sleep(PUBLISH_POLL_DELAY_SECONDS)
+        else:
+            raise ProviderWarning(
+                "Instagram", "container processing",
+                "Instagram video processing timed out. Nothing was published. Queue a new approval to retry.",
+            )
     try:
         published = json_request(
             "POST",
@@ -735,26 +725,6 @@ def _publish_reel(access_token: str, user_id: str, proposal: JSONObject, api: Ho
     media_id = published.get("id")
     return media_id if isinstance(media_id, str) else ""
 
-
-def _is_meta_upload_uri(value: str) -> bool:
-    """Accept only Meta's documented Instagram resumable-upload origin.
-
-    The OAuth token is sent in the upload Authorization header, so an arbitrary
-    HTTPS URI from a malformed container response must never be followed.
-    """
-    try:
-        parsed = urllib.parse.urlsplit(value)
-        port = parsed.port
-    except ValueError:
-        return False
-    return (
-        parsed.scheme == "https"
-        and parsed.hostname == "rupload.facebook.com"
-        and parsed.username is None
-        and parsed.password is None
-        and port in {None, 443}
-        and parsed.path.startswith("/ig-api-upload/")
-    )
 
 
 class InstagramTool:
@@ -800,7 +770,7 @@ class InstagramTool:
             return ActionFailed(exc.message)
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
-        except UnmappedProviderError:
+        except ProviderWarning:
             raise
         except Exception as exc:
             return ActionFailed(str(exc) or "Instagram tool request failed.")
@@ -834,7 +804,7 @@ class InstagramTool:
             return ApprovalExecuted(f"Published a Reel to Instagram as {current_account['label']}{suffix}.")
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
-        except UnmappedProviderError:
+        except ProviderWarning:
             raise
         except Exception as exc:
             return ActionFailed(str(exc) or "Instagram publish failed after approval.")

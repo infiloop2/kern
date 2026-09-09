@@ -352,6 +352,11 @@ class McpShimTests(unittest.TestCase):
         self.assertIn("Set limit from 1 to 25", search["description"])
         self.assertIn("paginate with next_cursor", search["description"])
         self.assertIn("untrusted data", search["description"])
+        trigger_filter = search["inputSchema"]["properties"][
+            "exclude_automated_triggers"
+        ]
+        self.assertEqual(trigger_filter["type"], "boolean")
+        self.assertIn("manual user messages", trigger_filter["description"])
         read = tools["read_thread_history"]
         self.assertEqual(read["inputSchema"]["required"], ["thread_id"])
         self.assertEqual(read["inputSchema"]["properties"]["limit"]["maximum"], 50)
