@@ -741,7 +741,6 @@ function renderGithubApproval() {
     disableButton.disabled = !enabled || !required;
     disableButton.textContent = enabled && !required ? "Disabled" : "Disable";
   }
-  renderPendingPushes();
 }
 
 export async function setGithubRequireApproval(requireApproval) {
@@ -760,63 +759,6 @@ export async function setGithubRequireApproval(requireApproval) {
       githubBlocksDirectMainPushes(policy),
     );
   }, `.github push approval ${requireApproval ? "enabled" : "disabled"}.`);
-}
-
-async function renderPendingPushes() {
-  let pushes = [];
-  try {
-    pushes = (await api("GET", "/v1/network-tools/github-pending-pushes")).pending_pushes || [];
-  } catch (_error) {
-    setHtml($("github-pending-pushes"), "");
-    return;
-  }
-  const pending = pushes.filter(push => push.status === "pending");
-  if (!pending.length) {
-    setHtml($("github-pending-pushes"), "");
-    return;
-  }
-  setHtml($("github-pending-pushes"), `
-    <div class="field-label"><code>.github</code> pushes awaiting approval</div>
-    ${pending.map(push => `
-      <div class="pending-push">
-        <div class="pending-push-head">
-          <span class="mono">${esc(push.owner)}/${esc(push.repo)}</span>
-          <span class="muted mono">push-${esc(push.id)}</span>
-          ${badge(push.status)}
-          <span class="muted mono">${(push.ref_updates || []).map(update => esc(update.ref)).join(", ")}</span>
-        </div>
-        <ul class="pending-push-paths">${(push.changed_paths || []).map(path => `<li class="mono">${esc(path)}</li>`).join("")}</ul>
-        <div class="actions">
-          <button class="sm" data-action="approve-github-push" data-id="${esc(push.id)}">Approve &amp; push</button>
-          <button class="danger ghost sm" data-action="reject-github-push" data-id="${esc(push.id)}">Reject</button>
-        </div>
-      </div>`).join("")}`);
-}
-
-export async function refreshPendingGithubPushes() {
-  await renderPendingPushes();
-}
-
-export async function approveGithubPush(id) {
-  if (!confirm(`Approve push-${id} and push its .github changes to GitHub?`)) return;
-  try {
-    await api("POST", `/v1/network-tools/github-pending-pushes/${id}/approve`, {});
-    policyMessage("github", `push-${id} approved and pushed.`);
-  } catch (error) {
-    policyMessage("github", `Approve failed: ${error.message}`, true);
-  }
-  renderPendingPushes();
-}
-
-export async function rejectGithubPush(id) {
-  if (!confirm(`Reject push-${id}? Its objects are discarded.`)) return;
-  try {
-    await api("POST", `/v1/network-tools/github-pending-pushes/${id}/reject`, {});
-    policyMessage("github", `push-${id} rejected.`);
-  } catch (error) {
-    policyMessage("github", `Reject failed: ${error.message}`, true);
-  }
-  renderPendingPushes();
 }
 
 export function toggleGithubCredentialMode() {

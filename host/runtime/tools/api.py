@@ -74,6 +74,7 @@ MAX_IMAGE_BODY_BYTES = tool_assets.MAX_IMAGE_BYTES
 MAX_CONCURRENT_CALLS = 8
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
 _UPLOAD_SLOTS = threading.BoundedSemaphore(2)
+_MEDIA_SLOTS = threading.BoundedSemaphore(2)
 ASSET_CLEANUP_INTERVAL_SECONDS = 3600
 MAX_STREAMING_ASSET_BYTES = 200_000_000
 STREAMING_RESULT_HEADER = "streaming-asset"
@@ -497,6 +498,7 @@ def _operator_decide(
     tool_id: str,
     approval_id: str,
     decision: str,
+    public_hostname: str | None,
     asset_store: tool_assets.ToolAssetStore | None = None,
 ) -> dict[str, Any]:
     # The approval is addressed under its tool, so reject a decision whose tool
@@ -504,7 +506,7 @@ def _operator_decide(
     if state.tool_approval(approval_id, tool_id=tool_id) is None:
         raise OperatorError(HTTPStatus.NOT_FOUND, "unknown approval")
     try:
-        return tools_host.decide_approval(approval_id, decision, asset_store)
+        return tools_host.decide_approval(approval_id, decision, public_hostname, asset_store)
     except tools_host.ToolCallError as exc:
         raise OperatorError(HTTPStatus.CONFLICT, str(exc)) from exc
 
@@ -543,8 +545,11 @@ def handle_operator(
         return _operator_service(service.group(1), service.group(2))
     decide = OPERATOR_DECIDE_RE.fullmatch(path)
     if decide:
+        hostname = body.get("public_hostname") if isinstance(body, dict) else None
+        if hostname is not None and not isinstance(hostname, str):
+            raise OperatorError(HTTPStatus.BAD_REQUEST, "public_hostname must be a string")
         return _operator_decide(
-            decide.group(1), decide.group(2), decide.group(3), asset_store
+            decide.group(1), decide.group(2), decide.group(3), hostname, asset_store
         )
     raise OperatorError(HTTPStatus.NOT_FOUND, "unknown path")
 
@@ -570,8 +575,73 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
     def _peer_is_admin(self) -> bool:
         return self._peer()[1] in self.server.admin_uids
 
+    def do_HEAD(self) -> None:
+        self._send_tool_media(head=True)
+
+    def _send_tool_media(self, *, head: bool = False) -> None:
+        if not self._peer_is_admin():
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "Peer not allowed."})
+            return
+        match = re.fullmatch(r"/operator/tool-media/([A-Za-z0-9_-]{43})", self.path)
+        if not match:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown media."})
+            return
+        if not _MEDIA_SLOTS.acquire(blocking=False):
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Media service busy."})
+            return
+        try:
+            with self.server.asset_store.open_asset_grant(match.group(1)) as (metadata, source):
+                size = metadata.size_bytes
+                start, end = 0, size - 1
+                requested = self.headers.get("Range")
+                if requested:
+                    bounds = re.fullmatch(r"bytes=(\d{0,12})-(\d{0,12})", requested)
+                    if not bounds or not any(bounds.groups()):
+                        self._send_media_range_error(size)
+                        return
+                    left, right = bounds.groups()
+                    if left:
+                        start = int(left)
+                        end = min(int(right), size - 1) if right else size - 1
+                    else:
+                        start = max(0, size - int(right))
+                    if start > end or start >= size:
+                        self._send_media_range_error(size)
+                        return
+                self.send_response(206 if requested else 200)
+                self.send_header("Content-Type", metadata.media_type)
+                self.send_header("Content-Length", str(end - start + 1))
+                self.send_header("Accept-Ranges", "bytes")
+                if requested:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                self.end_headers()
+                if not head:
+                    source.seek(start)
+                    remaining = end - start + 1
+                    while remaining:
+                        chunk = source.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+        except (tool_assets.AssetError, FileNotFoundError):
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown media."})
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        finally:
+            _MEDIA_SLOTS.release()
+
+    def _send_media_range_error(self, size: int) -> None:
+        self.send_response(416)
+        self.send_header("Content-Range", f"bytes */{size}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self) -> None:
-        # The sole GET route belongs to the agent MCP surface.
+        if self.path.startswith("/operator/tool-media/"):
+            self._send_tool_media()
+            return
+        # The remaining GET route belongs to the agent MCP surface.
         if not self._peer_is_agent():
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Peer not allowed."})
             return

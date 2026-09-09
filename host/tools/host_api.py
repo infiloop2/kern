@@ -145,6 +145,8 @@ class Assets(Protocol):
 
     def delete(self, asset_id: str) -> None: ...
 
+    def public_asset_url(self, asset_id: str) -> AbstractContextManager[str]: ...
+
 class Outbound(Protocol):
     """Host-owned guard for agent-controlled free-text request parameters.
 

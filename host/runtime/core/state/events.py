@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX
 from host.runtime.core import db, pgclient
 from host.runtime.core.state._base import (
     AGENT_EVENT_LIMIT,
@@ -361,6 +362,7 @@ def search_thread_messages(
     before: tuple[float, int] | tuple[str, int] | None,
     max_seq: int | None = None,
     exclude_seqs: tuple[int, ...] = (),
+    exclude_automated_triggers: bool = False,
 ) -> list[dict[str, Any]]:
     """Search retained thread messages with indexed relevance or time paging.
 
@@ -372,6 +374,12 @@ def search_thread_messages(
     """
     clauses = ["events.event_type = 'thread.message'", "events.message IS NOT NULL"]
     params: list[Any] = []
+    if exclude_automated_triggers:
+        clauses.append(
+            "NOT (events.source = 'user' AND events.thread_id LIKE 'schedule-%'"
+            " AND events.message LIKE %s)"
+        )
+        params.append(AUTOMATED_TRIGGER_PREFIX + "%")
     if exclude_seqs:
         placeholders = ", ".join("%s" for _ in exclude_seqs)
         clauses.append(f"events.seq NOT IN ({placeholders})")
@@ -641,6 +649,7 @@ def thread_messages_by_seqs(
     thread_id: str | None,
     sources: tuple[str, ...],
     max_seq: int,
+    exclude_automated_triggers: bool = False,
 ) -> list[dict[str, Any]]:
     """Fetch filtered source rows in a previously frozen semantic order."""
     if not seqs or not sources:
@@ -655,6 +664,11 @@ def thread_messages_by_seqs(
         f"source IN ({source_placeholders})",
     ]
     params: list[Any] = [*seqs, max_seq, *sources]
+    if exclude_automated_triggers:
+        clauses.append(
+            "NOT (source = 'user' AND thread_id LIKE 'schedule-%' AND message LIKE %s)"
+        )
+        params.append(AUTOMATED_TRIGGER_PREFIX + "%")
     if thread_id is not None:
         clauses.append("thread_id = %s")
         params.append(thread_id)
@@ -700,10 +714,17 @@ def search_thread_messages_semantic(
     minimum_similarity: float,
     max_seq: int | None = None,
     max_embedding_generation: int | None = None,
+    exclude_automated_triggers: bool = False,
 ) -> list[dict[str, Any]]:
     """Nearest indexed message vectors under the same filters as text search."""
     clauses = ["embeddings.model = %s"]
     params: list[Any] = [model]
+    if exclude_automated_triggers:
+        clauses.append(
+            "NOT (events.source = 'user' AND events.thread_id LIKE 'schedule-%'"
+            " AND events.message LIKE %s)"
+        )
+        params.append(AUTOMATED_TRIGGER_PREFIX + "%")
     if max_seq is not None:
         clauses.append("events.seq <= %s")
         params.append(max_seq)

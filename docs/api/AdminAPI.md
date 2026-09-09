@@ -1324,6 +1324,23 @@ API.
 The Workspace service reaches its narrow host-thread API over a peer-authenticated
 Unix socket. See [Chat and Web Apps workspaces](../architecture/workspaces/workspaces.md).
 
+## Approvals
+
+`GET /v1/approvals?view=pending&page=1` is operator-only, protected by the
+normal admin session and CSRF checks. `view` is `pending` (default) or
+`history`; `page` is a positive integer and is clamped to the last page.
+Counts and rows are live reads; concurrent changes can briefly make totals
+differ from returned rows or shift items between page requests.
+
+The response contains `items`, `page`, `pages`, `page_size` (always 10),
+`total`, `pending_count`, and `history_count`. Pending rows sort by creation
+time; history rows sort by decision time. Each item has `kind` (`tool` or
+`github_push`), `id`, `source`, `summary`, `status`, `created_at`, and
+`updated_at` (Unix seconds). Tool items also include `tool_id`, `action_id`,
+`connection_id`, `account_label`, and `result`; GitHub items include `owner`, `repo`,
+`ref_updates`, `changed_paths`, and `result`. Tool payloads are omitted and
+remain behind the existing authenticated detail endpoint.
+
 ## Tools
 
 ```text
@@ -1364,7 +1381,7 @@ Tool endpoints:
 | `POST` | `/v1/tools/{tool_id}/service/status` | none | Service status | Returns operator-only connection state for a manifest-declared service. For WhatsApp this may include a short-lived QR data URL while enabled, or `suspended` when a registered session is retained while disabled; agent tool actions never receive it. |
 | `POST` | `/v1/tools/{tool_id}/service/connect` | none | Service status | Asks the tool-owned service to connect. For WhatsApp this starts or resumes the linked-device session and waits briefly for either a QR code or a connected state. Requires the tool to be enabled. |
 | `POST` | `/v1/tools/{tool_id}/service/disconnect` | none | Service status | Asks the tool-owned service to disconnect. For WhatsApp this logs out the linked device and deletes its durable session keys and bounded local message cache. Available even while the tool is disabled. |
-| `GET` | `/v1/tools/{tool_id}/approvals` | none | Approval list response | Lists `{tool_id}`'s action approvals as a bounded working set: pending first (so open decisions surface at the top), then newest decided ones as bounded history. Approvals are addressed under their tool so the operator UI shows each tool's approvals in its own row. Payload is omitted from the list; fetch it per approval. The paginated audit trail is `/v1/tools/events`. |
+| `GET` | `/v1/tools/{tool_id}/approvals` | none | Approval list response | Lists `{tool_id}`'s action approvals as a bounded working set: pending first (so open decisions surface at the top), then newest decided ones as bounded history. The unified operator queue uses `/v1/approvals`; this tool-scoped endpoint remains available. Payload is omitted from the list; fetch it per approval. The paginated audit trail is `/v1/tools/events`. |
 | `GET` | `/v1/tools/{tool_id}/approvals/{approval_id}` | none | `{"approval"}` | The full approval record for `{approval_id}`, including its (up to 64 KiB) payload. `404` when `{approval_id}` is not an approval of `{tool_id}`. |
 | `POST` | `/v1/tools/{tool_id}/approvals/{approval_id}/approve` | none | `{"approval", "result"}` | Approves a pending approval and immediately executes the recorded payload exactly once; the response carries the terminal approval record (`executed` or `failed`) and the execution result. `404` when `{approval_id}` is not an approval of `{tool_id}`; `409` when it is not pending. |
 | `POST` | `/v1/tools/{tool_id}/approvals/{approval_id}/deny` | none | `{"approval"}` | Denies a pending approval; terminal. `404` when `{approval_id}` is not an approval of `{tool_id}`; `409` when it is not pending. |

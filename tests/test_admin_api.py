@@ -3478,7 +3478,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('ADMIN_UI_DIR / "favicon.svg"', api)
         self.assertIn('ADMIN_UI_DIR / "manifest.webmanifest"', api)
         self.assertIn('ADMIN_UI_DIR / "service-worker.js"', api)
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 2)
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 3)
         self.assertNotIn('id="tab-processes"', html)
         self.assertNotIn('id="tab-host-diagnostics"', html)
         self.assertIn('data-action="open-home-view" data-view="processes"', html)
@@ -3572,7 +3572,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('id="github-repo"', html)
         self.assertIn('data-action="enable-github-require-approval"', html)
         self.assertIn('data-action="disable-github-require-approval"', html)
-        self.assertIn('id="github-pending-pushes"', html)
+        self.assertNotIn('id="github-pending-pushes"', html)
+        self.assertIn('id="panel-approvals"', html)
         self.assertIn('id="github-token"', html)
         self.assertIn('id="github-credential-status"', html)
         self.assertIn('id="github-credential-form-label"', html)
@@ -3583,11 +3584,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('data-action="recheck-github-audit"', html)
         self.assertIn("renderGithubAudit", ui)
         self.assertIn("recheckGithubAudit", ui)
-        self.assertIn("refreshPendingGithubPushes", ui)
+        self.assertIn("pollApprovalBadge", ui)
         self.assertIn('"network": {', ui)
         self.assertIn(
-            "tick: [refreshPendingGithubPushes, refreshExpandedToolApprovals, "
-            "refreshExpandedLinkedDevices]",
+            "tick: [refreshExpandedLinkedDevices]",
             ui,
         )
         self.assertIn("audit-banner", ui)

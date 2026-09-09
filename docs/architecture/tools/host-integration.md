@@ -181,8 +181,7 @@ context instead of rewriting its prefix:
   generation or editing task. OpenAI image generation deletes its reference
   copies once OpenAI has returned a usable image. Instagram deletes its copy
   after publishing.
-  Every remaining id expires after about
-  26 hours. The next staging/access check
+  Staged images and videos expire after 26 hours. The next staging/access check
   removes it immediately after expiry, and an hourly service sweep removes it
   even when no later call touches the store. A tools-service restart deletes
   every remaining file and forgets every id. No asset metadata enters
@@ -191,6 +190,25 @@ context instead of rewriting its prefix:
   either one later fails and the upload must be retried. At most 20 assets and
   1 GB total are staged across both media types. This private spool preserves
   the Instagram approval boundary: Meta receives no video bytes until approval.
+
+  The reusable `Assets.public_asset_url` context supports only the existing
+  staged JPEG, PNG, WebP, MP4 and MOV types. Instagram is its only consumer,
+  and continues to accept only videos for Reels.
+  Instagram Login publishes with `video_url`, not the resumable flow limited
+  to Facebook Login for Business. During approved execution only, the host
+  receives only the configured hostname through the trusted admin delegation
+  (the tools role cannot read operator connections), then issues a separate
+  256-bit random capability for the exact staged video at
+  `https://<configured-hostname>/tool-media/<token>`. The admin API
+  permits public HTTPS GET/HEAD on this one route without a session, and
+  streams through an admin-peer-only tools socket route. Single byte ranges
+  are supported; responses prohibit caching. No paths or staging ids grant
+  public access. The capability is process-local, expires within 15 minutes,
+  and is revoked on processing completion or any failure. Restart invalidates
+  it too. Existing downloads may finish after revocation. A configured public
+  hostname is required; no Facebook account or new storage service is needed.
+  Instagram API failures reach Host Diagnostics with operation, HTTP status
+  and numeric Meta error codes; provider text and media URLs are discarded.
 
   Binary action output uses a generic exclusive result. A package returns either
   `ActionExecuted` JSON or one `StreamingAsset`, never both. The tools service
@@ -382,7 +400,7 @@ calling WhatsApp.
 
 Tools appear as cards under **Home > Integrations**. Opening a card shows one
 focused page containing enable/disable controls, write-only config inputs with
-set indicators, OAuth connect/disconnect controls, pending approvals, and the
+set indicators, OAuth connect/disconnect controls, and the
 manifest-backed guide. The guide renders the ordered setup steps (with this
 host's callback URI and the tool's config keys shown inside the step that needs
 them), exact action list with approval controls, local audited screenshots, and
@@ -407,7 +425,9 @@ links. Backed by the
    (also via the tools service). The authorization model for the callback and the
    exchange is described in [OAuth callback and token exchange](#oauth-callback-and-token-exchange)
    below.
-4. **Decide approvals**: pending approval-gated actions appear with the tool's
+4. **Decide approvals** on the first-class **Approvals** page below Home. Tool
+   actions and network integration approvals share paginated Pending and History
+   views. Pending approval-gated actions appear with the tool's
    redacted summary and the exact recorded payload. Approving runs
    `execute_approved` immediately and reports the outcome; denial is terminal.
 

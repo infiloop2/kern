@@ -563,8 +563,7 @@ def tool_approval(approval_id: str, tool_id: str | None = None) -> dict[str, Any
 
 def list_tool_approvals(limit: int, tool_id: str | None = None) -> list[dict[str, Any]]:
     """Newest approvals first, pending before decided so open decisions
-    surface at the top of the admin UI. Scoped to one tool when tool_id is set,
-    which is how the operator UI shows approvals per tool rather than unified."""
+    surface at the top. Scoped to one tool when tool_id is set."""
     order = " ORDER BY (status = 'pending') DESC, number DESC LIMIT %s"
     with db.transaction() as cur:
         if tool_id is None:

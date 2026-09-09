@@ -91,8 +91,8 @@ TOOL_PATH_RE = re.compile(
     r"(enable|disable|oauth_connect/start|oauth_connect/complete|oauth_connect/disconnect|"
     r"service/status|service/connect|service/disconnect)$"
 )
-# Approvals are addressed under their tool so the operator UI shows each tool's
-# approvals in its own row rather than one unified list.
+# Details and decisions stay addressed under their owning tool. The unified
+# operator queue uses /v1/approvals for paginated summaries.
 TOOL_APPROVALS_LIST_RE = re.compile(r"^/v1/tools/([a-z0-9_]{1,64})/approvals$")
 TOOL_APPROVAL_GET_RE = re.compile(r"^/v1/tools/([a-z0-9_]{1,64})/approvals/([A-Za-z0-9._:-]{1,128})$")
 TOOL_APPROVAL_DECIDE_RE = re.compile(r"^/v1/tools/([a-z0-9_]{1,64})/approvals/([A-Za-z0-9._:-]{1,128})/(approve|deny)$")
@@ -291,4 +291,41 @@ def decide_tool_approval(approval_id: str, decision: str, tool_id: str) -> Any:
     # Deciding runs the approved payload (a third-party call needing egress), so
     # the tools service owns it; it checks that tool_id owns the approval before
     # spending it and maps a missing approval to 404, a non-pending one to 409.
-    return _tools_operator_request(f"/operator/tools/{tool_id}/approvals/{approval_id}/{decision}")
+    # Only admin can read operator_connections. Forward its public hostname,
+    # never the tunnel token or a value from the caller's request body.
+    body = {"public_hostname": state.load_cloudflare_hostname()}
+    return _tools_operator_request(f"/operator/tools/{tool_id}/approvals/{approval_id}/{decision}", body)
+
+
+def send_tool_media(handler: Any, token: str, *, head: bool = False) -> None:
+    """Stream only a live approval capability from the private tools service."""
+    connection = _ToolsSocketConnection(TOOLS_SOCKET_PATH)
+    started = False
+    try:
+        headers = {"Range": handler.headers["Range"]} if "Range" in handler.headers else {}
+        connection.request("HEAD" if head else "GET", f"/operator/tool-media/{token}", headers=headers)
+        response = connection.getresponse()
+        handler.send_response(response.status)
+        for key in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
+            value = response.getheader(key)
+            if value is not None:
+                handler.send_header(key, value)
+        handler.send_header("Cache-Control", "private, no-store, max-age=0")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.send_header("Referrer-Policy", "no-referrer")
+        handler.send_header("X-Robots-Tag", "noindex, nofollow, noarchive")
+        handler.end_headers()
+        started = True
+        if not head:
+            while chunk := response.read(64 * 1024):
+                handler.wfile.write(chunk)
+    except (OSError, http.client.HTTPException):
+        # Never log the capability URL, including on client disconnects.
+        if not started:
+            handler.send_response(HTTPStatus.BAD_GATEWAY)
+            handler.send_header("Content-Length", "0")
+            handler.send_header("Cache-Control", "no-store")
+            handler.end_headers()
+        handler.close_connection = True
+    finally:
+        connection.close()

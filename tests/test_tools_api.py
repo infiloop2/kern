@@ -405,13 +405,13 @@ class ActionListingTests(ToolsApiTestCase):
         check_input = {"approval_id": pending["approval_id"]}
         checked = tools_api.call_action("check_tool_approval", check_input)
         self.assertEqual(checked["result"]["approval_status"], "pending")
-        tools_host.decide_approval(pending["approval_id"], "approve")
+        tools_host.decide_approval(pending["approval_id"], "approve", public_hostname=None)
         checked = tools_api.call_action("check_tool_approval", check_input)
         self.assertEqual(checked["result"]["approval_status"], "executed")
         self.assertEqual(checked["result"]["execution_result"], "Wrote the note (5 chars).")
 
         failed = tools_api.call_action("fake_notes_write_note", {"text": "fail"})
-        tools_host.decide_approval(failed["approval_id"], "approve")
+        tools_host.decide_approval(failed["approval_id"], "approve", public_hostname=None)
         checked = tools_api.call_action("check_tool_approval", {"approval_id": failed["approval_id"]})
         self.assertEqual(checked["result"]["approval_status"], "failed")
         self.assertEqual(checked["result"]["execution_result"], "Note write failed.")

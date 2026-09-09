@@ -15,6 +15,7 @@ import time
 import urllib.request
 
 import workspace_smokes
+import approval_smokes
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -158,6 +159,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
             ) from exc
         try:
             if scope in {"all", "core"}:
+                approval_smokes.approval_smoke(browser, url)
                 route_restore = browser.new_context()
                 route_restore_page = route_restore.new_page()
                 report_page_errors(route_restore_page, "workspace route supersession")
@@ -550,7 +552,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(headings.nth(1)).to_have_text("Apps")
     expect(headings.nth(2)).to_have_text("Scheduled agents")
     # Home and Memory are tabs; Schedules is the section heading above.
-    expect(page.locator("#sidebar .tab-button")).to_have_count(2)
+    expect(page.locator("#sidebar .tab-button")).to_have_count(3)
     expect(
         page.locator("#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']")
     ).to_be_visible()
@@ -1193,14 +1195,16 @@ def desktop_smoke(page, url: str) -> None:
     # The .github approval gate is on from the first GitHub enable. The mock
     # simulates the agent pushing after its first write repository is added.
     expect(page.locator("#github-require-approval-status")).to_contain_text("held for approval")
-    pending_push = page.locator("#github-pending-pushes .pending-push")
-    expect(pending_push).to_contain_text("infiloop2/kern")
-    expect(pending_push).to_contain_text(".github/workflows/deploy.yml")
+    page.locator("#tab-approvals").click()
+    pending_push = page.locator(".approval-card", has_text="Push to infiloop2/kern")
     expect(pending_push).to_contain_text("pending")
-    page.once("dialog", lambda dialog: dialog.accept())
-    pending_push.get_by_role("button", name="Approve & push").click()
-    expect(github_message).to_contain_text("approved and pushed")
-    expect(page.locator("#github-pending-pushes")).to_have_text("")
+    pending_push.locator("summary").click()
+    expect(pending_push).to_contain_text(".github/workflows/deploy.yml")
+    pending_push.get_by_role("button", name="Approve", exact=True).click()
+    pending_push.get_by_role("button", name="Confirm approval", exact=True).click()
+    expect(page.locator("#approval-feedback")).to_contain_text("1 approved")
+    expect(pending_push).to_have_count(0)
+    open_home_integration(page, "github")
     page.locator("[data-action='disable-github-require-approval']").click()
     expect(github_message).to_contain_text(".github push approval disabled")
     expect(approval_enable).to_be_enabled()
@@ -1512,14 +1516,15 @@ def tools_smoke(page, url: str) -> None:
     expect(gmail_row).to_contain_text("1 account connected")
     expect(gmail_row).to_contain_text("akshay@infiloop.io")
     expect(gmail_row).to_contain_text("GOOGLE_OAUTH_CLIENT_ID")
-    gmail_approvals = gmail_row.locator(".tool-approvals")
-    expect(gmail_approvals).to_contain_text("Invoice follow-up")
-    pending_row = gmail_approvals.locator("tr", has_text="Invoice follow-up")
-    pending_row.get_by_text("exact payload").click()
-    expect(pending_row).to_contain_text("billing@acme.dev")
-    page.once("dialog", lambda dialog: dialog.accept())
-    pending_row.get_by_role("button", name="Approve").click()
-    expect(gmail_row.locator("[data-tool-message='gmail']")).to_contain_text("Approved and executed")
+    expect(gmail_row.locator(".tool-approvals")).to_have_count(0)
+    page.locator("#tab-approvals").click()
+    pending_row = page.locator(".approval-card", has_text="Invoice follow-up")
+    pending_row.get_by_text("View exact request").click()
+    expect(pending_row.locator("pre")).to_contain_text("billing@acme.dev")
+    pending_row.get_by_role("button", name="Approve", exact=True).click()
+    pending_row.get_by_role("button", name="Confirm approval", exact=True).click()
+    expect(page.locator("#approval-feedback")).to_contain_text("1 approved")
+    open_home_integration(page, "tool:gmail")
 
     # A cancelled provider callback reloads the shell. The focused row is
     # rendered first so its callback result cannot be erased by tab refresh.

@@ -140,9 +140,17 @@ def _conversation_search_fingerprint(
     to_timestamp: str | None,
     thread_id: str | None,
     roles: list[str],
+    exclude_automated_triggers: bool = False,
 ) -> str:
     encoded = json.dumps(
-        [queries, from_timestamp, to_timestamp, thread_id, roles],
+        [
+            queries,
+            from_timestamp,
+            to_timestamp,
+            thread_id,
+            roles,
+            exclude_automated_triggers,
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
@@ -382,6 +390,7 @@ def _frozen_conversation_semantic_rows(
     min_seq: int,
     max_seq: int,
     embedding_min_seq: int,
+    exclude_automated_triggers: bool = False,
 ) -> list[dict[str, Any]]:
     """Resolve cursor ids only when every id still satisfies its search."""
     rows = state.thread_messages_by_seqs(
@@ -391,6 +400,7 @@ def _frozen_conversation_semantic_rows(
         thread_id=thread_id,
         sources=sources,
         max_seq=max_seq,
+        exclude_automated_triggers=exclude_automated_triggers,
     )
     if len(rows) != len(semantic_seqs):
         # Prefer the specific expiry response when retention advanced during
@@ -415,6 +425,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
         "to",
         "thread_id",
         "roles",
+        "exclude_automated_triggers",
         "limit",
         "cursor",
     }
@@ -473,9 +484,20 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
     ):
         raise ApiError(HTTPStatus.BAD_REQUEST, "roles must contain user and/or assistant")
     roles = list(dict.fromkeys(roles))
+    exclude_automated_triggers = body.get("exclude_automated_triggers", False)
+    if not isinstance(exclude_automated_triggers, bool):
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "exclude_automated_triggers must be a boolean",
+        )
     limit = _conversation_limit(body.get("limit", 10), CONVERSATION_SEARCH_LIMIT)
     fingerprint = _conversation_search_fingerprint(
-        queries, from_timestamp, to_timestamp, thread_id, roles
+        queries,
+        from_timestamp,
+        to_timestamp,
+        thread_id,
+        roles,
+        exclude_automated_triggers,
     )
     decoded_cursor = _decode_conversation_search_cursor(
         body.get("cursor"), fingerprint, bool(queries)
@@ -540,6 +562,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                 limit=CONVERSATION_SEMANTIC_CANDIDATES + 1,
                 before=None,
                 max_seq=snapshot_max_seq,
+                exclude_automated_triggers=exclude_automated_triggers,
             )
             # The extra row distinguishes a result set that ends exactly at the
             # candidate window from one with more matches below it, so a lexical
@@ -576,6 +599,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                     min_seq=snapshot_min_seq,
                     max_seq=snapshot_max_seq,
                     embedding_min_seq=snapshot_embedding_min_seq,
+                    exclude_automated_triggers=exclude_automated_triggers,
                 )
                 rows = _hybrid_conversation_rows(
                     lexical_rows,
@@ -599,6 +623,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                         minimum_similarity=embedding_client.MINIMUM_SIMILARITY,
                         max_seq=snapshot_max_seq,
                         max_embedding_generation=snapshot_embedding_generation,
+                        exclude_automated_triggers=exclude_automated_triggers,
                     )
                     snapshot_semantic_seqs = tuple(
                         int(row["seq"]) for row in semantic_rows
@@ -640,6 +665,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                     min_seq=snapshot_min_seq,
                     max_seq=snapshot_max_seq,
                     embedding_min_seq=snapshot_embedding_min_seq,
+                    exclude_automated_triggers=exclude_automated_triggers,
                 )
                 exclude_seqs = snapshot_semantic_seqs
             rows = state.search_thread_messages(
@@ -652,6 +678,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                 before=before,
                 max_seq=snapshot_max_seq,
                 exclude_seqs=exclude_seqs,
+                exclude_automated_triggers=exclude_automated_triggers,
             )
             continuation_mode = (
                 "rank" if cursor_mode == "rank" else "lexical"
