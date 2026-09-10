@@ -49,7 +49,8 @@ class RunwayToolTests(unittest.TestCase):
         destinations = next(card for card in cards if card.title == "Where it can go")
         destination_text = " ".join(point.text for point in destinations.points)
         self.assertIn("Gen-4.5, Gen-4 Turbo, and Aleph 2", destination_text)
-        self.assertIn("Google Veo 3.1 or ByteDance Seedance 2", destination_text)
+        self.assertIn("ByteDance Seedance 2.0/2.5", destination_text)
+        self.assertIn("fal's MiniMax H3 Max", destination_text)
         self.assertIn("to OpenAI's GPT Image 2", destination_text)
         self.assertIn("to ElevenLabs Multilingual v2", destination_text)
         retention = next(card for card in cards if card.title == "How long Runway retains it")
@@ -235,6 +236,94 @@ class RunwayToolTests(unittest.TestCase):
         for bad_input in bad_inputs:
             result = tool.execute("generate_video", bad_input, api_with_key())
             self.assertIsInstance(result, ActionFailed, bad_input)
+
+    def test_new_video_models_route_text_and_first_frame_requests(self) -> None:
+        for model, duration in (("seedance2_5", "30"), ("h3_max", "15")):
+            for image_url in (None, "https://example.com/portrait.png"):
+                with self.subTest(model=model, image_url=image_url):
+                    tool_input: JSONObject = {
+                        "prompt": "the brain mascot waves", "model": model,
+                        "duration_seconds": duration, "seed": "42",
+                    }
+                    expected: JSONObject = {
+                        "model": model, "promptText": "the brain mascot waves",
+                        "duration": int(duration), "seed": 42,
+                    }
+                    if model == "h3_max":
+                        expected["resolution"] = "768p"
+                    else:
+                        tool_input["ratio"] = "720:1280"
+                        expected["ratio"] = "720:1280"
+                    endpoint = runway.TEXT_TO_VIDEO_ENDPOINT
+                    if image_url:
+                        tool_input["image_url"] = image_url
+                        expected["promptImage"] = image_url
+                        endpoint = runway.IMAGE_TO_VIDEO_ENDPOINT
+                    with patch.object(runway, "json_request", return_value={"id": "task-new-model"}) as request:
+                        result = RunwayTool().execute("generate_video", tool_input, api_with_key())
+                    assert_matches_output_schema(self, runway.MANIFEST, "generate_video", result)
+                    self.assertIsInstance(result, ActionExecuted)
+                    self.assertEqual(request.call_args.args, ("POST", endpoint))
+                    self.assertEqual(request.call_args.kwargs["body"], expected)
+
+    def test_new_video_model_defaults_and_lower_duration_bounds(self) -> None:
+        for model, minimum in (("seedance2_5", 4), ("h3_max", 5)):
+            for duration in (None, str(minimum)):
+                with self.subTest(model=model, duration=duration):
+                    tool_input: JSONObject = {"prompt": "x", "model": model}
+                    if duration is not None:
+                        tool_input["duration_seconds"] = duration
+                    with patch.object(runway, "json_request", return_value={"id": "task-default"}) as request:
+                        result = RunwayTool().execute("generate_video", tool_input, api_with_key())
+                    self.assertIsInstance(result, ActionExecuted)
+                    body = request.call_args.kwargs["body"]
+                    self.assertEqual(body["duration"], int(duration) if duration else 5)
+                    self.assertEqual(body.get("resolution") if model == "h3_max" else body.get("ratio"),
+                                     "768p" if model == "h3_max" else "1280:720")
+
+    def test_new_video_models_use_uploaded_first_frame_and_consume_asset(self) -> None:
+        for model in ("seedance2_5", "h3_max"):
+            with self.subTest(model=model):
+                api = api_with_key()
+                asset_id = api.assets.add(filename="frame.png", media_type="image/png", data=b"image")
+                with (
+                    patch.object(runway, "_upload_staged_asset", return_value="runway://ephemeral/frame") as upload,
+                    patch.object(runway, "json_request", return_value={"id": "task-uploaded"}) as request,
+                ):
+                    result = RunwayTool().execute(
+                        "generate_video", {"prompt": "animate", "model": model, "image_asset_id": asset_id}, api
+                    )
+                self.assertIsInstance(result, ActionExecuted)
+                upload.assert_called_once()
+                self.assertEqual(upload.call_args.args[0], asset_id)
+                self.assertEqual(request.call_args.args, ("POST", runway.IMAGE_TO_VIDEO_ENDPOINT))
+                body = request.call_args.kwargs["body"]
+                self.assertEqual(body["promptImage"], "runway://ephemeral/frame")
+                self.assertEqual(body["model"], model)
+                self.assertNotIn(asset_id, api.assets.records)
+
+    def test_new_model_validation_precedes_workspace_image_upload(self) -> None:
+        bad_options = (
+            {"model": "seedance2_5", "duration_seconds": "3"},
+            {"model": "seedance2_5", "duration_seconds": "31"},
+            {"model": "h3_max", "duration_seconds": "4"},
+            {"model": "h3_max", "duration_seconds": "16"},
+            {"model": "h3_max", "ratio": "720:1280"},
+            {"model": "h3_max", "resolution": "480p"},
+            {"model": "seedance2_5", "resolution": "768p"},
+            {"model": "gen4.5", "resolution": "480p"},
+        )
+        for options in bad_options:
+            with self.subTest(options=options):
+                api = api_with_key()
+                asset_id = api.assets.add(filename="frame.png", media_type="image/png", data=b"image")
+                with patch.object(runway, "json_request") as request:
+                    result = RunwayTool().execute(
+                        "generate_video", {"prompt": "x", "image_asset_id": asset_id, **options}, api
+                    )
+                self.assertIsInstance(result, ActionFailed)
+                request.assert_not_called()
+                self.assertIn(asset_id, api.assets.records)
 
     def test_generation_rejects_malformed_provider_task_id(self) -> None:
         with patch.object(runway, "json_request", return_value={"id": "../../other-path"}):

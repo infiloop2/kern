@@ -68,14 +68,6 @@ def approval_smoke(browser, url):
     page.locator('[data-approval-key="tool:2"] summary').click()
     expect(page.locator('[data-approval-key="tool:2"]')).to_contain_text("gmail-2")
     expect(page.locator('[data-approval-key="tool:2"] pre')).to_contain_text("Exact reviewed message")
-    card = page.locator('[data-approval-key="tool:2"]')
-    card.get_by_role("button", name="Approve", exact=True).click()
-    expect(card.get_by_role("button", name="Confirm approval", exact=True)).to_be_visible()
-    assert not seen
-    card.get_by_role("button", name="Deny", exact=True).click()
-    expect(card.get_by_role("button", name="Confirm denial", exact=True)).to_be_visible()
-    expect(card.get_by_role("button", name="Approve", exact=True)).to_be_visible()
-    assert not seen
     # Arriving work changes the count but cannot replace the reviewed page.
     rows.insert(0, {**rows[2], "id": "late", "summary": "Arrived after review"})
     page.evaluate("import('/admin_ui/approvals.js').then(m => m.pollApprovals())")
@@ -116,10 +108,22 @@ def approval_smoke(browser, url):
     expect(page.locator('[data-action="approval-decide"]')).to_have_count(0)
     page.locator('[data-action="approval-view"][data-view="pending"]').click()
     expect(page.locator(".approval-card")).to_have_count(4)
+    # Each individual decision submits on its first click and disables repeats.
+    for item_id, decision in (("late", "approve"), ("10", "deny")):
+        card = page.locator(f'[data-approval-key="tool:{item_id}"]')
+        before = len(held)
+        card.get_by_role("button", name=decision.capitalize(), exact=True).click()
+        expect(card.locator(".approval-progress")).to_have_text("Approving..." if decision == "approve" else "Denying...")
+        expect(card.get_by_role("button", name=decision.capitalize(), exact=True)).to_be_disabled()
+        page.wait_for_timeout(100)
+        assert len(held) == before + 1, seen
+        assert seen[-1] == (item_id, decision)
+        finish(held[-1])
+        expect(card).to_have_count(0)
     before = len(held)
     page.once("dialog", lambda dialog: dialog.accept())
     page.locator('[data-action="approval-bulk"][data-decision="deny"]').click()
-    expect(page.locator(".approval-progress", has_text="Denying...")).to_have_count(4)
+    expect(page.locator(".approval-progress", has_text="Denying...")).to_have_count(2)
     page.wait_for_timeout(100)
     for route in held[before:]:
         finish(route)
@@ -128,10 +132,10 @@ def approval_smoke(browser, url):
     fail_listing.append(True)
     page.locator('[data-action="approval-refresh"]').click()
     expect(page.locator("#approval-feedback")).to_contain_text("Could not load approvals")
-    expect(page.locator("#approval-feedback")).to_contain_text("4 denied")
+    expect(page.locator("#approval-feedback")).to_contain_text("2 denied")
     page.locator('[data-action="approval-refresh"]').click()
     expect(page.locator("#approval-feedback")).not_to_contain_text("Could not load approvals")
-    expect(page.locator("#approval-feedback")).to_contain_text("4 denied")
+    expect(page.locator("#approval-feedback")).to_contain_text("2 denied")
     page.locator('[data-action="approval-view"][data-view="history"]').click()
     expect(page.locator(".approval-card")).to_have_count(10)
     page.locator('[data-action="approval-page"][data-page="2"]').click()

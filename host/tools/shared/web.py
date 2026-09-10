@@ -169,6 +169,7 @@ def open_response_stream(
     url: str,
     *,
     headers: Mapping[str, str] | None = None,
+    data: bytes | None = None,
     failure_message: str,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> Iterator[tuple[BinaryIO, dict[str, str]]]:
@@ -179,7 +180,7 @@ def open_response_stream(
     """
     if not url.startswith("https://"):
         raise WebRequestError(failure_message)
-    request = urllib.request.Request(url, headers=dict(headers or {}), method=method)
+    request = urllib.request.Request(url, data=data, headers=dict(headers or {}), method=method)
     try:
         response = _OPENER.open(request, timeout=timeout)
     except urllib.error.HTTPError as exc:

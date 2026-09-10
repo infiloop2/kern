@@ -27,8 +27,10 @@ on:
           - runway
           - seedance
           - twitter
+          - upwork
           - web_fetch
           - whatsapp
+          - vercel_analytics
           - twitterapi_io
           - zoho_mail
           - claude
@@ -237,6 +239,7 @@ jobs:
           KERN_STAGE_RUNWAY_API_SECRET: ${{ secrets.KERN_STAGE_RUNWAY_API_SECRET }}
           KERN_STAGE_OPENAI_API_KEY: ${{ secrets.KERN_STAGE_OPENAI_API_KEY }}
           KERN_STAGE_SEEDANCE_ARK_API_KEY: ${{ secrets.KERN_STAGE_SEEDANCE_ARK_API_KEY }}
+          KERN_STAGE_VERCEL_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_VERCEL_ACCESS_TOKEN }}
           KERN_STAGE_TWITTERAPI_IO_API_KEY: ${{ secrets.KERN_STAGE_TWITTERAPI_IO_API_KEY }}
         run: |
           set -euo pipefail

@@ -975,6 +975,10 @@ def seed_state() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Keep the socket alive while large catalog responses drain. On a live
+    # host, closing it early can leave retransmits without the socket owner
+    # required by the preview-port network policy. Responses carry a length.
+    protocol_version = "HTTP/1.1"
     server_version = "KernMock/0.2"
 
     def do_GET(self) -> None:
@@ -1467,7 +1471,7 @@ def list_tools() -> dict[str, Any]:
                     ],
                 },
             }
-            if manifest.connection == "oauth":
+            if manifest.connection in {"oauth", "mcp_oauth"}:
                 connections = STATE.tool_connections.get(tool_id) or []
                 entry["connected_accounts"] = connections
                 entry["connection_status"] = (
@@ -1540,7 +1544,7 @@ def tool_action(tool_id: str, operation: str, body: Any) -> dict[str, Any]:
                 }
                 STATE.tool_linked_devices[tool_id] = status
                 return dict(status)
-        if manifest.connection != "oauth":
+        if manifest.connection not in {"oauth", "mcp_oauth"}:
             raise ApiError(HTTPStatus.CONFLICT, f"{tool_id} has no connect flow")
         if tool_id not in STATE.tool_enabled:
             raise ApiError(HTTPStatus.CONFLICT, f"{tool_id} is not enabled")
@@ -1548,7 +1552,7 @@ def tool_action(tool_id: str, operation: str, body: Any) -> dict[str, Any]:
             connection_id = (
                 body.get("connection_id")
                 if isinstance(body, dict) and isinstance(body.get("connection_id"), str)
-                else f"connection_{tool_id}"
+                else "default" if manifest.connection == "mcp_oauth" else f"connection_{tool_id}"
             )
             return {
                 "authorization_url": f"/oauth/callback?code={MOCK_OAUTH_CODE}&state=mock-state",

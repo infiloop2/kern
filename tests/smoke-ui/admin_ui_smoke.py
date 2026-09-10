@@ -159,6 +159,12 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
             ) from exc
         try:
             if scope in {"all", "core"}:
+                vercel_context = browser.new_context()
+                vercel_analytics_smoke(vercel_context.new_page(), url)
+                vercel_context.close()
+                upwork_context = browser.new_context()
+                upwork_smoke(upwork_context.new_page(), url)
+                upwork_context.close()
                 approval_smokes.approval_smoke(browser, url)
                 route_restore = browser.new_context()
                 route_restore_page = route_restore.new_page()
@@ -492,6 +498,71 @@ def open_home_integration(page, guide_id: str) -> None:
     expect(page.locator("#integration-detail-title")).not_to_have_text("Integration")
 
 
+def vercel_analytics_smoke(page, url: str) -> None:
+    """The new tool uses the standard guide, disclosures and secret-config UI."""
+    from playwright.sync_api import expect
+
+    log_in(page, url)
+    open_home_integration(page, "tool:vercel_analytics")
+    expect(page.locator("#integration-detail-title")).to_have_text("Vercel Analytics")
+    guide = page.locator("[data-guide-section='tool:vercel_analytics']")
+    expect(guide).to_contain_text("query_visits")
+    expect(guide).to_contain_text("list_teams")
+    expect(guide).not_to_contain_text("query_events")
+    expect(guide).to_contain_text("list_projects")
+    expect(guide).to_contain_text("What leaves this host")
+    expect(guide).to_contain_text("How long Vercel retains it")
+    expect(guide).to_contain_text("not an analytics-only credential")
+    expect(guide).to_contain_text("VERCEL_ACCESS_TOKEN")
+    expect(guide).not_to_contain_text("VERCEL_ANALYTICS_PROJECTS")
+    expect(guide.get_by_role("link", name="Vercel privacy notice").first).to_have_attribute("href", "https://vercel.com/legal/privacy-notice")
+    assert_no_horizontal_overflow(page, "Vercel Analytics integration")
+
+
+def upwork_smoke(page, url: str) -> None:
+    from playwright.sync_api import expect
+
+    log_in(page, url)
+    open_home_integration(page, "tool:upwork")
+    expect(page.locator("#integration-detail-title")).to_have_text("Upwork")
+    guide = page.locator("[data-guide-section='tool:upwork']")
+    expect(guide).to_contain_text("search_jobs")
+    expect(guide).not_to_contain_text("list_tools")
+    expect(guide).to_contain_text("submit_proposal")
+    expect(guide).not_to_contain_text("execute_tool")
+    expect(guide).to_contain_text("What leaves this host")
+    expect(guide).to_contain_text("How long Upwork retains it")
+    expect(guide).to_contain_text("requires approval for submissions and messages")
+    expect(guide).to_contain_text("get_account")
+    expect(guide).not_to_contain_text("list_contracts")
+    expect(guide.locator(".guide-capability")).to_have_count(12)
+    expect(guide).not_to_contain_text("prepare_proposal")
+    expect(guide).not_to_contain_text("save_job")
+    expect(guide).not_to_contain_text("unsave_job")
+    expect(gmail_capability(guide, "submit_proposal")).to_contain_text("approval required")
+    expect(guide.get_by_role("link", name="Upwork privacy policy").first).to_have_attribute("href", "https://www.upwork.com/legal#privacy")
+    row = page.locator('[data-tool-row="upwork"]')
+    expect(row.locator('input[id^="tool-config-"]')).to_have_count(0)
+    if row.get_by_role("button", name="Enable", exact=True).is_disabled():
+        row.get_by_role("button", name="Disable", exact=True).click()
+    row.get_by_role("button", name="Enable", exact=True).click()
+    expect(row.get_by_role("button", name="Connect account", exact=True)).to_be_visible()
+    page.evaluate("""async () => {
+      const { api } = await import('/admin_ui/api.js');
+      await api('POST', '/v1/tools/upwork/oauth_connect/complete', {
+        code: 'mock-auth-code', state: 'mock-state',
+        redirect_uri: location.origin + '/oauth/callback', connection_id: 'default'
+      });
+      const { refreshTools } = await import('/admin_ui/tools.js');
+      await refreshTools();
+    }""")
+    expect(row.get_by_role("button", name="Disconnect", exact=True)).to_be_visible()
+    expect(row.get_by_role("button", name="Connect another account", exact=True)).to_have_count(0)
+    expect(row.get_by_role("button", name="Reconnect", exact=True)).to_have_count(0)
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert_no_horizontal_overflow(page, "Upwork integration")
+
+
 def gmail_capability(guide, action_id: str):
     """One action card, addressed by its heading rather than any text in it."""
     return guide.locator(".guide-capability").filter(
@@ -630,12 +701,14 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#panel-network")).to_be_visible()
     disabled_openai_row = page.locator(".integration-row[data-integration]", has_text="OpenAI")
     expect(disabled_openai_row.locator(".integration-details")).to_be_visible()
-    title_box = disabled_openai_row.locator(".integration-title").bounding_box()
-    account_card_box = disabled_openai_row.locator(
-        ".integration-details .detail-card"
-    ).first.bounding_box()
-    if not title_box or not account_card_box or abs(title_box["x"] - account_card_box["x"]) > 2:
-        raise AssertionError("expanded integration content is not aligned with the row title after the chevron")
+    # Navigation can move the row between two separate bounding-box reads.
+    # Check both boxes in one layout snapshot and wait for the route to settle.
+    page.wait_for_function("""() => {
+      const row = document.querySelector('.integration-row[data-integration="openai"]');
+      const title = row?.querySelector('.integration-title')?.getBoundingClientRect();
+      const card = row?.querySelector('.integration-details .detail-card')?.getBoundingClientRect();
+      return title?.width > 0 && card?.width > 0 && Math.abs(title.x - card.x) <= 2;
+    }""", timeout=5000)
     expect(disabled_openai_row).not_to_contain_text("No account linked yet")
     expect(disabled_openai_row).not_to_contain_text("deactivated")
     page.locator("#panel-network .home-back").click()
@@ -1201,7 +1274,6 @@ def desktop_smoke(page, url: str) -> None:
     pending_push.locator("summary").click()
     expect(pending_push).to_contain_text(".github/workflows/deploy.yml")
     pending_push.get_by_role("button", name="Approve", exact=True).click()
-    pending_push.get_by_role("button", name="Confirm approval", exact=True).click()
     expect(page.locator("#approval-feedback")).to_contain_text("1 approved")
     expect(pending_push).to_have_count(0)
     open_home_integration(page, "github")
@@ -1489,6 +1561,8 @@ def tools_smoke(page, url: str) -> None:
     open_home_integration(page, "tool:whatsapp")
     whatsapp_row = page.locator("#tools [data-tool-row='whatsapp']")
     whatsapp_row.get_by_role("button", name="Enable", exact=True).click()
+    # The enable action refreshes the row before reporting completion.
+    expect(whatsapp_row.locator("[data-tool-message='whatsapp']")).to_contain_text("enabled.")
     connect_url = "**/v1/tools/whatsapp/service/connect"
     page.route(
         connect_url,
@@ -1518,11 +1592,12 @@ def tools_smoke(page, url: str) -> None:
     expect(gmail_row).to_contain_text("GOOGLE_OAUTH_CLIENT_ID")
     expect(gmail_row.locator(".tool-approvals")).to_have_count(0)
     page.locator("#tab-approvals").click()
+    # Re-entering the queue refreshes and replaces its previous cards.
+    expect(page.locator("#panel-approvals [data-action='approval-refresh']")).to_be_enabled()
     pending_row = page.locator(".approval-card", has_text="Invoice follow-up")
     pending_row.get_by_text("View exact request").click()
     expect(pending_row.locator("pre")).to_contain_text("billing@acme.dev")
     pending_row.get_by_role("button", name="Approve", exact=True).click()
-    pending_row.get_by_role("button", name="Confirm approval", exact=True).click()
     expect(page.locator("#approval-feedback")).to_contain_text("1 approved")
     open_home_integration(page, "tool:gmail")
 

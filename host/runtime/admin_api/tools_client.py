@@ -40,7 +40,9 @@ TOOLS_SOCKET_PATH = os.environ.get("KERN_TOOLS_SOCKET", DEFAULT_TOOLS_SOCKET_PAT
 # timeout. Keep this proxy timeout above that worst case so a slow-but-successful
 # approval is not reported to the operator as a failure while the tools service
 # actually completes the side effect.
-TOOLS_OPERATOR_TIMEOUT_SECONDS = 180
+# Upwork proposal approval adds MCP initialization, cost verification, private
+# preview creation/read and confirmation, plus optional OAuth refresh and cleanup.
+TOOLS_OPERATOR_TIMEOUT_SECONDS = 300
 
 
 class _ToolsSocketConnection(http.client.HTTPConnection):
@@ -195,7 +197,7 @@ def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> 
             ],
         },
     }
-    if manifest.connection == "oauth":
+    if manifest.connection in {"oauth", "mcp_oauth"}:
         connections = state.tool_connections(manifest.tool_id)
         entry["connected_accounts"] = connections
         # Keep the old aggregate field during the API transition. New clients

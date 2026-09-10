@@ -87,6 +87,34 @@ def save_tool_config_value(cur: Any, tool_id: str, key: str, value: str) -> None
         cur.execute("DELETE FROM tool_config WHERE tool_id = %s AND key = %s", (tool_id, key))
 
 
+def tool_secret(tool_id: str) -> dict[str, Any] | None:
+    with db.transaction() as cur:
+        cur.execute("SELECT value FROM tool_secrets WHERE tool_id = %s", (tool_id,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    value = json.loads(secretbox.decrypt(row[0]))
+    if not isinstance(value, dict):
+        raise ValueError("Stored tool secret must be a JSON object.")
+    return value
+
+
+def put_tool_secret(tool_id: str, serialized: str) -> None:
+    # The HostAPI validates JSON and its 16 KiB plaintext cap before this call.
+    ciphertext = secretbox.encrypt(serialized)
+    with mutation() as cur:
+        cur.execute(
+            "INSERT INTO tool_secrets (tool_id, value) VALUES (%s, %s)"
+            " ON CONFLICT (tool_id) DO UPDATE SET value = EXCLUDED.value",
+            (tool_id, ciphertext),
+        )
+
+
+def delete_tool_secret(tool_id: str) -> None:
+    with mutation() as cur:
+        cur.execute("DELETE FROM tool_secrets WHERE tool_id = %s", (tool_id,))
+
+
 def tool_credential(tool_id: str, connection_id: str) -> dict[str, Any] | None:
     """One connection's stored OAuth credential (the store behind HostAPI.credentials),
     reassembled into the StoredCredential shape from its columns, or None if

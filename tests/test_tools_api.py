@@ -63,6 +63,58 @@ class _MemoryResponse:
         return self._source.read(size)
 
 
+class MCPOAuthConnectionTests(unittest.TestCase):
+    def test_single_connection_routes_use_default_and_reject_other_ids(self) -> None:
+        from host.tools import upwork
+        from test_tools import FakeHostAPI
+        tool = upwork.BUNDLED_TOOL
+        api = FakeHostAPI()
+        with patch.object(state, "enabled_tool_ids", return_value={"upwork"}), \
+             patch.object(state, "tool_credential", return_value=None), \
+             patch.object(state, "record_tool_event"), \
+             patch.object(tools_host, "host_api_for", return_value=api) as host_api, \
+             patch.object(upwork.oauth, "_request", return_value={"client_id": "public-client"}):
+            first = tools_api._operator_start_connect("upwork", {"redirect_uri": "https://kern.test/oauth/callback"})
+            second = tools_api._operator_start_connect("upwork", {"redirect_uri": "https://kern.test/oauth/callback"})
+            self.assertEqual((first["connection_id"], second["connection_id"]), ("default", "default"))
+            self.assertEqual(host_api.call_args.args[1].connection_id, "default")
+            for operation, body in (
+                (tools_api._operator_start_connect, {"redirect_uri": "https://kern.test/oauth/callback"}),
+                (tools_api._operator_complete_connect, {"redirect_uri": "https://kern.test/oauth/callback", "code": "code", "state": "state"}),
+                (tools_api._operator_disconnect, {}),
+            ):
+                with self.subTest(operation=operation.__name__), self.assertRaises(tools_api.OperatorError):
+                    operation("upwork", {**body, "connection_id": "another"})
+            with self.assertRaises(ValueError):
+                tools_host.connection_scope(tool, "another")
+            with self.assertRaises(tools_api.OperatorError):
+                tools_api._operator_complete_connect("upwork", {
+                    "redirect_uri": "https://kern.test/oauth/callback", "code": "code", "state": first["state"],
+                })
+            tools_api._operator_disconnect("upwork", {"connection_id": "default"})
+            self.assertIsNone(api.secrets.load())
+
+    def test_mcp_oauth_exposes_and_resolves_its_connected_account(self) -> None:
+        from host.tools import upwork
+        account = {"id": "grant-one", "label": "Upwork", "scopes": []}
+        connections = [{"connection_id": "default", "account": account}]
+        with patch.object(state, "enabled_tool_ids", return_value={"upwork"}), \
+             patch.object(state, "tool_connections", return_value=connections), \
+             patch.object(state, "tool_credential", return_value={"account": account}):
+            description = tools_api._describe_tool({"tool_id": "upwork"})["result"]
+            self.assertEqual(description["connected_accounts"], connections)
+            scope = tools_host.resolve_connection(upwork.BUNDLED_TOOL, None)
+            self.assertEqual((scope.connection_id, scope.account), ("default", account))
+            self.assertEqual(upwork.MANIFEST.connection, "mcp_oauth")
+            self.assertEqual(upwork.MANIFEST.config, ())
+
+    def test_multiple_account_tools_keep_independent_connection_ids(self) -> None:
+        first = tools_api._operator_connection_id({}, create=True)
+        second = tools_api._operator_connection_id({}, create=True)
+        self.assertNotEqual(first, second)
+        self.assertEqual(tools_api._operator_connection_id({"connection_id": first}), first)
+
+
 class StreamMaterializationUnitTests(unittest.TestCase):
     def test_materializes_exact_stream_with_private_modes(self) -> None:
         payload = b"v" * 512

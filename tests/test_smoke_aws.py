@@ -20,6 +20,28 @@ from tests.stage.stage_support import (
 
 
 class AwsSmokeTeardownTests(unittest.TestCase):
+    def test_fresh_smoke_does_not_start_dynamic_registration(self) -> None:
+        smoke = AwsSmoke()
+        entries = [
+            {"tool_id": "upwork", "connection": "mcp_oauth", "config": [],
+             "connection_status": {"connected": False}},
+            {"tool_id": "gmail", "connection": "oauth",
+             "config": [{"key": "client_id", "set": False}],
+             "connection_status": {"connected": False}},
+        ]
+        with patch.object(smoke, "_api_status", return_value=(400, "client_id not set")) as start:
+            smoke._check_unconfigured_tools(entries)
+        self.assertEqual(start.call_count, 1)
+        self.assertEqual(start.call_args.args[:2], ("POST", "/v1/tools/gmail/oauth_connect/start"))
+        with patch.object(smoke, "_api_status", return_value=(200, {})), self.assertRaises(AssertionError):
+            smoke._check_unconfigured_tools(entries)
+        for change in ({"connection_status": {"connected": True}},
+                       {"config": [{"key": "unexpected", "set": True}]}):
+            with self.subTest(change=change), patch.object(smoke, "_api_status") as start:
+                with self.assertRaises(AssertionError):
+                    smoke._check_unconfigured_tools([{**entries[0], **change}])
+                start.assert_not_called()
+
     def test_fresh_smoke_exercises_the_admin_listener_uid_boundary(self) -> None:
         source = Path(__file__).with_name("smoke").joinpath("smoke_aws.py").read_text()
         self.assertIn('admin_uid_results = {', source)
@@ -774,7 +796,7 @@ class WorkflowSmokeTests(unittest.TestCase):
             for requirement in BUNDLED_TOOLS[tool_id].manifest.config:
                 env_name = f"KERN_STAGE_{requirement.key}"
                 mapping = f"{env_name}: ${{{{ secrets.{env_name} }}}}"
-                if BUNDLED_TOOLS[tool_id].manifest.connection == "oauth":
+                if BUNDLED_TOOLS[tool_id].manifest.connection in {"oauth", "mcp_oauth"}:
                     self.assertNotIn(mapping, stage)
                 else:
                     self.assertIn(mapping, stage)

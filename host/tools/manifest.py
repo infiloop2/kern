@@ -21,11 +21,14 @@ from host.tools.json_types import JSONObject
 # - "oauth": the tool owns an operator third-party OAuth flow (see
 #   host.tools.tool.CredentialFlow); tokens live in host-provided credential
 #   storage.
+# - "mcp_oauth": hosted MCP OAuth using the same connect flow, with one fixed
+#   connection and no operator-configured OAuth client id/secret. The tool
+#   owns provider discovery, automatic client registration, and PKCE.
 # - "enable_only": no operator credentials; the operator just enables/disables the
 #   tool and it runs on deployment configuration (e.g. a service API key).
 # - "whatsapp_linked_device": a WhatsApp or WhatsApp Business account linked
 #   through the operator-only QR flow.
-ConnectionKind = Literal["oauth", "enable_only", "whatsapp_linked_device"]
+ConnectionKind = Literal["oauth", "mcp_oauth", "enable_only", "whatsapp_linked_device"]
 ApprovalKind = Literal["direct", "operator"]
 
 # Tool and action ids are used in credential/config partitions, approval
