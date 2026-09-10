@@ -32,12 +32,15 @@ ApprovalStatus = Literal["pending", "approved", "denied", "expired", "executed",
 
 
 class ConnectionAccount(TypedDict):
-    """The connected third-party account for an OAuth tool.
+    """The connected third-party identity for an OAuth tool.
 
     This is the explicit, non-secret account shape every OAuth tool returns and
     the host stores/displays. ``id`` is the stable provider account identifier
     (for example a Google ``sub``) used to bind approvals to the account that
-    was connected when they were proposed; ``label`` is the human-readable
+    was connected when they were proposed. When a provider has no published
+    identity endpoint, a tool may explicitly label a fresh grant identifier
+    instead; reconnect must replace that grant and invalidate old approvals.
+    ``label`` is the human-readable
     account (an email); ``scopes`` are the granted OAuth scopes.
     """
 
@@ -76,11 +79,7 @@ class ApprovalRecord:
 
 
 class Credentials(Protocol):
-    """The tool's OAuth credential store — the only place tool state lives.
-
-    OAuth tools are the only tools that persist state, and all they persist is a
-    connected-account credential selected for this call. Rather than a generic
-    key/value store, the host exposes this purpose-built, typed service: one
+    """The tool's typed OAuth credential store: one
     ``StoredCredential`` per connection. The tool cannot enumerate or select
     connections; the host decides *which* one is in scope and where/how it is
     stored (partitioning, encryption at rest). Enable-only tools never call it.
@@ -97,6 +96,20 @@ class Credentials(Protocol):
     def clear(self) -> None:
         """Delete this tool's stored credential. A no-op if absent."""
         ...
+
+
+class Secrets(Protocol):
+    """One private JSON object per tool definition, at most 16 KiB.
+    Encrypted at rest; never exposed through agent/operator APIs. Writes replace
+    the whole object. It survives restarts until the tool clears it. Tools own
+    their state, expiry checks, cleanup, and concurrency semantics.
+    """
+
+    def load(self) -> JSONObject | None: ...
+
+    def save(self, value: JSONObject) -> None: ...
+
+    def clear(self) -> None: ...
 
 
 class Approvals(Protocol):
@@ -174,6 +187,9 @@ class HostAPI(Protocol):
 
     @property
     def credentials(self) -> Credentials: ...
+
+    @property
+    def secrets(self) -> Secrets: ...
 
     @property
     def config(self) -> Mapping[str, str]: ...

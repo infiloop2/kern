@@ -3086,5 +3086,5 @@ html.iphone-standalone, html.iphone-standalone body {
   .approval-pagination > div { gap: 8px; }
 }
 .approval-decisions button { min-width: 82px; }
-.approval-decisions .approval-confirm { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-.approval-decisions .danger.approval-confirm { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+.integration-logo-tool-vercel_analytics { background: #111; color: #fff; }
+.integration-logo-tool-upwork { background: #14a800; color: #fff; }

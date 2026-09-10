@@ -9,8 +9,8 @@ The Python protocols under `host/tools/` express this contract as code
 (`manifest.py`, `tool.py`, `results.py`, `host_api.py`); this document is the
 source of truth and the two must agree.
 
-A tool package is pure tool logic: no UI, and the only state it owns is the OAuth
-credential selected for the current host-scoped call. Everything tool-specific —
+A tool package is pure tool logic: no UI. It persists credentials and private
+JSON only through the host-scoped services. Everything tool-specific —
 actions, input schemas, third-party API calls, third-party auth — lives in the
 package. Everything deployment-specific — where the credential lives, how config
 is supplied, how approvals are decided and audited — is provided by the host
@@ -20,7 +20,7 @@ behind the **host API**.
 agent / chat / MCP gateway
         │  action calls
         ▼
-host  (host API: credentials · config · approvals · staged assets)
+host  (host API: credentials · secrets · config · approvals · staged assets)
         │  Tool.execute(action, input, api)
         ▼
 tool package
@@ -30,7 +30,7 @@ third-party APIs
 ```
 
 Every `HostAPI` handed to a tool call is already **scoped to one tool on one
-host**. Credentials, approval records, and staged assets are implicitly
+host**. Credentials, private JSON, approval records, and staged assets are implicitly
 partitioned by `tool_id`; a tool can never address another tool's data.
 
 ## The tool: `Tool`
@@ -48,7 +48,7 @@ class Tool(Protocol):
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult: ...
 ```
 
-`credentials` is non-`None` exactly when `manifest.connection == "oauth"` and
+`credentials` is non-`None` exactly when `manifest.connection` is `oauth` or `mcp_oauth` and
 `None` for `enable_only` and `whatsapp_linked_device`. A WhatsApp linked-device session is a
 host-owned supervised process; the tool package still receives no storage path
 or session key.
@@ -81,7 +81,7 @@ reads. Enablement is a host policy, not part of this contract; this host does no
 gate it on config.
 
 ```python
-ConnectionKind = Literal["oauth", "enable_only", "whatsapp_linked_device"]
+ConnectionKind = Literal["oauth", "mcp_oauth", "enable_only", "whatsapp_linked_device"]
 ApprovalKind = Literal["direct", "operator"]
 
 @dataclass(frozen=True)
@@ -286,6 +286,8 @@ class HostAPI(Protocol):
     @property
     def credentials(self) -> Credentials: ...          # oauth token store (typed)
     @property
+    def secrets(self) -> Secrets: ...                  # bounded private JSON
+    @property
     def config(self) -> Mapping[str, str]: ...          # this tool's declared config keys
     @property
     def approvals(self) -> Approvals: ...               # host-owned approval workflow
@@ -388,9 +390,8 @@ generic `StreamingAsset` result instead and never enters this staged-asset store
 
 ### Credentials
 
-OAuth tool packages are the only packages that persist state, and all they persist is a
-connected-account credential. Instead of a generic key/value store, the host
-exposes a purpose-built typed service containing the one `StoredCredential`
+For OAuth connected-account credentials, the host exposes a typed service
+containing the one `StoredCredential`
 selected for that call. A package cannot enumerate or switch the host's
 connections; connection discovery and selection are host concerns. Enable-only
 tools and linked-device packages never touch it. The latter call only a
@@ -423,8 +424,37 @@ bookkeeping such as connect/refresh timestamps), and the host stores and returns
 them verbatim without ever interpreting them. So their shapes differ per tool by
 design; they are not declared in the manifest (which describes operator-supplied
 config, not credential internals) and are intentionally `JSONObject` rather than
-concrete fields. The host stores the whole `StoredCredential` encrypted at rest
-and guarantees per-tool isolation.
+concrete fields. The host encrypts `secret` at rest; the account and metadata are non-secret.
+The store is isolated by tool and host-selected connection.
+
+### Private JSON: `secrets`
+
+Every tool can store one private JSON object through `api.secrets`, independently
+of OAuth. There is exactly one object per tool definition, shared across that
+tool’s connections. There is no key, tool ID, or connection selector in this
+API, and no agent or admin endpoint reads it.
+
+```python
+class Secrets(Protocol):
+    def load(self) -> JSONObject | None: ...
+    def save(self, value: JSONObject) -> None: ...
+    def clear(self) -> None: ...
+```
+
+`save` replaces the whole object. The host validates finite JSON and limits its
+compact serialized representation to 16 KiB, then encrypts it with the existing
+host secretbox. Missing data loads as `None`; `clear` deletes the object and is
+idempotent. Values survive tools-service restarts until explicitly cleared.
+There is no automatic expiry: the tool owns any expiry checks it needs.
+
+Tools own the schema, cleanup, and synchronization of read/modify/write operations;
+this is not an atomic compare-and-swap API. Tools must never expose secret material from this store
+in results, approval payloads, URLs, or diagnostics. Upwork stores its PKCE verifier
+and a sign-in deadline, checks that deadline itself, and clears the object after
+completing or cancelling sign-in. `mcp_oauth` supports one fixed `default` connection and reuses the OAuth
+connect interface with no operator-configured OAuth client ID or secret; its
+tool owns automatic MCP client registration and PKCE.
+Connected-account tokens remain in `credentials`.
 
 ### Config
 
@@ -538,9 +568,9 @@ connections that still hold the older, broader grant.
 
 ## Rules
 
-1. **State only via `credentials`.** The only state a tool persists is its OAuth
-   credential, through `api.credentials`. The host decides where and how it lives
-   (partitioning, encryption); the tool decides what the `secret` is.
+1. **State only via the host API.** Persist OAuth credentials through
+   `api.credentials` and private JSON through `api.secrets`. The host owns
+   partitioning, encryption, and size limits; tools own their private schema.
 2. **No ambient access.** Tool code never reads environment secrets, token files,
    or databases directly — only the host API. Third-party HTTP calls are normal
    tool code.
@@ -551,8 +581,8 @@ connections that still hold the older, broader grant.
 5. **Everything visible is sanitized.** Results, messages, summaries, and errors
    are user/agent visible: no tokens, secrets, or raw third-party payloads. Map
    unexpected exceptions to generic messages.
-6. **Stateless across calls.** No in-process state between calls, so the same
-   package works on this host or another interchangeably.
+6. **Persist through the host.** In-process locks may coordinate concurrent calls,
+   but persistent state belongs in the host API so it survives service restarts.
 7. **Host-owned audit.** The host records every accepted call with its exact
    bounded arguments and outcome; tools do not write audit records. Approval
    decisions record the exact payload handed to `execute_approved`. Operator

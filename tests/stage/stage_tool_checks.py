@@ -132,14 +132,14 @@ class StageToolChecks:
             item["key"] for item in entry.get("config", []) if not item.get("set")
         ]
         connected = (entry.get("connection_status") or {}).get("connected") is True
-        needs_connection = manifest.connection in {"oauth", "whatsapp_linked_device"}
+        needs_connection = manifest.connection in {"oauth", "mcp_oauth", "whatsapp_linked_device"}
         if entry.get("enabled") and not missing_config and (not needs_connection or connected):
             state = "connected" if needs_connection else "configured"
             print(f"  [credential ok] {tool_id}: enabled and {state}", flush=True)
             return []
         problems: list[str] = []
         if missing_config:
-            if manifest.connection == "oauth":
+            if manifest.connection in {"oauth", "mcp_oauth"}:
                 problems.append(
                     "set its OAuth app configuration once in the stage admin UI "
                     f"(missing: {', '.join(missing_config)})"
@@ -158,7 +158,7 @@ class StageToolChecks:
         """Apply enable-only provider config from Actions secrets when present."""
         for tool_id in tool_ids:
             manifest = BUNDLED_TOOLS[tool_id].manifest
-            if manifest.connection in {"oauth", "whatsapp_linked_device"}:
+            if manifest.connection in {"oauth", "mcp_oauth", "whatsapp_linked_device"}:
                 continue
             for requirement in manifest.config:
                 value = os.environ.get(f"KERN_STAGE_{requirement.key}", "")
@@ -173,7 +173,7 @@ class StageToolChecks:
             for entry in self._api("GET", "/v1/tools")["tools"]
         }
         for tool_id in tool_ids:
-            if BUNDLED_TOOLS[tool_id].manifest.connection in {"oauth", "whatsapp_linked_device"}:
+            if BUNDLED_TOOLS[tool_id].manifest.connection in {"oauth", "mcp_oauth", "whatsapp_linked_device"}:
                 continue
             entry = listing[tool_id]
             if all(item.get("set") for item in entry.get("config", [])):
@@ -368,6 +368,8 @@ class StageToolChecks:
             "reddit": self._check_reddit_live,
             "twitter": self._check_twitter_live,
             "twitterapi_io": self._check_twitterapi_io_live,
+            "upwork": self._check_upwork_live,
+            "vercel_analytics": self._check_vercel_analytics_live,
             "whatsapp": self._check_whatsapp_live,
             "openai_images": self._check_openai_images_live,
             "runway": self._check_runway_live,
@@ -785,6 +787,74 @@ class StageToolChecks:
             f"search, global/personal trends, {derived} result-derived read(s), "
             "and approval-gated publishing not exercised"
         )
+
+    def _check_upwork_live(self) -> str:
+        result = self._successful_tool_call("upwork_list_accounts", {})
+        if not isinstance(result.get("accounts"), list) or any(not isinstance(row, dict) or not isinstance(row.get("org_uid"), str) or not row["org_uid"] for row in result["accounts"]):
+            raise AssertionError("Upwork returned an invalid accounts response")
+        return "read available accounts; no proposal drafts or writes executed"
+
+    def _check_vercel_analytics_live(self) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        # Do not confuse the first empty/uninstrumented project with a broken
+        # credential. Exhaust discovery pages, but keep this stage probe bounded.
+        calls = 0
+
+        def call(action: str, arguments: dict) -> dict:
+            nonlocal calls
+            calls += 1
+            if calls > 100:
+                raise AssertionError("Vercel stage discovery reached its 100-call bound before finding an analytics project")
+            return self._successful_tool_call("vercel_analytics_" + action, arguments)
+
+        def pages(action: str, scope: dict):
+            cursor = None
+            seen = set()
+            while True:
+                arguments = {**scope, **({"cursor": cursor} if cursor is not None else {})}
+                result = call(action, arguments)
+                rows = result.get(action.removeprefix("list_"))
+                if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                    raise AssertionError("Vercel stage discovery returned invalid resource rows")
+                yield from rows
+                cursor = result.get("next_cursor")
+                if cursor is None:
+                    return
+                if not isinstance(cursor, str) or cursor in seen:
+                    raise AssertionError("Vercel stage discovery returned an invalid or repeated cursor")
+                seen.add(cursor)
+
+        # Team discovery is exercised even when a personal project is usable.
+        teams = list(pages("list_teams", {}))
+        scopes = [{}] + [{"team_id": team["id"]} for team in teams]
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+        checked = 0
+        unavailable = (
+            "Vercel could not find the requested resource or analytics.",
+            "Vercel denied access; check the token's scope and project/team permissions.",
+            "Vercel rejected the request; check IDs, dates and query parameters.",
+        )
+        for scope in scopes:
+            try:
+                for project in pages("list_projects", scope):
+                    checked += 1
+                    payload = {"project_id": project["id"], "start_date": yesterday, "end_date": yesterday, "group_by": "requestPath", "limit": "1"}
+                    if project.get("team_id"):
+                        payload["team_id"] = project["team_id"]
+                    try:
+                        call("query_visits", payload)
+                    except AssertionError as exc:
+                        if not any(marker in str(exc) for marker in unavailable):
+                            raise
+                        # Move to another discovered resource; never change the
+                        # scope or parameters of a denied project to evade access.
+                        continue
+                    return f"live team/project discovery and production path report; found usable analytics after checking {checked} project(s)"
+            except AssertionError as exc:
+                if not any(marker in str(exc) for marker in unavailable):
+                    raise
+        raise AssertionError(f"No usable Vercel Web Analytics project found after checking {checked} discovered project(s); check tracking and token scope")
 
     def _check_twitterapi_io_live(self) -> str:
         result = self._successful_tool_call(

@@ -47,7 +47,7 @@ function renderToolRow(tool) {
   const connections = Array.isArray(tool.connected_accounts) ? tool.connected_accounts : [];
   const connected = connections.length > 0;
   const chips = [badge(tool.enabled ? "enabled" : "disabled")];
-  if (tool.connection === "oauth" && (tool.enabled || connected)) {
+  if (["oauth", "mcp_oauth"].includes(tool.connection) && (tool.enabled || connected)) {
     chips.push(connected
       ? `<span class="status active">${connections.length} account${connections.length === 1 ? "" : "s"} connected</span>`
       : `<span class="status">not connected</span>`);
@@ -76,7 +76,7 @@ function renderToolRow(tool) {
       <p class="inline-message integration-row-message" data-tool-message="${esc(tool.tool_id)}" role="status" aria-live="polite"></p>
       <div class="integration-details" data-tool-details="${esc(tool.tool_id)}"${expanded ? "" : " hidden"}>
         <p class="muted">${esc(tool.description)}</p>
-        ${tool.connection === "oauth" && (tool.enabled || connected) ? `
+        ${["oauth", "mcp_oauth"].includes(tool.connection) && (tool.enabled || connected) ? `
         <div class="detail-card">
           <div class="detail-card-head"><h3>Connection</h3></div>
           ${renderToolConnections(tool, connections)}
@@ -147,15 +147,16 @@ function renderToolConnections(tool, connections) {
         <span class="muted mono">${esc(connection.connection_id || "")}</span>
       </p>
       <span class="integration-account-actions">
-        <button class="ghost sm" data-action="connect-tool" data-tool="${esc(tool.tool_id)}" data-connection="${esc(connection.connection_id || "")}"${tool.enabled ? "" : " disabled"}>Reconnect</button>
+        ${tool.connection === "mcp_oauth" ? "" : `<button class="ghost sm" data-action="connect-tool" data-tool="${esc(tool.tool_id)}" data-connection="${esc(connection.connection_id || "")}"${tool.enabled ? "" : " disabled"}>Reconnect</button>`}
         <button class="danger ghost sm" data-action="disconnect-tool" data-tool="${esc(tool.tool_id)}" data-connection="${esc(connection.connection_id || "")}">Disconnect</button>
       </span>
     </div>`;
   }).join("");
   const empty = connections.length ? "" : `
     <p class="connection-summary">No account connected yet. Connect signs in on the provider's site and stores the tokens on the host.</p>`;
+  if (tool.connection === "mcp_oauth" && connections.length) return rows;
   return `${rows}${empty}<div class="integration-account">
-    <p class="connection-summary muted">Each account gets a stable connection id that agents use to target reads and approved writes.</p>
+    ${tool.connection === "mcp_oauth" ? "" : `<p class="connection-summary muted">Each account gets a stable connection id that agents use to target reads and approved writes.</p>`}
     <button class="primary sm" data-action="connect-tool" data-tool="${esc(tool.tool_id)}"${tool.enabled ? "" : " disabled"}>${connections.length ? "Connect another account" : "Connect account"}</button>
   </div>`;
 }

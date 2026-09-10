@@ -30,12 +30,12 @@ path through the policy proxy is unchanged, and tool traffic never rides the age
 proxy (which would have opened those domains to the agent as an exfiltration path).
 
 The tool tables (`enabled_tools`, `tool_config`, `tool_credentials`,
-`tool_approvals`, `tool_events`) are **owned by `kern-admin`**: the database
+`tool_secrets`, `tool_approvals`, `tool_events`) are **owned by `kern-admin`**: the database
 is created owned by that role and the migrations run as it, so — as the table
 owner — the admin service has full read/write on them implicitly, no `GRANT`
 needed. The **`kern-tools` role** the tools service connects as is layered
 on top with an *additional, scoped* grant: read-only on `enabled_tools`/
-`tool_config`, read/write on `tool_credentials`/`tool_approvals`/`tool_events`, and
+`tool_config`, read/write on `tool_credentials`/`tool_secrets`/`tool_approvals`/`tool_events`, and
 nothing else in the admin database. Those grants live in the schema migration
 (`host/migrations/0007_tool_state.sql`), the same pattern as the proxy role's
 grants; bootstrap provisions only the role, its `pg_hba` line, and database

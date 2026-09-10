@@ -1263,12 +1263,13 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#latest-agent-card")).to_have_count(0)
 
     lock_updates = frame.locator("#lock-agent-updates")
-    lock_updates.click()
+    with page.expect_response(lambda response: response.request.method == "PUT" and response.url.endswith("/apps/app-1/agent-updates")) as locked_response:
+        lock_updates.click()
+    # Generated-app onLoad notifications can replace the transient status
+    # message. Check the saved lock and its durable UI state instead.
+    assert locked_response.value.json()["app"]["agent_updates_locked"] is True
     expect(lock_updates).to_have_attribute("aria-pressed", "true")
     expect(lock_updates).to_have_attribute("aria-label", "Unlock agent updates")
-    expect(frame.locator("#runtime-status")).to_have_text(
-        "Agent updates locked. Agents will be asked to retry later."
-    )
     _open_host_app(page, "app-2")
     _open_host_app(page, "app-1")
     unlock_updates = frame.locator("#lock-agent-updates")

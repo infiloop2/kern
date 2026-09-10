@@ -132,7 +132,7 @@ def _bundled_tool_map(tools: tuple[Tool, ...]) -> dict[str, Tool]:
         # The manifest's connection kind and the Tool.credentials flow are two
         # declarations of one fact; pin them consistent at registration so no
         # consumer has to guess which to trust (tool-contract.md).
-        if (tool.manifest.connection == "oauth") != (tool.credentials is not None):
+        if (tool.manifest.connection in {"oauth", "mcp_oauth"}) != (tool.credentials is not None):
             raise RuntimeError(
                 f"{tool_id}: connection={tool.manifest.connection!r} disagrees with"
                 f" credentials={'set' if tool.credentials is not None else 'None'}"
@@ -189,10 +189,11 @@ def _ensure_json_object(value: Any, *, what: str, max_bytes: int) -> str:
     if not isinstance(value, dict):
         raise ValueError(f"{what} must be a JSON object.")
     try:
-        serialized = json.dumps(value, separators=(",", ":"), allow_nan=False)
-    except (TypeError, ValueError) as exc:
+        serialized = json.dumps(value, separators=(",", ":"), allow_nan=False, ensure_ascii=False)
+        size = len(serialized.encode("utf-8"))
+    except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError(f"{what} must be a JSON object with JSON-serializable values.") from exc
-    if len(serialized.encode("utf-8")) > max_bytes:
+    if size > max_bytes:
         raise ValueError(f"{what} exceeds {max_bytes} bytes.")
     return serialized
 
@@ -266,6 +267,35 @@ class HostCredentials:
         if not self._connection.connection_id:
             return
         state.delete_tool_credential(self._tool_id, self._connection.connection_id)
+
+
+class HostSecrets:
+    """One private JSON object per tool definition."""
+
+    def __init__(self, tool_id: str) -> None:
+        self._tool_id = tool_id
+
+    def load(self) -> JSONObject | None:
+        return cast(JSONObject | None, state.tool_secret(self._tool_id))
+
+    def save(self, value: JSONObject) -> None:
+        serialized = _ensure_json_object(value, what="Tool secret", max_bytes=16 * 1024)
+        # json.dumps accepts tuples and non-string keys, which would change on load.
+        pending: list[object] = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                if any(not isinstance(key, str) for key in item):
+                    raise ValueError("Tool secret object keys must be strings.")
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+            elif item is not None and not isinstance(item, (str, bool, int, float)):
+                raise ValueError("Tool secret must contain only JSON values.")
+        state.put_tool_secret(self._tool_id, serialized)
+
+    def clear(self) -> None:
+        state.delete_tool_secret(self._tool_id)
 
 
 class HostApprovals:
@@ -392,6 +422,7 @@ class HostToolAPI:
     """The ``tools.HostAPI`` bundle for one tool call."""
 
     credentials: HostCredentials
+    secrets: HostSecrets
     config: Mapping[str, str]
     approvals: HostApprovals
     assets: HostAssets
@@ -415,12 +446,14 @@ _OUTBOUND_GUARD = OutboundGuardService()
 
 def connection_scope(tool: Tool, connection_id: str) -> ConnectionScope:
     """Resolve the host scope for one tool from its manifest and stored account."""
-    if tool.manifest.connection != "oauth":
+    if tool.manifest.connection not in {"oauth", "mcp_oauth"}:
         if connection_id:
             raise ValueError(f"Tool {tool.manifest.tool_id} does not use account connections.")
         return NO_CONNECTION
     if not connection_id:
         raise ValueError("connection_id must be non-empty.")
+    if tool.manifest.connection == "mcp_oauth" and connection_id != "default":
+        raise ValueError("This tool supports only its default connection.")
     credential = state.tool_credential(tool.manifest.tool_id, connection_id)
     account = cast(ConnectionAccount, credential["account"]) if credential is not None else None
     return ConnectionScope(connection_id=connection_id, account=account)
@@ -433,12 +466,13 @@ def host_api_for(
     asset_store: tool_assets.ToolAssetStore | None = None,
 ) -> HostToolAPI:
     manifest = tool.manifest
-    if manifest.connection != "oauth" and connection != NO_CONNECTION:
+    if manifest.connection not in {"oauth", "mcp_oauth"} and connection != NO_CONNECTION:
         raise ValueError(f"Tool {manifest.tool_id} does not use account connections.")
     config = state.tool_config_values(manifest.tool_id, [entry.key for entry in manifest.config])
     credentials = HostCredentials(manifest.tool_id, connection)
     return HostToolAPI(
         credentials=credentials,
+        secrets=HostSecrets(manifest.tool_id),
         config=_ToolConfigView(config),
         approvals=HostApprovals(manifest, connection),
         assets=HostAssets(
@@ -474,7 +508,7 @@ def resolve_connection(tool: Tool, requested: str | None) -> ConnectionScope:
     tool has several accounts, the agent must name one explicitly so a write
     can never drift to whichever account happened to be connected first.
     """
-    if tool.manifest.connection != "oauth":
+    if tool.manifest.connection not in {"oauth", "mcp_oauth"}:
         if requested:
             raise ToolCallError(f"Tool {tool.manifest.tool_id} does not use account connections.")
         return connection_scope(tool, "")

@@ -30,6 +30,55 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ("upwork", "get_account", "org_uid"),
+    ("upwork", "get_account", "profile_key"),
+    ("upwork", "get_account", "limit"),
+    ("upwork", "get_account", "cursor"),
+    ("upwork", "search_jobs", "org_uid"),
+    ("upwork", "search_jobs", "query"),
+    ("upwork", "search_jobs", "title"),
+    ("upwork", "search_jobs", "job_type"),
+    ("upwork", "search_jobs", "experience_level"),
+    ("upwork", "search_jobs", "budget_min"),
+    ("upwork", "search_jobs", "budget_max"),
+    ("upwork", "search_jobs", "rate_min"),
+    ("upwork", "search_jobs", "rate_max"),
+    ("upwork", "search_jobs", "skills"),
+    ("upwork", "search_jobs", "verified_payment_only"),
+    ("upwork", "search_jobs", "sort"),
+    ("upwork", "search_jobs", "limit"),
+    ("upwork", "search_jobs", "cursor"),
+    ("upwork", "get_job", "org_uid"),
+    ("upwork", "get_job", "job_id"),
+    ("upwork", "get_recommended_jobs", "org_uid"),
+    ("upwork", "get_recommended_jobs", "mode"),
+    ("upwork", "get_recommended_jobs", "days_posted"),
+    ("upwork", "get_recommended_jobs", "from_date"),
+    ("upwork", "get_recommended_jobs", "to_date"),
+    ("upwork", "get_recommended_jobs", "limit"),
+    ("upwork", "get_recommended_jobs", "cursor"),
+    ("upwork", "list_proposals", "org_uid"),
+    ("upwork", "list_proposals", "status"),
+    ("upwork", "list_proposals", "limit"),
+    ("upwork", "list_proposals", "cursor"),
+    ("upwork", "get_proposal", "org_uid"),
+    ("upwork", "get_proposal", "proposal_id"),
+    ("upwork", "list_invitations", "org_uid"),
+    ("upwork", "list_invitations", "job_posting_id"),
+    ("upwork", "list_invitations", "status"),
+    ("upwork", "list_invitations", "limit"),
+    ("upwork", "list_invitations", "cursor"),
+    ("upwork", "list_conversations", "org_uid"),
+    ("upwork", "list_conversations", "unread_only"),
+    ("upwork", "list_conversations", "room_type"),
+    ("upwork", "list_conversations", "limit"),
+    ("upwork", "list_conversations", "cursor"),
+    ("upwork", "read_messages", "org_uid"),
+    ("upwork", "read_messages", "room_id"),
+    ("upwork", "read_messages", "limit"),
+    ("upwork", "read_messages", "cursor"),
+    ("vercel_analytics", "query_visits", "path"),
+    ("vercel_analytics", "list_projects", "cursor"),
     ("apify", "search_businesses", "location"),
     ("apify", "search_businesses", "query"),
     ("brave_search", "search_web", "query"),
@@ -78,6 +127,29 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ("upwork", "submit_proposal", "org_uid"): APPROVAL_GATED,
+    ("upwork", "submit_proposal", "job_reference"): APPROVAL_GATED,
+    ("upwork", "submit_proposal", "cover_letter"): APPROVAL_GATED,
+    ("upwork", "submit_proposal", "charged_amount"): APPROVAL_GATED,
+    ("upwork", "submit_proposal", "answers"): APPROVAL_GATED,
+    ("upwork", "submit_proposal", "boost_connects"): APPROVAL_GATED,
+    ("upwork", "submit_proposal", "team_org_id"): APPROVAL_GATED,
+    ("upwork", "submit_proposal", "attachments"): APPROVAL_GATED,
+    ("upwork", "submit_proposal", "certificate_ids"): APPROVAL_GATED,
+    ("upwork", "submit_proposal", "portfolio_project_ids"): APPROVAL_GATED,
+    ("upwork", "send_message", "org_uid"): APPROVAL_GATED,
+    ("upwork", "send_message", "room_id"): APPROVAL_GATED,
+    ("upwork", "send_message", "message"): APPROVAL_GATED,
+    ("upwork", "get_account", "section"): TYPED,
+    ("vercel_analytics", "query_visits", "project_id"): TYPED,
+    ("vercel_analytics", "query_visits", "start_date"): TYPED,
+    ("vercel_analytics", "query_visits", "end_date"): TYPED,
+    ("vercel_analytics", "query_visits", "group_by"): TYPED,
+    ("vercel_analytics", "query_visits", "limit"): TYPED,
+    ("vercel_analytics", "query_visits", "team_id"): TYPED,
+    ("vercel_analytics", "list_projects", "team_id"): TYPED,
+    ("vercel_analytics", "list_teams", "cursor"): TYPED,
+
     ("apify", "search_businesses", "limit"): TYPED,
     ("apify", "search_businesses", "language"): TYPED,
     ("apify", "search_businesses", "minimum_rating"): TYPED,
@@ -337,11 +409,16 @@ class CompletenessTest(unittest.TestCase):
     def test_guarded_tools_declare_the_shared_guide_protection(self) -> None:
         for manifest in _bundled_manifests():
             if manifest.tool_id in GUARDED_TOOL_IDS:
-                self.assertIn(
-                    PARAM_GUARD_PROTECTION,
-                    manifest.protections,
-                    f"{manifest.tool_id} guide must carry the parameter-guard line",
-                )
+                if manifest.tool_id == "upwork":
+                    # Approved Upwork text deliberately bypasses the guard.
+                    self.assertIn("Direct-action free text uses Parameter Guard; approved write parameters use structural validation and human review.", manifest.protections[0])
+                    self.assertNotIn(PARAM_GUARD_PROTECTION, manifest.protections)
+                else:
+                    self.assertIn(
+                        PARAM_GUARD_PROTECTION,
+                        manifest.protections,
+                        f"{manifest.tool_id} guide must carry the parameter-guard line",
+                    )
                 self.assertIn(
                     PARAM_GUARD_TECHNICAL_DETAIL,
                     manifest.technical_details,

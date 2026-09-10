@@ -434,6 +434,69 @@ import tests.stage.stage_aws
             "message,metadata{1},reels[1]",
         )
 
+    def test_upwork_stage_only_reads_accounts(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        with patch.object(stage, "_successful_tool_call", return_value={"accounts": []}) as call:
+            self.assertIn("no proposal drafts or writes", stage._check_upwork_live())
+        call.assert_called_once_with("upwork_list_accounts", {})
+        with patch.object(stage, "_successful_tool_call", return_value={"result_text": "partial", "truncated": True}):
+            with self.assertRaisesRegex(AssertionError, "invalid accounts"):
+                stage._check_upwork_live()
+
+    def test_vercel_stage_checks_personal_and_all_team_project_pages(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        calls = []
+
+        def responder(name, args):
+            calls.append((name, args))
+            if name == "vercel_analytics_list_teams":
+                if args.get("cursor") == "2":
+                    return {"teams": [{"id": "team_full"}], "next_cursor": None}
+                return {"teams": [{"id": "team_empty"}], "next_cursor": "2"}
+            if name == "vercel_analytics_list_projects":
+                if not args.get("team_id"):
+                    raise AssertionError("Vercel denied access; check the token's scope and project/team permissions.")
+                if args["team_id"] == "team_empty":
+                    return {"projects": [], "next_cursor": None}
+                project_id = "prj_usable" if args.get("cursor") else "prj_untracked"
+                return {"projects": [{"id": project_id, "team_id": "team_full"}], "next_cursor": None if args.get("cursor") else "ABC234="}
+            if args["project_id"] == "prj_untracked":
+                raise AssertionError("Vercel could not find the requested resource or analytics.")
+            return {"rows": []}
+
+        with patch.object(stage, "_successful_tool_call", side_effect=responder):
+            detail = stage._check_vercel_analytics_live()
+        self.assertIn("checking 2 project(s)", detail)
+        self.assertIn(("vercel_analytics_list_projects", {}), calls)
+        self.assertEqual(calls[-1][1]["project_id"], "prj_usable")
+        self.assertEqual(calls[-1][1]["team_id"], "team_full")
+
+    def test_vercel_stage_finds_personal_project_even_with_teams(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        with patch.object(stage, "_successful_tool_call", side_effect=[
+            {"teams": [{"id": "team_empty"}], "next_cursor": None},
+            {"projects": [{"id": "prj_personal", "team_id": None}], "next_cursor": None},
+            {"rows": []},
+        ]) as call:
+            self.assertIn("checking 1 project(s)", stage._check_vercel_analytics_live())
+        self.assertNotIn("team_id", call.call_args.args[1])
+
+    def test_vercel_stage_stops_on_real_failures_and_pagination_loops(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        for error in ("Vercel API rate limit reached; try again later.", "Vercel rejected the access token; replace it in Home > Integrations.", "invalid JSON"):
+            with patch.object(stage, "_successful_tool_call", side_effect=[
+                {"teams": [], "next_cursor": None},
+                {"projects": [{"id": "prj_one"}, {"id": "prj_two"}], "next_cursor": None},
+                AssertionError(error),
+            ]) as call:
+                with self.assertRaisesRegex(AssertionError, error):
+                    stage._check_vercel_analytics_live()
+            self.assertEqual(call.call_count, 3)
+        with patch.object(stage, "_successful_tool_call", return_value={"teams": [], "next_cursor": "2"}) as call:
+            with self.assertRaisesRegex(AssertionError, "repeated cursor"):
+                stage._check_vercel_analytics_live()
+        self.assertEqual(call.call_count, 2)
+
     def test_brave_stage_retries_one_provider_5xx(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
         with patch.object(

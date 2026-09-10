@@ -1,13 +1,13 @@
 # Kern Tools
 
 Kern's bundled tool framework and bundled tool packages. The framework and
-packages live under `host/tools/`; they are host-neutral (no UI, and the only
-state they see is the one OAuth credential the host selects for a call), so the same package could run on another
-host implementation of the same contract.
+packages live under `host/tools/`; they have no UI and persist only through
+host-scoped credential and private JSON services. The same package could run on
+another host implementation of the same contract.
 
 - [`tool-contract.md`](tool-contract.md) — the complete, host-neutral contract
   between a tool package and its host: the manifest, actions and per-action data
-  policy, results, credential flows, the host API (credentials, config,
+  policy, results, credential flows, the host API (credentials, secrets, config,
   approvals, staged assets), and the rules of the boundary. This is the source
   of truth; the
   Python protocols under `host/tools/` express it as code.
@@ -24,7 +24,7 @@ so adding or changing a package updates one operator-facing source.
 
 A tool package is pure tool logic: action handlers, input schemas, third-party
 API calls, third-party auth (OAuth flows, token refresh), and per-action data
-policy. The host owns every deployment-specific concern: the credential store,
+policy. The host owns every deployment-specific concern: credential and private JSON storage,
 config, approval decisions, staged binary assets, and audit logging. Packages
 reach them only through
 the small host API.
@@ -33,7 +33,7 @@ the small host API.
 agent / chat / MCP gateway
         │  action calls
         ▼
-host  (host API: credentials · config · approvals)
+host  (host API: credentials · secrets · config · approvals)
         │  Tool.execute(action, input, api)
         ▼
 tool package
@@ -49,7 +49,7 @@ independent per-tool versions while they live in this repo.
 
 Tool package unit tests mock the host API and every third-party boundary, so
 they run without network access or credentials. Hosts get the complementary
-guarantee: a fake `HostAPI` (in-memory credential store, static config, scripted
+guarantee: a fake `HostAPI` (in-memory credential and secret stores, static config, scripted
 approvals) is enough to exercise a whole tool package. Each bundled tool is
 covered by its own tests in `tests/test_tools.py` (the original three tools) or
 a per-tool `tests/test_tools_<tool_id>.py` file.

@@ -342,6 +342,25 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("lookup_user", {"username": "kern"}),
         ("post_tweet", {"text": "Kern smoke. Never published."}),
     ),
+    "upwork": (
+        ('list_accounts', {}),
+        ('get_account', {'section': 'profile', 'org_uid': 'smoke'}),
+        ('search_jobs', {'org_uid': 'smoke'}),
+        ('get_job', {'org_uid': 'smoke', 'job_id': 'smoke'}),
+        ('get_recommended_jobs', {'org_uid': 'smoke'}),
+        ('list_proposals', {'org_uid': 'smoke'}),
+        ('get_proposal', {'org_uid': 'smoke', 'proposal_id': 'smoke'}),
+        ('list_invitations', {'org_uid': 'smoke'}),
+        ('list_conversations', {'org_uid': 'smoke'}),
+        ('read_messages', {'org_uid': 'smoke', 'room_id': 'smoke'}),
+        ('submit_proposal', {'org_uid': 'smoke', 'job_reference': '123', 'cover_letter': 'Smoke. Never sent.', 'charged_amount': 50}),
+        ('send_message', {'org_uid': 'smoke', 'room_id': 'smoke', 'message': 'Smoke. Never sent.'}),
+    ),
+    "vercel_analytics": (
+        ("list_projects", {}),
+        ("query_visits", {"project_id": "prj_smoke", "start_date": "2026-09-01", "end_date": "2026-09-01"}),
+        ("list_teams", {}),
+    ),
     "twitterapi_io": (
         ("search_tweets", {"query": "Kern", "query_type": "Latest"}),
     ),
@@ -3102,10 +3121,34 @@ class AwsSmoke:
             "refused paths outside the agent home"
         )
 
+    def _check_unconfigured_tools(self, entries: list[dict]) -> None:
+        for entry in entries:
+            configured = [item["key"] for item in entry.get("config", []) if item.get("set")]
+            if configured:
+                raise AssertionError(
+                    f"fresh smoke must not configure {entry['tool_id']}, found {configured}"
+                )
+            if entry.get("connection") in {"oauth", "mcp_oauth"}:
+                if (entry.get("connection_status") or {}).get("connected") is True:
+                    raise AssertionError(f"fresh smoke unexpectedly connected {entry['tool_id']}: {entry}")
+                # Configless OAuth can register dynamically. Exercise that only
+                # in authenticated staging, never in the provider-free smoke.
+                if not entry.get("config"):
+                    continue
+                status, body = self._api_status(
+                    "POST",
+                    f"/v1/tools/{entry['tool_id']}/oauth_connect/start",
+                    {"redirect_uri": f"http://127.0.0.1:{ADMIN_PORT}/oauth/callback"},
+                )
+                if status != 400 or "not set" not in str(body).lower():
+                    raise AssertionError(
+                        f"{entry['tool_id']} OAuth start without config must fail locally: {status} {body}"
+                    )
+
     def check_tools_surface(self) -> None:
         """Every bundled action on a fresh host with no tool configuration.
 
-        Credentialed actions and OAuth starts must fail closed; all six public
+        Credentialed actions and configured OAuth starts must fail closed; all six public
         Polymarket reads must execute. The same pass covers MCP discovery,
         local image/video upload, exact audit arguments, approvals, peer
         credentials, and the tools-service-only egress boundary.
@@ -3390,30 +3433,12 @@ class AwsSmoke:
         if status != 404:
             raise AssertionError(f"deciding a missing approval must 404, got {status} {body}")
 
-        # Enable every package without setting even a dummy value. OAuth starts
-        # must fail locally on the absent client config; they never contact the
-        # provider or create a connection.
+        # Enable every package without setting even a dummy value. Only start
+        # OAuth when absent client config guarantees a local failure.
         for tool_id in BUNDLED_TOOLS:
             self._api("POST", f"/v1/tools/{tool_id}/enable", {})
         empty_config_listing = self._api("GET", "/v1/tools")["tools"]
-        for entry in empty_config_listing:
-            configured = [item["key"] for item in entry.get("config", []) if item.get("set")]
-            if configured:
-                raise AssertionError(
-                    f"fresh smoke must not configure {entry['tool_id']}, found {configured}"
-                )
-            if entry.get("connection") == "oauth":
-                if (entry.get("connection_status") or {}).get("connected") is True:
-                    raise AssertionError(f"fresh smoke unexpectedly connected {entry['tool_id']}: {entry}")
-                status, body = self._api_status(
-                    "POST",
-                    f"/v1/tools/{entry['tool_id']}/oauth_connect/start",
-                    {"redirect_uri": f"http://127.0.0.1:{ADMIN_PORT}/oauth/callback"},
-                )
-                if status != 400 or "not set" not in str(body).lower():
-                    raise AssertionError(
-                        f"{entry['tool_id']} OAuth start without config must fail locally: {status} {body}"
-                    )
+        self._check_unconfigured_tools(empty_config_listing)
 
         all_listed = self._ssh_code(f"printf '%s\\n' {shlex.quote(list_request)} | {shim_command}")
         all_tool_names = {
@@ -3617,7 +3642,7 @@ class AwsSmoke:
         for tool_id in BUNDLED_TOOLS:
             self._api("POST", f"/v1/tools/{tool_id}/disable", {})
         self._ok(
-            "every bundled action discoverable, triggered, and audited with no tool config; OAuth starts and "
+            "every bundled action discoverable, triggered, and audited with no tool config; configured OAuth starts and "
             "credentialed actions failed closed, all public Polymarket reads completed, local image/video "
             "uploads worked, non-agent peers were rejected, and no approval was queued"
         )

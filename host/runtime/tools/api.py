@@ -53,7 +53,7 @@ from host.runtime.core.unix_socket_service import (
     peer_uids,
 )
 from host.runtime.tools import assets as tool_assets, tools_host
-from host.tools import ToolServiceError
+from host.tools import ConnectionKind, ToolServiceError
 from host.tools import OpenedStreamingAsset, StreamingAssetError
 from host.tools.shared.web import ProviderWarning, UnmappedProviderError
 
@@ -202,7 +202,7 @@ def _list_bundled_tools(tool_input: Any) -> dict[str, Any]:
                 actions.append(action)
             entry["agent_notes"] = manifest.agent_notes
             entry["actions"] = actions
-            if manifest.connection == "oauth":
+            if manifest.connection in {"oauth", "mcp_oauth"}:
                 entry["connected_accounts"] = state.tool_connections(tool_id)
         tools.append(entry)
     result: dict[str, Any] = {"tools": tools}
@@ -243,7 +243,7 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
             "agent_notes": manifest.agent_notes,
             **(
                 {"connected_accounts": state.tool_connections(tool_id)}
-                if manifest.connection == "oauth"
+                if manifest.connection in {"oauth", "mcp_oauth"}
                 else {}
             ),
             "actions": [
@@ -344,8 +344,12 @@ OPERATOR_DECIDE_RE = re.compile(
 CONNECTION_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
 
-def _operator_connection_id(body: Any, *, create: bool = False) -> str:
+def _operator_connection_id(body: Any, *, create: bool = False, connection: ConnectionKind = "oauth") -> str:
     value = body.get("connection_id") if isinstance(body, dict) else None
+    if connection == "mcp_oauth":
+        if value not in (None, "default"):
+            raise OperatorError(HTTPStatus.BAD_REQUEST, "This tool supports only its default connection")
+        return "default"
     if value is None and create:
         return f"connection_{secrets.token_hex(12)}"
     if value is None:
@@ -376,8 +380,8 @@ def _operator_start_connect(
     flow = _operator_connect_flow(tool_id)
     if not isinstance(body, dict) or not isinstance(body.get("redirect_uri"), str) or not body["redirect_uri"]:
         raise OperatorError(HTTPStatus.BAD_REQUEST, "redirect_uri is required")
-    connection_id = _operator_connection_id(body, create=True)
     tool = tools_host.bundled_tool(tool_id)
+    connection_id = _operator_connection_id(body, create=True, connection=tool.manifest.connection)
     api = tools_host.host_api_for(
         tool,
         tools_host.connection_scope(tool, connection_id),
@@ -403,8 +407,8 @@ def _operator_complete_connect(
     params = {key: body.get(key) for key in ("code", "redirect_uri", "state")}
     if not all(isinstance(value, str) and value for value in params.values()):
         raise OperatorError(HTTPStatus.BAD_REQUEST, "code, redirect_uri, and state are required")
-    connection_id = _operator_connection_id(body)
     tool = tools_host.bundled_tool(tool_id)
+    connection_id = _operator_connection_id(body, connection=tool.manifest.connection)
     api = tools_host.host_api_for(
         tool,
         tools_host.connection_scope(tool, connection_id),
@@ -440,7 +444,7 @@ def _operator_disconnect(
 ) -> dict[str, Any]:
     # Disconnect skips the enabled gate so stored tokens can always be revoked.
     flow = _operator_connect_flow(tool_id, require_enabled=False)
-    connection_id = _operator_connection_id({} if body is None else body)
+    connection_id = _operator_connection_id({} if body is None else body, connection=tools_host.bundled_tool(tool_id).manifest.connection)
     credential = state.tool_credential(tool_id, connection_id)
     account = credential["account"] if credential is not None else {"id": "", "label": ""}
     tool = tools_host.bundled_tool(tool_id)

@@ -75,7 +75,7 @@ class ConnectionStatus(TypedDict, total=False):
 
 
 class CredentialFlow(Protocol):
-    """Tool-owned operator third-party auth (manifest ``connection == "oauth"``).
+    """Tool-owned operator third-party auth (connection type ``oauth`` or ``mcp_oauth``).
 
     Third-party auth is tool-owned because it is provider-specific: scope
     selection, authorization-URL construction, ``state`` verification, token
@@ -127,9 +127,9 @@ class ToolService(Protocol):
 class Tool(Protocol):
     """A loadable tool package.
 
-    Implementations must be stateless across calls: the only persistent state is
-    an OAuth credential through ``api.credentials``, so the same package can be
-    loaded by a local runtime or another host implementation interchangeably.
+    Persist only through ``api.credentials`` and ``api.secrets``, so the same
+    package can be loaded by another host implementing this contract. In-process
+    locks may coordinate concurrent calls; they must not hold durable state.
     """
 
     @property

@@ -824,7 +824,7 @@ class AdminUiStaticTests(unittest.TestCase):
             ),
             1,
         )
-        self.assertIn('tool.connection === "oauth" && (tool.enabled || connected)', tools_js)
+        self.assertIn('["oauth", "mcp_oauth"].includes(tool.connection) && (tool.enabled || connected)', tools_js)
         self.assertIn('${tool.enabled ? "" : " disabled"}>Reconnect</button>', tools_js)
         self.assertIn('${tool.enabled ? "" : " disabled"}>${connections.length', tools_js)
         self.assertIn(".connection-summary {", css)

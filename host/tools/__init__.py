@@ -46,6 +46,7 @@ from host.tools.host_api import (
     ApprovalStatus,
     ConnectionAccount,
     Credentials,
+    Secrets,
     HostAPI,
     StoredCredential,
 )
@@ -68,6 +69,7 @@ __all__ = [
     "ConnectionStatus",
     "CredentialFlow",
     "Credentials",
+    "Secrets",
     "DataSummary",
     "DataSummaryCard",
     "DataSummaryLink",

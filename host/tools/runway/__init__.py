@@ -49,8 +49,8 @@ MAX_PROMPT_CHARS = 1_000
 
 # Video generation models Runway exposes on text_to_video / image_to_video.
 # Runway is now a model aggregator, so this spans first-party Gen-4 models,
-# Google Veo, and ByteDance Seedance 2 (the successor to the Seedance models
-# this tool used directly before). gen4_turbo is image-to-video only.
+# Google Veo, ByteDance Seedance, and fal's MiniMax H3 Max variant.
+# gen4_turbo is image-to-video only.
 SUPPORTED_VIDEO_MODELS = (
     "gen4.5",
     "gen4_turbo",
@@ -58,6 +58,8 @@ SUPPORTED_VIDEO_MODELS = (
     "veo3.1_fast",
     "seedance2",
     "seedance2_fast",
+    "seedance2_5",
+    "h3_max",
 )
 IMAGE_ONLY_VIDEO_MODELS = frozenset({"gen4_turbo"})
 DEFAULT_TEXT_MODEL = "gen4.5"
@@ -84,9 +86,8 @@ SPEECH_VOICES = (
 )
 DEFAULT_SPEECH_VOICE = "Maya"
 
-# Keep one ratio contract that every exposed video model accepts. Runway exposes
-# more model-specific ratios, but admitting those here would require a second
-# matrix in the tool schema that can drift independently from provider support.
+# Keep the common landscape/portrait ratios for models that accept a ratio.
+# H3 Max instead accepts resolution and follows its first-frame image's aspect.
 SUPPORTED_RATIOS = (
     "1280:720",
     "720:1280",
@@ -99,6 +100,8 @@ VIDEO_DURATION_RANGES = {
     "gen4_turbo": (2, 10),
     "seedance2": (4, 15),
     "seedance2_fast": (4, 15),
+    "seedance2_5": (4, 30),
+    "h3_max": (5, 15),
 }
 
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -191,13 +194,13 @@ MANIFEST = ToolManifest(
                     "model": {
                         "type": "string",
                         "enum": list(SUPPORTED_VIDEO_MODELS),
-                        "description": "Default: gen4.5 (or gen4_turbo when image_url or image_asset_id is set). gen4_turbo is image-to-video only.",
+                        "description": "Default: gen4.5 (or gen4_turbo when image_url or image_asset_id is set). gen4_turbo is image-to-video only. h3_max always generates at 768p.",
                     },
                     "image_url": {"type": "string", "description": "Optional public HTTPS image URL used as the first frame (image-to-video)."},
                     "image_asset_id": {"type": "string", "description": "Built-in reference for a JPEG, PNG, or WebP from the agent workspace. Use at most one of image_url or image_asset_id."},
-                    "ratio": {"type": "string", "enum": list(SUPPORTED_RATIOS), "description": "Output aspect ratio, e.g. 1280:720 (default) or 720:1280."},
-                    "duration_seconds": {"type": "string", "description": "Video length in seconds. Gen-4 models accept 2-10 (default 5), Seedance accepts 4-15 (default 5), and Veo accepts only 4, 6, or 8 (default 4)."},
-                    "seed": {"type": "string", "description": "Optional integer seed for reproducible output."},
+                    "ratio": {"type": "string", "enum": list(SUPPORTED_RATIOS), "description": "Output aspect ratio: 1280:720 (default) or 720:1280. Omit for h3_max, which follows the first-frame image's aspect ratio; text-only H3 Max uses the provider's framing."},
+                    "duration_seconds": {"type": "string", "description": "Video length in seconds. Gen-4: 2-10; Seedance 2.0/Fast: 4-15; Seedance 2.5: 4-30; H3 Max: 5-15 (all default 5). Veo: only 4, 6, or 8 (default 4)."},
+                    "seed": {"type": "string", "description": "Optional integer seed. H3 Max uses Runway's default balanced prompt rewriting, so a fixed seed does not guarantee repeatable output."},
                 },
                 "additionalProperties": False,
             },
@@ -337,7 +340,7 @@ MANIFEST = ToolManifest(
                 title="Where it can go",
                 points=(
                     DataSummaryPoint(label="Runway models", text="Every request first goes to Runway. Gen-4.5, Gen-4 Turbo, and Aleph 2 generations use Runway's own models."),
-                    DataSummaryPoint(label="Third-party video models", text="When the agent explicitly selects Google Veo 3.1 or ByteDance Seedance 2, Runway sends that provider the prompt, output ratio and duration, optional seed, and any first-frame image. Kern does not let Runway silently choose one of these models."),
+                    DataSummaryPoint(label="Third-party video models", text="When the agent explicitly selects Google Veo 3.1, ByteDance Seedance 2.0/2.5, or fal's MiniMax H3 Max, Runway sends that provider the prompt, output ratio or resolution and duration, optional seed, and any first-frame image. Kern does not let Runway silently choose one of these models."),
                     DataSummaryPoint(label="Image and speech models", text="For image generation, Runway sends the prompt, ratio, and quality to OpenAI's GPT Image 2. For speech generation, Runway sends the speech text and selected voice to ElevenLabs Multilingual v2."),
                 ),
             ),
@@ -480,10 +483,17 @@ def _generation_request(
         raise ToolInputValidationError(
             f"Runway model {model} is image-to-video only; supply image_url or image_asset_id, or pick another model."
         )
-    ratio = _string_choice(tool_input, "ratio", SUPPORTED_RATIOS, DEFAULT_RATIO)
     duration = _duration_seconds(tool_input, model)
     seed = _optional_seed(tool_input)
-    body: JSONObject = {"model": model, "promptText": prompt, "ratio": ratio, "duration": duration}
+    body: JSONObject = {"model": model, "promptText": prompt, "duration": duration}
+    if model == "h3_max":
+        if tool_input.get("ratio") is not None:
+            raise ToolInputValidationError(
+                "Runway h3_max does not accept ratio; omit it and use a first-frame image to control the aspect ratio."
+            )
+        body["resolution"] = "768p"
+    else:
+        body["ratio"] = _string_choice(tool_input, "ratio", SUPPORTED_RATIOS, DEFAULT_RATIO)
     endpoint = TEXT_TO_VIDEO_ENDPOINT
     if prompt_image is not None:
         endpoint = IMAGE_TO_VIDEO_ENDPOINT

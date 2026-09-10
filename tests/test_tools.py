@@ -65,6 +65,8 @@ class MemoryCredentials:
     def clear(self) -> None:
         self.record = None
 
+
+
 class _ConfigView(dict[str, str]):
     """Mirror the production config view (tools_host._ToolConfigView): reading an
     unset key raises a RuntimeError with the operator-actionable message tools
@@ -169,6 +171,7 @@ class MemoryAssets:
 @dataclass(frozen=True)
 class FakeHostAPI:
     credentials: MemoryCredentials = field(default_factory=MemoryCredentials)
+    secrets: MemoryCredentials = field(default_factory=MemoryCredentials)
     config: dict[str, str] = field(default_factory=default_config)
     approvals: MemoryApprovals = field(default_factory=MemoryApprovals)
     assets: MemoryAssets = field(default_factory=MemoryAssets)

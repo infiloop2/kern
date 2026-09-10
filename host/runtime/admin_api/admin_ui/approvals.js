@@ -8,7 +8,6 @@ let current = null;
 let busy = false;
 let loading = false;
 let generation = 0;
-let confirmation = null;
 let badgeLoading = false;
 let counts = { pending_count: 0, history_count: 0 };
 const keyOf = item => `${item.kind}:${item.id}`;
@@ -43,7 +42,6 @@ export async function pollApprovalBadge() {
 }
 
 function render() {
-  confirmation = null;
   const data = current;
   $("approval-tabs").innerHTML = ["pending", "history"].map(value => `<button data-action="approval-view" data-view="${value}" aria-pressed="${view === value}"${disabled()}>${value === "pending" ? "Pending" : "History"}<span>${counts[`${value}_count`]}</span></button>`).join("");
   document.querySelector('#panel-approvals [data-action="approval-refresh"]').disabled = busy || loading;
@@ -165,15 +163,7 @@ export function decideApproval(key, decision) {
   if (busy || loading || !["approve", "deny"].includes(decision)) return;
   const item = current?.items.find(candidate => keyOf(candidate) === key);
   if (item?.status !== "pending") return;
-  if (confirmation?.key === key && confirmation.decision === decision) return decide([item], decision);
-  for (const button of $("approval-list").querySelectorAll('[data-action="approval-decide"]')) {
-    const selected = button.dataset.key === key && button.dataset.decision === decision;
-    button.textContent = selected ? "Confirm" : (button.dataset.decision === "approve" ? "Approve" : "Deny");
-    button.classList.toggle("approval-confirm", selected);
-    if (selected) button.setAttribute("aria-label", `Confirm ${decision === "approve" ? "approval" : "denial"}`);
-    else button.removeAttribute("aria-label");
-  }
-  confirmation = { key, decision };
+  return decide([item], decision);
 }
 
 export function decideVisibleApprovals(decision) {
