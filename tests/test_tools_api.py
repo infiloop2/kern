@@ -19,6 +19,7 @@ import sys
 import tempfile
 from typing import Any
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 import pg_harness
@@ -64,6 +65,67 @@ class _MemoryResponse:
 
 
 class MCPOAuthConnectionTests(unittest.TestCase):
+    def test_upwork_token_exchange_failure_reaches_host_without_callback_credentials(self) -> None:
+        from host.tools.upwork import oauth
+        from host.tools.shared import web
+        from test_tools import FakeHostAPI
+        api = FakeHostAPI()
+        redirect = "http://127.0.0.1:7443/oauth/callback"
+        api.secrets.save({"state": "PRIVATE_STATE", "redirect_uri": redirect, "client_id": "PRIVATE_CLIENT",
+                          "verifier": "PRIVATE_VERIFIER", "expires_at": oauth.now() + 900})
+        body = b'{"error":"invalid_grant","error_description":"PRIVATE_CODE"}'
+        with patch.object(state, "enabled_tool_ids", return_value={"upwork"}), \
+             patch.object(state, "tool_credential", return_value=None), \
+             patch.object(tools_host, "host_api_for", return_value=api), \
+             patch.object(web._OPENER, "open", side_effect=urllib.error.HTTPError(
+                 oauth.TOKEN, 400, "PRIVATE_BODY", {}, io.BytesIO(body))), \
+             patch.object(tools_api.host_errors, "report_warning") as report:
+            with self.assertRaises(tools_api.OperatorError):
+                tools_api._operator_complete_connect("upwork", {"redirect_uri": redirect, "state": "PRIVATE_STATE", "code": "PRIVATE_CODE"})
+        report.assert_called_once()
+        context = report.call_args.kwargs["context"]
+        self.assertEqual(context["operation"], "OAuth token exchange")
+        self.assertEqual(context["http_status"], 400)
+        self.assertEqual(json.loads(context["provider_response"])["error"], "invalid_grant")
+        self.assertNotIn("PRIVATE", str(report.call_args))
+        self.assertIsNone(api.credentials.load())
+
+    def test_upwork_registration_failure_reaches_host_without_exposing_oauth_secrets(self) -> None:
+        from host.tools.upwork import oauth
+        from host.tools.shared import web
+        from test_tools import FakeHostAPI
+
+        redirect = "http://127.0.0.1:7443/oauth/callback"
+        api = FakeHostAPI()
+        body = json.dumps({"error": "invalid_redirect_uri", "error_description": "PRIVATE_CODE",
+                           "access_token": "PRIVATE_TOKEN", "client_secret": "PRIVATE_SECRET"}).encode()
+        with patch.object(state, "enabled_tool_ids", return_value={"upwork"}), \
+             patch.object(state, "tool_credential", return_value=None), \
+             patch.object(tools_host, "host_api_for", return_value=api), \
+             patch.object(web._OPENER, "open", side_effect=urllib.error.HTTPError(
+                 oauth.REGISTER, 400, "PRIVATE_BODY", {"Content-Type": "application/json", "CF-Ray": "a397dfa57ac37411-IAD"}, io.BytesIO(body))) as request, \
+             patch.object(tools_api.host_errors, "report_warning") as report:
+            with self.assertRaises(tools_api.OperatorError) as caught:
+                tools_api._operator_start_connect("upwork", {"redirect_uri": redirect})
+
+        self.assertEqual(caught.exception.status, 502)
+        self.assertEqual(str(caught.exception), "Upwork could not complete the connection request. Please try again later.")
+        report.assert_called_once()
+        self.assertEqual(report.call_args.args[0], "tools.operator_provider_request")
+        context = report.call_args.kwargs["context"]
+        self.assertEqual(context["operation"], "OAuth client registration")
+        self.assertEqual(context["http_status"], 400)
+        details = json.loads(context["provider_response"])
+        self.assertEqual(details["error"], "invalid_redirect_uri")
+        self.assertEqual(details["redirect_uri"], redirect)
+        self.assertEqual(details["response_format"], "json")
+        self.assertEqual(details["cloudflare_ray_id"], "a397dfa57ac37411-IAD")
+        self.assertEqual(details["content_type"], "application/json")
+        self.assertEqual(request.call_args.args[0].get_header("User-agent"), "Kern/v1")
+        self.assertNotIn("PRIVATE", str(report.call_args))
+        self.assertIsNone(api.credentials.load())
+        self.assertIsNone(api.secrets.load())
+
     def test_single_connection_routes_use_default_and_reject_other_ids(self) -> None:
         from host.tools import upwork
         from test_tools import FakeHostAPI

@@ -93,6 +93,8 @@ PROMPT_POLL_SECONDS = 0.25
 # always revalidates, while the five-second pending poll never becomes a
 # provider-traffic loop.
 LIVE_VALIDATION_RETRY_SECONDS = 240
+# Subscription validation can perform two sequential OIDC token refreshes.
+SUBSCRIPTION_TIMEOUT_SECONDS = 60
 PROCESS_EXIT_TIMEOUT_SECONDS = 3
 JSONRPC_METHOD_NOT_FOUND = -32601
 # Grok Build uses these provider-returned team policy reasons for its own
@@ -995,23 +997,50 @@ def account_status(
     *, force_provider_probe: bool = False
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     """Return (status, detail, account metadata). detail is set only for "error"."""
-    # Bounded timeouts: only the background poller calls this, but a Grok agent
-    # server that cannot start (e.g. its startup traffic is denied by a
-    # restrictive policy) must not wedge the poller — it resolves to "error"
-    # with a detail until conditions improve. The init timeout leaves room for a
-    # cold start on a small instance.
+    global _live_validation_failure
     login_server = _current_login_server()
     if login_server is not None:
-        return _login_server_status(login_server, force_provider_probe=force_provider_probe)
+        # Never replace the server that owns an operator's pending login.
+        try:
+            return _login_server_status(login_server, force_provider_probe=force_provider_probe)
+        except GrokTimeout as exc:
+            result = _grok_status_error(exc, login_server)
+            _live_validation_failure = (result[0], result[1], time.monotonic())
+            return result
 
-    server = GrokAcpServer()
-    try:
-        server.start(init_timeout=45)
-        return _account_status_from_server(server, force_provider_probe=force_provider_probe)
-    except GrokAgentError as exc:
-        return _grok_status_error(exc, server)
-    finally:
-        server.close()
+    failure = _cached_validation_failure(force=force_provider_probe)
+    if failure is not None:
+        # A cached failure needs no process, auth-file read, or provider traffic.
+        return failure
+
+    for attempt in range(2):
+        server = GrokAcpServer()
+        try:
+            server.start(init_timeout=45)
+            return _account_status_from_server(server, force_provider_probe=force_provider_probe)
+        except GrokTimeout as exc:
+            if attempt == 1:
+                result = _grok_status_error(exc, server)
+                _live_validation_failure = (result[0], result[1], time.monotonic())
+                return result
+            # A fresh server retries the whole identity/entitlement check. Only
+            # a timeout earns a retry; account rejection still fails closed.
+        except GrokAgentError as exc:
+            return _grok_status_error(exc, server)
+        finally:
+            server.close()
+    raise AssertionError("Grok status attempts exhausted")
+
+
+def _cached_validation_failure(
+    *, force: bool = False
+) -> tuple[str, str | None, dict[str, Any] | None] | None:
+    failure = _live_validation_failure
+    if not force and failure is not None and (
+        failure[0] == "awaiting_login" or time.monotonic() - failure[2] < LIVE_VALIDATION_RETRY_SECONDS
+    ):
+        return failure[0], failure[1], None
+    return None
 
 
 def _current_login_server() -> "GrokAcpServer | None":
@@ -1107,6 +1136,8 @@ def _account_status_from_server(
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     try:
         info = server.call(AUTH_INFO_METHOD, {}, timeout=15)
+    except GrokTimeout:
+        raise
     except GrokAgentError as exc:
         return _grok_status_error(exc, server)
     if not _is_authenticated(info):
@@ -1200,16 +1231,14 @@ def _entitlement_status(
     generate provider traffic on every cycle.
     """
     global _live_validation_failure
-    failure = _live_validation_failure
-    if not force_provider_probe and failure is not None and (
-        failure[0] == "awaiting_login" or time.monotonic() - failure[2] < LIVE_VALIDATION_RETRY_SECONDS
-    ):
-        return failure[0], failure[1], None
+    failure = _cached_validation_failure(force=force_provider_probe)
+    if failure is not None:
+        return failure
     try:
-        server.call(CHECK_SUBSCRIPTION_METHOD, {}, timeout=15)
-    except GrokTimeout as exc:
-        _live_validation_failure = ("error", str(exc), time.monotonic())
-        return "error", str(exc), None
+        server.call(CHECK_SUBSCRIPTION_METHOD, {}, timeout=SUBSCRIPTION_TIMEOUT_SECONDS)
+    except GrokTimeout:
+        # The caller retries on a fresh server before caching a timeout.
+        raise
     except GrokAgentError as exc:
         status, error_message, account = _grok_status_error(exc, server)
         _live_validation_failure = (status, error_message, time.monotonic())

@@ -547,6 +547,44 @@ def upwork_smoke(page, url: str) -> None:
         row.get_by_role("button", name="Disable", exact=True).click()
     row.get_by_role("button", name="Enable", exact=True).click()
     expect(row.get_by_role("button", name="Connect account", exact=True)).to_be_visible()
+    connect_route = "**/v1/tools/upwork/oauth_connect/start"
+    original_url = page.url
+    for width in (1440, 390):
+        page.set_viewport_size({"width": width, "height": 844})
+        for status, body in ((403, "<html>Access denied</html>"), (502, ""), (200, "invalid")):
+            page.route(connect_route, lambda route, request, status=status, body=body: route.fulfill(
+                status=status, content_type="text/html", body=body,
+            ))
+            try:
+                row.get_by_role("button", name="Connect account", exact=True).click()
+                expect(row.locator("[data-tool-message]")).to_have_text(
+                    f"Server returned an invalid JSON response (HTTP {status})."
+                )
+                assert page.url == original_url, "failed connect navigated away"
+                assert_no_horizontal_overflow(page, "Upwork connection error")
+            finally:
+                page.unroute(connect_route)
+
+    # A non-JSON 401 must still trigger session recovery. Reload afterwards
+    # to restore the application's real unauthorized handler.
+    page.route(connect_route, lambda route: route.fulfill(
+        status=401, content_type="text/html", body="<html>Unauthorized</html>",
+    ))
+    try:
+        result = page.evaluate("""async () => {
+          const { api, setUnauthorizedHandler } = await import('/admin_ui/api.js');
+          let handled = false;
+          setUnauthorizedHandler(() => { handled = true; });
+          try { await api('POST', '/v1/tools/upwork/oauth_connect/start', {}); }
+          catch (error) { return { handled, message: error.message }; }
+        }""")
+        assert result == {"handled": True, "message": "unauthorized"}, result
+    finally:
+        page.unroute(connect_route)
+    page.set_viewport_size({"width": 1440, "height": 844})
+    page.reload()
+    expect(page.locator("#app")).to_be_visible()
+    open_home_integration(page, "tool:upwork")
     page.evaluate("""async () => {
       const { api } = await import('/admin_ui/api.js');
       await api('POST', '/v1/tools/upwork/oauth_connect/complete', {

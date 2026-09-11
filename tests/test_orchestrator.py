@@ -2410,6 +2410,29 @@ class OrchestratorTests(unittest.TestCase):
         orchestrator.reset_linked_account("grok")
         self.assertIsNone(state.read_proxy_xai_status_probe_account_id())
 
+    def test_reset_during_grok_probe_cannot_restore_the_account_or_pin(self) -> None:
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:00Z",
+        )
+        state.save_xai_account({
+            "account_id": "acct-xai",
+            "operator_approval": orchestrator.XAI_OPERATOR_APPROVAL,
+        })
+
+        def account_status():
+            orchestrator.reset_linked_account("grok")
+            return "active", None, {"account_id": "acct-xai"}
+
+        with (
+            patch.object(orchestrator.grok_agent, "collect_login_completion"),
+            patch.object(orchestrator.grok_agent, "account_status", side_effect=account_status),
+        ):
+            self.assertEqual(orchestrator.refresh_runtime_status("grok"), "awaiting_login")
+        self.assertEqual(state.read_xai_account(), {})
+        self.assertIsNone(state.read_proxy_xai_account_id())
+        self.assertIsNone(state.read_proxy_xai_status_probe_account_id())
+
     def test_failed_grok_login_is_retired_before_status_probe(self) -> None:
         save_policy(
             {"network_integrations": {"xai": {"enabled": True}}},
@@ -2874,37 +2897,6 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIsNone(read_openai_account().get("account_id"))
         self.assertIsNone(read_proxy_openai_account_id())
 
-    def test_status_loop_rechecks_each_runtime_on_its_own_cadence(self) -> None:
-        class StopLoop(Exception):
-            pass
-
-        now = [0.0]
-        sleeps = {"count": 0}
-        calls: list[str] = []
-
-        def fake_refresh(runtime_type: str) -> str:
-            calls.append(runtime_type)
-            if runtime_type == "codex" and calls.count("codex") > 1:
-                raise AssertionError("active Codex was rechecked at the pending-runtime cadence")
-            return "active" if runtime_type == "codex" else "awaiting_login"
-
-        def fake_sleep(seconds: float) -> None:
-            sleeps["count"] += 1
-            if sleeps["count"] >= 2:
-                raise StopLoop
-            now[0] += seconds
-
-        with (
-            patch.object(orchestrator, "refresh_runtime_status", fake_refresh),
-            patch.object(orchestrator.time, "monotonic", lambda: now[0]),
-            patch.object(orchestrator.time, "sleep", fake_sleep),
-        ):
-            with self.assertRaises(StopLoop):
-                orchestrator.runtime_status_loop()
-
-        self.assertEqual(calls.count("codex"), 1)
-        self.assertEqual(calls.count("claude_code"), 2)
-
     def test_policy_change_refreshes_reenabled_runtime_without_waiting_for_poll_cadence(self) -> None:
         save_policy(
             {
@@ -3233,35 +3225,94 @@ class StartBackgroundLoopsOrderTests(unittest.TestCase):
         self.assertEqual(observed, ["active"])
         self.assertEqual(orchestrator.runtime_status("script"), "active")
 
-    def test_unmanaged_runtimes_are_published_once_and_never_polled(self) -> None:
-        # That publish is the whole of their status lifecycle. The poller
-        # re-derives statuses that change underneath the host — a login
-        # expiring, a token rotating — and an unmanaged runtime has none of
-        # that, so polling it would re-publish a constant and open an empty
-        # transaction to do it.
-        class StopLoop(Exception):
+    def test_only_managed_runtimes_get_independent_status_loops(self) -> None:
+        with (
+            patch.object(orchestrator.github_credential, "reconcile"),
+            patch.object(orchestrator.threading, "Thread") as thread,
+        ):
+            orchestrator.start_background_loops()
+        runtimes = [
+            call.kwargs["args"][0] for call in thread.call_args_list
+            if call.kwargs["target"] is orchestrator.runtime_status_loop
+        ]
+        self.assertEqual(runtimes, ["codex", "codex-2", "claude_code", "grok", "hermes"])
+        self.assertTrue(all(call.kwargs["daemon"] for call in thread.call_args_list))
+        for runtime_type in orchestrator.UNMANAGED_RUNTIMES:
+            self.assertNotIn(runtime_type, runtimes)
+
+    def test_status_loop_waits_for_its_own_status_cadence_and_recovers_from_errors(self) -> None:
+        class StopLoop(BaseException):
             pass
 
-        polled: list[str] = []
+        delays = []
 
-        def fake_refresh(runtime_type: str) -> str:
-            polled.append(runtime_type)
-            return "active"
-
-        def fake_sleep(seconds: float) -> None:
-            raise StopLoop
+        def sleep(seconds):
+            delays.append(seconds)
+            if len(delays) == 3:
+                raise StopLoop
 
         with (
-            patch.object(orchestrator, "refresh_runtime_status", fake_refresh),
-            patch.object(orchestrator.time, "monotonic", lambda: 0.0),
-            patch.object(orchestrator.time, "sleep", fake_sleep),
+            patch.object(orchestrator, "refresh_runtime_status", side_effect=["active", "awaiting_login", RuntimeError("probe failed")]) as refresh,
+            patch.object(orchestrator.time, "sleep", side_effect=sleep),
+            patch.object(orchestrator.host_errors, "report_warning") as warning,
+            self.assertRaises(StopLoop),
         ):
-            with self.assertRaises(StopLoop):
-                orchestrator.runtime_status_loop()
+            orchestrator.runtime_status_loop("grok")
+        self.assertEqual(delays, [300, 5, 5])
+        self.assertEqual([call.args for call in refresh.call_args_list], [("grok",)] * 3)
+        warning.assert_called_once()
 
-        self.assertEqual(polled, ["codex", "codex-2", "claude_code", "grok", "hermes"])
-        for runtime_type in orchestrator.UNMANAGED_RUNTIMES:
-            self.assertNotIn(runtime_type, polled)
+    def test_blocked_grok_probe_does_not_delay_other_provider_checks(self) -> None:
+        class StopLoop(BaseException):
+            pass
+
+        grok_started = threading.Event()
+        release_grok = threading.Event()
+        other_rechecked = threading.Event()
+        calls = []
+        failures = []
+
+        def refresh(runtime_type):
+            calls.append(runtime_type)
+            if runtime_type == "grok":
+                grok_started.set()
+                if not release_grok.wait(5):
+                    failures.append("Grok was never released")
+                raise StopLoop
+            if calls.count("codex") == 2:
+                other_rechecked.set()
+                raise StopLoop
+            return "active"
+
+        def run(runtime_type):
+            try:
+                orchestrator.runtime_status_loop(runtime_type)
+            except StopLoop:
+                pass
+            except BaseException as exc:
+                failures.append(str(exc))
+
+        with (
+            patch.object(orchestrator, "refresh_runtime_status", side_effect=refresh),
+            patch.object(orchestrator.time, "sleep"),
+        ):
+            grok = threading.Thread(target=run, args=("grok",))
+            other = threading.Thread(target=run, args=("codex",))
+            grok.start()
+            try:
+                self.assertTrue(grok_started.wait(2))
+                other.start()
+                self.assertTrue(other_rechecked.wait(2))
+                self.assertTrue(grok.is_alive())
+                self.assertEqual(calls.count("grok"), 1)
+            finally:
+                release_grok.set()
+                grok.join(5)
+                if other.ident is not None:
+                    other.join(5)
+        self.assertFalse(grok.is_alive())
+        self.assertFalse(other.is_alive())
+        self.assertEqual(failures, [])
 
 
 class ClaudeLiveStatusTests(unittest.TestCase):

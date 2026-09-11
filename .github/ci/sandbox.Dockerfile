@@ -18,7 +18,20 @@ ARG PGVECTOR_SHA256=10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a
 # libnss-wrapper (initdb needs a passwd entry for the arbitrary uid the
 # sandbox runs as). The admin UI browser smoke needs Playwright and Chromium
 # installed while the image still has build-time network access.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Use the Azure Ubuntu mirror for GitHub's Azure-hosted runners. The default
+# archive repeatedly exhausted the job budget during package downloads.
+# Keep this config for Playwright's later apt dependency installation too.
+RUN sed -i \
+      -e 's#http://archive\.ubuntu\.com/ubuntu#http://azure.archive.ubuntu.com/ubuntu#g' \
+      -e 's#http://security\.ubuntu\.com/ubuntu#http://azure.archive.ubuntu.com/ubuntu#g' \
+      /etc/apt/sources.list \
+  && printf '%s\n' \
+       'Acquire::Retries "1";' \
+       'Acquire::http::Timeout "30";' \
+       'Acquire::https::Timeout "30";' \
+       'APT::Update::Error-Mode "any";' \
+       > /etc/apt/apt.conf.d/80kern-ci \
+  && apt-get update && apt-get install -y --no-install-recommends \
     bash \
     build-essential \
     ca-certificates \

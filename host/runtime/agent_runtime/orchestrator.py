@@ -568,32 +568,18 @@ def _stop_runtime_processes(runtime_type: str, reason: str) -> None:
         _interrupt_turn(server)
 
 
-def runtime_status_loop() -> None:
-    # Only the managed runtimes are polled. This loop exists to re-derive a
-    # status that can change underneath the host — a login expiring, a token
-    # rotating, a credential being revoked — and an unmanaged runtime has none
-    # of that: its status comes from a constant, so a poll would re-publish an
-    # unchangeable value and open an empty transaction to do it.
-    # ``start_background_loops`` publishes those runtimes once instead.
-    refresh_targets = ("codex", "codex-2", "claude_code", "grok", "hermes")
-    next_check_at = {runtime_type: 0.0 for runtime_type in refresh_targets}
+def runtime_status_loop(runtime_type: str) -> None:
+    # One serial loop per provider: a slow probe or its retry must not delay
+    # another provider's credential checks. The refresh lock also serializes
+    # this loop with manual refreshes for the same provider.
     while True:
-        now = time.monotonic()
         try:
-            for runtime_type in refresh_targets:
-                if now < next_check_at[runtime_type]:
-                    continue
-                status = refresh_runtime_status(runtime_type)
-                delay = RUNTIME_RECHECK_SECONDS if status == "active" else RUNTIME_PENDING_RECHECK_SECONDS
-                next_check_at[runtime_type] = time.monotonic() + delay
+            status = refresh_runtime_status(runtime_type)
+            delay = RUNTIME_RECHECK_SECONDS if status == "active" else RUNTIME_PENDING_RECHECK_SECONDS
         except Exception as exc:
-            # Keep the loop alive; retry soon because the failed refresh did
-            # not update that runtime's cached state.
             host_errors.report_warning("orchestrator.runtime_status_loop", exc)
-            time.sleep(RUNTIME_PENDING_RECHECK_SECONDS)
-            continue
-        sleep_for = min(max(0.0, due - time.monotonic()) for due in next_check_at.values())
-        time.sleep(min(max(sleep_for, 0.1), RUNTIME_PENDING_RECHECK_SECONDS))
+            delay = RUNTIME_PENDING_RECHECK_SECONDS
+        time.sleep(delay)
 
 
 def start_background_loops() -> None:
@@ -628,7 +614,8 @@ def start_background_loops() -> None:
         # not even run (the database briefly unavailable during startup), so
         # the refresh loop retries quickly rather than waiting a full cycle.
         converged = False
-    threading.Thread(target=runtime_status_loop, daemon=True).start()
+    for runtime_type in ("codex", "codex-2", "claude_code", "grok", "hermes"):
+        threading.Thread(target=runtime_status_loop, args=(runtime_type,), daemon=True).start()
     threading.Thread(target=github_credential_refresh_loop, args=(converged,), daemon=True).start()
 
 

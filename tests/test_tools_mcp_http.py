@@ -58,7 +58,7 @@ class MCPHTTPTests(unittest.TestCase):
             requests.append((payload, dict(kwargs["headers"])))
             self.assertEqual(url, "https://mcp.upwork.com/mcp")
             self.assertEqual(kwargs["timeout"], 30)
-            self.assertRegex(kwargs["headers"]["User-Agent"], r"^Kern/[^ ]+ ")
+            self.assertEqual(kwargs["headers"]["User-Agent"], "Kern/v1")
             if payload["method"] == "initialize":
                 self.assertEqual(payload["params"]["capabilities"], {})
                 yield io.BytesIO(json.dumps({"jsonrpc": "2.0", "id": payload["id"], "result": {"protocolVersion": mcp_http.PROTOCOL}}).encode()), {"content-type": "application/json", "mcp-session-id": "session-1"}
