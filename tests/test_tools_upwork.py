@@ -550,6 +550,54 @@ class UpworkValidationTests(unittest.TestCase):
 
 
 class UpworkOAuthTests(unittest.TestCase):
+    def test_refresh_and_disconnect_preserve_unexpected_provider_diagnostics(self):
+        api = connected_api()
+        stored = api.credentials.load()
+        stored["secret"]["expires_at"] = 1
+        api.credentials.save(stored)
+        failure = WebRequestError("PRIVATE", status=503, body=b"PRIVATE_RESPONSE")
+        with patch.object(oauth, "json_request", side_effect=failure), self.assertRaises(ProviderWarning) as refresh:
+            oauth.UpworkOAuth().connected(api)
+        self.assertEqual(refresh.exception.operation, "OAuth token refresh")
+        self.assertEqual(refresh.exception.status, 503)
+        self.assertIsNotNone(api.credentials.load())
+        with patch.object(oauth, "json_request", side_effect=failure), self.assertRaises(ProviderWarning) as revoke:
+            oauth.UpworkOAuth().disconnect(api)
+        self.assertEqual(revoke.exception.operation, "OAuth token revocation")
+        self.assertEqual(revoke.exception.status, 503)
+        self.assertIn("disconnected locally", str(revoke.exception))
+        self.assertNotIn("PRIVATE", str(revoke.exception) + revoke.exception.response_body)
+        self.assertIsNone(api.credentials.load())
+
+    def test_oauth_diagnostics_cover_provider_and_transport_failures_without_raw_bodies(self):
+        cases = (
+            (WebRequestError("PRIVATE", status=403, body=b"<html>PRIVATE_TOKEN</html>"), "http_error", "non_json"),
+            (WebRequestError("PRIVATE", status=502), "http_error", "empty"),
+            (WebRequestError("PRIVATE", status=401, body=b'{"error":"PRIVATE_TOKEN"}'), "http_error", "json"),
+            (WebRequestError("PRIVATE", status=400, body=b'{"error":{"token":"PRIVATE_TOKEN"}}'), "http_error", "json"),
+            (WebRequestError("PRIVATE"), "transport_error", "empty"),
+            (RuntimeError("PRIVATE"), "invalid_response", None),
+        )
+        for url, operation in ((oauth.REGISTER, "OAuth client registration"), (oauth.TOKEN, "OAuth token exchange"), (oauth.REVOKE, "OAuth token revocation")):
+            for failure, kind, response_format in cases:
+                with self.subTest(url=url, failure=failure, kind=kind), patch.object(oauth, "json_request", side_effect=failure), self.assertRaises(ProviderWarning) as caught:
+                    oauth._request(url)
+                warning = caught.exception
+                self.assertEqual(warning.operation, operation)
+                self.assertEqual(warning.status, getattr(failure, "status", 0))
+                details = json.loads(warning.response_body)
+                self.assertEqual(details["failure"], kind)
+                self.assertEqual(details.get("response_format"), response_format)
+                self.assertNotIn("PRIVATE", str(warning) + warning.response_body)
+
+    def test_invalid_registration_response_also_produces_diagnostic(self):
+        for response in ({}, {"client_id": "PRIVATE_CLIENT", "token_endpoint_auth_method": "client_secret_basic"}):
+            with self.subTest(response=response), patch.object(oauth, "json_request", return_value=response), self.assertRaises(ProviderWarning) as caught:
+                oauth.UpworkOAuth().start_connect({"redirect_uri": "http://127.0.0.1:7443/oauth/callback"}, FakeHostAPI())
+            self.assertEqual(caught.exception.operation, "OAuth client registration")
+            self.assertEqual(json.loads(caught.exception.response_body)["failure"], "invalid_response")
+            self.assertNotIn("PRIVATE_CLIENT", caught.exception.response_body)
+
     def test_registration_pkce_uses_generic_secret_store(self):
         flow = oauth.UpworkOAuth()
         api = FakeHostAPI()
@@ -746,6 +794,7 @@ class UpworkOAuthTests(unittest.TestCase):
         with patch.object(oauth, "now", return_value=1000), patch.object(oauth, "json_request", return_value=response) as request:
             result = oauth.UpworkOAuth().connected(api)
         request.assert_called_once()
+        self.assertEqual(request.call_args.kwargs["headers"]["User-Agent"], "Kern/v1")
         self.assertEqual(result["secret"]["access_token"], "new-access")
 
     def test_malformed_refresh_replacement_revokes_previous_refresh_grant(self):

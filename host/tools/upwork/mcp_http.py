@@ -16,9 +16,8 @@ import uuid
 from typing import BinaryIO, cast
 
 from host.tools.json_types import JSONObject
-from host.version import repo_version
 from host.tools.shared.web import _request_bytes_and_headers, open_response_stream, WebRequestError
-from host.tools.upwork.oauth import ENDPOINT
+from host.tools.upwork.oauth import ENDPOINT, USER_AGENT
 
 MAX_BYTES = 1024 * 1024
 PROTOCOL = "2025-06-18"
@@ -170,7 +169,7 @@ class MCPConnection:
         self.deadline = deadline if deadline is not None else time.monotonic() + 210
         self.headers = {
             "Authorization": f"Bearer {token}",
-            "User-Agent": f"Kern/{repo_version()} (+https://github.com/infiversehq/kern)",
+            "User-Agent": USER_AGENT,
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }

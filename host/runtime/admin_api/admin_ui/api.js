@@ -68,8 +68,17 @@ export async function api(method, path, body, extraHeaders) {
     body: body === undefined ? undefined : JSON.stringify(body),
     credentials: "same-origin",
   });
-  const data = await response.json();
   if (response.status === 401) { unauthorizedHandler(); throw new Error("unauthorized"); }
+  let data;
+  try {
+    data = await response.json();
+  } catch (_) {
+    // Proxies can return HTML or an empty body. Preserve the HTTP status
+    // instead of exposing Safari's unhelpful JSON parsing exception.
+    const error = new Error(`Server returned an invalid JSON response (HTTP ${response.status}).`);
+    error.status = response.status;
+    throw error;
+  }
   if (!response.ok) {
     const error = new Error(data.error ? data.error.message : response.statusText);
     error.status = response.status;

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import secrets
 import ipaddress
+import json
+import re
 from contextlib import contextmanager
 import threading
 import urllib.parse
+import urllib.error
 from typing import cast
 
 from host.tools.host_api import ConnectionAccount, HostAPI, StoredCredential
@@ -15,7 +18,7 @@ from host.tools.shared.oauth2 import (
     OAuth2CredentialStore, IntegrationReconnectRequired, access_token_is_fresh,
     clear_if_still_loaded, now, pkce_verifier_and_challenge, save_if_still_connected,
 )
-from host.tools.shared.web import json_request, WebRequestError
+from host.tools.shared.web import json_request, ProviderWarning, WebRequestError
 from host.tools.tool import OAuthStartConnectParams, OAuthStartConnectResult, OAuthCompleteConnectParams, OAuthCompleteConnectResult
 
 # Verified via Upwork's protected-resource and authorization-server metadata,
@@ -25,6 +28,7 @@ AUTHORIZE = "https://www.upwork.com/ab/account-security/oauth2/authorize"
 REGISTER = "https://www.upwork.com/register"
 TOKEN = "https://www.upwork.com/api/v3/oauth2/token"
 REVOKE = "https://www.upwork.com/api/v3/oauth2/token/revoke"
+USER_AGENT = "Kern/v1"
 RECONNECT = "Upwork is no longer connected. Disconnect this connection and click Connect again."
 # Leave enough lifetime for the complete approved proposal request sequence.
 TOKEN_WINDOW_SECONDS = 300
@@ -34,16 +38,56 @@ _REFRESH_LOCK = threading.Lock()
 _LOGIN_LOCK = threading.RLock()
 
 
-def _request(url: str, **kwargs) -> JSONObject:
+def _authorization_warning(operation: str, exc: RuntimeError, *, redirect_uri: str = "") -> ProviderWarning:
+    # OAuth responses can echo credentials, including in descriptions. Retain
+    # only standard error codes and structural facts, never raw response text.
+    details: JSONObject = {"failure": "invalid_response", "user_agent": USER_AGENT}
+    status = 0
+    if isinstance(exc, WebRequestError):
+        status = exc.status
+        details["failure"] = "http_error" if status else "transport_error"
+        details["response_bytes_retained"] = len(exc.body)
+        try:
+            response = json.loads(exc.body)
+        except (ValueError, UnicodeError):
+            details["response_format"] = "non_json" if exc.body else "empty"
+        else:
+            details["response_format"] = "json"
+            code = response.get("error") if isinstance(response, dict) else None
+            known_codes = {
+                "invalid_redirect_uri", "invalid_client_metadata", "invalid_request",
+                "invalid_client", "unauthorized_client", "access_denied", "invalid_grant",
+                "unsupported_grant_type", "unsupported_response_type", "invalid_scope",
+                "server_error", "temporarily_unavailable", "invalid_token",
+            }
+            if isinstance(code, str):
+                details["error"] = code if code in known_codes else "unrecognized"
+        if exc.__cause__ is not None:
+            details["cause_type"] = type(exc.__cause__).__name__
+        if isinstance(exc.__cause__, urllib.error.HTTPError):
+            headers = exc.__cause__.headers
+            ray = headers.get("CF-Ray", "")
+            if re.fullmatch(r"[0-9a-f]{16}(?:-[A-Z]{3})?", ray):
+                details["cloudflare_ray_id"] = ray
+            media_type = headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if media_type in {"application/json", "text/html", "text/plain"}:
+                details["content_type"] = media_type
+    if redirect_uri:
+        details["redirect_uri"] = redirect_uri
+    return ProviderWarning(
+        "Upwork", operation, "Upwork could not complete the connection request. Please try again later.",
+        status=status, body=json.dumps(details).encode("utf-8"),
+    )
+
+
+def _request(url: str, *, diagnostic_redirect_uri: str = "", **kwargs) -> JSONObject:
+    operation = {REGISTER: "OAuth client registration", TOKEN: "OAuth token exchange", REVOKE: "OAuth token revocation"}[url]
     try:
-        return json_request("POST", url, failure_message="Upwork authorization request failed.",
+        return json_request("POST", url, headers={"User-Agent": USER_AGENT}, failure_message="Upwork authorization request failed.",
                             invalid_response_message="Upwork returned an invalid authorization response.",
                             max_bytes=65536, **kwargs)
-    except WebRequestError as exc:
-        # Never retain OAuth error bodies in diagnostics: they can echo tokens.
-        if exc.status in (400, 401, 403):
-            raise RuntimeError("Upwork rejected the authorization request. Check the connection and callback support in staging.") from None
-        raise RuntimeError("Upwork authorization service is unavailable. Try connecting again later.") from None
+    except RuntimeError as exc:
+        raise _authorization_warning(operation, exc, redirect_uri=diagnostic_redirect_uri) from None
 
 
 def _text(value: object, field: str) -> str:
@@ -134,14 +178,17 @@ class UpworkOAuth(OAuth2CredentialStore):
             or parsed.scheme == "http" and loopback
         ):
             raise ValueError("Upwork requires Kern's HTTPS or localhost OAuth callback.")
-        registration = _request(REGISTER, body={
+        registration = _request(REGISTER, diagnostic_redirect_uri=redirect, body={
             "client_name": "Kern", "redirect_uris": [redirect],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"], "token_endpoint_auth_method": "none",
         })
-        client_id = _text(registration.get("client_id"), "client identifier")
-        if registration.get("token_endpoint_auth_method", "none") != "none":
-            raise RuntimeError("Upwork did not register the requested public OAuth client.")
+        try:
+            client_id = _text(registration.get("client_id"), "client identifier")
+            if registration.get("token_endpoint_auth_method", "none") != "none":
+                raise RuntimeError("Upwork did not register the requested public OAuth client.")
+        except RuntimeError as exc:
+            raise _authorization_warning("OAuth client registration", exc, redirect_uri=redirect) from None
         verifier, challenge = pkce_verifier_and_challenge()
         state = secrets.token_urlsafe(32)
         query = urllib.parse.urlencode({
@@ -198,7 +245,7 @@ class UpworkOAuth(OAuth2CredentialStore):
             old = loaded["secret"]
             try:
                 # Status is needed to distinguish an invalid grant from an outage.
-                response = json_request("POST", TOKEN, form={
+                response = json_request("POST", TOKEN, headers={"User-Agent": USER_AGENT}, form={
                     "grant_type": "refresh_token", "client_id": _text(old.get("client_id"), "client identifier"),
                     "refresh_token": _text(old.get("refresh_token"), "refresh token"), "resource": ENDPOINT,
                 }, failure_message="Upwork token refresh failed.", invalid_response_message="Upwork returned an invalid token response.", max_bytes=65536)
@@ -206,7 +253,9 @@ class UpworkOAuth(OAuth2CredentialStore):
                 if exc.status in (400, 401):
                     self.invalidate(api, loaded)
                     raise IntegrationReconnectRequired(RECONNECT) from None
-                raise RuntimeError("Upwork token refresh is unavailable. Try again later.") from None
+                raise _authorization_warning("OAuth token refresh", exc) from None
+            except RuntimeError as exc:
+                raise _authorization_warning("OAuth token refresh", exc) from None
             with _issued_tokens(response, cast(str, old["client_id"]), api, loaded) as secret:
                 account: ConnectionAccount = {**loaded["account"]}
                 if "scope" in response:
@@ -241,5 +290,8 @@ class UpworkOAuth(OAuth2CredentialStore):
             secret = loaded["secret"]
             try:
                 _revoke(secret)
+            except ProviderWarning as exc:
+                exc.args = ("Upwork was disconnected locally, but remote revocation failed. Remove Kern in Upwork Account Settings > Connected Apps.",)
+                raise
             except RuntimeError:
                 raise RuntimeError("Upwork was disconnected locally, but remote revocation failed. Remove Kern in Upwork Account Settings > Connected Apps.") from None

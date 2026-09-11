@@ -631,6 +631,114 @@ class GrokAccountStatusTests(unittest.TestCase):
         self.assertEqual(status, "active")
 
 
+    def test_a_slow_subscription_check_has_room_for_two_refreshes(self) -> None:
+        original = GrokAcpServer.call
+
+        def slow_subscription(server, method, params, *, timeout=60):
+            if method == grok_agent.CHECK_SUBSCRIPTION_METHOD and timeout < 25:
+                raise grok_agent.GrokTimeout("two refreshes need 25 seconds")
+            return original(server, method, params, timeout=timeout)
+
+        with patch.object(GrokAcpServer, "call", slow_subscription):
+            self.assertEqual(self.status(account={"account_id": "acct-1"})[0], "active")
+
+    def test_timeout_retries_after_cleanup_and_revalidates_identity(self) -> None:
+        original = GrokAcpServer.call
+        failed = []
+
+        def fail_once(server, method, params, *, timeout=60):
+            if method == grok_agent.CHECK_SUBSCRIPTION_METHOD and not failed:
+                failed.append(server)
+                raise grok_agent.GrokTimeout("subscription timed out")
+            if failed and server is not failed[0]:
+                self.assertFalse(failed[0].alive())
+            return original(server, method, params, timeout=timeout)
+
+        with patch.object(GrokAcpServer, "call", fail_once):
+            self.assertEqual(self.status(account={"account_id": "acct-1"})[0], "active")
+        self.assertIsNone(grok_agent._live_validation_failure)
+
+    def test_persistent_timeout_stops_after_two_attempts_and_skips_startup_until_due(self) -> None:
+        original = GrokAcpServer.call
+        attempted = []
+
+        def time_out(server, method, params, *, timeout=60):
+            if method == grok_agent.CHECK_SUBSCRIPTION_METHOD:
+                attempted.append(server)
+                raise grok_agent.GrokTimeout("subscription timed out")
+            return original(server, method, params, timeout=timeout)
+
+        with patch.object(GrokAcpServer, "call", time_out):
+            status, detail, account = self.status(account={"account_id": "acct-1"})
+        self.assertEqual((status, detail, account), ("error", "subscription timed out", None))
+        self.assertEqual(len(attempted), 2)
+        self.assertTrue(all(not server.alive() for server in attempted))
+        recorded = grok_agent._live_validation_failure[2]
+        with (
+            patch.object(grok_agent.time, "monotonic", return_value=recorded + 239),
+            patch.object(grok_agent, "GrokAcpServer") as factory,
+        ):
+            self.assertEqual(grok_agent.account_status(), (status, detail, account))
+            factory.assert_not_called()
+        with patch.object(grok_agent.time, "monotonic", return_value=recorded + 241):
+            self.assertEqual(self.status(account={"account_id": "acct-1"})[0], "active")
+
+    def test_manual_refresh_bypasses_timeout_cooldown(self) -> None:
+        grok_agent._live_validation_failure = ("error", "subscription timed out", grok_agent.time.monotonic())
+        self.assertEqual(self.status(account={"account_id": "acct-1"}, force_provider_probe=True)[0], "active")
+
+    def test_timeout_retry_does_not_accept_a_changed_identity(self) -> None:
+        original = GrokAcpServer.call
+        failed = []
+
+        def change_identity(server, method, params, *, timeout=60):
+            if method == grok_agent.CHECK_SUBSCRIPTION_METHOD:
+                failed.append(server)
+                raise grok_agent.GrokTimeout("subscription timed out")
+            if failed and method == grok_agent.AUTH_INFO_METHOD:
+                return {"principalId": "different-account"}
+            return original(server, method, params, timeout=timeout)
+
+        with patch.object(GrokAcpServer, "call", change_identity):
+            status, detail, account = self.status(account={"account_id": "acct-1"})
+        self.assertEqual(status, "error")
+        self.assertIn("different account", detail)
+        self.assertIsNone(account)
+        self.assertEqual(len(failed), 1)
+
+    def test_hard_subscription_rejection_is_not_retried(self) -> None:
+        original = GrokAcpServer.call
+        for error, expected in (("401 unauthorized", "awaiting_login"), ("403 permission-denied", "error")):
+            with self.subTest(error=error):
+                grok_agent.clear_live_validation_failure()
+                attempts = []
+
+                def reject(server, method, params, *, timeout=60):
+                    if method == grok_agent.CHECK_SUBSCRIPTION_METHOD:
+                        attempts.append(server)
+                        raise GrokAgentError(error)
+                    return original(server, method, params, timeout=timeout)
+
+                with patch.object(GrokAcpServer, "call", reject):
+                    status, _detail, account = self.status(account={"account_id": "acct-1"})
+                self.assertEqual(status, expected)
+                self.assertIsNone(account)
+                self.assertEqual(len(attempts), 1)
+                self.assertFalse(attempts[0].alive())
+
+    def test_parked_login_is_not_replaced_when_check_times_out(self) -> None:
+        parked = MagicMock()
+        parked.stderr_tail.return_value = ""
+        with (
+            patch.object(grok_agent, "_current_login_server", return_value=parked),
+            patch.object(grok_agent, "_login_server_status", side_effect=grok_agent.GrokTimeout("timed out")),
+            patch.object(grok_agent, "GrokAcpServer") as factory,
+        ):
+            self.assertEqual(grok_agent.account_status(), ("error", "timed out", None))
+        parked.close.assert_not_called()
+        factory.assert_not_called()
+
+
 class GrokAttestationTests(unittest.TestCase):
     def setUp(self) -> None:
         grok_agent._ATTESTED_IDENTITY.clear()
