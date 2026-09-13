@@ -178,10 +178,29 @@
           <svg width="19" height="19" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h8.5A1.5 1.5 0 0 1 15 6v9.5l-3-1.8-3 1.8V6H5v9.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
           <span>Memory</span>
         </button>
+        <button id="tab-analytics" class="tab-button" data-action="open-workspace-global" data-resource="analytics">
+          <svg width="19" height="19" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3v14h14M6 13V9m4 4V5m4 8V7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <span>Analytics</span>
+        </button>
       </div>
     </nav>
 
     <main>
+      <div id="panel-analytics" class="tab-panel" hidden>
+        <div class="analytics-heading"><div><h1>Analytics</h1><p class="muted">Token usage · Last 7 days</p></div><button id="analytics-refresh" class="ghost">Refresh</button></div>
+        <div class="analytics-toolbar"><label>Show <select id="analytics-kind"><option value="all">All threads</option><option value="chats">Chats</option><option value="apps">Apps</option><option value="schedules">Schedules</option></select></label><span id="analytics-updated" class="muted"></span></div>
+        <div id="analytics-status" role="status" aria-live="polite"></div>
+        <div id="analytics-focus" class="analytics-focus" hidden><strong id="analytics-focus-name"></strong><button id="analytics-clear" class="ghost">All threads</button></div>
+        <div id="analytics-cards" class="analytics-cards"></div>
+        <p id="analytics-turns" class="muted"></p>
+        <p id="analytics-empty" class="analytics-empty" hidden>No usage recorded in this period. New agent turns will appear here as measurements arrive.</p>
+        <div id="analytics-detail" hidden>
+          <section class="analytics-section"><h2>Daily usage</h2><div class="analytics-legend"><span class="chats">Chats</span><span class="apps">Apps</span><span class="schedules">Schedules</span></div><div id="analytics-chart" class="analytics-chart" role="img"></div></section>
+          <section class="analytics-section"><h2>Providers and models</h2><div id="analytics-providers"></div></section>
+          <section class="analytics-section"><h2>Usage by thread</h2><p class="muted">Highest measured usage first. Select a thread to explore its daily usage.</p><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Thread</th><th>Turns</th><th>Input</th><th>Cached input</th><th>Cache write</th><th>Output</th></tr></thead><tbody id="analytics-threads"></tbody></table></div><div id="analytics-pagination" class="analytics-pagination" hidden><button id="analytics-prev" class="ghost">Previous</button><span id="analytics-page"></span><button id="analytics-next" class="ghost">Next</button></div></section>
+        </div>
+        <p class="analytics-note muted">Input, cached input, cache write, and output are separate token buckets. — means unavailable; * means partial coverage. Charts sum known tokens, including cached tokens. Usage is grouped by the latest measurement time of each turn. Models show the turn’s selected model. Tokens measure consumption, not subscription cost.</p>
+      </div>
       <div id="panel-home" class="tab-panel">
         <section id="passkey-setup" class="passkey-setup" aria-labelledby="passkey-setup-title" hidden>
           <span class="passkey-setup-icon" aria-hidden="true">

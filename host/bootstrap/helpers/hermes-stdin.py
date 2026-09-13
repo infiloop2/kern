@@ -156,6 +156,17 @@ def _on_post_tool_call(**kwargs: object) -> None:
     return None
 
 
+def _on_post_api_request(**kwargs: object) -> None:
+    response = kwargs.get("response")
+    if not isinstance(response, dict) or not isinstance(response.get("usage"), dict):
+        return
+    _emit_activity({
+        "type": "token_usage",
+        "source_id": kwargs.get("api_request_id"),
+        "usage": response["usage"],
+    })
+
+
 def _register_activity_hooks() -> None:
     """Subscribe to Hermes tool-call hooks so each becomes an activity record.
 
@@ -178,6 +189,7 @@ def _register_activity_hooks() -> None:
         manager = plugins.get_plugin_manager()
         manager._hooks.setdefault("pre_tool_call", []).append(_on_pre_tool_call)
         manager._hooks.setdefault("post_tool_call", []).append(_on_post_tool_call)
+        manager._hooks.setdefault("post_api_request", []).append(_on_post_api_request)
     except Exception:
         pass
 

@@ -1134,6 +1134,26 @@ class StateStorageTests(unittest.TestCase):
         remaining = {row["thread_id"] for row in state.page_thread_summaries(None, 100)}
         self.assertEqual(remaining, {"thread-t5", "thread-t6", "thread-t7", "thread-c1"})
 
+    def test_prune_preserves_run_numbers_while_usage_is_retained(self) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "thread-old", last_used_at="2026-06-08T00:00:00Z")
+            run = state.start_thread_run(cur, "thread-old")
+            state.start_turn_usage(cur, "thread-old", run, "codex", "gpt-6-astra")
+            state.finish_thread_run(cur, "thread-old", run)
+            seed_thread(cur, "thread-new", last_used_at="2099-01-01T00:00:00Z")
+            state.prune_thread_sessions(cur, "codex", 1)
+            next_run = state.start_thread_run(cur, "thread-old")
+            self.assertEqual(next_run, run + 1)
+            state.start_turn_usage(cur, "thread-old", next_run, "codex", "gpt-6-astra")
+            state.finish_thread_run(cur, "thread-old", next_run)
+        remaining = {row["thread_id"] for row in state.page_thread_summaries(None, 100)}
+        self.assertEqual(remaining, {"thread-old", "thread-new"})
+        with state.mutation() as cur:
+            cur.execute("DELETE FROM turn_usage WHERE thread_id = 'thread-old'")
+            state.prune_thread_sessions(cur, "codex", 1)
+        remaining = {row["thread_id"] for row in state.page_thread_summaries(None, 100)}
+        self.assertEqual(remaining, {"thread-new"})
+
     def test_event_logs_prune_to_the_newest_cap(self) -> None:
         # Retention is a primary-key range delete below MAX(seq) - cap: cheap
         # enough for the append cadence even at the 10M agent-event production

@@ -71,7 +71,7 @@ function filesystemMountTile(label, mount) {
 }
 
 function historyStat(label, value, description) {
-  const count = Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  const count = Number.isInteger(value) && value >= 0 ? value : 0;
   const formatted = new Intl.NumberFormat().format(count);
   const accessible = `${label}: ${formatted}. ${description}`;
   return `
@@ -105,6 +105,7 @@ export async function refreshHealth() {
   const host = health.host_runtime;
   const mounts = host.filesystem?.mounts || {};
   const history = health.history || {};
+  const tokens = health.lifetime_tokens || {};
   setHtml($("health"), `
     ${renderHomeUpgrade(health.upgrade)}
     <div class="stat-grid stat-statuses">
@@ -126,6 +127,13 @@ export async function refreshHealth() {
         ${historyStat("Threads", history.threads, "All agent threads recorded on this host.")}
         ${historyStat("Inbound messages", history.messages, "Messages sent to agents on this host.")}
         ${historyStat("Agent activity", history.activities, "Agent messages, tool calls, commands, reasoning, and other recorded agent work.")}
+      </div>
+      <div class="lifetime-token-title">Lifetime tokens · All providers</div>
+      <div class="stat-history-grid lifetime-tokens" aria-label="Lifetime token usage">
+        ${historyStat("Input", tokens.input_tokens, "Known uncached input tokens since usage tracking began.")}
+        ${historyStat("Cached input", tokens.cached_input_tokens, "Known tokens read from cache since usage tracking began.")}
+        ${historyStat("Cache write", tokens.cache_write_tokens, "Known tokens written to cache since usage tracking began.")}
+        ${historyStat("Output", tokens.output_tokens, "Known generated tokens since usage tracking began, including reported reasoning.")}
       </div>
     </div>`);
   renderRuntimeOverview();

@@ -1102,6 +1102,8 @@ _WORKSPACE_PROXY_SUBTREES = ("getting-started", "chat", "web-apps", "memory", "s
 # too, never a 405.
 _ROUTES: tuple[_Route, ...] = (
     _Route("GET", "/v1/health", lambda request: health()),
+    _Route("GET", "/v1/analytics", lambda request: state.usage_report(), operator_only=True,
+           query_keys=frozenset(), query_label="analytics"),
     _Route("GET", "/v1/agent-runtime/status", lambda request: agent_runtime_status()),
     _Route("GET", "/v1/agent-runtime/account", _agent_accounts_route),
     _Route("POST", "/v1/agent-runtime/refresh", lambda request: refresh_agent_runtime_accounts(request.body)),
@@ -1376,6 +1378,7 @@ def health() -> dict[str, Any]:
         "network_controls": {"status": network_status},
         "host_runtime": host,
         "history": state.agent_history_counts(),
+        "lifetime_tokens": state.lifetime_token_usage(),
     }
 
 
@@ -1501,6 +1504,7 @@ def prune_state() -> None:
         state.prune_event_logs(cur)
         state.prune_host_diagnostics(cur)
         state.prune_pending_pushes(cur)
+        state.prune_turn_usage(cur, (now - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ"))
         state.prune_bedrock_usage(
             cur,
             (now - timedelta(days=state.BEDROCK_USAGE_RETAIN_DAYS))

@@ -1262,6 +1262,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dict[str, Any]:
+    if method == "GET" and path == "/v1/analytics":
+        from analytics_smokes import fixture
+        return fixture()
     if method == "GET" and path == "/v1/health":
         return health()
     if method == "GET" and path == "/v1/agent-runtime/status":
@@ -1620,6 +1623,12 @@ def health() -> dict[str, Any]:
         },
         "agent_runtime": runtime,
         "network_controls": {"status": "active"},
+        "lifetime_tokens": {
+            "input_tokens": 1234567890,
+            "cached_input_tokens": 9876543210987654,
+            "cache_write_tokens": 23456789,
+            "output_tokens": 345678901,
+        },
         "history": {
             "threads": 24,
             "messages": 1286,

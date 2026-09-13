@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import io
 import http.client
+from http import HTTPStatus
 import json
 import os
 from pathlib import Path
@@ -65,6 +66,23 @@ class _MemoryResponse:
 
 
 class MCPOAuthConnectionTests(unittest.TestCase):
+    def test_provider_response_status_is_independent_of_action_and_upstream_status(self) -> None:
+        from host.tools.shared.web import ProviderWarning
+
+        for action in ("oauth_connect_start", "oauth_connect_complete", "oauth_disconnect"):
+            for response_status in (HTTPStatus.BAD_GATEWAY, HTTPStatus.UNPROCESSABLE_ENTITY):
+                warning = ProviderWarning("Example", "Request", "Please correct this request.", status=400)
+                if response_status != HTTPStatus.BAD_GATEWAY:
+                    warning = ProviderWarning("Example", "Request", "Please correct this request.",
+                                              status=400, response_status=response_status)
+                with self.subTest(action=action, response_status=response_status), \
+                     patch.object(tools_api.host_errors, "report_warning") as report, \
+                     self.assertRaises(tools_api.OperatorError) as caught:
+                    tools_api._report_operator_provider_warning("example", action, warning)
+                self.assertEqual(caught.exception.status, response_status)
+                self.assertEqual(str(caught.exception), "Please correct this request.")
+                self.assertEqual(report.call_args.kwargs["context"]["http_status"], 400)
+
     def test_upwork_token_exchange_failure_reaches_host_without_callback_credentials(self) -> None:
         from host.tools.upwork import oauth
         from host.tools.shared import web
@@ -80,8 +98,9 @@ class MCPOAuthConnectionTests(unittest.TestCase):
              patch.object(web._OPENER, "open", side_effect=urllib.error.HTTPError(
                  oauth.TOKEN, 400, "PRIVATE_BODY", {}, io.BytesIO(body))), \
              patch.object(tools_api.host_errors, "report_warning") as report:
-            with self.assertRaises(tools_api.OperatorError):
+            with self.assertRaises(tools_api.OperatorError) as caught:
                 tools_api._operator_complete_connect("upwork", {"redirect_uri": redirect, "state": "PRIVATE_STATE", "code": "PRIVATE_CODE"})
+        self.assertEqual(caught.exception.status, 502)
         report.assert_called_once()
         context = report.call_args.kwargs["context"]
         self.assertEqual(context["operation"], "OAuth token exchange")
@@ -95,7 +114,7 @@ class MCPOAuthConnectionTests(unittest.TestCase):
         from host.tools.shared import web
         from test_tools import FakeHostAPI
 
-        redirect = "http://127.0.0.1:7443/oauth/callback"
+        redirect = "https://kern.test/oauth/callback"
         api = FakeHostAPI()
         body = json.dumps({"error": "invalid_redirect_uri", "error_description": "PRIVATE_CODE",
                            "access_token": "PRIVATE_TOKEN", "client_secret": "PRIVATE_SECRET"}).encode()
@@ -108,8 +127,8 @@ class MCPOAuthConnectionTests(unittest.TestCase):
             with self.assertRaises(tools_api.OperatorError) as caught:
                 tools_api._operator_start_connect("upwork", {"redirect_uri": redirect})
 
-        self.assertEqual(caught.exception.status, 502)
-        self.assertEqual(str(caught.exception), "Upwork could not complete the connection request. Please try again later.")
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(str(caught.exception), "Upwork Connect is currently only available through localhost. Open Kern through an SSH tunnel and try Connect again.")
         report.assert_called_once()
         self.assertEqual(report.call_args.args[0], "tools.operator_provider_request")
         context = report.call_args.kwargs["context"]

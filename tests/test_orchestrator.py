@@ -309,6 +309,34 @@ class OrchestratorTests(unittest.TestCase):
 
     # -- admission -------------------------------------------------------------------
 
+    def test_steered_and_failed_work_stays_in_one_usage_row(self) -> None:
+        running, release = threading.Event(), threading.Event()
+        sample = {"type": "token_usage", "source_id": "response-1", "usage": {
+            "input_tokens": 10, "cached_input_tokens": 20, "cache_write_tokens": 0, "output_tokens": 5}}
+
+        def fake_run_turn(server, input_message, provider_session_id, model, effort, on_message):
+            on_message(sample)
+            running.set()
+            if not release.wait(timeout=10):
+                raise AssertionError("test did not release the turn")
+            on_message(sample)  # repeated response must not count twice
+            on_message({**sample, "source_id": "response-2"})
+            raise RuntimeError("provider failed after work")
+
+        try:
+            with patch.object(orchestrator.codex_app_server, "run_turn", fake_run_turn):
+                self.send_message("thread-t1", "go")
+                self.assertTrue(running.wait(timeout=10))
+                self.send_message("thread-t1", "steered work")
+                release.set()
+                self.wait_until_idle("thread-t1")
+        finally:
+            release.set()
+        with db.transaction() as cur:
+            cur.execute("SELECT input_tokens, cached_input_tokens, output_tokens FROM turn_usage WHERE thread_id = %s", ("thread-t1",))
+            self.assertEqual(cur.fetchall(), [(20, 40, 10)])
+        self.assertTrue(any(e["event_type"] == "thread.error" for e in thread_events("thread-t1")))
+
     def test_message_to_idle_thread_runs_and_records_the_message(self) -> None:
         observed_config: list[tuple[str, str]] = []
 

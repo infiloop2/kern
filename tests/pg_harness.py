@@ -378,14 +378,18 @@ def reset_database() -> None:
             "INSERT INTO secret_keys (singleton, key_hex)"
             " VALUES (TRUE, translate(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''))"
         )
-        # Migration 0030 establishes these rows as a schema invariant. Tests
+        # Migrations 0030 and 0054 seed these rows as a schema invariant. Tests
         # truncate counters along with the rest of state, so restore the empty
         # database values before each test just like the secretbox key above.
         cur.execute(
             "INSERT INTO counters (name, value) VALUES"
             " ('agent_history_threads', 0),"
             " ('agent_history_messages', 0),"
-            " ('agent_history_activities', 0)"
+            " ('agent_history_activities', 0),"
+            " ('token_usage_input_tokens', 0),"
+            " ('token_usage_cached_input_tokens', 0),"
+            " ('token_usage_cache_write_tokens', 0),"
+            " ('token_usage_output_tokens', 0)"
         )
 
 

@@ -1,3 +1,4 @@
+import { refreshAnalytics } from "./analytics.js";
 // Entry module: session lifecycle (login, logout), tab switching, the
 // 5-second refresh tick, and the one delegated click dispatcher that maps
 // data-action buttons to feature handlers. Feature code lives in the sibling
@@ -79,8 +80,8 @@ let operatorScrolledSincePanelOpen = false;
 for (const event of ["wheel", "touchmove", "keydown"]) {
   window.addEventListener(event, () => { operatorScrolledSincePanelOpen = true; }, { passive: true });
 }
-const staticTabs = ["home", "approvals", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics"];
-const homeDetailTabs = new Set(staticTabs.filter(name => !["home", "approvals"].includes(name)));
+const staticTabs = ["analytics", "home", "approvals", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics"];
+const homeDetailTabs = new Set(staticTabs.filter(name => !["home", "approvals", "analytics"].includes(name)));
 const MOBILE_NAV_QUERY = "(max-width: 860px)";
 let mobileNavOpen = false;
 let uploadPickerOpen = false;
@@ -465,7 +466,7 @@ function showTab(name, workspaceActionSequence = null) {
   $("panel-workspace-global").hidden = name !== "workspace-global";
   renderWorkspaceNavigation();
   setMobileNavOpen(false, closeDrawer);
-  const opensAtTop = viewportPanelOpen || name === "approvals" || name === "home" || homeDetailTabs.has(name);
+  const opensAtTop = viewportPanelOpen || name === "approvals" || name === "home" || name === "analytics" || homeDetailTabs.has(name);
   const openSequence = ++panelOpenSequence;
   if (opensAtTop) {
     operatorScrolledSincePanelOpen = false;
@@ -529,14 +530,14 @@ function workspaceRouteUrl(resource, itemId = null) {
   if (resource === "apps") {
     return itemId ? `#apps/${encodeURIComponent(itemId)}` : "#apps";
   }
-  if (["memory", "schedules", "scheduled-agents"].includes(resource)) {
+  if (["memory", "schedules", "scheduled-agents", "analytics"].includes(resource)) {
     return itemId ? `#${resource}/${encodeURIComponent(itemId)}` : `#${resource}`;
   }
   return "#home";
 }
 
 function workspaceRouteFromLocation() {
-  const match = location.hash.match(/^#(chat|apps|memory|schedules|scheduled-agents)(?:\/(.+))?$/);
+  const match = location.hash.match(/^#(chat|apps|memory|schedules|scheduled-agents|analytics)(?:\/(.+))?$/);
   if (!match) return null;
   try {
     const resource = match[1];
@@ -622,6 +623,7 @@ function openPasskeyGuidance() {
 // only, never on the tick (that would wipe half-typed values); expanded
 // approvals carry no inputs and also refresh on the tick.
 const tabRefreshers = {
+  analytics: { enter: [refreshAnalytics], tick: [] },
   approvals: { enter: [refreshApprovals], tick: [pollApprovals] },
   "home": { enter: [refreshConnectionGuide], tick: [] },
   "agent-log": {
@@ -715,7 +717,10 @@ function showApp() {
       .catch(error => notice(error.message, "error"));
   } else {
     const workspaceRoute = workspaceRouteFromLocation();
-    if (workspaceRoute) {
+    if (workspaceRoute?.resource === "analytics") {
+      navigateWorkspaceRoute("analytics", null, true);
+      showTab("analytics");
+    } else if (workspaceRoute) {
       // Preserve copied deep links even if the first Workspace mount/index
       // request fails before the asynchronous restore can begin.
       navigateWorkspaceRoute(workspaceRoute.resource, workspaceRoute.itemId, true);
@@ -929,6 +934,11 @@ function renderWorkspaceNavigation() {
 }
 
 async function openWorkspaceGlobal(resource, itemId = null, updateHistory = true) {
+  if (resource === "analytics") {
+    if (updateHistory) navigateWorkspaceRoute(resource);
+    showTab("analytics");
+    return true;
+  }
   const actionSequence = ++workspaceNavigationActionSequence;
   await initializeWorkspaces();
   if (actionSequence !== workspaceNavigationActionSequence) return;

@@ -598,6 +598,20 @@ class UpworkOAuthTests(unittest.TestCase):
             self.assertEqual(json.loads(caught.exception.response_body)["failure"], "invalid_response")
             self.assertNotIn("PRIVATE_CLIENT", caught.exception.response_body)
 
+    def test_localhost_guidance_is_specific_to_registration_redirect_rejection(self):
+        for url, status, code, expected in (
+            (oauth.REGISTER, 400, "invalid_redirect_uri", True),
+            (oauth.REGISTER, 400, "invalid_client_metadata", False),
+            (oauth.REGISTER, 503, "invalid_redirect_uri", False),
+            (oauth.TOKEN, 400, "invalid_redirect_uri", False),
+            (oauth.REVOKE, 400, "invalid_redirect_uri", False),
+        ):
+            failure = WebRequestError("PRIVATE", status=status, body=json.dumps({"error": code}).encode())
+            with self.subTest(url=url, status=status, code=code), patch.object(oauth, "json_request", side_effect=failure), self.assertRaises(ProviderWarning) as caught:
+                oauth._request(url)
+            self.assertEqual("only available through localhost" in str(caught.exception), expected)
+            self.assertEqual(caught.exception.response_status, 400 if expected else 502)
+
     def test_registration_pkce_uses_generic_secret_store(self):
         flow = oauth.UpworkOAuth()
         api = FakeHostAPI()

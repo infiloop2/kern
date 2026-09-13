@@ -996,6 +996,27 @@ print(json.dumps({
         finally:
             claude_code.AGENT_CWD = original_cwd
 
+    def test_stream_reports_response_usage_even_before_failure(self) -> None:
+        script = r"""
+import json, sys
+json.loads(sys.stdin.readline())
+for _ in range(2):
+ print(json.dumps({"type":"assistant","session_id":"session-1","message":{"id":"response-1","usage":{"input_tokens":2,"cache_read_input_tokens":50,"cache_creation_input_tokens":10,"output_tokens":4},"content":[{"type":"text","text":"Working"}]}}),flush=True)
+print(json.dumps({"type":"result","session_id":"session-1","subtype":"error_during_execution","is_error":True,"result":"failed"}),flush=True)
+"""
+        emitted = []
+        with tempfile.TemporaryDirectory() as directory, patch.object(claude_code, "AGENT_CWD", directory):
+            server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script], on_ready=lambda: True)
+            try:
+                with self.assertRaises(claude_code.ClaudeCodeError):
+                    claude_code.run_turn(server, "go", None, "claude-opus-5", "high", emitted.append)
+            finally:
+                server.close()
+        usage = [event for event in emitted if isinstance(event, dict) and event.get("type") == "token_usage"]
+        self.assertEqual(len(usage), 2)
+        self.assertEqual(usage[0]["source_id"], usage[1]["source_id"])
+        self.assertEqual(usage[0]["usage"]["cached_input_tokens"], 50)
+
     def test_close_login_process_clears_handle_when_close_fails(self) -> None:
         class FakeLoginProcess:
             def close(self) -> None:
