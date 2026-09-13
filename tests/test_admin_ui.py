@@ -1030,7 +1030,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn(f'<img class="login-mark" width="44" height="44" src="{favicon_src}" alt="">', html)
         # Home owns integration and diagnostic navigation. Memory remains a
         # first-class destination; Schedules is the titled section below Apps.
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 3)
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 4)
         self.assertIn('/favicon.svg', html)
         self.assertIn('/favicon.ico', html)
         self.assertIn('/admin_ui.css', html)

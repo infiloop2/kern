@@ -23,8 +23,8 @@ The categories are:
 | `schema_migrations` | ledger | One row per shipped host migration; never runtime-controlled. |
 | `config` | fixed | Singleton. |
 | `operator_connections` | fixed | At most one SSH and one tunnel row. |
-| `counters` | fixed | Internal named counters only. |
-| `thread_sessions` | retention | Event-referenced sessions are bounded by retained events; unreferenced sessions retain the newest 100,000 per runtime. |
+| `counters` | fixed | Internal named counters, including four lifetime token totals. Never pruned with detailed usage. |
+| `thread_sessions` | retention | Sessions referenced by retained events or turn usage are preserved; unreferenced sessions retain the newest 100,000 per runtime. |
 | `agent_events` | retention | Newest 10,000,000 rows, with at most 499 rows of amortization slack; message text is length-bounded. |
 | `conversation_message_embeddings` | retention | Derived vectors only within the newest 250,000 `agent_events` sequence window, with at most 5,000 events of amortization slack; rows also cascade with source events. |
 | `oauth_logins` | fixed | At most one row for each supported OAuth runtime. |
@@ -50,6 +50,7 @@ The categories are:
 | `tool_approvals` | retention | At most 1,000 pending approvals and the newest 10,000 decided rows; pending rows expire. |
 | `tool_events` | retention | Newest 1,000,000 rows, with at most 499 rows of amortization slack. |
 | `bedrock_credentials` | fixed | Singleton. |
+| `turn_usage` | retention | 90 days by last measurement time; Analytics queries seven UTC calendar days. |
 | `bedrock_usage` | retention | Daily counters for the latest 400 days; model ids are normalized to a finite catalog plus `other`. |
 | `host_diagnostics` | retention | Newest 10,000 coalesced error and warning rows, with at most 99 rows of amortization slack. |
 | `admin_passkey_config` | fixed | Singleton. |
@@ -66,3 +67,8 @@ The categories are:
 | `web_app_revisions` | retention | Newest 5 exact revisions, then one recovery point per four-hour interval during the first day and one per day from day two through day seven, capped at 17 revisions; cascades with its quota-bounded App. |
 
 When adding or renaming a table, update this inventory in the same change.
+
+`turn_usage` retains 90 days by last measurement time, pruned by the ordinary
+admin retention loop. The Analytics page queries only seven UTC calendar days.
+Usage rows have no thread foreign key so deleting a conversation does not
+remove its recent usage from the report.

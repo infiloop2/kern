@@ -492,10 +492,7 @@ def _report_operator_provider_warning(tool_id: str, action_id: str, exc: Provide
         if isinstance(exc, UnmappedProviderError)
         else str(exc)
     )
-    raise OperatorError(
-        HTTPStatus.BAD_GATEWAY,
-        message,
-    ) from None
+    raise OperatorError(exc.response_status, message) from None
 
 
 def _operator_decide(

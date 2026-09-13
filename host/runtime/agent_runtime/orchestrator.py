@@ -55,6 +55,8 @@ How the synchronization fits together:
 
 from __future__ import annotations
 
+from host.runtime.agent_runtime import token_usage
+
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
@@ -191,6 +193,7 @@ class _Turn:
     # The adapter publishes only a provider-confirmed, non-empty resumable id.
     provider_session_id: str | None = None
     startup_timer: threading.Timer | None = None
+    usage: token_usage.TurnUsage = field(default_factory=token_usage.TurnUsage)
 
 
 # runtime/thread key -> live turn. An entry exists from admission until the
@@ -701,6 +704,8 @@ def admit_turn(
             )
         run_number = state.start_thread_run(cur, thread_id)
         turn = _Turn(runtime_type, thread_id, model, effort, run_number)
+        if runtime_type != "script":
+            state.start_turn_usage(cur, thread_id, run_number, runtime_type, model)
         # Other admissions cannot interleave because the mutation lock is
         # still held when this callback registers the live fence.
         after_commit.append(partial(_publish_turn, turn))
@@ -904,6 +909,18 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
     adapter = harness_adapter(runtime_type)
 
     def on_agent_message(message: str | dict[str, Any]) -> None:
+        if isinstance(message, dict) and message.get("type") == "token_usage":
+            # Stop may already have committed FINISHING while the driver drains
+            # its last usage frame. Preserve it in this execution's own row.
+            try:
+                with turn.delivery_lock:
+                    totals = turn.usage.add(message)
+                    if totals is not None:
+                        with state.mutation() as cur:
+                            state.save_turn_usage(cur, thread_id, turn.run_number, totals)
+            except Exception as exc:
+                host_errors.report_unexpected("agent_runtime.token_usage", exc)
+            return
         event_type: str
         payload: dict[str, Any]
         refresh_recency = False

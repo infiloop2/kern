@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
+import json
 import os
 from pathlib import Path
 import re
@@ -159,6 +160,10 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
             ) from exc
         try:
             if scope in {"all", "core"}:
+                import analytics_smokes
+                analytics_context = browser.new_context(service_workers="block")
+                analytics_smokes.run(analytics_context.new_page(), url, log_in)
+                analytics_context.close()
                 vercel_context = browser.new_context()
                 vercel_analytics_smoke(vercel_context.new_page(), url)
                 vercel_context.close()
@@ -247,6 +252,10 @@ def run_webkit_workspace_smoke(playwright, url: str, *, headed: bool) -> None:
         log_in(workspace_page, url)
         workspace_smokes.web_app_worker_startup_smoke(workspace_page)
         workspace.close()
+        import analytics_smokes
+        analytics_context = browser.new_context(service_workers="block")
+        analytics_smokes.run(analytics_context.new_page(), url, log_in)
+        analytics_context.close()
     finally:
         browser.close()
 
@@ -565,6 +574,18 @@ def upwork_smoke(page, url: str) -> None:
             finally:
                 page.unroute(connect_route)
 
+        message = "Upwork Connect is currently only available through localhost. Open Kern through an SSH tunnel and try Connect again."
+        page.route(connect_route, lambda route: route.fulfill(
+            status=400, content_type="application/json", body=json.dumps({"error": {"message": message}}),
+        ))
+        try:
+            row.get_by_role("button", name="Connect account", exact=True).click()
+            expect(row.locator("[data-tool-message]")).to_have_text(message)
+            assert page.url == original_url, "rejected callback navigated away"
+            assert_no_horizontal_overflow(page, "Upwork localhost connection guidance")
+        finally:
+            page.unroute(connect_route)
+
     # A non-JSON 401 must still trigger session recovery. Reload afterwards
     # to restore the application's real unauthorized handler.
     page.route(connect_route, lambda route: route.fulfill(
@@ -645,8 +666,8 @@ def desktop_smoke(page, url: str) -> None:
     stats = page.locator("#health .stat-history")
     expect(stats).to_have_attribute("aria-label", "Agent stats")
     expect(stats.locator(".stat-history-title")).to_have_text("Stats")
-    expect(stats.locator(".history-stat-value")).to_have_text(["24", "1,286", "9,431"])
-    expect(stats.locator(".history-stat-label")).to_have_text(
+    expect(stats.locator(".stat-history-grid").first.locator(".history-stat-value")).to_have_text(["24", "1,286", "9,431"])
+    expect(stats.locator(".stat-history-grid").first.locator(".history-stat-label")).to_have_text(
         ["Threads", "Inbound messages", "Agent activity"]
     )
     expect(page.locator("#panel-home").get_by_role("button", name="Reboot host")).to_be_visible()
@@ -660,8 +681,8 @@ def desktop_smoke(page, url: str) -> None:
     expect(headings.nth(0)).to_have_text("Chat")
     expect(headings.nth(1)).to_have_text("Apps")
     expect(headings.nth(2)).to_have_text("Scheduled agents")
-    # Home and Memory are tabs; Schedules is the section heading above.
-    expect(page.locator("#sidebar .tab-button")).to_have_count(3)
+    # Home, Approvals, Memory, and Analytics are tabs; Schedules is a section heading.
+    expect(page.locator("#sidebar .tab-button")).to_have_count(4)
     expect(
         page.locator("#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']")
     ).to_be_visible()
@@ -1615,7 +1636,7 @@ def tools_smoke(page, url: str) -> None:
     expect(whatsapp_row.get_by_role("button", name="Link device", exact=True)).to_be_enabled()
     page.unroute(connect_url)
     whatsapp_row.get_by_role("button", name="Link device", exact=True).click()
-    expect(whatsapp_row).to_contain_text("QR code shown below in Linked device")
+    # Refreshes can clear the inline success message; the QR is the durable result.
     expect(whatsapp_row.get_by_alt_text("WhatsApp linked-device QR code")).to_be_visible()
     whatsapp_row.get_by_role("button", name="Check status / refresh QR", exact=True).click()
     expect(whatsapp_row).to_contain_text("scan this QR code")

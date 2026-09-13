@@ -7,6 +7,7 @@ import ipaddress
 import json
 import re
 from contextlib import contextmanager
+from http import HTTPStatus
 import threading
 import urllib.parse
 import urllib.error
@@ -74,9 +75,14 @@ def _authorization_warning(operation: str, exc: RuntimeError, *, redirect_uri: s
                 details["content_type"] = media_type
     if redirect_uri:
         details["redirect_uri"] = redirect_uri
+    message = "Upwork could not complete the connection request. Please try again later."
+    response_status = HTTPStatus.BAD_GATEWAY
+    if operation == "OAuth client registration" and status == 400 and details.get("error") == "invalid_redirect_uri":
+        message = "Upwork Connect is currently only available through localhost. Open Kern through an SSH tunnel and try Connect again."
+        response_status = HTTPStatus.BAD_REQUEST
     return ProviderWarning(
-        "Upwork", operation, "Upwork could not complete the connection request. Please try again later.",
-        status=status, body=json.dumps(details).encode("utf-8"),
+        "Upwork", operation, message,
+        status=status, body=json.dumps(details).encode("utf-8"), response_status=response_status,
     )
 
 

@@ -9,6 +9,8 @@ run one turn, and close the running process for turn stops.
 
 from __future__ import annotations
 
+from host.runtime.agent_runtime import token_usage
+
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -374,6 +376,11 @@ class ClaudeCodeSession:
                 ):
                     self._on_session_id(reported_session_id)
             if message.get("type") == "assistant":
+                response = message.get("message")
+                if isinstance(response, dict):
+                    measured = token_usage.record(response.get("id"), response.get("usage"), "claude")
+                    if measured is not None:
+                        on_message(measured)
                 text = _assistant_text(message)
                 if text:
                     last_message = text

@@ -12,6 +12,9 @@ you already pay for. Learn more at [kernai.cloud](https://kernai.cloud), and
 read the thinking behind the design on
 [the Kern blog](https://kernai.cloud/blog).
 
+Read the [Kern documentation](https://docs.kernai.cloud) for setup guides,
+core concepts, and day-to-day use.
+
 **Why agents need a home:**
 
 - **Persistent and always on:** agents keep working after you close the laptop
@@ -37,7 +40,7 @@ read the thinking behind the design on
   phone: **Chat** for threaded agent sessions you can step into when
   judgment is needed, **Apps** for durable agent-built interfaces so you read
   a queue or a board instead of scrolling a transcript, plus host-global
-  **Memory** and **Schedules**.
+  **Memory**, **Schedules**, and **Analytics** for seven-day token usage across your agents.
 
 These choices follow from a broader set of beliefs about running AI agents;
 see [PHILOSOPHY.md](PHILOSOPHY.md).

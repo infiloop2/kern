@@ -9,6 +9,7 @@ visible, so callers keep them free of secrets and raw provider bodies.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from http import HTTPStatus
 import http.client
 import ipaddress
 import json
@@ -62,6 +63,8 @@ class ProviderWarning(RuntimeError):
     The exception message is curated for the agent/operator result. A bounded
     provider response is retained separately for the authenticated operator
     diagnostic and is never included in ``str(exc)``.
+    ``status`` is the upstream status for diagnostics; ``response_status`` is
+    the integration's chosen HTTP status for the operator response.
     """
 
     def __init__(
@@ -72,11 +75,13 @@ class ProviderWarning(RuntimeError):
         *,
         status: int = 0,
         body: bytes = b"",
+        response_status: HTTPStatus = HTTPStatus.BAD_GATEWAY,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.operation = operation
         self.status = status
+        self.response_status = response_status
         self.response_body = body.decode("utf-8", "replace").strip()
 
 

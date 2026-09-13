@@ -158,6 +158,12 @@ Response:
     "available": true,
     "latest": "x.y.z"
   },
+  "lifetime_tokens": {
+    "input_tokens": 0,
+    "cached_input_tokens": 0,
+    "cache_write_tokens": 0,
+    "output_tokens": 0
+  },
   "history": {
     "threads": 24,
     "messages": 1286,
@@ -216,6 +222,7 @@ Response fields:
 | `version.state` | string or null |  | Kern preserved-state version from admin disk `version.json`. |
 | `upgrade.available` | boolean |  | Whether the public `infiloop2/kern` main-branch version is newer than the running version. This advisory check does not affect overall health. |
 | `upgrade.latest` | string or null |  | Latest valid version returned by a successful public-repository check, or `null` until the first check succeeds after service start. A failed later check preserves the last successful value. |
+| `lifetime_tokens` | object | | Host lifetime known token totals across all providers: `input_tokens`, `cached_input_tokens`, `cache_write_tokens`, `output_tokens`. Four disjoint integer buckets, starting at feature deployment without backfill. Updated by measurement deltas, including corrections, and unaffected by the 90-day detail retention. Missing measurements contribute no known tokens; these are consumption totals, not billing or complete coverage. |
 | `history.threads` | integer |  | Monotonic number of agent threads recorded on this host. |
 | `history.messages` | integer |  | Monotonic number of user messages recorded on this host. |
 | `history.activities` | integer |  | Monotonic number of agent messages and activity records, including tool calls, commands, reasoning, and other agent work. |
@@ -1634,3 +1641,20 @@ Host runtime mutation response fields:
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
 | `status` | enum | `accepted` | Host runtime operation was accepted and will be applied asynchronously. |
+
+## Token analytics
+
+`GET /v1/analytics` is operator-only and accepts no query parameters. It returns
+`since`, `until`, seven UTC `days`, and `groups` aggregated by thread, selected
+runtime/model, and measurement day. Each group has `thread_id`, `name`, `kind`
+(`chats`, `apps`, or `schedules`), `runtime`, `model`, `day`, `turns`, `tokens`,
+`measured_turns`, and `active`. A Chat or App is active when it exists and is
+not archived; a schedule is active when its definition exists and is not
+deleted. A pruned schedule remains inactive. This flag describes current
+membership, not whether an agent is running. Both counter objects use `input_tokens`,
+`cached_input_tokens`, `cache_write_tokens`, and `output_tokens`.
+
+`tokens` sums available values (null if none); `measured_turns` gives the
+number of turns contributing to each bucket. Fewer measured turns than
+`turns` means a partial total. The report contains no prompts or responses.
+See [token analytics](../architecture/token-analytics.md).

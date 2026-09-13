@@ -41,6 +41,8 @@ fix an entitlement problem, and routing the operator into one is a dead end.
 
 from __future__ import annotations
 
+from host.runtime.agent_runtime import token_usage
+
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -852,6 +854,11 @@ def _consume_turn_notification(
         if not isinstance(update, dict):
             return
         update_type = update.get("sessionUpdate")
+        if update_type == "turn_completed":
+            measured = token_usage.record(update.get("prompt_id"), update.get("usage"), "grok")
+            if measured is not None:
+                on_message(measured)
+            return
         if update_type == "agent_message_chunk":
             text = _content_text(update.get("content"))
             if text:

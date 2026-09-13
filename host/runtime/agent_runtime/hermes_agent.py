@@ -17,6 +17,8 @@ credential surface (operator paste and STS attestation) is owned by
 
 from __future__ import annotations
 
+from host.runtime.agent_runtime import token_usage
+
 import json
 import queue
 import re
@@ -377,6 +379,8 @@ def _activity_from_line(line: str, activity_marker: str) -> dict[str, Any] | Non
         record = json.loads(payload)
     except (ValueError, TypeError):
         return None
+    if isinstance(record, dict) and record.get("type") == "token_usage":
+        return token_usage.record(record.get("source_id"), record.get("usage"), "hermes")
     return agent_activity.normalize_record(record)
 
 

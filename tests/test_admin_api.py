@@ -792,6 +792,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
             body["history"],
             {"threads": 0, "messages": 0, "activities": 0},
         )
+        self.assertEqual(body["lifetime_tokens"], {
+            "input_tokens": 0, "cached_input_tokens": 0, "cache_write_tokens": 0, "output_tokens": 0,
+        })
 
 
     def test_agent_file_content_route_requires_operator_auth(self) -> None:
@@ -3478,7 +3481,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('ADMIN_UI_DIR / "favicon.svg"', api)
         self.assertIn('ADMIN_UI_DIR / "manifest.webmanifest"', api)
         self.assertIn('ADMIN_UI_DIR / "service-worker.js"', api)
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 3)
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 4)
         self.assertNotIn('id="tab-processes"', html)
         self.assertNotIn('id="tab-host-diagnostics"', html)
         self.assertIn('data-action="open-home-view" data-view="processes"', html)

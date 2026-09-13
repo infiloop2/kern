@@ -34,6 +34,8 @@ contract it expects Codex to see during app-server initialization.
 
 from __future__ import annotations
 
+from host.runtime.agent_runtime import token_usage
+
 from collections import deque
 from dataclasses import dataclass, field
 import json
@@ -965,7 +967,18 @@ def run_turn(
         params = message.get("params", {})
         if not isinstance(params, dict):
             continue
-        if method == "item/agentMessage/delta":
+        if method == "thread/tokenUsage/updated":
+            if params.get("threadId") == thread_id and params.get("turnId") == turn_id:
+                usage = params.get("tokenUsage")
+                if isinstance(usage, dict):
+                    # Repeated notifications carry the same cumulative total.
+                    # Only `last` belongs to the new response; never import
+                    # the resumed thread's lifetime consumption.
+                    source = f"{turn_id}:{json.dumps(usage.get('total'), sort_keys=True)}"
+                    measured = token_usage.record(source, usage.get("last"), "codex")
+                    if measured is not None:
+                        on_message(measured)
+        elif method == "item/agentMessage/delta":
             delta = params.get("delta")
             if isinstance(delta, str) and delta:
                 current_parts.append(agent_activity.clean_text(delta))

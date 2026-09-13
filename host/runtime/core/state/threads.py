@@ -336,18 +336,20 @@ def thread_session_config(thread_id: str, cur: Any = None) -> dict[str, Any] | N
 def prune_thread_sessions(cur: Any, runtime: str, keep: int) -> None:
     """Drop least-recently-used unreferenced threads beyond ``keep``.
 
-    A thread with retained events keeps its canonical row so its history stays
-    listed; once event retention drops a thread's last event, the ordinary LRU
-    cap applies.
+    Retained events keep history listed; retained usage keeps run numbers from
+    restarting and colliding with existing accounting rows. The ordinary LRU
+    cap applies once neither references the thread.
     """
     cur.execute(
         "DELETE FROM thread_sessions AS candidate"
         " WHERE candidate.agent_runtime = %s"
         " AND NOT EXISTS (SELECT 1 FROM agent_events WHERE agent_events.thread_id = candidate.thread_id)"
+        " AND NOT EXISTS (SELECT 1 FROM turn_usage WHERE turn_usage.thread_id = candidate.thread_id)"
         " AND candidate.thread_id NOT IN ("
         "  SELECT retained.thread_id FROM thread_sessions AS retained"
         "  WHERE retained.agent_runtime = %s"
         "  AND NOT EXISTS (SELECT 1 FROM agent_events WHERE agent_events.thread_id = retained.thread_id)"
+        "  AND NOT EXISTS (SELECT 1 FROM turn_usage WHERE turn_usage.thread_id = retained.thread_id)"
         "  ORDER BY retained.last_used_at DESC NULLS LAST, retained.thread_id LIMIT %s)",
         (runtime, runtime, keep),
     )

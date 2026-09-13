@@ -59,7 +59,7 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `tool_approvals` | Host-owned approval records. `number` is the identity behind the public `approval_<number>.<token>` id (the token is an unguessable poll capability); conditional transitions make each approval single-use, and terminal result text is returned to both operator and agent (decided history is pruned to the newest 10,000). |
 | `tool_events` | Tool call, approval, connection, enablement, and config audit events. Accepted calls store their exact bounded arguments; lifecycle events store no arguments. Pruned to the newest 1,000,000. |
 | `host_diagnostics` | Service-level errors and contained warnings copied from structured journald records. Brief repeats coalesce by service and fingerprint; one shared cap retains the newest 10,000 rows. List reads omit traceback/context until detail expansion. |
-| `counters` | Monotonic Home Stats totals for threads, user messages, and agent activity. Agent activity combines agent-authored messages with activity events. Migrations seed each total from retained state, then the thread/event write transaction increments it so later session or audit pruning never lowers the displayed totals. |
+| `counters` | Four lifetime token totals start at zero on deployment, accumulate turn-measurement deltas including corrections, and survive usage retention. Also stores monotonic Home Stats totals for threads, user messages, and agent activity. Agent activity combines agent-authored messages with activity events. Migrations seed each total from retained state, then the thread/event write transaction increments it so later session or audit pruning never lowers the displayed totals. |
 | `secret_keys` | The at-rest encryption key for stored secrets (see below). The proxy and tools roles can read it, but their table grants expose only their own ciphertext-bearing rows. |
 | `schema_migrations` | Applied migration versions (owned by the migration runner). |
 
@@ -202,3 +202,10 @@ Rules for changing persisted state shape from now on:
 - Old code is not expected to run against a newer schema: deploy replaces the
   code and migrates in one operation, and downgrades go through `migrate down`
   before installing older code.
+
+## Token accounting
+
+`turn_usage` stores one row per orchestrator execution, keyed by thread and
+run number. It is admin-owned and contains four token counters, the selected
+runtime/model, and start/measurement timestamps. See
+[token analytics](token-analytics.md) for normalization and reporting semantics.
