@@ -197,9 +197,9 @@
         <div id="analytics-detail" hidden>
           <section class="analytics-section"><h2>Daily usage</h2><div class="analytics-legend"><span class="chats">Chats</span><span class="apps">Apps</span><span class="schedules">Schedules</span></div><div id="analytics-chart" class="analytics-chart" role="img"></div></section>
           <section class="analytics-section"><h2>Providers and models</h2><div id="analytics-providers"></div></section>
-          <section class="analytics-section"><h2>Usage by thread</h2><p class="muted">Highest measured usage first. Select a thread to explore its daily usage.</p><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Thread</th><th>Turns</th><th>Input</th><th>Cached input</th><th>Cache write</th><th>Output</th></tr></thead><tbody id="analytics-threads"></tbody></table></div><div id="analytics-pagination" class="analytics-pagination" hidden><button id="analytics-prev" class="ghost">Previous</button><span id="analytics-page"></span><button id="analytics-next" class="ghost">Next</button></div></section>
+          <section class="analytics-section"><h2>Usage by thread</h2><p class="muted">Highest measured usage first. Select a thread to explore its daily usage.</p><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Thread</th><th>Turns</th><th>Input tokens</th><th>Output tokens</th></tr></thead><tbody id="analytics-threads"></tbody></table></div><div id="analytics-pagination" class="analytics-pagination" hidden><button id="analytics-prev" class="ghost">Previous</button><span id="analytics-page"></span><button id="analytics-next" class="ghost">Next</button></div></section>
         </div>
-        <p class="analytics-note muted">Input, cached input, cache write, and output are separate token buckets. — means unavailable; * means partial coverage. Charts sum known tokens, including cached tokens. Usage is grouped by the latest measurement time of each turn. Models show the turn’s selected model. Tokens measure consumption, not subscription cost.</p>
+        <p class="analytics-note muted">Input tokens include ordinary input, cache writes, and cached input. “Of which cached” is a subset of input, not an additional total. Missing values mean unavailable; * means partial coverage. Charts sum known input and output tokens, counting cached input once. Usage is grouped by the latest measurement time of each turn. Models show the turn’s selected model. Tokens measure consumption, not subscription cost.</p>
       </div>
       <div id="panel-home" class="tab-panel">
         <section id="passkey-setup" class="passkey-setup" aria-labelledby="passkey-setup-title" hidden>
@@ -323,6 +323,7 @@
                 <button id="file-download" class="ghost compact" data-action="download-file" hidden>Download</button>
               </div>
               <pre id="file-content" class="file-content"></pre>
+              <p id="file-preview-message" class="empty-state" hidden></p>
               <video id="file-video" class="file-video" controls playsinline hidden></video>
               <img id="file-image" class="file-image" alt="" hidden>
             </div>

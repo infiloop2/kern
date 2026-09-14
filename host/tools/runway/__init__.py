@@ -69,12 +69,13 @@ DEFAULT_IMAGE_MODEL = "gen4_turbo"
 # an existing video from an instruction prompt rather than generating from
 # scratch.
 EDIT_MODEL = "aleph2"
-IMAGE_MODEL = "gpt_image_2"
+IMAGE_MODELS = ("gpt_image_2_5_sunburst", "gpt_image_2_5_flare")
+DEFAULT_IMAGE_GENERATION_MODEL = "gpt_image_2_5_sunburst"
 SPEECH_MODEL = "eleven_multilingual_v2"
 
 IMAGE_RATIOS = ("1920:1920", "1920:1280", "1280:1920")
 DEFAULT_IMAGE_RATIO = "1920:1920"
-IMAGE_QUALITIES = ("low", "medium", "high", "auto")
+IMAGE_QUALITIES = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_IMAGE_QUALITY = "low"
 SPEECH_VOICES = (
     "Maya", "Arjun", "Serene", "Bernard", "Billy", "Mark", "Clint", "Mabel",
@@ -122,7 +123,7 @@ RUNWAY_EDIT_POLICY = (
 )
 RUNWAY_IMAGE_POLICY = (
     "The image prompt and rendering parameters supplied by the user or agent are sent "
-    "to Runway's Developer API and forwarded by Runway to OpenAI's GPT Image 2. The generation is billed as "
+    "to Runway's Developer API and forwarded by Runway to OpenAI's GPT Image 2.5 Sunburst or Flare. The generation is billed as "
     "Runway credits. This action runs directly with no approval and publishes nothing; "
     "it returns a task id to active model context to poll with get_task."
 )
@@ -232,7 +233,7 @@ MANIFEST = ToolManifest(
         ActionSpec(
             id="generate_image",
             description=(
-                "Start an async GPT Image 2 text-to-image task through Runway and return a "
+                "Start an async GPT Image 2.5 text-to-image task through Runway and return a "
                 "task_id. Poll get_task with output_kind=image for the temporary image URL. "
                 "This runs immediately, spends Runway credits, and publishes nothing."
             ),
@@ -242,6 +243,7 @@ MANIFEST = ToolManifest(
                 "required": ["prompt"],
                 "properties": {
                     "prompt": {"type": "string", "description": "What to render (up to 1000 chars)."},
+                    "model": {"type": "string", "enum": list(IMAGE_MODELS), "description": "Default gpt_image_2_5_sunburst; choose gpt_image_2_5_flare for faster everyday generation."},
                     "ratio": {"type": "string", "enum": list(IMAGE_RATIOS), "description": "Output resolution: square 1920:1920 (default), landscape 1920:1280, or portrait 1280:1920."},
                     "quality": {"type": "string", "enum": list(IMAGE_QUALITIES), "description": "Rendering quality (default low); higher quality spends more Runway credits."},
                 },
@@ -341,7 +343,7 @@ MANIFEST = ToolManifest(
                 points=(
                     DataSummaryPoint(label="Runway models", text="Every request first goes to Runway. Gen-4.5, Gen-4 Turbo, and Aleph 2 generations use Runway's own models."),
                     DataSummaryPoint(label="Third-party video models", text="When the agent explicitly selects Google Veo 3.1, ByteDance Seedance 2.0/2.5, or fal's MiniMax H3 Max, Runway sends that provider the prompt, output ratio or resolution and duration, optional seed, and any first-frame image. Kern does not let Runway silently choose one of these models."),
-                    DataSummaryPoint(label="Image and speech models", text="For image generation, Runway sends the prompt, ratio, and quality to OpenAI's GPT Image 2. For speech generation, Runway sends the speech text and selected voice to ElevenLabs Multilingual v2."),
+                    DataSummaryPoint(label="Image and speech models", text="For image generation, Runway sends the prompt, ratio, and quality to OpenAI's GPT Image 2.5 Sunburst or Flare. For speech generation, Runway sends the speech text and selected voice to ElevenLabs Multilingual v2."),
                 ),
             ),
             DataSummaryCard(
@@ -619,11 +621,11 @@ def _upload_staged_asset(
 
 
 def _image_request(api: HostAPI, tool_input: JSONObject) -> JSONObject:
-    extra = set(tool_input) - {"prompt", "ratio", "quality"}
+    extra = set(tool_input) - {"prompt", "model", "ratio", "quality"}
     if extra:
-        raise ToolInputValidationError("Runway generate_image only supports prompt, ratio, and quality.")
+        raise ToolInputValidationError("Runway generate_image only supports prompt, model, ratio, and quality.")
     return {
-        "model": IMAGE_MODEL,
+        "model": _string_choice(tool_input, "model", IMAGE_MODELS, DEFAULT_IMAGE_GENERATION_MODEL),
         "promptText": _prompt_text(tool_input, api),
         "ratio": _string_choice(tool_input, "ratio", IMAGE_RATIOS, DEFAULT_IMAGE_RATIO),
         "quality": _string_choice(tool_input, "quality", IMAGE_QUALITIES, DEFAULT_IMAGE_QUALITY),
@@ -823,7 +825,7 @@ class RunwayTool:
                 return _save_video(cast(str, tool_input["task_id"]), headers)
             if action == "generate_image":
                 body = _image_request(api, tool_input)
-                return self._create_task(TEXT_TO_IMAGE_ENDPOINT, body, headers, IMAGE_MODEL, "image")
+                return self._create_task(TEXT_TO_IMAGE_ENDPOINT, body, headers, cast(str, body["model"]), "image")
             if action == "generate_speech":
                 body = _speech_request(api, tool_input)
                 return self._create_task(TEXT_TO_SPEECH_ENDPOINT, body, headers, SPEECH_MODEL, "audio")

@@ -2621,6 +2621,77 @@ class DeployUnitTests(unittest.TestCase):
             self.assertEqual(len(listed["entries"]), 1000)
             self.assertNotIn("should-not-be-touched.txt", {entry["name"] for entry in listed["entries"]})
 
+    def test_agent_file_helper_skips_unknown_types_and_large_files_without_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            home_path = Path(home)
+            namespace = self._agent_file_helper_namespace(home_path)
+            (home_path / "kit.ZIP").write_bytes(b"PK\x03\x04archive")
+            (home_path / "unknown.custom").write_text("Even readable unknown formats are download-only")
+            (home_path / "unknown").write_text("Unknown extensionless file")
+            with (home_path / "large.txt").open("wb") as handle:
+                handle.truncate(1024 * 1024 + 1)
+            for name, reason in [
+                ("kit.ZIP", "unsupported_type"),
+                ("unknown.custom", "unsupported_type"),
+                ("unknown", "unsupported_type"),
+                ("large.txt", "too_large"),
+            ]:
+                with self.subTest(name=name):
+                    output = io.StringIO()
+                    with patch("sys.stdout", output), patch("os.fdopen", side_effect=AssertionError("must not read file")):
+                        namespace["read_path"]("/" + name)  # type: ignore[index, operator]
+                    response = json.loads(output.getvalue())
+                    self.assertEqual(response["preview_unavailable"], reason)
+                    self.assertEqual(response["size_bytes"], (home_path / name).stat().st_size)
+                    self.assertNotIn("content", response)
+
+    def test_agent_file_helper_detects_binary_even_with_text_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            home_path = Path(home)
+            namespace = self._agent_file_helper_namespace(home_path)
+            for payload in [b"PK\x03\x04archive", b"hello\0world", b"\xff\xfehello", b"ascii\x7f"]:
+                with self.subTest(payload=payload):
+                    (home_path / "notes.txt").write_bytes(payload)
+                    output = io.StringIO()
+                    with patch("sys.stdout", output):
+                        namespace["read_path"]("/notes.txt")  # type: ignore[index, operator]
+                    response = json.loads(output.getvalue())
+                    self.assertEqual(response["preview_unavailable"], "binary")
+                    self.assertNotIn("content", response)
+
+    def test_agent_file_helper_previews_utf8_and_files_at_size_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            home_path = Path(home)
+            namespace = self._agent_file_helper_namespace(home_path)
+            for content in ["", "Hello 世界 👋\n\tIndented\r\n", "a" * (1024 * 1024)]:
+                with self.subTest(size=len(content)):
+                    (home_path / "README").write_text(content, encoding="utf-8")
+                    output = io.StringIO()
+                    with patch("sys.stdout", output):
+                        namespace["read_path"]("/README")  # type: ignore[index, operator]
+                    response = json.loads(output.getvalue())
+                    self.assertEqual(response["content"], content)
+                    self.assertFalse(response["truncated"])
+                    self.assertNotIn("preview_unavailable", response)
+
+    def test_agent_file_helper_rechecks_size_when_file_grows(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            home_path = Path(home)
+            (home_path / "growing.txt").write_text("small")
+            namespace = self._agent_file_helper_namespace(home_path)
+            real_fdopen = os.fdopen
+
+            def grow_before_read(fd, *args, **kwargs):
+                (home_path / "growing.txt").write_bytes(b"a" * (1024 * 1024 + 1))
+                return real_fdopen(fd, *args, **kwargs)
+
+            output = io.StringIO()
+            with patch("sys.stdout", output), patch("os.fdopen", side_effect=grow_before_read):
+                namespace["read_path"]("/growing.txt")  # type: ignore[index, operator]
+            response = json.loads(output.getvalue())
+            self.assertEqual(response["preview_unavailable"], "too_large")
+            self.assertNotIn("content", response)
+
     def test_agent_file_helper_opens_files_nonblocking(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             home_path = Path(home)
@@ -2673,20 +2744,19 @@ class DeployUnitTests(unittest.TestCase):
             self.assertEqual(header["size_bytes"], len(payload))
             self.assertEqual(streamed, payload)
 
-    def test_agent_file_helper_stream_rejects_oversized_image(self) -> None:
+    def test_agent_file_helper_stream_rejects_oversized_media_without_reading(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             home_path = Path(home)
-            oversized = home_path / "huge.webp"
-            with oversized.open("wb") as handle:
-                handle.truncate(25 * 1024 * 1024 + 1)
             namespace = self._agent_file_helper_namespace(home_path)
-
-            output = io.StringIO()
-            with patch("sys.stdout", output), self.assertRaises(SystemExit) as exc:
-                namespace["stream_path"]("/huge.webp")  # type: ignore[index, operator]
-
-            self.assertEqual(exc.exception.code, 3)
-            self.assertIn("file is larger than 26214400 bytes", output.getvalue())
+            for name in ["huge.webp", "huge.mp4"]:
+                with self.subTest(name=name):
+                    with (home_path / name).open("wb") as handle:
+                        handle.truncate(25 * 1024 * 1024 + 1)
+                    output = io.StringIO()
+                    with patch("sys.stdout", output), patch("os.fdopen", side_effect=AssertionError("must not read file")), self.assertRaises(SystemExit) as exc:
+                        namespace["stream_path"]("/" + name)  # type: ignore[index, operator]
+                    self.assertEqual(exc.exception.code, 3)
+                    self.assertIn("file is larger than 26214400 bytes", output.getvalue())
 
     def test_agent_file_helper_stream_rejects_unsupported_content(self) -> None:
         with tempfile.TemporaryDirectory() as home:

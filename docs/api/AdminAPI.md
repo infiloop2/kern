@@ -981,14 +981,31 @@ Agent file read response:
   "path": "/workspace/README.md",
   "size_bytes": 123,
   "truncated": false,
-  "encoding": "utf-8-replacement",
+  "encoding": "utf-8",
   "content": "File contents..."
 }
 ```
 
-File reads are capped at 1 MiB. If the file is larger, `truncated` is `true`
-and `content` contains the first 1 MiB decoded with replacement characters for
-invalid UTF-8 bytes.
+Text previews allow only known text, source, and configuration extensions and
+standard filenames such as `README`, `LICENSE`, and `.gitignore`. The allowlist
+is defined in `host/bootstrap/helpers/read-agent-file.sh`. Files must be valid
+UTF-8 without binary control bytes and no larger than 1 MiB. Unknown types
+(including archives) and oversized files are rejected before reading their
+contents. These requests succeed with metadata only, for example:
+
+```json
+{
+  "path": "/workspace/assets.zip",
+  "size_bytes": 10033207,
+  "preview_unavailable": "unsupported_type"
+}
+```
+
+`preview_unavailable` is `unsupported_type`, `too_large`, or `binary`; no
+`content` is returned. The Files viewer shows a download-only message.
+Image and video previews support JPEG, PNG, WebP, MP4, and MOV up to 25 MiB;
+larger media are rejected before streaming and remain downloadable within
+the separate 200,000,000-byte download limit.
 
 Upload `filename` is the original basename, not a path. It must be non-empty,
 at most 200 UTF-8 bytes, and contain no slash, backslash, NUL, or control

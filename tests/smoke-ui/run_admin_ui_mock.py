@@ -1779,8 +1779,8 @@ def agent_accounts() -> dict[str, Any]:
                 "metered_requests": 208,
                 "input_tokens": 1_804_211,
                 "output_tokens": 96_407,
-                "cache_read_tokens": 0,
-                "cache_write_tokens": 0,
+                "cache_read_tokens": 600_000,
+                "cache_write_tokens": 200_000,
             },
         }
         if STATE.bedrock_access_key_id and bedrock_status == "active":

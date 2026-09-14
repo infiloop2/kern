@@ -36,6 +36,10 @@ class RunwayToolTests(unittest.TestCase):
                 "get_task", "save_video",
             ],
         )
+        image_action = next(spec for spec in tool.manifest.actions if spec.id == "generate_image")
+        properties = image_action.input_schema["properties"]
+        self.assertEqual(properties["model"]["enum"], ["gpt_image_2_5_sunburst", "gpt_image_2_5_flare"])
+        self.assertEqual(properties["quality"]["enum"], ["low", "medium", "high", "xhigh", "max"])
         cards = tool.manifest.data_summary.cards
         self.assertEqual(len(cards), 4)
         self.assertEqual([card.title for card in cards][:2], ["What leaves this host", "Where it can go"])
@@ -51,7 +55,7 @@ class RunwayToolTests(unittest.TestCase):
         self.assertIn("Gen-4.5, Gen-4 Turbo, and Aleph 2", destination_text)
         self.assertIn("ByteDance Seedance 2.0/2.5", destination_text)
         self.assertIn("fal's MiniMax H3 Max", destination_text)
-        self.assertIn("to OpenAI's GPT Image 2", destination_text)
+        self.assertIn("to OpenAI's GPT Image 2.5 Sunburst or Flare", destination_text)
         self.assertIn("to ElevenLabs Multilingual v2", destination_text)
         retention = next(card for card in cards if card.title == "How long Runway retains it")
         protections = " ".join(tool.manifest.protections)
@@ -513,7 +517,7 @@ class RunwayToolTests(unittest.TestCase):
         assert isinstance(wrong_type, ActionFailed)
         self.assertIn("does not refer to a staged video", wrong_type.error)
 
-    def test_generate_image_uses_gpt_image_2_through_runway(self) -> None:
+    def test_generate_image_defaults_to_sunburst_through_runway(self) -> None:
         seen: dict[str, Any] = {}
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
@@ -532,7 +536,7 @@ class RunwayToolTests(unittest.TestCase):
         self.assertEqual(
             seen["body"],
             {
-                "model": "gpt_image_2",
+                "model": "gpt_image_2_5_sunburst",
                 "promptText": "a red fox",
                 "ratio": "1280:1920",
                 "quality": "medium",
@@ -540,6 +544,32 @@ class RunwayToolTests(unittest.TestCase):
             },
         )
         self.assertEqual(result.result["output_kind"], "image")
+
+    def test_generate_image_supports_both_2_5_models_and_new_qualities(self) -> None:
+        for model in ("gpt_image_2_5_sunburst", "gpt_image_2_5_flare"):
+            for quality in ("low", "medium", "high", "xhigh", "max"):
+                with self.subTest(model=model, quality=quality), patch.object(
+                    runway, "json_request", return_value={"id": "image-task"}
+                ) as request:
+                    result = RunwayTool().execute(
+                        "generate_image", {"prompt": "a fox", "model": model, "quality": quality}, api_with_key()
+                    )
+                assert isinstance(result, ActionExecuted)
+                self.assertEqual(request.call_args.args[1], runway.TEXT_TO_IMAGE_ENDPOINT)
+                self.assertEqual(request.call_args.kwargs["body"], {
+                    "model": model, "promptText": "a fox", "ratio": "1920:1920",
+                    "quality": quality, "outputCount": 1,
+                })
+                self.assertEqual(result.result["model"], model)
+                self.assertEqual(result.result["output_kind"], "image")
+                assert_matches_output_schema(self, runway.MANIFEST, "generate_image", result)
+
+    def test_generate_image_rejects_retired_model_and_auto_quality_before_network(self) -> None:
+        for extra in ({"model": "gpt_image_2"}, {"model": "unknown"}, {"quality": "auto"}):
+            with self.subTest(extra=extra), patch.object(runway, "json_request") as request:
+                result = RunwayTool().execute("generate_image", {"prompt": "a fox", **extra}, api_with_key())
+                self.assertIsInstance(result, ActionFailed)
+                request.assert_not_called()
 
     def test_generate_speech_uses_elevenlabs_through_runway(self) -> None:
         seen: dict[str, Any] = {}

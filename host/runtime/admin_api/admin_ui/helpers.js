@@ -178,10 +178,9 @@ export function bedrockUsage(account) {
   const currency = !usage.currency || usage.currency === "USD" ? "$" : `${usage.currency} `;
   return {
     cost: `${currency}${amount.toFixed(2)}`,
-    inputTokens: Number(usage.input_tokens) || 0,
+    inputTokens: (Number(usage.input_tokens) || 0) + (Number(usage.cache_read_tokens) || 0) + (Number(usage.cache_write_tokens) || 0),
     outputTokens: Number(usage.output_tokens) || 0,
     cacheReadTokens: Number(usage.cache_read_tokens) || 0,
-    cacheWriteTokens: Number(usage.cache_write_tokens) || 0,
     requests: Number(usage.requests) || 0,
     meteredRequests: Number(usage.metered_requests) || 0,
   };

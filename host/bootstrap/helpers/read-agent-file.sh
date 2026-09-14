@@ -16,7 +16,21 @@ from pathlib import Path, PurePosixPath
 AGENT_HOME = Path("/mnt/kern-agent/agent-home").resolve(strict=True)
 MAX_LIST_ENTRIES = 1000
 MAX_READ_BYTES = 1024 * 1024
-MAX_STREAM_BYTES = 200_000_000
+TEXT_PREVIEW_SUFFIXES = {
+    ".txt", ".md", ".mdx", ".rst", ".log", ".csv", ".tsv",
+    ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
+    ".xml", ".svg", ".html", ".htm", ".css", ".scss", ".less",
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue", ".svelte",
+    ".py", ".pyi", ".sh", ".bash", ".zsh", ".fish", ".sql",
+    ".go", ".rs", ".java", ".kt", ".c", ".h", ".cpp", ".hpp",
+    ".cs", ".rb", ".php", ".swift", ".diff", ".patch",
+}
+TEXT_PREVIEW_NAMES = {
+    "readme", "license", "copying", "notice", "makefile", "dockerfile",
+    ".gitignore", ".gitattributes", ".gitmodules", ".gitconfig", ".dockerignore",
+    ".editorconfig", ".env", ".npmrc", ".bashrc", ".zshrc", ".profile",
+}
+MAX_STREAM_BYTES = 25 * 1024 * 1024
 MAX_IMAGE_STREAM_BYTES = 25 * 1024 * 1024
 MAX_DOWNLOAD_BYTES = 200_000_000
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -157,21 +171,47 @@ def read_path(raw_path: str) -> None:
         info = os.fstat(file_fd)
         if not stat.S_ISREG(info.st_mode):
             fail(3, "path is not a regular file")
+        if (
+            Path(parts[-1]).suffix.lower() not in TEXT_PREVIEW_SUFFIXES
+            and parts[-1].lower() not in TEXT_PREVIEW_NAMES
+        ):
+            print_download_only(parts, info.st_size, "unsupported_type")
+            return
+        if info.st_size > MAX_READ_BYTES:
+            print_download_only(parts, info.st_size, "too_large")
+            return
         with os.fdopen(file_fd, "rb") as handle:
-            data = handle.read(MAX_READ_BYTES + 1)
             file_fd = -1
+            data = handle.read(MAX_READ_BYTES + 1)
     finally:
         if file_fd >= 0:
             os.close(file_fd)
-    truncated = len(data) > MAX_READ_BYTES
-    if truncated:
-        data = data[:MAX_READ_BYTES]
+    # Keep the read bounded even if the file grows after fstat.
+    if len(data) > MAX_READ_BYTES:
+        print_download_only(parts, max(info.st_size, len(data)), "too_large")
+        return
+    try:
+        content = data.decode("utf-8")
+    except UnicodeDecodeError:
+        print_download_only(parts, info.st_size, "binary")
+        return
+    if any(ord(char) < 32 and char not in "\t\n\r\f" or ord(char) == 127 for char in content):
+        print_download_only(parts, info.st_size, "binary")
+        return
     print(json.dumps({
         "path": public_path_for(parts),
         "size_bytes": info.st_size,
-        "truncated": truncated,
-        "encoding": "utf-8-replacement",
-        "content": data.decode("utf-8", errors="replace"),
+        "truncated": False,
+        "encoding": "utf-8",
+        "content": content,
+    }, sort_keys=True))
+
+
+def print_download_only(parts: list[str], size_bytes: int, reason: str) -> None:
+    print(json.dumps({
+        "path": public_path_for(parts),
+        "size_bytes": size_bytes,
+        "preview_unavailable": reason,
     }, sort_keys=True))
 
 
