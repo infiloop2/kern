@@ -88,6 +88,10 @@ async function readAgentFile(path, actionSequence = null, fallbackPath = "") {
     if (error.status === 404 && fallbackPath && fallbackPath !== path) {
       return readAgentFile(fallbackPath, requestSequence);
     }
+    if (error.status === 400 && /^file is larger than \d+ bytes$/.test(error.message)) {
+      renderDownloadOnly("too_large");
+      return;
+    }
     fileMessage(error.message, true);
   }
 }
@@ -186,10 +190,25 @@ function fileRow(name, path, type, sizeBytes) {
 
 function renderFileContent(file) {
   resetFileMedia();
+  if (file.preview_unavailable) {
+    $("file-viewer-title").textContent = file.path || "";
+    renderDownloadOnly(file.preview_unavailable);
+    return;
+  }
   $("file-content").hidden = false;
   const truncated = file.truncated ? " (truncated)" : "";
   $("file-viewer-title").textContent = `${file.path || ""}${truncated}`;
   $("file-content").textContent = file.content || "";
+}
+
+function renderDownloadOnly(reason) {
+  $("file-content").textContent = "";
+  $("file-content").hidden = true;
+  const message = $("file-preview-message");
+  message.textContent = reason === "too_large"
+    ? "This file is too large to preview. Use Download to save it."
+    : "Preview is unavailable for this file type. Use Download to save it.";
+  message.hidden = false;
 }
 
 function renderFileVideo(path, blob) {
@@ -215,6 +234,8 @@ function renderFileImage(path, blob) {
 
 function prepareFileViewer(path) {
   resetFileMedia();
+  $("file-preview-message").hidden = true;
+  $("file-preview-message").textContent = "";
   $("file-viewer-title").textContent = path;
   const content = $("file-content");
   content.textContent = "";

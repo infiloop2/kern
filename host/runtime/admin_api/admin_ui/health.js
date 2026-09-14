@@ -70,14 +70,16 @@ function filesystemMountTile(label, mount) {
   return usageTile(label, mount.used_bytes, mount.total_bytes);
 }
 
-function historyStat(label, value, description) {
+function historyStat(label, value, description, cached = null) {
   const count = Number.isInteger(value) && value >= 0 ? value : 0;
   const formatted = new Intl.NumberFormat().format(count);
-  const accessible = `${label}: ${formatted}. ${description}`;
+  const cachedDetail = cached === null ? "" : `Of which cached: ${new Intl.NumberFormat().format(cached)}`;
+  const accessible = `${label}: ${formatted}. ${description} ${cachedDetail}`;
   return `
     <div class="history-stat" aria-label="${esc(accessible)}" title="${esc(description)}">
       <span class="history-stat-value">${esc(formatted)}</span>
       <span class="history-stat-label">${esc(label)}</span>
+      ${cachedDetail ? `<span class="token-cache-detail">${esc(cachedDetail)}</span>` : ""}
     </div>`;
 }
 
@@ -130,10 +132,8 @@ export async function refreshHealth() {
       </div>
       <div class="lifetime-token-title">Lifetime tokens · All providers</div>
       <div class="stat-history-grid lifetime-tokens" aria-label="Lifetime token usage">
-        ${historyStat("Input", tokens.input_tokens, "Known uncached input tokens since usage tracking began.")}
-        ${historyStat("Cached input", tokens.cached_input_tokens, "Known tokens read from cache since usage tracking began.")}
-        ${historyStat("Cache write", tokens.cache_write_tokens, "Known tokens written to cache since usage tracking began.")}
-        ${historyStat("Output", tokens.output_tokens, "Known generated tokens since usage tracking began, including reported reasoning.")}
+        ${historyStat("Input tokens", (tokens.input_tokens ?? 0) + (tokens.cached_input_tokens ?? 0) + (tokens.cache_write_tokens ?? 0), "Known total input tokens since usage tracking began, including cached input and cache writes.", tokens.cached_input_tokens ?? 0)}
+        ${historyStat("Output tokens", tokens.output_tokens, "Known generated tokens since usage tracking began, including reported reasoning.")}
       </div>
     </div>`);
   renderRuntimeOverview();
@@ -354,7 +354,7 @@ function bedrockSummary(runtime, account) {
   const usageHtml = bedrockUsageReadout(usage);
   let usageSummaryText = "no metered usage yet";
   if (usage) {
-    const tokens = `${formatTokenCount(usage.inputTokens)} input / ${formatTokenCount(usage.outputTokens)} output tokens`;
+    const tokens = `${formatTokenCount(usage.inputTokens)} input tokens (of which cached: ${formatTokenCount(usage.cacheReadTokens)}) / ${formatTokenCount(usage.outputTokens)} output tokens`;
     // Surface the metered gap, so a screen reader hears why the estimate may
     // lag actual spend.
     const metered = usage.requests > usage.meteredRequests

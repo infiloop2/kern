@@ -66,15 +66,12 @@ EDITS_ENDPOINT = f"{OPENAI_API_BASE}/v1/images/edits"
 # size denial explain it. (OpenAI itself accepts far longer prompts.)
 MAX_PROMPT_CHARS = 1_000
 
-# One stable contract across every exposed model. GPT Image 2 also accepts
-# arbitrary width x height, but admitting that would put a per-model size
-# matrix in the tool schema that can drift from provider support independently
-# of this file; these three sizes are accepted by all three models.
-SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-1.5", "gpt-image-1-mini")
-DEFAULT_MODEL = "gpt-image-2"
+# Keep the same three output sizes across the exposed image models.
+SUPPORTED_MODELS = ("gpt-image-2.5-sunburst", "gpt-image-2.5-flare")
+DEFAULT_MODEL = "gpt-image-2.5-sunburst"
 SIZES = ("1024x1024", "1536x1024", "1024x1536")
 DEFAULT_SIZE = "1024x1024"
-QUALITIES = ("low", "medium", "high")
+QUALITIES = ("low", "medium", "high", "xhigh", "max", "auto")
 # Low by default: quality is the dominant cost *and* latency lever, and a tool
 # call still has a bounded lifetime (see REQUEST_TIMEOUT_SECONDS).
 DEFAULT_QUALITY = "low"
@@ -160,7 +157,7 @@ MANIFEST = ToolManifest(
                     "model": {
                         "type": "string",
                         "enum": list(SUPPORTED_MODELS),
-                        "description": "GPT Image model (default gpt-image-2, the strongest; gpt-image-1-mini is the cheapest and fastest).",
+                        "description": "Default gpt-image-2.5-sunburst for precise generation and editing; choose gpt-image-2.5-flare for faster everyday generation.",
                     },
                     "size": {
                         "type": "string",

@@ -279,6 +279,7 @@ EXEMPT_FIELDS = {
     ("runway", "generate_video", "seed"): TYPED,
     ("runway", "edit_video", "video_asset_id"): TYPED,
     ("runway", "edit_video", "seed"): TYPED,
+    ("runway", "generate_image", "model"): TYPED,
     ("runway", "generate_image", "ratio"): TYPED,
     ("runway", "generate_image", "quality"): TYPED,
     ("runway", "generate_speech", "voice"): TYPED,

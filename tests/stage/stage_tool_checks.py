@@ -976,8 +976,7 @@ class StageToolChecks:
 
     def _check_openai_images_live(self) -> str:
         """Generate one image for real: OpenAI has no read-only endpoint behind
-        this tool, and the cheapest model at low quality costs about a cent. The
-        spend is worth it because this is the only proof of the whole binary
+        this tool. Use Flare at low quality to exercise the whole binary
         path — provider call, base64 decode, socket relay, and the agent-owned
         file the shim writes under /tool_assets."""
         name = "openai_images_generate_image"
@@ -985,7 +984,7 @@ class StageToolChecks:
             name,
             {
                 "prompt": "a plain teal circle on a white background",
-                "model": "gpt-image-1-mini",
+                "model": "gpt-image-2.5-flare",
                 "quality": "low",
                 "size": "1024x1024",
             },

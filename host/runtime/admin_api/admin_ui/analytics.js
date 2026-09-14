@@ -3,7 +3,8 @@ import { api } from "./api.js";
 import { $, esc, formatTokenCount } from "./helpers.js";
 
 const fields = ["input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens"];
-const labels = ["Input", "Cached input", "Cache write", "Output"];
+const inputFields = fields.slice(0, 3);
+const labels = ["Input tokens", "Output tokens"];
 const kinds = { chats: "Chats", apps: "Apps", schedules: "Schedules" };
 const runtimes = { codex: "Codex", "codex-2": "Codex 2", claude_code: "Claude Code", grok: "Grok", hermes: "Hermes" };
 let report = null;
@@ -39,13 +40,26 @@ function metric(value, known, turns) {
   return `<span title="${esc(value === null ? "Usage unavailable" : `${value.toLocaleString()} tokens · ${known} of ${turns} turns measured`)}">${esc(count(value))}${partial ? "*" : ""}</span>`;
 }
 
+// Storage keeps disjoint provider buckets. The UI shows full input with cache
+// reads nested underneath, so cached input must not be added to charts again.
+function displayMetrics(summary) {
+  const values = inputFields.map(key => summary.tokens[key]);
+  const input = values.every(value => value === null) ? null : values.reduce((sum, value) => sum + (value ?? 0), 0);
+  const partial = input !== null && inputFields.some(key => summary.coverage[key] < summary.turns);
+  const description = input === null ? "Input usage unavailable" : `${input.toLocaleString()} input tokens, including cached input and cache writes.${partial ? " Some input measurements are unavailable." : ""}`;
+  return [
+    `<span title="${esc(description)}">${esc(count(input))}${partial ? "*" : ""}</span><div class="token-cache-detail">Of which cached: ${metric(summary.tokens.cached_input_tokens, summary.coverage.cached_input_tokens, summary.turns)}</div>`,
+    metric(summary.tokens.output_tokens, summary.coverage.output_tokens, summary.turns),
+  ];
+}
+
 function render() {
   if (!report) return;
   if (thread && !report.groups.some(row => row.thread_id === thread)) thread = "";
   const all = report.groups.filter(row => kind === "all" || row.kind === kind);
   const rows = all.filter(row => !thread || row.thread_id === thread);
   const totals = aggregate(rows);
-  $("analytics-cards").innerHTML = fields.map((key, i) => `<div class="stat-tile"><div class="stat-label">${labels[i]}</div><div class="stat-value">${metric(totals.tokens[key], totals.coverage[key], totals.turns)}</div></div>`).join("");
+  $("analytics-cards").innerHTML = displayMetrics(totals).map((value, i) => `<div class="stat-tile"><div class="stat-label">${labels[i]}</div><div class="stat-value">${value}</div></div>`).join("");
   const selected = report.groups.find(row => row.thread_id === thread);
   $("analytics-focus").hidden = !selected;
   $("analytics-focus-name").textContent = selected?.name || "";
@@ -76,7 +90,7 @@ function render() {
     const [runtime, model] = key.split("\n");
     const summary = aggregate(rows.filter(row => row.runtime === runtime && row.model === model));
     return { runtime, model, summary };
-  }).sort((a, b) => total(b.summary.tokens) - total(a.summary.tokens)).map(({ runtime, model, summary }) => `<div class="analytics-provider"><div><strong>${esc(runtimes[runtime] || runtime)}</strong><span class="muted">${esc(model)}</span></div><div class="analytics-provider-counts">${fields.map((key, i) => `<span><small>${labels[i]}</small>${metric(summary.tokens[key], summary.coverage[key], summary.turns)}</span>`).join("")}</div></div>`).join("");
+  }).sort((a, b) => total(b.summary.tokens) - total(a.summary.tokens)).map(({ runtime, model, summary }) => `<div class="analytics-provider"><div><strong>${esc(runtimes[runtime] || runtime)}</strong><span class="muted">${esc(model)}</span></div><div class="analytics-provider-counts">${displayMetrics(summary).map((value, i) => `<div><small>${labels[i]}</small>${value}</div>`).join("")}</div></div>`).join("");
 
   const byThread = new Map();
   for (const row of rows) {
@@ -92,7 +106,7 @@ function render() {
     const conversation = row.active
       ? ` · <a href="#${route}/${encodeURIComponent(row.thread_id)}">Open conversation</a>`
       : ` · ${row.kind === "schedules" ? "Inactive" : "Archived"}`;
-    return `<tr><td><button class="analytics-thread-name" data-analytics-thread="${esc(row.thread_id)}">${esc(row.name)}</button><small>${kinds[row.kind]}${conversation}</small></td><td>${row.summary.turns}</td>${fields.map(key => `<td>${metric(row.summary.tokens[key], row.summary.coverage[key], row.summary.turns)}</td>`).join("")}</tr>`;
+    return `<tr><td><button class="analytics-thread-name" data-analytics-thread="${esc(row.thread_id)}">${esc(row.name)}</button><small>${kinds[row.kind]}${conversation}</small></td><td>${row.summary.turns}</td>${displayMetrics(row.summary).map(value => `<td>${value}</td>`).join("")}</tr>`;
   }).join("");
   $("analytics-pagination").hidden = ranked.length <= 20;
   $("analytics-page").textContent = `${page + 1} / ${Math.max(1, Math.ceil(ranked.length / 20))}`;

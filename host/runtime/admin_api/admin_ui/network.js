@@ -334,18 +334,15 @@ function bedrockUsageBox(account) {
   const usage = bedrockUsage(account);
   if (!usage) return "";
   const tokenParts = [
-    `${formatTokenCount(usage.inputTokens)} in`,
-    `${formatTokenCount(usage.outputTokens)} out`,
+    `${formatTokenCount(usage.inputTokens)} input tokens (of which cached: ${formatTokenCount(usage.cacheReadTokens)})`,
+    `${formatTokenCount(usage.outputTokens)} output tokens`,
   ];
-  if (usage.cacheReadTokens || usage.cacheWriteTokens) {
-    tokenParts.push(`${formatTokenCount(usage.cacheReadTokens + usage.cacheWriteTokens)} cached`);
-  }
   const unmetered = usage.requests - usage.meteredRequests;
   const caveatHtml = unmetered > 0
     ? `<span class="bedrock-usage-caveat">${esc(`${unmetered} of ${usage.requests} requests unmetered`)}</span>`
     : "";
   return `
-    <span class="bedrock-usage-box" role="group" aria-label="${esc(`Month-to-date estimate ${usage.cost}; ${tokenParts.join(", ")} tokens; ${usage.requests} requests`)}">
+    <span class="bedrock-usage-box" role="group" aria-label="${esc(`Month-to-date estimate ${usage.cost}; ${tokenParts.join(", ")}; ${usage.requests} requests`)}">
       <span class="bedrock-usage-cost">MTD est. <strong>${esc(usage.cost)}</strong></span>
       <span class="bedrock-usage-tokens">${esc(tokenParts.join(" · "))} · ${esc(String(usage.requests))} req</span>
       ${caveatHtml}

@@ -160,6 +160,10 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
             ) from exc
         try:
             if scope in {"all", "core"}:
+                import file_preview_smokes
+                files_context = browser.new_context(service_workers="block")
+                file_preview_smokes.run(files_context.new_page(), url, log_in)
+                files_context.close()
                 import analytics_smokes
                 analytics_context = browser.new_context(service_workers="block")
                 analytics_smokes.run(analytics_context.new_page(), url, log_in)
@@ -238,6 +242,8 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
 
 
 def run_webkit_workspace_smoke(playwright, url: str, *, headed: bool) -> None:
+    import file_preview_smokes
+
     try:
         browser = playwright.webkit.launch(headless=not headed)
     except Exception as exc:
@@ -246,6 +252,9 @@ def run_webkit_workspace_smoke(playwright, url: str, *, headed: bool) -> None:
             "  python3 -m playwright install webkit"
         ) from exc
     try:
+        files_context = browser.new_context(service_workers="block")
+        file_preview_smokes.run(files_context.new_page(), url, log_in)
+        files_context.close()
         workspace = browser.new_context()
         workspace_page = workspace.new_page()
         report_page_errors(workspace_page, "WebKit generated Web App")
@@ -1211,7 +1220,7 @@ def desktop_smoke(page, url: str) -> None:
     # One live month-to-date estimate is metered from Hermes's Bedrock responses.
     expect(bedrock_row.locator(".bedrock-usage-box")).to_have_count(1)
     expect(bedrock_row.locator(".bedrock-usage-box")).to_contain_text("MTD est. $12.75")
-    expect(bedrock_row.locator(".bedrock-usage-box")).to_contain_text("1.8M in")
+    expect(bedrock_row.locator(".bedrock-usage-box")).to_contain_text("2.6M input tokens (of which cached: 600.0k)")
     expect(bedrock_row.locator(".bedrock-usage-box")).to_contain_text("2 of 210 requests unmetered")
     expect(bedrock_row.locator(".bedrock-usage-box")).not_to_contain_text("Hermes")
     expect(bedrock_row).not_to_contain_text("Cost Explorer")
@@ -1221,7 +1230,7 @@ def desktop_smoke(page, url: str) -> None:
     hermes_box = page.locator("#runtime-overview .runtime-summary", has_text="Hermes")
     expect(hermes_box).to_contain_text("MTD est.")
     expect(hermes_box).to_contain_text("$12.75")
-    expect(hermes_box).to_contain_text("1.8M")
+    expect(hermes_box).to_contain_text("2.6M")
     expect(page.locator("#runtime-overview .bedrock-toolbar-lag")).to_have_count(0)
     expect(hermes_box).to_contain_text("active")
     expect(hermes_box.locator(".runtime-running-badge")).to_have_count(0)

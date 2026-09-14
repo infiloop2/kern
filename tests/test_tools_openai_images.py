@@ -43,6 +43,11 @@ class OpenAIImagesToolTests(unittest.TestCase):
         self.assertIsNone(tool.credentials)
         self.assertEqual([spec.id for spec in tool.manifest.actions], ["generate_image"])
         self.assertEqual([item.key for item in tool.manifest.config], ["OPENAI_API_KEY"])
+        properties = tool.manifest.actions[0].input_schema["properties"]
+        self.assertEqual(properties["model"]["enum"], [
+            "gpt-image-2.5-sunburst", "gpt-image-2.5-flare",
+        ])
+        self.assertEqual(properties["quality"]["enum"], ["low", "medium", "high", "xhigh", "max", "auto"])
         cards = tool.manifest.data_summary.cards
         self.assertEqual(
             [card.title for card in cards],
@@ -100,7 +105,7 @@ class OpenAIImagesToolTests(unittest.TestCase):
         self.assertEqual(
             seen["body"],
             {
-                "model": "gpt-image-2",
+                "model": "gpt-image-2.5-sunburst",
                 "prompt": "a red fox in snow",
                 "size": "1024x1024",
                 "quality": "low",
@@ -127,7 +132,7 @@ class OpenAIImagesToolTests(unittest.TestCase):
                 "generate_image",
                 {
                     "prompt": "a poster",
-                    "model": "gpt-image-1-mini",
+                    "model": "gpt-image-2.5-flare",
                     "size": "1536x1024",
                     "quality": "medium",
                     "output_format": "jpeg",
@@ -135,7 +140,7 @@ class OpenAIImagesToolTests(unittest.TestCase):
                 api_with_key(),
             )
         assert isinstance(result, StreamingAsset)
-        self.assertEqual(seen["body"]["model"], "gpt-image-1-mini")
+        self.assertEqual(seen["body"]["model"], "gpt-image-2.5-flare")
         self.assertEqual(seen["body"]["size"], "1536x1024")
         self.assertEqual(seen["body"]["quality"], "medium")
         with result.open_stream() as opened:
@@ -196,6 +201,58 @@ class OpenAIImagesToolTests(unittest.TestCase):
         self.assertIn(b"put the logo on the scene", body)
         # The staged copies are one-shot: consumed once OpenAI returned an image.
         self.assertEqual(api.assets.records, {})
+
+    def test_both_gpt_image_2_5_models_generate_and_edit_at_new_qualities(self) -> None:
+        for model in ("gpt-image-2.5-sunburst", "gpt-image-2.5-flare"):
+            for quality in ("xhigh", "max", "auto"):
+                for editing in (False, True):
+                    with self.subTest(model=model, quality=quality, editing=editing):
+                        api = api_with_key()
+                        tool_input: JSONObject = {"prompt": "a fox", "model": model, "quality": quality}
+                        if editing:
+                            asset_id = api.assets.add(filename="fox.png", media_type="image/png", data=PNG_BYTES)
+                            tool_input["image_asset_ids"] = [asset_id]
+                        streamed_body = b""
+
+                        def fake_edit(method: str, url: str, **kwargs: Any) -> bytes:
+                            nonlocal streamed_body
+                            streamed_body = b"".join(kwargs["body"])
+                            return json.dumps(image_response()).encode()
+
+                        with (
+                            patch.object(openai_images, "json_request", return_value=image_response()) as generate,
+                            patch.object(openai_images, "stream_request_bytes", side_effect=fake_edit) as edit,
+                        ):
+                            result = OpenAIImagesTool().execute("generate_image", tool_input, api)
+                        self.assertIsInstance(result, StreamingAsset)
+                        if editing:
+                            generate.assert_not_called()
+                            self.assertEqual(edit.call_args.args[1], openai_images.EDITS_ENDPOINT)
+                            body = streamed_body
+                            self.assertIn(f'name="model"\r\n\r\n{model}\r\n'.encode(), body)
+                            self.assertIn(f'name="quality"\r\n\r\n{quality}\r\n'.encode(), body)
+                            self.assertEqual(api.assets.records, {})
+                        else:
+                            edit.assert_not_called()
+                            self.assertEqual(generate.call_args.args[1], openai_images.GENERATIONS_ENDPOINT)
+                            self.assertEqual(generate.call_args.kwargs["body"]["model"], model)
+                            self.assertEqual(generate.call_args.kwargs["body"]["quality"], quality)
+
+    def test_retired_models_fail_before_network(self) -> None:
+        bad_inputs: list[JSONObject] = [
+            {"prompt": "x", "model": model}
+            for model in ("gpt-image-2", "gpt-image-1.5", "gpt-image-1-mini")
+        ]
+        for tool_input in bad_inputs:
+            with (
+                self.subTest(tool_input=tool_input),
+                patch.object(openai_images, "json_request") as generate,
+                patch.object(openai_images, "stream_request_bytes") as edit,
+            ):
+                result = OpenAIImagesTool().execute("generate_image", tool_input, api_with_key())
+                self.assertIsInstance(result, ActionFailed)
+                generate.assert_not_called()
+                edit.assert_not_called()
 
     def test_reference_images_survive_an_unusable_response_for_retry(self) -> None:
         api = api_with_key()
