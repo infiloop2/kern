@@ -47,12 +47,13 @@ for line in sys.stdin:
         send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
     elif method == "thread/resume":
         assert msg["params"]["threadId"] == "thread_existing"
+        assert msg["params"]["excludeTurns"] is True
         assert msg["params"]["model"] == "gpt-5.6-sol"
         assert msg["params"]["developerInstructions"].startswith(
             "You are running inside Kern."
         )
         assert "effort" not in msg["params"]
-        send({"id": msg["id"], "result": {"thread": {"id": "thread_existing"}}})
+        send({"id": msg["id"], "result": {"thread": {"id": "thread_existing", "turns": []}}})
     elif method == "turn/start":
         assert msg["params"]["model"] == "gpt-5.6-sol"
         assert msg["params"]["effort"] == "ultra"

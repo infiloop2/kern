@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import contextmanager
+from urllib.parse import parse_qs, urlsplit
 import unittest
 from typing import Any
 from unittest.mock import patch
@@ -45,7 +47,7 @@ class InstagramReadTests(unittest.TestCase):
         self.assertEqual(tool.manifest.connection, "oauth")
         self.assertEqual(
             [spec.id for spec in tool.manifest.actions],
-            ["get_profile", "get_recent_media", "get_publishing_limit", "post_reel"],
+            ["get_profile", "get_recent_media", "get_publishing_limit", "post_image", "post_carousel", "post_reel"],
         )
 
     def test_get_profile_maps_fields(self) -> None:
@@ -413,6 +415,213 @@ class InstagramReelTests(unittest.TestCase):
             result = InstagramTool().execute_approved(approved_record, api)
         assert isinstance(result, ActionFailed)
         self.assertTrue(result.reconnect_required)
+
+
+class InstagramImageTests(unittest.TestCase):
+    def prepare(self, count=1, caption="  Exact caption\n🧠  "):
+        api = connected_api()
+        ids = [api.assets.add(asset_id=f"asset_image_{i}", filename=f"slide-{i}.jpg", media_type="image/jpeg", data=f"jpeg-{i}".encode()) for i in range(count)]
+        action = "post_image" if count == 1 else "post_carousel"
+        tool_input = {"image_asset_id": ids[0]} if count == 1 else {"image_asset_ids": ids}
+        tool_input["caption"] = caption
+        with (patch.object(instagram, "json_request", return_value=dict(ME_RESPONSE)) as request,
+              patch.object(api.assets, "public_asset_url") as grant):
+            pending = InstagramTool().execute(action, tool_input, api)
+        self.assertIsInstance(pending, ActionPendingApproval)
+        self.assertEqual(request.call_count, 1)  # Identity read only, no upload/create.
+        grant.assert_not_called()
+        return api, ids, api.approvals.approve(pending.approval_id)
+
+    def test_single_image_binds_exact_caption_and_asset_then_publishes(self):
+        api, ids, record = self.prepare()
+        proposal = record.payload["proposal"]
+        self.assertEqual(proposal["caption"], "  Exact caption\n🧠  ")
+        self.assertEqual(proposal["image_assets"][0]["sha256"], api.assets.describe(ids[0]).sha256)
+        calls = []
+        def request(method, url, **kwargs):
+            calls.append((method, url))
+            params = parse_qs(urlsplit(url).query)
+            if "/me?" in url:
+                return dict(ME_RESPONSE)
+            if "/media?" in url:
+                self.assertIn("image_url", params)
+                self.assertNotIn("media_type", params)
+                self.assertNotIn("is_carousel_item", params)
+                self.assertEqual(params["caption"], [proposal["caption"]])
+                return {"id": "100"}
+            if "/100?" in url:
+                return {"status_code": "FINISHED"}
+            if "/media_publish?" in url:
+                self.assertEqual(params["creation_id"], ["100"])
+                return {"id": "900"}
+            raise AssertionError(url)
+        with patch.object(instagram, "json_request", request):
+            result = InstagramTool().execute_approved(record, api)
+        self.assertIsInstance(result, ApprovalExecuted)
+        self.assertIn("900", result.message)
+        self.assertEqual(len([x for x in calls if "/media_publish?" in x[1]]), 1)
+        self.assertFalse(api.assets.records)
+
+    def test_carousel_preserves_order_waits_for_every_child_and_publishes_only_parent(self):
+        api, ids, record = self.prepare(10)
+        self.assertEqual([a["asset_id"] for a in record.payload["proposal"]["image_assets"]], ids)
+        live = set()
+        @contextmanager
+        def grant(asset_id):
+            live.add(asset_id)
+            try:
+                yield "https://kern.example/tool-media/" + asset_id
+            finally:
+                live.remove(asset_id)
+        children, finished, publications = [], set(), []
+        polls = {}
+        def request(method, url, **kwargs):
+            params = parse_qs(urlsplit(url).query)
+            if "/me?" in url:
+                return dict(ME_RESPONSE)
+            if "/media?" in url:
+                if params.get("media_type") == ["CAROUSEL"]:
+                    self.assertEqual(finished, set(children))
+                    self.assertEqual(params["children"], [",".join(children)])
+                    self.assertEqual(params["caption"], [record.payload["proposal"]["caption"]])
+                    return {"id": "200"}
+                index = len(children)
+                self.assertEqual(live, set(ids))
+                self.assertEqual(params["image_url"], ["https://kern.example/tool-media/" + ids[index]])
+                self.assertEqual(params["is_carousel_item"], ["true"])
+                self.assertNotIn("caption", params)
+                self.assertNotIn("media_type", params)
+                children.append(str(100 + index))
+                return {"id": children[-1]}
+            if "/media_publish?" in url:
+                self.assertFalse(live)
+                self.assertEqual(params["creation_id"], ["200"])
+                publications.append(params["creation_id"])
+                return {"id": "900"}
+            media_id = urlsplit(url).path.rsplit("/", 1)[1]
+            polls[media_id] = polls.get(media_id, 0) + 1
+            if media_id == "109" and polls[media_id] == 1:
+                return {"status_code": "IN_PROGRESS"}
+            if media_id in children:
+                finished.add(media_id)
+            return {"status_code": "FINISHED"}
+        with (patch.object(instagram, "json_request", request), patch.object(api.assets, "public_asset_url", grant), patch.object(instagram.time, "sleep") as sleep):
+            result = InstagramTool().execute_approved(record, api)
+        self.assertIsInstance(result, ApprovalExecuted)
+        self.assertEqual(len(publications), 1)
+        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(polls["100"], 1)  # Finished children aren't polled again.
+        self.assertFalse(live)
+        self.assertFalse(api.assets.records)
+
+    def test_invalid_image_inputs_never_create_approval_or_provider_write(self):
+        api = connected_api()
+        jpeg = api.assets.add(filename="a.jpg", media_type="image/jpeg")
+        png = api.assets.add(asset_id="png", filename="b.png", media_type="image/png")
+        video = api.assets.add(asset_id="video")
+        large = api.assets.add(asset_id="large", filename="large.jpg", media_type="image/jpeg")
+        meta, raw = api.assets.records[large]
+        api.assets.records[large] = (replace(meta, size_bytes=instagram.MAX_IMAGE_BYTES + 1), raw)
+        bad = [("post_image", x) for x in ({}, {"image_asset_id": 3}, {"image_asset_id": png}, {"image_asset_id": video}, {"image_asset_id": large}, {"image_asset_id": jpeg, "image_url": "https://elsewhere/image.jpg"}, {"image_asset_id": jpeg, "caption": "x" * 2201}, {"image_asset_id": jpeg, "caption": None})]
+        bad += [("post_carousel", {"image_asset_ids": value}) for value in ([], [jpeg], [jpeg, jpeg], [jpeg, png], [jpeg, 1], "abc", [jpeg] * 11)]
+        with patch.object(instagram, "json_request") as request:
+            for action, tool_input in bad:
+                with self.subTest(tool_input=tool_input):
+                    self.assertIsInstance(InstagramTool().execute(action, tool_input, api), ActionFailed)
+        request.assert_not_called()
+        self.assertFalse(api.approvals.records)
+
+    def test_last_changed_or_expired_slide_fails_before_any_grant_or_container(self):
+        for expired in (False, True):
+            with self.subTest(expired=expired):
+                api, ids, record = self.prepare(5)
+                if expired:
+                    api.assets.delete(ids[-1])
+                else:
+                    api.assets.add(asset_id=ids[-1], filename="slide-4.jpg", media_type="image/jpeg", data=b"changed")
+                with (patch.object(instagram, "json_request", return_value=dict(ME_RESPONSE)) as request,
+                      patch.object(api.assets, "public_asset_url") as grant):
+                    result = InstagramTool().execute_approved(record, api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(request.call_count, 1)
+                grant.assert_not_called()
+                self.assertIn(ids[0], api.assets.records)
+
+    def test_image_summary_has_bounded_utf8_size(self):
+        summary = instagram._image_summary({"caption": "🧠" * 2200, "image_assets": [{"filename": "界" * 255}] * 10}, "@" + "界" * 1000)
+        self.assertLessEqual(len(summary.encode()), 500)
+        self.assertIn("10-image carousel", summary)
+
+    def test_processing_failure_revokes_all_grants_and_never_partially_publishes(self):
+        for terminal in ("ERROR", "EXPIRED", "IN_PROGRESS"):
+            with self.subTest(terminal=terminal):
+                api, ids, record = self.prepare(2)
+                live = set()
+                @contextmanager
+                def grant(asset_id):
+                    live.add(asset_id)
+                    try:
+                        yield "https://kern.example/tool-media/" + asset_id
+                    finally:
+                        live.remove(asset_id)
+                responses = [dict(ME_RESPONSE), {"id": "100"}, {"id": "101"}]
+                responses += [{"status_code": "FINISHED"}, {"status_code": terminal}]
+                responses += [{"status_code": terminal}] * 7
+                with (patch.object(instagram, "json_request", side_effect=responses) as request,
+                      patch.object(api.assets, "public_asset_url", grant), patch.object(instagram.time, "sleep") as sleep,
+                      self.assertRaises(ProviderWarning)):
+                    InstagramTool().execute_approved(record, api)
+                self.assertFalse(live)
+                self.assertEqual(set(api.assets.records), set(ids))
+                self.assertFalse(any("media_publish" in c.args[1] for c in request.call_args_list))
+                self.assertLessEqual(sleep.call_count, 7)
+
+    def test_parent_processing_failure_never_publishes_children(self):
+        api, ids, record = self.prepare(2)
+        responses = [dict(ME_RESPONSE), {"id": "100"}, {"id": "101"}, {"status_code": "FINISHED"}, {"status_code": "FINISHED"}, {"id": "200"}, {"status_code": "ERROR"}]
+        with (patch.object(instagram, "json_request", side_effect=responses) as request, self.assertRaises(ProviderWarning)):
+            InstagramTool().execute_approved(record, api)
+        self.assertFalse(any("media_publish" in c.args[1] for c in request.call_args_list))
+        self.assertEqual(set(api.assets.records), set(ids))
+
+    def test_unconfirmed_publish_retains_assets_and_is_not_success_or_retried(self):
+        for response in ({}, {"id": "bad/id"}, {"id": 123}):
+            with self.subTest(response=response):
+                api, ids, record = self.prepare()
+                with patch.object(instagram, "json_request", side_effect=[dict(ME_RESPONSE), {"id": "100"}, {"status_code": "FINISHED"}, response]) as request:
+                    result = InstagramTool().execute_approved(record, api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("Check recent media before retrying", result.error)
+                self.assertEqual(sum("media_publish" in c.args[1] for c in request.call_args_list), 1)
+                self.assertIn(ids[0], api.assets.records)
+
+    def test_invalid_container_id_stops_before_publish(self):
+        api, ids, record = self.prepare(2)
+        with patch.object(instagram, "json_request", side_effect=[dict(ME_RESPONSE), {"id": "not-an-id"}]) as request:
+            result = InstagramTool().execute_approved(record, api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(set(api.assets.records), set(ids))
+
+    def test_image_provider_failure_preserves_sanitized_diagnostics(self):
+        api, ids, record = self.prepare()
+        error = WebRequestError("failed", status=400, body=b'{"error":{"code":100,"error_subcode":2207009,"message":"ig-access private-url"}}')
+        with (patch.object(instagram, "json_request", side_effect=[dict(ME_RESPONSE), error]), self.assertRaises(ProviderWarning) as caught):
+            InstagramTool().execute_approved(record, api)
+        self.assertEqual(caught.exception.operation, "image container")
+        self.assertIn("2207009", caught.exception.response_body)
+        self.assertNotIn("ig-access", caught.exception.response_body)
+        self.assertNotIn("private-url", str(caught.exception))
+        self.assertIn(ids[0], api.assets.records)
+
+    def test_carousel_account_change_prevents_grants_and_writes(self):
+        api, ids, record = self.prepare(2)
+        with (patch.object(instagram, "json_request", return_value={"user_id": "999", "username": "other"}) as request,
+              patch.object(api.assets, "public_asset_url") as grant):
+            result = InstagramTool().execute_approved(record, api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertEqual(request.call_count, 1)
+        grant.assert_not_called()
 
 
 class InstagramCredentialFlowTests(unittest.TestCase):

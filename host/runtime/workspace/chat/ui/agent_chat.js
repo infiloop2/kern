@@ -1052,7 +1052,7 @@ function renderThreadHistory() {
   // in-flight touch scroll (and its momentum) survives polling.
   const ordered = visibleThreadEvents().filter(event => (
     ["thread.message", "thread.activity", "thread.error", "thread.stopped",
-      "thread.memory_cleared"].includes(event.event_type)
+      "thread.memory_cleared", "thread.context_added"].includes(event.event_type)
   ));
   if (switched || !ordered.length) {
     renderedEntryHtml.clear();
@@ -1161,6 +1161,11 @@ function renderThreadEntry(event, openActivities) {
   if (event.event_type === "thread.stopped") {
     return `<article class="thread-entry thread-stopped" data-entry-id="${entryId}">
       Agent stopped
+    </article>`;
+  }
+  if (event.event_type === "thread.context_added") {
+    return `<article class="thread-entry thread-stopped" data-entry-id="${entryId}">
+      ${esc(payload.message || "Context added.")}
     </article>`;
   }
   if (event.event_type === "thread.memory_cleared") {

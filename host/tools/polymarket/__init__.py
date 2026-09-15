@@ -6,7 +6,7 @@ import urllib.parse
 from typing import cast
 
 from host.tools.json_types import JSONObject, JSONValue
-from host.tools.manifest import ActionSpec, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
+from host.tools.manifest import protect_inputs, guarded_input, validated_input, ActionSpec, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL, ParamGuardDenied
 from host.tools.host_api import HostAPI
@@ -137,7 +137,7 @@ MANIFEST = ToolManifest(
     display_name="Polymarket",
     description="Lets your agent browse and search prediction markets and events on Polymarket and read prices. Trading is not available.",
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(id="list_markets",
             description="List a flat set of individual tradable questions, defaulting to active markets ranked by 24-hour volume. Each summary includes outcomes, current prices, and outcome token ids for get_order_book/price_history; use list_events when related questions should stay grouped.",
             data_policy=POLYMARKET_READ_POLICY,
@@ -194,7 +194,35 @@ MANIFEST = ToolManifest(
             ),
             output_schema=PRICE_HISTORY_OUTPUT_SCHEMA,
         ),
-    ),
+    ), {
+        "list_markets": {
+            "limit": validated_input("Integer from 1 to 100."),
+            "offset": validated_input("Integer from 0 to 10000."),
+            "order": validated_input("One of the listed choices."),
+            "include_closed": validated_input("JSON boolean."),
+        },
+        "list_events": {
+            "limit": validated_input("Integer from 1 to 100."),
+            "offset": validated_input("Integer from 0 to 10000."),
+            "order": validated_input("One of the listed choices."),
+            "include_closed": validated_input("JSON boolean."),
+        },
+        "search": {
+            "query": guarded_input(),
+            "limit_per_type": validated_input("Integer from 1 to 50."),
+        },
+        "get_market": {
+            "market_id": validated_input("Decimal market ID, up to 60 characters; mutually exclusive with slug."),
+            "slug": guarded_input(),
+        },
+        "get_order_book": {
+            "token_id": validated_input("Decimal outcome token ID, up to 120 characters."),
+        },
+        "price_history": {
+            "token_id": validated_input("Decimal outcome token ID, up to 120 characters."),
+            "interval": validated_input("One of the listed choices."),
+        },
+    }),
     protections=(
         "All actions use unauthenticated public read-only market-data endpoints. The package has no wallet, private key, token, order, approval, or trading action.",
         "Queries, pagination, result sizes, order-book depth, and history points are bounded; provider payloads are normalized before entering model context.",

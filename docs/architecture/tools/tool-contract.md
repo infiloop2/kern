@@ -85,6 +85,14 @@ ConnectionKind = Literal["oauth", "mcp_oauth", "enable_only", "whatsapp_linked_d
 ApprovalKind = Literal["direct", "operator"]
 
 @dataclass(frozen=True)
+class InputProtection:
+    kind: Literal["validated", "parameter_guard"]
+    description: str = ""                  # only for validated inputs
+    allow_identifiers: bool = False
+    allow_machine_tokens: bool = False
+    identifiers_condition: Literal["decimal"] | None = None
+
+@dataclass(frozen=True)
 class ActionSpec:
     id: str
     description: str
@@ -93,6 +101,7 @@ class ActionSpec:
     output_schema: JSONObject = {}          # required unless the action returns no JSON result
     approval: ApprovalKind = "direct"
     returns_asset: bool = False             # the whole result is one streamed file
+    input_protections: dict[str, InputProtection] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class ToolManifest:
@@ -159,6 +168,25 @@ class ToolManifest:
 - **`ActionSpec.id`** matches `^[A-Za-z0-9._:-]{1,128}$` and is unique within the
   tool. `input_schema` declares the callable parameters (JSON Schema); it is
   required so agents can call the action over MCP.
+- **`ActionSpec.input_protections`** describes existing checks for each top-level
+  input of a direct action. Use `validated_input("Integer from 1 to 50.")` for
+  a fixed grammar, choice, range or other tool-owned validator, or
+  `guarded_input(allow_identifiers=True, allow_machine_tokens=True)` for a field
+  scanned by the shared guard. Omitted flags default to false. The declaration
+  must match the actual call path, including array items and nested values;
+  it does not apply validation or enable exceptions. `protect_inputs(actions,
+  declarations)` attaches these per-action maps and rejects missing or stale
+  declarations. Bundled-tool registration also requires every direct input.
+  The admin API and `describe_tool` return this metadata beside `input_schema`;
+  it is not an extension to the callable JSON Schema vocabulary.
+  Guides render a short `Validated: …` or `Parameter guard applied` line, adding
+  allowed identifiers/machine tokens only when declared. For an identifier
+  exception limited to all-digit values, set `identifiers_condition="decimal"`;
+  the short label and API metadata carry that condition. Otherwise leave it
+  unset. This describes the existing check without changing it. Shared Technical notes
+  explain both flags and the checks they retain. Approval actions leave this
+  map empty and their input descriptions explain meaning/options, without
+  validation commentary. Their runtime checks remain unchanged.
 - **`ActionSpec.output_schema`** describes the JSON result the action returns:
   every field named, typed, and described, with every object closed
   (`additionalProperties: false`), exactly like an input schema. It is required

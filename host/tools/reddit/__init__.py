@@ -12,6 +12,9 @@ from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAI
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
+    validated_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -169,7 +172,7 @@ MANIFEST = ToolManifest(
         "approval—publish text or link posts and comments."
     ),
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="get_profile",
             description=(
@@ -294,7 +297,34 @@ MANIFEST = ToolManifest(
             ),
             approval="operator",
         ),
-    ),
+    ), {
+        "get_home_feed": {
+            "sort": validated_input("One of the action’s documented sort choices."),
+            "time_filter": validated_input("One of hour, day, week, month, year or all."),
+            "limit": validated_input("Integer from 1 to 25."),
+            "after": validated_input("Reddit fullname: t1_ through t6_, followed by 1–32 letters or digits."),
+        },
+        "get_subreddit_posts": {
+            "subreddit": guarded_input(),
+            "sort": validated_input("One of the action’s documented sort choices."),
+            "time_filter": validated_input("One of hour, day, week, month, year or all."),
+            "limit": validated_input("Integer from 1 to 25."),
+            "after": validated_input("Reddit fullname: t1_ through t6_, followed by 1–32 letters or digits."),
+        },
+        "search_posts": {
+            "query": guarded_input(),
+            "subreddit": guarded_input(),
+            "sort": validated_input("One of the action’s documented sort choices."),
+            "time_filter": validated_input("One of hour, day, week, month, year or all."),
+            "limit": validated_input("Integer from 1 to 25."),
+            "after": validated_input("Reddit fullname: t1_ through t6_, followed by 1–32 letters or digits."),
+        },
+        "read_post": {
+            "post_id": validated_input("1–13 letters or digits, optionally prefixed with t3_."),
+            "comment_sort": validated_input("One of confidence, top, new, controversial, old, random or qa."),
+            "comment_limit": validated_input("Integer from 1 to 50."),
+        },
+    }),
     config=(
         ConfigRequirement(
             key="REDDIT_CLIENT_ID",

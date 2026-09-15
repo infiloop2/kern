@@ -34,6 +34,8 @@ a pending approval and the operator decides in the admin UI (see ``admin_api``).
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from http import HTTPStatus
 import os
 from pathlib import Path
@@ -252,6 +254,7 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
                     "description": spec.description,
                     "approval": spec.approval,
                     "input_schema": spec.input_schema,
+                    "input_protections": {name: asdict(protection) for name, protection in spec.input_protections.items()},
                     **({"output_schema": spec.output_schema} if spec.output_schema else {}),
                 }
                 for spec in manifest.actions
@@ -848,7 +851,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
         try:
             tool_id = self.headers.get("X-Kern-Tool") or ""
             allowed_tools = (
-                {"runway", "instagram"} if kind == "video" else {"runway", "openai_images"}
+                {"runway", "instagram"} if kind == "video" else {"runway", "openai_images", "instagram"}
             )
             if tool_id not in allowed_tools:
                 self._send_json(

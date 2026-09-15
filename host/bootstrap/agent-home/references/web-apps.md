@@ -5,7 +5,7 @@ always-loaded host guide carries the failure-prone invariants; this file is the
 complete route and runtime reference.
 
 Web Apps have immutable ids such as `app-1`, separate from editable display
-names. `GET /agent/apps` lists active and archived apps, including each App's
+names. `GET /agent/apps` lists active and archived apps, including each App's short `purpose` (up to 100 characters) and
 complete `agent_settings` (`agent_runtime`, `model`, and `effort`) and
 `agent_updates_locked` state. Any agent may read an App by id and may update an
 active, unlocked App; archived and agent-locked Apps are read-only. Use the id
@@ -19,6 +19,26 @@ agent configuration from the browser or an agent. The backend selects and
 persists the first active runtime, its named default model, and High effort (or
 Codex when none is active). The response contains the new immutable `app_id`
 and complete `agent_settings`; use the id for every subsequent read and write.
+
+## App name and agent settings
+
+- `PUT /agent/apps/{app_id}/name` with `{"name":"Marketing HQ"}` renames the
+  App without changing its immutable id. Names must be nonblank and at most
+  100 characters.
+- `GET /agent/apps/session-options` returns `session_options` (runtime keys
+  mapping to model keys and their supported effort lists) and `active_runtimes`.
+  Read these choices before configuring an App; do not guess model names.
+- `PUT /agent/apps/{app_id}/agent-settings` with
+  `{"agent_runtime":"codex","model":"gpt-5.6-sol","effort":"high"}` saves the
+  complete configuration for the App's next agent message. All three fields
+  are required and validated against the session options. This does not start
+  an agent turn. A running App agent returns 409; wait until it is idle before
+  changing settings, including when changing the current App's own settings.
+
+Both PUT routes return `{"app":...}` with the App summary, including `name`
+and `agent_settings`. They reject archived Apps (409) and agent-locked Apps
+(423). These metadata changes do not take `expected_revision` or advance the
+UI/data revision.
 
 ## State reads
 
@@ -92,6 +112,11 @@ collections.
 
 ## Generated App runtime
 
+Link to a file in the Files viewer with an anchor using its absolute path under
+agent home, for example
+`<a href="/mnt/kern-agent/agent-home/aira-studio/output/2026-09-14/aira-natural-v3.mp4">Video</a>`.
+Kern opens the file in Files when clicked. Paths outside agent home are rejected.
+
 Generated Apps normally receive the full data document once when their worker
 loads. For large datasets, register
 `app.onLoad(async () => { ... }, {data: "targeted"})` and use
@@ -122,3 +147,14 @@ compatibility mode or `app.read(path)` in targeted mode. In targeted mode
 `null`; read again when the resulting stored branch is needed. A worker turn
 is terminated after three seconds; durable state belongs in App data or a
 collection, never worker memory.
+
+## Discovery purpose
+
+Apps have an optional, single-line `purpose` of at most 100 characters. It is
+returned in App lists, separate from the name and data. Set it with
+`PUT /agent/apps/{app_id}/name`, using
+`{"name":"Research desk","purpose":"Review company research"}`. Omitting
+`purpose` preserves it; an empty string clears it. The App details dialog
+edits both fields. Existing archive and agent-update locks apply.
+
+For cross-thread requests and replies, see [agent messaging](agent-messaging.md).

@@ -406,6 +406,7 @@
 
   function resetScheduleForm() {
     $("schedule-name").value = "";
+    $("schedule-purpose").value = "";
     $("schedule-message").value = "";
     resizeTextarea("schedule-message");
     $("schedule-cadence").value = "interval";
@@ -422,6 +423,7 @@
     $("memory-form").hidden = true;
     $("schedule-form").hidden = false;
     $("schedule-name").value = schedule.name;
+    $("schedule-purpose").value = schedule.purpose || "";
     $("schedule-message").value = schedule.message;
     resizeTextarea("schedule-message");
     syncSessionSelectors(schedule.agent_runtime, schedule.model, schedule.effort);
@@ -529,6 +531,7 @@
     const operationRoute = window.location.hash;
     const body = {
       name: $("schedule-name").value.trim(),
+      purpose: $("schedule-purpose").value.trim(),
       message: $("schedule-message").value.trim(),
       cadence: $("schedule-cadence").value,
       agent_runtime: $("schedule-runtime").value,

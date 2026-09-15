@@ -12,7 +12,7 @@ from typing import Any, cast
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
-from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
+from host.tools.manifest import protect_inputs, guarded_input, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.tools.shared import outputs
 from host.tools.shared.inputs import bounded_int, clip as _text
@@ -77,7 +77,7 @@ MANIFEST = ToolManifest(
         "without connecting an Instagram account."
     ),
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="search_reels",
             description=(
@@ -206,7 +206,32 @@ MANIFEST = ToolManifest(
             },
             output_schema=DETAIL_OUTPUT_SCHEMA,
         ),
-    ),
+    ), {
+        "search_reels": {
+            "query": guarded_input(),
+            "limit": validated_input("Integer from 1 to 25."),
+            "date_posted": validated_input("One of the listed choices."),
+            "page": validated_input("Integer from 1 to 11."),
+        },
+        "get_trending_reels": {
+            "limit": validated_input("Integer from 1 to 25."),
+        },
+        "search_hashtag": {
+            "hashtag": guarded_input(),
+            "reels_only": validated_input("JSON boolean."),
+            "limit": validated_input("Integer from 1 to 25."),
+            "date_posted": validated_input("One of the listed choices."),
+            "cursor": validated_input("Decimal page number from 1 to 11."),
+        },
+        "get_reels_by_audio": {
+            "audio_id": validated_input("Numeric Instagram audio ID."),
+            "limit": validated_input("Integer from 1 to 25."),
+            "cursor": guarded_input(allow_identifiers=True, allow_machine_tokens=True, identifiers_condition="decimal"),
+        },
+        "get_reel_details": {
+            "url": validated_input("Instagram HTTPS reel URL with a restricted shortcode."),
+        },
+    }),
     config=(
         ConfigRequirement(
             key="SCRAPECREATORS_API_KEY",
@@ -220,6 +245,7 @@ MANIFEST = ToolManifest(
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(
+        "Audio pagination cursors allow machine tokens; the identifier exception is enabled only for all-digit cursors.",
         "Kern accepts only valid hashtags, numeric audio ids, and instagram.com Reel URLs. It asks ScrapeCreators not to download media, removes duplicate Reels, and maps vendor responses to fixed fields before returning them.",
         PARAM_GUARD_TECHNICAL_DETAIL,
     ),

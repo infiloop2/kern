@@ -155,7 +155,8 @@ context instead of rewriting its prefix:
   or JPEG/PNG/WebP as the agent, bound it to 512 bytes–200 MB, and stream raw
   bytes through `POST /assets/video` or `POST /assets/image`. The tools service
   returns a random, tool-scoped asset id. The agent passes that id directly to
-  the consuming Runway or Instagram action and does not persist it as app state.
+  the consuming Runway, OpenAI image generation, or Instagram action and does
+  not persist it as app state.
   The shim stores no copy. It streams the opened descriptor over
   `/run/kern-tools/tools.sock`; the socket's kernel peer credentials
   authenticate the `kern-agent` UID, then the separate
@@ -176,8 +177,8 @@ context instead of rewriting its prefix:
   The tools service accepts only the authenticated agent peer, receives
   filename/type/length but no pathname, and stores a mode-0600 private copy in
   its mode-0700 asset directory. The returned random id is scoped to exactly one
-  destination tool: a video to Runway or Instagram, an image to Runway or OpenAI
-  image generation. Runway deletes its input copy after Runway accepts the
+  destination tool: a video to Runway or Instagram, an image to Runway, OpenAI
+  image generation, or Instagram. Runway deletes its input copy after Runway accepts the
   generation or editing task. OpenAI image generation deletes its reference
   copies once OpenAI has returned a usable image. Instagram deletes its copy
   after publishing.
@@ -189,16 +190,17 @@ context instead of rewriting its prefix:
   assets. An approval created near expiry can outlive its asset too. Approving
   either one later fails and the upload must be retried. At most 20 assets and
   1 GB total are staged across both media types. This private spool preserves
-  the Instagram approval boundary: Meta receives no video bytes until approval.
+  the Instagram approval boundary: Meta receives no image or video bytes until approval.
 
   The reusable `Assets.public_asset_url` context supports only the existing
   staged JPEG, PNG, WebP, MP4 and MOV types. Instagram is its only consumer,
-  and continues to accept only videos for Reels.
-  Instagram Login publishes with `video_url`, not the resumable flow limited
-  to Facebook Login for Business. During approved execution only, the host
+  which accepts JPEG images up to 8 MB for single-image posts and ordered
+  carousels of 2–10 images, plus MP4/MOV videos for Reels.
+  Instagram Login fetches images with `image_url` and Reels with `video_url`,
+  not the resumable flow limited to Facebook Login for Business. During approved execution only, the host
   receives only the configured hostname through the trusted admin delegation
   (the tools role cannot read operator connections), then issues a separate
-  256-bit random capability for the exact staged video at
+  256-bit random capability for each exact staged asset at
   `https://<configured-hostname>/tool-media/<token>`. The admin API
   permits public HTTPS GET/HEAD on this one route without a session, and
   streams through an admin-peer-only tools socket route. Single byte ranges
@@ -209,6 +211,21 @@ context instead of rewriting its prefix:
   hostname is required; no Facebook account or new storage service is needed.
   Instagram API failures reach Host Diagnostics with operation, HTTP status
   and numeric Meta error codes; provider text and media URLs are discarded.
+
+  `post_image` accepts one `image_asset_id`; `post_carousel` accepts ordered
+  `image_asset_ids`. Both freeze the caption, account and asset metadata/hashes
+  in one approval. All images are revalidated before any public grant or
+  container is created. Carousel children use `is_carousel_item=true` with no
+  captions; after every child finishes, the parent uses `media_type=CAROUSEL`,
+  ordered `children` and the caption. Only the finished parent is published.
+  Polling occurs in bounded rounds across pending children. Failures revoke
+  all public grants and retain staged sources. Publication requires a returned
+  media id; an unconfirmed result is not reported as success or retried.
+  Sources are deleted only after confirmed publication. Agents should prepare
+  compatible JPEG dimensions/aspect ratios and review Meta's crop behavior
+  before requesting approval; Kern does not transcode or silently crop images.
+  See [Meta's publishing guide](https://developers.facebook.com/docs/instagram-platform/content-publishing/)
+  and [official SDK media parameters](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/iguser.py).
 
   Binary action output uses a generic exclusive result. A package returns either
   `ActionExecuted` JSON or one `StreamingAsset`, never both. The tools service

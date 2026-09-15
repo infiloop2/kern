@@ -9,8 +9,9 @@ import threading
 from typing import Any
 from urllib.parse import quote
 
-from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX, script_path_error
+from host.agent_scripts import AUTOMATED_TRIGGER_HEADER, script_path_error
 from host.runtime.core import db, host_errors
+from host.runtime.workspace.purpose import validate_purpose
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
 from host.runtime.workspace.query import one as _one
 from host.session_options import SCRIPT_RUNTIME, schedule_session_options
@@ -38,7 +39,7 @@ _SCHEDULER_WAKE = threading.Event()
 SCHEDULE_COLUMNS = (
     "id, name, message, cadence, interval_minutes, daily_time, agent_runtime,"
     " model, effort, revision, deleted_at, last_run_at, next_run_at,"
-    " created_at, updated_at, thread_id"
+    " created_at, updated_at, thread_id, purpose"
 )
 
 
@@ -172,7 +173,7 @@ def create_schedule(body: Any, *, actor: str) -> dict[str, Any]:
     }
     _require_keys(
         request,
-        required | {"interval_minutes", "daily_time"},
+        required | {"interval_minutes", "daily_time", "purpose"},
         required,
     )
     fields = _validated_fields(request)
@@ -200,14 +201,14 @@ def create_schedule(body: Any, *, actor: str) -> dict[str, Any]:
             "INSERT INTO schedules"
             " (id, name, message, cadence, interval_minutes, daily_time, agent_runtime,"
             " model, effort, revision, deleted_at, next_run_at, created_at, updated_at,"
-            " thread_id)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, NULL, %s, %s, %s, %s)"
+            " thread_id, purpose)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, NULL, %s, %s, %s, %s, %s)"
             f" RETURNING {SCHEDULE_COLUMNS}",
             (
                 schedule_id, fields["name"], fields["message"], fields["cadence"],
                 fields["interval_minutes"], fields["daily_time"],
                 fields["agent_runtime"], fields["model"], fields["effort"],
-                next_run, now_ts, now_ts, thread_id,
+                next_run, now_ts, now_ts, thread_id, fields["purpose"],
             ),
         )
         row = cur.fetchone()
@@ -223,7 +224,7 @@ def update_schedule(schedule_id: int, body: Any, *, actor: str) -> dict[str, Any
         "expected_revision", "name", "message", "cadence", "agent_runtime",
         "model", "effort",
     }
-    _require_keys(request, required | {"interval_minutes", "daily_time"}, required)
+    _require_keys(request, required | {"interval_minutes", "daily_time", "purpose"}, required)
     expected = _expected_revision(request["expected_revision"])
     fields = _validated_fields(request)
     now = datetime.now(timezone.utc)
@@ -237,6 +238,8 @@ def update_schedule(schedule_id: int, body: Any, *, actor: str) -> dict[str, Any
         if row is None or row[10] is not None:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule not found")
         current = _schedule_row(row)
+        if "purpose" not in request:
+            fields["purpose"] = current["purpose"]
         if current["revision"] != expected:
             raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reload and retry")
         cadence_changed = any(
@@ -253,13 +256,13 @@ def update_schedule(schedule_id: int, body: Any, *, actor: str) -> dict[str, Any
             "UPDATE schedules SET name = %s, message = %s, cadence = %s,"
             " interval_minutes = %s, daily_time = %s, agent_runtime = %s, model = %s,"
             " effort = %s, revision = %s, next_run_at = %s,"
-            " updated_at = %s WHERE id = %s"
+            " updated_at = %s, purpose = %s WHERE id = %s"
             f" RETURNING {SCHEDULE_COLUMNS}",
             (
                 fields["name"], fields["message"], fields["cadence"],
                 fields["interval_minutes"], fields["daily_time"], fields["agent_runtime"],
                 fields["model"], fields["effort"], revision,
-                next_run, now_ts, schedule_id,
+                next_run, now_ts, fields["purpose"], schedule_id,
             ),
         )
         changed = cur.fetchone()
@@ -349,7 +352,7 @@ def list_revisions(schedule_id: int, query: dict[str, list[str]]) -> dict[str, A
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule not found")
         cur.execute(
             "SELECT id, revision, name, message, cadence, interval_minutes, daily_time,"
-            " agent_runtime, model, effort, deleted, actor, created_at"
+            " agent_runtime, model, effort, deleted, actor, created_at, purpose"
             f" FROM schedule_revisions WHERE schedule_id = %s{clause}"
             " ORDER BY id DESC LIMIT %s",
             (*params, limit + 1),
@@ -363,7 +366,7 @@ def list_revisions(schedule_id: int, query: dict[str, list[str]]) -> dict[str, A
                 "id": row[0], "revision": row[1], "name": row[2], "message": row[3],
                 "cadence": row[4], "interval_minutes": row[5], "daily_time": row[6],
                 "agent_runtime": row[7], "model": row[8], "effort": row[9],
-                "deleted": row[10], "actor": row[11], "created_at": row[12],
+                "deleted": row[10], "actor": row[11], "created_at": row[12], "purpose": row[13],
             }
             for row in rows
         ]
@@ -396,7 +399,7 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
             raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reload and retry")
         cur.execute(
             "SELECT name, message, cadence, interval_minutes, daily_time, agent_runtime,"
-            " model, effort, deleted FROM schedule_revisions"
+            " model, effort, deleted, purpose FROM schedule_revisions"
             " WHERE schedule_id = %s AND revision = %s",
             (schedule_id, revision),
         )
@@ -407,6 +410,7 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
             "name": source[0], "message": source[1], "cadence": source[2],
             "interval_minutes": source[3], "daily_time": source[4],
             "agent_runtime": source[5], "model": source[6], "effort": source[7],
+            "purpose": source[9],
         }
         fields = _validated_fields(fields)
         new_revision = expected + 1
@@ -425,13 +429,13 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
             "UPDATE schedules SET name = %s, message = %s, cadence = %s,"
             " interval_minutes = %s, daily_time = %s, agent_runtime = %s, model = %s,"
             " effort = %s, revision = %s, deleted_at = %s,"
-            " next_run_at = %s, updated_at = %s WHERE id = %s"
+            " next_run_at = %s, updated_at = %s, purpose = %s WHERE id = %s"
             f" RETURNING {SCHEDULE_COLUMNS}",
             (
                 fields["name"], fields["message"], fields["cadence"],
                 fields["interval_minutes"], fields["daily_time"], fields["agent_runtime"],
                 fields["model"], fields["effort"], new_revision,
-                deleted_at, next_run, now_ts, schedule_id,
+                deleted_at, next_run, now_ts, fields["purpose"], schedule_id,
             ),
         )
         changed = cur.fetchone()
@@ -486,7 +490,7 @@ def _deliver_message(schedule: dict[str, Any]) -> None:
     thread_id = schedule["thread_id"]
     assert isinstance(thread_id, str)
     body = {
-        "message": AUTOMATED_TRIGGER_PREFIX + schedule["message"],
+        "message": AUTOMATED_TRIGGER_HEADER + schedule["message"],
         "agent_runtime": schedule["agent_runtime"],
         "model": schedule["model"],
         "effort": schedule["effort"],
@@ -531,7 +535,7 @@ def _schedule_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "model": row[7], "effort": row[8], "revision": row[9],
         "deleted": row[10] is not None, "last_run_at": row[11],
         "next_run_at": row[12], "created_at": row[13], "updated_at": row[14],
-        "thread_id": row[15],
+        "thread_id": row[15], "purpose": row[16],
     }
 
 
@@ -543,13 +547,13 @@ def _insert_revision(cur: Any, schedule: dict[str, Any], actor: str, now: str) -
     cur.execute(
         "INSERT INTO schedule_revisions"
         " (schedule_id, revision, name, message, cadence, interval_minutes, daily_time,"
-        " agent_runtime, model, effort, deleted, actor, created_at)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " agent_runtime, model, effort, deleted, actor, created_at, purpose)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             schedule["id"], schedule["revision"], schedule["name"], schedule["message"],
             schedule["cadence"], schedule["interval_minutes"], schedule["daily_time"],
             schedule["agent_runtime"], schedule["model"], schedule["effort"],
-            schedule["deleted"], actor, now,
+            schedule["deleted"], actor, now, schedule["purpose"],
         ),
     )
 
@@ -635,6 +639,7 @@ def _validated_fields(value: dict[str, Any]) -> dict[str, Any]:
             raise WorkspaceError(HTTPStatus.BAD_REQUEST, error)
     return {
         "name": name, "message": message, "cadence": cadence,
+        "purpose": validate_purpose(value.get("purpose", "")),
         "interval_minutes": interval, "daily_time": daily,
         **session,
     }

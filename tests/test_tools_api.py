@@ -28,6 +28,7 @@ from test_tools_host import FakeTool
 
 from host.runtime.core import state
 from host.runtime.tools import api as tools_api, tools_host
+from host.runtime.tools.assets import AssetError
 from host.runtime.agent_shim import mcp_shim as tools_mcp_shim
 from host.runtime.agent_shim.mcp_shim import UnixHTTPConnection
 from host.tools import OpenedStreamingAsset, StreamingAsset
@@ -49,6 +50,7 @@ EXPECTED_SHIM_TOOLS = [
     "stage_video",
     "search_conversation_history",
     "read_thread_history",
+    "send_agent_message",
     "workspace_api",
 ]
 
@@ -292,6 +294,8 @@ class ActionListingTests(ToolsApiTestCase):
                 with self.subTest(tool_id=tool_id, action=action.id):
                     self.assertEqual(by_id[action.id]["description"], action.description)
                     self.assertEqual(by_id[action.id]["input_schema"], action.input_schema)
+                    from dataclasses import asdict
+                    self.assertEqual(by_id[action.id]["input_protections"], {name: asdict(protection) for name, protection in action.input_protections.items()})
                     self.assertEqual(by_id[action.id]["approval"], action.approval)
                     # The result shape travels with the call shape, and only
                     # for the actions that return a JSON result at all.
@@ -961,6 +965,21 @@ class McpShimTests(ToolsApiTestCase):
         self.assertEqual(instagram["post_reel"]["required"], ["video_asset_id"])
         self.assertIn("video_asset_id", instagram["post_reel"]["properties"])
         self.assertNotIn("path", instagram["post_reel"]["properties"])
+
+        self.assertEqual(instagram["post_image"]["required"], ["image_asset_id"])
+        self.assertEqual(instagram["post_carousel"]["required"], ["image_asset_ids"])
+        self.assertEqual(instagram["post_carousel"]["properties"]["image_asset_ids"]["maxItems"], 10)
+        jpeg = Path(socket_dir.name) / "slide.jpg"
+        jpeg.write_bytes(b"j" * 512)
+        staged_jpeg = self.rpc(shim, {
+            "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+            "params": {"name": "stage_image", "arguments": {"path": "/slide.jpg", "for_tool": "instagram"}},
+        })
+        self.assertFalse(staged_jpeg["result"]["isError"])
+        jpeg_id = json.loads(staged_jpeg["result"]["content"][0]["text"])["image_asset_id"]
+        self.assertEqual(server.asset_store.describe("instagram", jpeg_id).media_type, "image/jpeg")
+        with self.assertRaises(AssetError):
+            server.asset_store.describe("runway", jpeg_id)
 
         video = Path(socket_dir.name) / "clip.mp4"
         video.write_bytes(b"x" * 512)

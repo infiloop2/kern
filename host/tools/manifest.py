@@ -11,9 +11,9 @@ operator each action's data policy and setup instructions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import re
-from typing import Literal
+from typing import Literal, cast
 
 from host.tools.json_types import JSONObject
 
@@ -68,6 +68,44 @@ def _validate_closed_schema(value: object, *, action: str, path: str) -> None:
 
 
 @dataclass(frozen=True)
+class InputProtection:
+    """Guide metadata for a direct input's existing execution checks.
+
+    This describes enforcement owned by the tool; it never enables a guard
+    exception or changes validation. Guard flags mirror the actual call site.
+    """
+
+    kind: Literal["validated", "parameter_guard"]
+    description: str = ""
+    allow_identifiers: bool = False
+    allow_machine_tokens: bool = False
+    identifiers_condition: Literal["decimal"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("validated", "parameter_guard"):
+            raise ValueError("Unknown input protection kind.")
+        if type(self.allow_identifiers) is not bool or type(self.allow_machine_tokens) is not bool:
+            raise ValueError("Input protection guard flags must be booleans.")
+        if self.identifiers_condition not in (None, "decimal") or (self.identifiers_condition and (self.kind != "parameter_guard" or not self.allow_identifiers)):
+            raise ValueError("Identifier conditions require an enabled parameter-guard identifier exception.")
+        if self.kind == "validated":
+            if not self.description.strip() or self.allow_identifiers or self.allow_machine_tokens:
+                raise ValueError("Validated inputs need a description and cannot declare guard exceptions.")
+        elif self.description:
+            raise ValueError("Parameter guard inputs use the shared guide explanation.")
+
+
+def validated_input(description: str) -> InputProtection:
+    return InputProtection("validated", description)
+
+
+def guarded_input(*, allow_identifiers: bool = False, allow_machine_tokens: bool = False,
+                  identifiers_condition: Literal["decimal"] | None = None) -> InputProtection:
+    return InputProtection("parameter_guard", allow_identifiers=allow_identifiers,
+                           allow_machine_tokens=allow_machine_tokens, identifiers_condition=identifiers_condition)
+
+
+@dataclass(frozen=True)
 class ActionSpec:
     """One callable action exposed by a tool.
 
@@ -97,6 +135,25 @@ class ActionSpec:
     # The whole result is one binary file relayed to the agent workspace, so
     # there is no JSON result to describe.
     returns_asset: bool = False
+    input_protections: dict[str, InputProtection] = field(default_factory=dict)
+
+
+def protect_inputs(actions: tuple[ActionSpec, ...], declarations: dict[str, dict[str, InputProtection]]) -> tuple[ActionSpec, ...]:
+    """Attach a tool's explicit declarations, requiring every direct input.
+
+    Keeping these next to the tool's actions makes its guide reviewable against
+    its implementation. Approval actions intentionally have no guide metadata.
+    """
+    expected = {action.id for action in actions if action.approval == "direct" and action.input_schema.get("properties")}
+    if set(declarations) != expected:
+        raise ValueError("Input protection declarations must cover exactly the direct actions with inputs.")
+    result = []
+    for action in actions:
+        declared = declarations.get(action.id, {})
+        if action.approval == "direct" and set(declared) != set(cast(JSONObject, action.input_schema.get("properties", {}))):
+            raise ValueError(f"Input protection declarations must cover every input of {action.id}.")
+        result.append(replace(action, input_protections=declared))
+    return tuple(result)
 
 
 @dataclass(frozen=True)
@@ -240,6 +297,11 @@ class ToolManifest:
             if spec.input_schema.get("type") != "object":
                 raise ValueError(f"ActionSpec.input_schema must be an object schema for {self.tool_id}:{spec.id}.")
             _validate_closed_schema(spec.input_schema, action=f"{self.tool_id}:{spec.id}", path="input_schema")
+            if spec.approval == "operator" and spec.input_protections:
+                raise ValueError("Approval actions do not declare guide input protections.")
+            for name, input_protection in spec.input_protections.items():
+                if name not in cast(JSONObject, spec.input_schema.get("properties", {})) or not isinstance(input_protection, InputProtection):
+                    raise ValueError(f"Invalid input protection for {self.tool_id}:{spec.id}:{name}.")
             if spec.approval == "operator" and spec.returns_asset:
                 raise ValueError(
                     f"ActionSpec.returns_asset cannot be set on approval-gated action {self.tool_id}:{spec.id}."

@@ -19,6 +19,9 @@ import urllib.parse
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
+    validated_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -169,7 +172,7 @@ MANIFEST = ToolManifest(
         "with native audio, straight from the model's own provider."
     ),
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="generate_video",
             description=(
@@ -245,7 +248,23 @@ MANIFEST = ToolManifest(
             },
             returns_asset=True,
         ),
-    ),
+    ), {
+        "generate_video": {
+            "prompt": guarded_input(),
+            "image_url": guarded_input(),
+            "resolution": validated_input("One of the listed choices."),
+            "ratio": validated_input("One of the listed choices."),
+            "duration_seconds": validated_input("Integer from 4 to 30."),
+            "generate_audio": validated_input("JSON boolean."),
+            "seed": validated_input("Integer from 0 to 4294967295."),
+        },
+        "get_task": {
+            "task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens; starts with a letter or digit."),
+        },
+        "save_video": {
+            "task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens; starts with a letter or digit."),
+        },
+    }),
     config=(
         ConfigRequirement(
             key="SEEDANCE_ARK_API_KEY",

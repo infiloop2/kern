@@ -48,6 +48,7 @@ THREAD_DISPLAY_EVENT_TYPES = (
     # Hiding activity must not hide the working-memory boundary, so this type
     # is deliberately outside the activity filter below.
     "thread.memory_cleared",
+    "thread.context_added",
 )
 THREAD_LIST_PAGE = 100
 # Chat history is durable user data, so old or archived threads are not

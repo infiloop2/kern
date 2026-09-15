@@ -115,7 +115,10 @@ def read_agent_events() -> list[dict[str, object]]:
 
 
 def thread_events(thread_id: str) -> list[dict[str, object]]:
-    return [event for event in read_agent_events() if event["thread_id"] == thread_id]
+    # These assertions cover execution lifecycle. Prompt-context display notices
+    # are asserted separately by the admin API admission tests.
+    return [event for event in read_agent_events()
+            if event["thread_id"] == thread_id and event["event_type"] != "thread.context_added"]
 
 
 def event_summary(events: list[dict[str, object]]) -> list[tuple[object, object]]:
@@ -1065,7 +1068,7 @@ class OrchestratorTests(unittest.TestCase):
 
         def recording_run_turn(server, input_message, provider_session_id, model, effort, on_message):
             seen.append(provider_session_id)
-            return f"codex-{input_message}", "done"
+            return f"codex-session-{len(seen)}", "done"
 
         with patch.object(orchestrator.codex_app_server, "run_turn", recording_run_turn):
             self.send_message("thread-chat", "first")
@@ -1073,10 +1076,10 @@ class OrchestratorTests(unittest.TestCase):
             self.send_message("thread-chat", "second")
             self.wait_until_idle("thread-chat")
 
-        self.assertEqual(seen, [None, "codex-first"])
+        self.assertEqual(seen, [None, "codex-session-1"])
         self.assertEqual(len(FakeServer.instances), 2)
         self.assertTrue(all(server.closed for server in FakeServer.instances))
-        self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "codex-second")
+        self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "codex-session-2")
 
     def test_claude_runtime_records_and_resumes_session_id(self) -> None:
         save_attested_claude_account("acct", access_token_sha256="f" * 64)
@@ -1270,7 +1273,9 @@ class OrchestratorTests(unittest.TestCase):
             )
             self.assertEqual(response["status"], "accepted")
             self.wait_until_idle("thread-stale-claude")
-            self.assertEqual(attempts, [("continue the work", "deleted-session")])
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0][1], "deleted-session")
+            self.assertTrue(attempts[0][0].endswith("continue the work"))
             self.assertIsNone(
                 state.thread_session_config("thread-stale-claude")["provider_session_id"]
             )

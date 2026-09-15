@@ -362,8 +362,8 @@ class ShimVideoStageTests(unittest.TestCase):
         self.assertEqual(connection.headers["X-Kern-Filename"], "frame.webp")
         self.assertNotIn(str(image), connection.headers.values())
 
-    def test_shim_scopes_image_staging_to_its_two_destinations(self) -> None:
-        """An image may be staged for Runway or OpenAI image generation and
+    def test_shim_scopes_image_staging_to_supported_destinations(self) -> None:
+        """An image may be staged for Runway, OpenAI image generation or Instagram and
         nothing else; the destination rides in a header the tools service
         re-checks against the same set."""
         class Response:
@@ -394,12 +394,14 @@ class ShimVideoStageTests(unittest.TestCase):
                 result = tools_mcp_shim._stage_image(
                     {"path": "/frame.png", "for_tool": "openai_images"}
                 )
-                with self.assertRaisesRegex(RuntimeError, "runway or openai_images"):
+                self.assertEqual(connection.headers["X-Kern-Tool"], "openai_images")
+                tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "instagram"})
+                with self.assertRaisesRegex(RuntimeError, "runway, openai_images, or instagram"):
                     tools_mcp_shim._stage_image(
-                        {"path": "/frame.png", "for_tool": "instagram"}
+                        {"path": "/frame.png", "for_tool": "gmail"}
                     )
         self.assertEqual(result, {"image_asset_id": "opaque-image-id"})
-        self.assertEqual(connection.headers["X-Kern-Tool"], "openai_images")
+        self.assertEqual(connection.headers["X-Kern-Tool"], "instagram")
 
 
 if __name__ == "__main__":

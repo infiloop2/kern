@@ -294,6 +294,7 @@ class NetworkIntrospectionTests(unittest.TestCase):
                 "stage_video",
                 "search_conversation_history",
                 "read_thread_history",
+                "send_agent_message",
                 "workspace_api",
             ],
         )

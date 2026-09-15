@@ -484,9 +484,10 @@ function cloneSafeNode(node, parent, budget, depth) {
   if (node.nodeType !== Node.ELEMENT_NODE) return;
   if (droppedElements.has(node.tagName)) return;
   const rawHref = node.tagName === "A" ? node.getAttribute("href") : "";
+  const filePath = node.tagName === "A" ? KernRichText.workspaceFilePath(rawHref) : "";
   const navigationHref = node.tagName === "A" ? KernRichText.safeNavigationHref(rawHref) : "";
   const copyHref = node.tagName === "A" && !navigationHref ? KernRichText.safeHref(rawHref) : "";
-  if (node.tagName === "A" && !navigationHref && !copyHref) {
+  if (node.tagName === "A" && !filePath && !navigationHref && !copyHref) {
     for (const child of node.childNodes) cloneSafeNode(child, parent, budget, depth + 1);
     return;
   }
@@ -494,13 +495,19 @@ function cloneSafeNode(node, parent, budget, depth) {
     for (const child of node.childNodes) cloneSafeNode(child, parent, budget, depth + 1);
     return;
   }
-  const clean = document.createElement(node.tagName === "A" && copyHref ? "button" : node.tagName.toLowerCase());
+  const clean = document.createElement(node.tagName === "A" && (filePath || copyHref) ? "button" : node.tagName.toLowerCase());
   for (const attribute of node.attributes) copySafeAttribute(node, clean, attribute.name, attribute.value);
   if (node.tagName === "A") {
     clean.removeAttribute("data-action");
     clean.removeAttribute("data-enter-action");
     clean.removeAttribute("data-drop-action");
-    if (navigationHref) {
+    if (filePath) {
+      clean.type = "button";
+      clean.classList.add("kern-open-file");
+      clean.setAttribute("data-kern-file-path", filePath);
+      clean.setAttribute("data-kern-file-fallback", KernRichText.workspaceFileFallbackPath(rawHref));
+      clean.setAttribute("title", `Open in Files: ${filePath}`);
+    } else if (navigationHref) {
       clean.setAttribute("href", navigationHref);
       clean.setAttribute("title", navigationHref);
       clean.setAttribute("target", "_blank");
@@ -637,7 +644,7 @@ function renderGenerated(html, css) {
     clearGeneratedDrag();
     const fragment = sanitizeHtml(html);
     const safeCss = sanitizeCssCached(css);
-    const styleText = `:host{display:block;min-height:100%;color:var(--text);background:var(--bg);font-family:system-ui,sans-serif}.kern-copy-link{background:transparent;border:0;color:inherit;cursor:pointer;font:inherit;padding:0;text-decoration:underline;text-underline-offset:.15em}${safeCss}${generatedMobileTextControlCss}`;
+    const styleText = `:host{display:block;min-height:100%;color:var(--text);background:var(--bg);font-family:system-ui,sans-serif}.kern-copy-link,.kern-open-file{background:transparent;border:0;color:inherit;cursor:pointer;font:inherit;padding:0;text-decoration:underline;text-underline-offset:.15em}${safeCss}${generatedMobileTextControlCss}`;
     patchChildren(generatedRoot, fragment);
     // Commit safe content before installing styles. A browser-specific style
     // failure must never strand the operator on the stored Loading placeholder.
@@ -834,6 +841,15 @@ function appWritesBlocked() {
 
 function generatedInteraction(event) {
   if (!(event.target instanceof Element)) return;
+  const fileLink = event.target.closest("button[data-kern-file-path]");
+  if (fileLink && generatedRoot.contains(fileLink)) {
+    event.preventDefault();
+    window.KernHost.openAgentFile(
+      fileLink.dataset.kernFilePath,
+      fileLink.dataset.kernFileFallback || "",
+    ).catch(error => showRuntimeStatus(error.message, "error"));
+    return;
+  }
   const copyLink = event.target.closest("button[data-kern-copy-href]");
   if (copyLink && generatedRoot.contains(copyLink)) {
     event.preventDefault();
@@ -1912,6 +1928,13 @@ function conversationEntries() {
         kind: "error",
         message: payload.error_message || "The agent stopped because of an error.",
       });
+    } else if (event.event_type === "thread.context_added") {
+      entries.push({
+        key: `event-${event.seq}`,
+        seq: Number(event.seq) || 0,
+        kind: "stopped",
+        message: payload.message || "Context added.",
+      });
     } else if (event.event_type === "thread.stopped") {
       entries.push({
         key: `event-${event.seq}`,
@@ -2745,6 +2768,7 @@ function setRenameAppOpen(open) {
     if (!selectedAppId || selectedAppOutsideActiveIndex) return;
     renameAppReturnFocus = webAppsRoot.activeElement || $("rename-app");
     $("rename-app-input").value = selectedAppName || selectedAppId;
+    $("app-purpose-input").value = apps.find(app => app.app_id === selectedAppId)?.purpose || "";
     $("rename-app-error").hidden = true;
     overlay.hidden = false;
     requestAnimationFrame(() => $("rename-app-input").select());
@@ -2770,9 +2794,9 @@ async function renameSelectedApp() {
   const response = await api(
     "PUT",
     `/apps/${encodeURIComponent(appId)}/name`,
-    { name },
+    { name, purpose: $("app-purpose-input").value.trim() },
   );
-  apps = apps.map(app => app.app_id === appId ? { ...app, name: response.app.name } : app);
+  apps = apps.map(app => app.app_id === appId ? { ...app, name: response.app.name, purpose: response.app.purpose } : app);
   if (selectedAppId === appId) selectedAppName = response.app.name;
   syncWorkspaceControls();
   setRenameAppOpen(false);

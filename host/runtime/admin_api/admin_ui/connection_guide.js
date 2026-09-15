@@ -24,6 +24,7 @@ const INTEGRATION_LOGOS = {
   python_packages: `<span class="integration-logo-word integration-logo-word-python"><b>Py</b></span>`,
   npm_packages: `<span class="integration-logo-word integration-logo-word-npm">npm</span>`,
   "tool:apify": `<span class="integration-logo-word integration-logo-word-apify">A</span>`,
+  "tool:apify_developer": `<span class="integration-logo-word integration-logo-word-apify">A</span>`,
   "tool:brave_search": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2.2" d="m16 3 10 4.2-1 14.2L16 28l-9-6.6L6 7.2 16 3Z"/><path fill="currentColor" d="M11 8.8h7c4 0 5.2 5 2.1 6.5 3.8 1.3 2.5 7.7-2 7.7H11V8.8Zm4 3v2.4h2.7c1.6 0 1.6-2.4 0-2.4H15Zm0 5.2v3h3c1.9 0 1.9-3 0-3h-3Z"/></svg>`,
   "tool:gmail": `<svg viewBox="0 0 32 32"><path class="gmail-blue" d="M4 10v15h5V14.3Z"/><path class="gmail-red" d="M4 10 8 7l8 6.2L24 7l4 3v15h-5V14.2L16 20 9 14.3V25H4Z"/><path class="gmail-yellow" d="m24 7 4 3-5 4.2V8Z"/><path class="gmail-green" d="M23 14.2 28 10v15h-5Z"/></svg>`,
   "tool:google_calendar": `<svg viewBox="0 0 32 32"><path class="calendar-blue" d="M6 5h20v22H6z"/><path class="calendar-green" d="M6 5h14v7H6z"/><path class="calendar-yellow" d="M6 12h7v15H6z"/><path class="calendar-red" d="M20 5h6v7h-6z"/><path fill="#fff" d="M13 14h6.3c3.1 0 4.7 1.6 4.7 3.7 0 1.5-.9 2.7-2.3 3.1v.1c1.7.3 2.7 1.5 2.7 3.2 0 .5-.1 1-.2 1.4H20c.2-.4.3-.8.3-1.3 0-1.3-.9-2.1-2.5-2.1h-1.5v-2.7h1.4c1.4 0 2.2-.7 2.2-1.8 0-1-.8-1.7-2.1-1.7H13V14Z"/></svg>`,
@@ -135,6 +136,7 @@ function toolGuide(tool) {
       description: action.description,
       approval: action.approval,
       inputSchema: action.input_schema || {},
+      inputProtections: action.input_protections || {},
       outputSchema: action.output_schema || {},
       returnsAsset: action.returns_asset === true,
     })),
@@ -370,7 +372,17 @@ function schemaTypeLabel(schema) {
   return label;
 }
 
-function renderParameterTable(title, schema, emptyLabel) {
+function inputProtectionLabel(protection) {
+  if (!protection) return "";
+  if (protection.kind === "validated") return `Validated: ${protection.description}`;
+  if (protection.kind !== "parameter_guard") return "";
+  const allowed = [];
+  if (protection.allow_identifiers) allowed.push(protection.identifiers_condition === "decimal" ? "identifiers for all-digit values" : "identifiers");
+  if (protection.allow_machine_tokens) allowed.push("machine tokens");
+  return `Parameter guard applied${allowed.length ? ` (with allowed ${allowed.join(" & ")})` : ""}`;
+}
+
+function renderParameterTable(title, schema, emptyLabel, protections = {}) {
   const properties = schemaProperties(schema);
   const required = new Set(Array.isArray(schema?.required) ? schema.required : []);
   return `<section class="guide-action-parameters">
@@ -382,6 +394,7 @@ function renderParameterTable(title, schema, emptyLabel) {
         <td><div class="guide-parameter-spec">
           <span><code>${esc(schemaTypeLabel(parameter))}</code> · ${required.has(name) ? "required" : "optional"}</span>
           <p>${esc(parameter && parameter.description ? parameter.description : "No description declared.")}</p>
+          ${protections[name] ? `<p class="guide-input-protection">${esc(inputProtectionLabel(protections[name]))}</p>` : ""}
         </div></td>
       </tr>`).join("")}</tbody>
     </table></div>` : `<p class="muted">${esc(emptyLabel)}</p>`}
@@ -403,7 +416,7 @@ function renderActionContract(capability) {
   return `<details class="guide-action-contract">
     <summary>Parameters: ${inputCount} ${inputCount === 1 ? "input" : "inputs"} · ${outputCount} declared ${outputCount === 1 ? "output" : "outputs"}</summary>
     <div class="guide-action-contract-body">
-      ${renderParameterTable("Input parameters", capability.inputSchema, "No input parameters.")}
+      ${renderParameterTable("Input parameters", capability.inputSchema, "No input parameters.", capability.approval === "direct" ? capability.inputProtections : {})}
       ${renderParameterTable("Declared output fields", capability.outputSchema, noOutputLabel(capability))}
     </div>
   </details>`;

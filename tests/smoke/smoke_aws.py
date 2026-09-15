@@ -123,6 +123,7 @@ STATIC_SHIM_TOOLS = [
     "stage_video",
     "search_conversation_history",
     "read_thread_history",
+    "send_agent_message",
     "workspace_api",
 ]
 
@@ -181,6 +182,24 @@ SMOKE_MANAGED_DOMAINS = (
     "bedrock-runtime.us-west-2.amazonaws.com",
 )
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
+    "apify_developer": (
+        ("get_account_usage", {}),
+        ("search_store", {"query": "website", "limit": 1}),
+        ("list_actors", {"limit": 1}),
+        ("get_actor", {"actor_id": "a" * 17}),
+        ("list_builds", {"actor_id": "a" * 17}),
+        ("get_build", {"build_id": "b" * 17}),
+        ("list_runs", {"actor_id": "a" * 17}),
+        ("get_run", {"run_id": "r" * 17}),
+        ("read_log", {"kind": "run", "job_id": "r" * 17}),
+        ("export_results", {"run_id": "r" * 17, "limit": 1}),
+        ("create_actor", {"name": "kern-smoke", "title": "Kern smoke", "description": "Never created by fresh smoke."}),
+        ("create_version", {"actor_id": "a" * 17, "version": "0.1", "files": [{"path": "main.js", "content": "console.log('smoke');"}]}),
+        ("build_actor", {"actor_id": "a" * 17, "version": "0.1"}),
+        ("run_actor", {"build_id": "b" * 17, "input_json": "{}"}),
+        ("publish_actor", {"actor_id": "a" * 17, "build_id": "b" * 17, "test_run_id": "r" * 17,
+                           "title": "Kern smoke", "description": "Never published by fresh smoke.", "categories": ["DEVELOPER_TOOLS"]}),
+    ),
     "apify": (
         (
             "search_businesses",
@@ -282,6 +301,8 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("get_profile", {}),
         ("get_recent_media", {"limit": "1"}),
         ("get_publishing_limit", {}),
+        ("post_image", {"image_asset_id": "$INSTAGRAM_IMAGE"}),
+        ("post_carousel", {"image_asset_ids": ["$INSTAGRAM_IMAGE", "$INSTAGRAM_IMAGE_2"]}),
         ("post_reel", {"video_asset_id": "$INSTAGRAM_VIDEO"}),
     ),
     "instagram_discovery": (
@@ -3487,7 +3508,7 @@ class AwsSmoke:
         # live in the agent workspace, are opened by the agent-side shim, and
         # are removed immediately after the private tool-scoped copies exist.
         media_root = "/mnt/kern-agent/agent-home"
-        image_path = "/kern-smoke.png"
+        image_path = "/kern-smoke.jpg"
         video_path = "/kern-smoke.mp4"
         image_local = f"{media_root}{image_path}"
         video_local = f"{media_root}{video_path}"
@@ -3500,6 +3521,12 @@ class AwsSmoke:
         try:
             _, image_stage = shim_tool_call(
                 "stage_image", {"path": image_path, "for_tool": "runway"}
+            )
+            _, instagram_image_stage = shim_tool_call(
+                "stage_image", {"path": image_path, "for_tool": "instagram"}
+            )
+            _, instagram_image_stage_2 = shim_tool_call(
+                "stage_image", {"path": image_path, "for_tool": "instagram"}
             )
             _, runway_video_stage = shim_tool_call(
                 "stage_video", {"path": video_path, "for_tool": "runway"}
@@ -3514,12 +3541,16 @@ class AwsSmoke:
             )
         if (
             not isinstance(image_stage, dict)
+            or not isinstance(instagram_image_stage, dict)
+            or not isinstance(instagram_image_stage_2, dict)
             or not isinstance(runway_video_stage, dict)
             or not isinstance(instagram_video_stage, dict)
         ):
             raise AssertionError("local media staging returned an invalid result")
         asset_ids = {
             "$RUNWAY_IMAGE": image_stage.get("image_asset_id"),
+            "$INSTAGRAM_IMAGE": instagram_image_stage.get("image_asset_id"),
+            "$INSTAGRAM_IMAGE_2": instagram_image_stage_2.get("image_asset_id"),
             "$RUNWAY_VIDEO": runway_video_stage.get("video_asset_id"),
             "$INSTAGRAM_VIDEO": instagram_video_stage.get("video_asset_id"),
         }
@@ -3551,7 +3582,9 @@ class AwsSmoke:
         for tool_id, calls in SMOKE_TOOL_CALLS.items():
             for action_id, arguments_template in calls:
                 arguments = {
-                    key: asset_ids.get(value, value) if isinstance(value, str) else value
+                    key: (asset_ids.get(value, value) if isinstance(value, str) else
+                          [asset_ids.get(item, item) if isinstance(item, str) else item for item in value]
+                          if isinstance(value, list) else value)
                     for key, value in arguments_template.items()
                 }
                 name = f"{tool_id}_{action_id}"

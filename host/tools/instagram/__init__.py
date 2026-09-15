@@ -7,10 +7,11 @@ import re
 import time
 import urllib.parse
 from collections.abc import Mapping
+from contextlib import ExitStack
 from typing import cast
 
 from host.tools.json_types import JSONObject, JSONValue
-from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
+from host.tools.manifest import protect_inputs, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import (
     ActionExecuted,
     ActionFailed,
@@ -61,6 +62,8 @@ LONG_LIVED_TOKEN_LIFETIME_SECONDS = 60 * 24 * 3600
 # once under this threshold so a quiet fortnight cannot silently expire the token.
 REFRESH_THRESHOLD_SECONDS = 14 * 24 * 3600
 MAX_CAPTION_CHARS = 2_200
+MAX_IMAGE_BYTES = 8_000_000
+MAX_CAROUSEL_IMAGES = 10
 MEDIA_ID_RE = re.compile(r"^[0-9]{1,30}$")
 PUBLISH_POLL_ATTEMPTS = 8
 PUBLISH_POLL_DELAY_SECONDS = 15
@@ -119,9 +122,9 @@ GET_PUBLISHING_LIMIT_OUTPUT_SCHEMA: JSONObject = outputs.obj(
 MANIFEST = ToolManifest(
     tool_id="instagram",
     display_name="Instagram",
-    description="Connect your professional Instagram account and let your agent read its posts and performance, and publish Reel videos with your approval.",
+    description="Connect your professional Instagram account and let your agent read its posts and performance, and publish images, image carousels, and Reel videos with your approval.",
     connection="oauth",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(id="get_profile",
             description="Read only the connected professional Instagram account's user id, username, account type, follower count, and media count. This cannot inspect another account.",
             data_policy=IG_READ_POLICY,
@@ -143,6 +146,44 @@ MANIFEST = ToolManifest(
             data_policy=IG_READ_POLICY,
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             output_schema=GET_PUBLISHING_LIMIT_OUTPUT_SCHEMA,
+        ),
+        ActionSpec(id="post_image",
+            description="Queue approval to publish one JPEG image to the connected Instagram account. Images come from the agent workspace; each must be at most 8 MB. No media reaches Instagram before approval.",
+            data_policy=(
+                "After approval, Meta fetches the privately staged images through temporary "
+                "links on your public Kern address and publishes them with the approved caption. "
+                "Approval binds the account, exact caption, image hashes and order. "
+                "The proposal and sanitized outcome are available to the active model; image bytes are not model context."
+            ),
+            input_schema={
+                "type": "object",
+                "required": ["image_asset_id"],
+                "properties": {
+                    "image_asset_id": {"type": "string", "description": "Internal reference for a JPEG image uploaded from the agent workspace (at most 8 MB)."},
+                    "caption": {"type": "string", "description": "Exact caption (up to 2200 characters)."},
+                },
+                "additionalProperties": False,
+            },
+            approval="operator",
+        ),
+        ActionSpec(id="post_carousel",
+            description="Queue approval to publish one carousel of 2–10 JPEG images in the supplied order to the connected Instagram account. Images come from the agent workspace; each must be at most 8 MB. No media reaches Instagram before approval.",
+            data_policy=(
+                "After approval, Meta fetches the privately staged images through temporary "
+                "links on your public Kern address and publishes them with the approved caption. "
+                "Approval binds the account, exact caption, image hashes and order. "
+                "The proposal and sanitized outcome are available to the active model; image bytes are not model context."
+            ),
+            input_schema={
+                "type": "object",
+                "required": ["image_asset_ids"],
+                "properties": {
+                    "image_asset_ids": {"type": "array", "minItems": 2, "maxItems": MAX_CAROUSEL_IMAGES, "items": {"type": "string"}, "description": "Ordered internal references for 2–10 JPEG images uploaded from the agent workspace; first image is the cover."},
+                    "caption": {"type": "string", "description": "Exact caption (up to 2200 characters)."},
+                },
+                "additionalProperties": False,
+            },
+            approval="operator",
         ),
         ActionSpec(id="post_reel",
             description="Queue approval to publish one Reel to the connected Instagram account using a video from the agent workspace. Nothing reaches Instagram before approval; this action does not discover media.",
@@ -166,7 +207,11 @@ MANIFEST = ToolManifest(
             },
             approval="operator",
         ),
-    ),
+    ), {
+        "get_recent_media": {
+            "limit": validated_input("Integer from 1 to 25."),
+        },
+    }),
     config=(
         ConfigRequirement(key="INSTAGRAM_APP_ID", description="Instagram app id (Meta developer app, Instagram API with Instagram Login)."),
         ConfigRequirement(key="INSTAGRAM_APP_SECRET", description="Instagram app secret."),
@@ -218,14 +263,14 @@ MANIFEST = ToolManifest(
                 title="What leaves this host",
                 points=(
                     DataSummaryPoint(label="Reads", text="Only the connected account id and bounded field and limit parameters; reads cover your own professional account, not other accounts."),
-                    DataSummaryPoint(label="Publishing", text="After approval, Meta receives the caption and fetches the staged video through a temporary link on your public Kern address."),
+                    DataSummaryPoint(label="Publishing", text="After approval, Meta receives the caption and fetches the staged images or video through temporary links on your public Kern address."),
                 ),
             ),
             DataSummaryCard(
                 title="Where it can go",
                 points=(
                     DataSummaryPoint(label="Meta", text="Everything goes to Meta's Instagram Graph API under the connected account."),
-                    DataSummaryPoint(label="The public internet", text="An approved Reel is published on Instagram under the account's audience settings and stays there until removed."),
+                    DataSummaryPoint(label="The public internet", text="An approved image, carousel, or Reel is published on Instagram under the account's audience settings and stays there until removed."),
                 ),
             ),
             DataSummaryCard(
@@ -251,8 +296,14 @@ MANIFEST = ToolManifest(
             ),
         ),
     ),
-    # Nothing to add beyond the description: it drives this tool on its own.
-    agent_notes="",
+    agent_notes=(
+        "For image posts, stage each JPEG with for_tool=instagram and pass the returned "
+        "image_asset_id to post_image or ordered image_asset_ids to post_carousel. "
+        "Kern accepts up to 10 images of at most 8 MB each. Prepare compatible dimensions "
+        "and matching aspect ratios: Meta may crop carousel images to the first slide. "
+        "Kern does not crop or transcode. Approval covers the whole post, not individual slides. "
+        "If publication is unconfirmed, inspect get_recent_media before requesting a retry."
+    ),
 )
 
 
@@ -277,13 +328,13 @@ def _mapped_web_error(exc: WebRequestError, what: str) -> Exception:
     if exc.status == 429 or code in {4, 9, 17, 613}:
         message = "Instagram API rate limit was reached."
     elif code == 9007 or code == 2207026:
-        message = f"Instagram could not process the video for the {what} request (format or fetch problem)."
+        message = f"Instagram could not process the media for the {what} request (format or fetch problem)."
     elif exc.status:
         message = f"Instagram API returned HTTP {exc.status} for the {what} request."
     else:
         return transport_or_unmapped_provider_error("Instagram", what, exc)
     # Only structured codes enter diagnostics: provider text can echo tokens,
-    # captions or the temporary video URL.
+    # captions or temporary media URLs.
     details: dict[str, int] = {}
     try:
         error = json.loads(exc.body).get("error", {})
@@ -665,6 +716,141 @@ def _reel_summary(proposal: JSONObject, account_label: str) -> str:
     return summary
 
 
+def _image_proposal(action: str, tool_input: JSONObject, api: HostAPI) -> JSONObject:
+    key = "image_asset_id" if action == "post_image" else "image_asset_ids"
+    if set(tool_input) - {key, "caption"}:
+        raise ToolInputValidationError(f"Instagram {action} only supports {key} and caption.")
+    ids = [tool_input.get(key)] if action == "post_image" else tool_input.get(key)
+    minimum = 1 if action == "post_image" else 2
+    maximum = 1 if action == "post_image" else MAX_CAROUSEL_IMAGES
+    if (not isinstance(ids, list) or not minimum <= len(ids) <= maximum
+            or any(not isinstance(item, str) or not item for item in ids)):
+        raise ToolInputValidationError(
+            f"Instagram {action} requires {minimum}–{maximum} staged JPEG image references."
+        )
+    if len(set(cast(list[str], ids))) != len(ids):
+        raise ToolInputValidationError("Instagram carousel image references must be distinct.")
+    caption = tool_input.get("caption", "")
+    if not isinstance(caption, str) or len(caption) > MAX_CAPTION_CHARS:
+        raise ToolInputValidationError(f"Instagram caption must be a string of at most {MAX_CAPTION_CHARS} characters.")
+    assets: list[JSONValue] = []
+    for asset_id in ids:
+        metadata = api.assets.describe(cast(str, asset_id))
+        if metadata.media_type not in {"image/jpeg", "image/jpg"} or not 0 < metadata.size_bytes <= MAX_IMAGE_BYTES:
+            raise ToolInputValidationError("Instagram image publishing requires JPEG images of at most 8 MB each.")
+        assets.append({
+            "asset_id": metadata.asset_id, "filename": metadata.filename,
+            "media_type": metadata.media_type, "size_bytes": metadata.size_bytes,
+            "sha256": metadata.sha256,
+        })
+    return {"caption": caption, "image_assets": assets}
+
+
+def _image_summary(proposal: JSONObject, account_label: str) -> str:
+    assets = cast(list[JSONObject], proposal["image_assets"])
+    caption = cast(str, proposal["caption"])
+    subject = "an image" if len(assets) == 1 else f"a {len(assets)}-image carousel in the approved order"
+    # Full ordered filenames/hashes and unmodified caption remain expandable
+    # in the approval payload. Keep the notification within its byte limit.
+    return (
+        f"Publish {subject} to Instagram as {clip_text(account_label, 30)}; "
+        f"{len(caption)}-char caption. Cover: {clip_text(str(assets[0]['filename']), 30)}. "
+        "Review the exact images, order and caption in the approval payload."
+    )
+
+
+def _create_image_container(access_token: str, user_id: str, params: dict[str, str]) -> str:
+    try:
+        created = json_request(
+            "POST", _graph_url(f"/{user_id}/media", {**params, "access_token": access_token}),
+            failure_message="Instagram media container creation failed.",
+            invalid_response_message="Instagram media container creation returned an invalid response.",
+        )
+    except WebRequestError as exc:
+        raise _mapped_web_error(exc, "image container") from exc
+    container_id = created.get("id")
+    if not isinstance(container_id, str) or not MEDIA_ID_RE.fullmatch(container_id):
+        raise RuntimeError("Instagram did not return a media container id. Nothing was published.")
+    return container_id
+
+
+def _wait_for_image_containers(access_token: str, container_ids: list[str]) -> None:
+    pending = list(container_ids)
+    # Poll a whole carousel in rounds, so ten pending children do not each
+    # consume a separate two-minute sleep budget. Finished children stay done.
+    for attempt in range(PUBLISH_POLL_ATTEMPTS):
+        for container_id in list(pending):
+            status = _graph_get(access_token, f"/{container_id}", {"fields": "status_code"}, what="container status")
+            status_code = status.get("status_code")
+            if status_code == "FINISHED":
+                pending.remove(container_id)
+            elif status_code in {"ERROR", "EXPIRED"}:
+                raise ProviderWarning("Instagram", "container processing",
+                                      f"Instagram could not process the images (container status {status_code}). Nothing was published.")
+        if not pending:
+            return
+        if attempt + 1 < PUBLISH_POLL_ATTEMPTS:
+            time.sleep(PUBLISH_POLL_DELAY_SECONDS)
+    raise ProviderWarning("Instagram", "container processing",
+                          "Instagram image processing timed out. Nothing was published. Queue a new approval to retry.")
+
+
+def _publish_images(access_token: str, user_id: str, action: str, proposal: JSONObject, api: HostAPI) -> str:
+    approved_assets = proposal.get("image_assets")
+    if not isinstance(approved_assets, list) or any(not isinstance(a, dict) for a in approved_assets):
+        raise RuntimeError("Instagram approval payload has invalid image assets.")
+    assets = cast(list[JSONObject], approved_assets)
+    ids = [a.get("asset_id") for a in assets]
+    tool_input: JSONObject = {"caption": proposal.get("caption")}
+    if action == "post_image":
+        if len(ids) != 1:
+            raise RuntimeError("Instagram image approval must contain exactly one image.")
+        tool_input["image_asset_id"] = ids[0]
+    else:
+        tool_input["image_asset_ids"] = ids
+    # Validate ALL images and compare every approved metadata field before
+    # creating any public grant or remote container, including the last slide.
+    if _image_proposal(action, tool_input, api) != proposal:
+        raise RuntimeError("Staged images no longer match the approved assets.")
+    carousel = action == "post_carousel"
+    with ExitStack() as grants:
+        urls = [grants.enter_context(api.assets.public_asset_url(cast(str, a["asset_id"]))) for a in assets]
+        children = []
+        for url in urls:
+            params = {"image_url": url}
+            if carousel:
+                params["is_carousel_item"] = "true"
+            else:
+                params["caption"] = cast(str, proposal["caption"])
+            children.append(_create_image_container(access_token, user_id, params))
+        _wait_for_image_containers(access_token, children)
+        if carousel:
+            container_id = _create_image_container(access_token, user_id, {
+                "media_type": "CAROUSEL", "children": ",".join(children),
+                "caption": cast(str, proposal["caption"]),
+            })
+            _wait_for_image_containers(access_token, [container_id])
+        else:
+            container_id = children[0]
+    return _publish_container(access_token, user_id, container_id)
+
+
+def _publish_container(access_token: str, user_id: str, container_id: str) -> str:
+    try:
+        published = json_request(
+            "POST",
+            _graph_url(f"/{user_id}/media_publish", {"creation_id": container_id, "access_token": access_token}),
+            failure_message="Instagram publish failed. Check recent media before retrying.",
+            invalid_response_message="Instagram publication could not be confirmed. Check recent media before retrying.",
+        )
+    except WebRequestError as exc:
+        raise _mapped_web_error(exc, "publish") from exc
+    media_id = published.get("id")
+    if not isinstance(media_id, str) or not MEDIA_ID_RE.fullmatch(media_id):
+        raise RuntimeError("Instagram publication could not be confirmed. Check recent media before retrying.")
+    return media_id
+
+
 def _publish_reel(access_token: str, user_id: str, proposal: JSONObject, api: HostAPI) -> str:
     video_asset = proposal.get("video_asset")
     if not isinstance(video_asset, dict) or not isinstance(video_asset.get("asset_id"), str):
@@ -713,17 +899,7 @@ def _publish_reel(access_token: str, user_id: str, proposal: JSONObject, api: Ho
                 "Instagram", "container processing",
                 "Instagram video processing timed out. Nothing was published. Queue a new approval to retry.",
             )
-    try:
-        published = json_request(
-            "POST",
-            _graph_url(f"/{user_id}/media_publish", {"creation_id": container_id, "access_token": access_token}),
-            failure_message="Instagram publish failed.",
-            invalid_response_message="Instagram publish returned an invalid response.",
-        )
-    except WebRequestError as exc:
-        raise _mapped_web_error(exc, "publish") from exc
-    media_id = published.get("id")
-    return media_id if isinstance(media_id, str) else ""
+    return _publish_container(access_token, user_id, container_id)
 
 
 
@@ -751,8 +927,8 @@ class InstagramTool:
                 access_token = IG_CREDENTIALS.access_token(api)
                 account = IG_CREDENTIALS.refresh_identity(api, access_token)
                 return ActionExecuted(_publishing_limit(access_token, account["id"]))
-            if action == "post_reel":
-                proposal = _reel_proposal(tool_input, api)
+            if action in {"post_reel", "post_image", "post_carousel"}:
+                proposal = _reel_proposal(tool_input, api) if action == "post_reel" else _image_proposal(action, tool_input, api)
                 access_token = IG_CREDENTIALS.access_token(api)
                 account = IG_CREDENTIALS.refresh_identity(api, access_token)
                 payload: JSONObject = {
@@ -762,7 +938,9 @@ class InstagramTool:
                     "proposal": proposal,
                 }
                 approval = api.approvals.request(
-                    action_id=action, summary=_reel_summary(proposal, account["label"]), payload=payload
+                    action_id=action,
+                    summary=(_reel_summary if action == "post_reel" else _image_summary)(proposal, account["label"]),
+                    payload=payload
                 )
                 return ActionPendingApproval(approval.approval_id, approval.summary)
             return ActionFailed("Unsupported Instagram action.")
@@ -778,7 +956,7 @@ class InstagramTool:
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
         try:
             # The host hands a loaded record: approved, and this tool's own.
-            if approval.action_id != "post_reel":
+            if approval.action_id not in {"post_reel", "post_image", "post_carousel"}:
                 return ActionFailed("Instagram approval action is invalid.")
             payload = approval.payload
             proposal = payload.get("proposal")
@@ -791,17 +969,21 @@ class InstagramTool:
                 return ActionFailed("Instagram approval payload is invalid.")
             if approved_account.get("id") != current_account["id"]:
                 return ActionFailed("Instagram account changed after approval. Please queue a new approval.")
-            asset = proposal.get("video_asset")
-            asset_id = asset.get("asset_id") if isinstance(asset, dict) else None
-            media_id = _publish_reel(
-                access_token, current_account["id"], cast(JSONObject, proposal), api
-            )
-            # Keep the source after any failed attempt so another approval that
-            # references it is not broken and the agent can retry cleanly.
-            if isinstance(asset_id, str):
-                api.assets.delete(asset_id)
-            suffix = f" (media id {media_id})" if media_id else ""
-            return ApprovalExecuted(f"Published a Reel to Instagram as {current_account['label']}{suffix}.")
+            if approval.action_id == "post_reel":
+                asset = proposal.get("video_asset")
+                asset_ids = [asset.get("asset_id")] if isinstance(asset, dict) else []
+                media_id = _publish_reel(access_token, current_account["id"], cast(JSONObject, proposal), api)
+                subject = "a Reel"
+            else:
+                media_id = _publish_images(access_token, current_account["id"], approval.action_id, cast(JSONObject, proposal), api)
+                asset_ids = [a["asset_id"] for a in cast(list[JSONObject], proposal["image_assets"])]
+                subject = "an image" if approval.action_id == "post_image" else "an image carousel"
+            # Retain all source assets on failure or unconfirmed publication.
+            # Temporary public grants are revoked by their context managers.
+            for asset_id in asset_ids:
+                if isinstance(asset_id, str):
+                    api.assets.delete(asset_id)
+            return ApprovalExecuted(f"Published {subject} to Instagram as {current_account['label']} (media id {media_id}).")
         except IntegrationReconnectRequired as exc:
             return ActionFailed(str(exc), reconnect_required=True)
         except ProviderWarning:

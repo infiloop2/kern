@@ -11,6 +11,7 @@ on:
           - all
           - all_runtimes
           - apify
+          - apify_developer
           - brave_search
           - gmail
           - google_calendar

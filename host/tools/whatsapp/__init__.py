@@ -9,6 +9,8 @@ from host.tools.whatsapp.gateway import WhatsAppGatewayError, gateway_request
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    validated_input,
     ActionSpec,
     DataSummary,
     DataSummaryCard,
@@ -87,7 +89,7 @@ MANIFEST = ToolManifest(
     description="Let agents read your WhatsApp chats and send messages.",
     connection="whatsapp_linked_device",
     service="host.tools.whatsapp.gateway:GATEWAY",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="connection_status",
             description="Check whether the persistent WhatsApp linked device is connected. The QR code is operator-only and is never returned to agents.",
@@ -139,7 +141,15 @@ MANIFEST = ToolManifest(
             },
             approval="operator",
         ),
-    ),
+    ), {
+        "list_chats": {
+            "limit": validated_input("Integer from 1 to 100."),
+        },
+        "read_messages": {
+            "chat_id": validated_input("WhatsApp chat ID or E.164 number, normalized and checked against the supported chat grammar."),
+            "limit": validated_input("Integer from 1 to 100."),
+        },
+    }),
     protections=(
         "QR codes and linked-device session keys are operator-only; agents receive neither.",
         "Reads come from a bounded local cache. Every outbound message requires approval of one exact phone number and exact text.",

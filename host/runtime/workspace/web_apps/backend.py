@@ -27,6 +27,7 @@ from host.constants import MAX_WORKSPACE_RESPONSE_BODY_BYTES
 from host.runtime.core import db
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
 from host.runtime.workspace import seen
+from host.runtime.workspace.purpose import validate_purpose
 from host.runtime.workspace.busy_retry import post_with_busy_retry
 from host.runtime.workspace.web_apps import collections as collection_store
 from host.runtime.workspace.web_apps.collections import (
@@ -70,7 +71,6 @@ MAX_DATA_BYTES = 10 * 1024 * 1024
 # source can also expand when escaped, so leave a full MiB of transport room.
 MAX_STATE_RESPONSE_BYTES = MAX_WORKSPACE_RESPONSE_BODY_BYTES - 1024 * 1024
 MAX_CHAT_MESSAGE_BYTES = 50_000
-APP_MESSAGE_CONTEXT = "This request is for Web App `{app_id}`.\n\n---\n\n"
 MAX_APP_NAME_CHARS = 100
 # Apps are durable user projects, so maintenance must not silently delete
 # them. A creation quota gives their current state and per-app revision bounds
@@ -98,6 +98,7 @@ CONVERSATION_EVENT_TYPES = (
     "thread.activity",
     "thread.error",
     "thread.stopped",
+    "thread.context_added",
 )
 MAX_PATH_DEPTH = 16
 MAX_PATH_KEY_BYTES = 128
@@ -118,7 +119,7 @@ STATE_COLUMNS = (
 )
 SUMMARY_COLUMNS = (
     "app_id, name, revision, created_at, updated_at, archived, agent_updates_locked,"
-    " agent_runtime, agent_model, agent_effort"
+    " agent_runtime, agent_model, agent_effort, purpose"
 )
 AGENT_UPDATES_LOCKED_MESSAGE = (
     "The user has locked agent updates for this app. Do not change the app now; "
@@ -284,6 +285,15 @@ def route_agent(
     Revert remains absent because restoring operator-visible state is a human
     control.
     """
+    if method == "GET" and path == "/agent/apps/session-options":
+        if query:
+            raise WorkspaceError(
+                HTTPStatus.BAD_REQUEST, "agent app session options take no query"
+            )
+        return {
+            "session_options": public_session_options(),
+            "active_runtimes": active_agent_runtimes(),
+        }
     if method == "GET" and path == "/agent/apps":
         if query:
             raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent app listing takes no query")
@@ -322,6 +332,12 @@ def route_agent(
         return {"app": read_app_data_path(app_id, body)}
     if method == "GET" and resource == "/collections":
         return {"collections": list_collections(app_id)}
+    if method == "PUT" and resource in {"/name", "/agent-settings"}:
+        with _workspace_lock(app_id):
+            _require_agent_writable_web_app(app_id)
+            if resource == "/name":
+                return {"app": rename_web_app(app_id, body)}
+            return {"app": set_app_agent_settings(app_id, body)}
     collection_match = re.fullmatch(r"/collections/([^/]+)/(query|actions)", resource)
     if collection_match:
         collection = _collection_path_segment(collection_match.group(1))
@@ -475,6 +491,7 @@ def _web_app_summary(
     return {
         "app_id": row[0],
         "name": row[1],
+        "purpose": row[10],
         "revision": row[2],
         "created_at": row[3],
         "updated_at": row[4],
@@ -597,7 +614,8 @@ def create_web_app(*, actor: str = "user") -> dict[str, Any]:
 
 def rename_web_app(app_id: str, body: Any) -> dict[str, Any]:
     request = _required_object(body, "rename request")
-    _require_keys(request, {"name"}, required={"name"})
+    _require_keys(request, {"name", "purpose"}, required={"name"})
+    purpose = validate_purpose(request["purpose"]) if "purpose" in request else None
     name = _required_text(request.get("name"), "name")
     if len(name) > MAX_APP_NAME_CHARS:
         raise WorkspaceError(
@@ -606,9 +624,9 @@ def rename_web_app(app_id: str, body: Any) -> dict[str, Any]:
         )
     with db.transaction() as cur:
         cur.execute(
-            "UPDATE web_apps SET name = %s WHERE app_id = %s"
+            "UPDATE web_apps SET name = %s, purpose = COALESCE(%s, purpose) WHERE app_id = %s"
             f" RETURNING {SUMMARY_COLUMNS}",
-            (name, app_id),
+            (name, purpose, app_id),
         )
         row = cur.fetchone()
     if row is None:
@@ -808,13 +826,12 @@ def create_message(body: Any, *, app_id: str) -> dict[str, Any]:
     request = _required_object(body, "message request")
     allowed = {"content", "agent_runtime", "model", "effort"}
     _require_keys(request, allowed, required={"content"})
-    context = APP_MESSAGE_CONTEXT.format(app_id=app_id)
     content = _bounded_required_text(
         request.get("content"),
         "content",
-        MAX_CHAT_MESSAGE_BYTES - len(context.encode()),
+        MAX_CHAT_MESSAGE_BYTES,
     )
-    host_request: dict[str, Any] = {"message": f"{context}{content}"}
+    host_request: dict[str, Any] = {"message": content}
     config_fields = ("agent_runtime", "model", "effort")
     supplied = [field for field in config_fields if field in request]
     if supplied:

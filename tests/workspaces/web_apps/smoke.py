@@ -91,6 +91,7 @@ def _app_markup(count: int, title: str = "Weekly focus") -> str:
           <p class="analysis">No analysis yet.</p>
           <label><input type="checkbox" data-action="toggle-review"> Reviewed</label>
           <div class="dashboard-actions">
+            <a href="/mnt/kern-agent/agent-home/workspace/video with spaces.mp4" id="file-video-link">Video</a>
             <button data-action="increment">Add priority</button>
             <button data-action="refresh-analysis">Refresh analysis</button>
           </div>
@@ -368,6 +369,7 @@ def _app_summary(workspace: dict[str, Any]) -> dict[str, Any]:
     return {
         "app_id": workspace["app_id"],
         "name": workspace["name"],
+        "purpose": workspace.get("purpose", ""),
         "revision": workspace["app"]["revision"],
         "created_at": workspace["created_at"],
         "updated_at": workspace["app"]["updated_at"],
@@ -479,7 +481,7 @@ def _rename_app(
     workspace: dict[str, Any], body: Any
 ) -> dict[str, Any]:
     request = builder_backend._required_object(body, "rename request")
-    builder_backend._require_keys(request, {"name"}, required={"name"})
+    builder_backend._require_keys(request, {"name", "purpose"}, required={"name"})
     name = builder_backend._required_text(request.get("name"), "name")
     if len(name) > builder_backend.MAX_APP_NAME_CHARS:
         raise builder_backend.WorkspaceError(
@@ -487,6 +489,8 @@ def _rename_app(
             f"name must be at most {builder_backend.MAX_APP_NAME_CHARS} characters",
         )
     workspace["name"] = name
+    if "purpose" in request:
+        workspace["purpose"] = builder_backend.validate_purpose(request["purpose"])
     return _app_summary(workspace)
 
 
@@ -990,6 +994,7 @@ def stylesheet_fallback_smoke(page: Any) -> None:
     )
     if not stylesheet.startswith("blob:"):
         raise AssertionError(f"generated app did not use its blob stylesheet fallback: {stylesheet!r}")
+    file_links_smoke(page)
 
 
 def worker_startup_smoke(page: Any) -> None:
@@ -1036,6 +1041,19 @@ def worker_startup_smoke(page: Any) -> None:
     )
     if leaked:
         raise AssertionError(f"generated worker escaped its networkless CSP: {leaked}")
+    file_links_smoke(page)
+
+
+def file_links_smoke(page: Any) -> None:
+    """End this browser journey in Files so no later action races an App reload."""
+    from playwright.sync_api import expect
+
+    frame = page.locator("#panel-workspace-web-apps")
+    frame.get_by_role("button", name="Show app", exact=True).click()
+    expect(frame.locator("#chat-history")).to_be_hidden()
+    frame.locator("#generated-host #file-video-link").click()
+    expect(page.locator("#file-video")).to_be_visible()
+    expect(page.locator("#file-viewer-title")).to_have_text("/workspace/video with spaces.mp4")
 
 
 def desktop_smoke(page: Any) -> None:
@@ -1329,12 +1347,16 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#app-update-veil")).to_be_hidden()
     expect(frame.locator(".analysis")).to_contain_text("Two priorities remain open")
 
-    frame.get_by_role("button", name="Rename app", exact=True).click()
-    expect(frame.get_by_role("dialog", name="Rename app")).to_be_visible()
+    frame.get_by_role("button", name="App details", exact=True).click()
+    expect(frame.get_by_role("dialog", name="App details")).to_be_visible()
     frame.locator("#rename-app-input").fill("Weekly focus")
+    frame.locator("#app-purpose-input").fill("Track weekly priorities")
     frame.locator("#rename-app-form").get_by_role("button", name="Save").click()
     expect(frame.locator("#app-title")).to_have_text("Weekly focus")
     expect(page.locator("#web-apps-nav-items")).to_contain_text("Weekly focus")
+    frame.get_by_role("button", name="App details", exact=True).click()
+    expect(frame.locator("#app-purpose-input")).to_have_value("Track weekly priorities")
+    frame.locator("#rename-app-cancel").click()
 
     frame.get_by_role("button", name="Recovery", exact=True).click()
     expect(frame.locator("#recovery-drawer")).to_be_visible()
@@ -1414,7 +1436,7 @@ def desktop_smoke(page: Any) -> None:
     archived_app.dispatch_event("click")
     expect(frame.locator("#archived-app-veil")).to_be_visible()
     expect(frame.locator("#agent-command-surface")).to_be_hidden()
-    expect(frame.get_by_role("button", name="Rename app", exact=True)).to_be_disabled()
+    expect(frame.get_by_role("button", name="App details", exact=True)).to_be_disabled()
     expect(frame.get_by_role("button", name="Agent", exact=True)).to_be_disabled()
     expect(frame.get_by_role("button", name="Archived app", exact=True)).to_be_disabled()
     frame.get_by_role("button", name="Recovery", exact=True).click()
@@ -1527,8 +1549,8 @@ def mobile_smoke(page: Any) -> None:
             f"{recovery_calls} forced scrolls"
         )
     generated_input.evaluate("element => element.blur()")
-    frame.get_by_role("button", name="Rename app", exact=True).click()
-    expect(frame.get_by_role("dialog", name="Rename app")).to_be_visible()
+    frame.get_by_role("button", name="App details", exact=True).click()
+    expect(frame.get_by_role("dialog", name="App details")).to_be_visible()
     if frame.locator("#rename-app-input").evaluate(
         "element => parseFloat(getComputedStyle(element).fontSize)"
     ) < 16:

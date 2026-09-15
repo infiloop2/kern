@@ -4,8 +4,8 @@ Read this file before listing, creating, editing, deleting, or diagnosing
 schedules. Schedules are shared by every thread.
 
 Every schedule owns one stable `schedule-N` thread and one recurring automated
-message. Each firing sends `This is an automated trigger.` followed by the
-saved message through the ordinary thread-message path. It steers an active
+message. Each firing sends `This is an automated trigger.`, a blank line,
+a `---` divider, and the saved message through the ordinary thread-message path. It steers an active
 turn when the runtime supports steering.
 
 Each firing makes one delivery attempt and advances the cadence immediately.
@@ -73,3 +73,14 @@ Combined output becomes an ordinary agent message in the persistent schedule
 thread. A non-zero exit, timeout, or launch failure becomes an ordinary
 `thread.error`; nothing is retried and no run/status row is created. Editing
 the file changes the next firing without editing the schedule.
+
+## Discovery purpose
+
+Schedules have an optional, single-line `purpose` of at most 100 characters,
+returned in list and detail responses. Include it in create/update requests
+to describe the ongoing work in one sentence. Omitting it on update preserves
+its value; an empty string clears it. Purpose is included in schedule history
+and restored with the definition. Model schedules can receive messages through
+`send_agent_message` without changing their cadence; Bash schedules cannot.
+
+For cross-thread requests and replies, see [agent messaging](agent-messaging.md).

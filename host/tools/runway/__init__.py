@@ -9,7 +9,7 @@ from typing import BinaryIO, Iterator, cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.json_types import JSONObject
-from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
+from host.tools.manifest import protect_inputs, guarded_input, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import (
     ActionExecuted,
     ActionFailed,
@@ -176,7 +176,7 @@ MANIFEST = ToolManifest(
     display_name="Runway Media Generation",
     description="Connect Runway and let your agent generate images, speech, and short videos, and edit videos.",
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="generate_video",
             description=(
@@ -302,7 +302,40 @@ MANIFEST = ToolManifest(
             },
             returns_asset=True,
         ),
-    ),
+    ), {
+        "generate_video": {
+            "prompt": guarded_input(),
+            "model": validated_input("One of the listed choices."),
+            "image_url": guarded_input(),
+            "image_asset_id": validated_input("Staged image reference; tool ownership, expiry and supported image format checked."),
+            "ratio": validated_input("One of the listed choices."),
+            "duration_seconds": validated_input("Integer within the selected model’s documented duration range or fixed choices."),
+            "seed": validated_input("Integer from 0 to 4294967295."),
+        },
+        "edit_video": {
+            "video_url": guarded_input(),
+            "video_asset_id": validated_input("Staged video reference; tool ownership, expiry and supported video format checked."),
+            "prompt": guarded_input(),
+            "seed": validated_input("Integer from 0 to 4294967295."),
+        },
+        "generate_image": {
+            "prompt": guarded_input(),
+            "model": validated_input("One of the listed choices."),
+            "ratio": validated_input("One of the listed choices."),
+            "quality": validated_input("One of the listed choices."),
+        },
+        "generate_speech": {
+            "text": guarded_input(),
+            "voice": validated_input("One of the listed choices."),
+        },
+        "get_task": {
+            "task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens."),
+            "output_kind": validated_input("One of the listed choices."),
+        },
+        "save_video": {
+            "task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens."),
+        },
+    }),
     config=(ConfigRequirement(key="RUNWAY_API_SECRET", description="Runway Developer API key (org-scoped) from the dev.runwayml.com dashboard."),),
     protections=(
         "Your Runway key stays in write-only tool config. Inputs are bounded, and local images and videos are uploaded to Runway only when used as inputs.",

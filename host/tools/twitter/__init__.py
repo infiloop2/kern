@@ -10,7 +10,7 @@ from typing import cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.json_types import JSONObject, JSONValue
-from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
+from host.tools.manifest import protect_inputs, guarded_input, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import (
     ActionExecuted,
     ActionFailed,
@@ -201,7 +201,7 @@ MANIFEST = ToolManifest(
         "messages are prepared as X links that you open, review, and send yourself."
     ),
     connection="oauth",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(id="search_tweets",
             description="Search public X posts from the last seven days with X query syntax and return post text, author, timestamp, and metrics. Pass start_time or since_id on recurring searches so already-read posts are not billed again. Use get_trends to discover trend names first; reads are billed per post returned.",
             data_policy=X_READ_POLICY,
@@ -295,7 +295,30 @@ MANIFEST = ToolManifest(
             ),
             approval="operator",
         ),
-    ),
+    ), {
+        "search_tweets": {
+            "query": guarded_input(),
+            "max_results": validated_input("Integer within the action’s documented result range."),
+            "start_time": validated_input("YYYY-MM-DDTHH:MM:SSZ text format; mutually exclusive with since_id."),
+            "since_id": validated_input("Numeric post ID; mutually exclusive with start_time."),
+        },
+        "read_tweet": {
+            "tweet_id": validated_input("Numeric post ID."),
+        },
+        "user_tweets": {
+            "username": validated_input("X handle of 1–15 letters, digits or underscores, with optional @; mutually exclusive with user_id."),
+            "user_id": validated_input("Numeric user ID; mutually exclusive with username."),
+            "max_results": validated_input("Integer within the action’s documented result range."),
+        },
+        "get_trends": {
+            "woeid": validated_input("1–10 decimal digits."),
+            "max_trends": validated_input("Integer from 1 to 50."),
+        },
+        "lookup_user": {
+            "username": validated_input("X handle of 1–15 letters, digits or underscores, with optional @; mutually exclusive with user_id."),
+            "user_id": validated_input("Numeric user ID; mutually exclusive with username."),
+        },
+    }),
     config=(
         ConfigRequirement(key="X_OAUTH_CLIENT_ID", description="X developer app OAuth 2.0 client id."),
         ConfigRequirement(key="X_OAUTH_CLIENT_SECRET", description="X developer app OAuth 2.0 client secret (confidential client)."),

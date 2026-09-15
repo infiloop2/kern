@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from host import agent_scripts
 from host.agent_scripts import (
-    AUTOMATED_TRIGGER_PREFIX,
+    AUTOMATED_TRIGGER_HEADER,
     SCRIPT_TIMEOUT_SECONDS,
     script_path_error,
 )
@@ -139,7 +139,7 @@ class ScriptSessionTests(unittest.TestCase):
 
         session_id, output = script_runner.run_turn(
             server,
-            AUTOMATED_TRIGGER_PREFIX + path,
+            AUTOMATED_TRIGGER_HEADER + path,
             None,
             "bash",
             "fixed",

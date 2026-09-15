@@ -44,24 +44,21 @@ REASON_PII = "request_param_pii_denied"
 # The one standard guide line for tools whose request parameters are guarded.
 # Kept here so every Integration Guide renders the identical sentence and a
 # wording change is a one-line diff.
-PARAM_GUARD_PROTECTION = (
-    "Request parameters pass the host parameter guard before they are sent. "
-    "Recognized secret and credential shapes are always denied; personal "
-    "identifiers and machine-shaped tokens are allowed only for fields that "
-    "require them."
-)
+PARAM_GUARD_PROTECTION = "Parameter guard applied to marked inputs."
 
 # The expanded guide description (Home integration page technical details).
 # Defined next to the short line so the two cannot drift apart.
 PARAM_GUARD_TECHNICAL_DETAIL = (
-    "Parameter guard: free-text request parameters sent without operator "
-    "approval are limited to 1,024 bytes and checked against deterministic "
-    "rules for secrets, credentials, personal and financial identifiers, and "
-    "encoded or random-looking payloads. Personal-identifier checks are skipped "
-    "only for fields whose validated grammar requires them, and generic "
-    "machine-token checks only for opaque provider-token fields; explicit "
-    "secret and credential checks always apply. A match denies the action "
-    "before anything is sent."
+    "Parameter guard checks request text against rules for secrets, credentials, "
+    "personal and financial identifiers, and encoded or random-looking data. Each "
+    "checked string is limited to 1,024 UTF-8 bytes. A match blocks the request "
+    "before it is sent. Both exception flags default to false. "
+    "`allow_identifiers` permits personal identifier patterns needed by the field, "
+    "such as an email address in a mailbox search. `allow_machine_tokens` permits "
+    "opaque provider tokens, such as pagination cursors, that may resemble encoded "
+    "data or credentials. These exceptions relax only the corresponding pattern "
+    "checks, within the field’s accepted format; explicit secret and credential "
+    "checks, text checks and the byte limit still apply."
 )
 
 

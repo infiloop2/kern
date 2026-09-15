@@ -397,6 +397,31 @@ class McpShimTests(unittest.TestCase):
             {},
         )
 
+    def test_agent_message_roundtrip_uses_peer_identity_and_surfaces_failures(self) -> None:
+        from host.runtime.workspace import agent_messages
+        socket_path = self.start_server()
+        shim = self.start_shim(socket_path)
+        with patch.object(agent_api, "_peer_thread_id", return_value="thread-11"), patch.object(
+            agent_messages, "_destination_settings", return_value={}
+        ), patch.object(agent_messages, "call_admin_api", return_value={"status": "accepted"}) as post:
+            result = self.rpc(shim, {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "send_agent_message", "arguments": {
+                    "thread_id": "thread-12", "message": "Please review."
+                }},
+            })["result"]
+            self.assertFalse(result["isError"])
+            self.assertIn("Sender thread: thread-11", post.call_args.args[2]["message"])
+            result = self.rpc(shim, {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "send_agent_message", "arguments": {
+                    "thread_id": "thread-11", "message": "Repeat."
+                }},
+            })["result"]
+            self.assertTrue(result["isError"])
+            self.assertIn("own thread", result["content"][0]["text"])
+            self.assertEqual(post.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

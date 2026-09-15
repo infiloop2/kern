@@ -29,6 +29,9 @@ from typing import Iterator, cast
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.json_types import JSONObject
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
+    validated_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -134,7 +137,7 @@ MANIFEST = ToolManifest(
         "models, saved straight into the agent workspace."
     ),
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="generate_image",
             description=(
@@ -187,7 +190,16 @@ MANIFEST = ToolManifest(
             # describe: the host returns the streamed asset instead.
             returns_asset=True,
         ),
-    ),
+    ), {
+        "generate_image": {
+            "prompt": guarded_input(),
+            "model": validated_input("One of the listed choices."),
+            "size": validated_input("One of the listed choices."),
+            "quality": validated_input("One of the listed choices."),
+            "output_format": validated_input("One of the listed choices."),
+            "image_asset_ids": validated_input("At most four staged image references; tool ownership, expiry and supported image format checked."),
+        },
+    }),
     config=(
         ConfigRequirement(
             key="OPENAI_API_KEY",

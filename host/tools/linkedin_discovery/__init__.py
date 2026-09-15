@@ -9,7 +9,7 @@ from typing import cast
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
-from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
+from host.tools.manifest import protect_inputs, guarded_input, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.tools.shared import outputs
 from host.tools.shared.inputs import bounded_int as _bounded_int, clip as _text
@@ -52,7 +52,7 @@ MANIFEST = ToolManifest(
         "a LinkedIn account."
     ),
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="search_posts",
             description=(
@@ -89,7 +89,13 @@ MANIFEST = ToolManifest(
             },
             output_schema=RESULT_SCHEMA,
         ),
-    ),
+    ), {
+        "search_posts": {
+            "query": guarded_input(),
+            "limit": validated_input("Integer from 1 to 10."),
+            "page": validated_input("Integer from 1 to 10."),
+        },
+    }),
     config=(
         ConfigRequirement(
             key="SERPERAPI_API_KEY",

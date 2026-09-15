@@ -251,6 +251,82 @@ class UpworkTests(unittest.TestCase):
         self.client.call.assert_called_once()
         self.assertEqual(self.client.call.call_args.args[0], "upwork__find_jobs")
 
+    def stored_preview(self, **changes):
+        # Reconstruct the params envelope and camelCase fields observed in
+        # the 2026-09-14 diagnostic; this is not a complete captured response.
+        params = {"jobReference": "123", "coverLetter": "A specific proposal",
+                  "chargedAmount": 50, "connects_cost": 10}
+        params.update(changes)
+        return {"content": [{"type": "text", "text": json.dumps({
+            "expires_at": "2026-09-14T16:35:50Z", "params": params,
+            "preview_id": "preview-one"})}]}
+
+    def test_stored_preview_checks_camelcase_content_and_fresh_job_eligibility(self):
+        for options, preview_options in (
+            ({}, {}),
+            ({"answers": [{"question": "Relevant work?", "answer": "API integrations"}],
+              "boost_connects": 3, "team_org_id": "team-one", "attachments": ["file-one"],
+              "certificate_ids": ["cert-one"], "portfolio_project_ids": ["project-one"]},
+             {"answers": [{"question": "Relevant work?", "answer": "API integrations"}],
+              "boostConnects": 3, "teamOrgId": "team-one", "attachments": ["file-one"],
+              "certificateIds": ["cert-one"], "portfolioProjectIds": ["project-one"],
+              "screeningQuestions": ["Relevant work?"]}),
+        ):
+            with self.subTest(options=options):
+                pending = self.submit(**options)
+                self.client.reset_mock()
+                self.client.call.side_effect = [self.job_cost(), self.preview(),
+                    self.stored_preview(**preview_options), {"content": [{"type": "text", "text": "Submitted"}]}]
+                result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                self.assertIsInstance(result, ApprovalExecuted)
+                self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
+                    ["upwork__find_jobs", "upwork__manage_proposals", "upwork__get_preview", "upwork__confirm_preview"])
+
+    def test_stored_preview_changes_and_unapproved_camelcase_terms_never_confirm(self):
+        for changes in ({"coverLetter": "Changed"}, {"chargedAmount": 51}, {"jobReference": "124"},
+                        {"connects_cost": 11}, {"connects_cost": True}, {"connects_cost": "10"},
+                        {"connectsBalance": 1}, {"connectsBalance": None}, {"canApply": False},
+                        {"canApply": None}, {"boostConnects": 3}, {"teamOrgId": "team-two"},
+                        {"certificateIds": ["cert-one"]}, {"portfolioProjectIds": ["project-one"]},
+                        {"screeningQuestions": ["Unanswered?"]}):
+            with self.subTest(changes=changes):
+                pending = self.submit()
+                self.client.reset_mock()
+                self.client.call.side_effect = [self.job_cost(), self.preview(), self.stored_preview(**changes)]
+                result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(self.client.call.call_count, 3)
+
+    def test_stored_preview_missing_fields_and_alias_collisions_never_confirm(self):
+        for field, alias in (("coverLetter", "cover_letter"), ("chargedAmount", "charged_amount"),
+                             ("jobReference", "job_reference"), ("connects_cost", "connectsCost")):
+            for duplicate in (False, True):
+                with self.subTest(field=field, duplicate=duplicate):
+                    preview = self.stored_preview()
+                    data = json.loads(preview["content"][0]["text"])
+                    if duplicate:
+                        data["params"][alias] = data["params"][field]
+                    else:
+                        del data["params"][field]
+                    preview["content"][0]["text"] = json.dumps(data)
+                    pending = self.submit()
+                    self.client.reset_mock()
+                    self.client.call.side_effect = [self.job_cost(), self.preview(), preview]
+                    with self.assertRaisesRegex(ProviderWarning, "repeated fields:" if duplicate else "Missing fields:"):
+                        upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                    self.assertEqual(self.client.call.call_count, 3)
+
+    def test_fresh_job_ineligible_or_insufficient_balance_stops_before_preparation(self):
+        for changes in ({"can_apply": False}, {"connects_balance": 1}):
+            with self.subTest(changes=changes):
+                pending = self.submit()
+                self.client.reset_mock()
+                self.client.call.side_effect = [self.job_cost(**changes)]
+                result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.client.call.assert_called_once()
+                self.assertEqual(self.client.call.call_args.args[0], "upwork__find_jobs")
+
     def test_changed_or_unapproved_preview_fields_never_confirm(self):
         for changes in ({"cover_letter": "Changed"}, {"charged_amount": 51}, {"job_reference": "124"},
                         {"connects_cost": 11}, {"connects_balance": 1}, {"can_apply": False},

@@ -129,6 +129,8 @@ def _bundled_tool_map(tools: tuple[Tool, ...]) -> dict[str, Tool]:
                 error = unsupported_schema_error(schema, allow_empty=label == "output_schema")
                 if error:
                     raise RuntimeError(f"{tool_id}.{spec.id}.{label}: {error}")
+            if spec.approval == "direct" and set(spec.input_protections) != set(cast(JSONObject, spec.input_schema.get("properties", {}))):
+                raise RuntimeError(f"{tool_id}.{spec.id}: every direct input must declare its protection.")
         # The manifest's connection kind and the Tool.credentials flow are two
         # declarations of one fact; pin them consistent at registration so no
         # consumer has to guess which to trust (tool-contract.md).
