@@ -12,6 +12,7 @@ concurrency:
 
 jobs:
   authorize:
+    if: github.repository == 'infiversehq/kern'
     name: Authorize stage start
     runs-on: ubuntu-latest
     steps:

@@ -51,6 +51,7 @@ concurrency:
 
 jobs:
   authorize:
+    if: github.repository == 'infiversehq/kern'
     name: Authorize AWS stage
     runs-on: ubuntu-latest
     outputs:

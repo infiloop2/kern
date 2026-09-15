@@ -10,10 +10,17 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Run all host tests
+  suites:
+    name: Host tests (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, browser]
+    permissions:
+      contents: read
+      packages: read
     runs-on: ubuntu-latest
-    # A cold image build/export plus the full test suite can exceed 15 minutes.
+    # Independent runners keep browser CPU/memory use out of database tests.
     timeout-minutes: 25
     steps:
       - name: Checkout
@@ -26,40 +33,60 @@ jobs:
         run: |
           npm ci --prefix host/npm --omit=dev --ignore-scripts --no-fund --no-audit
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Authenticate to GitHub Container Registry
+        if: github.repository == 'infiversehq/kern'
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
-      - name: Build CI sandbox image
+      - name: Prepare sandbox image
         timeout-minutes: 12
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: .github/ci/sandbox.Dockerfile
-          tags: kern-ci:${{ github.run_id }}
-          load: true
-          cache-from: type=gha,scope=kern-ci
-          cache-to: type=gha,scope=kern-ci,mode=max
+        shell: bash
+        run: bash .github/ci/prepare-sandbox.sh pull ghcr.io/infiversehq/kern-ci
+
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io
 
       - name: Compile all sources in no-network sandbox
+        if: matrix.suite == 'unit'
         shell: bash
         run: |
-          .github/ci/run-in-sandbox.sh kern-ci:${{ github.run_id }} \
+          .github/ci/run-in-sandbox.sh kern-ci:sandbox \
             'python3 -m py_compile $(find host tests -name "*.py")'
 
       - name: Run host type checks in no-network sandbox
+        if: matrix.suite == 'unit'
         shell: bash
         run: |
-          .github/ci/run-in-sandbox.sh kern-ci:${{ github.run_id }} \
+          .github/ci/run-in-sandbox.sh kern-ci:sandbox \
             'python3 -m mypy --config-file mypy.ini && python3 -m pyright --project pyrightconfig.json'
 
       - name: Run unit tests in no-network sandbox
+        if: matrix.suite == 'unit'
         shell: bash
         run: |
-          .github/ci/run-in-sandbox.sh kern-ci:${{ github.run_id }} \
+          .github/ci/run-in-sandbox.sh kern-ci:sandbox \
             'python3 -m unittest discover -s tests -v'
 
       - name: Run admin UI smoke in no-network sandbox
+        if: matrix.suite == 'browser'
         shell: bash
         run: |
-          .github/ci/run-in-sandbox.sh kern-ci:${{ github.run_id }} \
+          .github/ci/run-in-sandbox.sh kern-ci:sandbox \
             'python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --webkit'
+
+  test:
+    # Preserve the branch-protection check name. Skipped, cancelled, and failed
+    # suites must never turn the aggregate green.
+    name: Run all host tests
+    needs: suites
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require every suite to pass
+        env:
+          SUITES_RESULT: ${{ needs.suites.result }}
+        run: test "$SUITES_RESULT" = success

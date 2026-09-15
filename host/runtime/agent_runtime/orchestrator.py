@@ -1031,7 +1031,7 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
             # and surface the failed turn; the user's next send starts a fresh
             # session through the normal history handoff.
             with turn.delivery_lock:
-                if turn.phase != ExecutionPhase.RUNNING:
+                if turn.phase not in (ExecutionPhase.STARTING, ExecutionPhase.RUNNING):
                     return
                 after_commit: list[Callable[[], None]] = []
                 with state.mutation(after_commit=after_commit) as cur:

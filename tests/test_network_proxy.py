@@ -115,7 +115,7 @@ class NetworkProxyTests(unittest.TestCase):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(cert, key)
             server.socket = context.wrap_socket(server.socket, server_side=True)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -123,7 +123,7 @@ class NetworkProxyTests(unittest.TestCase):
 
     def start_proxy(self) -> ThreadingHTTPServer:
         server = ThreadingHTTPServer(("127.0.0.1", 0), network_proxy.ProxyHandler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -540,7 +540,7 @@ class NetworkProxyTests(unittest.TestCase):
         upstream_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         upstream_context.load_cert_chain(cert, key)
         upstream.socket = upstream_context.wrap_socket(upstream.socket, server_side=True)
-        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        threading.Thread(target=upstream.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.addCleanup(upstream.server_close)
         self.addCleanup(upstream.shutdown)
         proxy = self.start_proxy()

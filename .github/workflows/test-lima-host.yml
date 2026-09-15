@@ -15,10 +15,11 @@ jobs:
   authorize:
     name: Authorize Lima smoke
     if: >-
-      github.event_name == 'push' ||
+      github.repository == 'infiversehq/kern' &&
+      (github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event.issue.pull_request &&
-        (github.event.comment.body == '/lima-smoke' || github.event.comment.body == 'lima-smoke'))
+        (github.event.comment.body == '/lima-smoke' || github.event.comment.body == 'lima-smoke')))
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.resolve.outputs.ref }}

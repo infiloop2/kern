@@ -9,8 +9,8 @@
 
 Run the static type checks and unit tests on every change; the admin UI mock
 smoke runs in CI and is also useful locally while editing the files under
-`host/runtime/admin_api/admin_ui/`. The automatic
-[Fresh Lima smoke](fresh-lima-smoke.md) boots a real local host on every push
+`host/runtime/admin_api/admin_ui/`. In the canonical `infiversehq/kern`
+repository, the automatic [Fresh Lima smoke](fresh-lima-smoke.md) boots a real local host on every push
 to `main` and when a repository admin requests it for a pull request. It runs
 the fresh AWS smoke's complete credential-free live-host contract alongside
 Lima-specific definition, lifecycle, disk, replacement, and recovery checks.
@@ -57,14 +57,14 @@ installs it, so CI always runs the full suite.
 
 `.github/workflows/test-all-host.yml` runs on every pull request and push to
 `main`. Because a pull request can change code that the workflow then executes,
-test execution is a potential data-exfiltration vector. So CI builds a minimal
+test execution is a potential data-exfiltration vector. CI uses a dependency-only
 Ubuntu image (`.github/ci/sandbox.Dockerfile`) and runs the compile and test
 steps inside it with `--network none`, all capabilities dropped,
 `no-new-privileges`, a read-only source mount, and a non-root user
 (`.github/ci/run-in-sandbox.sh`). The workflow token is read-only and the
 checkout does not persist credentials.
 
-Consequently the **unit-test job** can never reach the internet or any account.
+Test commands inside the sandbox cannot reach the internet or any account.
 The admin UI mock smoke is safe there because it uses only localhost and
 in-memory mock data. A separate read-only-token job runs the real Lima smoke
 with network access and KVM but receives no provider or repository-write
@@ -72,6 +72,47 @@ credential. The real Lima and AWS smokes run automatically for trusted `main`
 code; pull request runs require an explicit repository-admin request. The live
 AWS stage workflows run separately and only after a repository admin starts
 them.
+
+Unit/database tests (including compilation and type checks) and the complete
+Chromium/WebKit mock smoke run concurrently on separate GitHub runners. Each
+sandbox still has its own writable workspace and temporary database. The
+required **Run all host tests** check succeeds only when both suites succeed;
+a skipped or cancelled suite cannot satisfy it. Both suites run on PRs and main.
+
+### Reusing the CI image
+
+The canonical repository's `ci-sandbox-image.yml` publishes a private dependency
+image to `ghcr.io/infiversehq/kern-ci` when the Dockerfile or test requirements
+change on main. It can also be dispatched on main to seed a missing image.
+The requirements live at `.github/ci/requirements.txt`, alongside the Dockerfile,
+so edits to either build input use the same protected push path.
+Tags contain a SHA-256 hash of both build inputs. Ordinary test jobs pull that
+exact image directly into Docker, avoiding BuildKit cache restoration and a
+second image export/import. If an image is missing, inaccessible (for example,
+in a public mirror or fork), or the PR changes its dependencies, the test job
+builds those exact inputs locally. It never silently uses older dependencies.
+
+Publishing uses the built-in `GITHUB_TOKEN` with `packages: write` in a separate
+main-only workflow. Test jobs have only `packages: read`, remove registry login
+credentials before testing, and never publish PR images. The image build context
+contains only the Dockerfile and test requirements. Package creation must be
+allowed by the organization's policy; no extra registry secret is needed.
+There is no Actions image cache or image artifact. Fresh runners still download
+and unpack the image, and dependency changes still incur a cold build. Update
+the Dockerfile (even a refresh comment) when a fresh OS/dependency rebuild is
+needed without changing requirements; existing dependency tags are reused.
+
+The pgvector extension is compiled with `OPTFLAGS=""` so a shared image is
+portable across runner CPUs. HTTP test fixtures use a 10 ms server shutdown
+polling interval; request timeouts and assertion deadlines are unchanged.
+
+### Public mirror
+
+The public mirror keeps compilation, type checks, unit/database tests, and the
+mock browser smoke. Real AWS/Lima smoke and AWS stage workflows are restricted
+to `infiversehq/kern`; the mirror does not provision live test environments or
+require their credentials. These guards live in the canonical source so public
+syncs preserve them. Existing public workflow runs are not changed retroactively.
 
 ## Admin UI mock smoke (`tests/smoke-ui/`)
 
@@ -100,7 +141,7 @@ development-only test dependencies once. If no cached browser builds are
 available, install Chromium and WebKit too:
 
 ```bash
-python3 -m pip install -r tests/requirements.txt
+python3 -m pip install -r .github/ci/requirements.txt
 python3 -m playwright install chromium webkit
 ```
 

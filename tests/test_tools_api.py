@@ -620,7 +620,7 @@ class ToolsSocketTests(ToolsApiTestCase):
         self.last_server = server
         import threading
 
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         return socket_path
@@ -981,7 +981,7 @@ class McpShimTests(ToolsApiTestCase):
         server = tools_api.ToolsServer(socket_path, frozenset({os.getuid()}))
         import threading
 
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         # Enable Runway and Instagram so their actions are executable. Neither

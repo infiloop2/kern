@@ -25,7 +25,7 @@ class PublicToolMediaTests(unittest.TestCase):
         self.tools = ToolsServer(str(root / "tools.sock"), frozenset({999999}), frozenset({os.getuid()}))
         self.admin = UnixSocketServer(str(root / "admin.sock"), admin_api.Handler)
         for server in (self.tools, self.admin):
-            threading.Thread(target=server.serve_forever, daemon=True).start()
+            threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
             self.addCleanup(server.server_close)
             self.addCleanup(server.shutdown)
         self.stack.enter_context(patch.object(tools_client, "TOOLS_SOCKET_PATH", str(root / "tools.sock")))
