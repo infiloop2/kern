@@ -7,6 +7,8 @@ from typing import Any
 def run(page: Any, url: str, log_in: Any) -> None:
     from playwright.sync_api import expect
 
+    page_ids = ["thread-1", 'memory-"quoted"<page>&']
+    tooltip = "\n".join(page_ids)
     events = [
         {"seq": 1, "event_type": "thread.message", "payload": {"source": "user", "message": "Continue"}},
         {"seq": 2, "event_type": "thread.context_added", "payload": {
@@ -14,11 +16,15 @@ def run(page: Any, url: str, log_in: Any) -> None:
         }},
         {"seq": 3, "event_type": "thread.context_added", "payload": {
             "message": "Self identity and 2 memories injected.",
+            "memory_page_ids": page_ids,
         }},
         {"seq": 4, "event_type": "thread.context_added", "payload": {
             "message": "Self identity and 2 memories injected.",
         }},
-        {"seq": 5, "event_type": "thread.message", "payload": {"source": "agent", "message": "Ready"}},
+        {"seq": 5, "event_type": "thread.context_added", "payload": {
+            "message": "Self identity and 0 memories injected.", "memory_page_ids": [],
+        }},
+        {"seq": 6, "event_type": "thread.message", "payload": {"source": "agent", "message": "Ready"}},
     ]
     # Repeated notice text must retain separate rows, including after polling
     # and reloading. Context notices are not collapsible activity cards.
@@ -33,6 +39,11 @@ def run(page: Any, url: str, log_in: Any) -> None:
     notices = chat.locator(".thread-stopped", has_text="Self identity and 2 memories injected.")
     expect(notices).to_have_count(2)
     expect(notices.first).to_be_visible()
+    notices.first.hover()
+    expect(notices.first).to_have_attribute("title", tooltip)
+    expect(notices.first).to_have_text("Self identity and 2 memories injected.")
+    expect(notices.nth(1)).not_to_have_attribute("title", re.compile(r".*"))
+    expect(chat.locator(".thread-stopped", has_text="Self identity and 0 memories injected.")).not_to_have_attribute("title", re.compile(r".*"))
     expect(chat.locator(".thread-activity")).to_have_count(0)
     activity = chat.get_by_role("switch", name="Activity", exact=True)
     expect(activity).to_have_attribute("aria-checked", "false")
@@ -43,12 +54,20 @@ def run(page: Any, url: str, log_in: Any) -> None:
     page.reload()
     expect(notices).to_have_count(2)
 
+    expect(notices.first).to_have_attribute("title", tooltip)
+
     # Clearing the transcript hides older context notices with the old history.
-    events.append({"seq": 6, "event_type": "thread.memory_cleared", "payload": {
+    events.append({"seq": 7, "event_type": "thread.memory_cleared", "payload": {
         "message": "Working memory cleared.",
     }})
     page.reload()
     expect(chat.locator(".thread-stopped")).to_have_text("Working memory cleared.")
+    notice_style = """element => {
+        const style = getComputedStyle(element);
+        return { color: style.color, fontSize: style.fontSize,
+                 textAlign: style.textAlign };
+    }"""
+    cleared_style = chat.locator(".thread-stopped").evaluate(notice_style)
     events.pop()
 
     if page.get_by_role("button", name="Open navigation", exact=True).is_visible():
@@ -61,6 +80,14 @@ def run(page: Any, url: str, log_in: Any) -> None:
         app.locator("#history-toggle").click()
         expect(app.locator(".chat-history-entry.stopped", has_text="Historical context transferred.")).to_be_visible()
         expect(app.locator(".chat-history-entry.stopped", has_text="Self identity and 2 memories injected.")).to_have_count(2)
+        app_notices = app.locator(".chat-history-entry.stopped .chat-history-message", has_text="Self identity and 2 memories injected.")
+        app_notices.first.hover()
+        expect(app_notices.first).to_have_attribute("title", tooltip)
+        expect(app_notices.first).to_have_text("Self identity and 2 memories injected.")
+        expect(app_notices.nth(1)).not_to_have_attribute("title", re.compile(r".*"))
+        expect(app.locator(".chat-history-message", has_text="Self identity and 0 memories injected.")).not_to_have_attribute("title", re.compile(r".*"))
+        context_message = app.locator(".chat-history-entry.stopped .chat-history-message").first
+        assert context_message.evaluate(notice_style) == cleared_style
         expect(app.locator("#chat-history-list details")).to_have_count(0)
         expect(app.locator(".chat-history-entry.user")).to_have_text("You:Continue")
     finally:

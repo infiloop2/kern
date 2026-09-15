@@ -56,6 +56,23 @@ def seed_thread(
     )
 
 
+class EventPayloadTests(unittest.TestCase):
+    def test_memory_notice_encodes_page_ids_for_event_storage(self) -> None:
+        for page_ids in (["thread-1", "memory-page"], []):
+            with self.subTest(page_ids=page_ids):
+                cur = MagicMock()
+                cur.fetchone.return_value = (1,)
+                state.append_agent_event(cur, "thread.context_added", "thread-1", {
+                    "message": "Memories injected.", "memory_page_ids": page_ids,
+                })
+                cur.execute.assert_called_once()
+                sql, parameters = cur.execute.call_args.args
+                self.assertIn("memory_page_ids", sql)
+                self.assertEqual(sql.count("%s"), len(parameters))
+                self.assertIsInstance(parameters[-1], pgclient.Jsonb)
+                self.assertEqual(parameters[-1].value, page_ids)
+
+
 class StateStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()

@@ -2283,6 +2283,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(notice["event_type"], "thread.context_added")
         self.assertEqual(notice["payload"], {
             "message": "Self identity and 2 memories injected.",
+            "memory_page_ids": ["thread-t1", "playwright-browser"],
         })
 
     def test_memory_notice_counts_only_injected_pages(self) -> None:
@@ -2302,6 +2303,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(len(events["events"]), 2)
         self.assertEqual(events["events"][-1]["payload"], {
             "message": "Self identity and 1 memory injected.",
+            "memory_page_ids": ["thread-t1"],
         })
 
     def test_memory_recall_timeout_warns_and_does_not_block_the_turn(self) -> None:
@@ -2327,6 +2329,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual([e["event_type"] for e in events["events"]], ["thread.message", "thread.context_added"])
         self.assertEqual(events["events"][-1]["payload"]["message"], "Self identity and 0 memories injected.")
+        self.assertEqual(events["events"][-1]["payload"]["memory_page_ids"], [])
 
     def test_message_steers_running_turn_without_a_host_mailbox(self) -> None:
         seed_thread_session("thread-t1")

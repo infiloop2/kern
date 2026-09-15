@@ -523,7 +523,7 @@ button.app-toolbar-button svg { height: 15px; width: 15px; }
 }
 .chat-history-entry.agent,
 .chat-history-entry.error { justify-self: start; }
-.chat-history-entry.stopped { color: var(--text-dim); font-size: 0.78rem; justify-self: center; }
+.chat-history-entry.stopped { color: var(--text-dim); font-size: 0.78rem; text-align: center; }
 .chat-history-entry.error { border-left: 2px solid var(--danger); color: var(--text-dim); font-size: 0.8rem; padding-left: 0.6rem; }
 .chat-history-message {
   color: var(--text);
@@ -533,6 +533,11 @@ button.app-toolbar-button svg { height: 15px; width: 15px; }
   white-space: pre-wrap;
 }
 .chat-history-entry.agent .chat-history-message { white-space: normal; }
+.chat-history-entry.stopped .chat-history-message {
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
 .chat-history-more {
   background: transparent;
   border: 0;
