@@ -25,7 +25,7 @@ from host.runtime.core.unix_socket_service import (
     UnixSocketServer,
     peer_uids,
 )
-from host.runtime.workspace import conversation_history, memory, schedules
+from host.runtime.workspace import agent_messages, conversation_history, memory, schedules
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.web_apps import backend as web_apps
 
@@ -110,6 +110,10 @@ def dispatch_call(
                     actor="agent",
                 )
             }
+    elif parsed.path == "/agent/messages":
+        if method != "POST" or query:
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent messaging accepts only POST without query parameters")
+        response = agent_messages.send_message(body, sender_thread_id=peer_thread_id)
     elif parsed.path.startswith("/agent/conversation-history/"):
         response = conversation_history.route_agent(method, parsed.path, body, query)
     elif parsed.path == "/agent/memory" or parsed.path.startswith("/agent/memory/"):

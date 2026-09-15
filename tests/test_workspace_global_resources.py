@@ -1264,7 +1264,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                     "POST",
                     f"/v1/threads/{schedule['thread_id']}/messages",
                     {
-                        "message": "This is an automated trigger.\n\nSummarize open work.",
+                        "message": "This is an automated trigger.\n\n---\n\nSummarize open work.",
                         **SESSION,
                     },
                 )
@@ -1779,7 +1779,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                     f"/v1/threads/{schedule['thread_id']}/messages",
                     {
                         "message": (
-                            "This is an automated trigger.\n\n"
+                            "This is an automated trigger.\n\n---\n\n"
                             "/mnt/kern-agent/agent-home/scripts/backup.sh"
                         ),
                         "agent_runtime": "script",

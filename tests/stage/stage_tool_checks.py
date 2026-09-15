@@ -358,6 +358,7 @@ class StageToolChecks:
     def _check_tool_provider(self, tool_id: str) -> str:
         specialized = {
             "apify": self._check_apify_live,
+            "apify_developer": self._check_apify_developer_live,
             "brave_search": self._check_brave_live,
             "gmail": self._check_gmail_live,
             "google_calendar": self._check_calendar_live,
@@ -416,6 +417,20 @@ class StageToolChecks:
         suffix = "; publish proposal denied" if tool_id == "linkedin" else ""
         read_count = len(calls) + (1 if tool_id == "ibkr" else 0)
         return f"{read_count} live read(s) completed{suffix}"
+
+    def _check_apify_developer_live(self) -> str:
+        self._successful_tool_call("apify_developer_get_account_usage", {})
+        self._successful_tool_call("apify_developer_list_actors", {"limit": 1})
+        store = self._successful_tool_call("apify_developer_search_store", {"query": "website", "limit": 1})
+        items = store.get("items")
+        if not isinstance(items, list) or not items or not isinstance(items[0], dict) or not items[0].get("id"):
+            raise AssertionError("Apify Developer Store search returned no Actor id")
+        self._successful_tool_call("apify_developer_get_actor", {"actor_id": items[0]["id"]})
+        self._queue_and_deny("apify_developer", "apify_developer_create_actor", {
+            "name": "kern-stage-" + os.urandom(3).hex(), "title": "Kern stage proposal",
+            "description": "Approval test only; creation must be denied.",
+        })
+        return "four live developer reads completed; private Actor creation proposed and denied; no builds, runs or publication"
 
     def _check_apify_live(self) -> str:
         search = self._successful_tool_call(

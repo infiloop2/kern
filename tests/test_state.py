@@ -831,6 +831,10 @@ class StateStorageTests(unittest.TestCase):
                 cur, "thread.message", "schedule-7",
                 {"message": automated, "source": "user"},
             )
+            divided_prompt = state.append_agent_event(
+                cur, "thread.message", "schedule-7",
+                {"message": "This is an automated trigger.\n\n---\n\nRemember this correction", "source": "user"},
+            )
             kept = [
                 state.append_agent_event(
                     cur, "thread.message", thread_id,
@@ -844,7 +848,7 @@ class StateStorageTests(unittest.TestCase):
                     ("thread-1", "user", automated),
                 )
             ]
-        seqs = (prompt, *kept)
+        seqs = (prompt, divided_prompt, *kept)
         vector = [1.0] + [0.0] * 383
         state.store_thread_message_embeddings("test-model", [(seq, vector) for seq in seqs])
         for exclude in (False, True):

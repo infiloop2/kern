@@ -170,6 +170,7 @@ class ScriptSession:
         script_path = input_message
         if script_path.startswith(AUTOMATED_TRIGGER_PREFIX):
             script_path = script_path[len(AUTOMATED_TRIGGER_PREFIX):]
+            script_path = script_path.removeprefix("---\n\n")
         script_path = script_path.strip()
         error = script_path_error(script_path)
         if error is not None:

@@ -296,7 +296,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("void Promise.all([refresh(), window.KernHost.refreshNavigation()])", send)
         self.assertIn(
             '["thread.message", "thread.activity", "thread.error", "thread.stopped",\n'
-            '      "thread.memory_cleared"].includes(event.event_type)',
+            '      "thread.memory_cleared", "thread.context_added"].includes(event.event_type)',
             script,
         )
         # A clear made while scrolled up must bring its own confirmation into
@@ -1300,6 +1300,7 @@ class AdminUiStaticTests(unittest.TestCase):
                             "thread.message",
                             "thread.error",
                             "thread.stopped",
+                            "thread.context_added",
                         ],
                     },
                     None,
@@ -1316,6 +1317,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "thread.message",
                 "thread.error",
                 "thread.stopped",
+                "thread.context_added",
             ),
         )
         with self.assertRaises(admin_api.ApiError) as error:

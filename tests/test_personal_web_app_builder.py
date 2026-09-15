@@ -38,6 +38,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
                 "codex",
                 "gpt-5.6-terra",
                 "high",
+                "",
             ),
             {
                 "status": "idle",
@@ -956,6 +957,73 @@ class BrowserRoutingTests(unittest.TestCase):
         self.assertIn("retry again in a while", error.exception.message)
         apply.assert_not_called()
 
+    def test_agent_can_read_app_session_options(self) -> None:
+        options = {"codex": {"gpt-5.6-sol": ["high"]}}
+        with (
+            patch.object(backend, "public_session_options", return_value=options),
+            patch.object(backend, "active_agent_runtimes", return_value=["codex"]),
+        ):
+            self.assertEqual(
+                backend.route_agent("GET", "/agent/apps/session-options", None),
+                {"session_options": options, "active_runtimes": ["codex"]},
+            )
+            with self.assertRaises(backend.WorkspaceError) as error:
+                backend.route_agent(
+                    "GET", "/agent/apps/session-options", None, {"x": ["1"]}
+                )
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+
+    def test_agent_metadata_routes_require_an_unlocked_active_app(self) -> None:
+        for resource, function, body in (
+            ("name", "rename_web_app", {"name": "Marketing HQ"}),
+            ("agent-settings", "set_app_agent_settings", {
+                "agent_runtime": "codex", "model": "gpt-5.6-sol", "effort": "high",
+            }),
+        ):
+            with (
+                self.subTest(resource=resource),
+                patch.object(backend, "_require_web_app"),
+                patch.object(backend, "_require_agent_writable_web_app") as writable,
+                patch.object(backend, function, return_value={"app_id": "app-9"}) as save,
+            ):
+                self.assertEqual(
+                    backend.route_agent("PUT", f"/agent/apps/app-9/{resource}", body),
+                    {"app": {"app_id": "app-9"}},
+                )
+                writable.assert_called_once_with("app-9")
+                save.assert_called_once_with("app-9", body)
+                save.reset_mock()
+                for status in (HTTPStatus.LOCKED, HTTPStatus.CONFLICT):
+                    writable.side_effect = backend.WorkspaceError(status, "read-only")
+                    with self.assertRaises(backend.WorkspaceError) as error:
+                        backend.route_agent("PUT", f"/agent/apps/app-9/{resource}", body)
+                    self.assertEqual(error.exception.status, status)
+                    save.assert_not_called()
+
+    def test_agent_metadata_routes_validate_before_writing(self) -> None:
+        settings = {
+            "agent_runtime": "codex", "model": "gpt-5.6-sol", "effort": "high",
+        }
+        with (
+            patch.object(backend, "_require_web_app"),
+            patch.object(backend, "_require_agent_writable_web_app"),
+            patch.object(backend, "browser_conversation", return_value={"status": "running"}),
+            patch.object(backend.db, "transaction") as transaction,
+        ):
+            for resource, body, status in (
+                ("name", {"name": " "}, HTTPStatus.BAD_REQUEST),
+                ("name", {"name": "x" * 101}, HTTPStatus.BAD_REQUEST),
+                ("agent-settings", {"agent_runtime": "codex"}, HTTPStatus.BAD_REQUEST),
+                ("agent-settings", {**settings, "model": "unknown"}, HTTPStatus.BAD_REQUEST),
+                ("agent-settings", settings, HTTPStatus.CONFLICT),
+            ):
+                with self.subTest(resource=resource, body=body), self.assertRaises(
+                    backend.WorkspaceError
+                ) as error:
+                    backend.route_agent("PUT", f"/agent/apps/app-9/{resource}", body)
+                self.assertEqual(error.exception.status, status)
+            transaction.assert_not_called()
+
     def test_agent_can_create_an_app_only_through_the_collection_route(self) -> None:
         created = {"app_id": "app-10", "revision": 0}
         with patch.object(
@@ -1553,7 +1621,7 @@ class ConversationTests(unittest.TestCase):
             "GET",
             "/v1/threads/app-6/events?since=2&limit=6&message_bytes=122880"
             "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
-            "&event_type=thread.stopped",
+            "&event_type=thread.stopped&event_type=thread.context_added",
         )
 
     def test_conversation_events_open_at_tail_and_page_backward(self) -> None:
@@ -1573,7 +1641,7 @@ class ConversationTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/app-6/events?limit=6&message_bytes=122880"
                 "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
-                "&event_type=thread.stopped",
+                "&event_type=thread.stopped&event_type=thread.context_added",
             ),
         )
         self.assertEqual(
@@ -1582,7 +1650,7 @@ class ConversationTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880"
                 "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
-                "&event_type=thread.stopped",
+                "&event_type=thread.stopped&event_type=thread.context_added",
             ),
         )
 
@@ -1602,7 +1670,7 @@ class ConversationTests(unittest.TestCase):
             "GET",
             "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880"
             "&event_type=thread.message&event_type=thread.error"
-            "&event_type=thread.stopped",
+            "&event_type=thread.stopped&event_type=thread.context_added",
         )
 
     def test_conversation_events_reject_mixed_cursors(self) -> None:
@@ -1633,9 +1701,7 @@ class ConversationTests(unittest.TestCase):
             "POST",
             "/v1/threads/app-5/messages",
             {
-                "message": (
-                    "This request is for Web App `app-5`.\n\n---\n\nBuild it."
-                ),
+                "message": "Build it.",
                 **self.SESSION,
             },
         )
@@ -1666,7 +1732,7 @@ class ConversationTests(unittest.TestCase):
         self.assertNotIn("script", rejected.exception.message)
         host.assert_not_called()
 
-    def test_message_creation_adds_app_context_before_the_user_message(self) -> None:
+    def test_message_creation_preserves_the_user_message(self) -> None:
         with (
             patch.object(backend, "_require_web_app"),
             patch.object(
@@ -1679,12 +1745,11 @@ class ConversationTests(unittest.TestCase):
             )
         self.assertEqual(
             host.call_args.args[2]["message"],
-            "This request is for Web App `app-5`.\n\n---\n\nMorning check.",
+            "Morning check.",
         )
 
-    def test_message_creation_bounds_context_and_content_together(self) -> None:
-        context = backend.APP_MESSAGE_CONTEXT.format(app_id="app-5")
-        content = "x" * (backend.MAX_CHAT_MESSAGE_BYTES - len(context.encode()))
+    def test_message_creation_bounds_content(self) -> None:
+        content = "x" * backend.MAX_CHAT_MESSAGE_BYTES
         with (
             patch.object(backend, "_require_web_app"),
             patch.object(
@@ -2344,8 +2409,15 @@ class AgenticWebAppDbTests(unittest.TestCase):
             "browser_conversation",
             return_value={"session": None, "status": "idle"},
         ):
-            saved = backend.set_app_agent_settings("app-1", settings)
+            saved = backend.route_agent(
+                "PUT", "/agent/apps/app-1/agent-settings", settings
+            )["app"]
         self.assertEqual(saved["agent_settings"], settings)
+        renamed = backend.route_agent(
+            "PUT", "/agent/apps/app-1/name", {"name": "Marketing HQ"}
+        )["app"]
+        self.assertEqual(renamed["app_id"], "app-1")
+        self.assertEqual(renamed["revision"], created["revision"])
         with patch.object(
             backend,
             "call_admin_api",
@@ -2353,6 +2425,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
         ):
             listed = backend.list_web_apps({})["apps"]
         self.assertEqual(listed[0]["agent_settings"], settings)
+        self.assertEqual(listed[0]["name"], "Marketing HQ")
 
     def test_web_app_creation_stops_at_durable_quota(self) -> None:
         with (

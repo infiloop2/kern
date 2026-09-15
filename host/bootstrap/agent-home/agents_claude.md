@@ -67,7 +67,8 @@ controls. Never put secrets in URLs or disguise a destination.
 Link files under agent home with an absolute
 `/mnt/kern-agent/agent-home/...` Markdown target, optionally with `:line` or
 `:line:column`; wrap paths containing spaces in angle brackets. Do not link
-paths outside agent home.
+paths outside agent home. In Apps, use the same path in an anchor's `href` to
+open the file in Files.
 
 The `kern` MCP server always exposes `workspace_api`. It reaches only the
 host's agent-facing `/agent/` Workspace routes. Do not guess or probe routes;
@@ -99,8 +100,9 @@ trigger; do not preload unrelated references.
 
 ### Web Apps Workspace API
 
-App routes stay forced:
+App routes:
 
+- `GET /agent/apps/session-options`; `PUT /agent/apps/{app_id}/{name|agent-settings}`.
 - `GET /agent/apps`; `GET /agent/apps/{app_id}/state/{meta|ui|data|data/shape}`;
   `POST /agent/apps/{app_id}/state/data/read`; and
   `POST /agent/apps/{app_id}/actions`.
@@ -108,16 +110,15 @@ App routes stay forced:
   `POST /agent/apps/{app_id}/collections/{name}/query`; and
   `POST /agent/apps/{app_id}/collections/{name}/actions`.
 
-Read `/opt/kern-host/host/bootstrap/agent-home/references/web-apps.md` for payload schemas and
-generated App code. These invariants also stay forced:
+Read `/opt/kern-host/host/bootstrap/agent-home/references/web-apps.md` for schemas and
+App code. Invariants:
 
 - Use the immutable `app-N` id, never an editable name alone. Create a new App
   only when the operator explicitly asks.
 - Read only the needed data: inspect `state/data/shape`, then use targeted
   `state/data/read` paths. Keep repeated queryable rows in collections.
-- Carry the returned `revision` into `expected_revision`; after 409, re-read
-  only the relevant state and retry. After 423, stop and tell the operator the
-  App is locked.
+- UI/data writes carry `revision` into `expected_revision`; after 409, re-read
+  relevant state and retry. After 423, stop and report the App is locked.
 - Data paths use object keys and numeric array indexes. A parent path must
   already exist. Use `append` for a new array item; `set` does not append at
   index equal to the array length.

@@ -637,8 +637,9 @@ triple rotates an idle thread to a new provider session in the same admission
 transaction; a partial triple returns `400`, and a change while running
 returns `409`. The synthetic handoff is sent only to the new provider: the
 visible event stream records a completed `thread.activity` describing the old
-and new session configuration, followed by the operator's new message, but not
-the transcript wrapper. The handoff independently preserves up to 100,000
+and new session configuration, followed by the operator's new message and a
+compact `thread.context_added` notice. The transcript wrapper itself is not
+stored. The handoff independently preserves up to 100,000
 characters of newest conversation and 150,000 characters of newest bounded
 activity summaries; older retained history may be omitted. Provider-side
 context and cache reads from the previous session are not available. Thread
@@ -858,6 +859,7 @@ thread.activity
 thread.error
 thread.stopped
 thread.memory_cleared
+thread.context_added
 agent_runtime.active
 agent_runtime.login_completed
 agent_runtime.linked_account_reset
@@ -881,6 +883,25 @@ A client that requests explicit `event_type` filters must include
 `thread.memory_cleared` to render the boundary. It is a display event only:
 it is never handed to a provider, and a conversation-only view that drops
 `thread.activity` is still expected to fetch it.
+
+`thread.context_added` payload fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `message` | string | A compact notice describing context Kern added to the accepted turn's launch prompt. |
+
+Kern records “Historical context transferred” only when retained conversation
+or activity is included for a new provider session, respecting the latest
+working-memory clear boundary. “Self identity and N memories injected” confirms
+the immutable thread identity and counts the validated self/swarm pages included
+in each model turn. Identity is included even with zero memories. Existing
+self-memory is loaded before shared-memory search. Live steering, script turns,
+and rejected admissions produce no injection notice.
+
+Chat, scheduled-agent Chat, and App conversations show these notices even with
+activity hidden. They are display events: they are excluded from conversation
+search and future history handoffs. They describe Kern's prompt assembly, not
+provider acknowledgement or provider-managed context/compaction.
 
 `thread.activity` payload fields:
 
@@ -1512,7 +1533,7 @@ tool. Each tool object has:
 | `display_name`, `description` | Operator-facing name and one-line summary from the manifest. |
 | `connection` | `oauth` (operator third-party auth), `mcp_oauth` (hosted MCP OAuth with one fixed `default` connection), `enable_only` (deployment key only), or `whatsapp_linked_device` (WhatsApp QR linking). |
 | `enabled` | Whether the operator has enabled the tool for agent calls. |
-| `actions[]` | Each action's stable `id`, `description`, per-action `data_policy`, `approval` (`direct` or `operator`), `input_schema`, `output_schema`, and `returns_asset`. Both schemas name every field and close every object (`additionalProperties: false`). `output_schema` is empty `{}` exactly for the actions that return no JSON result: an approval-gated one, which returns a user-visible message, and a `returns_asset` one, whose whole result is a file streamed into the agent workspace. A field the provider may not supply is declared as a `oneOf` union with `{"type": "null"}`. |
+| `actions[]` | Each action's stable `id`, `description`, per-action `data_policy`, `approval` (`direct` or `operator`), `input_schema`, `input_protections`, `output_schema`, and `returns_asset`. `input_protections` maps each direct input name to `{kind, description, allow_identifiers, allow_machine_tokens, identifiers_condition}`; kind is `validated` (with a concise description) or `parameter_guard` (with the two boolean exception flags). `identifiers_condition` is null or `decimal` (the identifier exception applies only to all-digit values). It describes existing checks and does not configure execution. Approval actions return an empty map. Both schemas name every field and close every object (`additionalProperties: false`). `output_schema` is empty `{}` exactly for the actions that return no JSON result: an approval-gated one, which returns a user-visible message, and a `returns_asset` one, whose whole result is a file streamed into the agent workspace. A field the provider may not supply is declared as a `oneOf` union with `{"type": "null"}`. |
 | `config[]` | This tool's declared config keys with `description` and `set`. All config is secret and scoped per tool; values are never returned (see `PUT /v1/tools/{tool_id}/config`). |
 | `protections[]` | Short operator-facing safeguards rendered on the focused Home integration page. |
 | `setup_steps[]` | Ordered provider-side and Kern setup steps. A step may include a provider documentation link and a local audited screenshot with alt text; `show_callback`/`show_config` render this host's OAuth callback URI or the tool's config keys inside that step. |

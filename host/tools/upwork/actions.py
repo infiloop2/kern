@@ -25,24 +25,6 @@ class Operation:
     input_schema: JSONObject
 
 
-def _protection(field: str, spec: JSONObject, *, approval: bool) -> str:
-    kind = spec.get("type")
-    if approval:
-        return "validated type, structure and provider limits; exact parameters require human approval. Parameter Guard does not scan approved content."
-    if field in OPAQUE_FIELDS:
-        shape = "array and item limits; bounded ASCII IDs" if kind == "array" else "ASCII ID, 1–" + str(spec.get("maxLength", 1024)) + " characters"
-        return "validated " + shape + "; Parameter Guard permits identifier and machine-token patterns but still checks for explicit credentials."
-    if kind == "boolean":
-        return "validated as a JSON boolean."
-    if kind in ("integer", "number"):
-        return "validated numeric type, finite safe value and stated bounds; Parameter Guard also checks the value."
-    if kind in ("array", "object"):
-        return "validated structure and size; nested text is checked by Parameter Guard, including decoded values."
-    if "enum" in spec:
-        return "validated against the listed choices and checked by Parameter Guard."
-    return "validated string, at most 1,024 UTF-8 bytes and any stricter stated limits; Parameter Guard checks text and decoded values for sensitive data, with no identifier or machine-token exceptions."
-
-
 def operation(action_id: str, tool: str, action: str, description: str,
               properties: JSONObject, required: tuple[str, ...] = (), *,
               approval: bool = False, organization: bool = True) -> Operation:
@@ -63,10 +45,6 @@ def operation(action_id: str, tool: str, action: str, description: str,
         if isinstance(value, dict):
             result = {key: public_schema(child) for key, child in value.items()
                       if key not in ("minimum", "maximum", "minLength", "maxLength")}
-            if "properties" in value:
-                for field, original in cast(JSONObject, value["properties"]).items():
-                    target = cast(JSONObject, cast(JSONObject, result["properties"])[field])
-                    target["description"] = str(target.get("description", "")) + " Protection: " + _protection(field, cast(JSONObject, original), approval=approval)
             return result
         if isinstance(value, list):
             return [public_schema(child) for child in value]
@@ -137,7 +115,7 @@ ACCOUNT_READS = {
     "connects": "get_connects_balance",
 }
 _account_fields: JSONObject = {"section": {"type": "string", "enum": list(ACCOUNT_READS),
-    "description": "Account section to read: profile, dashboard, portfolio/certificates, or Connects balance and usage. Protection: validated against these four choices; no arbitrary operation names."}}
+    "description": "Account section to read: profile, dashboard, portfolio/certificates, or Connects balance and usage."}}
 for _name in ACCOUNT_READS.values():
     _account_fields.update(cast(JSONObject, OPERATIONS[_name].spec.input_schema["properties"]))
 GET_ACCOUNT = ActionSpec(

@@ -9,6 +9,8 @@ from typing import Any, cast
 
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    validated_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -133,7 +135,7 @@ MANIFEST = ToolManifest(
             ),
         ),
     ),
-    actions=(
+    actions=protect_inputs((
         ActionSpec(id="read_events",
             description="Read events in a time range.",
             data_policy=(
@@ -164,7 +166,12 @@ MANIFEST = ToolManifest(
             ),
             approval="operator",
         ),
-    ),
+    ), {
+        "read_events": {
+            "start_time": validated_input("ISO 8601 timestamp."),
+            "end_time": validated_input("Parsed ISO 8601 timestamp."),
+        },
+    }),
     config=(
         ConfigRequirement(key="GOOGLE_OAUTH_CLIENT_ID", description="Google OAuth client id for the hosting deployment."),
         ConfigRequirement(key="GOOGLE_OAUTH_CLIENT_SECRET", description="Google OAuth client secret for the hosting deployment."),

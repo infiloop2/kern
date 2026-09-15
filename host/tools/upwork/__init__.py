@@ -7,10 +7,10 @@ import time
 from contextlib import contextmanager
 from typing import cast
 
-from host.param_guard import PARAM_GUARD_TECHNICAL_DETAIL
+from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.host_api import ApprovalRecord, HostAPI, StoredCredential
 from host.tools.json_types import JSONObject
-from host.tools.manifest import DataSummary, DataSummaryCard, DataSummaryLink, SetupStep, ToolManifest
+from host.tools.manifest import protect_inputs, guarded_input, validated_input, DataSummary, DataSummaryCard, DataSummaryLink, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
 from host.tools.upwork.mcp_http import MCPConnection, result_text as _text
 from host.tools.shared.oauth2 import IntegrationReconnectRequired
@@ -26,9 +26,77 @@ PRIVACY = "https://www.upwork.com/legal#privacy"
 MANIFEST = ToolManifest(
     tool_id="upwork", display_name="Upwork", connection="mcp_oauth",
     description="Read jobs, profiles, messages and proposals through Upwork's official MCP service. Submit proposals and send messages with your approval.",
-    actions=ACTIONS,
+    actions=protect_inputs(ACTIONS, {
+        "get_account": {
+            "section": validated_input("One of the listed choices."),
+            "org_uid": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "profile_key": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "limit": guarded_input(),
+            "cursor": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "search_jobs": {
+            "org_uid": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "query": guarded_input(),
+            "title": guarded_input(),
+            "job_type": guarded_input(),
+            "experience_level": guarded_input(),
+            "budget_min": guarded_input(),
+            "budget_max": guarded_input(),
+            "rate_min": guarded_input(),
+            "rate_max": guarded_input(),
+            "skills": guarded_input(),
+            "verified_payment_only": validated_input("JSON boolean."),
+            "sort": guarded_input(),
+            "limit": guarded_input(),
+            "cursor": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "get_job": {
+            "org_uid": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "job_id": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "get_recommended_jobs": {
+            "org_uid": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "mode": guarded_input(),
+            "days_posted": guarded_input(),
+            "from_date": guarded_input(),
+            "to_date": guarded_input(),
+            "limit": guarded_input(),
+            "cursor": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "list_proposals": {
+            "org_uid": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "status": guarded_input(),
+            "limit": guarded_input(),
+            "cursor": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "get_proposal": {
+            "org_uid": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "proposal_id": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "list_invitations": {
+            "org_uid": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "job_posting_id": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "status": guarded_input(),
+            "limit": guarded_input(),
+            "cursor": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "list_conversations": {
+            "org_uid": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "unread_only": validated_input("JSON boolean."),
+            "room_type": guarded_input(),
+            "limit": guarded_input(),
+            "cursor": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "read_messages": {
+            "org_uid": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "room_id": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+            "limit": guarded_input(),
+            "cursor": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+    }),
     protections=(
-        "Direct-action free text uses Parameter Guard; approved write parameters use structural validation and human review. Read actions run directly. Sending messages and submitting proposals require your approval; private proposal preparation happens internally after approval.",
+        PARAM_GUARD_PROTECTION,
+        "Sending messages and submitting proposals require your approval; private proposal preparation happens internally after approval.",
         "Approvals bind the exact parameters and connected OAuth grant. Proposal submission checks the private preview against the approved content, terms and Connects cost before confirming.",
         "Kern stores OAuth credentials encrypted and uses them to authenticate Upwork requests. Chat history and workspace files are not automatically included.",
         "Only the fixed Upwork endpoints are contacted. Redirects, server requests for model access, and automatic file or link fetching are disabled.",
@@ -150,9 +218,19 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
     fields: dict[str, list] = {key: [] for key in (
         "preview_id", "cover_letter", "charged_amount", "job_reference", "connects_cost", "connects_balance", "can_apply",
         "answers", "boost_connects", "team_org_id", "attachments", "certificate_ids", "portfolio_project_ids", "screening_questions")}
+    # The stored preview uses provider camelCase parameters (coverLetter,
+    # chargedAmount), even though the creating MCP action takes snake_case.
+    aliases = {
+        "previewId": "preview_id", "coverLetter": "cover_letter", "chargedAmount": "charged_amount",
+        "jobReference": "job_reference", "connectsCost": "connects_cost", "connectsBalance": "connects_balance",
+        "canApply": "can_apply", "boostConnects": "boost_connects", "teamOrgId": "team_org_id",
+        "certificateIds": "certificate_ids", "portfolioProjectIds": "portfolio_project_ids",
+        "screeningQuestions": "screening_questions",
+    }
     def inspect(value):
         if isinstance(value, dict):
             for key, child in value.items():
+                key = aliases.get(key, key)
                 if key in fields:
                     fields[key].append(child)
                 inspect(child)
@@ -160,10 +238,15 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
             for child in value:
                 inspect(child)
     inspect(preview)
-    required = {"cover_letter", "charged_amount", "job_reference", "connects_cost", "connects_balance", "can_apply"} | (set(params) - {"org_uid"})
+    # Balance and eligibility are checked by the fresh get_job immediately
+    # before preparation; they need not be repeated in the stored preview.
+    required = {"cover_letter", "charged_amount", "job_reference", "connects_cost"} | (set(params) - {"org_uid"})
     with _response("get_preview", text, credential):
-        if any(len(fields[key]) != 1 for key in required) or any(len(rows) > 1 for rows in fields.values()):
-            raise ValueError("Upwork's preview does not expose unambiguous approved proposal content and cost.")
+        missing = sorted(key for key in required if not fields[key])
+        repeated = sorted(key for key, rows in fields.items() if len(rows) > 1)
+        if missing or repeated:
+            raise ValueError("Upwork's preview does not expose unambiguous approved proposal content and cost. "
+                             f"Missing fields: {', '.join(missing) or 'none'}; repeated fields: {', '.join(repeated) or 'none'}.")
     values = {key: rows[0] for key, rows in fields.items() if rows}
     for key in ("connects_cost", "connects_balance"):
         value = values.get(key)
@@ -187,8 +270,8 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
     for key in set(cast(JSONObject, OPERATIONS["submit_proposal"].input_schema["properties"])) - set(params) - {"org_uid"}:
         if key in values and values[key] not in (None, [], "", 0):
             raise ValueError("Upwork added unapproved proposal terms. Request a new approval.")
-    balance = values["connects_balance"]
-    if values["can_apply"] is not True or type(values["connects_cost"]) is not int or values["connects_cost"] != cost["connects_cost"] or type(balance) is not int or balance < cast(int, cost["maximum_connects"]):
+    balance = values.get("connects_balance", cost["connects_balance"])
+    if values.get("can_apply", True) is not True or type(values["connects_cost"]) is not int or values["connects_cost"] != cost["connects_cost"] or type(balance) is not int or balance < cast(int, cost["maximum_connects"]):
         raise ValueError("Upwork changed the approved Connects cost or application eligibility. Request a new approval.")
 
 

@@ -292,7 +292,7 @@ def _schedule_fields(body: Any, api_error: Any, *, update: bool = False) -> dict
     }
     if update:
         required.add("expected_revision")
-    allowed = required | {"interval_minutes", "daily_time"}
+    allowed = required | {"interval_minutes", "daily_time", "purpose"}
     try:
         schedule_backend._require_keys(body, allowed, required)
         return schedule_backend._validated_fields(body)
@@ -552,6 +552,7 @@ def desktop_smoke(page: Any) -> None:
     expect(surface.locator("#schedule-enabled")).to_have_count(0)
     expect(surface.locator("#schedule-runs-section")).to_have_count(0)
     surface.locator("#schedule-name").fill("Morning review")
+    surface.locator("#schedule-purpose").fill("Summarize release work")
     schedule_message = surface.locator("#schedule-message")
     schedule_message.fill("Summarize open release work.\n" + "unbroken-schedule-message-" * 24)
     expect(schedule_message).to_have_css("overflow-x", "hidden")
@@ -593,6 +594,7 @@ def desktop_smoke(page: Any) -> None:
     expect(surface).to_be_visible()
     expect(surface.locator("#global-title")).to_have_text("Scheduled agent")
     expect(surface.locator("#schedule-name")).to_have_value("Daily release review")
+    expect(surface.locator("#schedule-purpose")).to_have_value("Summarize release work")
     expect(surface.locator("#schedule-runs-section")).to_have_count(0)
     expect(page).to_have_url(re.compile(r"#scheduled-agents/1$"))
     page.evaluate("""() => {
@@ -638,7 +640,7 @@ def desktop_smoke(page: Any) -> None:
     expect(page).to_have_url(re.compile(r"#scheduled-agents/1$"))
     expect(surface.locator("#global-title")).to_have_text("Scheduled agent")
 
-    trigger_message = "This is an automated trigger.\n\nSummarize open release work."
+    trigger_message = "This is an automated trigger.\n\n---\n\nSummarize open release work."
     chat_index = page.evaluate(
         "() => window.KernHost.api('GET', '/v1/workspace/chat/scheduled-agents')"
     )

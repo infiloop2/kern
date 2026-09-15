@@ -11,6 +11,9 @@ from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAI
 from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
+    validated_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -107,7 +110,7 @@ MANIFEST = ToolManifest(
         "This is a read-only, lower-cost discovery path; it never uses or changes an X account."
     ),
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="search_tweets",
             description=(
@@ -169,7 +172,17 @@ MANIFEST = ToolManifest(
             ),
             output_schema=OUTPUT_SCHEMA,
         ),
-    ),
+    ), {
+        "search_tweets": {
+            "query": guarded_input(),
+            "query_type": validated_input("Latest or Top."),
+            "max_results": validated_input("Integer from 1 to 20."),
+            "lookback_hours": validated_input("Integer from 0 to 720."),
+            "exclude_replies": validated_input("JSON boolean."),
+            "exclude_retweets": validated_input("JSON boolean."),
+            "exclude_usernames": guarded_input(),
+        },
+    }),
     config=(
         ConfigRequirement(
             key="TWITTERAPI_IO_API_KEY",

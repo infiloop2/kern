@@ -18,6 +18,9 @@ from host.param_guard import (
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI, StoredCredential
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
+    validated_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -309,7 +312,7 @@ MANIFEST = ToolManifest(
         "organize it by creating folders, moving or archiving messages, and send safely rendered email with your approval."
     ),
     connection="oauth",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="search_messages",
             description="Search the connected mailbox with Zoho Mail search syntax and return bounded message summaries.",
@@ -488,7 +491,35 @@ MANIFEST = ToolManifest(
             ),
             approval="operator",
         ),
-    ),
+    ), {
+        "search_messages": {
+            "search_key": guarded_input(allow_identifiers=True),
+            "start": validated_input("Integer from 1 to 1000000."),
+            "limit": validated_input("Integer from 1 to 50."),
+        },
+        "list_messages": {
+            "folder_id": validated_input("1–30 decimal digits."),
+            "start": validated_input("Integer from 1 to 1000000."),
+            "limit": validated_input("Integer from 1 to 50."),
+        },
+        "read_message": {
+            "folder_id": validated_input("1–30 decimal digits."),
+            "message_id": validated_input("1–30 decimal digits."),
+        },
+        "create_folder": {
+            "name": guarded_input(allow_identifiers=True),
+            "parent_folder_id": validated_input("1–30 decimal digits."),
+        },
+        "move_messages": {
+            "message_ids": validated_input("1–50 message IDs, each 1–30 decimal digits."),
+            "destination_folder_id": validated_input("1–30 decimal digits."),
+            "source_folder_id": validated_input("1–30 decimal digits."),
+            "include_archived": validated_input("JSON boolean."),
+        },
+        "archive_messages": {
+            "message_ids": validated_input("1–50 message IDs, each 1–30 decimal digits."),
+        },
+    }),
     config=(
         ConfigRequirement(key="ZOHO_OAUTH_CLIENT_ID", description="Zoho server-based application's OAuth client id."),
         ConfigRequirement(key="ZOHO_OAUTH_CLIENT_SECRET", description="Zoho server-based application's OAuth client secret."),

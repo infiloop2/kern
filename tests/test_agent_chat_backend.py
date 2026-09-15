@@ -857,7 +857,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "&event_type=thread.activity"
             "&event_type=thread.error"
             "&event_type=thread.stopped"
-            "&event_type=thread.memory_cleared"
+            "&event_type=thread.memory_cleared&event_type=thread.context_added"
             "&since=2",
         )
         self.assertEqual(response, events)
@@ -929,7 +929,7 @@ class AgentChatBackendTests(unittest.TestCase):
                     "&event_type=thread.activity"
                     "&event_type=thread.error"
                     "&event_type=thread.stopped"
-                    "&event_type=thread.memory_cleared",
+                    "&event_type=thread.memory_cleared&event_type=thread.context_added",
                 ),
                 call(
                     "GET",
@@ -940,7 +940,7 @@ class AgentChatBackendTests(unittest.TestCase):
                     "&event_type=thread.activity"
                     "&event_type=thread.error"
                     "&event_type=thread.stopped"
-                    "&event_type=thread.memory_cleared"
+                    "&event_type=thread.memory_cleared&event_type=thread.context_added"
                     "&before=5",
                 ),
             ],
@@ -972,7 +972,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "&event_type=thread.message"
             "&event_type=thread.error"
             "&event_type=thread.stopped"
-            "&event_type=thread.memory_cleared"
+            "&event_type=thread.memory_cleared&event_type=thread.context_added"
             "&before=5",
         )
         self.assertEqual(response, events)

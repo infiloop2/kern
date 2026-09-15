@@ -12,7 +12,7 @@
       <div class="app-view-mode">
         <span class="app-title-row">
           <strong id="app-title"></strong>
-          <button id="rename-app" class="app-rename-button" type="button" title="Rename app" aria-label="Rename app">
+          <button id="rename-app" class="app-rename-button" type="button" title="App details" aria-label="App details">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4.5 14.5-.5 2 2-.5 9-9-1.5-1.5-9 9ZM12.5 6.5 14 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
         </span>
@@ -126,16 +126,18 @@
     <div id="app-history-list" class="app-history-list"></div>
   </aside>
   <div id="rename-app-overlay" class="rename-overlay" hidden>
-    <button id="rename-app-backdrop" class="rename-backdrop" type="button" aria-label="Cancel rename"></button>
+    <button id="rename-app-backdrop" class="rename-backdrop" type="button" aria-label="Cancel app details"></button>
     <form id="rename-app-form" class="rename-sheet" role="dialog" aria-modal="true" aria-labelledby="rename-app-title">
       <div class="rename-sheet-head">
-        <div><span class="rename-eyebrow">Web App</span><h2 id="rename-app-title">Rename app</h2></div>
-        <button id="rename-app-close" class="ghost icon-button" type="button" aria-label="Cancel rename">
+        <div><span class="rename-eyebrow">Web App</span><h2 id="rename-app-title">App details</h2></div>
+        <button id="rename-app-close" class="ghost icon-button" type="button" aria-label="Cancel app details">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
         </button>
       </div>
       <label for="rename-app-input">Name</label>
       <input id="rename-app-input" maxlength="100" autocomplete="off" required>
+      <label for="app-purpose-input">Purpose</label>
+      <input id="app-purpose-input" maxlength="100" placeholder="What this app agent handles">
       <p id="rename-app-error" class="rename-error" role="alert" hidden></p>
       <div class="rename-actions">
         <button id="rename-app-cancel" class="ghost" type="button">Cancel</button>

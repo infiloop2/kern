@@ -14,6 +14,9 @@ from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAI
 from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
+    validated_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -164,7 +167,7 @@ MANIFEST = ToolManifest(
         "This tool always uses the fixed Apify Actor compass/crawler-google-places."
     ),
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="search_businesses",
             description=(
@@ -228,7 +231,23 @@ MANIFEST = ToolManifest(
             },
             output_schema=DETAIL_OUTPUT_SCHEMA,
         ),
-    ),
+    ), {
+        "search_businesses": {
+            "query": guarded_input(),
+            "location": guarded_input(),
+            "limit": validated_input("Integer from 1 to 20."),
+            "language": validated_input("Two or three ASCII letters, optionally followed by a hyphen and 2–8 letters or digits."),
+            "minimum_rating": validated_input("One of the listed choices."),
+            "website_filter": validated_input("One of the listed choices."),
+            "skip_closed": validated_input("JSON boolean."),
+        },
+        "get_business_details": {
+            "place_id": validated_input("Exactly 27 URL-safe characters beginning ChIJ or GhIJ."),
+            "language": validated_input("Two or three ASCII letters, optionally followed by a hyphen and 2–8 letters or digits."),
+            "max_reviews": validated_input("Integer from 0 to 5."),
+            "max_images": validated_input("Integer from 0 to 8."),
+        },
+    }),
     config=(
         ConfigRequirement(
             key="APIFY_API_TOKEN",

@@ -19,6 +19,9 @@ from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAI
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
+    validated_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -167,7 +170,7 @@ MANIFEST = ToolManifest(
         "first/last frames, or multimodal references."
     ),
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="generate_video",
             description=(
@@ -277,7 +280,27 @@ MANIFEST = ToolManifest(
             },
             returns_asset=True,
         ),
-    ),
+    ), {
+        "generate_video": {
+            "prompt": guarded_input(),
+            "image_url": guarded_input(),
+            "end_image_url": guarded_input(),
+            "reference_image_urls": guarded_input(),
+            "reference_video_urls": guarded_input(),
+            "reference_audio_urls": guarded_input(),
+            "resolution": validated_input("One of the listed choices."),
+            "aspect_ratio": validated_input("One of the listed choices."),
+            "duration_seconds": validated_input("Integer from 5 to 15."),
+            "prompt_expansion_mode": validated_input("One of the listed choices."),
+            "seed": validated_input("Integer from 0 to 4294967295."),
+        },
+        "get_task": {
+            "task_id": validated_input("A text_, image_ or reference_ prefix followed by a UUID."),
+        },
+        "save_video": {
+            "task_id": validated_input("A text_, image_ or reference_ prefix followed by a UUID."),
+        },
+    }),
     config=(
         ConfigRequirement(
             key="H3MAX_FAL_KEY",

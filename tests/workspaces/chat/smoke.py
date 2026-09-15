@@ -98,6 +98,7 @@ def route_workspace_api(
             "thread.stopped",
             # Outside the activity filter, like the real backend.
             "thread.memory_cleared",
+            "thread.context_added",
         ]
         if include_activity:
             event_types.insert(1, "thread.activity")

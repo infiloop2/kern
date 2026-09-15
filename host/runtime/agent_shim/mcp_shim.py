@@ -110,9 +110,9 @@ STAGE_IMAGE_TOOL = {
     "name": "stage_image",
     "description": (
         "Stream an agent-workspace JPEG, PNG, or WebP into the private Kern tools "
-        "service for Runway or OpenAI Image Generation. Returns a short-lived, "
+        "service for Runway, OpenAI Image Generation, or Instagram (JPEG only). Returns a short-lived, "
         "tool-scoped image_asset_id to pass directly to runway_generate_video or "
-        "openai_images_generate_image; never store it as durable app state."
+        "openai_images_generate_image or Instagram image publishing; never store it as durable app state."
     ),
     "inputSchema": {
         "type": "object",
@@ -124,7 +124,7 @@ STAGE_IMAGE_TOOL = {
             },
             "for_tool": {
                 "type": "string",
-                "enum": ["runway", "openai_images"],
+                "enum": ["runway", "openai_images", "instagram"],
                 "description": "Destination tool; staged ids cannot cross tools.",
             },
         },
@@ -404,6 +404,7 @@ def _list_tools() -> list[dict[str, Any]]:
     listed.extend(_mcp_declaration(tool) for tool in agent_tool_surface.AGENT_NETWORK_TOOLS)
     listed.extend((STAGE_IMAGE_TOOL, STAGE_VIDEO_TOOL))
     listed.extend((SEARCH_CONVERSATION_HISTORY_TOOL, READ_THREAD_HISTORY_TOOL))
+    listed.append(_mcp_declaration(agent_tool_surface.SEND_AGENT_MESSAGE_TOOL))
     listed.append(_workspace_api_tool())
     return listed
 
@@ -418,10 +419,10 @@ def _stage_asset(arguments: dict[str, Any], *, kind: str) -> dict[str, Any]:
         raise RuntimeError(f"{action} path must be a non-empty string.")
     public_path, local_path = _workspace_local_path(path)
     allowed_tools = (
-        {"runway", "instagram"} if kind == "video" else {"runway", "openai_images"}
+        {"runway", "instagram"} if kind == "video" else {"runway", "openai_images", "instagram"}
     )
     if for_tool not in allowed_tools:
-        choices = "runway or instagram" if kind == "video" else "runway or openai_images"
+        choices = "runway or instagram" if kind == "video" else "runway, openai_images, or instagram"
         raise RuntimeError(f"{action} for_tool must be {choices}.")
     suffix = os.path.splitext(public_path)[1].lower()
     media_types = (
@@ -518,7 +519,10 @@ def _workspace_api_tool() -> dict[str, Any]:
             "Call Kern's bounded agent-facing Workspace API for Web Apps, global memory, "
             "global schedules, and current thread identity. App routes use an explicit "
             "immutable app id; GET /agent/apps lists the available ids, and POST "
-            "/agent/apps creates a new app only when the operator explicitly asks. Returns "
+            "/agent/apps creates a new app only when the operator explicitly asks. "
+            "GET /agent/apps/session-options lists runtime/model/effort choices; "
+            "PUT /agent/apps/{app_id}/name renames an app, and "
+            "PUT /agent/apps/{app_id}/agent-settings sets its runtime, model, and effort. Returns "
             '{"status": <HTTP status>, "body": <response JSON>} so you can read '
             "validation errors and retry within this turn. Use only routes and "
             "request shapes documented by the host instructions."
@@ -549,12 +553,13 @@ def _call_workspace_api(arguments: dict[str, Any]) -> dict[str, Any]:
     return _tool_text(json.dumps(result, separators=_COMPACT_JSON))
 
 
-def _call_conversation_history_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    path = (
-        "/agent/conversation-history/search"
-        if name == SEARCH_CONVERSATION_HISTORY_TOOL_NAME
-        else "/agent/conversation-history/read"
-    )
+def _call_typed_workspace_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    path = {
+        SEARCH_CONVERSATION_HISTORY_TOOL_NAME: "/agent/conversation-history/search",
+        READ_THREAD_HISTORY_TOOL_NAME: "/agent/conversation-history/read",
+        "send_agent_message": "/agent/messages",
+    }[name]
+    label = "Agent message" if name == "send_agent_message" else "Conversation history"
     try:
         result = _tools_request(
             "POST",
@@ -563,13 +568,13 @@ def _call_conversation_history_tool(name: str, arguments: dict[str, Any]) -> dic
             socket_path=WORKSPACE_AGENT_SOCKET_PATH,
         )
     except RuntimeError as exc:
-        return _tool_text(f"Conversation history call failed: {exc}", is_error=True)
+        return _tool_text(f"{label} call failed: {exc}", is_error=True)
     except Exception as exc:
-        return _tool_text(f"Conversation history unavailable: {exc}", is_error=True)
+        return _tool_text(f"{label} unavailable: {exc}", is_error=True)
     if result.get("status") != 200:
         body = result.get("body")
         message = body.get("error", {}).get("message") if isinstance(body, dict) else None
-        return _tool_text(str(message or "Conversation history call failed."), is_error=True)
+        return _tool_text(str(message or f"{label} call failed."), is_error=True)
     return _tool_text(json.dumps(result.get("body", {}), separators=_COMPACT_JSON))
 
 
@@ -581,8 +586,9 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
     if name in {
         SEARCH_CONVERSATION_HISTORY_TOOL_NAME,
         READ_THREAD_HISTORY_TOOL_NAME,
+        "send_agent_message",
     }:
-        return _call_conversation_history_tool(
+        return _call_typed_workspace_tool(
             str(name), arguments if isinstance(arguments, dict) else {}
         )
     try:

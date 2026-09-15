@@ -5,7 +5,8 @@ always-loaded host guide defines automatic turn-start recall and the trust
 model. That recall is not comprehensive; search again as new needs emerge.
 
 `GET /agent/identity` returns the current thread's immutable host identity.
-Automatic turn-start context includes that identity with recalled memory pages.
+Every model turn starts with that identity, even when no memory pages are
+recalled. Existing self-memory is included before any shared-memory matches.
 Kern resolves self-memory from that host-authenticated identity; never put an
 identity or page id into the self-memory request.
 

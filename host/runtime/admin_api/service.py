@@ -291,6 +291,7 @@ THREAD_DISPLAY_EVENT_TYPES = frozenset({
     "thread.error",
     "thread.stopped",
     "thread.memory_cleared",
+    "thread.context_added",
 })
 CONVERSATION_SEARCH_LIMIT = 25
 CONVERSATION_SEARCH_EXCERPT_BYTES = 2 * 1024

@@ -8,6 +8,8 @@ from typing import Any, cast
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -73,7 +75,7 @@ MANIFEST = ToolManifest(
             ),
         ),
     ),
-    actions=(
+    actions=protect_inputs((
         ActionSpec(id="search_web",
             description="Search the web and return grounding results (title, url, snippets).",
             data_policy=(
@@ -103,7 +105,11 @@ MANIFEST = ToolManifest(
                 ["message", "query", "results"],
             ),
         ),
-    ),
+    ), {
+        "search_web": {
+            "query": guarded_input(),
+        },
+    }),
     config=(ConfigRequirement(key="BRAVE_SEARCH_API_KEY", description="Brave Search API subscription key for the hosting deployment."),),
     protections=(
         "Only the search query and the API key that authenticates the request are sent to Brave. The API key stays in write-only host config and is never returned to the agent.",

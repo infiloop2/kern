@@ -1256,7 +1256,7 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-word-python { color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45); }
 .integration-logo-npm_packages { background: #cb3837; border-radius: 8px; }
 .integration-logo-word-npm { font-family: ui-monospace, monospace; font-size: 0.94rem; letter-spacing: -0.12em; margin-left: -0.1em; }
-.integration-logo-tool-apify { background: #6c5ce7; }
+.integration-logo-tool-apify, .integration-logo-tool-apify_developer { background: #6c5ce7; }
 .integration-logo-word-apify { font-family: Arial, sans-serif; font-size: 1.55rem; }
 .integration-logo-tool-brave_search { background: #fb542b; }
 .integration-logo-tool-gmail { background: #fff; }

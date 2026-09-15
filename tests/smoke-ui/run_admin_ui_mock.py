@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1434,6 +1434,7 @@ def list_tools() -> dict[str, Any]:
                         "data_policy": spec.data_policy,
                         "approval": spec.approval,
                         "input_schema": spec.input_schema,
+                        "input_protections": {name: asdict(protection) for name, protection in spec.input_protections.items()},
                         "output_schema": spec.output_schema,
                         "returns_asset": spec.returns_asset,
                     }

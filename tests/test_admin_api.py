@@ -641,6 +641,11 @@ class AdminApiClientDisconnectTests(unittest.TestCase):
 
 
 class ThreadAdmissionHelpersTests(unittest.TestCase):
+    def test_identity_is_included_without_any_recalled_memories(self) -> None:
+        context = admin_threads._memory_context_message("app-7", [])
+        self.assertIn('"identity": {"thread_id": "app-7"}', context)
+        self.assertIn('"memories": []', context)
+
     def test_memory_context_carries_the_immutable_thread_identity(self) -> None:
         context = admin_threads._memory_context_message(
             "app-7",
@@ -1359,7 +1364,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         events = self.workspace_request("GET", "/v1/threads/thread-1/events")
         self.assertEqual(
             [(event["event_type"], event["thread_id"]) for event in events["events"]],
-            [("thread.message", "thread-1")],
+            [("thread.message", "thread-1"), ("thread.context_added", "thread-1")],
         )
         self.assertEqual(events["events"][0]["payload"]["message"], "from app")
 
@@ -1424,7 +1429,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         events = self.workspace_request("GET", "/v1/threads/thread-durable-steer/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.message", "thread.message"],
+            ["thread.message", "thread.context_added", "thread.message", "thread.message"],
         )
 
     def test_workspace_task_routes_are_forbidden(self) -> None:
@@ -2215,12 +2220,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         launch.assert_called_once()
         turn = launch.call_args.args[0]
         self.assertEqual((turn.runtime_type, turn.thread_id), ("codex", "thread-t1"))
-        self.assertEqual(launch.call_args.args[1], "first turn")
+        self.assertIn('"identity": {"thread_id": "thread-t1"}', launch.call_args.args[1])
+        self.assertTrue(launch.call_args.args[1].endswith("first turn"))
 
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [(event["event_type"], event["thread_id"]) for event in events["events"]],
-            [("thread.message", "thread-t1")],
+            [("thread.message", "thread-t1"), ("thread.context_added", "thread-t1")],
         )
         self.assertEqual(events["events"][0]["payload"], {"message": "first turn", "source": "user"})
 
@@ -2267,11 +2273,36 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertTrue(launch_message.endswith("Take mobile screenshots"))
 
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
-        self.assertEqual(len(events["events"]), 1)
+        self.assertEqual(len(events["events"]), 2)
         self.assertEqual(
             events["events"][0]["payload"],
             {"message": "Take mobile screenshots", "source": "user"},
         )
+
+        notice = events["events"][1]
+        self.assertEqual(notice["event_type"], "thread.context_added")
+        self.assertEqual(notice["payload"], {
+            "message": "Self identity and 2 memories injected.",
+        })
+
+    def test_memory_notice_counts_only_injected_pages(self) -> None:
+        seed_thread_session("thread-t1", provider_session_id="existing-session")
+        valid = {
+            "page_id": "thread-t1", "scope": "self", "description": "Preferences",
+            "content": "Keep it concise.", "revision": 3,
+        }
+        self.mock_memory_recall.return_value = {"pages": [
+            valid, {}, {**valid, "revision": "invalid"}, {}, {},
+            {**valid, "page_id": "outside-cap"},
+        ]}
+        with patch.object(orchestrator, "launch_turn") as launch:
+            self.request("POST", "/v1/threads/thread-t1/messages", {"message": "go"})
+        self.assertNotIn("outside-cap", launch.call_args.args[1])
+        _, events = self.request("GET", "/v1/threads/thread-t1/events")
+        self.assertEqual(len(events["events"]), 2)
+        self.assertEqual(events["events"][-1]["payload"], {
+            "message": "Self identity and 1 memory injected.",
+        })
 
     def test_memory_recall_timeout_warns_and_does_not_block_the_turn(self) -> None:
         seed_thread_session("thread-t1")
@@ -2287,10 +2318,15 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "POST", "/v1/threads/thread-t1/messages", {"message": "continue"}
             )
 
-        self.assertEqual(launch.call_args.args[1], "continue")
+        self.assertIn('"identity": {"thread_id": "thread-t1"}', launch.call_args.args[1])
+        self.assertTrue(launch.call_args.args[1].endswith("continue"))
         self.mock_memory_recall.assert_called_once()
         warning.assert_called_once()
         self.assertEqual(warning.call_args.kwargs["kind"], "memory_recall_timeout")
+
+        _, events = self.request("GET", "/v1/threads/thread-t1/events")
+        self.assertEqual([e["event_type"] for e in events["events"]], ["thread.message", "thread.context_added"])
+        self.assertEqual(events["events"][-1]["payload"]["message"], "Self identity and 0 memories injected.")
 
     def test_message_steers_running_turn_without_a_host_mailbox(self) -> None:
         seed_thread_session("thread-t1")
@@ -2313,7 +2349,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.message", "thread.message", "thread.message"],
+            ["thread.message", "thread.context_added", "thread.message", "thread.message", "thread.message"],
         )
 
     def test_message_rejected_while_thread_finishes_previous_turn(self) -> None:
@@ -2597,6 +2633,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "thread.activity",
                 "thread.activity",
                 "thread.message",
+                "thread.context_added",
+                "thread.context_added",
             ],
         )
         change = events["events"][3]["payload"]["activity"]
@@ -2615,6 +2653,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
             ["original question", "original answer", "continue here"],
         )
         self.assertEqual(accepted["thread"]["agent_runtime"], "claude_code")
+
+        notice = events["events"][-2]
+        self.assertIn("Historical context transferred", notice["payload"]["message"])
 
     def test_session_handoff_reserves_100k_for_newest_conversation(self) -> None:
         history = [
@@ -2747,7 +2788,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.message"],
+            ["thread.message", "thread.message", "thread.context_added", "thread.context_added"],
         )
 
     def test_a_schedule_thread_runs_the_script_runtime_on_the_ordinary_path(self) -> None:
@@ -3109,7 +3150,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.stopped"],
+            ["thread.message", "thread.context_added", "thread.stopped"],
         )
 
         # The thread stays fenced until the owning turn thread releases it, so
@@ -3127,7 +3168,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.stopped"],
+            ["thread.message", "thread.context_added", "thread.stopped"],
         )
         config = state.thread_session_config("thread-t1")
         self.assertIsNotNone(config)
@@ -3220,12 +3261,20 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, launch_message, provider_session_id = launch.call_args.args
         self.assertIsNone(provider_session_id)
         # The missing provider session would normally trigger a replay. The
-        # cleared floor is what keeps the launch message bare.
-        self.assertEqual(launch_message, "fresh start")
+        # cleared floor excludes history; current host identity is still injected.
+        self.assertTrue(launch_message.endswith("fresh start"))
+        self.assertIn('"identity":', launch_message)
         self.assertNotIn("new agent session continuing", launch_message)
         self.assertNotIn("secret plan", launch_message)
 
-    def test_clearing_then_switching_session_still_sends_a_raw_message(self) -> None:
+        _, events = self.request("GET", "/v1/threads/thread-cleared/events")
+        self.assertFalse(any(
+            event["event_type"] == "thread.context_added"
+            and event["payload"]["message"] == "Historical context transferred."
+            for event in events["events"]
+        ))
+
+    def test_clearing_then_switching_session_excludes_old_history(self) -> None:
         """Switching runtime after a clear must not resurrect the handoff.
 
         The floor empties the retained history, but the switch path would
@@ -3258,9 +3307,17 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
         _, launch_message, provider_session_id = launch.call_args.args
         self.assertIsNone(provider_session_id)
-        self.assertEqual(launch_message, "fresh start")
+        self.assertTrue(launch_message.endswith("fresh start"))
+        self.assertIn('"identity":', launch_message)
         self.assertNotIn("continuing a thread", launch_message)
         self.assertNotIn("old plan", launch_message)
+
+        _, events = self.request("GET", "/v1/threads/thread-switched/events")
+        self.assertFalse(any(
+            event["event_type"] == "thread.context_added"
+            and event["payload"]["message"] == "Historical context transferred."
+            for event in events["events"]
+        ))
 
     def test_repeated_clears_each_keep_their_own_boundary(self) -> None:
         """Chat merges events that share an activity id, regardless of type.

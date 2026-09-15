@@ -12,6 +12,9 @@ from typing import Any, NoReturn, cast
 
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
+    validated_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -402,7 +405,7 @@ MANIFEST = ToolManifest(
             ),
         ),
     ),
-    actions=(
+    actions=protect_inputs((
         ActionSpec(id="search_messages",
             description="Search messages with a Gmail query string.",
             data_policy=GMAIL_SEARCH_POLICY,
@@ -477,7 +480,24 @@ MANIFEST = ToolManifest(
             ),
             approval="operator",
         ),
-    ),
+    ), {
+        "search_messages": {
+            "query": guarded_input(allow_identifiers=True),
+            "start_time": validated_input("ISO 8601 timestamp or YYYY-MM-DD date."),
+            "end_time": validated_input("ISO 8601 timestamp or YYYY-MM-DD date, after start_time."),
+        },
+        "read_message": {
+            "message_id": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "read_thread": {
+            "thread_id": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "list_drafts": {
+            "query": guarded_input(allow_identifiers=True),
+            "page_token": guarded_input(allow_machine_tokens=True),
+            "include_spam_trash": validated_input("JSON boolean."),
+        },
+    }),
     config=(
         ConfigRequirement(key="GOOGLE_OAUTH_CLIENT_ID", description="Google OAuth client id for the hosting deployment."),
         ConfigRequirement(key="GOOGLE_OAUTH_CLIENT_SECRET", description="Google OAuth client secret for the hosting deployment."),

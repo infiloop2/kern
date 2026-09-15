@@ -17,6 +17,7 @@ from the shared ``admin_errors`` module, so there is no import back into
 from __future__ import annotations
 
 import http.client
+from dataclasses import asdict
 from http import HTTPStatus
 import json
 import os
@@ -152,6 +153,7 @@ def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> 
                 "data_policy": spec.data_policy,
                 "approval": spec.approval,
                 "input_schema": spec.input_schema,
+                "input_protections": {name: asdict(protection) for name, protection in spec.input_protections.items()},
                 "output_schema": spec.output_schema,
                 "returns_asset": spec.returns_asset,
             }

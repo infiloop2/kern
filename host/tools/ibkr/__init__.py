@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from host.tools.json_types import JSONObject, JSONValue
-from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
+from host.tools.manifest import protect_inputs, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult, ApprovalResult
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.shared import outputs
@@ -201,7 +201,7 @@ MANIFEST = ToolManifest(
     display_name="Interactive Brokers",
     description="Connect your Interactive Brokers account and let your agent read live positions, balances, margin, and executed trades. Trading is not available.",
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(id="get_accounts",
             description="List the IBKR accounts available to the connected username, with each account's id, title, alias, currency, and type. Call this first; the other actions require one of these account ids.",
             data_policy=IBKR_READ_POLICY,
@@ -231,7 +231,18 @@ MANIFEST = ToolManifest(
             ),
             output_schema=GET_TRADES_OUTPUT_SCHEMA,
         ),
-    ),
+    ), {
+        "get_positions": {
+            "account_id": validated_input("1–20 ASCII letters or digits; resolved against accessible accounts."),
+        },
+        "get_account_summary": {
+            "account_id": validated_input("1–20 ASCII letters or digits; resolved against accessible accounts."),
+        },
+        "get_trades": {
+            "account_id": validated_input("1–20 ASCII letters or digits; resolved against accessible accounts."),
+            "days": validated_input("Integer from 1 to 7."),
+        },
+    }),
     config=(
         ConfigRequirement(key="IBKR_OAUTH_CONSUMER_KEY", description="The nine-uppercase-letter public identifier you choose in IBKR's OAuth self-service page."),
         ConfigRequirement(key="IBKR_OAUTH_ACCESS_TOKEN", description="Access token generated in the OAuth self-service portal."),

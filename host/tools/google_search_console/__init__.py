@@ -18,6 +18,9 @@ from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAI
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
+    validated_input,
     ActionSpec,
     ConfigRequirement,
     DataSummary,
@@ -331,7 +334,7 @@ MANIFEST = ToolManifest(
             ),
         ),
     ),
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="list_properties",
             description="List properties available to the connected Search Console account.",
@@ -473,7 +476,27 @@ MANIFEST = ToolManifest(
             ),
             approval="operator",
         ),
-    ),
+    ), {
+        "query_search_analytics": {
+            "site_url": validated_input("Property URL matched against the connected account’s accessible properties."),
+            "start_date": validated_input("Calendar date in YYYY-MM-DD form."),
+            "end_date": validated_input("Calendar date in YYYY-MM-DD form, on or after start_date."),
+            "dimensions": validated_input("At most three unique choices from the listed dimensions."),
+            "search_type": validated_input("One of the listed choices."),
+            "aggregation_type": validated_input("One of the listed choices."),
+            "data_state": validated_input("One of the listed choices."),
+            "row_limit": validated_input("Integer from 1 to 100."),
+            "start_row": validated_input("Integer from 0 to 25000."),
+        },
+        "list_sitemaps": {
+            "site_url": validated_input("Property URL matched against the connected account’s accessible properties."),
+        },
+        "inspect_url": {
+            "site_url": validated_input("Property URL matched against the connected account’s accessible properties."),
+            "inspection_url": guarded_input(),
+            "language_code": validated_input("Two or three language letters, with optional script and region subtags."),
+        },
+    }),
     config=(
         ConfigRequirement(
             key="GOOGLE_OAUTH_CLIENT_ID",

@@ -27,6 +27,8 @@ from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAI
 from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
+    protect_inputs,
+    guarded_input,
     ActionSpec,
     DataSummary,
     DataSummaryCard,
@@ -146,7 +148,7 @@ MANIFEST = ToolManifest(
             ),
         ),
     ),
-    actions=(
+    actions=protect_inputs((
         ActionSpec(
             id="fetch_page",
             description="Fetch one public web page over HTTPS and return its response text.",
@@ -183,7 +185,11 @@ MANIFEST = ToolManifest(
                 ["message", "url", "content_type", "content", "truncated"],
             ),
         ),
-    ),
+    ), {
+        "fetch_page": {
+            "url": guarded_input(),
+        },
+    }),
     protections=(
         "Requests are read-only, anonymous GETs: no cookies or credential headers are ever "
         "sent, and the client identifies itself with a fixed User-Agent.",

@@ -30,6 +30,8 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ("apify_developer", "search_store", "query"),
+    ("apify_developer", "run_actor", "input_json"),
     ("upwork", "get_account", "org_uid"),
     ("upwork", "get_account", "profile_key"),
     ("upwork", "get_account", "limit"),
@@ -44,7 +46,6 @@ GUARDED_FIELDS = {
     ("upwork", "search_jobs", "rate_min"),
     ("upwork", "search_jobs", "rate_max"),
     ("upwork", "search_jobs", "skills"),
-    ("upwork", "search_jobs", "verified_payment_only"),
     ("upwork", "search_jobs", "sort"),
     ("upwork", "search_jobs", "limit"),
     ("upwork", "search_jobs", "cursor"),
@@ -69,7 +70,6 @@ GUARDED_FIELDS = {
     ("upwork", "list_invitations", "limit"),
     ("upwork", "list_invitations", "cursor"),
     ("upwork", "list_conversations", "org_uid"),
-    ("upwork", "list_conversations", "unread_only"),
     ("upwork", "list_conversations", "room_type"),
     ("upwork", "list_conversations", "limit"),
     ("upwork", "list_conversations", "cursor"),
@@ -127,6 +127,45 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ("upwork", "list_conversations", "unread_only"): TYPED,
+    ("upwork", "search_jobs", "verified_payment_only"): TYPED,
+    ("apify_developer", "search_store", "limit"): TYPED,
+    ("apify_developer", "search_store", "offset"): TYPED,
+    ("apify_developer", "search_store", "sort"): TYPED,
+    ("apify_developer", "list_actors", "limit"): TYPED,
+    ("apify_developer", "list_actors", "offset"): TYPED,
+    ("apify_developer", "get_actor", "actor_id"): TYPED,
+    ("apify_developer", "list_builds", "actor_id"): TYPED,
+    ("apify_developer", "list_builds", "limit"): TYPED,
+    ("apify_developer", "list_builds", "offset"): TYPED,
+    ("apify_developer", "get_build", "build_id"): TYPED,
+    ("apify_developer", "list_runs", "actor_id"): TYPED,
+    ("apify_developer", "list_runs", "limit"): TYPED,
+    ("apify_developer", "list_runs", "offset"): TYPED,
+    ("apify_developer", "get_run", "run_id"): TYPED,
+    ("apify_developer", "read_log", "job_id"): TYPED,
+    ("apify_developer", "read_log", "kind"): TYPED,
+    ("apify_developer", "export_results", "run_id"): TYPED,
+    ("apify_developer", "export_results", "limit"): TYPED,
+    ("apify_developer", "export_results", "offset"): TYPED,
+    ("apify_developer", "create_actor", "name"): APPROVAL_GATED,
+    ("apify_developer", "create_actor", "title"): APPROVAL_GATED,
+    ("apify_developer", "create_actor", "description"): APPROVAL_GATED,
+    ("apify_developer", "create_version", "actor_id"): APPROVAL_GATED,
+    ("apify_developer", "create_version", "version"): APPROVAL_GATED,
+    ("apify_developer", "create_version", "files"): APPROVAL_GATED,
+    ("apify_developer", "build_actor", "actor_id"): APPROVAL_GATED,
+    ("apify_developer", "build_actor", "version"): APPROVAL_GATED,
+    ("apify_developer", "run_actor", "build_id"): TYPED,
+    ("apify_developer", "run_actor", "timeout_seconds"): TYPED,
+    ("apify_developer", "run_actor", "memory_mb"): TYPED,
+    ("apify_developer", "run_actor", "max_charge_usd"): TYPED,
+    ("apify_developer", "publish_actor", "actor_id"): APPROVAL_GATED,
+    ("apify_developer", "publish_actor", "build_id"): APPROVAL_GATED,
+    ("apify_developer", "publish_actor", "test_run_id"): APPROVAL_GATED,
+    ("apify_developer", "publish_actor", "title"): APPROVAL_GATED,
+    ("apify_developer", "publish_actor", "description"): APPROVAL_GATED,
+    ("apify_developer", "publish_actor", "categories"): APPROVAL_GATED,
     ("upwork", "submit_proposal", "org_uid"): APPROVAL_GATED,
     ("upwork", "submit_proposal", "job_reference"): APPROVAL_GATED,
     ("upwork", "submit_proposal", "cover_letter"): APPROVAL_GATED,
@@ -214,6 +253,10 @@ EXEMPT_FIELDS = {
     ("ibkr", "get_trades", "account_id"): TYPED,
     ("ibkr", "get_trades", "days"): TYPED,
     ("instagram", "get_recent_media", "limit"): TYPED,
+    ("instagram", "post_image", "image_asset_id"): TYPED,
+    ("instagram", "post_image", "caption"): APPROVAL_GATED,
+    ("instagram", "post_carousel", "image_asset_ids"): TYPED,
+    ("instagram", "post_carousel", "caption"): APPROVAL_GATED,
     ("instagram", "post_reel", "video_asset_id"): TYPED,
     ("instagram", "post_reel", "caption"): APPROVAL_GATED,
     ("instagram", "post_reel", "share_to_feed"): TYPED,
@@ -410,16 +453,7 @@ class CompletenessTest(unittest.TestCase):
     def test_guarded_tools_declare_the_shared_guide_protection(self) -> None:
         for manifest in _bundled_manifests():
             if manifest.tool_id in GUARDED_TOOL_IDS:
-                if manifest.tool_id == "upwork":
-                    # Approved Upwork text deliberately bypasses the guard.
-                    self.assertIn("Direct-action free text uses Parameter Guard; approved write parameters use structural validation and human review.", manifest.protections[0])
-                    self.assertNotIn(PARAM_GUARD_PROTECTION, manifest.protections)
-                else:
-                    self.assertIn(
-                        PARAM_GUARD_PROTECTION,
-                        manifest.protections,
-                        f"{manifest.tool_id} guide must carry the parameter-guard line",
-                    )
+                self.assertIn(PARAM_GUARD_PROTECTION, manifest.protections)
                 self.assertIn(
                     PARAM_GUARD_TECHNICAL_DETAIL,
                     manifest.technical_details,

@@ -235,6 +235,14 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 log_in(workspace_mobile_page, url)
                 workspace_smokes.mobile_smoke(workspace_mobile_page)
                 mobile_workspaces.close()
+
+                # Existing workspace journeys use the initial App ids. Run the
+                # independent notice fixture after those journeys have finished.
+                import context_notices_smokes
+                notices_context = browser.new_context(service_workers="block")
+                context_notices_smokes.run(notices_context.new_page(), url, log_in)
+                notices_context.close()
+
         finally:
             browser.close()
         if webkit and scope in {"all", "workspaces"}:
@@ -1052,12 +1060,19 @@ def desktop_smoke(page, url: str) -> None:
     )
     expect(send_email).not_to_contain_text("permits additional output fields")
     expect(send_email.locator(".guide-action-json")).to_have_count(0)
+    expect(send_email.locator(".guide-input-protection")).to_have_count(0)
     # A read describes what comes back, field by field, for the operator.
     search_messages = gmail_capability(gmail_guide, "search_messages")
     expect(search_messages.locator(".guide-action-contract > summary")).to_have_text(
         "Parameters: 3 inputs · 3 declared outputs"
     )
     search_messages.locator(".guide-action-contract > summary").click()
+    expect(search_messages.locator(".guide-input-protection")).to_have_count(3)
+    expect(search_messages.locator(".guide-input-protection").first).to_have_text(
+        "Parameter guard applied (with allowed identifiers)"
+    )
+    expect(search_messages.locator(".guide-input-protection").nth(1)).to_contain_text("Validated: ISO 8601")
+    expect(gmail_guide.locator(".guide-technical-details")).to_contain_text("allow_machine_tokens")
     expect(search_messages.locator(".guide-action-parameters").last).to_contain_text("messages")
     expect(search_messages.locator(".guide-action-parameters").last).to_contain_text(
         "matching messages, newest first"

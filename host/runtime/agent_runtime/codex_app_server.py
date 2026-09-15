@@ -881,6 +881,8 @@ def run_turn(
                 # developer instructions, but no effort.
                 {
                     "threadId": thread_id,
+                    # Resume context without returning the unused transcript.
+                    "excludeTurns": True,
                     "cwd": AGENT_CWD,
                     "model": model,
                     "developerInstructions": _developer_instructions(),

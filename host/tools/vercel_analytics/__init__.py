@@ -8,7 +8,7 @@ from typing import cast
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL, ParamGuardDenied
 from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
-from host.tools.manifest import ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, SetupStep, ToolManifest
+from host.tools.manifest import protect_inputs, guarded_input, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, int_field, schema, decoded_url_component_values
@@ -37,7 +37,7 @@ QUERY_SCHEMA = schema({
     "end_date": outputs.text("Last UTC date, YYYY-MM-DD, inclusive; at most 31 dates per query."),
     "group_by": {"type": "string", "enum": list(DIMENSIONS), "description": "One Hobby-compatible breakdown; default day. Use requestPath for paths such as /snowbid."},
     "limit": outputs.text("1-50 top dimension values, default 10. For day grouping, Kern raises this to cover every requested date. Vercel may add an Others group."),
-    "path": outputs.text("Optional exact page path, up to 256 characters, without query or fragment; checked by the parameter guard."),
+    "path": outputs.text("Optional exact page path, up to 256 characters, without query or fragment."),
 }, ["project_id", "start_date", "end_date"])
 DISCOVERY_SCHEMAS = {
     "list_teams": schema({"cursor": outputs.text("Optional next_cursor from list_teams, a millisecond timestamp. One page of up to 20 teams per call.")}),
@@ -61,7 +61,7 @@ MANIFEST = ToolManifest(
     display_name="Vercel Analytics",
     description="Discover your Vercel projects and read production page views, visitors, daily trends and path breakdowns. Works with Hobby Web Analytics.",
     connection="enable_only",
-    actions=(
+    actions=protect_inputs((
         ActionSpec(id="list_teams", description="Discover teams accessible to the configured token, one page at a time.", data_policy="Sends the token and optional pagination timestamp to Vercel in one GET. Returns only team IDs, names and a pagination cursor to the agent. Runs directly.", input_schema=DISCOVERY_SCHEMAS["list_teams"], output_schema=_discovery_output(False)),
         ActionSpec(id="list_projects", description="Discover accessible projects in a team or personal scope, one page at a time. No manual project configuration.", data_policy="Sends the token, optional team ID and pagination cursor to Vercel in one GET. Returns only project IDs, names, owning team IDs and the next cursor; drops deployment, environment and other project settings. Runs directly.", input_schema=DISCOVERY_SCHEMAS["list_projects"], output_schema=_discovery_output(True)),
         ActionSpec(id="query_visits", description="Query production page views and visitors over up to 31 UTC dates, grouped by a Hobby-compatible dimension.", data_policy="Sends the token, project/team IDs, dates, breakdown, limit and guarded exact path filter to Vercel in one read-only request. Aggregate results become available to the agent and its model provider. Runs directly without approval; no writes or event collection.", input_schema=QUERY_SCHEMA, output_schema=outputs.obj({
@@ -76,7 +76,24 @@ MANIFEST = ToolManifest(
                 "visitors": outputs.integer("Visitors in this group; not additive across groups."),
             }, ["value", "pageviews", "visitors"]), "At most 100 aggregate rows; never raw events."),
         }, ["message", "project_id", "start_date", "end_date", "group_by", "rows"])),
-    ),
+    ), {
+        "list_teams": {
+            "cursor": validated_input("1–16 decimal digits."),
+        },
+        "list_projects": {
+            "team_id": validated_input("team_ followed by 1–64 ASCII letters or digits."),
+            "cursor": guarded_input(allow_identifiers=True, allow_machine_tokens=True),
+        },
+        "query_visits": {
+            "project_id": validated_input("prj_ followed by 1–64 ASCII letters or digits."),
+            "team_id": validated_input("team_ followed by 1–64 ASCII letters or digits."),
+            "start_date": validated_input("Calendar date in YYYY-MM-DD form."),
+            "end_date": validated_input("Calendar date in YYYY-MM-DD form; chronological range of 1–31 days."),
+            "group_by": validated_input("One of the listed choices."),
+            "limit": validated_input("Integer from 1 to 50."),
+            "path": guarded_input(),
+        },
+    }),
     config=(ConfigRequirement("VERCEL_ACCESS_TOKEN", "Vercel access token. Use the narrowest scope and an expiry; stored write-only by Kern. Projects are discovered automatically."),),
     protections=(
         "Read-only by construction: fixed GET endpoints for team/project discovery and visit aggregates. No deployments, settings, billing changes, raw logs, or event writes.",
