@@ -100,6 +100,23 @@ let renameThreadReturnFocus = null;
 
 const chatRoot = window.KernWorkspaceRoots.chat;
 const $ = id => chatRoot.querySelector(`#${CSS.escape(id)}`);
+
+function positionMemoryPages(event) {
+  const notice = event.target.closest?.(".memory-notice");
+  if (!notice || (event.relatedTarget && notice.contains(event.relatedTarget))) return;
+  const panel = notice.querySelector(".memory-pages");
+  const bounds = $("chat-scroll").getBoundingClientRect();
+  const anchor = notice.getBoundingClientRect();
+  const above = Math.max(0, anchor.top - bounds.top - 4);
+  const below = Math.max(0, bounds.bottom - anchor.bottom - 4);
+  panel.style.maxHeight = "";
+  const openBelow = above < panel.scrollHeight + 2 && below > above;
+  notice.classList.toggle("memory-notice-below", openBelow);
+  panel.style.maxHeight = `${openBelow ? below : above}px`;
+}
+chatRoot.addEventListener("pointerover", positionMemoryPages);
+chatRoot.addEventListener("focusin", positionMemoryPages);
+
 const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => ({
   claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", grok: "Grok", hermes: "Hermes",
@@ -1165,9 +1182,13 @@ function renderThreadEntry(event, openActivities) {
   }
   if (event.event_type === "thread.context_added") {
     const pageIds = Array.isArray(payload.memory_page_ids) ? payload.memory_page_ids : [];
-    const title = pageIds.length ? ` title="${escAttr(pageIds.join("\n"))}"` : "";
-    return `<article class="thread-entry thread-stopped" data-entry-id="${entryId}"${title}>
-      ${esc(payload.message || "Context added.")}
+    const message = esc(payload.message || "Context added.");
+    const notice = pageIds.length ? `<div class="memory-notice">
+      <button type="button" aria-describedby="memory-pages-${entryId}">${message}</button>
+      <div class="memory-pages" id="memory-pages-${entryId}" role="tooltip">${esc(pageIds.join("\n"))}</div>
+    </div>` : message;
+    return `<article class="thread-entry thread-stopped" data-entry-id="${entryId}">
+      ${notice}
     </article>`;
   }
   if (event.event_type === "thread.memory_cleared") {

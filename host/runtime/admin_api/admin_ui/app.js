@@ -49,6 +49,23 @@ import {
 } from "./install.js";
 import { refreshApprovals, pollApprovalBadge, pollApprovals, changeApprovalView, changeApprovalPage, decideApproval, decideVisibleApprovals } from "./approvals.js";
 import { createWorkspaceLastSeen } from "./workspace_last_seen.js";
+import { createWorkspaceReorder } from "./workspace_reorder.js";
+
+const workspaceReorder = createWorkspaceReorder({
+  async move(kind, itemId, beforeId) {
+    ++workspaceNavigationRefreshSequence;
+    const endpoint = kind === "apps"
+      ? "/v1/workspace/web-apps/apps/order"
+      : "/v1/workspace/chat/scheduled-agents/order";
+    try {
+      await api("POST", endpoint, { item_id: itemId, before_id: beforeId });
+    } finally {
+      await refreshWorkspaceNavigation();
+    }
+  },
+  render: () => renderWorkspaceNavigation(),
+  reportError: message => notice(message, "error"),
+});
 
 // Panel navigation is pushState within one document, and every panel decides
 // its own scroll position (see resetPageScroll). Leaving restoration on "auto"
@@ -912,9 +929,14 @@ async function refreshWorkspaceNavigation() {
 }
 
 function renderWorkspaceNavigation() {
+  if (workspaceReorder.busy) return;
+  const focusedId = document.activeElement?.dataset.reorderId;
   renderWorkspaceRows("chat-nav-items", chatNavItems, "open-chat", chatNavArchived);
   renderWorkspaceRows("web-apps-nav-items", webAppNavItems, "open-web-app", webAppsNavArchived);
   renderWorkspaceRows("scheduled-agents-nav-items", scheduledAgentNavItems, "open-chat", false);
+  if (focusedId) {
+    document.querySelector(`[data-reorder-id="${CSS.escape(focusedId)}"]`)?.focus({ preventScroll: true });
+  }
   const chatArchive = document.querySelector('[data-action="show-chat-archive"]');
   const appArchive = document.querySelector('[data-action="show-web-app-archive"]');
   if (chatArchive) {
@@ -1010,6 +1032,12 @@ function renderWorkspaceRows(containerId, items, action, archived) {
       restore.setAttribute("aria-label", `Restore ${item.name || itemId}`);
       restore.textContent = "↩";
       row.append(restore);
+    }
+    if (!archived && containerId !== "chat-nav-items") {
+      workspaceReorder.addHandle(
+        container, row, kind === "web-apps" ? "apps" : "schedules",
+        itemId, item.name || itemId, pending,
+      );
     }
     container.append(row);
   }

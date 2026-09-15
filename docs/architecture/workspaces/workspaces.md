@@ -14,6 +14,20 @@ transcripts in the conversation renderer. The Schedules management view creates
 and edits model and script schedules. Archive applies to Chat and Apps;
 deleting a schedule hides its transcript until the schedule is restored.
 
+Apps and scheduled agents have a stable sidebar order independent of activity.
+New items appear at the bottom, in creation order. The operator can drag the
+three-line handle with a mouse or touch, or focus it and press Up or Down.
+Escape cancels a drag. Chat keeps its recent-activity order.
+
+`workspace_navigation_order` stores each list's order on the host, shared across
+browsers. The browser posts `{item_id, before_id}` to
+`/v1/workspace/web-apps/apps/order` or
+`/v1/workspace/chat/scheduled-agents/order`; a null `before_id` moves to the end.
+Each relative move locks the list row and merges against current identities,
+so concurrent browsers do not overwrite the whole list. Archived Apps retain
+their positions; archived or deleted move targets return 409. These are
+operator browser routes, with no agent-facing reorder action.
+
 The trusted Workspace HTML, CSS, and JavaScript are fixed admin assets mounted
 into Shadow DOM. They are separate source files for maintainability, but are
 served by the admin UI service rather than an app server or iframe bridge.

@@ -91,6 +91,23 @@ const agentSettingsSaveFailures = new Map();
 
 const webAppsRoot = window.KernWorkspaceRoots["web-apps"];
 const $ = id => webAppsRoot.querySelector(`#${CSS.escape(id)}`);
+
+function positionMemoryPages(event) {
+  const notice = event.target.closest?.(".memory-notice");
+  if (!notice || (event.relatedTarget && notice.contains(event.relatedTarget))) return;
+  const panel = notice.querySelector(".memory-pages");
+  const bounds = $("chat-history-scroll").getBoundingClientRect();
+  const anchor = notice.getBoundingClientRect();
+  const above = Math.max(0, anchor.top - bounds.top - 4);
+  const below = Math.max(0, bounds.bottom - anchor.bottom - 4);
+  panel.style.maxHeight = "";
+  const openBelow = above < panel.scrollHeight + 2 && below > above;
+  notice.classList.toggle("memory-notice-below", openBelow);
+  panel.style.maxHeight = `${openBelow ? below : above}px`;
+}
+webAppsRoot.addEventListener("pointerover", positionMemoryPages);
+webAppsRoot.addEventListener("focusin", positionMemoryPages);
+
 const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => ({
   claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", grok: "Grok", hermes: "Hermes",
@@ -1983,7 +2000,6 @@ function renderConversationHistory(forceBottom = false) {
       sender.textContent = `${entry.kind === "user" ? "You" : entry.kind === "agent" ? "Agent" : "System"}:`;
       const message = document.createElement("div");
       message.className = "chat-history-message";
-      if (entry.memoryPageIds?.length) message.title = entry.memoryPageIds.join("\n");
       // Thread messages are intentionally shown exactly as recorded. This keeps
       // host-added Web App context visible instead of silently rewriting history.
       if (entry.kind === "agent") {
@@ -1991,6 +2007,19 @@ function renderConversationHistory(forceBottom = false) {
         message.innerHTML = KernRichText.renderMarkdown(entry.message);
       } else {
         message.textContent = entry.message;
+      }
+      if (entry.memoryPageIds?.length) {
+        message.classList.add("memory-notice");
+        const trigger = document.createElement("button");
+        trigger.type = "button";
+        trigger.textContent = entry.message;
+        const pages = document.createElement("div");
+        pages.className = "memory-pages";
+        pages.id = `app-memory-pages-${entry.seq}`;
+        pages.setAttribute("role", "tooltip");
+        pages.textContent = entry.memoryPageIds.join("\n");
+        trigger.setAttribute("aria-describedby", pages.id);
+        message.replaceChildren(trigger, pages);
       }
       item.append(sender, message);
       return item;
