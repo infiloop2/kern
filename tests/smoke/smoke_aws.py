@@ -215,7 +215,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ),
     ),
     "brave_search": (("search_web", {"query": "Kern"}),),
-    "web_fetch": (("fetch_page", {"url": "https://example.com/"}),),
+    "web_fetch": tuple((action, {"url": "https://example.com/"}) for action in ("fetch_page", "fetch_page_file", "head_url")),
     "whatsapp": (
         ("connection_status", {}),
         ("list_chats", {"limit": 1}),

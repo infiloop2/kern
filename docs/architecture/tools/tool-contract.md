@@ -265,7 +265,7 @@ stored payload exactly as proposed, and returns `ApprovalExecuted` or
 @dataclass(frozen=True)
 class ActionExecuted:      result: JSONObject      # direct action, validated vs output_schema
 @dataclass(frozen=True)
-class OpenedStreamingAsset: filename: str; media_type: str; size_bytes: int; source: BinaryIO
+class OpenedStreamingAsset: filename: str; media_type: str; size_bytes: int; source: BinaryIO; summary: str = ""
 @dataclass(frozen=True)
 class StreamingAsset:      open_stream: Callable[[], AbstractContextManager[OpenedStreamingAsset]]
 @dataclass(frozen=True)
@@ -287,7 +287,9 @@ ApprovalResult = ApprovalExecuted | ActionFailed                          # exec
   ones it only sometimes sets.
 - `StreamingAsset` is the entire direct-action result, never a field inside an
   `ActionExecuted` JSON object. Entering `open_stream` yields one opened source
-  plus its filename, media type, and exact encoded byte length. The host relays
+  plus its filename, media type, and exact encoded byte length (which may be zero).
+  An optional `summary` of at most 8 KiB UTF-8 supplies agent-visible context or a
+  short untrusted preview. It is bounded metadata, not a second JSON result. The host relays
   the bytes over its agent transport, and the agent-side adapter converts every
   stream into a durable workspace path. The two result variants make mixed
   JSON-and-binary responses unrepresentable. Expected open or transfer failures

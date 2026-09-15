@@ -42,6 +42,9 @@ class OpenedStreamingAsset:
     media_type: str
     size_bytes: int
     source: BinaryIO
+    # Optional agent-visible context/preview, at most 8 KiB of UTF-8. It is
+    # metadata, never executed or interpreted by the host.
+    summary: str = ""
 
 
 @dataclass(frozen=True)

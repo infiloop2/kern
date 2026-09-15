@@ -404,7 +404,7 @@ class StageToolChecks:
                 "linkedin_discovery": (
                     ("search_posts", {"query": "Kern", "limit": "1"}),
                 ),
-                "web_fetch": (("fetch_page", {"url": "https://example.com/"}),),
+                "web_fetch": tuple((action, {"url": "https://example.com/"}) for action in ("fetch_page", "fetch_page_file", "head_url")),
             }[tool_id]
         for action_id, arguments in calls:
             self._successful_tool_call(f"{tool_id}_{action_id}", arguments)

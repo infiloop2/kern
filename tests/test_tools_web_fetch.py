@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from host.tools import web_fetch
 from host.tools.web_fetch import BUNDLED_TOOL
-from host.tools.results import ActionExecuted, ActionFailed
+from host.tools.results import ActionExecuted, ActionFailed, StreamingAsset
 from test_tools import FakeHostAPI, assert_matches_output_schema
 
 HTML_PAGE = (
@@ -76,6 +76,100 @@ class WebFetchUrlValidationTests(unittest.TestCase):
 class WebFetchFetchTests(unittest.TestCase):
     def execute(self, url: str = "https://example.com/article") -> object:
         return BUNDLED_TOOL.execute("fetch_page", {"url": url}, FakeHostAPI())
+
+    def test_head_returns_status_and_bounded_headers_after_redirect(self) -> None:
+        hops = [
+            _response(status=302, headers={"location": "/final"}),
+            _response(status=405, headers={"x-long": "x" * 2000, "allow": "GET"}),
+        ]
+        with patch.object(web_fetch, "_fetch_once", side_effect=hops) as fetch:
+            result = BUNDLED_TOOL.execute("head_url", {"url": "https://example.com/start"}, FakeHostAPI())
+        assert_matches_output_schema(self, web_fetch.MANIFEST, "head_url", result)
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["url"], "https://example.com/final")
+        self.assertEqual(result.result["status"], 405)
+        self.assertTrue(result.result["headers_truncated"])
+        self.assertIn({"name": "x-long", "value": "x" * 1024}, result.result["headers"])
+        self.assertTrue(all(call.args[2] == "HEAD" for call in fetch.call_args_list))
+
+    def test_head_does_not_access_or_read_response_body(self) -> None:
+        with patch.object(web_fetch, "_PinnedHTTPSConnection") as connection_class, patch.object(
+            web_fetch, "_response_socket", side_effect=AssertionError("must not read body"),
+        ):
+            connection = connection_class.return_value
+            response = connection.getresponse.return_value
+            response.status = 200
+            response.getheaders.return_value = [("Content-Type", "application/octet-stream"), ("Content-Length", "999999999")]
+            result = web_fetch._fetch_address("https://example.com/file", "93.184.216.34", time.monotonic() + 20, "HEAD")
+        connection.request.assert_called_once_with("HEAD", "/file", headers=web_fetch._REQUEST_HEADERS)
+        self.assertEqual(result[2:], (b"", False))
+        response.read.assert_not_called()
+        response.read1.assert_not_called()
+
+    def test_file_can_save_empty_successful_response(self) -> None:
+        with patch.object(web_fetch, "_fetch_once", return_value=_response(body=b"")):
+            result = BUNDLED_TOOL.execute("fetch_page_file", {"url": "https://example.com"}, FakeHostAPI())
+        assert isinstance(result, StreamingAsset)
+        with result.open_stream() as opened:
+            self.assertEqual(opened.size_bytes, 0)
+            self.assertEqual(opened.source.read(), b"")
+            self.assertIn("Preview truncated: false", opened.summary)
+
+    def test_javascript_is_source_text_for_both_actions(self) -> None:
+        body = b"throw new Error('never execute this');\n"
+        for media_type in (
+            "text/javascript", "application/javascript", "application/x-javascript",
+            "text/ecmascript", "application/ecmascript",
+        ):
+            with self.subTest(media_type=media_type), patch.object(
+                web_fetch, "_fetch_once",
+                return_value=_response(headers={"content-type": media_type}, body=body),
+            ):
+                inline = self.execute()
+                assert isinstance(inline, ActionExecuted)
+                self.assertEqual(inline.result["content"], body.decode())
+                result = BUNDLED_TOOL.execute("fetch_page_file", {"url": "https://example.com/app.js"}, FakeHostAPI())
+                assert isinstance(result, StreamingAsset)
+                with result.open_stream() as opened:
+                    self.assertEqual(opened.source.read(), body)
+                    self.assertEqual(opened.media_type, "text/plain")
+                    self.assertIn(f"Content type: {media_type}", opened.summary)
+
+    def test_file_preserves_bytes_past_inline_limit_with_bounded_preview(self) -> None:
+        body = b"\xef\xbb\xbf" + b"x" * 150_000 + b"\xff<script src='/directory.js'></script>"
+        hops = [_response(status=302, headers={"location": "/final"}), _response(body=body)]
+        with patch.object(web_fetch, "_fetch_once", side_effect=hops):
+            result = BUNDLED_TOOL.execute("fetch_page_file", {"url": "https://example.com/start"}, FakeHostAPI())
+        assert isinstance(result, StreamingAsset)
+        with result.open_stream() as opened:
+            self.assertEqual(opened.source.read(), body)
+            self.assertEqual(opened.size_bytes, len(body))
+            self.assertIn("Source URL: https://example.com/final", opened.summary)
+            self.assertIn("Download truncated at 4 MiB: false", opened.summary)
+            self.assertIn("Preview truncated: true", opened.summary)
+            self.assertNotIn("directory.js", opened.summary)
+            self.assertLess(len(opened.summary.encode()), 8192)
+
+    def test_file_download_truncation_is_independent_of_preview(self) -> None:
+        with patch.object(web_fetch, "_fetch_once", return_value=_response(body=b"partial", truncated=True)):
+            result = BUNDLED_TOOL.execute("fetch_page_file", {"url": "https://example.com"}, FakeHostAPI())
+        assert isinstance(result, StreamingAsset)
+        with result.open_stream() as opened:
+            self.assertIn("Download truncated at 4 MiB: true", opened.summary)
+            self.assertIn("Preview truncated: false", opened.summary)
+
+    def test_file_action_keeps_url_and_response_protections(self) -> None:
+        with patch.object(web_fetch, "_fetch_once", side_effect=AssertionError("must not fetch")):
+            for url in ("https://127.0.0.1/", "https://example.com/?email=alice%40example.com"):
+                self.assertIsInstance(BUNDLED_TOOL.execute("fetch_page_file", {"url": url}, FakeHostAPI()), ActionFailed)
+        for response in (
+            _response(status=403),
+            _response(headers={"content-type": "image/png"}),
+            _response(headers={"content-encoding": "gzip"}),
+            _response(status=302, headers={"location": "https://127.0.0.1/"}),
+        ):
+            with self.subTest(response=response), patch.object(web_fetch, "_fetch_once", return_value=response):
+                self.assertIsInstance(BUNDLED_TOOL.execute("fetch_page_file", {"url": "https://example.com"}, FakeHostAPI()), ActionFailed)
 
     def test_returns_html_response_text_as_is(self) -> None:
         with patch.object(web_fetch, "_fetch_once", return_value=_response()) as fetch:
@@ -252,8 +346,8 @@ class WebFetchFetchTests(unittest.TestCase):
             _response(),
         ]
 
-        def fetch(url: str, deadline: float) -> tuple[int, dict[str, str], bytes, bool]:
-            del url
+        def fetch(url: str, deadline: float, method: str) -> tuple[int, dict[str, str], bytes, bool]:
+            del url, method
             deadlines.append(deadline)
             return hops.pop(0)
 
@@ -280,8 +374,8 @@ class WebFetchFetchTests(unittest.TestCase):
         self.assertEqual(
             [call.args for call in fetch.call_args_list],
             [
-                ("https://example.com/", "2606:2800:220:1:248:1893:25c8:1946", 110.0),
-                ("https://example.com/", "93.184.216.34", deadline),
+                ("https://example.com/", "2606:2800:220:1:248:1893:25c8:1946", 110.0, "GET"),
+                ("https://example.com/", "93.184.216.34", deadline, "GET"),
             ],
         )
 

@@ -262,7 +262,7 @@ def _materialize_stream(response: http.client.HTTPResponse) -> dict[str, Any]:
     if not raw_length.isascii() or not raw_length.isdecimal():
         raise RuntimeError("Tool asset stream did not include a valid size.")
     size_bytes = int(raw_length)
-    if not 1 <= size_bytes <= MAX_VIDEO_BYTES:
+    if not 0 <= size_bytes <= MAX_VIDEO_BYTES:
         raise RuntimeError("Tool asset stream size is outside the supported range.")
     media_type = response.getheader("Content-Type", "").strip().lower()
     if not STREAMING_MEDIA_TYPE_RE.fullmatch(media_type):
@@ -282,6 +282,16 @@ def _materialize_stream(response: http.client.HTTPResponse) -> dict[str, Any]:
         or any(ord(character) < 32 or ord(character) == 127 for character in filename)
     ):
         raise RuntimeError("Tool asset stream returned an invalid filename.")
+
+    encoded_summary = response.getheader("X-Kern-Asset-Summary", "")
+    if len(encoded_summary) > 8192 * 3 or not encoded_summary.isascii():
+        raise RuntimeError("Tool asset stream returned an invalid summary.")
+    try:
+        summary = urllib.parse.unquote(encoded_summary, errors="strict")
+        if len(summary.encode("utf-8")) > 8192:
+            raise ValueError("summary too long")
+    except (UnicodeError, ValueError) as exc:
+        raise RuntimeError("Tool asset stream returned an invalid summary.") from exc
 
     agent_home = os.path.realpath(
         os.environ.get("HOME") or "/mnt/kern-agent/agent-home"
@@ -342,6 +352,7 @@ def _materialize_stream(response: http.client.HTTPResponse) -> dict[str, Any]:
             "path": f"/tool_assets/{final_name}",
             "media_type": media_type,
             "size_bytes": size_bytes,
+            **({"summary": summary} if summary else {}),
         }
     finally:
         if descriptor >= 0:

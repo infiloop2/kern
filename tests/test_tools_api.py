@@ -21,7 +21,7 @@ import tempfile
 from typing import Any
 import unittest
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pg_harness
 from test_tools_host import FakeTool
@@ -199,6 +199,46 @@ class MCPOAuthConnectionTests(unittest.TestCase):
 
 
 class StreamMaterializationUnitTests(unittest.TestCase):
+    def test_nonempty_source_cannot_claim_zero_length(self) -> None:
+        @contextmanager
+        def open_stream():
+            yield OpenedStreamingAsset("source.txt", "text/plain", 0, io.BytesIO(b"unexpected"))
+
+        handler = Mock()
+        handler._validated_stream_metadata = tools_api.ToolsRequestHandler._validated_stream_metadata
+        with patch.object(tools_host, "finish_streaming_action"):
+            tools_api.ToolsRequestHandler._send_streaming_action(handler, Mock(asset=StreamingAsset(open_stream)))
+        handler.send_response.assert_not_called()
+        self.assertEqual(handler._send_json.call_args.args[1]["status"], "failed")
+
+    def test_summary_and_empty_file_round_trip(self) -> None:
+        summary = "Untrusted preview:\n<script>💡</script>\r\nX-Fake: value"
+        response = _MemoryResponse(b"", **{
+            "Content-Length": "0", "Content-Type": "text/plain", "X-Kern-Filename": "source.txt",
+            "X-Kern-Asset-Summary": urllib.parse.quote(summary, safe=""),
+        })
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}):
+            result = tools_mcp_shim._materialize_stream(response)  # type: ignore[arg-type]
+            self.assertEqual(result["summary"], summary)
+            self.assertEqual((Path(directory) / result["path"].lstrip("/")).read_bytes(), b"")
+
+    def test_rejects_invalid_summary_before_writing(self) -> None:
+        for summary in ("a" * 8193, "%FF", "💡", "%41" * 8193):
+            response = _MemoryResponse(b"x", **{
+                "Content-Length": "1", "Content-Type": "text/plain", "X-Kern-Filename": "source.txt",
+                "X-Kern-Asset-Summary": summary,
+            })
+            with self.subTest(summary=summary[:20]), tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}):
+                with self.assertRaisesRegex(RuntimeError, "invalid summary"):
+                    tools_mcp_shim._materialize_stream(response)  # type: ignore[arg-type]
+                self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_service_rejects_oversized_summary(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid summary"):
+            tools_api.ToolsRequestHandler._validated_stream_metadata(
+                OpenedStreamingAsset("source.txt", "text/plain", 0, io.BytesIO(), summary="💡" * 2049)
+            )
+
     def test_materializes_exact_stream_with_private_modes(self) -> None:
         payload = b"v" * 512
         response = _MemoryResponse(
@@ -817,6 +857,25 @@ class ToolsSocketTests(ToolsApiTestCase):
                 tools_api.ToolsRequestHandler._validated_stream_metadata(
                     OpenedStreamingAsset(filename, "video/mp4", 1, io.BytesIO(b"v"))
                 )
+
+    def test_web_fetch_file_through_service_and_shim(self) -> None:
+        from host.tools import web_fetch
+        socket_path = self.start_server()
+        payload = b"<html>" + b"x" * 150_000 + b"<script src='/tail.js'></script></html>"
+        with state.mutation() as cur:
+            state.set_tool_enabled(cur, "web_fetch", True)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}), patch.object(
+            web_fetch, "_fetch_once", return_value=(200, {"content-type": "text/html"}, payload, False),
+        ):
+            response = tools_mcp_shim._tools_action_request(
+                {"name": "web_fetch_fetch_page_file", "input": {"url": "https://example.com/"}}, socket_path,
+            )
+            result = response["result"]
+            self.assertEqual((Path(directory) / result["path"].lstrip("/")).read_bytes(), payload)
+            self.assertEqual(result["media_type"], "text/plain")
+            self.assertIn("Download truncated at 4 MiB: false", result["summary"])
+            self.assertIn("Preview truncated: true", result["summary"])
+            self.assertNotIn("tail.js", result["summary"])
 
     def test_streaming_result_removes_partial_file_when_source_ends_early(self) -> None:
         socket_path = self.start_server()
