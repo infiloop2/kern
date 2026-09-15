@@ -141,7 +141,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
     except ModuleNotFoundError as exc:
         raise SystemExit(
             "Playwright is not installed. Run:\n"
-            "  python3 -m pip install -r tests/requirements.txt\n"
+            "  python3 -m pip install -r .github/ci/requirements.txt\n"
             "  python3 -m playwright install chromium webkit"
         ) from exc
 

@@ -420,9 +420,8 @@ class GeneratedWordDataTest(unittest.TestCase):
             self.assertIn(word, COMMON_WORDS)
 
     def test_word_data_matches_generator(self) -> None:
-        # Regenerate and diff only when the pinned generation packages are
-        # present (they are generation-only, not a runtime/CI dependency). To
-        # make this run in CI, add mnemonic and wordfreq to tests/requirements.
+        # Regenerate and diff when the pinned generation packages from
+        # .github/ci/requirements.txt are installed.
         try:
             import mnemonic  # noqa: F401
             import wordfreq  # noqa: F401

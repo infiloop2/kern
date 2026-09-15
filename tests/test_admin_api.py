@@ -234,7 +234,8 @@ def start_admin_http_server(test: unittest.TestCase) -> str:
     test.addCleanup(socket_dir.cleanup)
     socket_path = str(Path(socket_dir.name) / "admin-api.sock")
     server = UnixSocketHTTPServer(socket_path, admin_api.Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    # Frequent polling speeds shutdown without shortening request deadlines.
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     test.addCleanup(server.server_close)
     test.addCleanup(server.shutdown)
     urllib.request.install_opener(urllib.request.build_opener(_UnixSocketHTTPHandler(socket_path)))
@@ -6018,7 +6019,7 @@ class ToolRoutesTests(unittest.TestCase):
         tools_server = tools_api.ToolsServer(
             tools_socket, frozenset({os.getuid()}), frozenset({os.getuid()})
         )
-        threading.Thread(target=tools_server.serve_forever, daemon=True).start()
+        threading.Thread(target=tools_server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.addCleanup(tools_server.server_close)
         self.addCleanup(tools_server.shutdown)
 
@@ -6524,7 +6525,7 @@ class WorkspaceAdminSocketTests(unittest.TestCase):
             return workspace_admin_api.create_workspace_admin_server()
 
     def serve(self, server: workspace_admin_api.ThreadingUnixHTTPServer) -> None:
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
 

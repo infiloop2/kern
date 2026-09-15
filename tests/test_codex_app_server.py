@@ -1424,14 +1424,11 @@ for line in sys.stdin:
         self.assertEqual(output, "Final answer")
 
     def test_a_turn_that_never_started_does_not_publish_its_empty_thread(self) -> None:
-        # A resume that falls back to thread/start holds a brand new, empty
-        # conversation. The orchestrator persists last_known_session_id when a
-        # turn dies, so publishing that id before turn/start is accepted would
-        # let a rate limit replace the thread's real history with an empty one.
+        # A first-turn rate limit must not publish an empty session id.
         calls: list[str] = []
         accepted_sessions: list[str] = []
 
-        class ResumeFallbackServer:
+        class NewThreadServer:
             last_known_session_id: str | None = None
             _on_ready = None
             _on_session_id = accepted_sessions.append
@@ -1440,24 +1437,56 @@ for line in sys.stdin:
                 calls.append(method)
                 if method == "thread/start":
                     return {"thread": {"id": "thread_empty"}}
-                raise codex_app_server_module.CodexAppServerError(
-                    "thread not found" if method == "thread/resume" else "usage limit reached"
-                )
+                raise codex_app_server_module.CodexAppServerError("usage limit reached")
 
-        server = ResumeFallbackServer()
+        server = NewThreadServer()
         with self.assertRaises(codex_app_server_module.CodexAppServerError):
             run_turn(
                 server,  # type: ignore[arg-type]
                 "continue",
-                "thread_with_history",
+                None,
                 "gpt-5.6-sol",
                 "high",
                 lambda _m: None,
             )
 
-        self.assertEqual(calls, ["thread/resume", "thread/start", "turn/start"])
+        self.assertEqual(calls, ["thread/start", "turn/start"])
         self.assertIsNone(server.last_known_session_id)
         self.assertEqual(accepted_sessions, [])
+
+    def test_missing_session_uses_the_shared_recovery_path_without_starting_a_turn(self) -> None:
+        session_id = "00000000-0000-4000-8000-000000000000"
+        server = MagicMock(last_known_session_id=None)
+        # Verified against the pinned Codex CLI 0.153.3 thread/resume response.
+        server.call.side_effect = CodexAppServerError(f"no rollout found for thread id {session_id}")
+
+        with self.assertRaisesRegex(
+            codex_app_server_module.ProviderSessionLost, "send the message again"
+        ):
+            run_turn(server, "continue", session_id, "gpt-5.6-sol", "high", lambda _m: None)
+
+        self.assertEqual([call.args[0] for call in server.call.call_args_list], ["thread/resume"])
+        self.assertIsNone(server.last_known_session_id)
+        server._on_session_id.assert_not_called()
+
+    def test_other_resume_errors_preserve_the_saved_session(self) -> None:
+        for error in (
+            CodexAppServerError("authentication required"),
+            CodexAppServerError("usage limit reached"),
+            codex_app_server_module.CodexTimeout("Codex app-server request timed out"),
+            CodexAppServerError("failed to read rollout: permission denied"),
+            CodexAppServerError("no rollout found for thread id another-session"),
+        ):
+            with self.subTest(error=str(error)):
+                server = MagicMock(last_known_session_id=None)
+                server.call.side_effect = error
+                with self.assertRaises(CodexAppServerError) as raised:
+                    run_turn(server, "continue", "saved-session", "gpt-5.6-sol", "high", lambda _m: None)
+                self.assertIs(raised.exception, error)
+                self.assertNotIsInstance(raised.exception, codex_app_server_module.ProviderSessionLost)
+                self.assertEqual([call.args[0] for call in server.call.call_args_list], ["thread/resume"])
+                self.assertIsNone(server.last_known_session_id)
+                server._on_session_id.assert_not_called()
 
     def test_run_turn_emits_unflushed_deltas_on_completion(self) -> None:
         messages: list[str] = []

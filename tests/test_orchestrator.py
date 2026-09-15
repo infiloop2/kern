@@ -1220,6 +1220,59 @@ class OrchestratorTests(unittest.TestCase):
             "replacement-session",
         )
 
+    def test_missing_codex_session_errors_then_hands_off_history_on_the_next_send(self) -> None:
+        thread_id = "thread-stale-codex"
+        with state.mutation() as cur:
+            state.save_thread_session(
+                cur, "codex", thread_id, "deleted-session", state.utc_now(),
+                "gpt-5.6-terra", "high",
+            )
+            state.append_agent_event(
+                cur, "thread.message", thread_id,
+                {"message": "remember this decision", "source": "user"},
+            )
+
+        attempts: list[tuple[str, str | None]] = []
+
+        class StartingServer(FakeServer):
+            def start(self, init_timeout: float = 60.0) -> None:
+                # Codex becomes ready only after turn/start, not process startup.
+                self.started += 1
+
+        def fake_run_turn(server, input_message, session_id, model, effort, on_message):
+            del model, effort, on_message
+            attempts.append((input_message, session_id))
+            if session_id:
+                raise orchestrator.codex_app_server.CodexSessionNotFoundError(
+                    "The saved Codex session no longer exists; send the message again."
+                )
+            server.on_ready()
+            return "replacement-session", "done"
+
+        with (
+            patch.object(orchestrator.codex_app_server, "CodexAppServer", StartingServer),
+            patch.object(orchestrator.codex_app_server, "run_turn", fake_run_turn),
+        ):
+            service.send_thread_message(thread_id, {"message": "continue the work"})
+            self.wait_until_idle(thread_id)
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0][1], "deleted-session")
+            self.assertIsNone(state.thread_session_config(thread_id)["provider_session_id"])
+            errors = [event for event in thread_events(thread_id) if event["event_type"] == "thread.error"]
+            self.assertEqual(len(errors), 1)
+            self.assertIn("send the message again", errors[0]["payload"]["error_message"])
+
+            service.send_thread_message(thread_id, {"message": "retry now"})
+            self.wait_until_idle(thread_id)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertIsNone(attempts[1][1])
+        self.assertIn("remember this decision", attempts[1][0])
+        self.assertIn("User:\ncontinue the work", attempts[1][0])
+        self.assertIn("CURRENT USER MESSAGE ---\nretry now", attempts[1][0])
+        self.assertEqual(state.thread_session_config(thread_id)["provider_session_id"], "replacement-session")
+        self.assertTrue(all(server.closed for server in FakeServer.instances))
+
     def test_missing_claude_session_is_cleared_for_an_explicit_retry(self) -> None:
         save_attested_claude_account("acct", access_token_sha256="f" * 64)
         with state.mutation() as cur:

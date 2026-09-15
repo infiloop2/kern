@@ -20,10 +20,11 @@ jobs:
   authorize:
     name: Authorize AWS smoke
     if: >-
-      github.event_name == 'push' ||
+      github.repository == 'infiversehq/kern' &&
+      (github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event.issue.pull_request &&
-        (github.event.comment.body == '/smoke' || github.event.comment.body == 'smoke'))
+        (github.event.comment.body == '/smoke' || github.event.comment.body == 'smoke')))
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.resolve.outputs.ref }}

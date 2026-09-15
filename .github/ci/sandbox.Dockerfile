@@ -8,6 +8,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PIP_NO_CACHE_DIR=1
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
+# Images are shared across runner CPUs; pgvector must not use -march=native.
 ARG PGVECTOR_VERSION=0.8.6
 ARG PGVECTOR_SHA256=10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f
 
@@ -48,15 +49,15 @@ RUN sed -i \
   && echo "${PGVECTOR_SHA256}  /tmp/pgvector.tar.gz" | sha256sum --check --status \
   && mkdir /tmp/pgvector \
   && tar -xzf /tmp/pgvector.tar.gz -C /tmp/pgvector --strip-components=1 \
-  && make -C /tmp/pgvector \
-  && make -C /tmp/pgvector install \
+  && make -C /tmp/pgvector OPTFLAGS="" \
+  && make -C /tmp/pgvector OPTFLAGS="" install \
   && rm -rf /tmp/pgvector /tmp/pgvector.tar.gz \
   && apt-get purge -y build-essential postgresql-server-dev-14 \
   && apt-get autoremove -y --purge \
   && ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
   && rm -rf /var/lib/apt/lists/*
 
-COPY tests/requirements.txt /tmp/test-requirements.txt
+COPY .github/ci/requirements.txt /tmp/test-requirements.txt
 
 RUN python3.11 -m venv /opt/kern-ci-venv \
   && /opt/kern-ci-venv/bin/python -m pip install --upgrade pip \

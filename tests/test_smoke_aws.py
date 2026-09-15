@@ -805,7 +805,7 @@ class WorkflowSmokeTests(unittest.TestCase):
         smoke = Path(".github/workflows/kern-smoke.yml").read_text()
 
         self.assertIn("playwright==1.60.0", smoke)
-        self.assertIn("playwright==1.60.0", Path("tests/requirements.txt").read_text())
+        self.assertIn("playwright==1.60.0", Path(".github/ci/requirements.txt").read_text())
         self.assertIn('"${RUNNER_TEMP}/kern-smoke-venv/bin/python" tests/smoke/smoke_aws.py', smoke)
         self.assertLess(smoke.index("playwright==1.60.0"), smoke.index("AWS_ACCESS_KEY_ID"))
         self.assertIn("context kern-smoke", smoke)

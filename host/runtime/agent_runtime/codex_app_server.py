@@ -47,7 +47,7 @@ import time
 from typing import IO, Any, Callable
 
 from host.runtime.agent_runtime import agent_activity, thread_scope
-from host.runtime.agent_runtime.harness import ProviderTurnFinishing
+from host.runtime.agent_runtime.harness import ProviderSessionLost, ProviderTurnFinishing
 from host.runtime.core.state import OPENAI_PROVIDER_KEYS, read_proxy_openai_account_id
 
 DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-codex-app-server"]
@@ -99,6 +99,10 @@ class CodexTimeout(CodexAppServerError):
     pass
 
 
+class CodexSessionNotFoundError(CodexAppServerError, ProviderSessionLost):
+    """The requested local Codex session no longer exists."""
+
+
 class CodexTurnFinishing(CodexAppServerError, ProviderTurnFinishing):
     """A steer arrived after Codex published this turn's completion."""
 
@@ -143,11 +147,8 @@ class CodexAppServer:
         self._thread_id = thread_id
         self._on_ready = on_ready
         self._on_session_id = on_session_id
-        # run_turn sets this as soon as the Codex threadId for this turn is
-        # known — well before turn/start, let alone turn/completed — so a
-        # kill (which surfaces run_turn's call()/read_message() as an
-        # exception, discarding its locals) still leaves the orchestrator
-        # able to read it and persist the thread mapping.
+        # run_turn sets this after turn/start accepts the input, so interrupted
+        # turns can preserve their session without publishing an empty thread.
         self.last_known_session_id: str | None = None
         # Turns run inside a systemd scope named after the host thread:
         # the helper consumes this pair and turns it into systemd-run --unit,
@@ -889,8 +890,13 @@ def run_turn(
                 },
                 timeout=30,
             )["thread"]
-        except CodexAppServerError:
-            thread = _start_thread(server, model)
+        except CodexAppServerError as exc:
+            if str(exc) == f"no rollout found for thread id {thread_id}":
+                raise CodexSessionNotFoundError(
+                    "The saved Codex session no longer exists; send the message again "
+                    "to start a fresh session with retained thread context."
+                ) from exc
+            raise
     else:
         thread = _start_thread(server, model)
     thread_id = str(thread["id"])
@@ -904,13 +910,8 @@ def run_turn(
         },
         timeout=30,
     )["turn"]
-    # Only now, once the thread has accepted this turn's input, is the id worth
-    # remembering. A resume that fell back to _start_thread above holds a brand
-    # new empty thread, and the caller persists this attribute when a turn dies
-    # — publishing it any earlier would let a turn/start failure (a rate limit,
-    # an auth error) overwrite the thread's real history with an empty
-    # conversation. A turn that never started has nothing worth resuming, so
-    # leaving the previous mapping untouched is always the better trade.
+    # Publish the session id only after turn/start accepts the input. A new
+    # thread whose first turn fails has no conversation worth resuming.
     server.last_known_session_id = thread_id
     turn_id = turn["id"]
     server.set_active_turn(thread_id, turn_id)
