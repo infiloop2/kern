@@ -114,6 +114,8 @@ GUARDED_FIELDS = {
     ("reddit", "search_posts", "subreddit"),
     ("twitter", "search_tweets", "query"),
     ("web_fetch", "fetch_page", "url"),
+    ("web_fetch", "fetch_page_file", "url"),
+    ("web_fetch", "head_url", "url"),
     ("twitterapi_io", "search_tweets", "query"),
     ("twitterapi_io", "search_tweets", "exclude_usernames"),
     ("zoho_mail", "search_messages", "search_key"),
@@ -520,12 +522,13 @@ class BehavioralDenialTest(unittest.TestCase):
     def test_web_fetch_url_denied(self) -> None:
         from host.tools.web_fetch import BUNDLED_TOOL
 
-        result = BUNDLED_TOOL.execute(
-            "fetch_page",
-            {"url": "https://example.com/lookup?q=AKIAIOSFODNN7EXAMPLE"},
-            FakeHostAPI(),
-        )
-        self.assert_denied(result, "credential")
+        for action in ("fetch_page", "fetch_page_file", "head_url"):
+            result = BUNDLED_TOOL.execute(
+                action,
+                {"url": "https://example.com/lookup?q=AKIAIOSFODNN7EXAMPLE"},
+                FakeHostAPI(),
+            )
+            self.assert_denied(result, "credential")
 
     def test_zoho_mail_search_query_denied(self) -> None:
         from host.tools.zoho_mail import BUNDLED_TOOL

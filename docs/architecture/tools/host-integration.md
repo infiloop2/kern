@@ -230,16 +230,31 @@ context instead of rewriting its prefix:
   Binary action output uses a generic exclusive result. A package returns either
   `ActionExecuted` JSON or one `StreamingAsset`, never both. The tools service
   enters the stream, validates its basename-only filename, media type, and exact
-  length up to 200 MB, and relays it directly over the existing agent Unix-socket
+  length from zero to 200 MB, and relays it directly over the existing agent Unix-socket
   response. Provider output does not land in the private staged-input spool.
 
   The MCP shim recognizes the binary response and always converts it into one
   mode-0600 agent file under `/tool_assets`. It validates the same bounded
   metadata, streams into an exclusive temporary file, verifies the declared
   length, fsyncs it, and atomically exposes a random host-generated filename.
-  Failure removes the partial file. The final MCP result is JSON containing only
-  `path`, `media_type`, and `size_bytes`; the agent never chooses a destination
+  Failure removes the partial file. The final MCP result is JSON containing
+  `path`, `media_type`, and `size_bytes`, plus `summary` when the tool supplies it.
+  The optional summary is limited to 8 KiB UTF-8, percent-encoded in
+  `X-Kern-Asset-Summary`, and validated again by the shim before file creation.
+  Newlines and non-ASCII preview text cannot become HTTP headers. The agent never chooses a destination
   path or sees a transport id.
+
+  Web Fetch offers `fetch_page_file` for inspecting long HTML and JavaScript
+  sources. It saves the original response bytes as a plain `.txt` file under
+  the existing 4 MiB download cap. Its summary includes the final URL, original
+  content type, separate download/preview truncation notices, and a 1,024-character
+  UTF-8 preview. JavaScript is only read as source text; there is no execution.
+  The existing `fetch_page` inline result remains available with its 100,000-character
+  cap. Both downloads share the same anonymous GET, URL guard, public-address
+  validation, redirect checks and deadline. `head_url` reuses those checks for
+  anonymous HEAD requests and returns status and bounded response headers
+  (up to 50, each capped at 1,024 characters, with clipping reported). It reports
+  non-success HTTP statuses and does not fall back to GET or replay cookies.
 
   Runway is the first producer. `runway_save_video {task_id}` re-reads the task
   from Runway, accepts only its authoritative successful HTTPS output, and

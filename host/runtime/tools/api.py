@@ -676,12 +676,14 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
         if (
             isinstance(size_bytes, bool)
             or not isinstance(size_bytes, int)
-            or not 1 <= size_bytes <= MAX_STREAMING_ASSET_BYTES
+            or not 0 <= size_bytes <= MAX_STREAMING_ASSET_BYTES
         ):
             raise ValueError("invalid size")
         media_type = opened.media_type
         if not isinstance(media_type, str) or not STREAMING_MEDIA_TYPE_RE.fullmatch(media_type):
             raise ValueError("invalid media type")
+        if not isinstance(opened.summary, str) or len(opened.summary.encode("utf-8")) > 8192:
+            raise ValueError("invalid summary")
         return filename, media_type, size_bytes
 
     def _send_streaming_action(self, streaming: tools_host.StreamingAction) -> None:
@@ -691,11 +693,17 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
         try:
             with streaming.asset.open_stream() as opened:
                 filename, media_type, size_bytes = self._validated_stream_metadata(opened)
+                # A zero-length HTTP response is complete as soon as headers
+                # arrive, so verify emptiness before committing those headers.
+                if size_bytes == 0 and opened.source.read(1):
+                    raise StreamingAssetError("Tool asset stream exceeded its declared size.")
                 self.send_response(HTTPStatus.OK.value)
                 self.send_header("Content-Type", media_type)
                 self.send_header("Content-Length", str(size_bytes))
                 self.send_header("X-Kern-Result", STREAMING_RESULT_HEADER)
                 self.send_header("X-Kern-Filename", quote(filename, safe=""))
+                if opened.summary:
+                    self.send_header("X-Kern-Asset-Summary", quote(opened.summary, safe=""))
                 self.send_header("Cache-Control", "private, no-store, max-age=0")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
