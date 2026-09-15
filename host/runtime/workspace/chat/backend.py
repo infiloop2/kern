@@ -21,7 +21,7 @@ from urllib.parse import quote, unquote
 from host.runtime.core import db
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
 from host.runtime.workspace.busy_retry import post_with_busy_retry
-from host.runtime.workspace import seen
+from host.runtime.workspace import navigation_order, seen
 from host.session_options import (
     SCRIPT_RUNTIME,
     public_session_options,
@@ -109,6 +109,8 @@ def route_browser(
                 raise WorkspaceError(HTTPStatus.BAD_REQUEST, "archived must be true or false")
             archived = archived_values[0] == "true"
         return list_chat_threads(archived=archived)
+    if method == "POST" and path == "/scheduled-agents/order":
+        return navigation_order.move("schedules", body)
     if method == "GET" and path == "/scheduled-agents":
         if query:
             raise WorkspaceError(
@@ -236,7 +238,10 @@ def _list_indexed_threads(
                 has_session=has_session,
             )
         )
-    chat_threads.sort(key=lambda item: str(item.get("last_used_at") or ""), reverse=True)
+    if scheduled:
+        navigation_order.sort_items("schedules", chat_threads, "thread_id")
+    else:
+        chat_threads.sort(key=lambda item: str(item.get("last_used_at") or ""), reverse=True)
     seen.add_to_items("chat", chat_threads, "thread_id")
     return {"threads": chat_threads}
 

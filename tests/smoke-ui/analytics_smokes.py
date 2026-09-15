@@ -33,9 +33,8 @@ def run(page, url, login):
     expect(hermes).to_contain_text('2.6M')
     expect(hermes).to_have_attribute('aria-label', re.compile(r'2\.6M input tokens \(of which cached: 600\.0k\)'))
     lifetime = page.locator('#health .lifetime-tokens')
-    expect(lifetime.locator('.history-stat-label')).to_have_text(['Input tokens', 'Output tokens'])
-    expect(lifetime.locator('.history-stat-value')).to_have_text(['9,876,544,469,012,332', '345,678,901'])
-    expect(lifetime.locator('.token-cache-detail')).to_have_text('Of which cached: 9,876,543,210,987,654')
+    expect(lifetime.locator('.history-stat-label')).to_have_text(['Input tokens', 'Of which cached', 'Output tokens'])
+    expect(lifetime.locator('.history-stat-value')).to_have_text(['9,876,544,469,012,332', '9,876,543,210,987,654', '345,678,901'])
     for width in [1280, 390]:
         page.set_viewport_size({'width':width,'height':844})
         expect(lifetime).to_be_visible()
@@ -43,13 +42,13 @@ def run(page, url, login):
         # Compare positions in one browser operation, in the same layout.
         values = lifetime.locator('.history-stat-value').evaluate_all(
             '(elements) => elements.map(el => el.getBoundingClientRect().y)')
-        assert abs(values[0] - values[1]) < 1, values
+        assert max(values) - min(values) < 1, values
         # Very large input totals wrap on phones; compare labels only when
-        # both totals fit one line on desktop.
+        # all totals fit one line on desktop.
         if width == 1280:
             labels = lifetime.locator('.history-stat-label').evaluate_all(
                 '(elements) => elements.map(el => el.getBoundingClientRect().y)')
-            assert abs(labels[0] - labels[1]) < 1, labels
+            assert max(labels) - min(labels) < 1, labels
         assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
     page.set_viewport_size({'width':1280,'height':900})
     page.locator('#tab-analytics').click()

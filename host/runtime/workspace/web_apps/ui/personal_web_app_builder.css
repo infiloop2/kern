@@ -683,3 +683,59 @@ button.app-toolbar-button svg { height: 15px; width: 15px; }
   }
   .rename-actions { display: grid; grid-template-columns: 1fr 1fr; }
 }
+
+/* Open toward the available space without moving the notice or transcript. */
+.memory-notice {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  white-space: normal;
+}
+.memory-notice > button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: inherit;
+  cursor: help;
+  font: inherit;
+  line-height: inherit;
+  padding: 0;
+  text-align: inherit;
+}
+.memory-notice > button:focus-visible {
+  outline: 2px solid var(--text-dim);
+  outline-offset: 3px;
+}
+.memory-pages {
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  display: none;
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: 100%;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  padding: 0.5rem 0.7rem;
+  text-align: left;
+  white-space: pre-wrap;
+}
+.memory-notice:hover > .memory-pages,
+.memory-notice:focus-within > .memory-pages {
+  display: block;
+}
+
+.memory-notice-below > .memory-pages {
+  bottom: auto;
+  top: 100%;
+}
+@media (pointer: coarse) {
+  .memory-notice > button { min-height: 44px; }
+}

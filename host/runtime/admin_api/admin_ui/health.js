@@ -70,16 +70,14 @@ function filesystemMountTile(label, mount) {
   return usageTile(label, mount.used_bytes, mount.total_bytes);
 }
 
-function historyStat(label, value, description, cached = null) {
+function historyStat(label, value, description) {
   const count = Number.isInteger(value) && value >= 0 ? value : 0;
   const formatted = new Intl.NumberFormat().format(count);
-  const cachedDetail = cached === null ? "" : `Of which cached: ${new Intl.NumberFormat().format(cached)}`;
-  const accessible = `${label}: ${formatted}. ${description} ${cachedDetail}`;
+  const accessible = `${label}: ${formatted}. ${description}`;
   return `
     <div class="history-stat" aria-label="${esc(accessible)}" title="${esc(description)}">
       <span class="history-stat-value">${esc(formatted)}</span>
       <span class="history-stat-label">${esc(label)}</span>
-      ${cachedDetail ? `<span class="token-cache-detail">${esc(cachedDetail)}</span>` : ""}
     </div>`;
 }
 
@@ -132,7 +130,8 @@ export async function refreshHealth() {
       </div>
       <div class="lifetime-token-title">Lifetime tokens · All providers</div>
       <div class="stat-history-grid lifetime-tokens" aria-label="Lifetime token usage">
-        ${historyStat("Input tokens", (tokens.input_tokens ?? 0) + (tokens.cached_input_tokens ?? 0) + (tokens.cache_write_tokens ?? 0), "Known total input tokens since usage tracking began, including cached input and cache writes.", tokens.cached_input_tokens ?? 0)}
+        ${historyStat("Input tokens", (tokens.input_tokens ?? 0) + (tokens.cached_input_tokens ?? 0) + (tokens.cache_write_tokens ?? 0), "Known total input tokens since usage tracking began, including cached input and cache writes.")}
+        ${historyStat("Of which cached", tokens.cached_input_tokens, "Cached input tokens already included in the input total.")}
         ${historyStat("Output tokens", tokens.output_tokens, "Known generated tokens since usage tracking began, including reported reasoning.")}
       </div>
     </div>`);

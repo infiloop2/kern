@@ -26,7 +26,7 @@ from urllib.parse import quote, unquote
 from host.constants import MAX_WORKSPACE_RESPONSE_BODY_BYTES
 from host.runtime.core import db
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
-from host.runtime.workspace import seen
+from host.runtime.workspace import navigation_order, seen
 from host.runtime.workspace.purpose import validate_purpose
 from host.runtime.workspace.busy_retry import post_with_busy_retry
 from host.runtime.workspace.web_apps import collections as collection_store
@@ -147,7 +147,7 @@ def route_browser(
 
 def _browser_mutation_app_id(method: str, path: str) -> str | None:
     """Return the decoded app id whose browser mutation must be serialized."""
-    if method == "GET":
+    if method == "GET" or path == "/apps/order":
         return None
     parts = path.strip("/").split("/")
     if len(parts) <= 1 or parts[0] != "apps":
@@ -166,6 +166,8 @@ def _route_browser(
             "session_options": public_session_options(),
             "active_runtimes": active_agent_runtimes(),
         }
+    if method == "POST" and path == "/apps/order":
+        return navigation_order.move("apps", body)
     if method == "GET" and path == "/apps":
         return list_web_apps(query or {})
     if method == "POST" and path == "/apps":
@@ -399,10 +401,7 @@ def _list_web_apps(archived: bool | None) -> dict[str, Any]:
         _web_app_summary(row, summaries.get(row[0]))
         for row in rows
     ]
-    apps.sort(
-        key=lambda app: str(app.get("last_used_at") or app["updated_at"]),
-        reverse=True,
-    )
+    navigation_order.sort_items("apps", apps, "app_id")
     seen.add_to_items("apps", apps, "app_id")
     return {"apps": apps}
 

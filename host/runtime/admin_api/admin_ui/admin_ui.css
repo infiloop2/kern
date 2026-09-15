@@ -1441,8 +1441,11 @@ body.viewport-panel-open main { min-height: 0; }
 }
 
 .lifetime-token-title { margin-top: 1rem; color: var(--text-dim); font-size: .7rem; }
-.stat-history-grid.lifetime-tokens { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.stat-history-grid.lifetime-tokens { align-items: start; }
 .lifetime-tokens .history-stat-value { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .lifetime-tokens .history-stat { padding-inline: 0.5rem; }
+}
 
 
 .stat-tile {
@@ -3145,3 +3148,26 @@ html.iphone-standalone, html.iphone-standalone body {
 .analytics-cards .stat-value { display: block; font-size: 1.4rem; }
 
 .token-cache-detail { color: var(--text-dim); font-size: 0.7rem; font-weight: 400; line-height: 1.5; margin-top: 6px; overflow-wrap: anywhere; white-space: normal; }
+
+.workspace-reorder-status {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+/* The handle owns touch dragging; the rest of each row still scrolls normally. */
+.workspace-nav-row.workspace-nav-reorderable { grid-template-columns: 24px minmax(0, 1fr); }
+button.workspace-reorder-handle {
+  align-self: stretch; background: transparent; border: 0; border-radius: 4px;
+  color: var(--muted); cursor: grab; font-size: 20px; line-height: 1;
+  padding: 0; touch-action: none; user-select: none;
+}
+button.workspace-reorder-handle:hover, button.workspace-reorder-handle:focus-visible {
+  background: var(--surface-2); color: var(--text);
+}
+button.workspace-reorder-handle:active { cursor: grabbing; }
+button.workspace-reorder-handle:disabled { cursor: not-allowed; opacity: 0.35; }
+.workspace-reorder-dragging { opacity: 0.5; }
+.workspace-reorder-before { box-shadow: 0 -2px 0 var(--accent); }
+.workspace-reorder-after { box-shadow: 0 2px 0 var(--accent); }
+@media (max-width: 860px) {
+  .workspace-nav-row.workspace-nav-reorderable { grid-template-columns: 32px minmax(0, 1fr); }
+}

@@ -779,6 +779,7 @@ class AgentChatBackendTests(unittest.TestCase):
             patch.object(backend, "_recorded_threads", return_value=metadata),
             patch.object(backend, "_host_thread_summaries", return_value=[]),
             patch.object(backend.seen, "add_to_items"),
+            patch.object(backend.navigation_order, "sort_items"),
         ):
             response = backend.list_scheduled_agent_threads()
 
