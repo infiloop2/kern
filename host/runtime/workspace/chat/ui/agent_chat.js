@@ -1164,7 +1164,9 @@ function renderThreadEntry(event, openActivities) {
     </article>`;
   }
   if (event.event_type === "thread.context_added") {
-    return `<article class="thread-entry thread-stopped" data-entry-id="${entryId}">
+    const pageIds = Array.isArray(payload.memory_page_ids) ? payload.memory_page_ids : [];
+    const title = pageIds.length ? ` title="${escAttr(pageIds.join("\n"))}"` : "";
+    return `<article class="thread-entry thread-stopped" data-entry-id="${entryId}"${title}>
       ${esc(payload.message || "Context added.")}
     </article>`;
   }

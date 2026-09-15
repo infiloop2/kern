@@ -28,7 +28,9 @@ from host.runtime.core.state.threads import _increment_counter
 
 
 # The typed event payload fields; every event the runtime emits uses a subset.
-_EVENT_PAYLOAD_COLUMNS = ("message", "source", "error_message", "agent_runtime", "activity")
+_EVENT_PAYLOAD_COLUMNS = (
+    "message", "source", "error_message", "agent_runtime", "activity", "memory_page_ids",
+)
 _EVENT_FIELDS = (
     "seq, created_at, event_type, thread_id, run_number, "
     + ", ".join(_EVENT_PAYLOAD_COLUMNS)
@@ -112,7 +114,7 @@ def append_agent_event(
     values: list[Any] = []
     for column in _EVENT_PAYLOAD_COLUMNS:
         value = payload.get(column)
-        if column == "activity" and value is not None:
+        if column in ("activity", "memory_page_ids") and value is not None:
             values.append(pgclient.Jsonb(_jsonb_safe(value)))
         elif column in ("message", "error_message"):
             values.append(_bounded_event_message(value))
@@ -120,8 +122,8 @@ def append_agent_event(
             values.append(value)
     cur.execute(
         "INSERT INTO agent_events (created_at, event_type, thread_id, run_number,"
-        " message, source, error_message, agent_runtime, activity)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING seq",
+        " message, source, error_message, agent_runtime, activity, memory_page_ids)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING seq",
         (utc_now(), event_type, thread_id, run_number, *values),
     )
     seq = int(cur.fetchone()[0])

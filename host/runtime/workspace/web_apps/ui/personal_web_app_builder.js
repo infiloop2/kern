@@ -1934,6 +1934,7 @@ function conversationEntries() {
         seq: Number(event.seq) || 0,
         kind: "stopped",
         message: payload.message || "Context added.",
+        memoryPageIds: Array.isArray(payload.memory_page_ids) ? payload.memory_page_ids : [],
       });
     } else if (event.event_type === "thread.stopped") {
       entries.push({
@@ -1982,6 +1983,7 @@ function renderConversationHistory(forceBottom = false) {
       sender.textContent = `${entry.kind === "user" ? "You" : entry.kind === "agent" ? "Agent" : "System"}:`;
       const message = document.createElement("div");
       message.className = "chat-history-message";
+      if (entry.memoryPageIds?.length) message.title = entry.memoryPageIds.join("\n");
       // Thread messages are intentionally shown exactly as recorded. This keeps
       // host-added Web App context visible instead of silently rewriting history.
       if (entry.kind === "agent") {

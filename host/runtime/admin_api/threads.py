@@ -348,6 +348,7 @@ def send_thread_message(
                         thread_id,
                         {
                             "message": f"Self identity and {count} {'memory' if count == 1 else 'memories'} injected.",
+                            "memory_page_ids": [page["page_id"] for page in recalled_pages],
                         },
                         run_number=turn.run_number,
                     )
