@@ -104,9 +104,12 @@ CALL_TOOL_TOOL: JSONObject = {
         "Run one action of one bundled tool. Use the tool_id and action_id from "
         "list_bundled_tools and an input matching the schema from describe_tool. An "
         "approval-gated action returns a pending status with an approval_id instead of a "
-        "result; poll check_tool_approval with that id and do not re-issue the action. "
+        "result. Wait for Kern’s result message or use check_tool_approval as needed; "
+        "do not re-issue a pending action. "
         "For an OAuth tool with multiple connected accounts, connection_id is required "
-        "and binds the call, approval, execution, and audit record to that account."
+        "and binds the call, approval, execution, and audit record to that account. "
+        "Saved files return path (Files-root path) and filesystem_path "
+        "(absolute local path for shell commands)."
     ),
     "input_schema": {
         "type": "object",
@@ -117,7 +120,7 @@ CALL_TOOL_TOOL: JSONObject = {
                 "type": "string",
                 "description": "Connected account id from list_bundled_tools; required when that OAuth tool has multiple accounts.",
             },
-            "input": {"description": "Action input object matching its describe_tool schema."},
+            "input": {"description": "Action input as a JSON object matching its describe_tool schema, not a JSON-encoded string."},
         },
         "required": ["tool_id", "action_id"],
         "additionalProperties": False,
@@ -127,10 +130,8 @@ CALL_TOOL_TOOL: JSONObject = {
 CHECK_APPROVAL_TOOL: JSONObject = {
     "name": "check_tool_approval",
     "description": (
-        "Check the status of a tool action approval. Approval-gated actions return an "
-        "approval_id and wait for the operator to decide in the Kern admin UI; poll this "
-        "with that id to learn the outcome (pending, approved, denied, expired, executed, "
-        "or failed)."
+        "Check a tool approval using its approval_id. Returns pending, approved, denied, "
+        "expired, executed, or failed."
     ),
     "input_schema": {
         "type": "object",

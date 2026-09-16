@@ -48,9 +48,9 @@ Start at step 1 for an undiscovered capability:
 Tools remain listed during service failures; treat the call's error as the
 fact, not evidence that the capability disappeared.
 
-Approval-gated actions return a pending `approval_id`. Ask the operator to
-decide in the admin UI, then poll `check_tool_approval`; never re-issue a
-pending action. A denial is final. Retry a terminal failure only deliberately.
+Approvals return `approval_id`. Ask the operator to decide in the admin UI.
+Wait for Kern’s result message or use `check_tool_approval` as needed.
+Never reissue pending actions or retry denials. Retry failures deliberately.
 
 `search_conversation_history` finds bounded user/assistant excerpts across
 retained Chat, App, and schedule threads using hybrid search plus optional
@@ -142,11 +142,11 @@ approaches; keep a current summary, not a log. Read
 
 ### Swarm memory (global memory)
 
-Swarm memory is shared by every thread. Kern supplies likely relevant pages
-within a five-page total turn-start limit. This is not comprehensive: as new
-needs emerge, search with `GET /agent/memory/search?q=words&limit=20`, then fetch useful
+Swarm memory is shared across threads. Kern supplies available self-memory and a
+selection of popular and relevant shared pages at turn start.
+This is not comprehensive: as needed, search `GET /agent/memory/search?q=words&limit=20`, then fetch
 matches with `GET /agent/memory/pages/{page_id}`. Search is hybrid semantic plus
-exact-word; page descriptions say when each page matters. Read
+exact-word; descriptions say when pages matter. Read
 `/opt/kern-host/host/bootstrap/agent-home/references/memory.md` before writes, maintenance, or
 broad memory audits.
 

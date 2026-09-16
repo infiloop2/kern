@@ -587,7 +587,7 @@ systemctl stop apt-daily.service apt-daily-upgrade.service
 # Node.js (and npm) come from the official tarball below, not apt: the Ubuntu
 # npm package pulls in hundreds of node-* dependencies.
 apt_get update
-apt_get install -y ca-certificates curl gh git jq nftables openssl python3 python3-venv sudo unattended-upgrades xz-utils
+apt_get install -y ca-certificates curl gh git iproute2 jq nftables openssl python3 python3-venv sudo unattended-upgrades xz-utils
 
 # PostgreSQL for admin state. postgresql-common is installed first so its
 # default-cluster creation can be disabled: the data directory must live on

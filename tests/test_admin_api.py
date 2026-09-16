@@ -642,6 +642,32 @@ class AdminApiClientDisconnectTests(unittest.TestCase):
 
 
 class ThreadAdmissionHelpersTests(unittest.TestCase):
+    def test_recall_preserves_seven_pages_and_identifies_popular_context(self) -> None:
+        pages = [
+            {
+                "page_id": f"page-{index}", "scope": "swarm",
+                "description": "Working guidance", "content": "Keep it concise.",
+                "revision": 1, "selection": "popular" if index == 1 else "relevant",
+            }
+            for index in range(8)
+        ]
+        pages[3] = {**pages[3], "page_id": "thread-7", "scope": "self"}
+        with patch.object(workspace_api_proxy, "recall_memory", return_value={"pages": pages}):
+            recalled = admin_threads._recalled_memory_pages("thread-7", "hello")
+        self.assertEqual(len(recalled), 7)
+        self.assertEqual(
+            [page["page_id"] for page in recalled],
+            ["thread-7", "page-0", "page-2", "page-4", "page-5", "page-6", "page-1"],
+        )
+        self.assertEqual(recalled[0]["selection"], "self")
+        self.assertEqual(recalled[-1]["selection"], "popular")
+        context = admin_threads._memory_context_message("thread-7", recalled)
+        self.assertIn("may not be relevant to this task", context)
+        self.assertIn('"selection": "popular"', context)
+        self.assertNotIn('"page_id": "page-7"', context)
+        self.assertLess(context.index('"page_id": "thread-7"'), context.index('"page_id": "page-0"'))
+        self.assertLess(context.index('"page_id": "page-6"'), context.index('"page_id": "page-1"'))
+
     def test_identity_is_included_without_any_recalled_memories(self) -> None:
         context = admin_threads._memory_context_message("app-7", [])
         self.assertIn('"identity": {"thread_id": "app-7"}', context)
@@ -2295,6 +2321,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         }
         self.mock_memory_recall.return_value = {"pages": [
             valid, {}, {**valid, "revision": "invalid"}, {}, {},
+            {}, {},
             {**valid, "page_id": "outside-cap"},
         ]}
         with patch.object(orchestrator, "launch_turn") as launch:
@@ -2853,7 +2880,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {"message": "earlier output", "source": "agent"},
             )
         message = (
-            "This is an automated trigger.\n\n"
+            "This is an automated message from Kern.\n\n"
             "/mnt/kern-agent/agent-home/scripts/backup.sh"
         )
         with (
@@ -3877,11 +3904,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
         state.save_proxy_github_token("ghs_working")
         state.enqueue_pending_push(
             "aa11bb22", "infiloop2", "kern",
-            [{"old": "0" * 40, "new": "1" * 40, "ref": "refs/heads/main"}], [".github/workflows/ci.yml"],
+            [{"old": "0" * 40, "new": "1" * 40, "ref": "refs/heads/main"}], [".github/workflows/ci.yml"], origin_thread_id=None,
         )
         state.enqueue_pending_push(
             "cc33dd44", "infiloop2", "kern",
-            [{"old": "0" * 40, "new": "2" * 40, "ref": "refs/heads/feat"}], [".github/dependabot.yml"],
+            [{"old": "0" * 40, "new": "2" * 40, "ref": "refs/heads/feat"}], [".github/dependabot.yml"], origin_thread_id=None,
         )
         status, listing = self.request("GET", "/v1/network-tools/github-pending-pushes")
         self.assertEqual(status, 200)
@@ -3921,7 +3948,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         state.enqueue_pending_push(
             "dd55ee66", "infiloop2", "kern",
-            [{"old": "0" * 40, "new": "3" * 40, "ref": "refs/heads/rejected"}], [".github/workflows/fail.yml"],
+            [{"old": "0" * 40, "new": "3" * 40, "ref": "refs/heads/rejected"}], [".github/workflows/fail.yml"], origin_thread_id=None,
         )
         failure_calls: list[dict] = []
 
@@ -3947,7 +3974,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         state.enqueue_pending_push(
             "0badcafe", "infiloop2", "kern",
             [{"old": "0" * 40, "new": "8" * 40, "ref": "refs/heads/no-token"}],
-            [".github/workflows/no-token.yml"],
+            [".github/workflows/no-token.yml"], origin_thread_id=None,
         )
         # Approving with no working token resolves the row exactly once: the
         # replay never runs (no token to push with), so the push fails
@@ -3968,7 +3995,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         state.enqueue_pending_push(
             "ff99aa00", "infiloop2", "kern",
             [{"old": "0" * 40, "new": "5" * 40, "ref": "refs/heads/cleanup-lock"}],
-            [".github/workflows/cleanup.yml"],
+            [".github/workflows/cleanup.yml"], origin_thread_id=None,
         )
         cleanup_calls: list[dict] = []
 
@@ -3996,7 +4023,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         state.enqueue_pending_push(
             "ee77ff88", "infiloop2", "kern",
-            [{"old": "0" * 40, "new": "4" * 40, "ref": "refs/heads/racing"}], [".github/workflows/race.yml"],
+            [{"old": "0" * 40, "new": "4" * 40, "ref": "refs/heads/racing"}], [".github/workflows/race.yml"], origin_thread_id=None,
         )
         # A resolution racing another one gets a crisp conflict: resolutions
         # serialize on RESOLVE_LOCK with a bounded wait.
@@ -6314,7 +6341,7 @@ class ToolRoutesTests(unittest.TestCase):
                     "metadata": {},
                 }
             )
-            pending = admin_api.tools_host.execute_action("fake_notes", "write_note", {"text": "hello"})
+            pending = admin_api.tools_host.execute_action("fake_notes", "write_note", {"text": "hello"}, origin_thread_id=None)
             approval_id = pending["approval_id"]
 
             status, body = self.request("GET", "/v1/tools/fake_notes/approvals")
@@ -6344,7 +6371,7 @@ class ToolRoutesTests(unittest.TestCase):
                 self.request("POST", f"/v1/tools/fake_notes/approvals/{approval_id}/deny")
             self.assertEqual(error.exception.code, 409)
 
-            denied = admin_api.tools_host.execute_action("fake_notes", "write_note", {"text": "no"})
+            denied = admin_api.tools_host.execute_action("fake_notes", "write_note", {"text": "no"}, origin_thread_id=None)
             status, body = self.request("POST", f"/v1/tools/fake_notes/approvals/{denied['approval_id']}/deny")
             self.assertEqual(body["approval"]["status"], "denied")
 
@@ -6362,7 +6389,7 @@ class ToolRoutesTests(unittest.TestCase):
             self.request("PUT", "/v1/tools/fake_notes/config", {"key": "FAKE_NOTES_TOKEN", "value": "token-1"})
             self.request("POST", "/v1/tools/fake_notes/enable")
             for _ in range(3):
-                admin_api.tools_host.execute_action("fake_notes", "read_note", {})
+                admin_api.tools_host.execute_action("fake_notes", "read_note", {}, origin_thread_id=None)
 
             status, body = self.request("GET", "/v1/tools/events?limit=2")
             self.assertEqual(status, 200)

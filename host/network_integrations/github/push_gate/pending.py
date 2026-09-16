@@ -48,6 +48,10 @@ class PendingPushError(Exception):
     """The pending push could not be resolved (missing, already resolved, or the
     replay failed)."""
 
+    def __init__(self, message: str, *, resolved_push: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.resolved_push = resolved_push
+
 
 def approve(push_id: str) -> dict[str, Any]:
     if not RESOLVE_LOCK.acquire(timeout=RESOLVE_LOCK_TIMEOUT_SECONDS):
@@ -62,16 +66,16 @@ def approve(push_id: str) -> dict[str, Any]:
             # credential is fixed, which starts a fresh gate round.
             detail = "no working GitHub token is available to replay the push"
             _cleanup_pending_refs(row, push_id)
-            state.resolve_pending_push(push_id, "failed", detail)
-            raise PendingPushError(detail)
+            resolved = state.resolve_pending_push(push_id, "failed", detail)
+            raise PendingPushError(detail, resolved_push=resolved)
         payload = _helper_payload(row, push_id, "approve", token=token)
         try:
             _run_helper_json(APPROVE_COMMAND, payload, timeout=APPROVE_HELPER_TIMEOUT_SECONDS)
         except HelperError as exc:
             detail = f"replay to GitHub failed: {exc}"
             _cleanup_pending_refs(row, push_id)
-            state.resolve_pending_push(push_id, "failed", detail[:500])
-            raise PendingPushError(detail) from exc
+            resolved = state.resolve_pending_push(push_id, "failed", detail[:500])
+            raise PendingPushError(detail, resolved_push=resolved) from exc
         return state.resolve_pending_push(push_id, "approved")
     finally:
         RESOLVE_LOCK.release()

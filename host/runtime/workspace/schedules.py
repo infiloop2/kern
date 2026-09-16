@@ -9,7 +9,7 @@ import threading
 from typing import Any
 from urllib.parse import quote
 
-from host.agent_scripts import AUTOMATED_TRIGGER_HEADER, script_path_error
+from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX, script_path_error
 from host.runtime.core import db, host_errors
 from host.runtime.workspace.purpose import validate_purpose
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
@@ -490,7 +490,7 @@ def _deliver_message(schedule: dict[str, Any]) -> None:
     thread_id = schedule["thread_id"]
     assert isinstance(thread_id, str)
     body = {
-        "message": AUTOMATED_TRIGGER_HEADER + schedule["message"],
+        "message": AUTOMATED_TRIGGER_PREFIX + schedule["message"],
         "agent_runtime": schedule["agent_runtime"],
         "model": schedule["model"],
         "effort": schedule["effort"],

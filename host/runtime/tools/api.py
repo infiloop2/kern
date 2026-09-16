@@ -46,6 +46,7 @@ import time
 from typing import Any, BinaryIO, NoReturn, cast
 from urllib.parse import quote, unquote
 
+from host.runtime.core.peer_identity import peer_thread_id
 from host import agent_tool_surface
 from host.constants import TOOLS_SOCKET_PATH
 from host.runtime.core import host_errors, state
@@ -121,6 +122,7 @@ def _resolve_action(name: str) -> tuple[str, str] | None:
 def call_action(
     name: Any,
     tool_input: Any,
+    origin_thread_id: str | None,
     asset_store: tool_assets.ToolAssetStore | None = None,
 ) -> dict[str, Any] | tools_host.StreamingAction:
     if not isinstance(name, str):
@@ -132,14 +134,14 @@ def call_action(
     if name == "describe_tool":
         return _describe_tool(tool_input)
     if name == "call_tool":
-        return _call_tool(tool_input, asset_store)
+        return _call_tool(tool_input, asset_store, origin_thread_id=origin_thread_id)
     # Flat "<tool_id>_<action_id>" names are no longer listed, but stay
     # callable: approval records, audit rows, and any agent that learned a name
     # before this change all address actions that way.
     resolved = _resolve_action(name)
     if resolved is None:
         raise tools_host.ToolCallError(f"Unknown tool: {name}.")
-    return tools_host.execute_action(resolved[0], resolved[1], tool_input, asset_store)
+    return tools_host.execute_action(resolved[0], resolved[1], tool_input, origin_thread_id, asset_store)
 
 
 def _string_field(tool_input: Any, field: str) -> str:
@@ -266,6 +268,7 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
 def _call_tool(
     tool_input: Any,
     asset_store: tool_assets.ToolAssetStore | None,
+    origin_thread_id: str | None,
 ) -> dict[str, Any] | tools_host.StreamingAction:
     """Invoke one bundled action addressed by tool_id and action_id."""
     tool_id = _string_field(tool_input, "tool_id")
@@ -295,6 +298,7 @@ def _call_tool(
         tool_id,
         action_id,
         action_input,
+        origin_thread_id,
         asset_store,
         connection_id=connection_id,
     )
@@ -388,6 +392,7 @@ def _operator_start_connect(
     api = tools_host.host_api_for(
         tool,
         tools_host.connection_scope(tool, connection_id),
+        origin_thread_id=None,
         asset_store=asset_store,
     )
     try:
@@ -415,6 +420,7 @@ def _operator_complete_connect(
     api = tools_host.host_api_for(
         tool,
         tools_host.connection_scope(tool, connection_id),
+        origin_thread_id=None,
         asset_store=asset_store,
     )
     try:
@@ -454,6 +460,7 @@ def _operator_disconnect(
     api = tools_host.host_api_for(
         tool,
         tools_host.connection_scope(tool, connection_id),
+        origin_thread_id=None,
         asset_store=asset_store,
     )
     try:
@@ -830,7 +837,8 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
                 if body is None:
                     return
                 action_result = call_action(
-                    body.get("name"), body.get("input"), self.server.asset_store
+                    body.get("name"), body.get("input"), peer_thread_id(self._peer()[0]),
+                    self.server.asset_store,
                 )
             except tools_host.ToolCallError as exc:
                 action_result = {"status": "failed", "error": str(exc), "reconnect_required": False}

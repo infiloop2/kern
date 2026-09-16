@@ -56,7 +56,7 @@ class IntegrationGuard:
     host_allowed: HostAllowed
     request_denied: RequestDenied
     rewrite_request_headers: RewriteRequestHeaders | None = None
-    gate_response: Callable[[Any, str, str, str, bytes], tuple[bytes | None, str | None]] | None = None
+    gate_response: Callable[[Any, str, str, str, bytes, str | None], tuple[bytes | None, str | None]] | None = None
     websocket_allowed: WebSocketAllowed = _websocket_denied
     ws_message_denied: WebSocketMessageDenied = _websocket_message_allowed
     response_meter: Callable[[Any, str, str, str, str, list[tuple[str, str]], bytes], Any] | None = None
@@ -136,12 +136,13 @@ def request_denied(
 
 
 def gate_response(
-    controls: NetworkControls, method: str, host: str, path: str, body: bytes
+    controls: NetworkControls, method: str, host: str, path: str, body: bytes,
+    origin_thread_id: str | None = None,
 ) -> tuple[bytes | None, str | None]:
     guard, config = _selection(controls, host)
     if not config.enabled or guard.gate_response is None:
         return None, None
-    return guard.gate_response(config, method, host, path, body)
+    return guard.gate_response(config, method, host, path, body, origin_thread_id)
 
 
 def rewrite_request_headers(

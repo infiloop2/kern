@@ -1,0 +1,54 @@
+{
+  "success": true,
+  "credits_charged": 1,
+  "more": {
+    "has_more": true,
+    "cursor": "myoaw2m,myob40l,myoeo9h"
+  },
+  "post": {
+    "id": "1lfbo7u",
+    "subreddit": "AskReddit",
+    "score": 47,
+    "num_comments": 353,
+    "created_utc": 1750341959,
+    "title": "Example public post",
+    "author": "example_author"
+  },
+  "comments": [
+    {
+      "id": "mymupxb",
+      "created_utc": 1750342221,
+      "created_at_iso": "2025-06-19T14:10:21.000Z",
+      "parent_id": "t3_1lfbo7u",
+      "score": 75,
+      "author": "example_author",
+      "body": "Example comment text",
+      "replies": {
+        "items": [
+          {
+            "created_utc": 1750343166,
+            "created_at_iso": "2025-06-19T14:26:06.000Z",
+            "id": "mymxwde",
+            "parent_id": "t1_mymupxb",
+            "score": 19,
+            "link_id": "t3_1lfbo7u",
+            "score_hidden": false,
+            "author": "example_author",
+            "body": "Example comment text",
+            "replies": {
+              "items": [],
+              "more": {
+                "has_more": false,
+                "next_cursor": null
+              }
+            }
+          }
+        ],
+        "more": {
+          "has_more": true,
+          "cursor": "myn970w"
+        }
+      }
+    }
+  ]
+}

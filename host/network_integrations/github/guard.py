@@ -260,7 +260,8 @@ def _github_actions_blob_request_denied(
 
 
 def gate_response(
-    config: GitHubIntegration, method: str, host: str, path: str, body: bytes
+    config: GitHubIntegration, method: str, host: str, path: str, body: bytes,
+    origin_thread_id: str | None = None,
 ) -> tuple[bytes | None, str | None]:
     """Git push controls, applied after a push has passed the write guard.
     Returns ``(response, denial)``:
@@ -308,7 +309,8 @@ def gate_response(
             push_id = push_gate.new_push_id()
             try:
                 response = result.hold_for_approval(push_id)
-                enqueue_pending_push(push_id, owner, repo, result.ref_updates, sorted(result.paths))
+                enqueue_pending_push(push_id, owner, repo, result.ref_updates, sorted(result.paths),
+                                     origin_thread_id=origin_thread_id)
             except Exception:
                 result.cleanup_pending(push_id)
                 raise

@@ -402,8 +402,9 @@ class McpShimTests(unittest.TestCase):
         socket_path = self.start_server()
         shim = self.start_shim(socket_path)
         with patch.object(agent_api, "_peer_thread_id", return_value="thread-11"), patch.object(
-            agent_messages, "_destination_settings", return_value={}
-        ), patch.object(agent_messages, "call_admin_api", return_value={"status": "accepted"}) as post:
+            agent_messages, "call_admin_api", return_value={"status": "accepted"}
+        ) as post, patch.object(agent_messages.db, "transaction") as transaction:
+            transaction.return_value.__enter__.return_value.fetchone.return_value = (False,)
             result = self.rpc(shim, {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "send_agent_message", "arguments": {

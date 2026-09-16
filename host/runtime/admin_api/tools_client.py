@@ -29,6 +29,7 @@ from host.constants import TOOLS_SOCKET_PATH as DEFAULT_TOOLS_SOCKET_PATH
 from host.runtime.core import host_errors, state
 from host.runtime.tools import tools_host
 from host.runtime.admin_api.errors import ApiError
+from host.runtime.admin_api import approval_outcomes
 
 # Tool code and third-party egress live in the dedicated kern-tools
 # service; the admin service forwards the operator operations that need that
@@ -298,7 +299,9 @@ def decide_tool_approval(approval_id: str, decision: str, tool_id: str) -> Any:
     # Only admin can read operator_connections. Forward its public hostname,
     # never the tunnel token or a value from the caller's request body.
     body = {"public_hostname": state.load_cloudflare_hostname()}
-    return _tools_operator_request(f"/operator/tools/{tool_id}/approvals/{approval_id}/{decision}", body)
+    result = _tools_operator_request(f"/operator/tools/{tool_id}/approvals/{approval_id}/{decision}", body)
+    approval_outcomes.notify(result["approval"])
+    return result
 
 
 def send_tool_media(handler: Any, token: str, *, head: bool = False) -> None:

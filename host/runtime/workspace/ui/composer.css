@@ -204,3 +204,7 @@ button.attachment-clear {
     width: 2.75rem;
   }
 }
+
+@media (max-width: 720px) {
+  .workspace-composer textarea { font-size: 16px; }
+}

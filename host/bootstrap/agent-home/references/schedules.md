@@ -3,10 +3,8 @@
 Read this file before listing, creating, editing, deleting, or diagnosing
 schedules. Schedules are shared by every thread.
 
-Every schedule owns one stable `schedule-N` thread and one recurring automated
-message. Each firing sends `This is an automated trigger.`, a blank line,
-a `---` divider, and the saved message through the ordinary thread-message path. It steers an active
-turn when the runtime supports steering.
+Every schedule owns one stable `schedule-N` thread. Each firing sends the saved
+message to that thread, steering an active turn when the runtime supports it.
 
 Each firing makes one delivery attempt and advances the cadence immediately.
 There is no retry queue, separate run record, success status, or recent-failure

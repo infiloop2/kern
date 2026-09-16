@@ -1,0 +1,14 @@
+{
+  "success": true,
+  "credits_charged": 1,
+  "id": "1q6pxwn",
+  "subreddit": "webscraping",
+  "score": 33,
+  "created_utc": 1767816090,
+  "created_at_iso": "2026-01-07T20:01:30.000Z",
+  "num_comments": 53,
+  "over_18": false,
+  "title": "Example public post",
+  "selftext": "Example post text",
+  "author": "example_author"
+}

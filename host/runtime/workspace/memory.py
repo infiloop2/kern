@@ -34,7 +34,10 @@ DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 100
 MAX_REVISION_PAGE_LIMIT = 50
 MAX_SEARCH_BYTES = 200
-MAX_RECALLED_PAGES = 5
+MAX_RECALL_QUERY_BYTES = 1000
+MAX_RECALLED_PAGES = 7
+RECALL_POPULAR_LIMIT = 1
+RECALL_RELEVANT_LIMIT = 5
 MAX_CURSOR_BYTES = 512
 SEMANTIC_CANDIDATES = 200
 EXACT_CANDIDATES = 50
@@ -211,7 +214,7 @@ def search_swarm_pages(query: dict[str, list[str]]) -> dict[str, Any]:
 
 
 def recall_pages(body: Any) -> dict[str, Any]:
-    """Return bounded turn-start context without weak or popular fallbacks."""
+    """Return self-memory, popular pages, then distinct relevant pages."""
     request = _object(body, "memory recall request")
     _require_keys(request, {"thread_id", "message"}, {"thread_id", "message"})
     thread_id = individual_page_id(request["thread_id"])
@@ -229,25 +232,41 @@ def recall_pages(body: Any) -> dict[str, Any]:
         if exc.status != HTTPStatus.NOT_FOUND:
             raise
 
+    try:
+        with db.transaction() as cur:
+            popular = _popular_rows(cur, scope="swarm", limit=RECALL_POPULAR_LIMIT)
+        _append_recalled_pages(
+            pages, [_page_summary(row) for row in popular], RECALL_POPULAR_LIMIT,
+            thread_id=thread_id, selection="popular",
+        )
+    except (WorkspaceError, pgclient.Error, OSError) as exc:
+        host_errors.report_warning(
+            "workspace.memory_recall",
+            exc,
+            context={"thread_id": thread_id, "phase": "popular_search"},
+            kind="memory_recall_degraded",
+        )
+
     if "\x00" in message:
         host_errors.report_warning(
             "workspace.memory_recall",
-            "swarm recall skipped for a NUL-containing query",
+            "relevant recall skipped for a NUL-containing query",
             context={"thread_id": thread_id, "phase": "query"},
             kind="memory_recall_degraded",
         )
         return {"pages": pages}
 
-    remaining = MAX_RECALLED_PAGES - len(pages)
     query = _recall_query(message)
     if not query:
         return {"pages": pages}
     try:
         matches = _search_pages(
-            {"q": [query], "limit": [str(remaining)]},
+            # Overfetch so popular pages do not consume relevance slots.
+            {"q": [query], "limit": [str(RECALL_RELEVANT_LIMIT + RECALL_POPULAR_LIMIT)]},
             scope="swarm",
             record_top_hit=False,
             semantic=True,
+            max_query_bytes=MAX_RECALL_QUERY_BYTES,
         )
     except (WorkspaceError, pgclient.Error, OSError) as exc:
         host_errors.report_warning(
@@ -257,11 +276,28 @@ def recall_pages(body: Any) -> dict[str, Any]:
             kind="memory_recall_degraded",
         )
         return {"pages": pages}
-    # Weak token overlap and popularity are useful discovery fallbacks for an
-    # agent that can judge them. Automatic context keeps a higher bar.
+    # Popular pages have their own slots; weak token overlap still does not
+    # qualify for the relevance slots. Recall never records popularity hits.
     summaries = [] if matches.get("match_mode") == "weak" else matches.get("pages", [])
+    _append_recalled_pages(
+        pages, summaries, RECALL_RELEVANT_LIMIT,
+        thread_id=thread_id, selection="relevant",
+    )
+    return {"pages": pages}
+
+
+def _append_recalled_pages(
+    pages: list[dict[str, Any]], summaries: list[dict[str, Any]], limit: int,
+    *, thread_id: str, selection: str,
+) -> None:
+    seen = {page["page_id"] for page in pages}
+    target = min(len(pages) + limit, MAX_RECALLED_PAGES)
     for summary in summaries:
+        if len(pages) >= target:
+            break
         if not isinstance(summary, dict) or not isinstance(summary.get("page_id"), str):
+            continue
+        if summary["page_id"] in seen:
             continue
         try:
             page = load_page(summary["page_id"])
@@ -272,7 +308,7 @@ def recall_pages(body: Any) -> dict[str, Any]:
                 context={"thread_id": thread_id, "phase": "swarm_load"},
                 kind="memory_recall_degraded",
             )
-            return {"pages": pages}
+            return
         if page.get("revision") != summary.get("revision"):
             host_errors.report_warning(
                 "workspace.memory_recall",
@@ -281,15 +317,13 @@ def recall_pages(body: Any) -> dict[str, Any]:
                 kind="memory_recall_degraded",
             )
             continue
-        pages.append({**page, "scope": "swarm"})
-    return {"pages": pages}
+        pages.append({**page, "scope": "swarm", "selection": selection})
+        seen.add(page["page_id"])
 
 
 def _recall_query(message: str) -> str:
     encoded = message.strip().encode("utf-8", errors="ignore")
-    if len(encoded) <= MAX_SEARCH_BYTES:
-        return message.strip()
-    return encoded[:MAX_SEARCH_BYTES].decode("utf-8", errors="ignore").strip()
+    return encoded[:MAX_RECALL_QUERY_BYTES].decode("utf-8", errors="ignore").strip()
 
 
 def _search_pages(
@@ -298,6 +332,7 @@ def _search_pages(
     scope: str,
     record_top_hit: bool,
     semantic: bool,
+    max_query_bytes: int = MAX_SEARCH_BYTES,
 ) -> dict[str, Any]:
     needle = _one(query, "q")
     try:
@@ -308,11 +343,11 @@ def _search_pages(
         not needle
         or not needle.strip()
         or "\x00" in needle
-        or len(needle_bytes) > MAX_SEARCH_BYTES
+        or len(needle_bytes) > max_query_bytes
     ):
         raise WorkspaceError(
             HTTPStatus.BAD_REQUEST,
-            f"q must be non-empty, contain no NUL, and be at most {MAX_SEARCH_BYTES} bytes",
+            f"q must be non-empty, contain no NUL, and be at most {max_query_bytes} bytes",
         )
     limit = _limit(query, default=20)
     if not semantic:
@@ -792,14 +827,18 @@ def _weak_search_tokens(needle: str) -> list[str]:
 def _popular_rows(cur: Any, *, scope: str, limit: int) -> list[tuple[Any, ...]]:
     if limit == 0:
         return []
+    # Reuse the same existing counters for recall and agent-search fallback.
+    # This gates on recent activity; hit counts remain cumulative.
+    cutoff = _format_ts(datetime.now(timezone.utc) - timedelta(hours=24))
     cur.execute(
         "SELECT page_id, description, content, revision, deleted_at,"
         " updated_by, created_at, updated_at FROM memory_pages"
         " WHERE deleted_at IS NULL AND strong_top_hit_count > 0"
+        " AND last_strong_top_hit_at > %s"
         f"{_scope_clause(scope)}"
         " ORDER BY strong_top_hit_count DESC,"
         " last_strong_top_hit_at DESC NULLS LAST, updated_at DESC, page_id LIMIT %s",
-        (limit,),
+        (cutoff, limit),
     )
     return cur.fetchall()
 

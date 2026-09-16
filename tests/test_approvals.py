@@ -47,9 +47,9 @@ class ApprovalStorageTests(unittest.TestCase):
             row = state.insert_tool_approval("fake_notes", "write_note", f"Note {index}",
                                             {"private_payload": "not in list"}, 1700000000 + index,
                                             pending_limit=1000, connection_id=f"work-{index}",
-                                            account_label="Work")
+                                            account_label="Work", origin_thread_id=None)
             tool_ids.append(row["approval_id"])
-        state.enqueue_pending_push("abc123", "org", "repo", [], [".github/workflows/test.yml"])
+        state.enqueue_pending_push("abc123", "org", "repo", [], [".github/workflows/test.yml"], origin_thread_id=None)
         first = state.page_approvals("pending", 1)
         second = state.page_approvals("pending", 2)
         self.assertEqual((first["total"], first["pages"], len(first["items"]), len(second["items"])), (13, 2, 10, 3))
@@ -69,7 +69,7 @@ class ApprovalStorageTests(unittest.TestCase):
 
     def test_same_second_requests_are_newest_first_across_pages(self):
         ids = [state.insert_tool_approval("fake_notes", "write_note", f"Note {index}", {},
-                                         1700000000, pending_limit=1000)["approval_id"]
+                                         1700000000, pending_limit=1000, origin_thread_id=None)["approval_id"]
                for index in range(12)]
         first = state.page_approvals("pending", 1)
         second = state.page_approvals("pending", 2)

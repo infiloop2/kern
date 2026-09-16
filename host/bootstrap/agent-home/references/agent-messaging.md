@@ -16,7 +16,3 @@ queue or automatic retries. Use messaging only within the operator's task.
 Your message may contain at most 10,000 characters, excluding Kern's header.
 The complete message has a 50,000 UTF-8 byte limit, leaving room for the header
 and multibyte characters. Reference files or App data for larger results.
-
-Schedule eligibility and settings are read immediately before delivery.
-Deleting or editing a schedule does not cancel a send already in flight;
-that send may use the settings it just read.

@@ -243,6 +243,22 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 context_notices_smokes.run(notices_context.new_page(), url, log_in)
                 notices_context.close()
 
+                import app_chat_review_smokes
+                for mobile, short_transcript in ((False, False), (True, False), (False, True)):
+                    app_chat_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    app_chat_review_smokes.run(
+                        app_chat_context.new_page(), url, log_in,
+                        scroll_during_load=not mobile and not short_transcript,
+                        short_transcript=short_transcript,
+                    )
+                    app_chat_context.close()
+                activity_only_context = browser.new_context(service_workers="block")
+                app_chat_review_smokes.run_activity_only_paging(activity_only_context.new_page(), url, log_in)
+                activity_only_context.close()
+
                 import navigation_order_smokes
                 for touch in (False, True):
                     order_context = browser.new_context(
@@ -280,6 +296,11 @@ def run_webkit_workspace_smoke(playwright, url: str, *, headed: bool) -> None:
         log_in(workspace_page, url)
         workspace_smokes.web_app_worker_startup_smoke(workspace_page)
         workspace.close()
+        import app_chat_review_smokes
+        for short_transcript in (False, True):
+            app_chat_context = browser.new_context(viewport=IPHONE_VIEWPORT, service_workers="block")
+            app_chat_review_smokes.run(app_chat_context.new_page(), url, log_in, short_transcript=short_transcript)
+            app_chat_context.close()
         import analytics_smokes
         analytics_context = browser.new_context(service_workers="block")
         analytics_smokes.run(analytics_context.new_page(), url, log_in)

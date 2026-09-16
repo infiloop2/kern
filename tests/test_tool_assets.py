@@ -299,9 +299,12 @@ class ShimVideoStageTests(unittest.TestCase):
                 patch.dict("os.environ", {"HOME": directory}),
                 patch.object(tools_mcp_shim, "UnixHTTPConnection", return_value=connection),
             ):
-                result = tools_mcp_shim._stage_video(
-                    {"path": "/workspace/videos/clip.mp4", "for_tool": "runway"}
-                )
+                for path in ("/workspace/videos/clip.mp4", str(video)):
+                    with self.subTest(path=path):
+                        result = tools_mcp_shim._stage_video(
+                            {"path": path, "for_tool": "runway"}
+                        )
+                        self.assertEqual(connection.body, b"x" * 512)
         self.assertEqual(result, {"video_asset_id": "opaque-id"})
         self.assertEqual(connection.body, b"x" * 512)
         self.assertEqual(connection.path, "/assets/video")
@@ -317,12 +320,43 @@ class ShimVideoStageTests(unittest.TestCase):
             with (
                 patch.dict("os.environ", {"HOME": directory}),
                 patch.object(tools_mcp_shim, "UnixHTTPConnection") as connection,
-                self.assertRaisesRegex(RuntimeError, "regular, non-symlink"),
             ):
-                tools_mcp_shim._stage_video(
-                    {"path": "/linked.mp4", "for_tool": "runway"}
-                )
+                for path in ("/linked.mp4", str(symlink)):
+                    with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, "regular, non-symlink"):
+                        tools_mcp_shim._stage_video(
+                            {"path": path, "for_tool": "runway"}
+                        )
             connection.assert_not_called()
+
+    def test_both_path_formats_reject_traversal_and_escaping_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            home = Path(directory)
+            (Path(outside) / "frame.png").write_bytes(b"x" * 512)
+            (home / "escape").symlink_to(outside, target_is_directory=True)
+            with (
+                patch.dict("os.environ", {"HOME": directory}),
+                patch.object(tools_mcp_shim, "UnixHTTPConnection") as connection,
+            ):
+                for suffix in ("/../frame.png", "/./frame.png", "/escape/frame.png"):
+                    for prefix in ("", directory):
+                        with self.subTest(path=prefix + suffix), self.assertRaisesRegex(
+                            RuntimeError, "dot segments|outside the agent Files root"
+                        ):
+                            tools_mcp_shim._stage_image({"path": prefix + suffix, "for_tool": "runway"})
+                connection.assert_not_called()
+
+    def test_filesystem_prefix_must_match_whole_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"HOME": directory}):
+            files_path = directory + "-other/frame.png"
+            public, local = tools_mcp_shim._workspace_local_path(files_path)
+            self.assertEqual(public, files_path)
+            self.assertEqual(local, str(Path(directory) / files_path.lstrip("/")))
+
+    def test_bad_paths_explain_supported_formats(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"HOME": directory}):
+            for path in ("frame.png", "/missing.png", directory + "/missing.png", "/bad\0.png"):
+                with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, "Files path.*filesystem path"):
+                    tools_mcp_shim._stage_image({"path": path, "for_tool": "runway"})
 
     def test_shim_stages_a_local_image_for_runway(self) -> None:
         class Response:
@@ -352,9 +386,12 @@ class ShimVideoStageTests(unittest.TestCase):
                 patch.dict("os.environ", {"HOME": directory}),
                 patch.object(tools_mcp_shim, "UnixHTTPConnection", return_value=connection),
             ):
-                result = tools_mcp_shim._stage_image(
-                    {"path": "/frame.webp", "for_tool": "runway"}
-                )
+                for path in ("/frame.webp", str(image)):
+                    with self.subTest(path=path):
+                        result = tools_mcp_shim._stage_image(
+                            {"path": path, "for_tool": "runway"}
+                        )
+                        self.assertEqual(connection.body, b"x" * 512)
         self.assertEqual(result, {"image_asset_id": "opaque-image-id"})
         self.assertEqual(connection.body, b"x" * 512)
         self.assertEqual(connection.path, "/assets/image")

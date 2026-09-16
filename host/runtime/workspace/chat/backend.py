@@ -560,24 +560,27 @@ def set_chat_thread_archived(thread_id: str, *, archived: bool) -> dict[str, Any
         raise WorkspaceError(
             HTTPStatus.CONFLICT, "schedule transcripts cannot be archived"
         )
-    if archived:
-        _require_chat_thread(thread_id, include_archived=True)
-        response = call_admin_api(
-            "GET", f"/v1/threads/{quote(thread_id, safe='')}"
-        )
-        thread = response.get("thread")
-        if not isinstance(thread, dict) or thread.get("status") not in {
-            "idle", "running"
-        }:
-            raise WorkspaceError(
-                HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread"
-            )
-        if thread["status"] == "running":
-            raise WorkspaceError(
-                HTTPStatus.CONFLICT,
-                "threads can only be archived while their agent is idle",
-            )
     with db.transaction() as cur:
+        # Serialize the idle check and archive with Workspace message admission.
+        cur.execute("SELECT 1 FROM chat_threads WHERE thread_id = %s FOR UPDATE", (thread_id,))
+        if cur.fetchone() is None:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "thread not found")
+        if archived:
+            response = call_admin_api(
+                "GET", f"/v1/threads/{quote(thread_id, safe='')}"
+            )
+            thread = response.get("thread")
+            if not isinstance(thread, dict) or thread.get("status") not in {
+                "idle", "running"
+            }:
+                raise WorkspaceError(
+                    HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread"
+                )
+            if thread["status"] == "running":
+                raise WorkspaceError(
+                    HTTPStatus.CONFLICT,
+                    "threads can only be archived while their agent is idle",
+                )
         cur.execute(
             "UPDATE chat_threads SET archived = %s WHERE thread_id = %s"
             " RETURNING thread_id, archived",

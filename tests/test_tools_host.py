@@ -5,11 +5,12 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pg_harness
 
@@ -518,7 +519,7 @@ class HostCredentialsTests(ToolsHostTestCase):
 class HostAPIScopeTests(ToolsHostTestCase):
     def test_unconnected_oauth_tool_has_no_credential_scope(self) -> None:
         api = tools_host.host_api_for(
-            tools_host.BUNDLED_TOOLS["fake_notes"], tools_host.NO_CONNECTION
+            tools_host.BUNDLED_TOOLS["fake_notes"], tools_host.NO_CONNECTION, origin_thread_id=None
         )
         self.assertIsNone(api.credentials.load())
         with self.assertRaisesRegex(ValueError, "without a connection scope"):
@@ -529,7 +530,7 @@ class HostAPIScopeTests(ToolsHostTestCase):
     def test_enable_only_tool_rejects_an_oauth_connection_scope(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not use account connections"):
             tools_host.host_api_for(
-                tools_host.BUNDLED_TOOLS["brave_search"], _connection()
+                tools_host.BUNDLED_TOOLS["brave_search"], _connection(), origin_thread_id=None
             )
 
     def test_enable_only_approval_executes_without_an_account_scope(self) -> None:
@@ -559,6 +560,7 @@ class HostAPIScopeTests(ToolsHostTestCase):
                 "reddit",
                 "create_post",
                 {"subreddit": "kern", "title": "Test", "kind": "self", "text": "Body"},
+                origin_thread_id=None,
             )
             decided = tools_host.decide_approval(queued["approval_id"], "approve", public_hostname=None)
 
@@ -568,7 +570,7 @@ class HostAPIScopeTests(ToolsHostTestCase):
 
 class HostApprovalsTests(ToolsHostTestCase):
     def test_request_validates_action_summary_and_payload(self) -> None:
-        approvals = tools_host.HostApprovals(FAKE_MANIFEST, _connection())
+        approvals = tools_host.HostApprovals(FAKE_MANIFEST, _connection(), origin_thread_id=None)
         with self.assertRaises(ValueError):
             approvals.request(action_id="not_in_manifest", summary="s", payload={})
         with self.assertRaises(ValueError):
@@ -579,10 +581,55 @@ class HostApprovalsTests(ToolsHostTestCase):
             approvals.request(action_id="write_note", summary="s", payload={"big": "x" * 70_000})
 
     def test_request_returns_the_pending_record(self) -> None:
-        approvals = tools_host.HostApprovals(FAKE_MANIFEST, _connection())
+        approvals = tools_host.HostApprovals(FAKE_MANIFEST, _connection(), origin_thread_id=None)
         record = approvals.request(action_id="write_note", summary="Write.", payload={"text": "hi"})
         self.assertEqual(record.status, "pending")
         self.assertEqual(record.payload, {"text": "hi"})
+
+
+class ToolInputNormalizationTests(unittest.TestCase):
+    def test_object_string_uses_normal_execution_and_audit(self) -> None:
+        tool = Mock(manifest=FAKE_MANIFEST)
+        tool.execute.return_value = ActionExecuted({"text": "hello"})
+        with (
+            patch.object(tools_host, "enabled_tool", return_value=tool),
+            patch.object(tools_host, "resolve_connection", return_value=_connection()),
+            patch.object(tools_host, "host_api_for", return_value=Mock()) as host_api,
+            patch.object(tools_host, "_audit") as audit,
+        ):
+            result = tools_host.execute_action("fake_notes", "read_note", "{}", "thread-24")
+        self.assertEqual(result, {"status": "executed", "result": {"text": "hello"}})
+        self.assertEqual(tool.execute.call_args.args[1], {})
+        self.assertEqual(audit.call_args.kwargs["arguments"], {})
+        self.assertEqual(host_api.call_args.kwargs["origin_thread_id"], "thread-24")
+
+    def test_invalid_strings_fail_before_execution_or_audit(self) -> None:
+        for value in (
+            "{bad}", "[]", "null", "true", "42", json.dumps("{}"),
+            '{"text":"one","text":"two"}',
+            '{"text":{"x":1,"x":2}}',
+            '{"text":NaN}', '{"text":Infinity}', '{"text":1e999}',
+            '{"text":false}', '{"unknown":1}', "{} trailing",
+            "[" * 1500 + "]" * 1500, "\ud800", [], 1,
+            '{"text":"' + "x" * 65536 + '"}',
+        ):
+            tool = Mock(manifest=FAKE_MANIFEST)
+            with (
+                self.subTest(value=str(value)[:50]),
+                patch.object(tools_host, "enabled_tool", return_value=tool),
+                patch.object(tools_host, "resolve_connection", return_value=_connection()),
+                patch.object(tools_host, "_audit") as audit,
+                self.assertRaises(tools_host.ToolCallError),
+            ):
+                tools_host.execute_action("fake_notes", "write_note", value, None)
+            tool.execute.assert_not_called()
+            audit.assert_not_called()
+
+    def test_decode_preserves_values_and_missing_input_behavior(self) -> None:
+        value = {"text": "café", "nested": {"array": [None, True, 3, "{}"]}}
+        self.assertEqual(tools_host._normalize_tool_input(json.dumps(value)), value)
+        self.assertIs(tools_host._normalize_tool_input(value), value)
+        self.assertEqual(tools_host._normalize_tool_input(None), {})
 
 
 class ExecuteActionTests(ToolsHostTestCase):
@@ -600,9 +647,10 @@ class ExecuteActionTests(ToolsHostTestCase):
                 }
             )
         with self.assertRaisesRegex(tools_host.ToolCallError, "multiple connected accounts"):
-            tools_host.execute_action("fake_notes", "read_note", {})
+            tools_host.execute_action("fake_notes", "read_note", {}, origin_thread_id=None)
         result = tools_host.execute_action(
-            "fake_notes", "read_note", {}, connection_id="connection_second"
+            "fake_notes", "read_note", {}, connection_id="connection_second",
+            origin_thread_id=None,
         )
         self.assertEqual(result["result"]["text"], "second")
         event = state.page_tool_events_before(None)[0]
@@ -622,6 +670,7 @@ class ExecuteActionTests(ToolsHostTestCase):
         queued = tools_host.execute_action(
             "fake_notes", "write_note", {"text": "after"},
             connection_id="connection_second",
+            origin_thread_id=None,
         )
         approval = state.tool_approval(queued["approval_id"])
         self.assertEqual(approval["connection_id"], "connection_second")
@@ -653,6 +702,7 @@ class ExecuteActionTests(ToolsHostTestCase):
             "write_note",
             {"text": "approved for second"},
             connection_id=connection_id,
+            origin_thread_id=None,
         )
         state.delete_tool_credential("fake_notes", connection_id)
         replacement: StoredCredential = {
@@ -679,20 +729,20 @@ class ExecuteActionTests(ToolsHostTestCase):
 
     def test_rejects_unknown_disabled_and_invalid_calls(self) -> None:
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown tool"):
-            tools_host.execute_action("missing_tool", "read_note", {})
+            tools_host.execute_action("missing_tool", "read_note", {}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "not enabled"):
-            tools_host.execute_action("fake_notes", "read_note", {})
+            tools_host.execute_action("fake_notes", "read_note", {}, origin_thread_id=None)
         self.prepare_fake_tool()
         with self.assertRaisesRegex(tools_host.ToolCallError, "no action"):
-            tools_host.execute_action("fake_notes", "missing_action", {})
+            tools_host.execute_action("fake_notes", "missing_action", {}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "text is required"):
-            tools_host.execute_action("fake_notes", "write_note", {})
+            tools_host.execute_action("fake_notes", "write_note", {}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "unsupported fields"):
-            tools_host.execute_action("fake_notes", "read_note", {"bogus": 1})
+            tools_host.execute_action("fake_notes", "read_note", {"bogus": 1}, origin_thread_id=None)
 
     def test_read_action_executes_with_configured_values(self) -> None:
         self.prepare_fake_tool()
-        result = tools_host.execute_action("fake_notes", "read_note", {})
+        result = tools_host.execute_action("fake_notes", "read_note", {}, origin_thread_id=None)
         self.assertEqual(result, {"status": "executed", "result": {"text": "", "token": "token-1"}})
         events = state.page_tool_events_before(None)
         self.assertEqual(len(events), 1)
@@ -709,7 +759,7 @@ class ExecuteActionTests(ToolsHostTestCase):
         # with an operator-actionable message, not a bare KeyError or the generic
         # crash sanitizer.
         self.prepare_fake_tool(configured=False)
-        result = tools_host.execute_action("fake_notes", "read_note", {})
+        result = tools_host.execute_action("fake_notes", "read_note", {}, origin_thread_id=None)
         self.assertEqual(result["status"], "failed")
         self.assertEqual(
             result["error"],
@@ -718,7 +768,7 @@ class ExecuteActionTests(ToolsHostTestCase):
 
     def test_write_action_queues_exact_payload(self) -> None:
         self.prepare_fake_tool()
-        result = tools_host.execute_action("fake_notes", "write_note", {"text": "ship it"})
+        result = tools_host.execute_action("fake_notes", "write_note", {"text": "ship it"}, origin_thread_id=None)
         self.assertEqual(result["status"], "pending_approval")
         # The id carries the poll token: "approval_<number>.<token>".
         self.assertRegex(result["approval_id"], r"^approval_\d+\.[A-Za-z0-9_-]{20,}$")
@@ -735,18 +785,29 @@ class ExecuteActionTests(ToolsHostTestCase):
         self.assertIsNone(state.tool_approval(number))
         self.assertIsNone(state.tool_approval(number + ".wrong-token"))
 
+    def test_string_input_preserves_approval_and_audit_payload(self) -> None:
+        self.prepare_fake_tool()
+        result = tools_host.execute_action("fake_notes", "write_note", '{"text":"ship it"}', None)
+        self.assertEqual(result["status"], "pending_approval")
+        record = state.tool_approval(result["approval_id"])
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record["payload"], {"text": "ship it"})
+        event = state.page_tool_events_before(None)[0]
+        self.assertEqual(state.tool_event(event["seq"])["arguments"], {"text": "ship it"})
+
     def test_action_arguments_are_capped_before_execution_or_audit(self) -> None:
         self.prepare_fake_tool()
         with self.assertRaisesRegex(tools_host.ToolCallError, "Tool input exceeds 65536 bytes"):
-            tools_host.execute_action("fake_notes", "write_note", {"text": "x" * 70_000})
+            tools_host.execute_action("fake_notes", "write_note", {"text": "x" * 70_000}, origin_thread_id=None)
         self.assertEqual(state.page_tool_events_before(None), [])
 
     def test_pending_approvals_are_capped(self) -> None:
         self.prepare_fake_tool()
         with patch("host.runtime.tools.tools_host.PENDING_APPROVAL_LIMIT", 2):
-            first = tools_host.execute_action("fake_notes", "write_note", {"text": "one"})
-            second = tools_host.execute_action("fake_notes", "write_note", {"text": "two"})
-            third = tools_host.execute_action("fake_notes", "write_note", {"text": "three"})
+            first = tools_host.execute_action("fake_notes", "write_note", {"text": "one"}, origin_thread_id=None)
+            second = tools_host.execute_action("fake_notes", "write_note", {"text": "two"}, origin_thread_id=None)
+            third = tools_host.execute_action("fake_notes", "write_note", {"text": "three"}, origin_thread_id=None)
 
         self.assertEqual(first["status"], "pending_approval")
         self.assertEqual(second["status"], "pending_approval")
@@ -766,7 +827,7 @@ class ExecuteActionTests(ToolsHostTestCase):
     def test_tool_crash_is_audited_as_failed_call(self) -> None:
         self.prepare_fake_tool()
         with patch.object(tools_host.host_errors, "report_warning") as report:
-            result = tools_host.execute_action("fake_notes", "crash_note", {})
+            result = tools_host.execute_action("fake_notes", "crash_note", {}, origin_thread_id=None)
         self.assertEqual(result, {"status": "failed", "error": "Tool call failed.", "reconnect_required": False})
         report.assert_called_once()
         events = state.page_tool_events_before(None)
@@ -784,7 +845,7 @@ class ExecuteActionTests(ToolsHostTestCase):
             patch.object(FakeTool, "execute", side_effect=provider_error),
             patch.object(tools_host.host_errors, "report_warning") as report,
         ):
-            result = tools_host.execute_action("fake_notes", "read_note", {})
+            result = tools_host.execute_action("fake_notes", "read_note", {}, origin_thread_id=None)
         self.assertEqual(
             result,
             {
@@ -813,7 +874,7 @@ class ExecuteActionTests(ToolsHostTestCase):
             patch.object(FakeTool, "execute", side_effect=warning),
             patch.object(tools_host.host_errors, "report_warning") as report,
         ):
-            result = tools_host.execute_action("fake_notes", "read_note", {})
+            result = tools_host.execute_action("fake_notes", "read_note", {}, origin_thread_id=None)
 
         self.assertEqual(result["error"], "X declined the post request (HTTP 403 forbidden).")
         self.assertNotIn("reply blocked", result["error"])
@@ -838,7 +899,7 @@ class ExecuteActionTests(ToolsHostTestCase):
                 with patch.dict(tools_host.BUNDLED_TOOLS, {"wrong_kind_tool": tool}):
                     with state.mutation() as cur:
                         state.set_tool_enabled(cur, "wrong_kind_tool", True)
-                    result = tools_host.execute_action("wrong_kind_tool", "run", {})
+                    result = tools_host.execute_action("wrong_kind_tool", "run", {}, origin_thread_id=None)
                 self.assertEqual(result["status"], "failed")
                 self.assertIn(expected, result["error"])
                 self.assertEqual(state.page_tool_events_before(None)[0]["outcome"], "failed")
@@ -849,14 +910,14 @@ class ExecuteActionTests(ToolsHostTestCase):
                 with patch.dict(tools_host.BUNDLED_TOOLS, {"wrong_kind_tool": tool}):
                     with state.mutation() as cur:
                         state.set_tool_enabled(cur, "wrong_kind_tool", True)
-                    result = tools_host.execute_action("wrong_kind_tool", "run", {})
+                    result = tools_host.execute_action("wrong_kind_tool", "run", {}, origin_thread_id=None)
                 self.assertEqual(result["error"], "provider down")
 
     def test_executed_output_must_match_manifest_output_schema(self) -> None:
         with patch.dict(tools_host.BUNDLED_TOOLS, {"bad_output_tool": BadOutputTool()}):
             with state.mutation() as cur:
                 state.set_tool_enabled(cur, "bad_output_tool", True)
-            result = tools_host.execute_action("bad_output_tool", "run", {})
+            result = tools_host.execute_action("bad_output_tool", "run", {}, origin_thread_id=None)
         self.assertEqual(result["status"], "failed")
         self.assertIn("Invalid output", result["error"])
         self.assertEqual(state.page_tool_events_before(None)[0]["outcome"], "failed")
@@ -872,7 +933,7 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
                 "metadata": {},
             }
         )
-        return tools_host.execute_action("fake_notes", "write_note", {"text": text})["approval_id"]
+        return tools_host.execute_action("fake_notes", "write_note", {"text": text}, origin_thread_id=None)["approval_id"]
 
     def test_approved_execution_must_report_one_message(self) -> None:
         # execute_approved reports a user-visible message or a failure. Any
@@ -932,7 +993,7 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
     def test_tool_events_paginate_newest_first(self) -> None:
         self.prepare_fake_tool()
         for _ in range(5):
-            tools_host.execute_action("fake_notes", "read_note", {})
+            tools_host.execute_action("fake_notes", "read_note", {}, origin_thread_id=None)
         first = state.page_tool_events_before(None, limit=2)
         self.assertEqual([e["seq"] for e in first], sorted((e["seq"] for e in first), reverse=True))
         self.assertEqual(len(first), 2)
@@ -976,7 +1037,7 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
 
     def test_maintenance_expires_old_pending_approvals(self) -> None:
         fresh_id = self.queue_write("fresh")
-        stale = state.insert_tool_approval("fake_notes", "write_note", "Old write.", {"text": "old"}, created_at=1, pending_limit=tools_host.PENDING_APPROVAL_LIMIT)
+        stale = state.insert_tool_approval("fake_notes", "write_note", "Old write.", {"text": "old"}, created_at=1, pending_limit=tools_host.PENDING_APPROVAL_LIMIT, origin_thread_id=None)
         tools_host.maintain_approvals()
         self.assertEqual(state.tool_approval(stale["approval_id"])["status"], "expired")
         self.assertNotEqual(state.tool_approval(stale["approval_id"])["decided_at"], 0)
@@ -1154,14 +1215,14 @@ class ToolConfigStateTests(ToolsHostTestCase):
             state.save_tool_config_value(cur, "gmail", "GOOGLE_OAUTH_CLIENT_ID", "other")
         tool = tools_host.BUNDLED_TOOLS["fake_notes"]
         api = tools_host.host_api_for(
-            tool, tools_host.connection_scope(tool, _connection().connection_id)
+            tool, tools_host.connection_scope(tool, _connection().connection_id), origin_thread_id=None
         )
         self.assertEqual(dict(api.config), {"FAKE_NOTES_TOKEN": "token-1"})
         # Clearing a value removes the key from the tool's config view.
         with state.mutation() as cur:
             state.save_tool_config_value(cur, "fake_notes", "FAKE_NOTES_TOKEN", "")
         cleared = tools_host.host_api_for(
-            tool, tools_host.connection_scope(tool, _connection().connection_id)
+            tool, tools_host.connection_scope(tool, _connection().connection_id), origin_thread_id=None
         )
         self.assertEqual(dict(cleared.config), {})
 
@@ -1193,7 +1254,7 @@ class ToolConfigStateTests(ToolsHostTestCase):
         # Round-trips transparently for the tool call and credential layers.
         tool = tools_host.BUNDLED_TOOLS["fake_notes"]
         api = tools_host.host_api_for(
-            tool, tools_host.connection_scope(tool, _connection().connection_id)
+            tool, tools_host.connection_scope(tool, _connection().connection_id), origin_thread_id=None
         )
         self.assertEqual(dict(api.config), {"FAKE_NOTES_TOKEN": "super-secret-key"})
         self.assertEqual(

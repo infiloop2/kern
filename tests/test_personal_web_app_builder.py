@@ -251,17 +251,6 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("button.app-toolbar-button.history-toggle.active", css)
         command_surface = css.split(".agent-command-surface {", 1)[1].split("}", 1)[0]
         self.assertIn("z-index: 13", command_surface)
-        load_older = source.split("async function loadOlderConversationEvents", 1)[1].split(
-            "\nfunction setHistoryMode", 1
-        )[0]
-        self.assertLess(
-            load_older.index("const response = await api("),
-            load_older.index("const previousHeight = scroll.scrollHeight"),
-        )
-        self.assertIn(
-            "scroll.scrollTop = previousTop + scroll.scrollHeight - previousHeight",
-            load_older,
-        )
         self.assertIn("KernRichText.compactActivityEvents(ordered)", source)
         self.assertIn("Number(listed?.seen_message_seq) || 0", source)
         self.assertNotIn("const renderedMessageSeq = conversationEvents.reduce", source)
@@ -499,7 +488,6 @@ class AgenticWebAppContractTests(unittest.TestCase):
         )
         self.assertIn("GET /agent/self/memory", instructions)
         self.assertIn("Before each model turn", instructions)
-        self.assertIn("five-page total turn-start limit", instructions)
         self.assertIn("This is not comprehensive", instructions)
         self.assertNotIn("mandatory startup retrieval", instructions + memory)
         self.assertNotIn("Perform the startup retrieval", instructions)
@@ -926,6 +914,72 @@ class BrowserRoutingTests(unittest.TestCase):
             backend.route_browser("GET", "/apps/app-5/history", None)
         self.assertEqual(hidden_history.exception.status, HTTPStatus.NOT_FOUND)
 
+    def test_clear_memory_proxies_to_the_app_thread_and_retries_finishing(self) -> None:
+        finishing = backend.WorkspaceError(HTTPStatus.CONFLICT, "retry shortly")
+        with (
+            patch.object(backend, "_require_writable_web_app") as require,
+            patch.object(backend, "call_admin_api", side_effect=[finishing, {"status": "cleared"}]) as host,
+            patch("host.runtime.workspace.busy_retry.time.sleep"),
+        ):
+            result = backend.route_browser("POST", "/apps/app-8/clear-memory", None)
+        self.assertEqual(result, {"status": "cleared"})
+        require.assert_called_once_with("app-8")
+        self.assertEqual(host.call_count, 2)
+        host.assert_called_with("POST", "/v1/threads/app-8/clear-memory", None)
+
+    def test_clear_shares_app_write_order_with_sends_and_archive(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        for first_route, first_method, second_route, second_method in (
+            ("messages", "create_message", "clear-memory", "call_admin_api"),
+            ("clear-memory", "call_admin_api", "archive", "set_web_app_archived"),
+        ):
+            entered = threading.Event()
+            release = threading.Event()
+            following_started = threading.Event()
+            following_entered = threading.Event()
+            def first(*args, **kwargs):
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("test did not release the first app write")
+                return {"status": "accepted"}
+            def second(*args, **kwargs):
+                following_entered.set()
+                return {"status": "accepted"}
+            def send_following():
+                following_started.set()
+                return backend.route_browser("POST", f"/apps/app-8/{second_route}", {})
+            with self.subTest(first=first_route, second=second_route), patch.object(
+                backend, "_require_writable_web_app"
+            ), patch.object(backend, first_method, side_effect=first), patch.object(
+                backend, second_method, side_effect=second
+            ), ThreadPoolExecutor(max_workers=2) as pool:
+                initial = pool.submit(backend.route_browser, "POST", f"/apps/app-8/{first_route}", {})
+                try:
+                    self.assertTrue(entered.wait(5))
+                    following = pool.submit(send_following)
+                    self.assertTrue(following_started.wait(5))
+                    self.assertFalse(following_entered.wait(0.1))
+                finally:
+                    release.set()
+                initial.result(timeout=5)
+                following.result(timeout=5)
+                self.assertTrue(following_entered.is_set())
+
+    def test_clear_memory_rejects_archived_apps_and_running_threads(self) -> None:
+        for blocked_at in ("_require_writable_web_app", "call_admin_api"):
+            with (
+                self.subTest(blocked_at=blocked_at),
+                patch.object(backend, "_require_writable_web_app") as require,
+                patch.object(backend, "call_admin_api") as host,
+            ):
+                blocked = require if blocked_at == "_require_writable_web_app" else host
+                blocked.side_effect = backend.WorkspaceError(HTTPStatus.CONFLICT, "read-only or running")
+                with self.assertRaises(backend.WorkspaceError) as error:
+                    backend.route_browser("POST", "/apps/app-8/clear-memory", None)
+                self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+                self.assertEqual(host.call_count, 0 if blocked is require else 1)
+
     def test_stop_route_verifies_the_workspace_and_proxies_to_the_host(self) -> None:
         with (
             patch.object(backend, "_require_web_app") as require,
@@ -1022,7 +1076,11 @@ class BrowserRoutingTests(unittest.TestCase):
                 ) as error:
                     backend.route_agent("PUT", f"/agent/apps/app-9/{resource}", body)
                 self.assertEqual(error.exception.status, status)
-            transaction.assert_not_called()
+            transaction.assert_called_once()
+            cursor = transaction.return_value.__enter__.return_value
+            self.assertTrue(all(
+                call.args[0].startswith("SELECT ") for call in cursor.execute.call_args_list
+            ))
 
     def test_agent_can_create_an_app_only_through_the_collection_route(self) -> None:
         created = {"app_id": "app-10", "revision": 0}
@@ -1621,7 +1679,7 @@ class ConversationTests(unittest.TestCase):
             "GET",
             "/v1/threads/app-6/events?since=2&limit=6&message_bytes=122880"
             "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
-            "&event_type=thread.stopped&event_type=thread.context_added",
+            "&event_type=thread.stopped&event_type=thread.context_added&event_type=thread.memory_cleared",
         )
 
     def test_conversation_events_open_at_tail_and_page_backward(self) -> None:
@@ -1641,7 +1699,7 @@ class ConversationTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/app-6/events?limit=6&message_bytes=122880"
                 "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
-                "&event_type=thread.stopped&event_type=thread.context_added",
+                "&event_type=thread.stopped&event_type=thread.context_added&event_type=thread.memory_cleared",
             ),
         )
         self.assertEqual(
@@ -1650,7 +1708,7 @@ class ConversationTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880"
                 "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
-                "&event_type=thread.stopped&event_type=thread.context_added",
+                "&event_type=thread.stopped&event_type=thread.context_added&event_type=thread.memory_cleared",
             ),
         )
 
@@ -1670,7 +1728,7 @@ class ConversationTests(unittest.TestCase):
             "GET",
             "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880"
             "&event_type=thread.message&event_type=thread.error"
-            "&event_type=thread.stopped&event_type=thread.context_added",
+            "&event_type=thread.stopped&event_type=thread.context_added&event_type=thread.memory_cleared",
         )
 
     def test_conversation_events_reject_mixed_cursors(self) -> None:

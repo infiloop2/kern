@@ -514,12 +514,13 @@ def enqueue_pending_push(
     repo: str,
     ref_updates: list[dict[str, str]],
     changed_paths: list[str],
+    origin_thread_id: str | None,
 ) -> None:
     with mutation() as cur:
         cur.execute(
-            "INSERT INTO pending_pushes (id, owner, repo, ref_updates, changed_paths, requested_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s)",
-            (push_id, owner, repo, db.jsonb(ref_updates), db.jsonb(changed_paths), utc_now()),
+            "INSERT INTO pending_pushes (id, owner, repo, ref_updates, changed_paths, requested_at, origin_thread_id)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (push_id, owner, repo, db.jsonb(ref_updates), db.jsonb(changed_paths), utc_now(), origin_thread_id),
         )
 
 
@@ -532,7 +533,7 @@ def count_pending_pushes() -> int:
 
 
 def _pending_push_row(row: tuple[Any, ...]) -> dict[str, Any]:
-    push_id, owner, repo, ref_updates, changed_paths, requested_at, status, resolved_at, detail = row
+    push_id, owner, repo, ref_updates, changed_paths, requested_at, status, resolved_at, detail, origin_thread_id = row
     value: dict[str, Any] = {
         "id": str(push_id),
         "owner": str(owner),
@@ -541,6 +542,7 @@ def _pending_push_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "changed_paths": changed_paths if isinstance(changed_paths, list) else [],
         "requested_at": requested_at,
         "status": str(status),
+        "origin_thread_id": origin_thread_id,
     }
     if resolved_at is not None:
         value["resolved_at"] = resolved_at
@@ -549,7 +551,7 @@ def _pending_push_row(row: tuple[Any, ...]) -> dict[str, Any]:
     return value
 
 
-_PENDING_PUSH_COLUMNS = "id, owner, repo, ref_updates, changed_paths, requested_at, status, resolved_at, detail"
+_PENDING_PUSH_COLUMNS = "id, owner, repo, ref_updates, changed_paths, requested_at, status, resolved_at, detail, origin_thread_id"
 
 
 def read_pending_pushes() -> list[dict[str, Any]]:
