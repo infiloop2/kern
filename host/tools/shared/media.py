@@ -2,7 +2,7 @@
 
 Every generation tool that saves a finished render into the agent workspace does
 the same thing with the provider's authoritative output URL: stream it under a
-size bound, admit only known video media types, and hand the host one
+size bound, admit only known media types, and hand the host one
 ``OpenedStreamingAsset``. Only the provider name in the messages, the filename,
 and the status mapping differ.
 
@@ -23,7 +23,7 @@ from host.tools.shared.web import WebRequestError, open_response_stream
 # A render smaller than this is not a video, and the upper bound matches the
 # agent asset store's own ceiling.
 MIN_VIDEO_BYTES = 512
-MAX_VIDEO_BYTES = 200_000_000
+MAX_MEDIA_BYTES = 200_000_000
 # Only containers the workspace can name from the response alone. An unknown
 # media type is refused rather than guessed at, since the suffix decides the
 # filename the operator ends up with.
@@ -45,7 +45,45 @@ def open_downloaded_video(
     secret-free message; it may also raise, which lets a package report an
     unmapped failure as a Host warning instead of a vague string.
     """
-    failure_message = f"{provider} video download failed."
+    with _open_downloaded_media(
+        url, provider=provider, filename_stem=filename_stem, map_failure=map_failure,
+        kind="video", suffixes=VIDEO_SUFFIXES, min_bytes=MIN_VIDEO_BYTES,
+        timeout=timeout,
+    ) as opened:
+        yield opened
+
+
+@contextmanager
+def open_downloaded_audio(
+    url: str,
+    *,
+    provider: str,
+    filename_stem: str,
+    map_failure: Callable[[WebRequestError], str],
+    timeout: int = 120,
+) -> Iterator[OpenedStreamingAsset]:
+    """Stream generated MP3 speech through the same bounded asset handoff."""
+    with _open_downloaded_media(
+        url, provider=provider, filename_stem=filename_stem, map_failure=map_failure,
+        kind="audio", suffixes={"audio/mpeg": ".mp3"}, min_bytes=1,
+        timeout=timeout,
+    ) as opened:
+        yield opened
+
+
+@contextmanager
+def _open_downloaded_media(
+    url: str,
+    *,
+    provider: str,
+    filename_stem: str,
+    map_failure: Callable[[WebRequestError], str],
+    kind: str,
+    suffixes: dict[str, str],
+    min_bytes: int,
+    timeout: int,
+) -> Iterator[OpenedStreamingAsset]:
+    failure_message = f"{provider} {kind} download failed."
     try:
         with open_response_stream(
             "GET", url, failure_message=failure_message, timeout=timeout
@@ -53,20 +91,20 @@ def open_downloaded_video(
             raw_length = response_headers.get("content-length", "")
             if not raw_length.isascii() or not raw_length.isdecimal():
                 raise StreamingAssetError(
-                    f"{provider} video download did not include a valid size."
+                    f"{provider} {kind} download did not include a valid size."
                 )
             size_bytes = int(raw_length)
-            if not MIN_VIDEO_BYTES <= size_bytes <= MAX_VIDEO_BYTES:
+            if not min_bytes <= size_bytes <= MAX_MEDIA_BYTES:
                 raise StreamingAssetError(
-                    f"{provider} video download size is outside the supported range."
+                    f"{provider} {kind} download size is outside the supported range."
                 )
             media_type = (
                 response_headers.get("content-type", "").split(";", 1)[0].strip().lower()
             )
-            suffix = VIDEO_SUFFIXES.get(media_type)
+            suffix = suffixes.get(media_type)
             if suffix is None:
                 raise StreamingAssetError(
-                    f"{provider} video download returned an unsupported media type."
+                    f"{provider} {kind} download returned an unsupported media type."
                 )
             yield OpenedStreamingAsset(
                 filename=f"{filename_stem}{suffix}",

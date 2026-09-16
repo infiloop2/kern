@@ -358,12 +358,31 @@ class McpShimTests(unittest.TestCase):
         self.assertEqual(trigger_filter["type"], "boolean")
         self.assertIn("manual user messages", trigger_filter["description"])
         read = tools["read_thread_history"]
+        self.assertEqual(read["inputSchema"]["properties"]["include_context"], {"type": "boolean"})
+        self.assertIn("memory_page_ids", read["description"])
         self.assertEqual(read["inputSchema"]["required"], ["thread_id"])
         self.assertEqual(read["inputSchema"]["properties"]["limit"]["maximum"], 50)
         self.assertEqual(
             read["inputSchema"]["properties"]["before"]["maxLength"],
             24,
         )
+
+    def test_shim_reads_memory_context_notices(self) -> None:
+        socket_path = self.start_server()
+        arguments = {"thread_id": "thread-1", "include_context": True}
+        response = {"events": [{
+            "type": "context", "event_id": "event_1",
+            "content": "Memories injected.", "memory_page_ids": ["kern-memory-system"],
+        }]}
+        with patch.object(conversation_history, "route_agent", return_value=response) as route:
+            shim = self.start_shim(socket_path)
+            called = self.rpc(shim, {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "read_thread_history", "arguments": arguments},
+            })
+        self.assertFalse(called["result"]["isError"])
+        self.assertEqual(json.loads(called["result"]["content"][0]["text"]), response)
+        route.assert_called_once_with("POST", "/agent/conversation-history/read", arguments, {})
 
     def test_shim_calls_typed_conversation_history_tool(self) -> None:
         socket_path = self.start_server()

@@ -2313,6 +2313,25 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "memory_page_ids": ["thread-t1", "playwright-browser"],
         })
 
+        _, default_history = self.request(
+            "POST", "/v1/conversation-history/read", {"thread_id": "thread-t1"},
+        )
+        self.assertEqual([event["type"] for event in default_history["events"]], ["message"])
+        _, history = self.request(
+            "POST", "/v1/conversation-history/read",
+            {"thread_id": "thread-t1", "include_context": True, "limit": 1},
+        )
+        context = history["events"][0]
+        self.assertEqual(context["type"], "context")
+        self.assertEqual(context["memory_page_ids"], ["thread-t1", "playwright-browser"])
+        self.assertEqual(context["event_id"], notice["event_id"])
+        self.assertIsNotNone(history["older_cursor"])
+        _, previous = self.request(
+            "POST", "/v1/conversation-history/read",
+            {"thread_id": "thread-t1", "include_context": True, "before": history["older_cursor"]},
+        )
+        self.assertEqual([event["type"] for event in previous["events"]], ["message"])
+
     def test_memory_notice_counts_only_injected_pages(self) -> None:
         seed_thread_session("thread-t1", provider_session_id="existing-session")
         valid = {

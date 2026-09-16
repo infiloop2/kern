@@ -327,7 +327,7 @@ export const MANAGED_INTEGRATIONS = {
       ],
     },
     capabilities: [
-      { name: "Hermes runtime", description: "Runs Hermes on DeepSeek, Qwen, and Kimi models through one guarded Bedrock connection." },
+      { name: "Hermes runtime", description: "Runs Hermes on DeepSeek, Qwen, Kimi, and GLM models through one guarded Bedrock connection." },
       { name: "Live usage estimate", description: "Provider details show a month-to-date estimate computed live by this host from the token usage AWS reports in each response and priced at the on-demand catalog rates. AWS bills authoritatively." },
     ],
     controls: [

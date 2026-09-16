@@ -1752,6 +1752,7 @@ class AdminUiStaticTests(unittest.TestCase):
             {"thread_id": "legacy-thread"},
             {"thread_id": "thread-1", "before": "event_0"},
             {"thread_id": "thread-1", "include_activity": 1},
+            {"thread_id": "thread-1", "include_context": 1},
             {"thread_id": "thread-1", "limit": float("inf")},
             {"thread_id": "thread-1", "unexpected": []},
         )
@@ -2582,6 +2583,86 @@ class AdminUiStaticTests(unittest.TestCase):
             len(json.dumps(response).encode()),
             admin_api.CONVERSATION_RESPONSE_BYTES,
         )
+
+    def test_conversation_read_context_preserves_recorded_ids_and_legacy_notices(self) -> None:
+        payloads = [
+            {"message": "Memories injected.", "memory_page_ids": ["thread-1", "kern-memory-system"]},
+            {"message": "Self identity and 0 memories injected.", "memory_page_ids": []},
+            {"message": "Historical context transferred."},
+            {"message": "Legacy memory notice."},
+        ]
+        raw = [
+            {
+                "seq": index,
+                "event_id": f"event_{index}",
+                "timestamp": "2026-09-16T00:00:00Z",
+                "event_type": "thread.context_added",
+                "payload": payload,
+            }
+            for index, payload in enumerate(payloads, 2)
+        ]
+        with (
+            patch.object(admin_api.state, "page_thread_events", return_value=raw) as page,
+            patch.object(admin_api.state, "thread_event_page_bounds", return_value=(True, True)) as bounds,
+        ):
+            response = admin_api.read_conversation_history({
+                "thread_id": "thread-1", "include_context": True, "after": "event_1",
+            })
+        event_types = ("thread.message", "thread.context_added")
+        page.assert_called_once_with("thread-1", 1, 20, event_types=event_types)
+        bounds.assert_called_once_with("thread-1", 2, 5, event_types=event_types)
+        self.assertEqual(response["instruction_authority"], "none")
+        self.assertEqual(response["trust"], "untrusted")
+        for event, payload in zip(response["events"], payloads):
+            self.assertEqual(event["type"], "context")
+            self.assertEqual(event["content"], payload["message"])
+            self.assertFalse(event["truncated"])
+            if "memory_page_ids" in payload:
+                self.assertEqual(event["memory_page_ids"], payload["memory_page_ids"])
+            else:
+                self.assertNotIn("memory_page_ids", event)
+        self.assertEqual(response["older_cursor"], "event_2")
+        self.assertEqual(response["newer_cursor"], "event_5")
+
+    def test_conversation_read_context_filters_apply_to_every_paging_mode(self) -> None:
+        for include_activity in (False, True):
+            for include_context in (False, True):
+                for cursor in ({}, {"before": "event_5"}, {"after": "event_5"}, {"around_event_id": "event_5"}):
+                    with (
+                        self.subTest(activity=include_activity, context=include_context, cursor=cursor),
+                        patch.object(admin_api.state, "page_thread_events", return_value=[]) as page,
+                        patch.object(admin_api.state, "page_thread_events_around", return_value=[]) as around,
+                    ):
+                        admin_api.read_conversation_history({
+                            "thread_id": "thread-1", "include_activity": include_activity,
+                            "include_context": include_context, **cursor,
+                        })
+                        expected = ("thread.message",)
+                        if include_activity:
+                            expected += ("thread.activity",)
+                        if include_context:
+                            expected += ("thread.context_added",)
+                        called = around if "around_event_id" in cursor else page
+                        self.assertEqual(called.call_args.kwargs["event_types"], expected)
+
+    def test_conversation_read_context_is_bounded(self) -> None:
+        raw = [{
+            "seq": index, "event_id": f"event_{index}",
+            "timestamp": "2026-09-16T00:00:00Z", "event_type": "thread.context_added",
+            "payload": {"message": "\x01" * 100_000, "memory_page_ids": ["a" * 64] * 1000},
+        } for index in range(1, 51)]
+        with (
+            patch.object(admin_api.state, "page_thread_events", return_value=raw),
+            patch.object(admin_api.state, "thread_event_page_bounds", return_value=(True, False)),
+        ):
+            response = admin_api.read_conversation_history({
+                "thread_id": "thread-1", "include_context": True, "limit": 50,
+            })
+        self.assertTrue(response["events"])
+        self.assertLess(len(response["events"]), 50)
+        self.assertEqual(response["events"][-1]["event_id"], "event_50")
+        self.assertTrue(all(event["truncated"] for event in response["events"]))
+        self.assertLess(len(json.dumps(response).encode()), admin_api.CONVERSATION_RESPONSE_BYTES)
 
     def test_conversation_read_rejects_an_anchor_outside_the_thread(self) -> None:
         with (

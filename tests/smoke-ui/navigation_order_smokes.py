@@ -63,17 +63,16 @@ def run(page: Any, url: str, log_in: Any, *, touch: bool = False) -> None:
     assert len(writes) == 1
 
     def drag_handle(source: Any, target: Any, *, cancel: bool = False) -> None:
-        # Keep this fixed-target check away from the sidebar's edge scrolling.
-        source.evaluate("el => el.parentElement.parentElement.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'})")
-        # A navigation refresh can replace the handles before pointer capture.
-        # Resolve both current elements and read their bounds in one operation,
-        # retrying while either is temporarily absent instead of retaining a
-        # detached ElementHandle across Playwright's scroll/geometry calls.
+        # A refresh can detach a handle before Locator.evaluate runs. Resolve,
+        # center the group away from edge scrolling, and measure in one task.
         bounds = page.wait_for_function("""([sourceId, targetId]) => {
-            const rects = [sourceId, targetId].map(id => {
-                const el = document.querySelector(`[data-reorder-id="${CSS.escape(id)}"]`);
-                return el?.getBoundingClientRect();
+            const handles = [sourceId, targetId].map(id =>
+                document.querySelector(`[data-reorder-id="${CSS.escape(id)}"]`));
+            if (handles.some(el => !el)) return false;
+            handles[0].parentElement.parentElement.scrollIntoView({
+                block: 'center', inline: 'nearest', behavior: 'instant',
             });
+            const rects = handles.map(el => el.getBoundingClientRect());
             return rects.every(rect => rect && rect.width > 0 && rect.height > 0)
                 ? rects.map(rect => ({x: rect.x, y: rect.y, width: rect.width, height: rect.height}))
                 : false;

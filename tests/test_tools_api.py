@@ -825,38 +825,62 @@ class ToolsSocketTests(ToolsApiTestCase):
 
     def test_streaming_result_writes_host_named_agent_file_without_spool(self) -> None:
         socket_path = self.start_server()
-        payload = b"v" * 512
+        for action, media_type, suffix in (
+            ("runway_save_video", "video/mp4", ".mp4"),
+            ("runway_save_audio", "audio/mpeg", ".mp3"),
+        ):
+            payload = b"v" * 512
 
-        @contextmanager
-        def open_stream():
-            yield OpenedStreamingAsset("runway-task.mp4", "video/mp4", len(payload), io.BytesIO(payload))
+            @contextmanager
+            def open_stream():
+                yield OpenedStreamingAsset(f"runway-task{suffix}", media_type, len(payload), io.BytesIO(payload))
 
-        with state.mutation() as cur:
-            state.set_tool_enabled(cur, "runway", True)
-        with tempfile.TemporaryDirectory() as directory:
-            with (
-                patch.object(
-                    tools_host.BUNDLED_TOOLS["runway"],
-                    "execute",
-                    return_value=StreamingAsset(open_stream),
-                ),
-                patch.dict(os.environ, {"HOME": directory}),
-            ):
-                response = tools_mcp_shim._tools_action_request(
-                    {"name": "runway_save_video", "input": {"task_id": "task-1"}},
-                    socket_path,
-                )
-            result = response["result"]
-            self.assertRegex(result["path"], r"^/tool_assets/asset-[0-9a-f]{32}\.mp4$")
-            self.assertEqual((Path(directory) / result["path"].lstrip("/")).read_bytes(), payload)
-            self.assertEqual(result, {
-                "path": result["path"],
-                "filesystem_path": str(Path(directory) / result["path"].lstrip("/")),
-                "media_type": "video/mp4",
-                "size_bytes": len(payload),
-            })
+            with state.mutation() as cur:
+                state.set_tool_enabled(cur, "runway", True)
+            with tempfile.TemporaryDirectory() as directory:
+                with (
+                    patch.object(
+                        tools_host.BUNDLED_TOOLS["runway"],
+                        "execute",
+                        return_value=StreamingAsset(open_stream),
+                    ),
+                    patch.dict(os.environ, {"HOME": directory}),
+                ):
+                    response = tools_mcp_shim._tools_action_request(
+                        {"name": action, "input": {"task_id": "task-1"}},
+                        socket_path,
+                    )
+                result = response["result"]
+                self.assertRegex(result["path"], rf"^/tool_assets/asset-[0-9a-f]{{32}}\{suffix}$")
+                self.assertEqual((Path(directory) / result["path"].lstrip("/")).read_bytes(), payload)
+                self.assertEqual(result, {
+                    "path": result["path"],
+                    "filesystem_path": str(Path(directory) / result["path"].lstrip("/")),
+                    "media_type": media_type,
+                    "size_bytes": len(payload),
+                })
         spool = Path(socket_path).parent / "assets"
         self.assertFalse(spool.exists() and any(spool.iterdir()))
+
+    def test_elevenlabs_generation_saves_actual_tool_response_through_bridge(self) -> None:
+        from host.tools import elevenlabs
+        socket_path = self.start_server()
+        payload = b"ID3" + b"m" * 512
+        @contextmanager
+        def response(*args, **kwargs):
+            yield io.BytesIO(payload), {"content-type": "audio/mpeg"}
+        with state.mutation() as cur:
+            state.set_tool_enabled(cur, "elevenlabs", True)
+            state.save_tool_config_value(cur, "elevenlabs", "ELEVENLABS_API_KEY", "test-key")
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(elevenlabs, "open_response_stream", response), patch.dict(os.environ, {"HOME": directory}):
+                response_body = tools_mcp_shim._tools_action_request(
+                    {"name": "elevenlabs_generate_music", "input": {"prompt": "Sparse piano", "duration_ms": 5000}}, socket_path,
+                )
+            result = response_body["result"]
+            self.assertEqual(Path(result["filesystem_path"]).read_bytes(), payload)
+            self.assertEqual(result["media_type"], "audio/mpeg")
+            self.assertEqual("ElevenLabs audio saved.", result["summary"])
 
     def test_streaming_result_rejects_invalid_filename_metadata(self) -> None:
         for filename in ("", ".", "../escape.mp4", "nested/clip.mp4", "bad\nname.mp4", "x" * 256):
@@ -1023,6 +1047,8 @@ class McpShimTests(ToolsApiTestCase):
         runway = describe("runway")
         self.assertEqual(runway["save_video"]["required"], ["task_id"])
         self.assertNotIn("path", runway["save_video"]["properties"])
+        self.assertEqual(runway["save_audio"]["required"], ["task_id"])
+        self.assertEqual(set(runway["save_audio"]["properties"]), {"task_id"})
         self.assertIn("video_asset_id", runway["edit_video"]["properties"])
         self.assertNotIn("video_path", runway["edit_video"]["properties"])
         self.assertIn("image_asset_id", runway["generate_video"]["properties"])

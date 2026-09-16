@@ -179,11 +179,15 @@ def _actor_result(actor: dict[str, Any]) -> JSONObject:
     public_runs = public_runs if isinstance(public_runs, dict) else {}
     pricing = actor.get("currentPricingInfo")
     pricing = pricing if isinstance(pricing, dict) else {}
+    tags = actor.get("taggedBuilds")
+    latest = tags.get("latest") if isinstance(tags, dict) else None
+    latest_id = latest.get("buildId") if isinstance(latest, dict) else None
     return {
         "id": _text(actor.get("id"), 17), "name": _text(actor.get("name"), 64),
         "username": _text(actor.get("username"), 64), "title": _text(actor.get("title"), 100),
         "description": _text(actor.get("description")),
         "is_public": actor.get("isPublic") if type(actor.get("isPublic")) is bool else None,
+        "latest_build_id": latest_id if isinstance(latest_id, str) and ID_RE.fullmatch(latest_id) else None,
         "created_at": _text(actor.get("createdAt"), 40), "modified_at": _text(actor.get("modifiedAt"), 40),
         "stats": {name: _number(stats.get(source)) for name, source in (
             ("total_runs", "totalRuns"), ("total_users", "totalUsers"), ("users_7_days", "totalUsers7Days"),
@@ -527,7 +531,9 @@ class ApifyDeveloperTool(Tool):
                     payload["source_for_review"] = _redact_result(source, api)
                     payload["source_digest"] = _digest(source)
                     payload["tag"] = "kern-candidate-" + uuid.uuid4().hex[:15]
-                if action == "publish_actor":
+                if action == "set_latest_build" and actor.get("isPublic") is not False:
+                    raise ValueError("Setting latest without publication requires a private Actor.")
+                if action in ("set_latest_build", "publish_actor"):
                     _release(api, values, account)
                     payload["listing_digest"] = _digest(_listing_state(actor))
             summary = f"Apify {action} on {target} in account {account}."
@@ -543,6 +549,9 @@ class ApifyDeveloperTool(Tool):
                     "Review the exact JSON input in the payload; code executes on Apify and may contact upstream services.")
             if action == "publish_actor":
                 summary += f" Public listing and latest build {values['build_id']}; default runs select latest with limited permissions; title: {clip_text(values['title'], 100)}."
+            if action == "set_latest_build":
+                summary += (f" Set latest to tested build {values['build_id']} while keeping the Actor private. "
+                            "Future runs selecting latest use this build. No build or run starts; pricing and run defaults are unchanged.")
             approval = api.approvals.request(action_id=action, summary=summary, payload=payload)
             return ActionPendingApproval(approval.approval_id, approval.summary)
         except Exception as exc:
@@ -591,10 +600,16 @@ class ApifyDeveloperTool(Tool):
                     raise ValueError("Invalid candidate build tag.")
                 build = _object(_request(api, "POST", f"/actors/{actor_id}/builds", params={"version": values["version"], "tag": tag, "useCache": "false", "waitForFinish": 0}))
                 return ApprovalExecuted("Started Apify build " + _id(build.get("id")) + f" for Actor {actor_id}. Inspect its final status before running.")
-            if action == "publish_actor":
+            if action == "set_latest_build" and actor.get("isPublic") is not False:
+                raise ValueError("Setting latest without publication requires a private Actor.")
+            if action in ("set_latest_build", "publish_actor"):
                 if payload.get("listing_digest") != _digest(_listing_state(actor)):
                     raise ValueError("Actor listing, pricing, build tags or run defaults changed after approval; queue a new approval.")
                 _release(api, values, account)
+                if action == "set_latest_build":
+                    _request(api, "PUT", f"/actors/{actor_id}", body={
+                        "taggedBuilds": {"latest": {"buildId": values["build_id"]}}})
+                    return ApprovalExecuted(f"Set private Apify Actor {actor_id} latest build to {values['build_id']}; not published.")
                 # Preserve provider defaults, including charge limits and future
                 # resource settings, while changing only the reviewed selectors.
                 defaults = dict(_object(actor.get("defaultRunOptions") or {}))

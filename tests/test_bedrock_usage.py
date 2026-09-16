@@ -179,6 +179,14 @@ class PricingTests(unittest.TestCase):
         catalog = set(SESSION_OPTIONS["hermes"])
         self.assertEqual(catalog, set(MODEL_PRICING_PER_MILLION))
 
+    def test_glm_response_is_metered_with_us_standard_pricing(self) -> None:
+        meter = usage.BedrockResponseMeter("zai.glm-5")
+        with patch.object(usage, "record_bedrock_usage") as record:
+            meter.feed(http_response(json.dumps({"usage": USAGE}).encode()))
+            meter.finish()
+        # 1,350 input (including cache counters), 345 output, at $1/$3.20 per M.
+        record.assert_called_once_with("zai.glm-5", COUNTERS, 0.002454)
+
     def test_estimate_prices_input_output_and_conservative_cache(self) -> None:
         # deepseek.v3.2: $0.62/M input, $1.85/M output; cached tokens (zero
         # today — no catalog model supports Bedrock prompt caching) would be

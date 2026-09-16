@@ -54,6 +54,7 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
         "deepseek.v3.2": ("high",),
         "qwen.qwen3-coder-next": ("high",),
         "moonshotai.kimi-k2.5": ("high",),
+        "zai.glm-5": ("high",),
     },
 }
 

@@ -52,6 +52,8 @@ MODEL_PRICING_PER_MILLION: dict[str, tuple[float, float]] = {
     "deepseek.v3.2": (0.62, 1.85),
     "qwen.qwen3-coder-next": (0.50, 1.20),
     "moonshotai.kimi-k2.5": (0.60, 3.00),
+    # https://aws.amazon.com/bedrock/pricing/ — US standard, checked 2026-09-16.
+    "zai.glm-5": (1.00, 3.20),
 }
 
 # Where usage for a model outside the price table is recorded. Collapsing

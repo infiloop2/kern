@@ -71,6 +71,7 @@ class AgentChatBackendTests(unittest.TestCase):
                         "deepseek.v3.2": ["high"],
                         "qwen.qwen3-coder-next": ["high"],
                         "moonshotai.kimi-k2.5": ["high"],
+                        "zai.glm-5": ["high"],
                     },
                 },
                 # No admin socket in this test, so activation is unknown and the

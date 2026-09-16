@@ -683,8 +683,8 @@ the running turn's process; the thread remains available for a later message.
 
 ### Bedrock transport
 
-Hermes uses its boto3 Converse transport for the DeepSeek, Qwen, and
-Kimi catalog. The Bedrock guard therefore admits only
+Hermes uses its boto3 Converse transport for the DeepSeek, Qwen, Kimi, and
+GLM catalog. The Bedrock guard therefore admits only
 ``/model/<id>/converse`` and ``/converse-stream``. Hermes honors
 ``HTTP_PROXY``/``HTTPS_PROXY`` and reads the proxy CA through
 ``SSL_CERT_FILE`` and ``AWS_CA_BUNDLE`` (both set by the launcher to the
