@@ -319,6 +319,11 @@ def _route_workspace_api(
             return {"app": _set_agent_settings(workspace, body)}
         if method == "POST" and resource in {"archive", "unarchive"}:
             return {"app": _set_archived(workspace, resource == "archive")}
+        if method == "POST" and resource == "clear-memory":
+            if workspace["archived"] or workspace["turn"] is not None:
+                raise builder_backend.WorkspaceError(HTTPStatus.CONFLICT, "app is read-only or running")
+            _append_turn_event(workspace, "thread.memory_cleared", {"message": "Working memory cleared."})
+            return {"status": "cleared"}
         if method == "POST" and resource == "stop":
             return _stop_turn(workspace)
         if method == "POST" and resource == "runtime/actions":
@@ -1191,8 +1196,22 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#chat-history-list")).not_to_contain_text(
         "Inspecting app workspace"
     )
+    activity_toggle = frame.get_by_role("switch", name="Activity")
+    expect(activity_toggle).to_have_attribute("aria-checked", "false")
+    activity_toggle.click()
+    activity = frame.locator(".activity-card", has_text="Inspecting app workspace")
+    expect(activity).to_be_visible()
+    activity.locator("summary").click()
+    expect(activity.locator(".activity-body")).to_contain_text("Structured data loaded.")
+    activity_toggle.click()
+    expect(activity).to_be_hidden()
+    activity_toggle.click()
+    expect(activity).to_have_attribute("open", "")
+    activity_toggle.click()
+
     # Chat uses the same in-composer working and Stop treatment as Agent Chat.
     expect(frame.locator("#composer-running")).to_be_visible()
+    expect(frame.locator("#clear-memory")).to_be_disabled()
     expect(frame.locator("#stop-turn")).to_be_visible()
     frame.get_by_role("button", name="Show app", exact=True).click()
     expect(frame.locator("#chat-history")).to_be_hidden()
@@ -1369,6 +1388,22 @@ def desktop_smoke(page: Any) -> None:
     frame.get_by_role("button", name="Close Recovery", exact=True).click()
 
     frame.get_by_role("button", name="Show Chat", exact=True).click()
+    clear = frame.get_by_role("button", name="Clear working memory", exact=True)
+    expect(clear).to_be_enabled()
+    page.once("dialog", lambda dialog: dialog.dismiss())
+    clear.click()
+    expect(frame.locator(".chat-history-entry.user")).not_to_have_count(0)
+    page.once("dialog", lambda dialog: dialog.accept())
+    clear.click()
+    expect(frame.locator("#chat-history-list")).to_have_text("System:Working memory cleared.")
+    expect(frame.locator("#chat-history-more")).to_be_hidden()
+    frame.get_by_role("switch", name="Activity").click()
+    expect(frame.locator(".activity-card")).to_have_count(0)
+    frame.get_by_role("switch", name="Activity").click()
+    frame.get_by_role("button", name="Show app", exact=True).click()
+    expect(frame.locator("#canvas-empty")).to_be_visible()
+    frame.get_by_role("button", name="Show Chat", exact=True).click()
+    _composer_growth_smoke(frame)
     frame.locator("#message").fill("Keep this unsent human draft.")
     _start_host_app(page)
     expect(frame.locator("#message")).to_have_value("")
@@ -1446,6 +1481,20 @@ def desktop_smoke(page: Any) -> None:
     expect(archived_toggle).to_have_attribute("aria-pressed", "false")
 
 
+def _composer_growth_smoke(frame: Any) -> None:
+    area = frame.locator("#message")
+    area.fill("Short")
+    height = area.evaluate("element => element.clientHeight")
+    area.fill("A longer message that wraps as you type. " * 30)
+    grown = area.evaluate("element => element.clientHeight")
+    if not height < grown <= 205:
+        raise AssertionError(f"App composer did not grow within its cap: {height} -> {grown}")
+    area.fill("Short again")
+    if area.evaluate("element => element.clientHeight") != height:
+        raise AssertionError("App composer did not shrink after deleting text")
+    area.fill("")
+
+
 def mobile_smoke(page: Any) -> None:
     from playwright.sync_api import expect
 
@@ -1484,6 +1533,7 @@ def mobile_smoke(page: Any) -> None:
         )
     frame.get_by_role("button", name="Show Chat", exact=True).click()
     expect(frame.locator("#message")).to_be_visible()
+    _composer_growth_smoke(frame)
     composer_touch_heights = frame.locator(
         "#attach-file, #send-message"
     ).evaluate_all(

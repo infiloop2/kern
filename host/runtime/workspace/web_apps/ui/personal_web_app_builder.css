@@ -464,6 +464,8 @@ button.app-toolbar-button svg { height: 15px; width: 15px; }
 .settings-popover .agent-settings { border: 0; margin: 0; padding: 0; }
 .app-canvas { min-height: 0; position: relative; }
 .chat-history {
+  display: flex;
+  flex-direction: column;
   background: var(--surface);
   border: 0;
   border-radius: 0;
@@ -475,8 +477,19 @@ button.app-toolbar-button svg { height: 15px; width: 15px; }
   z-index: 12;
 }
 .chat-history[hidden] { display: none; }
+.chat-history-toolbar {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.35rem;
+  justify-content: flex-end;
+  padding: 0.25rem 1rem;
+}
+.chat-history-toolbar > button { min-height: 44px; }
+.chat-history.activity-hidden .chat-history-entry.activity { display: none; }
 .chat-history-scroll {
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   min-width: 0;
   overflow-anchor: none;
   overflow-y: auto;
@@ -495,7 +508,7 @@ button.app-toolbar-button svg { height: 15px; width: 15px; }
   margin: 0 auto;
   max-width: 48rem;
   min-width: 0;
-  padding: 1.25rem 1rem 0.75rem;
+  padding: 1.25rem 1rem calc(0.75rem + var(--activity-anchor-space, 0px));
 }
 .chat-history-entry {
   min-width: 0;
@@ -664,7 +677,7 @@ button.app-toolbar-button svg { height: 15px; width: 15px; }
   .chat-history-scroll {
     padding: 0;
   }
-  .chat-history-list { padding: 0.9rem 0.8rem max(0.5rem, env(safe-area-inset-bottom)); }
+  .chat-history-list { padding: 0.9rem 0.8rem calc(max(0.5rem, env(safe-area-inset-bottom)) + var(--activity-anchor-space, 0px)); }
   .chat-history-entry { max-width: 100%; }
   .settings-popover {
     bottom: auto;

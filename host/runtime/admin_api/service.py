@@ -50,6 +50,7 @@ from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
 from host.network_integrations.bedrock.manifest import SUPPORTED_REGIONS as BEDROCK_REGIONS
 from host.network_integrations.github.push_gate import pending as github_pending_push
+from host.runtime.admin_api import approval_outcomes
 from host.session_options import session_config_error
 # workspace_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
@@ -1264,8 +1265,11 @@ def resolve_pending_push(push_id: str, action: str) -> dict[str, Any]:
     try:
         push = github_pending_push.approve(push_id) if action == "approve" else github_pending_push.reject(push_id)
     except github_pending_push.PendingPushError as exc:
+        if exc.resolved_push is not None:
+            approval_outcomes.notify_push(exc.resolved_push)
         status = HTTPStatus.NOT_FOUND if "not found" in str(exc) else HTTPStatus.CONFLICT
         raise ApiError(status, str(exc)) from exc
+    approval_outcomes.notify_push(push)
     return {"pending_push": push}
 
 

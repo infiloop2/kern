@@ -1,0 +1,17 @@
+{
+  "success": true,
+  "credits_charged": 1,
+  "after": "t3_1lfogps",
+  "posts": [
+    {
+      "id": "1lfbo7u",
+      "subreddit": "AskReddit",
+      "score": 45,
+      "num_comments": 349,
+      "created_utc": 1750341959,
+      "title": "Example public post",
+      "selftext": "",
+      "author": "example_author"
+    }
+  ]
+}

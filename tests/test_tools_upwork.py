@@ -502,7 +502,7 @@ class UpworkTests(unittest.TestCase):
             patch.object(tools_host, "_audit"),
             patch.object(tools_host.host_errors, "report_warning") as report,
         ):
-            result = tools_host.execute_action("upwork", "list_accounts", {})
+            result = tools_host.execute_action("upwork", "list_accounts", {}, origin_thread_id=None)
         self.assertEqual(result["status"], "failed")
         self.assertIn("missing required", result["error"])
         self.assertNotIn("unexpected_accounts", result["error"])

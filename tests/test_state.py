@@ -841,8 +841,9 @@ class StateStorageTests(unittest.TestCase):
         self.assertNotIn(hostile, search_sql)
         self.assertEqual(parameters[0], hostile)
 
-    def test_conversation_search_can_exclude_only_saved_schedule_prompts(self) -> None:
+    def test_conversation_search_excludes_automated_approvals_and_schedule_prompts(self) -> None:
         automated = "This is an automated trigger.\n\nRemember this correction"
+        current = "This is an automated message from Kern.\n\n---\n\nRemember this correction"
         with state.mutation() as cur:
             prompt = state.append_agent_event(
                 cur, "thread.message", "schedule-7",
@@ -852,6 +853,14 @@ class StateStorageTests(unittest.TestCase):
                 cur, "thread.message", "schedule-7",
                 {"message": "This is an automated trigger.\n\n---\n\nRemember this correction", "source": "user"},
             )
+            automated_prompts = [
+                state.append_agent_event(
+                    cur, "thread.message", thread_id,
+                    {"message": message, "source": "user"},
+                )
+                for thread_id in ("thread-1", "app-1", "schedule-7")
+                for message in (current, automated)
+            ]
             kept = [
                 state.append_agent_event(
                     cur, "thread.message", thread_id,
@@ -862,22 +871,24 @@ class StateStorageTests(unittest.TestCase):
                     ("schedule-7", "user", "This is an automated trigger. Remember this correction"),
                     ("schedule-7", "user", "This is an automated trigger.\nRemember this correction"),
                     ("schedule-7", "agent", automated),
-                    ("thread-1", "user", automated),
+                    ("thread-1", "agent", current),
+                    ("app-1", "user", "Quoting: " + current),
+                    ("thread-1", "user", "This is an automated message from Kern. Remember this correction"),
                 )
             ]
-        seqs = (prompt, divided_prompt, *kept)
+        seqs = (prompt, divided_prompt, *automated_prompts, *kept)
         vector = [1.0] + [0.0] * 383
         state.store_thread_message_embeddings("test-model", [(seq, vector) for seq in seqs])
         for exclude in (False, True):
             expected = set(kept if exclude else seqs)
             lexical = state.search_thread_messages(
                 ("remember correction",), from_timestamp=None, to_timestamp=None,
-                thread_id=None, sources=("user", "agent"), limit=10, before=None,
+                thread_id=None, sources=("user", "agent"), limit=50, before=None,
                 exclude_automated_triggers=exclude,
             )
             semantic = state.search_thread_messages_semantic(
                 vector, "test-model", from_timestamp=None, to_timestamp=None,
-                thread_id=None, sources=("user", "agent"), limit=10, minimum_similarity=0.5,
+                thread_id=None, sources=("user", "agent"), limit=50, minimum_similarity=0.5,
                 exclude_automated_triggers=exclude,
             )
             frozen = state.thread_messages_by_seqs(
@@ -1423,7 +1434,7 @@ class StateStorageTests(unittest.TestCase):
             "infiloop2",
             "kern",
             [{"old": "0" * 40, "new": "1" * 40, "ref": "refs/heads/main"}],
-            [".github/workflows/ci.yml"],
+            [".github/workflows/ci.yml"], origin_thread_id=None,
         )
         pending = state.read_pending_pushes()
         self.assertEqual(len(pending), 1)
@@ -1449,7 +1460,7 @@ class StateStorageTests(unittest.TestCase):
                 "infiloop2",
                 "kern",
                 [{"old": "0" * 40, "new": "1" * 40, "ref": "refs/heads/main"}],
-                [".github/workflows/ci.yml"],
+                [".github/workflows/ci.yml"], origin_thread_id=None,
             )
         for push_id in ("aa0001", "aa0002", "aa0003"):
             state.resolve_pending_push(push_id, "approved")

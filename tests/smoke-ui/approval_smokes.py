@@ -1,4 +1,5 @@
 """Exercise visible-page scope, concurrency, failures, and responsive review."""
+import time
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import expect
@@ -94,7 +95,11 @@ def approval_smoke(browser, url):
     for route in list(held):
         finish(route, "/2/approve" in route.request.url)
     expect(page.locator("#approval-feedback")).to_contain_text("9 of 10")
-    assert len(held) == 10
+    # Progress can render before Playwright intercepts the next GitHub call.
+    deadline = time.monotonic() + 5
+    while len(held) < 10 and time.monotonic() < deadline:
+        page.wait_for_timeout(10)
+    assert len(held) == 10, seen
     finish(held[-1])
     expect(page.locator("#approval-feedback")).to_contain_text("9 approved, 1 failed")
     expect(page.locator("#approval-feedback")).to_contain_text("Provider declined request")

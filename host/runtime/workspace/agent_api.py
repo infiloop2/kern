@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 from host.constants import MAX_WORKSPACE_RESPONSE_BODY_BYTES
 from host.runtime.core import host_errors
+from host.runtime.core.peer_identity import peer_thread_id
 from host.runtime.core.unix_socket_service import (
     UnixSocketRequestHandler,
     UnixSocketServer,
@@ -41,7 +42,6 @@ AGENT_PATH_RE = re.compile(
 )
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
 PROC_ROOT = Path("/proc")
-THREAD_SCOPE_RE = re.compile(r"(?:^|/)kern-agent-thread-([A-Za-z0-9_-]{1,64})\.scope$")
 
 
 def agent_peer_uids() -> frozenset[int]:
@@ -113,7 +113,7 @@ def dispatch_call(
     elif parsed.path == "/agent/messages":
         if method != "POST" or query:
             raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent messaging accepts only POST without query parameters")
-        response = agent_messages.send_message(body, sender_thread_id=peer_thread_id)
+        response = agent_messages.send_agent_message(body, sender_thread_id=peer_thread_id)
     elif parsed.path.startswith("/agent/conversation-history/"):
         response = conversation_history.route_agent(method, parsed.path, body, query)
     elif parsed.path == "/agent/memory" or parsed.path.startswith("/agent/memory/"):
@@ -238,28 +238,4 @@ def _peer_uid(conn: socket.socket) -> int:
 
 
 def _peer_thread_id(pid: int) -> str | None:
-    """Derive the MCP shim's host thread from its kernel-assigned cgroup.
-
-    This is an informational identity, not app authorization. The peer PID is
-    obtained with SO_PEERCRED and the thread id is accepted only from the
-    root-created per-turn scope name.
-    """
-    try:
-        lines = (PROC_ROOT / str(pid) / "cgroup").read_text().splitlines()
-    except (OSError, UnicodeDecodeError):
-        return None
-    for line in lines:
-        path = line.split(":", 2)[-1]
-        # systemd may hex-escape unit-name bytes in a cgroup component.
-        try:
-            path = re.sub(
-                r"\\x([0-9a-fA-F]{2})",
-                lambda match: chr(int(match.group(1), 16)),
-                path,
-            )
-        except ValueError:
-            continue
-        match = THREAD_SCOPE_RE.search(path)
-        if match is not None:
-            return match.group(1)
-    return None
+    return peer_thread_id(pid, PROC_ROOT)

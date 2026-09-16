@@ -41,6 +41,7 @@ from host.config import NetworkControls, parse_network_controls
 from host.constants import LOOPBACK, PROXY_PORT
 from host.network_integrations import runtime as integrations
 from host.runtime.core.network_policy import load_policy
+from host.runtime.core.peer_identity import tcp_peer_thread_id
 from host.runtime.core.state import (
     append_network_event,
     network_proxy_cert_files,
@@ -345,7 +346,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # forwarded.
             gate_response = None
             if denial is None:
-                gate_response, gate_denial = integrations.gate_response(policy, method, host, path, body)
+                origin_thread_id = (
+                    tcp_peer_thread_id(client_tls)
+                    if host.lower() == "github.com" and method == "POST" and path.endswith("/git-receive-pack")
+                    else None
+                )
+                gate_response, gate_denial = integrations.gate_response(
+                    policy, method, host, path, body, origin_thread_id,
+                )
                 if gate_denial is not None:
                     denial = gate_denial
             # Ordinary HTTP is decided entirely by the request guards. A

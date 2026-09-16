@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 from host.constants import LOOPBACK, WORKSPACE_AGENT_SOCKET_PATH, WORKSPACE_PORT
 from host.runtime.core import host_errors
-from host.runtime.workspace import agent_api, getting_started, memory, schedules
+from host.runtime.workspace import agent_api, agent_messages, getting_started, memory, schedules
 from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.web_apps import backend as web_apps
@@ -45,7 +45,10 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self, method: str) -> None:
         parsed = urlparse(self.path)
         try:
-            if parsed.path == "/chat" or parsed.path.startswith("/chat/"):
+            if method == "POST" and parsed.path.startswith("/messages/"):
+                body = self._read_body(agent_api.MAX_REQUEST_BODY_BYTES)
+                response = agent_messages.deliver_message(parsed.path.removeprefix("/messages/"), body)
+            elif parsed.path == "/chat" or parsed.path.startswith("/chat/"):
                 body = self._read_body(chat.MAX_REQUEST_BODY_BYTES)
                 response = chat.route_browser(
                     method,

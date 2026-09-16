@@ -213,7 +213,7 @@ class PublicToolMediaTests(unittest.TestCase):
         self.assertEqual(self.tools.asset_store._public_asset_grants, {})
 
     def test_admin_supplies_configured_hostname_and_ignores_caller_override(self):
-        with patch.object(tools_client, "_tools_operator_request", return_value={}) as delegated:
+        with patch.object(tools_client, "_tools_operator_request", return_value={"approval": {"origin_thread_id": None}}) as delegated:
             tools_client.tools_route("POST", "/v1/tools/instagram/approvals/approval_1/approve",
                                      {"public_hostname": "attacker.example"})
         self.assertEqual(delegated.call_args.args[1], {"public_hostname": "kern.example"})

@@ -252,6 +252,12 @@ class StreamMaterializationUnitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}):
             result = tools_mcp_shim._materialize_stream(response)  # type: ignore[arg-type]
             local_path = Path(directory) / result["path"].lstrip("/")
+            self.assertEqual(result["filesystem_path"], str(local_path))
+            self.assertEqual(Path(result["filesystem_path"]).read_bytes(), payload)
+            self.assertEqual(
+                tools_mcp_shim._workspace_local_path(result["filesystem_path"]),
+                (result["path"], str(local_path)),
+            )
             self.assertEqual(local_path.read_bytes(), payload)
             self.assertEqual(local_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(local_path.parent.stat().st_mode & 0o777, 0o700)
@@ -327,7 +333,7 @@ class ActionListingTests(ToolsApiTestCase):
 
     def test_describe_tool_exposes_every_bundled_action_contract(self) -> None:
         for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
-            described = tools_api.call_action("describe_tool", {"tool_id": tool_id})
+            described = tools_api.call_action("describe_tool", {"tool_id": tool_id}, origin_thread_id=None)
             self.assertEqual(described["status"], "executed")
             by_id = {entry["id"]: entry for entry in described["result"]["actions"]}
             for action in tool.manifest.actions:
@@ -344,7 +350,7 @@ class ActionListingTests(ToolsApiTestCase):
                     )
 
         def described_action(tool_id: str, action_id: str) -> dict[str, Any]:
-            result = tools_api.call_action("describe_tool", {"tool_id": tool_id})["result"]
+            result = tools_api.call_action("describe_tool", {"tool_id": tool_id}, origin_thread_id=None)["result"]
             return {entry["id"]: entry for entry in result["actions"]}[action_id]
 
         self.assertIn("individual tradable questions", described_action("polymarket", "list_markets")["description"])
@@ -366,7 +372,7 @@ class ActionListingTests(ToolsApiTestCase):
     def test_agent_notes_are_stated_only_for_focused_catalog_entries(self) -> None:
         broad_catalog = {
             entry["tool_id"]: entry
-            for entry in tools_api.call_action("list_bundled_tools", {})["result"]["tools"]
+            for entry in tools_api.call_action("list_bundled_tools", {}, origin_thread_id=None)["result"]["tools"]
         }
         for entry in broad_catalog.values():
             self.assertNotIn("agent_notes", entry)
@@ -375,7 +381,7 @@ class ActionListingTests(ToolsApiTestCase):
         catalog = {
             entry["tool_id"]: entry
             for entry in tools_api.call_action(
-                "list_bundled_tools", {"tool_ids": list(tools_host.BUNDLED_TOOLS)}
+                "list_bundled_tools", {"tool_ids": list(tools_host.BUNDLED_TOOLS)}, origin_thread_id=None
             )["result"]["tools"]
         }
         # Always stated, empty included, so "this tool has nothing to add" is
@@ -394,60 +400,60 @@ class ActionListingTests(ToolsApiTestCase):
 
         # Broad discovery goes directly to describe_tool, so the described tool
         # repeats its one short note to make that documented path self-contained.
-        described = tools_api.call_action("describe_tool", {"tool_id": "twitter"})["result"]
+        described = tools_api.call_action("describe_tool", {"tool_id": "twitter"}, origin_thread_id=None)["result"]
         self.assertEqual(described["agent_notes"], catalog["twitter"]["agent_notes"])
         for action in described["actions"]:
             with self.subTest(action=action["id"]):
                 self.assertNotIn("agent_notes", action)
 
     def test_describe_tool_reports_enablement_and_rejects_unknown_ids(self) -> None:
-        described = tools_api.call_action("describe_tool", {"tool_id": "fake_notes"})
+        described = tools_api.call_action("describe_tool", {"tool_id": "fake_notes"}, origin_thread_id=None)
         self.assertTrue(described["result"]["enabled"])
         self.assertEqual(described["result"]["display_name"], "Fake Notes")
-        self.assertFalse(tools_api.call_action("describe_tool", {"tool_id": "gmail"})["result"]["enabled"])
+        self.assertFalse(tools_api.call_action("describe_tool", {"tool_id": "gmail"}, origin_thread_id=None)["result"]["enabled"])
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown tool_id"):
-            tools_api.call_action("describe_tool", {"tool_id": "nope"})
+            tools_api.call_action("describe_tool", {"tool_id": "nope"}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "must be a non-empty string"):
-            tools_api.call_action("describe_tool", {})
+            tools_api.call_action("describe_tool", {}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "only tool_id"):
-            tools_api.call_action("describe_tool", {"tool_id": "fake_notes", "extra": 1})
+            tools_api.call_action("describe_tool", {"tool_id": "fake_notes", "extra": 1}, origin_thread_id=None)
 
     def test_call_tool_runs_an_action_and_rejects_bad_addresses(self) -> None:
         result = tools_api.call_action(
-            "call_tool", {"tool_id": "fake_notes", "action_id": "read_note", "input": {}}
+            "call_tool", {"tool_id": "fake_notes", "action_id": "read_note", "input": {}}, origin_thread_id=None
         )
         self.assertEqual(result["status"], "executed")
         # A missing input is an empty object, not a crash.
         self.assertEqual(
-            tools_api.call_action("call_tool", {"tool_id": "fake_notes", "action_id": "read_note"})["status"],
+            tools_api.call_action("call_tool", {"tool_id": "fake_notes", "action_id": "read_note"}, origin_thread_id=None)["status"],
             "executed",
         )
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown tool_id"):
-            tools_api.call_action("call_tool", {"tool_id": "nope", "action_id": "read_note"})
+            tools_api.call_action("call_tool", {"tool_id": "nope", "action_id": "read_note"}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown action_id"):
-            tools_api.call_action("call_tool", {"tool_id": "fake_notes", "action_id": "nope"})
+            tools_api.call_action("call_tool", {"tool_id": "fake_notes", "action_id": "nope"}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "must be a non-empty string"):
-            tools_api.call_action("call_tool", {"tool_id": "fake_notes"})
+            tools_api.call_action("call_tool", {"tool_id": "fake_notes"}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "only tool_id, action_id, connection_id, and input"):
             tools_api.call_action(
-                "call_tool", {"tool_id": "fake_notes", "action_id": "read_note", "extra": 1}
+                "call_tool", {"tool_id": "fake_notes", "action_id": "read_note", "extra": 1}, origin_thread_id=None
             )
         # A disabled tool is addressable but refuses, so the agent can tell the
         # operator which integration to enable.
         with self.assertRaisesRegex(tools_host.ToolCallError, "not enabled"):
-            tools_api.call_action("call_tool", {"tool_id": "gmail", "action_id": "search_messages"})
+            tools_api.call_action("call_tool", {"tool_id": "gmail", "action_id": "search_messages"}, origin_thread_id=None)
 
     def test_flat_action_names_stay_callable_though_unlisted(self) -> None:
         # Approval records and audit rows address actions this way.
         listed = [entry["name"] for entry in tools_api.action_listing()]
         self.assertNotIn("fake_notes_read_note", listed)
-        self.assertEqual(tools_api.call_action("fake_notes_read_note", {})["status"], "executed")
+        self.assertEqual(tools_api.call_action("fake_notes_read_note", {}, origin_thread_id=None)["status"], "executed")
 
     def test_list_bundled_tools_reports_the_catalog_with_enablement(self) -> None:
         # Enabled and disabled bundled tools both appear, distinguished by the
         # enabled flag, so the agent can ask the operator to enable an existing
         # tool instead of rebuilding it.
-        result = tools_api.call_action("list_bundled_tools", {})
+        result = tools_api.call_action("list_bundled_tools", {}, origin_thread_id=None)
         self.assertEqual(result["status"], "executed")
         by_id = {entry["tool_id"]: entry for entry in result["result"]["tools"]}
         self.assertTrue(by_id["fake_notes"]["enabled"])
@@ -458,7 +464,7 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertNotIn("actions", gmail)
 
         focused = tools_api.call_action(
-            "list_bundled_tools", {"tool_ids": ["fake_notes", "gmail"]}
+            "list_bundled_tools", {"tool_ids": ["fake_notes", "gmail"]}, origin_thread_id=None
         )["result"]["tools"]
         focused_by_id = {entry["tool_id"]: entry for entry in focused}
         self.assertEqual(
@@ -485,7 +491,7 @@ class ActionListingTests(ToolsApiTestCase):
                 }
             )
         catalog = tools_api.call_action(
-            "list_bundled_tools", {"tool_ids": ["fake_notes"]}
+            "list_bundled_tools", {"tool_ids": ["fake_notes"]}, origin_thread_id=None
         )["result"]["tools"][0]
         self.assertEqual(
             [item["connection_id"] for item in catalog["connected_accounts"]],
@@ -493,7 +499,7 @@ class ActionListingTests(ToolsApiTestCase):
         )
         with self.assertRaisesRegex(tools_host.ToolCallError, "multiple connected accounts"):
             tools_api.call_action(
-                "call_tool", {"tool_id": "fake_notes", "action_id": "read_note"}
+                "call_tool", {"tool_id": "fake_notes", "action_id": "read_note"}, origin_thread_id=None
             )
         result = tools_api.call_action(
             "call_tool",
@@ -501,14 +507,14 @@ class ActionListingTests(ToolsApiTestCase):
                 "tool_id": "fake_notes",
                 "action_id": "read_note",
                 "connection_id": "connection_second",
-            },
+            }, origin_thread_id=None,
         )
         self.assertEqual(result["result"]["text"], "second")
 
     def test_list_bundled_tools_filters_known_ids_and_reports_unknown_ids(self) -> None:
         result = tools_api.call_action(
             "list_bundled_tools",
-            {"tool_ids": ["twitter", "missing-tool", "fake_notes"]},
+            {"tool_ids": ["twitter", "missing-tool", "fake_notes"]}, origin_thread_id=None,
         )["result"]
         self.assertEqual(
             [entry["tool_id"] for entry in result["tools"]],
@@ -517,7 +523,7 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertEqual(result["unknown_tool_ids"], ["missing-tool"])
         self.assertTrue(result["tools"][1]["enabled"])
 
-        unfiltered = tools_api.call_action("list_bundled_tools", {})["result"]
+        unfiltered = tools_api.call_action("list_bundled_tools", {}, origin_thread_id=None)["result"]
         self.assertNotIn("unknown_tool_ids", unfiltered)
 
     def test_list_bundled_tools_rejects_invalid_filters(self) -> None:
@@ -534,13 +540,13 @@ class ActionListingTests(ToolsApiTestCase):
             with self.subTest(tool_input=tool_input), self.assertRaises(
                 tools_host.ToolCallError
             ):
-                tools_api.call_action("list_bundled_tools", tool_input)
+                tools_api.call_action("list_bundled_tools", tool_input, origin_thread_id=None)
 
     def test_catalog_carries_descriptions_but_not_schemas(self) -> None:
         # Descriptions are what the agent plans from; schemas are what it needs
         # only once it commits to a call, so they stay behind describe_tool.
         catalog = tools_api.call_action(
-            "list_bundled_tools", {"tool_ids": ["fake_notes"]}
+            "list_bundled_tools", {"tool_ids": ["fake_notes"]}, origin_thread_id=None
         )["result"]["tools"]
         by_id = {entry["tool_id"]: entry for entry in catalog}
         for action in by_id["fake_notes"]["actions"]:
@@ -552,14 +558,14 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertNotIn("approval", by_action["read_note"])
 
     def test_call_action_resolves_names_and_rejects_unknowns(self) -> None:
-        result = tools_api.call_action("fake_notes_read_note", {})
+        result = tools_api.call_action("fake_notes_read_note", {}, origin_thread_id=None)
         self.assertEqual(result["status"], "executed")
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown tool"):
-            tools_api.call_action("fake_notes_missing", {})
+            tools_api.call_action("fake_notes_missing", {}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "not enabled"):
-            tools_api.call_action("gmail_search_messages", {})  # resolvable but disabled
+            tools_api.call_action("gmail_search_messages", {}, origin_thread_id=None)  # resolvable but disabled
         with self.assertRaisesRegex(tools_host.ToolCallError, "must be a string"):
-            tools_api.call_action(7, {})
+            tools_api.call_action(7, {}, origin_thread_id=None)
 
     def test_check_tool_approval_reports_status(self) -> None:
         tools_host.HostCredentials(
@@ -575,32 +581,32 @@ class ActionListingTests(ToolsApiTestCase):
                 "metadata": {},
             }
         )
-        pending = tools_api.call_action("fake_notes_write_note", {"text": "hello"})
+        pending = tools_api.call_action("fake_notes_write_note", {"text": "hello"}, origin_thread_id=None)
         self.assertEqual(pending["status"], "pending_approval")
         # The token is folded into the id; no separate field.
         self.assertNotIn("approval_check_token", pending)
         check_input = {"approval_id": pending["approval_id"]}
-        checked = tools_api.call_action("check_tool_approval", check_input)
+        checked = tools_api.call_action("check_tool_approval", check_input, origin_thread_id=None)
         self.assertEqual(checked["result"]["approval_status"], "pending")
         tools_host.decide_approval(pending["approval_id"], "approve", public_hostname=None)
-        checked = tools_api.call_action("check_tool_approval", check_input)
+        checked = tools_api.call_action("check_tool_approval", check_input, origin_thread_id=None)
         self.assertEqual(checked["result"]["approval_status"], "executed")
         self.assertEqual(checked["result"]["execution_result"], "Wrote the note (5 chars).")
 
-        failed = tools_api.call_action("fake_notes_write_note", {"text": "fail"})
+        failed = tools_api.call_action("fake_notes_write_note", {"text": "fail"}, origin_thread_id=None)
         tools_host.decide_approval(failed["approval_id"], "approve", public_hostname=None)
-        checked = tools_api.call_action("check_tool_approval", {"approval_id": failed["approval_id"]})
+        checked = tools_api.call_action("check_tool_approval", {"approval_id": failed["approval_id"]}, origin_thread_id=None)
         self.assertEqual(checked["result"]["approval_status"], "failed")
         self.assertEqual(checked["result"]["execution_result"], "Note write failed.")
         # A right-shaped id with the wrong token, and a guessed sequential
         # number, both fail closed.
         number = pending["approval_id"].split(".", 1)[0]
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown approval"):
-            tools_api.call_action("check_tool_approval", {"approval_id": number + ".wrong-token"})
+            tools_api.call_action("check_tool_approval", {"approval_id": number + ".wrong-token"}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown approval"):
-            tools_api.call_action("check_tool_approval", {"approval_id": number})
+            tools_api.call_action("check_tool_approval", {"approval_id": number}, origin_thread_id=None)
         with self.assertRaisesRegex(tools_host.ToolCallError, "requires approval_id"):
-            tools_api.call_action("check_tool_approval", {})
+            tools_api.call_action("check_tool_approval", {}, origin_thread_id=None)
 
 
 class ToolsSocketTests(ToolsApiTestCase):
@@ -845,6 +851,7 @@ class ToolsSocketTests(ToolsApiTestCase):
             self.assertEqual((Path(directory) / result["path"].lstrip("/")).read_bytes(), payload)
             self.assertEqual(result, {
                 "path": result["path"],
+                "filesystem_path": str(Path(directory) / result["path"].lstrip("/")),
                 "media_type": "video/mp4",
                 "size_bytes": len(payload),
             })

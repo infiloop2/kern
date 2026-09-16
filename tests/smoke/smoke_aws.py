@@ -326,6 +326,12 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("list_events", {"limit": "1"}),
         ("search", {"query": "bitcoin", "limit_per_type": "1"}),
     ),
+    "reddit_scrapecreators": (
+        ("search_posts", {"query": "Kern"}),
+        ("get_subreddit_posts", {"subreddit": "selfhosted"}),
+        ("read_post", {"post_id": "abc"}),
+        ("read_comments", {"post_id": "abc"}),
+    ),
     "reddit": (
         ("get_profile", {}),
         ("get_home_feed", {"limit": "1"}),
@@ -3650,7 +3656,7 @@ class AwsSmoke:
 
         # Every action call, including local failures, is recorded with
         # expandable exact arguments in the tool audit log.
-        events = self._api("GET", "/v1/tools/events?limit=100")["events"]
+        events = self._drain_event_pages("/v1/tools/events", 0)
         action_events = {
             f"{event['tool_id']}_{event['action_id']}": event
             for event in events

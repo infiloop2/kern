@@ -378,7 +378,66 @@
     return html.join("");
   }
 
+  const ACTIVITY_PRESENTATION = Object.freeze({
+    reasoning: { icon: "✦", label: "Reasoning", detail: "Thought process", output: "Result" },
+    plan: { icon: "✓", label: "Plan", detail: "Plan", output: "Result" },
+    command: { icon: "›_", label: "Command", detail: "Context", output: "Terminal output" },
+    file_change: { icon: "Δ", label: "File change", detail: "Changes", output: "Result" },
+    tool: { icon: "◇", label: "Tool", detail: "Input", output: "Tool output" },
+    agent: { icon: "◎", label: "Sub-agent", detail: "Assignment", output: "Result" },
+    search: { icon: "⌕", label: "Search", detail: "Query", output: "Results" },
+    image: { icon: "▧", label: "Image", detail: "Image details", output: "Output" },
+    wait: { icon: "◷", label: "Wait", detail: "Wait details", output: "Result" },
+    status: { icon: "•", label: "Status", detail: "Details", output: "Output" },
+  });
+  function renderActivity(value, openActivities) {
+    const activityId = String(value.activity_id || "");
+    const phase = value.phase === "completed" ? "completed" : "started";
+    const requestedKind = String(value.kind || "status").replace(/[^a-z_]/g, "");
+    const kind = Object.prototype.hasOwnProperty.call(ACTIVITY_PRESENTATION, requestedKind)
+      ? requestedKind
+      : "status";
+    const presentation = ACTIVITY_PRESENTATION[kind];
+    const rawStatus = typeof value.status === "string" ? value.status : "";
+    const showStatus = rawStatus && !["completed", "running"].includes(rawStatus.toLowerCase());
+    const statusTone = /(?:fail|error|denied|exit\s+[1-9])/i.test(rawStatus) ? " failed" : "";
+    const status = showStatus
+      ? `<span class="activity-status${statusTone}">${escapeHtml(rawStatus)}</span>`
+      : "";
+    const body = [
+      value.detail
+        ? `<section><div class="activity-label">${presentation.detail}</div><pre>${escapeHtml(value.detail)}</pre></section>`
+        : "",
+      value.output
+        ? `<section><div class="activity-label">${presentation.output}</div><pre>${escapeHtml(value.output)}</pre></section>`
+        : "",
+    ].join("");
+    const summary = `
+        <span class="activity-icon" aria-hidden="true">${presentation.icon}</span>
+        <span class="activity-heading">
+          <span class="activity-title">${escapeHtml(value.title || "Agent activity")}</span>
+          <span class="activity-kind">${presentation.label}</span>
+        </span>
+        ${status}
+        ${phase === "started" ? `<span class="activity-phase">Started</span>` : ""}`;
+    const cardClass = `activity-card activity-${escapeHtml(kind)} ${phase}`;
+    const label = `${presentation.label}: ${String(value.title || "Agent activity")}`;
+    if (!body) {
+      return `
+        <div class="${cardClass} activity-static" data-activity-id="${escapeHtml(activityId)}" role="status" aria-label="${escapeHtml(label)}">
+          <div class="activity-summary">${summary}</div>
+        </div>`;
+    }
+    const open = openActivities.has(activityId);
+    return `
+      <details class="${cardClass}" data-activity-id="${escapeHtml(activityId)}" aria-label="${escapeHtml(label)}"${open ? " open" : ""}>
+        <summary>${summary}</summary>
+        <div class="activity-body">${body}</div>
+      </details>`;
+  }
+
   const api = {
+    renderActivity,
     escapeHtml,
     safeNavigationHref,
     workspaceFilePath,

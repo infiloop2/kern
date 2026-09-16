@@ -672,7 +672,7 @@ class OrchestratorTests(unittest.TestCase):
         ):
             self.send_message(
                 thread_id,
-                "This is an automated trigger.\n\n"
+                "This is an automated message from Kern.\n\n"
                 "/mnt/kern-agent/agent-home/failing.sh",
                 runtime="script",
             )
@@ -684,7 +684,7 @@ class OrchestratorTests(unittest.TestCase):
             [
                 (
                     "thread.message",
-                    "This is an automated trigger.\n\n"
+                    "This is an automated message from Kern.\n\n"
                     "/mnt/kern-agent/agent-home/failing.sh",
                 ),
                 ("thread.error", None),

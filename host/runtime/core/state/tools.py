@@ -29,7 +29,7 @@ from host.runtime.core.state.events import _page_before, _prune_events
 _APPROVAL_ID_PREFIX = "approval_"
 _TOOL_APPROVAL_FIELDS = (
     "number, tool_id, action_id, status, summary, payload, check_token, result,"
-    " created_at, decided_at, connection_id, account_id, account_label"
+    " created_at, decided_at, connection_id, account_id, account_label, origin_thread_id"
 )
 
 
@@ -501,6 +501,7 @@ def _tool_approval_dict(row: Any) -> dict[str, Any]:
     (
         number, tool_id, action_id, status, summary, payload, check_token,
         result, created_at, decided_at, connection_id, account_id, account_label,
+        origin_thread_id,
     ) = row
     return {
         "approval_id": _approval_id(number, check_token),
@@ -515,6 +516,7 @@ def _tool_approval_dict(row: Any) -> dict[str, Any]:
         "connection_id": connection_id,
         "account_id": account_id,
         "account_label": account_label,
+        "origin_thread_id": origin_thread_id,
     }
 
 
@@ -531,6 +533,7 @@ def insert_tool_approval(
     summary: str,
     payload: dict[str, Any],
     created_at: int,
+    origin_thread_id: str | None,
     *,
     pending_limit: int,
     connection_id: str = "",
@@ -548,13 +551,13 @@ def insert_tool_approval(
         cur.execute(
             "INSERT INTO tool_approvals"
             " (tool_id, action_id, status, summary, payload, check_token, created_at,"
-            " connection_id, account_id, account_label)"
-            " VALUES (%s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s)"
+            " connection_id, account_id, account_label, origin_thread_id)"
+            " VALUES (%s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s)"
             f" RETURNING {_TOOL_APPROVAL_FIELDS}",
             (
                 tool_id, action_id, summary, db.jsonb(payload),
                 secrets.token_urlsafe(32), created_at, connection_id,
-                account_id, account_label,
+                account_id, account_label, origin_thread_id,
             ),
         )
         return _tool_approval_dict(cur.fetchone())

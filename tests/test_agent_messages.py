@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import pg_harness
-from host.runtime.core import db
+from host.runtime.core import db, pgclient
 from host.runtime.workspace import agent_api, agent_messages, schedules
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.purpose import validate_purpose
@@ -15,6 +15,11 @@ SESSION = {"agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high"}
 
 
 class AgentMessageTests(unittest.TestCase):
+    def setUp(self):
+        transaction = self.enterContext(patch.object(db, "transaction"))
+        self.cursor = transaction.return_value.__enter__.return_value
+        self.cursor.fetchone.return_value = (False,)
+
     def test_identity_and_shape_errors_never_deliver(self):
         cases = [
             (None, {"thread_id": "app-1", "message": "hello"}),
@@ -28,11 +33,12 @@ class AgentMessageTests(unittest.TestCase):
         for sender, body in cases:
             with self.subTest(body=str(body)[:100]), patch.object(agent_messages, "call_admin_api") as post:
                 with self.assertRaises(WorkspaceError):
-                    agent_messages.send_message(body, sender_thread_id=sender)
+                    agent_messages.send_agent_message(body, sender_thread_id=sender)
                 post.assert_not_called()
 
     def test_sender_header_comes_from_host(self):
-        with patch.object(agent_messages, "_destination_settings", return_value=SESSION), patch.object(
+        self.cursor.fetchone.return_value = ("codex", "gpt-6-astra", "high", False, False)
+        with patch.object(
             agent_messages, "call_admin_api", return_value={"status": "accepted"}
         ) as post:
             result = agent_api.dispatch_call("POST", "/agent/messages", {
@@ -45,33 +51,33 @@ class AgentMessageTests(unittest.TestCase):
         self.assertIn('Sender thread: thread-1', body["message"])
         self.assertIn('not the operator', body["message"])
         self.assertTrue(body["message"].endswith("Please review the draft."))
-        self.assertEqual(body["model"], SESSION["model"])
+        self.assertEqual(set(body), {"message", "agent_runtime", "model", "effort"})
 
     def test_full_character_allowance_leaves_room_for_utf8_and_header(self):
-        with patch.object(agent_messages, "_destination_settings", return_value={}), patch.object(
+        with patch.object(
             agent_messages, "call_admin_api", return_value={"status": "accepted"}
         ) as post:
             message = "😀" * 10000
-            agent_messages.send_message({"thread_id": "thread-2", "message": message}, sender_thread_id="thread-1")
+            agent_messages.send_agent_message({"thread_id": "thread-2", "message": message}, sender_thread_id="thread-1")
         delivered = post.call_args.args[2]["message"]
         self.assertTrue(delivered.endswith(message))
         self.assertGreater(len(delivered.encode("utf-8")), 40000)
 
     def test_reply_to_chat_uses_same_delivery_path_without_runtime_override(self):
-        with patch.object(agent_messages, "_destination_settings", return_value={}), patch.object(
+        with patch.object(
             agent_messages, "call_admin_api", return_value={"status": "accepted"}
         ) as post:
-            agent_messages.send_message({"thread_id": "thread-1", "message": "Review complete."}, sender_thread_id="app-2")
+            agent_messages.send_agent_message({"thread_id": "thread-1", "message": "Review complete."}, sender_thread_id="app-2")
         self.assertEqual(post.call_args.args[1], "/v1/threads/thread-1/messages")
         self.assertEqual(set(post.call_args.args[2]), {"message"})
         self.assertIn("Sender thread: app-2", post.call_args.args[2]["message"])
 
     def test_runtime_error_is_returned_without_retry(self):
-        with patch.object(agent_messages, "_destination_settings", return_value={}), patch.object(
+        with patch.object(
             agent_messages, "call_admin_api", side_effect=WorkspaceError(HTTPStatus.TOO_MANY_REQUESTS, "runtime at capacity")
         ) as post:
             with self.assertRaisesRegex(WorkspaceError, "runtime at capacity"):
-                agent_messages.send_message({"thread_id": "thread-2", "message": "hello"}, sender_thread_id="thread-1")
+                agent_messages.send_agent_message({"thread_id": "thread-2", "message": "hello"}, sender_thread_id="thread-1")
         self.assertEqual(post.call_count, 1)
 
     def test_destination_eligibility(self):
@@ -83,12 +89,24 @@ class AgentMessageTests(unittest.TestCase):
         ]:
             cur = MagicMock()
             cur.fetchone.return_value = row
-            with self.subTest(target=target, row=row), patch.object(db, "transaction") as transaction, patch.object(agent_messages, "call_admin_api") as post:
+            with self.subTest(target=target, row=row), patch.object(db, "transaction") as transaction, patch.object(agent_messages, "call_admin_api", return_value={"status": "accepted"}) as post:
                 transaction.return_value.__enter__.return_value = cur
                 with self.assertRaises(WorkspaceError) as caught:
-                    agent_messages.send_message({"thread_id": target, "message": "hello"}, sender_thread_id="thread-9")
+                    agent_messages.deliver_message(target, {"message": "hello"})
                 self.assertEqual(caught.exception.status, expected)
                 post.assert_not_called()
+
+    def test_workspace_rejects_invalid_or_overridden_message_before_delivery(self):
+        for target, body in [
+            ("../../app-1", {"message": "hello"}),
+            ("app-1", {"message": "hello", "model": "override"}),
+            ("app-1", {"message": " "}),
+            ("app-1", {"message": "😀" * 13000}),
+        ]:
+            with self.subTest(target=target), patch.object(db, "transaction") as transaction:
+                with self.assertRaises(WorkspaceError):
+                    agent_messages.deliver_message(target, body)
+                transaction.assert_not_called()
 
     def test_mcp_failure_and_success_are_tool_results(self):
         for status, body, is_error in [
@@ -135,7 +153,7 @@ class AgentMessageDatabaseTests(unittest.TestCase):
         self.assertEqual(schedules.list_revisions(schedule["id"], {})["revisions"][0]["purpose"], "Research companies")
         schedules.delete_schedule(schedule["id"], {"expected_revision": [str(restored["revision"])]}, actor="agent")
         with self.assertRaises(WorkspaceError):
-            agent_messages._destination_settings(schedule["thread_id"])
+            agent_messages.deliver_message(schedule["thread_id"], {"message": "hello"})
 
     def test_app_purpose_is_listed_and_omitting_it_preserves_it(self):
         from host.runtime.workspace.web_apps import backend as apps
@@ -146,5 +164,69 @@ class AgentMessageDatabaseTests(unittest.TestCase):
         self.assertEqual(app["purpose"], "Review company research")
         with patch.object(apps, "_host_thread_summaries", return_value=[]):
             self.assertEqual(apps.list_all_web_apps()["apps"][0]["purpose"], "Review company research")
-        settings = agent_messages._destination_settings(app["app_id"])
-        self.assertEqual(settings, app["agent_settings"])
+        with patch.object(agent_messages, "call_admin_api", return_value={"status": "accepted"}) as send:
+            agent_messages.deliver_message(app["app_id"], {"message": "hello"})
+        self.assertEqual(send.call_args.args[2], {"message": "hello", **app["agent_settings"]})
+
+    def test_destination_row_stays_locked_until_send_returns(self):
+        from host.runtime.workspace.web_apps import backend as apps
+        with patch.object(apps, "active_agent_runtimes", return_value=["codex"]):
+            app = apps.create_web_app()
+        schedule = schedules.create_schedule({
+            **SESSION, "name": "Research", "message": "Research",
+            "cadence": "daily", "daily_time": "09:00",
+        }, actor="agent")
+        with db.transaction() as cur:
+            cur.execute("INSERT INTO chat_threads (thread_id) VALUES ('thread-34')")
+        for target, query in [
+            ("thread-34", "SELECT archived FROM chat_threads WHERE thread_id = %s FOR UPDATE NOWAIT"),
+            (app["app_id"], "SELECT archived FROM web_apps WHERE app_id = %s FOR UPDATE NOWAIT"),
+            (schedule["thread_id"], "SELECT deleted_at FROM schedules WHERE thread_id = %s FOR UPDATE NOWAIT"),
+        ]:
+            def attempt_edit(*args):
+                # A second connection models a concurrent Workspace edit.
+                with self.assertRaises(pgclient.Error) as caught:
+                    with db.transaction() as cur:
+                        cur.execute(query, (target,))
+                self.assertEqual(caught.exception.sqlstate, "55P03")
+                return {"status": "accepted"}
+            with self.subTest(target=target), patch.object(
+                agent_messages, "call_admin_api", side_effect=attempt_edit
+            ) as send:
+                agent_messages.deliver_message(target, {"message": "hello"})
+                send.assert_called_once()
+                with db.transaction() as cur:
+                    cur.execute(query, (target,))
+                    self.assertIsNotNone(cur.fetchone())
+
+    def test_archive_and_settings_lock_destination_before_checking_idle(self):
+        from host.runtime.workspace.chat import backend as chat
+        from host.runtime.workspace.web_apps import backend as apps
+        with patch.object(apps, "active_agent_runtimes", return_value=["codex"]):
+            app = apps.create_web_app()
+        with db.transaction() as cur:
+            cur.execute("INSERT INTO chat_threads (thread_id) VALUES ('thread-34')")
+        for backend, target, action, query in [
+            (chat, "thread-34", lambda: chat.set_chat_thread_archived("thread-34", archived=True),
+             "SELECT archived FROM chat_threads WHERE thread_id = %s FOR SHARE NOWAIT"),
+            (apps, app["app_id"], lambda: apps.set_web_app_archived(app["app_id"], True),
+             "SELECT archived FROM web_apps WHERE app_id = %s FOR SHARE NOWAIT"),
+            (apps, app["app_id"], lambda: apps.set_app_agent_settings(app["app_id"], SESSION),
+             "SELECT archived FROM web_apps WHERE app_id = %s FOR SHARE NOWAIT"),
+        ]:
+            def status_check(*args):
+                # A notification must not enter between this idle check and
+                # the archive/settings update in the same transaction.
+                with self.assertRaises(pgclient.Error) as caught:
+                    with db.transaction() as cur:
+                        cur.execute(query, (target,))
+                self.assertEqual(caught.exception.sqlstate, "55P03")
+                return {"thread": {**SESSION, "thread_id": target, "status": "idle"}}
+            with self.subTest(target=target), patch.object(
+                backend, "call_admin_api", side_effect=status_check
+            ) as status, patch.object(apps, "active_agent_runtimes", return_value=["codex"]):
+                action()
+                status.assert_called_once()
+                with db.transaction() as cur:
+                    cur.execute(query, (target,))
+                    self.assertIsNotNone(cur.fetchone())

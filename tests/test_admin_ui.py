@@ -286,6 +286,8 @@ class AdminUiStaticTests(unittest.TestCase):
         ).read_text()
         stylesheet = (
             Path(__file__).parents[1] / "host/runtime/workspace/chat/ui/agent_chat.css"
+        ).read_text() + (
+            Path(__file__).parents[1] / "host/runtime/workspace/chat/ui/rich_text.css"
         ).read_text()
         send = script.split("async function sendMessageUnlocked()", 1)[1].split(
             "\nasync function", 1
@@ -448,7 +450,8 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("const threadViewStates = new Map()", script)
         self.assertIn("saveSelectedThreadView();", script)
         self.assertIn("restoreThreadView(threadId);", script)
-        self.assertIn('<span class="activity-phase">Started</span>', script)
+        activity_script = (Path(__file__).parents[1] / "host/runtime/workspace/chat/ui/rich_text.js").read_text()
+        self.assertIn('<span class="activity-phase">Started</span>', activity_script)
         self.assertNotIn(".activity-card.started .activity-icon", stylesheet)
         self.assertIn('"/threads?archived=true"', script)
         self.assertIn('"unarchive"', script)

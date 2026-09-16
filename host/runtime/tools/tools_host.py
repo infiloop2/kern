@@ -309,9 +309,11 @@ class HostApprovals:
         self,
         manifest: ToolManifest,
         connection: ConnectionScope,
+        origin_thread_id: str | None,
     ) -> None:
         self._manifest = manifest
         self._connection = connection
+        self._origin_thread_id = origin_thread_id
 
     def request(self, *, action_id: str, summary: str, payload: JSONObject) -> ApprovalRecord:
         spec = self._manifest.action(action_id)
@@ -324,6 +326,7 @@ class HostApprovals:
             record = state.insert_tool_approval(
                 self._manifest.tool_id, action_id, summary, payload, int(time.time()),
                 pending_limit=PENDING_APPROVAL_LIMIT,
+                origin_thread_id=self._origin_thread_id,
                 connection_id=self._connection.connection_id,
                 account_id=self._connection.account_id,
                 account_label=self._connection.account_label,
@@ -464,6 +467,7 @@ def connection_scope(tool: Tool, connection_id: str) -> ConnectionScope:
 def host_api_for(
     tool: Tool,
     connection: ConnectionScope,
+    origin_thread_id: str | None,
     *,
     asset_store: tool_assets.ToolAssetStore | None = None,
 ) -> HostToolAPI:
@@ -476,7 +480,7 @@ def host_api_for(
         credentials=credentials,
         secrets=HostSecrets(manifest.tool_id),
         config=_ToolConfigView(config),
-        approvals=HostApprovals(manifest, connection),
+        approvals=HostApprovals(manifest, connection, origin_thread_id),
         assets=HostAssets(
             manifest.tool_id,
             asset_store or _DEFAULT_ASSET_STORE,
@@ -570,10 +574,39 @@ def _provider_failure_result(exc: ProviderWarning) -> ActionFailed:
     return ActionFailed(str(exc) or "Provider request failed. Check Host diagnostics for details.")
 
 
+def _normalize_tool_input(value: Any) -> dict[str, Any]:
+    """Decode at most one model-added JSON string wrapper before normal validation."""
+    message = (
+        'Tool input must be a JSON object matching describe_tool, e.g. "input": {"text": "hello"}, '
+        "not a JSON-encoded string, array, or scalar."
+    )
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        def unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in result:
+                    raise ValueError("duplicate key")
+                result[key] = item
+            return result
+
+        try:
+            if len(value.encode("utf-8")) > PAYLOAD_MAX_BYTES:
+                raise ToolCallError(f"Tool input exceeds {PAYLOAD_MAX_BYTES} bytes.")
+            value = json.loads(value, object_pairs_hook=unique_keys)
+        except (ValueError, RecursionError) as exc:
+            raise ToolCallError(message + " String input must contain valid JSON without duplicate keys.") from exc
+    if not isinstance(value, dict):
+        raise ToolCallError(message)
+    return value
+
+
 def execute_action(
     tool_id: str,
     action: str,
     tool_input: Any,
+    origin_thread_id: str | None,
     asset_store: tool_assets.ToolAssetStore | None = None,
     *,
     connection_id: str | None = None,
@@ -586,10 +619,7 @@ def execute_action(
     spec = tool.manifest.action(action) if isinstance(action, str) else None
     if spec is None:
         raise ToolCallError(f"Tool {tool_id} has no action {action}.")
-    if tool_input is None:
-        tool_input = {}
-    if not isinstance(tool_input, dict):
-        raise ToolCallError("Tool input must be a JSON object.")
+    tool_input = _normalize_tool_input(tool_input)
     schema_error = validate_against_schema(tool_input, spec.input_schema)
     if schema_error:
         raise ToolCallError(f"Invalid input for {tool_id}.{action}: {schema_error}")
@@ -605,7 +635,7 @@ def execute_action(
         result = tool.execute(
             action,
             audit_arguments,
-            host_api_for(tool, connection, asset_store=asset_store),
+            host_api_for(tool, connection, asset_store=asset_store, origin_thread_id=origin_thread_id),
         )
     except (
         ApprovalBackpressureError,
@@ -691,7 +721,7 @@ def _execute_approved(
                 "The account selected for this approval is no longer connected. "
                 "Queue the action again."
             )
-        api = host_api_for(tool, connection, asset_store=asset_store)
+        api = host_api_for(tool, connection, origin_thread_id=record.get("origin_thread_id"), asset_store=asset_store)
         with api.assets._approved_execution(public_hostname):
             result: Any = tool.execute_approved(_approval_record(record), api)
     except (

@@ -1273,7 +1273,7 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-tool-linkedin, .integration-logo-tool-linkedin_discovery { --logo-badge: #0a66c2; background: #0a66c2; }
 .integration-logo-word-linkedin { font-family: Arial, sans-serif; font-size: 1.5rem; letter-spacing: -0.08em; margin-left: -0.06em; }
 .integration-logo-tool-polymarket { background: #635bff; }
-.integration-logo-tool-reddit { background: #ff4500; }
+.integration-logo-tool-reddit, .integration-logo-tool-reddit_scrapecreators { background: #ff4500; }
 .integration-logo-tool-runway { background: #f4f4f2; color: #111; }
 .integration-logo-word-runway { font-family: Georgia, serif; font-size: 1.8rem; font-weight: 500; }
 .integration-logo-tool-twitter { background: #050505; }

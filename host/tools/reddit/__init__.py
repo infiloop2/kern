@@ -165,7 +165,7 @@ REDDIT_WRITE_POLICY = (
 
 MANIFEST = ToolManifest(
     tool_id="reddit",
-    display_name="Reddit",
+    display_name="Reddit Personal-use Script App",
     description=(
         "Use one existing Reddit personal-use script app to let your agent read "
         "your home feed, browse and search posts, open discussions, and—with your explicit "

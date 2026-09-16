@@ -25,6 +25,7 @@ on:
           - openai_images
           - polymarket
           - reddit
+          - reddit_scrapecreators
           - runway
           - seedance
           - twitter

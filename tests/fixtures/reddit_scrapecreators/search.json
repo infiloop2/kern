@@ -1,0 +1,16 @@
+{
+  "success": true,
+  "credits_charged": 1,
+  "after": "t3_1izmcgx",
+  "posts": [
+    {
+      "id": "w63dgy",
+      "subreddit": "MadeMeSmile",
+      "score": 220403,
+      "num_comments": 1246,
+      "created_utc": 1658580900,
+      "title": "Example public post",
+      "author": "example_author"
+    }
+  ]
+}

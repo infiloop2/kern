@@ -30,6 +30,13 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ("reddit_scrapecreators", "search_posts", "query"),
+    ("reddit_scrapecreators", "search_posts", "subreddit"),
+    ("reddit_scrapecreators", "search_posts", "cursor"),
+    ("reddit_scrapecreators", "get_subreddit_posts", "subreddit"),
+    ("reddit_scrapecreators", "get_subreddit_posts", "cursor"),
+    ("reddit_scrapecreators", "read_comments", "cursor"),
+
     ("apify_developer", "search_store", "query"),
     ("apify_developer", "run_actor", "input_json"),
     ("upwork", "get_account", "org_uid"),
@@ -129,6 +136,16 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ("reddit_scrapecreators", "search_posts", "sort"): TYPED,
+    ("reddit_scrapecreators", "search_posts", "timeframe"): TYPED,
+    ("reddit_scrapecreators", "search_posts", "limit"): TYPED,
+    ("reddit_scrapecreators", "get_subreddit_posts", "sort"): TYPED,
+    ("reddit_scrapecreators", "get_subreddit_posts", "timeframe"): TYPED,
+    ("reddit_scrapecreators", "get_subreddit_posts", "limit"): TYPED,
+    ("reddit_scrapecreators", "read_post", "post_id"): TYPED,
+    ("reddit_scrapecreators", "read_comments", "post_id"): TYPED,
+    ("reddit_scrapecreators", "read_comments", "limit"): TYPED,
+
     ("upwork", "list_conversations", "unread_only"): TYPED,
     ("upwork", "search_jobs", "verified_payment_only"): TYPED,
     ("apify_developer", "search_store", "limit"): TYPED,

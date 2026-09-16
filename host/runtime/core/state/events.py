@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX
+from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX, LEGACY_AUTOMATED_TRIGGER_PREFIX
 from host.runtime.core import db, pgclient
 from host.runtime.core.state._base import (
     AGENT_EVENT_LIMIT,
@@ -378,10 +378,10 @@ def search_thread_messages(
     params: list[Any] = []
     if exclude_automated_triggers:
         clauses.append(
-            "NOT (events.source = 'user' AND events.thread_id LIKE 'schedule-%'"
-            " AND events.message LIKE %s)"
+            "NOT (events.source = 'user' AND (events.message LIKE %s OR"
+            " events.message LIKE %s))"
         )
-        params.append(AUTOMATED_TRIGGER_PREFIX + "%")
+        params.extend((AUTOMATED_TRIGGER_PREFIX + "%", LEGACY_AUTOMATED_TRIGGER_PREFIX + "%"))
     if exclude_seqs:
         placeholders = ", ".join("%s" for _ in exclude_seqs)
         clauses.append(f"events.seq NOT IN ({placeholders})")
@@ -668,9 +668,10 @@ def thread_messages_by_seqs(
     params: list[Any] = [*seqs, max_seq, *sources]
     if exclude_automated_triggers:
         clauses.append(
-            "NOT (source = 'user' AND thread_id LIKE 'schedule-%' AND message LIKE %s)"
+            "NOT (source = 'user' AND (message LIKE %s OR"
+            " message LIKE %s))"
         )
-        params.append(AUTOMATED_TRIGGER_PREFIX + "%")
+        params.extend((AUTOMATED_TRIGGER_PREFIX + "%", LEGACY_AUTOMATED_TRIGGER_PREFIX + "%"))
     if thread_id is not None:
         clauses.append("thread_id = %s")
         params.append(thread_id)
@@ -723,10 +724,10 @@ def search_thread_messages_semantic(
     params: list[Any] = [model]
     if exclude_automated_triggers:
         clauses.append(
-            "NOT (events.source = 'user' AND events.thread_id LIKE 'schedule-%'"
-            " AND events.message LIKE %s)"
+            "NOT (events.source = 'user' AND (events.message LIKE %s OR"
+            " events.message LIKE %s))"
         )
-        params.append(AUTOMATED_TRIGGER_PREFIX + "%")
+        params.extend((AUTOMATED_TRIGGER_PREFIX + "%", LEGACY_AUTOMATED_TRIGGER_PREFIX + "%"))
     if max_seq is not None:
         clauses.append("events.seq <= %s")
         params.append(max_seq)

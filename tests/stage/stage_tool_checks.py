@@ -367,6 +367,7 @@ class StageToolChecks:
             "instagram_discovery": self._check_instagram_discovery_live,
             "polymarket": self._check_polymarket_live,
             "reddit": self._check_reddit_live,
+            "reddit_scrapecreators": self._check_reddit_scrapecreators_live,
             "twitter": self._check_twitter_live,
             "twitterapi_io": self._check_twitterapi_io_live,
             "upwork": self._check_upwork_live,
@@ -881,6 +882,30 @@ class StageToolChecks:
         if count > 20:
             raise AssertionError(f"TwitterAPI.io returned more than 20 posts: {count}")
         return f"one guarded single-page public-post search returned {count} post(s)"
+
+    def _check_reddit_scrapecreators_live(self) -> str:
+        # Five bounded reads; derive the detail id from this run rather than a
+        # hard-coded post that may have been deleted. Never publish or retry.
+        self._successful_tool_call("reddit_scrapecreators_search_posts", {"query": "selfhosted"})
+        self._successful_tool_call(
+            "reddit_scrapecreators_search_posts", {"query": "server", "subreddit": "selfhosted"}
+        )
+        listing = self._successful_tool_call(
+            "reddit_scrapecreators_get_subreddit_posts", {"subreddit": "selfhosted"}
+        )
+        posts = listing.get("posts")
+        if not isinstance(posts, list) or not posts:
+            raise AssertionError("ScrapeCreators returned no subreddit post for detail checks")
+        post_id = posts[0].get("id") if isinstance(posts[0], dict) else None
+        if not isinstance(post_id, str) or not post_id:
+            raise AssertionError("ScrapeCreators listing returned no usable post id")
+        self._successful_tool_call("reddit_scrapecreators_read_post", {"post_id": post_id})
+        comments = self._successful_tool_call("reddit_scrapecreators_read_comments", {"post_id": post_id})
+        return (
+            "global/subreddit search, listing and derived post/comment reads completed; "
+            f"comment pagination_incomplete={comments.get('pagination_incomplete')}, "
+            f"truncated={comments.get('truncated')} (not a completeness benchmark)"
+        )
 
     def _check_reddit_live(self) -> str:
         self._successful_tool_call("reddit_get_profile", {})

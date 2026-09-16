@@ -99,6 +99,7 @@ CONVERSATION_EVENT_TYPES = (
     "thread.error",
     "thread.stopped",
     "thread.context_added",
+    "thread.memory_cleared",
 )
 MAX_PATH_DEPTH = 16
 MAX_PATH_KEY_BYTES = 128
@@ -263,6 +264,19 @@ def _route_browser(
         with _workspace_lock(app_id):
             _require_writable_web_app(app_id)
             return restore_revision(app_id, int(match.group(2)))
+
+    match = re.fullmatch(r"/apps/([^/]+)/clear-memory", path)
+    if method == "POST" and match:
+        app_id = _path_segment(match.group(1))
+        with _workspace_lock(app_id):
+            _require_writable_web_app(app_id)
+            return post_with_busy_retry(
+                f"/v1/threads/{quote(app_id, safe='')}/clear-memory",
+                body,
+                attempts=SEND_BUSY_RETRIES,
+                exhausted_message="the thread stayed busy while clearing; retry in a moment",
+                post=call_admin_api,
+            )
 
     match = re.fullmatch(r"/apps/([^/]+)/stop", path)
     if method == "POST" and match:
@@ -653,13 +667,16 @@ def set_agent_updates_locked(app_id: str, body: Any) -> dict[str, Any]:
 
 def set_app_agent_settings(app_id: str, body: Any) -> dict[str, Any]:
     settings = _validated_agent_settings(body)
-    if browser_conversation(app_id)["status"] == "running":
-        raise WorkspaceError(
-            HTTPStatus.CONFLICT,
-            "agent settings can only be changed while the app agent is idle",
-        )
     now = _utc_now()
     with db.transaction() as cur:
+        cur.execute("SELECT 1 FROM web_apps WHERE app_id = %s FOR UPDATE", (app_id,))
+        if cur.fetchone() is None:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
+        if browser_conversation(app_id)["status"] == "running":
+            raise WorkspaceError(
+                HTTPStatus.CONFLICT,
+                "agent settings can only be changed while the app agent is idle",
+            )
         cur.execute(
             "UPDATE web_apps SET agent_runtime = %s, agent_model = %s,"
             " agent_effort = %s, updated_at = %s WHERE app_id = %s"
@@ -679,29 +696,32 @@ def set_app_agent_settings(app_id: str, body: Any) -> dict[str, Any]:
 
 
 def set_web_app_archived(app_id: str, archived: bool) -> dict[str, Any]:
-    _require_web_app(app_id)
-    if archived:
-        try:
-            response = call_admin_api(
-                "GET", f"/v1/threads/{quote(app_id, safe='')}"
-            )
-        except WorkspaceError as exc:
-            if exc.status != HTTPStatus.NOT_FOUND:
-                raise
-        else:
-            thread = response.get("thread")
-            if not isinstance(thread, dict) or thread.get("status") not in {
-                "idle", "running"
-            }:
-                raise WorkspaceError(
-                    HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread"
-                )
-            if thread["status"] == "running":
-                raise WorkspaceError(
-                    HTTPStatus.CONFLICT,
-                    "apps can only be archived while their agent is idle",
-                )
     with db.transaction() as cur:
+        # Hold the same row that admin locks while admitting agent messages.
+        cur.execute("SELECT 1 FROM web_apps WHERE app_id = %s FOR UPDATE", (app_id,))
+        if cur.fetchone() is None:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
+        if archived:
+            try:
+                response = call_admin_api(
+                    "GET", f"/v1/threads/{quote(app_id, safe='')}"
+                )
+            except WorkspaceError as exc:
+                if exc.status != HTTPStatus.NOT_FOUND:
+                    raise
+            else:
+                thread = response.get("thread")
+                if not isinstance(thread, dict) or thread.get("status") not in {
+                    "idle", "running"
+                }:
+                    raise WorkspaceError(
+                        HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread"
+                    )
+                if thread["status"] == "running":
+                    raise WorkspaceError(
+                        HTTPStatus.CONFLICT,
+                        "apps can only be archived while their agent is idle",
+                    )
         cur.execute(
             "UPDATE web_apps SET archived = %s WHERE app_id = %s"
             f" RETURNING {SUMMARY_COLUMNS}",

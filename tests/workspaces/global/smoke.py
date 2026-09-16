@@ -640,7 +640,7 @@ def desktop_smoke(page: Any) -> None:
     expect(page).to_have_url(re.compile(r"#scheduled-agents/1$"))
     expect(surface.locator("#global-title")).to_have_text("Scheduled agent")
 
-    trigger_message = "This is an automated trigger.\n\n---\n\nSummarize open release work."
+    trigger_message = "This is an automated message from Kern.\n\n---\n\nSummarize open release work."
     chat_index = page.evaluate(
         "() => window.KernHost.api('GET', '/v1/workspace/chat/scheduled-agents')"
     )

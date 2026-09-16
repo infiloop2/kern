@@ -57,6 +57,14 @@
 
     <div class="app-canvas">
       <section id="chat-history" class="chat-history" aria-label="App chat" hidden>
+        <div class="chat-history-toolbar">
+          <button class="activity-switch" id="activity-toggle" type="button" role="switch"
+            aria-controls="chat-history-list" aria-checked="false" title="Show agent activity">
+            <span>Activity</span>
+            <span class="activity-switch-track" aria-hidden="true"><span class="activity-switch-thumb"></span></span>
+          </button>
+          <button id="clear-memory" class="ghost sm" type="button" aria-label="Clear working memory" title="Start the agent fresh without deleting this app" hidden>Clear</button>
+        </div>
         <div id="chat-history-scroll" class="chat-history-scroll" tabindex="0">
           <div class="chat-history-loader">
             <button id="chat-history-more" class="chat-history-more" type="button" hidden>Load earlier messages</button>

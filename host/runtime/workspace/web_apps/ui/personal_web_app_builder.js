@@ -52,6 +52,9 @@ let agentUpdateLockBusy = false;
 let selectedAppOutsideActiveIndex = false;
 let snapshot = { app: null, session: null, status: "idle" };
 let conversationEvents = [];
+let historyPinnedToTail = true;
+let lastHistoryScrollTop = 0;
+let composerTailFrame = 0;
 let conversationEventPages = freshConversationEventPages();
 const conversationViewStates = new Map();
 let renderedRevision = -1;
@@ -81,6 +84,7 @@ let recoveryPoints = [];
 let runtimeStatusSequence = 0;
 let renameAppReturnFocus = null;
 let historyMode = false;
+let showingActivity = false;
 let historyLoadingOlder = false;
 let historyRenderedAppId = null;
 let historyRenderedEntryKey = "";
@@ -153,6 +157,40 @@ function restoreComposerDraft() {
   $("message").value = selectedAppId
     ? composerDrafts[`app:${selectedAppId}`] || ""
     : "";
+  autosizeComposer();
+}
+
+function syncHistoryTailPin() {
+  const scroll = $("chat-history-scroll");
+  // A refresh, toggle, or resize can arrive before the scroll event.
+  if (scroll.scrollTop < lastHistoryScrollTop
+      && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight >= 48) {
+    historyPinnedToTail = false;
+  }
+}
+
+function autosizeComposer() {
+  const area = $("message");
+  const scroll = $("chat-history-scroll");
+  syncHistoryTailPin();
+  const atTail = historyPinnedToTail;
+  const previousTop = scroll.scrollTop;
+  area.style.height = "auto";
+  area.style.height = `${Math.min(area.scrollHeight, 200)}px`;
+  // Measuring at auto height can temporarily grow the transcript and clamp
+  // its scroll position. Restore it after the final composer height is set.
+  scroll.scrollTop = atTail ? scroll.scrollHeight : previousTop;
+  lastHistoryScrollTop = scroll.scrollTop;
+}
+
+function keepLatestMessageAboveComposer() {
+  cancelAnimationFrame(composerTailFrame);
+  composerTailFrame = requestAnimationFrame(() => {
+    if (!historyMode || !historyPinnedToTail) return;
+    const scroll = $("chat-history-scroll");
+    scroll.scrollTop = scroll.scrollHeight;
+    lastHistoryScrollTop = scroll.scrollTop;
+  });
 }
 
 function clearComposerDraft(appId, submittedDraft) {
@@ -1881,6 +1919,7 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
       const clearedSubmittedDraft = clearComposerDraft(appId, submittedDraft);
       if (clearedSubmittedDraft && $("message").value === submittedDraft) {
         $("message").value = "";
+        autosizeComposer();
       }
       pendingAttachments = [];
       renderAttachments();
@@ -1927,18 +1966,121 @@ async function stopRunningTurn() {
   await refreshSelectedApp(appId);
 }
 
+async function clearWorkingMemory() {
+  const appId = selectedAppId;
+  if (!appId || selectedAppOutsideActiveIndex) return;
+  if (snapshot.status === "running") {
+    showChatStatus("Stop the agent before clearing working memory.", true);
+    return;
+  }
+  if (!confirm(
+    "Clear working memory?\n\n"
+    + "The agent starts fresh from here. Earlier messages will be hidden "
+    + "and will no longer be sent to it."
+  )) return;
+  await api("POST", `/apps/${encodeURIComponent(appId)}/clear-memory`);
+  await refreshSelectedApp(appId);
+  if (selectedAppId === appId) renderConversationHistory(true);
+}
+
 function renderChat() {
   const running = snapshot.status === "running";
   $("composer-running").hidden = !running;
+  $("clear-memory").hidden = !snapshot.session || selectedAppOutsideActiveIndex;
+  $("clear-memory").disabled = running;
+  updateActivityToggle();
   renderConversationHistory();
   syncAgentSettings(snapshot.session);
+}
+
+function updateActivityToggle() {
+  const button = $("activity-toggle");
+  button.setAttribute("aria-checked", String(showingActivity));
+  button.title = showingActivity ? "Hide agent activity" : "Show agent activity";
+  $("chat-history").classList.toggle("activity-hidden", !showingActivity);
+}
+
+function preserveConversationPosition(hidingActivity = false) {
+  const scroll = $("chat-history-scroll");
+  const list = $("chat-history-list");
+  syncHistoryTailPin();
+  const atTail = historyPinnedToTail;
+  const top = scroll.getBoundingClientRect().top;
+  const entries = Array.from(list.querySelectorAll(".chat-history-entry"));
+  const anchor = entries.find(entry => (
+    (!hidingActivity || !entry.classList.contains("activity"))
+    && entry.getBoundingClientRect().bottom > top
+  ));
+  const key = anchor?.dataset.entryKey;
+  const offset = anchor ? anchor.getBoundingClientRect().top - top : 0;
+  const previousTop = scroll.scrollTop;
+  return () => {
+    if (atTail) {
+      list.style.removeProperty("--activity-anchor-space");
+      scroll.scrollTop = scroll.scrollHeight;
+      lastHistoryScrollTop = scroll.scrollTop;
+      return;
+    }
+    // Rendering can replace nodes; resolve the entry being read by its key.
+    const current = key ? list.querySelector(`[data-entry-key="${CSS.escape(key)}"]`) : null;
+    const desired = current
+      ? scroll.scrollTop + current.getBoundingClientRect().top - scroll.getBoundingClientRect().top - offset
+      : previousTop;
+    // scrollHeight includes unused viewport space when the transcript is short.
+    const contentBottom = scroll.scrollTop + list.getBoundingClientRect().bottom - scroll.getBoundingClientRect().top;
+    // Keep the old spacer until its replacement is known. Removing it first
+    // briefly makes short transcripts unscrollable and lets the browser clamp
+    // the reading position during an otherwise unchanged refresh.
+    const currentSpace = parseFloat(list.style.getPropertyValue("--activity-anchor-space")) || 0;
+    const maximum = contentBottom - currentSpace - scroll.clientHeight;
+    if (desired > Math.max(0, maximum)) {
+      list.style.setProperty("--activity-anchor-space", `${Math.ceil(desired - maximum)}px`);
+    } else {
+      list.style.removeProperty("--activity-anchor-space");
+    }
+    scroll.scrollTop = Math.max(0, desired);
+    historyPinnedToTail = false;
+    lastHistoryScrollTop = scroll.scrollTop;
+  };
+}
+
+async function toggleActivity() {
+  const appId = selectedAppId;
+  if (!appId) return;
+  const restorePosition = preserveConversationPosition(showingActivity);
+  showingActivity = !showingActivity;
+  updateActivityToggle();
+  renderConversationHistory();
+  restorePosition();
+  await refreshSelectedApp(appId);
+}
+
+function hasWorkingMemoryBoundary(pageState = activeConversationEventPage()) {
+  return pageState.oldestSeq !== null && conversationEvents.some(event => (
+    event.event_type === "thread.memory_cleared" && event.seq >= pageState.oldestSeq
+  ));
 }
 
 function conversationEntries() {
   const entries = [];
   for (const event of conversationEvents) {
     const payload = event.payload || {};
-    if (event.event_type === "thread.error") {
+    if (event.event_type === "thread.memory_cleared") {
+      entries.length = 0;
+      entries.push({
+        key: `event-${event.seq}`,
+        seq: Number(event.seq) || 0,
+        kind: "stopped",
+        message: payload.message || "Working memory cleared.",
+      });
+    } else if (event.event_type === "thread.activity") {
+      entries.push({
+        key: `event-${event.seq}`,
+        seq: Number(event.seq) || 0,
+        kind: "activity",
+        activity: payload.activity || {},
+      });
+    } else if (event.event_type === "thread.error") {
       entries.push({
         key: `event-${event.seq}`,
         seq: Number(event.seq) || 0,
@@ -1981,20 +2123,28 @@ function renderConversationHistory(forceBottom = false) {
   const scroll = $("chat-history-scroll");
   const list = $("chat-history-list");
   const appChanged = historyRenderedAppId !== selectedAppId;
-  const wasNearBottom = appChanged || (
-    scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48
-  );
+  const restorePosition = preserveConversationPosition();
+  const wasNearBottom = appChanged || historyPinnedToTail;
   const entries = conversationEntries();
   const newestAgentEntry = entries.reduce((latest, entry) => (
     entry.kind === "agent" && entry.seq > (latest?.seq || 0) ? entry : latest
   ), null);
   const previousNewestAgentSeq = historyRenderedNewestAgentSeq;
   const newestAgentSeq = newestAgentEntry?.seq || 0;
-  const entryKey = entries.map(entry => entry.key).join("\0");
+  const entryKey = JSON.stringify(entries);
   if (appChanged || entryKey !== historyRenderedEntryKey) {
+    const openActivities = new Set(
+      Array.from(list.querySelectorAll(".activity-card[open]"))
+        .map(card => card.dataset.activityId),
+    );
     const nodes = entries.map(entry => {
       const item = document.createElement("article");
       item.className = `chat-history-entry ${entry.kind}`;
+      item.dataset.entryKey = entry.key;
+      if (entry.kind === "activity") {
+        item.innerHTML = KernRichText.renderActivity(entry.activity, openActivities);
+        return item;
+      }
       const sender = document.createElement("span");
       sender.className = "chat-history-sender";
       sender.textContent = `${entry.kind === "user" ? "You" : entry.kind === "agent" ? "Agent" : "System"}:`;
@@ -2034,27 +2184,31 @@ function renderConversationHistory(forceBottom = false) {
     $("chat-announcer").textContent = `Agent: ${newestAgentEntry.message}`;
   }
   historyRenderedNewestAgentSeq = newestAgentSeq;
-  $("chat-history-empty").hidden = entries.length !== 0;
+  $("chat-history-empty").hidden = entries.some(entry => showingActivity || entry.kind !== "activity");
   const pageState = activeConversationEventPage();
   const more = $("chat-history-more");
-  more.hidden = !pageState.hasOlder;
+  more.hidden = !pageState.hasOlder || hasWorkingMemoryBoundary();
   more.disabled = historyLoadingOlder;
   more.textContent = historyLoadingOlder
     ? "Loading earlier messages…"
     : "Load earlier messages";
   if (historyMode && (forceBottom || appChanged || wasNearBottom)) {
+    historyPinnedToTail = true;
+    list.style.removeProperty("--activity-anchor-space");
     scroll.scrollTop = scroll.scrollHeight;
+    lastHistoryScrollTop = scroll.scrollTop;
+  } else if (historyMode) {
+    restorePosition();
   }
 }
 
 async function loadOlderConversationEvents() {
   const pageState = activeConversationEventPage();
   if (
-    historyLoadingOlder || !historyMode || !selectedAppId
+    historyLoadingOlder || !historyMode || !selectedAppId || hasWorkingMemoryBoundary()
     || !pageState.hasOlder || pageState.oldestSeq === null
   ) return;
   const appId = selectedAppId;
-  const scroll = $("chat-history-scroll");
   historyLoadingOlder = true;
   renderConversationHistory();
   try {
@@ -2069,15 +2223,12 @@ async function loadOlderConversationEvents() {
     ) return;
     const events = response.events || [];
     const older = events.filter(event => event.seq < pageState.oldestSeq);
-    const previousHeight = scroll.scrollHeight;
-    const previousTop = scroll.scrollTop;
     if (older.length) {
       mergeConversationEvents(older);
       pageState.oldestSeq = older[0].seq;
     }
     pageState.hasOlder = events.length === CONVERSATION_EVENTS_PAGE;
     renderConversationHistory();
-    scroll.scrollTop = previousTop + scroll.scrollHeight - previousHeight;
   } catch (error) {
     if (selectedAppId === appId) {
       showRuntimeStatus(error.message || "Could not load earlier messages", "error");
@@ -2101,6 +2252,7 @@ function setHistoryMode(open) {
   $("chat-composer").hidden = !historyMode || selectedAppOutsideActiveIndex;
   if (historyMode) {
     closeAdmin();
+    autosizeComposer();
     renderConversationHistory(true);
     markSelectedAppSeen();
   }
@@ -2125,7 +2277,7 @@ function freshConversationEventPages() {
 }
 
 function activeConversationEventPage() {
-  return conversationEventPages.conversation;
+  return showingActivity ? conversationEventPages.all : conversationEventPages.conversation;
 }
 
 function conversationEventsPath(appId, pageState, cursorName = null, cursor = null) {
@@ -2154,6 +2306,7 @@ async function refreshConversationEvents(appId, refreshSequence) {
     for (
       let page = 1;
       page < INITIAL_CONVERSATION_EVENT_PAGES
+      && !hasWorkingMemoryBoundary(pageState)
       && oldestPage.length === CONVERSATION_EVENTS_PAGE
       && pageState.oldestSeq !== null;
       page += 1
@@ -2444,6 +2597,7 @@ function syncWorkspaceControls() {
   $("app-view-toolbar").hidden = !hasApp;
   $("agent-command-surface").hidden = !hasApp || readOnly || !historyMode;
   $("chat-composer").hidden = !hasApp || readOnly || !historyMode;
+  if (!$("chat-composer").hidden) autosizeComposer();
   $("rename-app").disabled = !hasApp || readOnly;
   $("settings-open").disabled = !hasApp || readOnly;
   const historyToggle = $("history-toggle");
@@ -2962,14 +3116,46 @@ $("history-toggle").addEventListener("click", () => setHistoryMode(!historyMode)
 $("app-memory").addEventListener("click", () => {
   if (selectedAppId) void window.KernHost.openWorkspace("memory", selectedAppId);
 });
+$("activity-toggle").addEventListener("click", () => {
+  toggleActivity().catch(error => showChatStatus(error.message, true));
+});
 $("chat-history-more").addEventListener("click", () => {
   void loadOlderConversationEvents();
 });
+// An anchor spacer can leave the reader at the temporary scroll limit, so
+// release it on input even when the browser cannot scroll any farther.
+for (const type of ["wheel", "touchmove"]) {
+  $("chat-history-scroll").addEventListener(type, () => {
+    $("chat-history-list").style.removeProperty("--activity-anchor-space");
+  }, { passive: true });
+}
+$("chat-history-scroll").addEventListener("keydown", event => {
+  if (!["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) return;
+  if (event.target.closest("button, input, textarea, select, a, summary, [contenteditable]")) return;
+  $("chat-history-list").style.removeProperty("--activity-anchor-space");
+});
 $("chat-history-scroll").addEventListener("scroll", () => {
-  if ($("chat-history-scroll").scrollTop <= 80) {
+  const scroll = $("chat-history-scroll");
+  const list = $("chat-history-list");
+  if (Math.abs(scroll.scrollTop - lastHistoryScrollTop) > 1) {
+    list.style.removeProperty("--activity-anchor-space");
+  }
+  const nearTail = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48;
+  if (nearTail && !list.style.getPropertyValue("--activity-anchor-space")) {
+    historyPinnedToTail = true;
+  } else if (scroll.scrollTop < lastHistoryScrollTop) {
+    historyPinnedToTail = false;
+  }
+  lastHistoryScrollTop = scroll.scrollTop;
+  if (scroll.scrollTop <= 80) {
     void loadOlderConversationEvents();
   }
 });
+$("chat-history-list").addEventListener("toggle", () => {
+  const scroll = $("chat-history-scroll");
+  historyPinnedToTail = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48
+    && !$("chat-history-list").style.getPropertyValue("--activity-anchor-space");
+}, true);
 $("archive-app").addEventListener("click", () => archiveSelectedApp().catch(error => showRuntimeStatus(error.message, "error")));
 $("app-refresh").addEventListener("click", applyPendingAppVersion);
 $("settings-open").addEventListener("click", () => {
@@ -3012,12 +3198,30 @@ $("stop-turn").addEventListener("click", () => {
   stopRunningTurn().catch(error => showChatStatus(error.message, true));
 });
 $("message").addEventListener("keydown", event => {
-  if (event.key === "Enter" && !event.shiftKey) {
+  const sendKey = event.key === "Enter" && !event.isComposing && (!event.shiftKey || event.metaKey || event.ctrlKey);
+  if (sendKey) {
     event.preventDefault();
     sendMessage();
   }
 });
-$("message").addEventListener("input", saveComposerDraft);
+$("clear-memory").addEventListener("click", () => {
+  clearWorkingMemory().catch(error => showChatStatus(error.message, true));
+});
+$("message").addEventListener("input", () => {
+  autosizeComposer();
+  saveComposerDraft();
+});
+$("message").addEventListener("focus", () => {
+  const scroll = $("chat-history-scroll");
+  historyPinnedToTail = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 48
+    && !$("chat-history-list").style.getPropertyValue("--activity-anchor-space");
+  keepLatestMessageAboveComposer();
+});
+window.addEventListener("resize", () => {
+  autosizeComposer();
+  keepLatestMessageAboveComposer();
+});
+window.visualViewport?.addEventListener("resize", keepLatestMessageAboveComposer, { passive: true });
 webAppsRoot.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
   if (!$("rename-app-overlay").hidden) {

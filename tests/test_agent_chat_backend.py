@@ -1041,8 +1041,8 @@ class AgentChatBackendTests(unittest.TestCase):
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
         cursor.fetchone.side_effect = [
-            ("thread-1", True),
-            ("thread-1", False),
+            (1,), ("thread-1", True),
+            (1,), ("thread-1", False),
         ]
         with (
             patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
