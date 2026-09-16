@@ -793,6 +793,7 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
         "after",
         "around_event_id",
         "include_activity",
+        "include_context",
         "limit",
     }
     unexpected = sorted(set(body) - allowed)
@@ -825,8 +826,13 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
     include_activity = body.get("include_activity", False)
     if not isinstance(include_activity, bool):
         raise ApiError(HTTPStatus.BAD_REQUEST, "include_activity must be a boolean")
+    include_context = body.get("include_context", False)
+    if not isinstance(include_context, bool):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "include_context must be a boolean")
     limit = _conversation_limit(body.get("limit", 20), CONVERSATION_READ_LIMIT)
     event_types = CONVERSATION_EVENT_TYPES if include_activity else ("thread.message",)
+    if include_context:
+        event_types += ("thread.context_added",)
     if "around" in cursors:
         raw_events = state.page_thread_events_around(
             thread_id,
@@ -897,6 +903,29 @@ def _conversation_event(event: dict[str, Any]) -> dict[str, Any]:
             "content": clipped,
             "truncated": clipped != content,
         }
+    if event.get("event_type") == "thread.context_added":
+        content = payload.get("message")
+        content = content if isinstance(content, str) else ""
+        clipped = _clip_json_encoded_text(content, CONVERSATION_MESSAGE_BYTES)
+        context: dict[str, Any] = {
+            "event_id": event["event_id"],
+            "timestamp": event["timestamp"],
+            "type": "context",
+            "content": clipped,
+            "truncated": clipped != content,
+        }
+        # Preserve absent versus empty: old notices and history handoffs do
+        # not record page ids; an empty list records recall returning no pages.
+        page_ids = payload.get("memory_page_ids")
+        if isinstance(page_ids, list):
+            bounded_ids = [
+                page_id for page_id in page_ids[:100]
+                if isinstance(page_id, str)
+                and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", page_id)
+            ]
+            context["memory_page_ids"] = bounded_ids
+            context["truncated"] = context["truncated"] or bounded_ids != page_ids
+        return context
     activity = payload.get("activity")
     activity = activity if isinstance(activity, dict) else {}
     summary: dict[str, Any] = {}

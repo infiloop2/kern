@@ -13,6 +13,7 @@ on:
           - apify
           - apify_developer
           - brave_search
+          - elevenlabs
           - gmail
           - google_calendar
           - google_search_console
@@ -240,6 +241,7 @@ jobs:
           KERN_STAGE_SCRAPECREATORS_API_KEY: ${{ secrets.KERN_STAGE_SCRAPECREATORS_API_KEY }}
           KERN_STAGE_SERPERAPI_API_KEY: ${{ secrets.KERN_STAGE_SERPERAPI_API_KEY }}
           KERN_STAGE_RUNWAY_API_SECRET: ${{ secrets.KERN_STAGE_RUNWAY_API_SECRET }}
+          KERN_STAGE_ELEVENLABS_API_KEY: ${{ secrets.KERN_STAGE_ELEVENLABS_API_KEY }}
           KERN_STAGE_OPENAI_API_KEY: ${{ secrets.KERN_STAGE_OPENAI_API_KEY }}
           KERN_STAGE_SEEDANCE_ARK_API_KEY: ${{ secrets.KERN_STAGE_SEEDANCE_ARK_API_KEY }}
           KERN_STAGE_VERCEL_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_VERCEL_ACCESS_TOKEN }}

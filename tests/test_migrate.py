@@ -254,6 +254,85 @@ class MigrateRunnerTests(unittest.TestCase):
             cur.execute("SELECT message FROM agent_events WHERE thread_id = 'thread-astra'")
             self.assertEqual(cur.fetchall(), [("Astra transcript",)])
 
+    def test_glm_model_migration_allows_sessions_and_rolls_back_active_settings(self) -> None:
+        self.assertEqual(migrate.up(target=58, quiet=True), list(range(1, 59)))
+        with self.assertRaises(Exception):
+            with db.transaction() as cur:
+                cur.execute(
+                    "INSERT INTO thread_sessions"
+                    " (agent_runtime, thread_id, model, effort)"
+                    " VALUES ('hermes', 'thread-glm', 'zai.glm-5', 'high')"
+                )
+
+        self.assertEqual(migrate.up(target=59, quiet=True), [59])
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO web_apps"
+                " (app_id, name, archived, revision, agent_runtime, agent_model, agent_effort,"
+                " created_at, updated_at) VALUES"
+                " ('app-59', 'GLM App', FALSE, 0, 'hermes', 'zai.glm-5', 'high',"
+                " '2026-09-16T00:00:00Z', '2026-09-16T00:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO schedules"
+                " (id, thread_id, name, message, cadence, interval_minutes, agent_runtime,"
+                " model, effort, next_run_at, created_at, updated_at) VALUES"
+                " (59, 'schedule-59', 'GLM Schedule', 'Run with GLM', 'interval', 60,"
+                " 'hermes', 'zai.glm-5', 'high', '2026-09-16T01:00:00Z',"
+                " '2026-09-16T00:00:00Z', '2026-09-16T00:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO schedule_revisions"
+                " (schedule_id, revision, name, message, cadence, interval_minutes,"
+                " agent_runtime, model, effort, deleted, actor, created_at) VALUES"
+                " (59, 1, 'GLM Schedule', 'Run with GLM', 'interval', 60,"
+                " 'hermes', 'zai.glm-5', 'high', FALSE, 'user',"
+                " '2026-09-16T00:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO thread_sessions"
+                " (agent_runtime, thread_id, provider_session_id, model, effort) VALUES"
+                " ('hermes', 'thread-glm', 'provider-chat', 'zai.glm-5', 'high'),"
+                " ('hermes', 'app-59', 'provider-app', 'zai.glm-5', 'high'),"
+                " ('hermes', 'schedule-59', 'provider-schedule', 'zai.glm-5', 'high')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, message, source)"
+                " VALUES ('2026-09-16T00:00:00Z', 'thread.message',"
+                " 'thread-glm', 'GLM transcript', 'agent')"
+            )
+
+        self.assertEqual(migrate.down(target=58, quiet=True), [59])
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT thread_id, model, effort, provider_session_id"
+                " FROM thread_sessions ORDER BY thread_id"
+            )
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("app-59", "moonshotai.kimi-k2.5", "high", None),
+                    ("schedule-59", "moonshotai.kimi-k2.5", "high", None),
+                    ("thread-glm", "moonshotai.kimi-k2.5", "high", None),
+                ],
+            )
+            cur.execute(
+                "SELECT agent_runtime, agent_model, agent_effort"
+                " FROM web_apps WHERE app_id = 'app-59'"
+            )
+            self.assertEqual(cur.fetchone(), ("hermes", "moonshotai.kimi-k2.5", "high"))
+            cur.execute(
+                "SELECT agent_runtime, model, effort FROM schedules WHERE id = 59"
+            )
+            self.assertEqual(cur.fetchone(), ("hermes", "moonshotai.kimi-k2.5", "high"))
+            cur.execute(
+                "SELECT model, effort FROM schedule_revisions WHERE schedule_id = 59"
+            )
+            self.assertEqual(cur.fetchone(), ("zai.glm-5", "high"))
+            cur.execute("SELECT message FROM agent_events WHERE thread_id = 'thread-glm'")
+            self.assertEqual(cur.fetchall(), [("GLM transcript",)])
+
     def test_persistent_schedules_create_threads_and_drop_old_runs(self) -> None:
         migrate.up(target=46, quiet=True)
         with db.transaction() as cur:

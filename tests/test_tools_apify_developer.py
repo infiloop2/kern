@@ -336,6 +336,61 @@ class ApifyDeveloperTests(unittest.TestCase):
     def release_input(self):
         return {"actor_id": ACTOR, "build_id": BUILD, "test_run_id": RUN, "title": "Test", "description": "Public data", "categories": ["DEVELOPER_TOOLS"]}
 
+    def latest_input(self):
+        return {"actor_id": ACTOR, "build_id": BUILD, "test_run_id": RUN}
+
+    def test_private_latest_changes_only_tag_after_approval(self):
+        self.provider.actor.update(taggedBuilds={"latest": {"buildId": OTHER}, "stable": {"buildId": OTHER}},
+                                   defaultRunOptions={"build": "0.0.1", "maxTotalChargeUsd": 0.1})
+        pending = self.execute("set_latest_build", self.latest_input())
+        self.assertEqual(self.writes(), [])
+        self.assertIn("keeping the Actor private", pending.summary)
+        self.assertIn("Future runs selecting latest", pending.summary)
+        self.assertIsInstance(self.approve(pending), ApprovalExecuted)
+        self.assertEqual([(c[0], c[1], c[3]) for c in self.writes()], [
+            ("PUT", "/actors/" + ACTOR, {"taggedBuilds": {"latest": {"buildId": BUILD}}})])
+
+    def test_private_latest_requires_owned_private_tested_release_at_both_phases(self):
+        cases = [("actor", "isPublic", True), ("actor", "isPublic", None),
+                 ("actor", "userId", OTHER), ("build", "userId", OTHER),
+                 ("run", "userId", OTHER), ("build", "actId", OTHER),
+                 ("run", "actId", OTHER), ("run", "buildId", OTHER),
+                 ("build", "status", "FAILED"), ("run", "status", "RUNNING"),
+                 ("build", "readme", "")]
+        for phase in ("request", "approval"):
+            for target, key, value in cases:
+                with self.subTest(phase=phase, target=target, key=key, value=value):
+                    pending = self.execute("set_latest_build", self.latest_input()) if phase == "approval" else None
+                    obj = getattr(self.provider, target)
+                    before = obj[key]
+                    obj[key] = value
+                    result = self.approve(pending) if pending else self.execute("set_latest_build", self.latest_input())
+                    self.assertIsInstance(result, ActionFailed)
+                    obj[key] = before
+        self.assertEqual(self.writes(), [])
+
+    def test_private_latest_rechecks_account_and_reviewed_settings(self):
+        for target, key, value in ((self.provider, "account", OTHER),
+                                  (self.provider.actor, "taggedBuilds", {"latest": {"buildId": OTHER}}),
+                                  (self.provider.actor, "defaultRunOptions", {"build": "0.0.1"})):
+            pending = self.execute("set_latest_build", self.latest_input())
+            if isinstance(target, dict):
+                target[key] = value
+            else:
+                setattr(target, key, value)
+            self.assertIsInstance(self.approve(pending), ActionFailed)
+            self.provider.account = ACCOUNT
+        self.assertEqual(self.writes(), [])
+
+    def test_actor_reports_latest_build_without_exposing_tag_metadata(self):
+        for latest, expected in ((None, None), ({"buildId": BUILD, "other": TOKEN}, BUILD),
+                                 ({"buildId": "malformed"}, None)):
+            self.provider.actor["taggedBuilds"] = {"latest": latest}
+            result = self.execute("get_actor", {"actor_id": ACTOR})
+            assert_matches_output_schema(self, dev.MANIFEST, "get_actor", result)
+            self.assertEqual(result.result["actor"]["latest_build_id"], expected)
+            self.assertNotIn(TOKEN, json.dumps(result.result))
+
     def test_publication_requires_exact_test_and_rechecks_mutable_listing(self):
         self.provider.run["buildId"] = OTHER
         self.assertIsInstance(self.execute("publish_actor", self.release_input()), ActionFailed)

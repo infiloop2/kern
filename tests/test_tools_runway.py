@@ -9,7 +9,7 @@ from typing import Any
 from unittest.mock import patch
 
 from host.tools.json_types import JSONObject
-from host.tools.results import ActionExecuted, ActionFailed, StreamingAsset
+from host.tools.results import ActionExecuted, ActionFailed, StreamingAsset, StreamingAssetError
 from host.tools import runway
 from host.tools.runway import RunwayTool
 from host.tools.shared import media as shared_media
@@ -25,7 +25,7 @@ def api_with_key() -> FakeHostAPI:
 
 
 class RunwayToolTests(unittest.TestCase):
-    def test_manifest_is_enable_only_with_six_actions(self) -> None:
+    def test_manifest_is_enable_only_with_seven_actions(self) -> None:
         tool = RunwayTool()
         self.assertEqual(tool.manifest.connection, "enable_only")
         self.assertIsNone(tool.credentials)
@@ -33,7 +33,7 @@ class RunwayToolTests(unittest.TestCase):
             [spec.id for spec in tool.manifest.actions],
             [
                 "generate_video", "edit_video", "generate_image", "generate_speech",
-                "get_task", "save_video",
+                "get_task", "save_video", "save_audio",
             ],
         )
         image_action = next(spec for spec in tool.manifest.actions if spec.id == "generate_image")
@@ -488,6 +488,74 @@ class RunwayToolTests(unittest.TestCase):
 
         self.assertEqual(api.assets.records, {})
 
+    def test_save_audio_streams_mp3_from_authoritative_task_through_agent_bridge(self) -> None:
+        from host.runtime.agent_shim import mcp_shim
+        import os
+        import tempfile
+        from pathlib import Path
+
+        payload = b"ID3" + b"x" * 597
+
+        @contextmanager
+        def fake_stream(method: str, url: str, **kwargs: Any):
+            self.assertEqual((method, url), ("GET", "https://cdn.example/speech.mp3?token=private"))
+            self.assertNotIn("headers", kwargs)  # Do not forward the Runway API key to the CDN.
+            yield io.BytesIO(payload), {"content-length": str(len(payload)), "content-type": "audio/mpeg; charset=binary"}
+
+        with (
+            patch.object(runway, "json_request", return_value={
+                "status": "SUCCEEDED", "output": ["https://cdn.example/speech.mp3?token=private"]
+            }) as lookup,
+            patch.object(shared_media, "open_response_stream", fake_stream),
+        ):
+            result = RunwayTool().execute("save_audio", {"task_id": "speech-1"}, api_with_key())
+            lookup.assert_called_once()
+            self.assertEqual(lookup.call_args.args, ("GET", f"{runway.TASKS_ENDPOINT}/speech-1"))
+            self.assertEqual(lookup.call_args.kwargs["headers"]["authorization"], "Bearer rw-key")
+            assert isinstance(result, StreamingAsset)
+            with result.open_stream() as opened:
+                self.assertEqual((opened.filename, opened.media_type), ("runway-speech-1.mp3", "audio/mpeg"))
+                # Exercise the same file-writing bridge used for downloaded video.
+                from test_tools_api import _MemoryResponse
+                response = _MemoryResponse(opened.source.read(), **{
+                    "Content-Length": str(opened.size_bytes), "Content-Type": opened.media_type,
+                    "X-Kern-Filename": opened.filename,
+                })
+                with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}):
+                    saved = mcp_shim._materialize_stream(response)
+                    self.assertEqual(Path(saved["filesystem_path"]).read_bytes(), payload)
+                    self.assertEqual(saved["media_type"], "audio/mpeg")
+                    self.assertTrue(saved["path"].endswith(".mp3"))
+
+    def test_save_audio_rejects_bad_input_or_unusable_task_before_download(self) -> None:
+        with patch.object(runway, "json_request") as lookup:
+            for value in ({}, {"task_id": 123}, {"task_id": "../bad"},
+                          {"task_id": "ok", "url": "https://caller.example/file.mp3"}):
+                with self.subTest(value=value):
+                    self.assertIsInstance(RunwayTool().execute("save_audio", value, api_with_key()), ActionFailed)
+            lookup.assert_not_called()
+        for task in ({"status": "RUNNING"}, {"status": "FAILED"}, {"status": "SUCCEEDED"},
+                     {"status": "SUCCEEDED", "output": ["http://cdn.example/file.mp3"]}):
+            with self.subTest(task=task), patch.object(runway, "json_request", return_value=task), \
+                 patch.object(shared_media, "open_response_stream") as download:
+                self.assertIsInstance(RunwayTool().execute("save_audio", {"task_id": "speech-1"}, api_with_key()), ActionFailed)
+                download.assert_not_called()
+
+    def test_save_audio_rejects_wrong_media_type_and_invalid_size(self) -> None:
+        for content_type, size in (("video/mp4", "600"), ("text/html", "600"),
+                                   ("audio/mpeg", ""), ("audio/mpeg", "0"),
+                                   ("audio/mpeg", "200000001")):
+            @contextmanager
+            def fake_stream(*args: Any, **kwargs: Any):
+                yield io.BytesIO(b"x" * 600), {"content-type": content_type, "content-length": size}
+            with self.subTest(content_type=content_type, size=size), \
+                 patch.object(runway, "json_request", return_value={"status": "SUCCEEDED", "output": ["https://cdn.example/speech.mp3"]}), \
+                 patch.object(shared_media, "open_response_stream", fake_stream):
+                result = RunwayTool().execute("save_audio", {"task_id": "speech-1"}, api_with_key())
+                assert isinstance(result, StreamingAsset)
+                with self.assertRaises(StreamingAssetError), result.open_stream():
+                    self.fail("Invalid response must not become a workspace asset")
+
     def test_save_video_rejects_nonterminal_task(self) -> None:
         with patch.object(runway, "json_request", return_value={"id": "task-1", "status": "RUNNING"}):
             result = RunwayTool().execute(
@@ -594,6 +662,62 @@ class RunwayToolTests(unittest.TestCase):
             },
         )
         self.assertEqual(result.result["output_kind"], "audio")
+
+    def test_generate_expressive_speech_preserves_tags_and_delivery_controls(self) -> None:
+        text = "[whispers] Please... don't erase me."
+        with patch.object(runway, "json_request", return_value={"id": "expressive-task"}) as request:
+            result = RunwayTool().execute("generate_speech", {
+                "text": text, "voice": "Serene", "model": "eleven_v3",
+                "stability": 0.5, "style": 0.3, "speed": 0.9,
+            }, api_with_key())
+        self.assertEqual(request.call_args.args[:2], ("POST", runway.TEXT_TO_SPEECH_ENDPOINT))
+        self.assertEqual(request.call_args.kwargs["body"], {
+            "model": "eleven_v3", "promptText": text,
+            "voice": {"type": "runway-preset", "presetId": "Serene"},
+            "stability": 0.5, "style": 0.3, "speed": 0.9,
+        })
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["model"], "eleven_v3")
+        self.assertEqual(result.result["output_kind"], "audio")
+        assert_matches_output_schema(self, runway.MANIFEST, "generate_speech", result)
+
+    def test_speech_model_selection_leaves_omitted_controls_to_provider(self) -> None:
+        for model in ("eleven_multilingual_v2", "eleven_v3"):
+            with self.subTest(model=model), patch.object(
+                runway, "json_request", return_value={"id": "audio-task"},
+            ) as request:
+                result = RunwayTool().execute(
+                    "generate_speech", {"text": "Hello", "model": model}, api_with_key(),
+                )
+                self.assertIsInstance(result, ActionExecuted)
+                self.assertEqual(request.call_args.kwargs["body"], {
+                    "model": model, "promptText": "Hello",
+                    "voice": {"type": "runway-preset", "presetId": "Maya"},
+                })
+
+    def test_speech_rejects_invalid_or_inapplicable_controls_before_network(self) -> None:
+        bad_inputs: list[JSONObject] = [{"model": "unknown"}, {"model": True}]
+        for name, low, high in (("stability", 0, 1), ("style", 0, 1), ("speed", 0.7, 1.2)):
+            for value in (None, True, "0.5", [], {}, low - 0.01, high + 0.01, float("nan"), float("inf")):
+                bad_inputs.append({"model": "eleven_v3", name: value})
+            bad_inputs.extend([{name: low}, {"model": "eleven_multilingual_v2", name: low}])
+        for settings in bad_inputs:
+            with self.subTest(settings=settings), patch.object(runway, "json_request") as request:
+                result = RunwayTool().execute("generate_speech", {"text": "Hello", **settings}, api_with_key())
+                self.assertIsInstance(result, ActionFailed)
+                request.assert_not_called()
+
+    def test_speech_accepts_delivery_control_boundaries(self) -> None:
+        for controls in ({"stability": 0, "style": 0, "speed": 0.7}, {"stability": 1, "style": 1, "speed": 1.2}):
+            with self.subTest(controls=controls), patch.object(
+                runway, "json_request", return_value={"id": "audio-task"},
+            ) as request:
+                result = RunwayTool().execute("generate_speech", {
+                    "text": "Hello", "model": "eleven_v3", **controls,
+                }, api_with_key())
+                self.assertIsInstance(result, ActionExecuted)
+                for name, value in controls.items():
+                    self.assertEqual(request.call_args.kwargs["body"][name], value)
 
     def test_image_and_speech_validate_input(self) -> None:
         tool = RunwayTool()

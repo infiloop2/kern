@@ -39,7 +39,15 @@ source or vector retention advances. A new search may fall back to lexical
 ranking when the model is unavailable; once paging starts, its cursor keeps the
 ranking mode and frozen candidate set stable without requiring inference again.
 Read returns chronological, byte-bounded user/assistant messages and optional
-normalized activity summaries. It can open the latest page, page before or
+normalized activity summaries. `include_context: true` additionally returns
+`thread.context_added` notices as `type: "context"`, with `content`, `truncated`,
+and `memory_page_ids` when recorded. The flag defaults to false and is
+independent of `include_activity`. An absent ids field means the notice did
+not record ids; an empty array records zero recalled pages. Page ids preserve
+recorded order but do not capture historical page revisions or text. Fetching
+a page now returns its current contents. Context notices participate in the
+same event limits, byte budgets, and cursors as other requested events; they
+are not added to message search. Read can open the latest page, page before or
 after an event cursor, or center context on a search hit. These routes can read
 any retained host thread, including Chat, app, and schedule threads.
 

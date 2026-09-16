@@ -256,9 +256,13 @@ context instead of rewriting its prefix:
   (up to 50, each capped at 1,024 characters, with clipping reported). It reports
   non-success HTTP statuses and does not fall back to GET or replay cookies.
 
-  Runway is the first producer. `runway_save_video {task_id}` re-reads the task
+  Runway supports `runway_save_video {task_id}` and
+  `runway_save_audio {task_id}` for completed MP3 speech. Each re-reads the task
   from Runway, accepts only its authoritative successful HTTPS output, and
-  returns that response as a `StreamingAsset`. `seedance_save_video` is the same
+  returns that response as a bounded `StreamingAsset`. Audio saving accepts
+  `audio/mpeg` and gives the file an `.mp3` suffix. Agents do not need a custom
+  network-domain allowance to save the output through these actions.
+  `seedance_save_video` is the same
   shape against BytePlus ModelArk; both rely on the generic streaming-result
   path rather than any per-tool wiring in the shim. The egress-capable tools
   process cannot write agent files, while the filesystem-capable shim has no

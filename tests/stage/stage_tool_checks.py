@@ -360,6 +360,7 @@ class StageToolChecks:
             "apify": self._check_apify_live,
             "apify_developer": self._check_apify_developer_live,
             "brave_search": self._check_brave_live,
+            "elevenlabs": self._check_elevenlabs_live,
             "gmail": self._check_gmail_live,
             "google_calendar": self._check_calendar_live,
             "google_search_console": self._check_search_console_live,
@@ -1013,6 +1014,12 @@ class StageToolChecks:
                 f"isError={result.get('isError')}, message={text}"
             )
         return "authenticated missing-task probe completed without generation spend"
+
+    def _check_elevenlabs_live(self) -> str:
+        result = self._successful_tool_call("elevenlabs_list_voices", {"page_size": 1})
+        if not isinstance(result.get("voices"), list):
+            raise AssertionError("ElevenLabs did not return a voice list")
+        return "authenticated voice lookup completed without audio generation spend"
 
     def _check_openai_images_live(self) -> str:
         """Generate one image for real: OpenAI has no read-only endpoint behind

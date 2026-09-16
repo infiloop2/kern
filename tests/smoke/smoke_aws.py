@@ -161,6 +161,7 @@ SMOKE_BEDROCK_MODELS = (
     "deepseek.v3.2",
     "qwen.qwen3-coder-next",
     "moonshotai.kimi-k2.5",
+    "zai.glm-5",
 )
 SMOKE_GITHUB_INTEGRATION = {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "kern"}]}
 SMOKE_MANAGED_DOMAINS = (
@@ -197,6 +198,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("create_version", {"actor_id": "a" * 17, "version": "0.1", "files": [{"path": "main.js", "content": "console.log('smoke');"}]}),
         ("build_actor", {"actor_id": "a" * 17, "version": "0.1"}),
         ("run_actor", {"build_id": "b" * 17, "input_json": "{}"}),
+        ("set_latest_build", {"actor_id": "a" * 17, "build_id": "b" * 17, "test_run_id": "r" * 17}),
         ("publish_actor", {"actor_id": "a" * 17, "build_id": "b" * 17, "test_run_id": "r" * 17,
                            "title": "Kern smoke", "description": "Never published by fresh smoke.", "categories": ["DEVELOPER_TOOLS"]}),
     ),
@@ -344,6 +346,15 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ),
         ("create_comment", {"parent_id": "t3_abc", "text": "Never published."}),
     ),
+    "elevenlabs": (
+        ("list_voices", {"page_size": 1}),
+        ("design_voice", {"voice_description": "A warm and expressive storyteller voice."}),
+        ("preview_voice", {"generated_voice_id": "voice_preview_smoke"}),
+        ("save_voice", {"generated_voice_id": "voice_preview_smoke", "name": "Kern smoke", "voice_description": "A warm storyteller voice."}),
+        ("generate_speech", {"text": "Kern smoke", "voice_id": "voice_smoke"}),
+        ("generate_music", {"prompt": "Gentle piano", "duration_ms": 3000}),
+        ("generate_sound_effect", {"text": "Soft wind", "duration_seconds": 1}),
+    ),
     "openai_images": (
         ("generate_image", {"prompt": "Kern smoke"}),
     ),
@@ -354,6 +365,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("generate_speech", {"text": "Kern smoke"}),
         ("get_task", {"task_id": "kern-smoke-missing"}),
         ("save_video", {"task_id": "kern-smoke-missing"}),
+        ("save_audio", {"task_id": "kern-smoke-missing"}),
     ),
     "seedance": (
         ("generate_video", {"prompt": "Kern smoke"}),
@@ -2151,7 +2163,7 @@ class AwsSmoke:
             raise AssertionError(f"runtime status should report empty active_thread_ids: {record}")
         self._ok(
             "all three pre-login runtimes rejected messages with the runtime status, "
-            "Hermes rejected all three Bedrock models, rejections left no thread state; "
+            "Hermes rejected all catalog Bedrock models, rejections left no thread state; "
             "validation 400s and unknown-thread 404s honored; task routes gone"
         )
 

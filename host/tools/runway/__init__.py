@@ -20,7 +20,7 @@ from host.tools.results import (
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, provider_fetched_https_url
-from host.tools.shared.media import open_downloaded_video
+from host.tools.shared.media import open_downloaded_audio, open_downloaded_video
 from host.tools.shared.web import (
     UnmappedProviderError,
     WebRequestError,
@@ -71,7 +71,8 @@ DEFAULT_IMAGE_MODEL = "gen4_turbo"
 EDIT_MODEL = "aleph2"
 IMAGE_MODELS = ("gpt_image_2_5_sunburst", "gpt_image_2_5_flare")
 DEFAULT_IMAGE_GENERATION_MODEL = "gpt_image_2_5_sunburst"
-SPEECH_MODEL = "eleven_multilingual_v2"
+SPEECH_MODELS = ("eleven_multilingual_v2", "eleven_v3")
+DEFAULT_SPEECH_MODEL = "eleven_multilingual_v2"
 
 IMAGE_RATIOS = ("1920:1920", "1920:1280", "1280:1920")
 DEFAULT_IMAGE_RATIO = "1920:1920"
@@ -128,8 +129,8 @@ RUNWAY_IMAGE_POLICY = (
     "it returns a task id to active model context to poll with get_task."
 )
 RUNWAY_SPEECH_POLICY = (
-    "The speech text and selected Runway voice preset supplied by the user or agent are "
-    "sent to Runway's Developer API and forwarded by Runway to ElevenLabs Multilingual v2. The generation "
+    "The speech text, selected Runway voice preset, and optional delivery settings supplied by the user or agent are "
+    "sent to Runway's Developer API and forwarded by Runway to ElevenLabs Multilingual v2 or Eleven v3. The generation "
     "is billed as Runway credits. This action runs directly with no approval and publishes "
     "nothing; it returns a task id to active model context to poll with get_task."
 )
@@ -140,6 +141,12 @@ RUNWAY_POLL_POLICY = (
 )
 RUNWAY_SAVE_VIDEO_POLICY = (
     "Read-only handoff. Sends the task id to Runway, downloads the completed video from "
+    "Runway's authoritative temporary output URL, and streams it through the agent-side "
+    "bridge into a host-generated path under /tool_assets in the agent workspace."
+)
+
+RUNWAY_SAVE_AUDIO_POLICY = (
+    "Read-only handoff. Sends the task id to Runway, downloads completed MP3 speech from "
     "Runway's authoritative temporary output URL, and streams it through the agent-side "
     "bridge into a host-generated path under /tool_assets in the agent workspace."
 )
@@ -254,16 +261,22 @@ MANIFEST = ToolManifest(
         ActionSpec(
             id="generate_speech",
             description=(
-                "Start an async ElevenLabs Multilingual v2 text-to-speech task through Runway "
-                "and return a task_id. Poll get_task with output_kind=audio for the temporary "
-                "audio URL. This runs immediately, spends Runway credits, and publishes nothing."
+                "Start an async ElevenLabs text-to-speech task through Runway. Select eleven_v3 "
+                "for expressive audio tags and optional stability, style, and speed controls. "
+                "Returns a task_id. Poll get_task with output_kind=audio for the temporary "
+                "audio URL, then use save_audio to keep the completed MP3 in the workspace. "
+                "This runs immediately, spends Runway credits, and publishes nothing."
             ),
             data_policy=RUNWAY_SPEECH_POLICY,
             input_schema={
                 "type": "object",
                 "required": ["text"],
                 "properties": {
-                    "text": {"type": "string", "description": "Words to speak, up to 1000 characters."},
+                    "text": {"type": "string", "description": "Words to speak, up to 1000 characters. With eleven_v3, include delivery tags such as [whispers] or [laughs] in the script; tags are part of this limit."},
+                    "model": {"type": "string", "enum": list(SPEECH_MODELS), "description": "Default eleven_multilingual_v2. Choose eleven_v3 for expressive delivery and audio tags."},
+                    "stability": {"type": "number", "description": "Eleven v3 only, 0 to 1. Lower values allow more emotional variation; higher values are steadier. Omit for the provider default."},
+                    "style": {"type": "number", "description": "Eleven v3 only, 0 to 1. Style exaggeration; higher values amplify the speaker style. Omit for the provider default."},
+                    "speed": {"type": "number", "description": "Eleven v3 only, 0.7 to 1.2. Speech speed multiplier; 1 is normal. Omit for the provider default."},
                     "voice": {"type": "string", "enum": list(SPEECH_VOICES), "description": "Runway's ElevenLabs voice preset (default Maya)."},
                 },
                 "additionalProperties": False,
@@ -302,6 +315,23 @@ MANIFEST = ToolManifest(
             },
             returns_asset=True,
         ),
+        ActionSpec(
+            id="save_audio",
+            description=(
+                "Save completed Runway MP3 speech under /tool_assets in the agent workspace. "
+                "The agent-side bridge creates the filename and returns the durable path."
+            ),
+            data_policy=RUNWAY_SAVE_AUDIO_POLICY,
+            input_schema={
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": {"type": "string", "description": "Completed Runway speech task id."},
+                },
+                "additionalProperties": False,
+            },
+            returns_asset=True,
+        ),
     ), {
         "generate_video": {
             "prompt": guarded_input(),
@@ -325,12 +355,19 @@ MANIFEST = ToolManifest(
             "quality": validated_input("One of the listed choices."),
         },
         "generate_speech": {
+            "model": validated_input("One of the listed choices."),
+            "stability": validated_input("Number from 0 to 1; Eleven v3 only."),
+            "style": validated_input("Number from 0 to 1; Eleven v3 only."),
+            "speed": validated_input("Number from 0.7 to 1.2; Eleven v3 only."),
             "text": guarded_input(),
             "voice": validated_input("One of the listed choices."),
         },
         "get_task": {
             "task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens."),
             "output_kind": validated_input("One of the listed choices."),
+        },
+        "save_audio": {
+            "task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens."),
         },
         "save_video": {
             "task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens."),
@@ -339,7 +376,7 @@ MANIFEST = ToolManifest(
     config=(ConfigRequirement(key="RUNWAY_API_SECRET", description="Runway Developer API key (org-scoped) from the dev.runwayml.com dashboard."),),
     protections=(
         "Your Runway key stays in write-only tool config. Inputs are bounded, and local images and videos are uploaded to Runway only when used as inputs.",
-        "Generation is billed to your Runway organization. Kern does not publish the media. A completed video can be saved from Runway's authoritative temporary URL into the agent workspace for durable operator review and later approval-gated publishing.",
+        "Generation is billed to your Runway organization. Kern does not publish the media. Completed video and MP3 speech can be saved from Runway's authoritative temporary URL into the agent workspace for durable operator review and later approval-gated publishing.",
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(PARAM_GUARD_TECHNICAL_DETAIL,),
@@ -367,7 +404,7 @@ MANIFEST = ToolManifest(
             DataSummaryCard(
                 title="What leaves this host",
                 points=(
-                    DataSummaryPoint(label="Generation requests", text="The prompt or speech text, generation options (model, ratio, duration, quality, voice, seed), and any public image or video URL given as input go to Runway. These free-text values (prompt, speech text, external media URL) first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before anything is sent."),
+                    DataSummaryPoint(label="Generation requests", text="The prompt or speech text, generation options (model, ratio, duration, quality, voice, stability, style, speed, seed), and any public image or video URL given as input go to Runway. These free-text values (prompt, speech text, external media URL) first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before anything is sent."),
                     DataSummaryPoint(label="Workspace media", text="When an image or video from the agent workspace is used as an input, its bytes and original filename upload to Runway. Its local workspace path is not sent."),
                 ),
             ),
@@ -376,7 +413,7 @@ MANIFEST = ToolManifest(
                 points=(
                     DataSummaryPoint(label="Runway models", text="Every request first goes to Runway. Gen-4.5, Gen-4 Turbo, and Aleph 2 generations use Runway's own models."),
                     DataSummaryPoint(label="Third-party video models", text="When the agent explicitly selects Google Veo 3.1, ByteDance Seedance 2.0/2.5, or fal's MiniMax H3 Max, Runway sends that provider the prompt, output ratio or resolution and duration, optional seed, and any first-frame image. Kern does not let Runway silently choose one of these models."),
-                    DataSummaryPoint(label="Image and speech models", text="For image generation, Runway sends the prompt, ratio, and quality to OpenAI's GPT Image 2.5 Sunburst or Flare. For speech generation, Runway sends the speech text and selected voice to ElevenLabs Multilingual v2."),
+                    DataSummaryPoint(label="Image and speech models", text="For image generation, Runway sends the prompt, ratio, and quality to OpenAI's GPT Image 2.5 Sunburst or Flare. For speech generation, Runway sends the speech text, selected voice, and optional delivery settings to ElevenLabs Multilingual v2 or Eleven v3."),
                 ),
             ),
             DataSummaryCard(
@@ -667,9 +704,9 @@ def _image_request(api: HostAPI, tool_input: JSONObject) -> JSONObject:
 
 
 def _speech_request(api: HostAPI, tool_input: JSONObject) -> JSONObject:
-    extra = set(tool_input) - {"text", "voice"}
+    extra = set(tool_input) - {"text", "voice", "model", "stability", "style", "speed"}
     if extra:
-        raise ToolInputValidationError("Runway generate_speech only supports text and voice.")
+        raise ToolInputValidationError("Runway generate_speech only supports text, voice, model, stability, style, and speed.")
     text = tool_input.get("text")
     if not isinstance(text, str) or not text.strip():
         raise ToolInputValidationError("Runway tool_input.text is required.")
@@ -677,11 +714,22 @@ def _speech_request(api: HostAPI, tool_input: JSONObject) -> JSONObject:
     if len(text) > MAX_PROMPT_CHARS:
         raise ToolInputValidationError(f"Runway speech text must be at most {MAX_PROMPT_CHARS} characters.")
     voice = _string_choice(tool_input, "voice", SPEECH_VOICES, DEFAULT_SPEECH_VOICE)
-    return {
-        "model": SPEECH_MODEL,
+    model = _string_choice(tool_input, "model", SPEECH_MODELS, DEFAULT_SPEECH_MODEL)
+    body: JSONObject = {
+        "model": model,
         "promptText": api.outbound.guard_request_parameter_string(text),
         "voice": {"type": "runway-preset", "presetId": voice},
     }
+    for name, lower, upper in (("stability", 0, 1), ("style", 0, 1), ("speed", 0.7, 1.2)):
+        if name not in tool_input:
+            continue
+        if model != "eleven_v3":
+            raise ToolInputValidationError(f"Runway speech {name} requires model eleven_v3.")
+        value = tool_input[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not lower <= value <= upper:
+            raise ToolInputValidationError(f"Runway speech {name} must be a number from {lower} to {upper}.")
+        body[name] = value
+    return body
 
 
 def _task_result(response: JSONObject, output_kind: str = "video") -> JSONObject:
@@ -748,7 +796,7 @@ def _failure_from_status(exc: WebRequestError) -> str:
     return message
 
 
-def _save_video(task_id: str, headers: dict[str, str]) -> ActionResult:
+def _save_media(task_id: str, headers: dict[str, str], *, kind: str) -> ActionResult:
     if not TASK_ID_RE.fullmatch(task_id):
         raise ToolInputValidationError("Runway tool_input.task_id is invalid.")
     response = json_request(
@@ -759,20 +807,21 @@ def _save_video(task_id: str, headers: dict[str, str]) -> ActionResult:
         invalid_response_message="Runway returned an invalid task response.",
     )
     if response.get("status") != "SUCCEEDED":
-        return ActionFailed("Runway video is not complete. Poll get_task and try again after it succeeds.")
+        return ActionFailed(f"Runway {kind} is not complete. Poll get_task and try again after it succeeds.")
     output = response.get("output")
     output_url = output[0] if isinstance(output, list) and output and isinstance(output[0], str) else ""
     if not output_url or not _is_public_https_url(output_url):
-        return ActionFailed("Runway reported success but returned no valid video URL.")
-    def open_video():
-        return open_downloaded_video(
+        return ActionFailed(f"Runway reported success but returned no valid {kind} URL.")
+    def open_media():
+        download = open_downloaded_audio if kind == "audio" else open_downloaded_video
+        return download(
             output_url,
             provider="Runway",
             filename_stem=f"runway-{task_id}",
             map_failure=_failure_from_status,
         )
 
-    return StreamingAsset(open_video)
+    return StreamingAsset(open_media)
 
 
 class RunwayTool:
@@ -850,18 +899,21 @@ class RunwayTool:
                 if isinstance(result, ActionExecuted):
                     api.assets.delete(asset_id)
                 return result
-            if action == "save_video":
+            if action in {"save_video", "save_audio"}:
                 if set(tool_input) != {"task_id"} or not isinstance(tool_input.get("task_id"), str):
                     raise ToolInputValidationError(
-                        "Runway save_video requires exactly one string task_id."
+                        f"Runway {action} requires exactly one string task_id."
                     )
-                return _save_video(cast(str, tool_input["task_id"]), headers)
+                return _save_media(
+                    cast(str, tool_input["task_id"]), headers,
+                    kind="audio" if action == "save_audio" else "video",
+                )
             if action == "generate_image":
                 body = _image_request(api, tool_input)
                 return self._create_task(TEXT_TO_IMAGE_ENDPOINT, body, headers, cast(str, body["model"]), "image")
             if action == "generate_speech":
                 body = _speech_request(api, tool_input)
-                return self._create_task(TEXT_TO_SPEECH_ENDPOINT, body, headers, SPEECH_MODEL, "audio")
+                return self._create_task(TEXT_TO_SPEECH_ENDPOINT, body, headers, cast(str, body["model"]), "audio")
             if action == "get_task":
                 extra = set(tool_input) - {"task_id", "output_kind"}
                 if extra:

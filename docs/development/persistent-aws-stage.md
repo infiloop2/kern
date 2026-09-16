@@ -216,7 +216,7 @@ a running turn that stage stops, and a post-stop recovery turn. While the
 Hermes stop target is running, stage
 proves that steering is rejected; this denial invokes no additional model
 turn. Hermes uses Qwen
-3 Coder Next, the least expensive of the three exposed Bedrock models for short
+3 Coder Next, the least expensive of the four exposed Bedrock models for short
 stage prompts. The model turns are paid Bedrock inference calls;
 the exact token cost varies with model output and runtime behavior. Credential
 setup itself makes only an STS call, never a paid model invocation.
