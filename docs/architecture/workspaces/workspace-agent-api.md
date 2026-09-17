@@ -41,10 +41,12 @@ ranking mode and frozen candidate set stable without requiring inference again.
 Read returns chronological, byte-bounded user/assistant messages and optional
 normalized activity summaries. `include_context: true` additionally returns
 `thread.context_added` notices as `type: "context"`, with `content`, `truncated`,
-and `memory_page_ids` when recorded. The flag defaults to false and is
+and `memory_page_ids` when recorded. Context notices may include
+`memory_recall_details`, a bounded diagnostic trace also shown on hover.
+The flag defaults to false and is
 independent of `include_activity`. An absent ids field means the notice did
 not record ids; an empty array records zero recalled pages. Page ids preserve
-recorded order but do not capture historical page revisions or text. Fetching
+recorded order; IDs alone do not capture historical page revisions or text. Fetching
 a page now returns its current contents. Context notices participate in the
 same event limits, byte budgets, and cursors as other requested events; they
 are not added to message search. Read can open the latest page, page before or

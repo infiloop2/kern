@@ -7,6 +7,7 @@ from http import HTTPStatus
 import json
 import re
 import threading
+import time
 from typing import Any, Callable
 
 from host.config import AGENT_RUNTIMES
@@ -234,9 +235,10 @@ def send_thread_message(
             turn = None
             provider_session_id = None
         else:
-            recalled_pages = []
+            recalled_pages: list[dict[str, Any]] = []
+            recall_details = ""
             if agent_runtime != SCRIPT_RUNTIME:
-                recalled_pages = _recalled_memory_pages(thread_id, message)
+                recalled_pages, recall_details = _recalled_memory_pages(thread_id, message)
             after_commit: list[Callable[[], None]] = []
             with state.mutation(after_commit=after_commit) as cur:
                 # Re-read inside the admission transaction. The send lock keeps
@@ -349,6 +351,7 @@ def send_thread_message(
                         {
                             "message": f"Self identity and {count} {'memory' if count == 1 else 'memories'} injected.",
                             "memory_page_ids": [page["page_id"] for page in recalled_pages],
+                            "memory_recall_details": recall_details,
                         },
                         run_number=turn.run_number,
                     )
@@ -362,25 +365,26 @@ def send_thread_message(
 def _recalled_memory_pages(
     thread_id: str,
     message: str,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str]:
+    started = time.monotonic()
     try:
         response = workspace_proxy.recall_memory(thread_id, message)
     except ApiError as exc:
         _report_degraded_recall(thread_id, exc)
-        return []
+        return [], "Recall unavailable; see Host diagnostics."
     if not isinstance(response, dict):
         _report_degraded_recall(
             thread_id,
             "Workspace returned a non-object recall response",
         )
-        return []
+        return [], "Recall unavailable; see Host diagnostics."
     pages = response.get("pages")
     if not isinstance(pages, list):
         _report_degraded_recall(
             thread_id,
             "Workspace returned an invalid recall page list",
         )
-        return []
+        return [], "Recall unavailable; see Host diagnostics."
     recalled = [
         page for page in pages[:RECALLED_MEMORY_PAGE_LIMIT]
         if isinstance(page, dict)
@@ -390,7 +394,7 @@ def _recalled_memory_pages(
             thread_id,
             "Workspace returned a malformed recall page",
         )
-        return []
+        return [], "Recall unavailable; see Host diagnostics."
     normalized: list[dict[str, Any]] = []
     for page in recalled:
         if not (
@@ -420,7 +424,13 @@ def _recalled_memory_pages(
         key=lambda page: 0 if page["selection"] == "self"
         else 2 if page["selection"] == "popular" else 1
     )
-    return normalized
+    details = response.get("diagnostics")
+    details = details[:12000] if isinstance(details, str) else "No retrieval details recorded."
+    details = (
+        f"Admission recall: {round((time.monotonic() - started) * 1000)} ms.\n"
+        f"{details}"
+    )
+    return normalized, details
 
 
 def _report_degraded_recall(

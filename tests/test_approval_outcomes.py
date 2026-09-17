@@ -283,7 +283,7 @@ class GitHubApprovalDatabaseTests(unittest.TestCase):
         seed_thread_session("thread-34")
         with state.mutation() as cur:
             cur.execute("INSERT INTO chat_threads (thread_id) VALUES ('thread-34')")
-        with patch.object(outcomes.workspace_proxy, "_proxy", side_effect=to_workspace), patch.object(agent_messages, "call_admin_api", side_effect=to_admin), patch.object(pending, "_run_helper_json", return_value={"ok": True}), patch.object(orchestrator, "runtime_network_enabled", return_value=True), patch.object(orchestrator, "runtime_status", return_value="active"), patch.object(threads, "_recalled_memory_pages", return_value=[]), patch.object(threads, "_memory_context_message", return_value="Identity"), patch.object(orchestrator, "launch_turn", side_effect=attach_recording_steer_server) as launch:
+        with patch.object(outcomes.workspace_proxy, "_proxy", side_effect=to_workspace), patch.object(agent_messages, "call_admin_api", side_effect=to_admin), patch.object(pending, "_run_helper_json", return_value={"ok": True}), patch.object(orchestrator, "runtime_network_enabled", return_value=True), patch.object(orchestrator, "runtime_status", return_value="active"), patch.object(threads, "_recalled_memory_pages", return_value=([], "")), patch.object(threads, "_memory_context_message", return_value="Identity"), patch.object(orchestrator, "launch_turn", side_effect=attach_recording_steer_server) as launch:
             result = service.resolve_pending_push("abc123", "approve")
             self.assertEqual(result["pending_push"]["origin_thread_id"], "thread-34")
             launch.assert_called_once()

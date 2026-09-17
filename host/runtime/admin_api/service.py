@@ -48,6 +48,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
+from host.runtime.admin_api import xai_video_storage
 from host.network_integrations.bedrock.manifest import SUPPORTED_REGIONS as BEDROCK_REGIONS
 from host.network_integrations.github.push_gate import pending as github_pending_push
 from host.runtime.admin_api import approval_outcomes
@@ -1206,6 +1207,9 @@ _ROUTES: tuple[_Route, ...] = (
         "/v1/network-tools/github-credential",
         lambda request: _credential_response(github_credential.metadata()),
     ),
+    _Route("GET", "/v1/network-tools/xai-video-storage", lambda request: state.xai_video_storage_metadata()),
+    _Route("PUT", "/v1/network-tools/xai-video-storage", lambda request: replace_xai_video_storage(request.body)),
+    _Route("DELETE", "/v1/network-tools/xai-video-storage", lambda request: xai_video_storage.delete()),
     _Route("PUT", "/v1/network-tools/github-credential", lambda request: replace_github_credential(request.body)),
     _Route("DELETE", "/v1/network-tools/github-credential", _delete_github_credential_route),
     _Route("POST", "/v1/network-tools/github-audit", _github_audit_route),
@@ -1271,6 +1275,13 @@ def resolve_pending_push(push_id: str, action: str) -> dict[str, Any]:
         raise ApiError(status, str(exc)) from exc
     approval_outcomes.notify_push(push)
     return {"pending_push": push}
+
+
+def replace_xai_video_storage(body: Any) -> dict[str, Any]:
+    try:
+        return xai_video_storage.replace(body)
+    except ValueError as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
 
 
 def replace_github_credential(body: Any) -> dict[str, Any]:

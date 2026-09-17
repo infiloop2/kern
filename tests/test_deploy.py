@@ -2180,6 +2180,7 @@ class DeployUnitTests(unittest.TestCase):
         # Grok 1.0.5 otherwise advertises its loopback OAuth callback through
         # ACP, which no browser can reach on a remote Kern host.
         self.assertIn("GROK_LOGIN_DEVICE_FLOW=1", launcher)
+        self.assertIn("GROK_DISABLE_ZDR_INCOMPATIBLE_TOOLS=false", launcher)
 
     def test_grok_launcher_forces_noninteractive_permissions(self) -> None:
         launcher = Path("host/bootstrap/helpers/run-grok.sh").read_text()

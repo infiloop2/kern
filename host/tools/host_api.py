@@ -177,8 +177,9 @@ class Outbound(Protocol):
         *,
         allow_identifiers: bool = False,
         allow_machine_tokens: bool = False,
+        allow_longer_text: bool = False,
     ) -> str:
-        """Guard one request value, with narrow identifier and opaque-token exceptions."""
+        """Guard one value, with opt-in identifier/token exceptions and a fixed 5 KB text tier."""
         ...
 
 

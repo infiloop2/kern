@@ -18,8 +18,9 @@ from host.tools.results import (
     StreamingAsset,
 )
 from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.runway import options
 from host.tools.shared import outputs
-from host.tools.shared.inputs import ToolInputValidationError, provider_fetched_https_url
+from host.tools.shared.inputs import ToolInputValidationError
 from host.tools.shared.media import open_downloaded_audio, open_downloaded_video
 from host.tools.shared.web import (
     UnmappedProviderError,
@@ -109,14 +110,14 @@ VIDEO_DURATION_RANGES = {
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 RUNWAY_GENERATE_POLICY = (
-    "The prompt (and optional first-frame image URL or image from the agent workspace) supplied by the user or "
-    "agent is sent to Runway's Developer API to render a video, billed as "
+    "The prompt, generation settings, and optional image/video/audio inputs supplied by the user or "
+    "agent are sent to Runway's Developer API to render a video, billed as "
     "credits against the deployment's Runway organization. This action runs "
     "directly with no approval; it publishes nothing anywhere, and the result is a "
     "task id returned to active model context to poll with get_task."
 )
 RUNWAY_EDIT_POLICY = (
-    "The source video and editing-instruction prompt supplied by the user or "
+    "The source video, optional guidance keyframes, editing prompt, and output settings supplied by the user or "
     "agent are sent to Runway's Developer API (Aleph 2) to render an "
     "edited video, billed as credits against the deployment's Runway "
     "organization. This action runs directly with no approval; it publishes "
@@ -173,6 +174,7 @@ GET_TASK_OUTPUT_SCHEMA: JSONObject = outputs.obj(
         "video_url": outputs.text("Temporary video URL, present only on a SUCCEEDED video task."),
         "image_url": outputs.text("Temporary image URL, present only on a SUCCEEDED image task."),
         "audio_url": outputs.text("Temporary audio URL, present only on a SUCCEEDED audio task."),
+        "output_urls": {"type": "array", "items": {"type": "string"}, "description": "All temporary output URLs on success, including ZIP sequences and separate audio/metadata artifacts. save_video handles MP4/MOV only."},
     },
     ["message", "task_id", "task_status"],
 )
@@ -188,7 +190,7 @@ MANIFEST = ToolManifest(
             id="generate_video",
             description=(
                 "Start an async Runway video generation task from a text prompt and optional "
-                "first-frame image from a public URL or the agent workspace. Returns a "
+                "media from public URLs, existing Runway uploads, or the agent workspace. Supports keyframes and model-specific references. Returns a "
                 "task_id to poll with get_task; renders "
                 "typically take one to three minutes. This runs immediately, spends Runway "
                 "credits, and creates no public post."
@@ -196,19 +198,20 @@ MANIFEST = ToolManifest(
             data_policy=RUNWAY_GENERATE_POLICY,
             input_schema={
                 "type": "object",
-                "required": ["prompt"],
+                "required": [],
                 "properties": {
-                    "prompt": {"type": "string", "description": "What to render (up to 1000 chars)."},
+                    "prompt": {"type": "string", "description": "What to render. Gen-4/Veo: 1000 UTF-16 chars; Seedance 2.0/Fast: 3500; 2.5: 15000. Uses allow_longer_text: up to 5 KB (5120 UTF-8 bytes), subject to the model limit. Required for text-only routes except Seedance 2.5, and always for Gen-4.5/H3 Max."},
                     "model": {
                         "type": "string",
                         "enum": list(SUPPORTED_VIDEO_MODELS),
-                        "description": "Default: gen4.5 (or gen4_turbo when image_url or image_asset_id is set). gen4_turbo is image-to-video only. h3_max always generates at 768p.",
+                        "description": "Default: gen4.5 (or gen4_turbo with image inputs). gen4_turbo is image-to-video only. Select the model explicitly to follow operator preferences.",
                     },
                     "image_url": {"type": "string", "description": "Optional public HTTPS image URL used as the first frame (image-to-video)."},
                     "image_asset_id": {"type": "string", "description": "Built-in reference for a JPEG, PNG, or WebP from the agent workspace. Use at most one of image_url or image_asset_id."},
-                    "ratio": {"type": "string", "enum": list(SUPPORTED_RATIOS), "description": "Output aspect ratio: 1280:720 (default) or 720:1280. Omit for h3_max, which follows the first-frame image's aspect ratio; text-only H3 Max uses the provider's framing."},
-                    "duration_seconds": {"type": "string", "description": "Video length in seconds. Gen-4: 2-10; Seedance 2.0/Fast: 4-15; Seedance 2.5: 4-30; H3 Max: 5-15 (all default 5). Veo: only 4, 6, or 8 (default 4)."},
-                    "seed": {"type": "string", "description": "Optional integer seed. H3 Max uses Runway's default balanced prompt rewriting, so a fixed seed does not guarantee repeatable output."},
+                    "ratio": options.choice_schema(options.ALL_VIDEO_RATIOS, "Output dimensions, default 1280:720. Seedance 2.5: 480p/720p/1080p (portrait 480:854, 720:1280, 1080:1920); 2.0 also 4K; Fast only 480p/720p. Gen-4 text: landscape/portrait 720p; image also other listed Gen-4 shapes. Veo: portrait/landscape 720p or 1080p. Omit for h3_max; use resolution and a first frame for framing."),
+                    "duration_seconds": {"type": "string", "description": "Gen-4: 2-10; Seedance 2.0/Fast: 4-15; Seedance 2.5: 4-30; H3 Max: 5-15 (default 5). Seedance also accepts auto, billed at the maximum up front with unused credits refunded. Veo: 4, 6, or 8 (default 4)."},
+                    "seed": {"type": "string", "description": "Optional integer seed. H3 Max prompt_expansion_mode=disabled is also needed for repeatability."},
+                    **options.VIDEO_PROPERTIES,
                 },
                 "additionalProperties": False,
             },
@@ -226,12 +229,13 @@ MANIFEST = ToolManifest(
             data_policy=RUNWAY_EDIT_POLICY,
             input_schema={
                 "type": "object",
-                "required": ["prompt"],
+                "required": [],
                 "properties": {
                     "video_url": {"type": "string", "description": "Public HTTPS URL of the source video to edit."},
                     "video_asset_id": {"type": "string", "description": "Built-in reference for an MP4 or MOV from the agent workspace. Use exactly one of video_url or video_asset_id."},
-                    "prompt": {"type": "string", "description": "The editing instruction (up to 1000 chars), e.g. 'make it night time'."},
+                    "prompt": {"type": "string", "description": "Optional editing instruction, e.g. 'make it night time'. Uses allow_longer_text: up to 5 KB (5120 UTF-8 bytes)."},
                     "seed": {"type": "string", "description": "Optional integer seed for reproducible output."},
+                    **options.EDIT_PROPERTIES,
                 },
                 "additionalProperties": False,
             },
@@ -249,7 +253,7 @@ MANIFEST = ToolManifest(
                 "type": "object",
                 "required": ["prompt"],
                 "properties": {
-                    "prompt": {"type": "string", "description": "What to render (up to 1000 chars)."},
+                    "prompt": {"type": "string", "description": "What to render (up to 1000 chars). Uses allow_longer_text: a 5 KB (5120 UTF-8 bytes) guard ceiling; the model character limit still applies."},
                     "model": {"type": "string", "enum": list(IMAGE_MODELS), "description": "Default gpt_image_2_5_sunburst; choose gpt_image_2_5_flare for faster everyday generation."},
                     "ratio": {"type": "string", "enum": list(IMAGE_RATIOS), "description": "Output resolution: square 1920:1920 (default), landscape 1920:1280, or portrait 1280:1920."},
                     "quality": {"type": "string", "enum": list(IMAGE_QUALITIES), "description": "Rendering quality (default low); higher quality spends more Runway credits."},
@@ -334,22 +338,27 @@ MANIFEST = ToolManifest(
         ),
     ), {
         "generate_video": {
-            "prompt": guarded_input(),
+            "prompt": guarded_input(allow_longer_text=True),
             "model": validated_input("One of the listed choices."),
             "image_url": guarded_input(),
             "image_asset_id": validated_input("Staged image reference; tool ownership, expiry and supported image format checked."),
             "ratio": validated_input("One of the listed choices."),
+            **{key: (guarded_input() if key in {"prompt_images", "reference_images", "reference_videos", "reference_audio", "video_url", "negative_prompt"}
+                     else validated_input("Validated for the selected model; workspace references also check media type."))
+               for key in options.VIDEO_PROPERTIES},
             "duration_seconds": validated_input("Integer within the selected model’s documented duration range or fixed choices."),
             "seed": validated_input("Integer from 0 to 4294967295."),
         },
         "edit_video": {
             "video_url": guarded_input(),
             "video_asset_id": validated_input("Staged video reference; tool ownership, expiry and supported video format checked."),
-            "prompt": guarded_input(),
+            "prompt": guarded_input(allow_longer_text=True),
+            **{key: (guarded_input() if key == "keyframes" else validated_input("Validated Aleph setting."))
+               for key in options.EDIT_PROPERTIES},
             "seed": validated_input("Integer from 0 to 4294967295."),
         },
         "generate_image": {
-            "prompt": guarded_input(),
+            "prompt": guarded_input(allow_longer_text=True),
             "model": validated_input("One of the listed choices."),
             "ratio": validated_input("One of the listed choices."),
             "quality": validated_input("One of the listed choices."),
@@ -404,15 +413,15 @@ MANIFEST = ToolManifest(
             DataSummaryCard(
                 title="What leaves this host",
                 points=(
-                    DataSummaryPoint(label="Generation requests", text="The prompt or speech text, generation options (model, ratio, duration, quality, voice, stability, style, speed, seed), and any public image or video URL given as input go to Runway. These free-text values (prompt, speech text, external media URL) first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before anything is sent."),
-                    DataSummaryPoint(label="Workspace media", text="When an image or video from the agent workspace is used as an input, its bytes and original filename upload to Runway. Its local workspace path is not sent."),
+                    DataSummaryPoint(label="Generation requests", text="The prompt or speech text, generation options (including model, dimensions, duration, audio, output format, quality, voice, and seed), and image/video/audio input URLs go to Runway. These free-text values (prompt, speech text, external media URL) first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before anything is sent."),
+                    DataSummaryPoint(label="Workspace media", text="When an image or video file from the agent workspace is used as an input, its bytes and original filename upload to Runway. Its local workspace path is not sent. Audio references use public HTTPS URLs or existing Runway upload URIs; workspace audio staging is not available."),
                 ),
             ),
             DataSummaryCard(
                 title="Where it can go",
                 points=(
                     DataSummaryPoint(label="Runway models", text="Every request first goes to Runway. Gen-4.5, Gen-4 Turbo, and Aleph 2 generations use Runway's own models."),
-                    DataSummaryPoint(label="Third-party video models", text="When the agent explicitly selects Google Veo 3.1, ByteDance Seedance 2.0/2.5, or fal's MiniMax H3 Max, Runway sends that provider the prompt, output ratio or resolution and duration, optional seed, and any first-frame image. Kern does not let Runway silently choose one of these models."),
+                    DataSummaryPoint(label="Third-party video models", text="When the agent explicitly selects Google Veo 3.1, ByteDance Seedance 2.0/2.5, or fal's MiniMax H3 Max, Runway sends that provider the prompt, generation settings, and any supplied keyframes or reference images, videos, and audio. Kern does not let Runway silently choose one of these models."),
                     DataSummaryPoint(label="Image and speech models", text="For image generation, Runway sends the prompt, ratio, and quality to OpenAI's GPT Image 2.5 Sunburst or Flare. For speech generation, Runway sends the speech text, selected voice, and optional delivery settings to ElevenLabs Multilingual v2 or Eleven v3."),
                 ),
             ),
@@ -444,13 +453,22 @@ MANIFEST = ToolManifest(
             ),
         ),
     ),
-    # Nothing to add beyond the description: it drives this tool on its own.
-    agent_notes="",
+    agent_notes=(
+        "Video inputs use shared {uri or asset_id} media objects. prompt_images adds position first/last; "
+        "Seedance unpositioned images use reference mode. Choose Seedance resolution with ratio pixel dimensions; "
+        "H3 Max uses resolution 480p/768p and no ratio. New model-specific options are omitted unless selected. "
+        "Seedance video input uses generate_video; Aleph uses edit_video. Public URL media dimensions and "
+        "combined durations are validated by Runway. Prompt fields use allow_longer_text (5 KB/5120 UTF-8 bytes); other free text/URLs keep the 1024-byte guard. "
+        "Use staged workspace files instead of inline base64. get_task.output_urls returns every artifact; "
+        "save_video handles MP4/MOV, not ZIP frame sequences. Non-MP4 output formats can cost extra."
+    ),
 )
 
 
-def _duration_seconds(tool_input: JSONObject, model: str) -> int:
+def _duration_seconds(tool_input: JSONObject, model: str) -> int | str:
     value = tool_input.get("duration_seconds")
+    if value == "auto" and model in options.SEEDANCE_MODELS:
+        return "auto"
     if value is None:
         return 4 if model in {"veo3.1", "veo3.1_fast"} else DEFAULT_DURATION_SECONDS
     if isinstance(value, str) and value.strip().isascii() and value.strip().isdecimal():
@@ -512,86 +530,130 @@ def _prompt_text(tool_input: JSONObject, api: HostAPI) -> str:
     # render of an input the agent did not ask for.
     if len(prompt) > MAX_PROMPT_CHARS:
         raise ToolInputValidationError(f"Runway prompt must be at most {MAX_PROMPT_CHARS} characters.")
-    return api.outbound.guard_request_parameter_string(prompt)
-
-
-def _https_url(tool_input: JSONObject, key: str, api: HostAPI) -> str:
-    return provider_fetched_https_url(tool_input, key, api, provider="Runway")
+    return api.outbound.guard_request_parameter_string(prompt, allow_longer_text=True)
 
 
 def _generation_request(
-    api: HostAPI, tool_input: JSONObject, staged_image_uri: str | None = None
+    api: HostAPI, tool_input: JSONObject, uploads: dict[str, str]
 ) -> tuple[str, JSONObject]:
-    """Build the (endpoint, body) for generate_video, routing to image- or
-    text-to-video by whether a first-frame image was supplied."""
-    extra = set(tool_input) - {
-        "prompt", "model", "image_url", "image_asset_id", "ratio", "duration_seconds", "seed"
-    }
-    if extra:
-        raise ToolInputValidationError(
-            "Runway generate_video only supports prompt, model, image_url, image_asset_id, ratio, duration_seconds, and seed."
-        )
-    prompt = _prompt_text(tool_input, api)
-    has_url = tool_input.get("image_url") is not None
-    has_asset = tool_input.get("image_asset_id") is not None
-    if has_url and has_asset:
-        raise ToolInputValidationError(
-            "Runway generate_video supports at most one of image_url or image_asset_id."
-        )
-    prompt_image: str | None = None
-    if has_url:
-        prompt_image = _https_url(tool_input, "image_url", api)
-    elif has_asset:
-        asset_id = tool_input.get("image_asset_id")
-        if not isinstance(asset_id, str) or not asset_id:
-            raise ToolInputValidationError(
-                "Runway tool_input.image_asset_id must be a non-empty string."
-            )
-        prompt_image = staged_image_uri or "runway://pending"
-    has_image = prompt_image is not None
-    default_model = DEFAULT_IMAGE_MODEL if has_image else DEFAULT_TEXT_MODEL
-    model = _string_choice(tool_input, "model", SUPPORTED_VIDEO_MODELS, default_model)
+    """Validate the entire request before uploading any workspace media."""
+    allowed = {"prompt", "model", "image_url", "image_asset_id", "ratio", "duration_seconds", "seed", *options.VIDEO_PROPERTIES}
+    if set(tool_input) - allowed:
+        raise ToolInputValidationError("Runway generate_video received unsupported fields.")
+    image_keys = [k for k in ("image_url", "image_asset_id", "prompt_images") if tool_input.get(k) is not None]
+    if len(image_keys) > 1:
+        raise ToolInputValidationError("Runway generate_video supports at most one of image_url, image_asset_id, or prompt_images.")
+    video_keys = [k for k in ("video_url", "video_asset_id") if tool_input.get(k) is not None]
+    if len(video_keys) > 1 or (video_keys and image_keys):
+        raise ToolInputValidationError("Runway video input cannot be combined with image keyframes or a second video source.")
+    has_image = bool(image_keys)
+    model = _string_choice(tool_input, "model", SUPPORTED_VIDEO_MODELS, DEFAULT_IMAGE_MODEL if has_image else DEFAULT_TEXT_MODEL)
+    seedance = model in options.SEEDANCE_MODELS
+    veo = model in {"veo3.1", "veo3.1_fast"}
     if not has_image and model in IMAGE_ONLY_VIDEO_MODELS:
-        raise ToolInputValidationError(
-            f"Runway model {model} is image-to-video only; supply image_url or image_asset_id, or pick another model."
-        )
-    duration = _duration_seconds(tool_input, model)
-    seed = _optional_seed(tool_input)
-    body: JSONObject = {"model": model, "promptText": prompt, "duration": duration}
+        raise ToolInputValidationError(f"Runway model {model} is image-to-video only; supply image_url, image_asset_id, or prompt_images.")
+    if video_keys and not seedance:
+        raise ToolInputValidationError("Runway generate_video video input requires a Seedance model; use edit_video for Aleph.")
+    mode = None
+    if "mode" in tool_input:
+        if model != "seedance2_5" or not video_keys:
+            raise ToolInputValidationError("Runway mode requires Seedance 2.5 video input.")
+        mode = options.choice(tool_input["mode"], ("reference", "extend", "edit"), "mode")
+    prompt_optional = model == "seedance2_5" or (has_image and model != "gen4.5" and model != "h3_max") or bool(video_keys)
+    body: JSONObject = {"model": model, "duration": _duration_seconds(tool_input, model)}
+    if "prompt" in tool_input or not prompt_optional or mode in {"extend", "edit"}:
+        limit = 15000 if model == "seedance2_5" else 3500 if seedance else None if model == "h3_max" else 1000
+        body["promptText"] = options.text(tool_input.get("prompt"), "prompt", api, limit, allow_longer_text=True)
     if model == "h3_max":
         if tool_input.get("ratio") is not None:
-            raise ToolInputValidationError(
-                "Runway h3_max does not accept ratio; omit it and use a first-frame image to control the aspect ratio."
-            )
-        body["resolution"] = "768p"
+            raise ToolInputValidationError("Runway h3_max does not accept ratio; omit it and use a first-frame image to control the aspect ratio.")
+        body["resolution"] = _string_choice(tool_input, "resolution", ("480p", "768p"), "768p")
+        if "prompt_expansion_mode" in tool_input:
+            body["promptExpansionMode"] = options.choice(tool_input["prompt_expansion_mode"], ("disabled", "balanced", "quality"), "prompt_expansion_mode")
     else:
-        body["ratio"] = _string_choice(tool_input, "ratio", SUPPORTED_RATIOS, DEFAULT_RATIO)
+        if "resolution" in tool_input or "prompt_expansion_mode" in tool_input:
+            raise ToolInputValidationError("Runway resolution and prompt_expansion_mode require h3_max; Seedance resolution is selected through ratio.")
+        ratios = options.MODEL_RATIOS.get(model, options.GEN4_IMAGE_RATIOS if has_image else SUPPORTED_RATIOS)
+        if mode in {"extend", "edit"}:
+            if "ratio" in tool_input:
+                raise ToolInputValidationError("Runway Seedance extend/edit follows the source aspect ratio; omit ratio.")
+            if mode == "edit" and body["duration"] != "auto":
+                raise ToolInputValidationError("Runway Seedance edit requires duration_seconds=auto.")
+        else:
+            body["ratio"] = _string_choice(tool_input, "ratio", ratios, DEFAULT_RATIO)
+    if mode is not None:
+        body["mode"] = mode
+    if "audio" in tool_input:
+        if not (seedance or veo) or not isinstance(tool_input["audio"], bool):
+            raise ToolInputValidationError("Runway audio must be a boolean and requires Seedance or Veo.")
+        body["audio"] = tool_input["audio"]
+    if "negative_prompt" in tool_input:
+        if not veo:
+            raise ToolInputValidationError("Runway negative_prompt requires Veo.")
+        body["negativePrompt"] = options.text(tool_input["negative_prompt"], "negative_prompt", api)
+    options.format_options(tool_input, body, model)
     endpoint = TEXT_TO_VIDEO_ENDPOINT
-    if prompt_image is not None:
+    if has_image:
         endpoint = IMAGE_TO_VIDEO_ENDPOINT
-        body["promptImage"] = prompt_image
+        if "prompt_images" in image_keys:
+            maximum = 30 if model == "seedance2_5" else 9 if seedance else 2 if (veo or model == "h3_max") else 1
+            frames = options.media_list(tool_input["prompt_images"], "image", api, uploads, maximum=maximum, extras=("position",))
+            positions: list[str] = []
+            for frame in frames:
+                if "position" not in frame:
+                    if not seedance:
+                        raise ToolInputValidationError("Runway image keyframes require position.")
+                    continue
+                positions.append(options.choice(frame["position"], ("first", "last") if (seedance or veo or model == "h3_max") else ("first",), "position"))
+            if positions and (len(positions) != len(frames) or len(set(positions)) != len(positions)):
+                raise ToolInputValidationError("Runway keyframes cannot mix with unpositioned references or repeat positions.")
+            if model == "h3_max" and "first" not in positions:
+                raise ToolInputValidationError("Runway H3 Max last frame requires a first frame.")
+            body["promptImage"] = cast(list, frames)
+        else:
+            body["promptImage"] = options.media_uri({"uri": tool_input.get("image_url"), "asset_id": tool_input.get("image_asset_id")}, "image", api, uploads)
+    if video_keys:
+        endpoint = VIDEO_TO_VIDEO_ENDPOINT
+        body["promptVideo"] = options.media_uri({"uri": tool_input.get("video_url"), "asset_id": tool_input.get("video_asset_id")}, "video", api, uploads)
+    for key, wire, kind in (("reference_images", "references", "image"), ("reference_videos", "referenceVideos", "video"), ("reference_audio", "referenceAudio", "audio")):
+        if key not in tool_input:
+            continue
+        if not seedance or (has_image and kind != "audio"):
+            raise ToolInputValidationError(f"Runway {key} requires Seedance text/video-to-video (audio is also accepted with image input).")
+        maximum = 30 if model == "seedance2_5" else 9 if kind == "image" else 30
+        references = options.media_list(tool_input[key], kind, api, uploads, maximum=maximum)
+        if kind != "image":
+            for reference in references:
+                reference["type"] = kind
+        body[wire] = cast(list, references)
+    seed = _optional_seed(tool_input)
     if seed is not None:
         body["seed"] = seed
     return endpoint, body
 
 
-def _edit_request(api: HostAPI, tool_input: JSONObject, video_uri: str | None = None) -> JSONObject:
-    extra = set(tool_input) - {"video_url", "video_asset_id", "prompt", "seed"}
-    if extra:
-        raise ToolInputValidationError(
-            "Runway edit_video only supports video_url, video_asset_id, prompt, and seed."
-        )
-    has_url = tool_input.get("video_url") is not None
-    has_asset = tool_input.get("video_asset_id") is not None
-    if has_url == has_asset:
-        raise ToolInputValidationError(
-            "Runway edit_video requires exactly one of video_url or video_asset_id."
-        )
-    if video_uri is None:
-        video_uri = _https_url(tool_input, "video_url", api)
-    prompt = _prompt_text(tool_input, api)
+def _edit_request(api: HostAPI, tool_input: JSONObject, uploads: dict[str, str]) -> JSONObject:
+    if set(tool_input) - {"video_url", "video_asset_id", "prompt", "seed", *options.EDIT_PROPERTIES}:
+        raise ToolInputValidationError("Runway edit_video received unsupported fields.")
+    if (tool_input.get("video_url") is None) == (tool_input.get("video_asset_id") is None):
+        raise ToolInputValidationError("Runway edit_video requires exactly one of video_url or video_asset_id.")
+    body: JSONObject = {
+        "model": EDIT_MODEL,
+        "videoUri": options.media_uri({"uri": tool_input.get("video_url"), "asset_id": tool_input.get("video_asset_id")}, "video", api, uploads),
+    }
+    if "prompt" in tool_input:
+        body["promptText"] = options.text(tool_input["prompt"], "prompt", api, allow_longer_text=True)
+    if "keyframes" in tool_input:
+        body["keyframes"] = cast(list, options.keyframes(tool_input["keyframes"], api, uploads))
+    if "ratio" in tool_input:
+        ratio = tool_input["ratio"]
+        if not isinstance(ratio, str) or not re.fullmatch(r"[1-9][0-9]{0,4}:[1-9][0-9]{0,4}", ratio):
+            raise ToolInputValidationError("Runway Aleph ratio must be width:height pixel dimensions.")
+        body["ratio"] = ratio
+    if "target_aspect_ratio" in tool_input:
+        body["targetAspectRatio"] = options.choice(tool_input["target_aspect_ratio"], options.ASPECT_RATIOS, "target_aspect_ratio")
+    options.format_options(tool_input, body, EDIT_MODEL)
     seed = _optional_seed(tool_input)
-    body: JSONObject = {"model": EDIT_MODEL, "videoUri": video_uri, "promptText": prompt}
     if seed is not None:
         body["seed"] = seed
     return body
@@ -741,6 +803,8 @@ def _task_result(response: JSONObject, output_kind: str = "video") -> JSONObject
     }
     if task_status == "SUCCEEDED":
         output = response.get("output")
+        if isinstance(output, list):
+            result["output_urls"] = [url for url in output if isinstance(url, str) and _is_public_https_url(url)]
         output_url = ""
         if isinstance(output, list) and output and isinstance(output[0], str):
             output_url = output[0]
@@ -864,40 +928,19 @@ class RunwayTool:
                 "authorization": f"Bearer {api_key}",
                 "x-runway-version": RUNWAY_API_VERSION,
             }
-            if action == "generate_video":
-                asset_id = tool_input.get("image_asset_id")
-                endpoint, body = _generation_request(api, tool_input)
-                if asset_id is None:
-                    return self._create_task(endpoint, body, headers, cast(str, body["model"]), "video")
-                runway_uri = _upload_staged_asset(cast(str, asset_id), headers, api, kind="image")
-                endpoint, body = _generation_request(api, tool_input, runway_uri)
+            if action in {"generate_video", "edit_video"}:
+                uploads: dict[str, str] = {}
+                if action == "generate_video":
+                    endpoint, body = _generation_request(api, tool_input, uploads)
+                else:
+                    endpoint, body = VIDEO_TO_VIDEO_ENDPOINT, _edit_request(api, tool_input, uploads)
+                uploaded = {asset_id: _upload_staged_asset(asset_id, headers, api, kind=kind)
+                            for asset_id, kind in uploads.items()}
+                body = cast(JSONObject, options.replace_assets(body, uploaded))
                 result = self._create_task(endpoint, body, headers, cast(str, body["model"]), "video")
                 if isinstance(result, ActionExecuted):
-                    api.assets.delete(cast(str, asset_id))
-                return result
-            if action == "edit_video":
-                asset_id = tool_input.get("video_asset_id")
-                if asset_id is None:
-                    body = _edit_request(api, tool_input)
-                    return self._create_task(
-                        VIDEO_TO_VIDEO_ENDPOINT, body, headers, EDIT_MODEL, "video"
-                    )
-                if not isinstance(asset_id, str):
-                    raise ToolInputValidationError(
-                        "Runway tool_input.video_asset_id must be a string."
-                    )
-                # Validate the full request shape before uploading, so a bad
-                # input never streams the staged video to Runway first.
-                _edit_request(api, tool_input, "runway://pending")
-                runway_uri = _upload_staged_asset(asset_id, headers, api, kind="video")
-                body = _edit_request(api, tool_input, runway_uri)
-                result = self._create_task(
-                    VIDEO_TO_VIDEO_ENDPOINT, body, headers, EDIT_MODEL, "video"
-                )
-                # Delete only after Runway confirms a task id. A malformed
-                # success response keeps the source available for a clean retry.
-                if isinstance(result, ActionExecuted):
-                    api.assets.delete(asset_id)
+                    for asset_id in uploads:
+                        api.assets.delete(asset_id)
                 return result
             if action in {"save_video", "save_audio"}:
                 if set(tool_input) != {"task_id"} or not isinstance(tool_input.get("task_id"), str):

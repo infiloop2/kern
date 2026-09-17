@@ -717,12 +717,19 @@ def _load_older_history(frame: Any, *, expected_turns: int) -> None:
         button.evaluate(
             """element => {
               const loader = element.closest("#history-loader");
-              const before = loader.dataset.oldestSeq;
+              let before = null;
               return new Promise((resolve, reject) => {
                 const finished = () => loader.hidden || (
-                  loader.dataset.oldestSeq !== before && !element.disabled
+                  before !== null && loader.dataset.oldestSeq !== before && !element.disabled
                 );
                 const finish = () => {
+                  // Auto-loading on scroll may have disabled the button before
+                  // this callback. Start only when it can accept a click, and
+                  // capture that cursor atomically with the click.
+                  if (!loader.hidden && !element.disabled && before === null) {
+                    before = loader.dataset.oldestSeq;
+                    element.click();
+                  }
                   if (!finished()) return;
                   clearTimeout(timer);
                   observer.disconnect();
@@ -738,7 +745,6 @@ def _load_older_history(frame: Any, *, expected_turns: int) -> None:
                   subtree: true,
                   attributeFilter: ["hidden", "data-oldest-seq", "disabled"],
                 });
-                element.click();
                 finish();
               });
             }"""

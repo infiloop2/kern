@@ -23,7 +23,7 @@ import {
 import { refreshAgentProcesses } from "./processes.js";
 import { agentLog, hostDiagnosticLog, netLog, toolLog, toggleHostDiagnosticFilter, toggleNetDeniedFilter } from "./logs.js";
 import {
-  addDomainRule, addGithubRepo, deleteGithubCredential,
+  addDomainRule, addGithubRepo, deleteGithubCredential, saveXaiVideoStorage, deleteXaiVideoStorage,
   loadPolicy, recheckGithubAudit, removeDomainRule,
   removeGithubRepo, resetLinkedAccount, connectBedrockCredentials, setProviderWebSearch, setGithubBlockMainPushes,
   setGithubCredential, setGithubRequireApproval,
@@ -1309,6 +1309,8 @@ document.addEventListener("click", event => {
     "add-domain-rule": () => addDomainRule(),
     "remove-domain-rule": () => removeDomainRule(button.dataset.domain),
     "set-github-credential": () => setGithubCredential(),
+    "save-xai-video-storage": () => saveXaiVideoStorage(),
+    "delete-xai-video-storage": () => deleteXaiVideoStorage(),
     "recheck-github-audit": () => recheckGithubAudit(),
     "delete-github-credential": () => deleteGithubCredential(),
     "toggle-net-denied": () => toggleNetDeniedFilter(),

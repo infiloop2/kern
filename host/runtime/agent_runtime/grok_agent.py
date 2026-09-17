@@ -67,7 +67,8 @@ ACCOUNT_HELPER_TIMEOUT_SECONDS = 10
 PROTOCOL_VERSION = 1
 # The one auth method Kern uses: the Grok subscription login. An API-key login
 # would bill a metered console balance instead of the operator's subscription,
-# and api.x.ai is denied by the network integration, so it is not offered.
+# so it is not offered. Imagine stills and video may use api.x.ai with this
+# OAuth token; chat completions on that host stay denied.
 AUTH_METHOD_ID = "grok.com"
 # The only login mode this host can complete: xAI shows the operator a code in
 # their own browser and polls for approval, so nothing has to listen here.

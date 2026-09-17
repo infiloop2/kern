@@ -64,13 +64,15 @@ class EventPayloadTests(unittest.TestCase):
                 cur.fetchone.return_value = (1,)
                 state.append_agent_event(cur, "thread.context_added", "thread-1", {
                     "message": "Memories injected.", "memory_page_ids": page_ids,
+                    "memory_recall_details": "Current query: screenshot",
                 })
                 cur.execute.assert_called_once()
                 sql, parameters = cur.execute.call_args.args
                 self.assertIn("memory_page_ids", sql)
                 self.assertEqual(sql.count("%s"), len(parameters))
-                self.assertIsInstance(parameters[-1], pgclient.Jsonb)
-                self.assertEqual(parameters[-1].value, page_ids)
+                self.assertIsInstance(parameters[-2], pgclient.Jsonb)
+                self.assertEqual(parameters[-2].value, page_ids)
+                self.assertEqual(parameters[-1], "Current query: screenshot")
 
 
 class StateStorageTests(unittest.TestCase):
@@ -1615,6 +1617,27 @@ class StateStorageTests(unittest.TestCase):
         self.assertIsNone(state.read_proxy_github_token())
         with self.assertRaises(ValueError):
             state.save_proxy_github_token("")
+
+    def test_xai_video_storage_persistence_encryption_and_roles(self) -> None:
+        value = dict(bucket="test-videos", region="us-east-1", access_key_id="AKIA" + "A" * 16, secret_access_key="a" * 40)
+        self.assertEqual(state.xai_video_storage_metadata(), {"configured": False})
+        state.save_xai_video_storage(value)
+        self.assertEqual(state.read_xai_video_storage(), value)
+        self.assertEqual(state.xai_video_storage_metadata(), {"configured": True, "bucket": "test-videos", "region": "us-east-1"})
+        with db.transaction() as cur:
+            cur.execute("SELECT secret_access_key_encrypted FROM xai_video_storage")
+            encrypted = cur.fetchone()[0]
+            self.assertTrue(encrypted.startswith(secretbox.PREFIX))
+            self.assertNotIn(value["secret_access_key"], encrypted)
+            for role, operation, allowed in (("kern-proxy", "SELECT", True), ("kern-proxy", "INSERT", False), ("kern-proxy", "UPDATE", False), ("kern-proxy", "DELETE", False), ("kern-agent-network", "SELECT", False), ("kern-tools", "SELECT", False)):
+                cur.execute("SELECT has_table_privilege(%s, 'xai_video_storage', %s)", (role, operation))
+                self.assertEqual(cur.fetchone(), (allowed,), (role, operation))
+        replacement = dict(value, bucket="new-videos", secret_access_key="b" * 40)
+        state.save_xai_video_storage(replacement)
+        self.assertEqual(state.read_xai_video_storage(), replacement)
+        state.save_xai_video_storage(None)
+        self.assertIsNone(state.read_xai_video_storage())
+        self.assertEqual(state.xai_video_storage_metadata(), {"configured": False})
 
     def test_bedrock_proxy_reads_the_one_validated_row(self) -> None:
         self.assertIsNone(state.read_bedrock_proxy_credential())

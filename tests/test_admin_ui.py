@@ -598,22 +598,15 @@ class AdminUiStaticTests(unittest.TestCase):
         # are the operator-facing point of this integration.
         self.assertIn("auth.x.ai", catalog)
         self.assertIn("cli-chat-proxy.grok.com", catalog)
-        self.assertIn("metered developer API stays blocked", catalog)
-        self.assertIn("Run Grok Build chats and tasks", catalog)
+        self.assertIn("api.x.ai", catalog)
+        self.assertNotIn("vidgen.x.ai", catalog)
         self.assertIn("Creates and resumes Grok Build sessions", catalog)
         self.assertIn("accepts live steering", catalog)
-        for url in (
-            "https://console.x.ai/",
-            "https://docs.x.ai/build/modes-and-commands#core-tui-commands",
-            "https://docs.x.ai/developers/tools/x-search",
-            "https://docs.x.ai/developers/tools/image-generation",
-            "https://docs.x.ai/developers/faq/security#does-xai-train-on-customers-api-requests",
-            "https://docs.x.ai/build/enterprise#privacy--data-lifecycle",
-            "https://grok.com/?_s=data",
-            "https://x.com/settings/grok_settings",
-            "https://x.ai/legal/faq#how-do-i-select-whether-my-content-is-used-for-model-training",
-        ):
-            self.assertIn(url, catalog)
+        for contract in ("Opt out", "s3:PutObject", "s3:GetObject", "Block Public Access", "grok-videos/", "GROK_DISABLE_ZDR_INCOMPATIBLE_TOOLS=false", "does not change", "15-minute"):
+            self.assertIn(contract, catalog)
+        self.assertIn("https://docs.x.ai/build/settings/zdr-video-storage", catalog)
+        self.assertIn("/v1/network-tools/xai-video-storage", network)
+        self.assertIn("save-xai-video-storage", app)
 
         # The shared web-search control stays parameterised by provider, but
         # Grok is not one of its providers: xAI ships no toggle at all.
@@ -635,8 +628,6 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("shapes that stay on xAI/X infrastructure", catalog)
         self.assertIn("xAI executes keyword, semantic, user, and thread search", catalog)
         self.assertIn("this host does not contact x.com or a third-party search provider", catalog)
-        self.assertIn("Grok Build 1.0.5 does not emit either declaration", catalog)
-        self.assertIn("media generation is not yet usable from the Grok runtime", catalog)
         # Nothing in the xAI entry may still offer the removed control. The
         # capability block described it as optional after the toggle was gone,
         # which is the shape this regression takes.

@@ -1,23 +1,8 @@
-"""xAI managed integration: static contract.
+"""xAI managed integration: pinned Grok inference and private S3 video output.
 
-Opens the xAI OAuth path and a narrow allowlist of chat-proxy endpoints, pinned
-to the configured account by the bearer token's account claim. X search with
-X-only filters, text-to-image generation, and a bare reserved video-generation
-declaration are allowed; web search, hosted browsing, code execution,
-collections search, remote MCP servers, unknown tools, and media shapes with
-external inputs remain denied. The integration exposes no options.
-
-The chat proxy also serves blob storage, remote session registration and
-search, workspace sync, and cloud sandboxes. Those routes would move agent
-files and conversation history off the host for reasons unrelated to inference,
-so the integration allows only the endpoints a login plus inference needs.
-
-Subscription inference runs against ``cli-chat-proxy.grok.com``. The metered
-developer API (``api.x.ai``) is deliberately not opened: it bills per token
-against a console credit balance rather than the operator's Grok subscription,
-so allowing it would let a misconfigured runtime silently spend money.
+Storage credentials live separately in the encrypted admin database. Network
+configuration remains enablement-only; images require no storage configuration.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -34,16 +19,17 @@ MANIFEST = IntegrationManifest(
     integration_id="xai",
     display_name="xAI",
     description=(
-        "Grok runtime access to the xAI CLI chat proxy under the pinned account, plus the "
-        "xAI OAuth login path. The metered developer API is not opened, so inference draws "
-        "on the operator's Grok subscription. X search with X-only filters, text-to-image "
-        "generation, and a bare reserved video-generation declaration are allowed; web "
-        "search, code execution, hosted browsing, collections search, remote MCP, unknown "
-        "tools, and media declarations with external inputs remain denied. The integration "
-        "has no options."
+        "Grok chat, X search and Imagine images under the pinned OAuth account. "
+        "Videos require operator-configured private S3 storage; Kern supplies signed "
+        "upload/download URLs without exposing AWS credentials to Grok. Hosted web "
+        "search, remote MCP, code execution, external media URLs, and other developer "
+        "API routes remain blocked."
     ),
     owned_apexes=("x.ai", "grok.com"),
     denial_reasons=(
+        DenialReason("xai_video_response_invalid", "The video result could not be decoded or its storage URL could not be verified. Check that storage was not changed during generation and the upload URL has not expired; inspect the provider job error before starting another video."),
+        DenialReason("xai_video_storage_required", "Configure Video storage under Home > Grok with a private S3 bucket, region and IAM access key pair. Images do not require this. Keep coding-data retention opted out."),
+        DenialReason("xai_media_input_denied", "Use the supported Imagine request fields and inline media references. External media URLs cannot be fetched through xAI."),
         DenialReason(
             "xai_account_unavailable",
             "The pinned xAI account identity is not available yet (the Grok login has not "
@@ -93,19 +79,6 @@ MANIFEST = IntegrationManifest(
 
 @dataclass(frozen=True)
 class XaiIntegration:
-    """When enabled, the Grok runtime reaches the xAI CLI chat proxy under the
-    pinned account. There are no options: X search with X-only filters,
-    text-to-image generation, and a bare reserved video-generation declaration
-    are admitted, while every other Grok server-side tool or shape — web search
-    included — is denied, so enablement is the whole configuration.
-
-    Web search is not offered because Grok's has no shape narrow enough to
-    offer. It searches and browses live pages in one indivisible capability,
-    the page fetch happens on xAI's infrastructure rather than here, and the
-    URL fetched is the model's choice — so allowing it would open an egress
-    path this host's network policy cannot see, and there is no cache-backed
-    mode (as OpenAI has) to allow instead."""
-
     enabled: bool
 
     def to_json(self) -> dict[str, Any]:

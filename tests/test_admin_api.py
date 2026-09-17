@@ -653,7 +653,7 @@ class ThreadAdmissionHelpersTests(unittest.TestCase):
         ]
         pages[3] = {**pages[3], "page_id": "thread-7", "scope": "self"}
         with patch.object(workspace_api_proxy, "recall_memory", return_value={"pages": pages}):
-            recalled = admin_threads._recalled_memory_pages("thread-7", "hello")
+            recalled, details = admin_threads._recalled_memory_pages("thread-7", "hello")
         self.assertEqual(len(recalled), 7)
         self.assertEqual(
             [page["page_id"] for page in recalled],
@@ -759,6 +759,25 @@ class AdminApiIntegrationTests(unittest.TestCase):
             request.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read())
+
+    def test_xai_video_storage_admin_http_round_trip(self) -> None:
+        path = "/v1/network-tools/xai-video-storage"
+        value = dict(bucket="test-videos", region="us-east-1", access_key_id="AKIA" + "A" * 16, secret_access_key="a" * 40)
+        for method, body in (("GET", None), ("PUT", value), ("DELETE", None)):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(method, path, body, auth=False)
+            self.assertEqual(error.exception.code, 401)
+        self.assertEqual(self.request("GET", path), (200, {"configured": False}))
+        expected = {"configured": True, "bucket": "test-videos", "region": "us-east-1"}
+        self.assertEqual(self.request("PUT", path, value), (200, expected))
+        self.assertEqual(state.read_xai_video_storage(), value)
+        self.assertEqual(self.request("GET", path), (200, expected))
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request("PUT", path, {"bucket": "partial"})
+        self.assertEqual(error.exception.code, 400)
+        self.assertEqual(state.read_xai_video_storage(), value)
+        self.assertEqual(self.request("DELETE", path), (200, {"configured": False}))
+        self.assertIsNone(state.read_xai_video_storage())
 
     def raw_request(self, request: bytes) -> bytes:
         return raw_admin_request(self.admin_socket_path, request)
@@ -2308,7 +2327,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         notice = events["events"][1]
         self.assertEqual(notice["event_type"], "thread.context_added")
-        self.assertEqual(notice["payload"], {
+        self.assertIn("memory_recall_details", notice["payload"])
+        self.assertEqual({key: value for key, value in notice["payload"].items() if key != "memory_recall_details"}, {
             "message": "Self identity and 2 memories injected.",
             "memory_page_ids": ["thread-t1", "playwright-browser"],
         })
@@ -2324,6 +2344,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         context = history["events"][0]
         self.assertEqual(context["type"], "context")
         self.assertEqual(context["memory_page_ids"], ["thread-t1", "playwright-browser"])
+        self.assertEqual(context["memory_recall_details"], notice["payload"]["memory_recall_details"])
         self.assertEqual(context["event_id"], notice["event_id"])
         self.assertIsNotNone(history["older_cursor"])
         _, previous = self.request(
@@ -2348,7 +2369,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertNotIn("outside-cap", launch.call_args.args[1])
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(len(events["events"]), 2)
-        self.assertEqual(events["events"][-1]["payload"], {
+        self.assertEqual({key: value for key, value in events["events"][-1]["payload"].items() if key != "memory_recall_details"}, {
             "message": "Self identity and 1 memory injected.",
             "memory_page_ids": ["thread-t1"],
         })

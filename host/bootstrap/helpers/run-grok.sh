@@ -78,5 +78,6 @@ exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
   REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
   GROK_DISABLE_AUTOUPDATER=1 \
+  GROK_DISABLE_ZDR_INCOMPATIBLE_TOOLS=false \
   GROK_LOGIN_DEVICE_FLOW=1 \
   /usr/local/bin/grok --disable-web-search agent --always-approve --no-leader stdio

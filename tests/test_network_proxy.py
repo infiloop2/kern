@@ -1553,20 +1553,24 @@ class OpenAIAccountBindingTests(unittest.TestCase):
 
 
 class XaiRouteTests(unittest.TestCase):
-    """The xAI integration opens exactly two hosts under its owned apexes: the
-    OAuth issuer and the subscription chat proxy. Everything else beneath
-    ``x.ai`` and ``grok.com`` is denied by the route table — most importantly
-    ``api.x.ai``, the metered developer API, which bills console credits
-    instead of the operator's Grok subscription."""
+    """The xAI integration opens login, the subscription chat proxy, and the
+    observed Grok Build Imagine routes. Everything else beneath ``x.ai`` and
+    ``grok.com`` is denied by the route table, including chat completions and
+    tokenize-text on ``api.x.ai``."""
 
     CONFIG = XaiIntegration(enabled=True)
     ACCOUNT = "user-pinned"
+
+    def setUp(self):
+        storage = patch.object(xai_guard.state, "xai_video_storage_metadata", return_value={"configured": True, "region": "us-east-1"})
+        storage.start()
+        self.addCleanup(storage.stop)
 
     def deny(self, host: str, *, method: str = "POST", path: str = "/v1/responses") -> str | None:
         headers = [("Authorization", xai_bearer(self.ACCOUNT))]
         with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
             return xai_guard.request_denied(
-                self.CONFIG, method, host, path, "", headers, b""
+                self.CONFIG, method, host, path, "", headers, b"{}" if method == "POST" else b""
             )
 
     def test_auth_host_is_open_and_unpinned(self) -> None:
@@ -1654,17 +1658,71 @@ class XaiRouteTests(unittest.TestCase):
             "network_policy_denied",
         )
 
-    def test_metered_developer_api_is_denied(self) -> None:
-        self.assertEqual(self.deny("api.x.ai"), "network_policy_denied")
+    def test_metered_developer_api_chat_and_tokenize_stay_denied(self) -> None:
+        for path in (
+            "/v1/responses",
+            "/v1/chat/completions",
+            "/v1/tokenize-text",
+            "/v1/images/edits",
+        ):
+            self.assertEqual(self.deny("api.x.ai", path=path), "network_policy_denied", path)
+
+    def test_imagine_image_and_video_generation_are_open(self) -> None:
+        self.assertIsNone(
+            self.deny("api.x.ai", path="/v1/images/generations"),
+        )
+        self.assertIsNone(
+            self.deny("api.x.ai", path="/v1/videos/generations"),
+        )
+        video_id = "930b0d87-691b-96a6-936e-13bb4cf856d9"
+        self.assertIsNone(
+            self.deny("api.x.ai", method="GET", path=f"/v1/videos/{video_id}"),
+        )
+        self.assertEqual(
+            self.deny("api.x.ai", method="GET", path="/v1/videos/generations"),
+            "network_policy_denied",
+        )
+
+    def test_imagine_requires_the_pinned_bearer(self) -> None:
+        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+            self.assertEqual(
+                xai_guard.request_denied(
+                    self.CONFIG,
+                    "POST",
+                    "api.x.ai",
+                    "/v1/images/generations",
+                    "",
+                    [],
+                    b"{}",
+                ),
+                "xai_token_account_mismatch",
+            )
+            self.assertEqual(
+                xai_guard.request_denied(
+                    self.CONFIG,
+                    "POST",
+                    "api.x.ai",
+                    "/v1/images/generations",
+                    "",
+                    [("Authorization", "Bearer xai-not-a-jwt")],
+                    b"{}",
+                ),
+                "xai_token_account_mismatch",
+            )
+
+    def test_provider_storage_stays_closed(self) -> None:
+        self.assertEqual(self.deny("vidgen.x.ai", method="GET", path="/xai-vidgen-bucket/xai-video-930b0d87-691b-96a6-936e-13bb4cf856d9.mp4"), "network_policy_denied")
 
     def test_other_owned_hosts_are_denied(self) -> None:
-        for host in ("code.grok.com", "grok.com", "accounts.x.ai", "x.ai"):
+        for host in ("code.grok.com", "grok.com", "accounts.x.ai", "x.ai", "imgen.x.ai"):
             self.assertEqual(self.deny(host), "network_policy_denied", host)
 
     def test_host_allowed_matches_the_route_table(self) -> None:
         self.assertTrue(xai_guard.host_allowed(self.CONFIG, "cli-chat-proxy.grok.com"))
         self.assertTrue(xai_guard.host_allowed(self.CONFIG, "AUTH.X.AI"))
-        self.assertFalse(xai_guard.host_allowed(self.CONFIG, "api.x.ai"))
+        self.assertTrue(xai_guard.host_allowed(self.CONFIG, "api.x.ai"))
+        self.assertFalse(xai_guard.host_allowed(self.CONFIG, "vidgen.x.ai"))
+        self.assertFalse(xai_guard.host_allowed(self.CONFIG, "imgen.x.ai"))
 
     def test_unsupported_method_is_denied(self) -> None:
         self.assertEqual(

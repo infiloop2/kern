@@ -13,11 +13,12 @@ an automatic action bound for a public or third-party destination:
 api.outbound.guard_request_parameter_string(value)                        # public / third-party
 api.outbound.guard_request_parameter_string(value, allow_identifiers=True) # validated identifier-bearing field
 api.outbound.guard_request_parameter_string(value, allow_machine_tokens=True) # opaque provider token
+api.outbound.guard_request_parameter_string(value, allow_longer_text=True) # reviewed text field, up to 5 KB (5120 UTF-8 bytes)
 api.outbound.guard_request_parameter_string(value, allow_identifiers=True, allow_machine_tokens=True) # validated opaque token that can be identifier-shaped
 ```
 
 The default form is for values sent to a public or third-party destination.
-The two optional flags are false by default and each removes one narrow class
+The optional flags are false by default and each addresses a narrow class
 of false positive. `allow_identifiers=True` is for a field whose validated
 grammar legitimately permits identifiers, such as mailbox-search syntax
 (`from:alice@example.com`) or a numeric or hexadecimal provider token. It
@@ -29,6 +30,14 @@ cursors and GitHub revision/ref query values): it skips G3 `TOKEN_RUN` and G4
 and personal-identifier rules still apply. In particular it does not skip G18
 `ENTROPY_NEAR_KEYWORD`, whose explicit `api key` / `token` / `credential`
 context makes it a secret rule rather than a generic entropy heuristic.
+
+`allow_longer_text=True` raises only G1 LENGTH from 1,024 to 5,120 UTF-8 bytes
+(5 KB). Every other check scans the complete value; no truncation or splitting
+is performed. Runway `generate_video.prompt`, `edit_video.prompt`, and
+`generate_image.prompt` opt in. Their provider character limits still apply;
+Runway URLs, negative prompts, and speech text retain the default tier. The
+per-input integration guide identifies every enabled flag, and the shared
+parameter-guard technical notes explain the two length tiers.
 
 The tool API and managed-network helper expose these same names and semantics.
 Callers receive no limits, thresholds, guard lists, or policy objects;
@@ -104,7 +113,7 @@ Examples are drawn from the tested vectors in `tests/test_param_guard.py`:
 
 | ID | Guard | Implementation | Examples | Skipped by `allow_identifiers` |
 | --- | --- | --- | --- | --- |
-| G1 | `LENGTH` | UTF-8 byte length > **1,024** (fixed host constant) denies. Always applied; the floor that works when every other guard misses — encoding pays a size tax, never a discount. | ✗ a 3 KB email thread pasted as a query<br>✓ any value ≤ 1,024 bytes | no |
+| G1 | `LENGTH` | UTF-8 byte length > **1,024**, or **5,120** with `allow_longer_text=True` (fixed host tiers), denies. Always applied; the floor that works when every other guard misses — encoding pays a size tax, never a discount. | ✗ a 3 KB email thread pasted as a query<br>✓ any value ≤ 1,024 bytes | no |
 | G2 | `PRINTABLE` | Any character in a Unicode `C*` ("Other") category denies, except tab/newline/CR. `C*` covers `Cc` control characters (NUL, ESC, backspace), `Cf` invisible formatting characters (zero-width space U+200B, zero-width joiner, right-to-left override U+202E), `Co` private-use, `Cs` surrogates, and `Cn` unassigned codepoints. These never appear in typed text — they appear in smuggled payloads and display-spoofing tricks. Character-level rule: hex/base58 strings are ordinary printable characters and are caught by shape rules, not here. | ✗ `hello\x00world` (embedded NUL)<br>✗ `zero\u200bwidth` (invisible zero-width space between words)<br>✗ `pay\u202egnp.txt` (right-to-left override making "png" render as "gnp")<br>✓ text containing tabs and newlines | no |
 | G3 | `TOKEN_RUN` | Any whitespace-delimited token longer than **128** characters denies, unless the token is a plain `https` URL. "Plain" means no userinfo: userinfo is the login part a URL can carry before an `@` (`https://user:password@host/...`), which is how credentials hide inside an otherwise-exempt URL — those are denied (G10). Anti-smuggling rule: no query or prompt needs an unbroken token this long, but base64/hex payloads do. | ✗ `summarize dGhlIHF1YXJ0ZXJseSBib2FyZCBkZWNrIGFuZCB0aGUgYWNxdWlzaXRpb24gdGVybSBzaGVldCB3ZXJlIGF0dGFjaGVkIHRvIHRoZSB0aHJlYWQgYmVsb3cgcGxlYXNlIGtlZXAgY29uZmlkZW50aWFs` (a 152-char base64 blob — an encoded email)<br>✓ `https://en.wikipedia.org/wiki/List_of_United_States_cities_by_population?utm_source=search&utm_medium=organic&utm_campaign=summer_travel_guide` (142 chars, but a plain https URL)<br>(URLs carrying userinfo are not exempt, but they are G10's job — see its examples) | no |
 | G4 | `UNNATURAL_TOKEN` | Scored gibberish check on unbroken alphanumeric runs of **14+** chars (below that, nothing statistical separates secrets from handles). Denies on **3 of 5** signals: length ≥ 16; letter↔digit interleaving ≥ 2 transitions (humans append digits — `mrbeast6000`; machines interleave); mean character-bigram log-probability below threshold against a table built at import from the bundled common-words vocabulary (the tunable "entropy" knob, as cross-entropy against natural tokens rather than raw Shannon entropy, which is meaningless at this length); all three of lower/upper/digit classes present; no dictionary segment of 4+ chars (`iPhone15Pro` passes). Tuned to zero false positives on the checked-in handles/brands/slugs/multilingual corpus. Public wallet addresses (Ethereum `0x`+40-hex, Bitcoin base58/bech32) are exempt: address-shaped tokens are masked before pattern scanning, so neither this rule nor a digit run inside the address denies them — they are broadcast-public identifiers and crypto discovery queries legitimately carry them. The cost is that ~20–30 bytes can be smuggled shaped as a fake address; accepted. | ✗ `x9Qv7Kp2mZr8TbN4` (16 chars, interleaved digits, no dictionary segment)<br>✓ `mrbeast6000` (digits appended, not interleaved)<br>✓ `manchesterunited` (dictionary segments)<br>✓ `arnoldschwarzenegger`<br>✓ `supercalifragilisticexpialidocious` (natural bigrams)<br>✓ `0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045` (public wallet address — exempt)<br>✓ `bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq` (bech32 — exempt) | no |
@@ -264,7 +273,7 @@ assert the descriptive message reaches the caller.
 
 | Reason code | Meaning |
 | --- | --- |
-| `request_param_too_large` | fixed 1,024-byte limit exceeded (G1) |
+| `request_param_too_large` | selected 1,024-byte or 5,120-byte limit exceeded (G1) |
 | `request_param_encoded_blob_denied` | printable/token-shape guard finding (G2, G3, G4) |
 | `request_param_secret_denied` | secret-shaped finding (G5–G10, G18, G19) |
 | `request_param_pii_denied` | personal/financial identifier finding (G11–G17, G20–G22) |
@@ -313,11 +322,11 @@ cannot.
   approval-gated or connected-account and already bounded by shipped limits.
 - **Caller-supplied `max_bytes`, guard lists, strictness classes, or named
   per-surface guard sets.** Each was a knob at the call site least likely to
-  get security review. The two retained booleans correspond directly to the
-  only recurring false-positive classes: personal identifiers in connected
-  mailbox queries and machine-shaped provider tokens. They default false,
-  compose without changing any other rule, and are implemented identically
-  for tool and managed-network call sites.
+  get security review. The retained booleans cover
+  personal identifiers, machine-shaped provider tokens, and reviewed longer
+  prompts. `allow_longer_text` selects a fixed 5 KB tier, never an arbitrary
+  caller-supplied limit. They default false, compose without changing unrelated
+  rules, and are implemented identically for tool and managed-network call sites.
 - **Central per-field policy registry.** Duplicated the tool-local shipped
   limits and the coverage-test machinery while adding a second place every
   field must be maintained.

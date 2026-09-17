@@ -1087,6 +1087,9 @@ PUT    /v1/network/policy
 GET    /v1/network-tools/github-credential
 PUT    /v1/network-tools/github-credential
 DELETE /v1/network-tools/github-credential
+GET    /v1/network-tools/xai-video-storage
+PUT    /v1/network-tools/xai-video-storage
+DELETE /v1/network-tools/xai-video-storage
 POST   /v1/network-tools/github-audit
 GET    /v1/network-tools/github-pending-pushes
 POST   /v1/network-tools/github-pending-pushes/<id>/approve
@@ -1103,6 +1106,9 @@ Network endpoints:
 | `GET` | `/v1/network-tools/github-credential` | none | GitHub credential metadata | Returns credential metadata only; never the token. |
 | `PUT` | `/v1/network-tools/github-credential` | GitHub credential request | GitHub credential metadata | Stores or replaces the single fixed GitHub token. The `token` field is write-only. |
 | `DELETE` | `/v1/network-tools/github-credential` | none | GitHub credential metadata | Removes the stored credential and withdraws the proxy-injected working token. |
+| `GET` | `/v1/network-tools/xai-video-storage` | none | Grok video storage metadata | Returns configuration status, bucket and region; never either credential. |
+| `PUT` | `/v1/network-tools/xai-video-storage` | Grok video storage request | Grok video storage metadata | Replaces all four fields; credentials are write-only. Does not enable Grok or change network policy. |
+| `DELETE` | `/v1/network-tools/xai-video-storage` | none | `{configured: false}` | Removes storage configuration; leaves bucket objects, Grok login and custom-domain rules intact. |
 | `POST` | `/v1/network-tools/github-audit` | none | GitHub credential metadata | Force-refreshes the per-repository audits and returns the updated metadata (including `repository_audits`). |
 | `GET` | `/v1/network-tools/github-pending-pushes` | none | `{pending_pushes: [...]}` | Lists pushes held by the `.github` approval gate: `id`, `owner`, `repo`, `ref_updates`, `changed_paths`, `requested_at`, `status`. |
 | `POST` | `/v1/network-tools/github-pending-pushes/<id>/approve` | none | `{pending_push: {...}}` | Replays the held push to GitHub with the working token through the `approve-github-push` root helper and marks it approved. `404` if unknown, `409` if already resolved, another resolution is in progress, no working token is available (the row stays pending), or the replay fails. Replay failures mark the row `failed` after one best-effort cleanup. |
@@ -1335,6 +1341,56 @@ Network event fields:
 | `query` | string |  | Request query string without the leading `?`, or an empty string when no query was present. |
 | `decision` | enum | `allowed`, `denied` | Network decision. |
 | `reason_code` | string | optional | Present only on denied events: the stable snake_case code for the denial class. The agent-facing `recent_network_denials` tool joins it against per-integration guidance. |
+
+### Grok video storage
+
+These authenticated admin routes back the Grok integration's Video storage
+form. They work independently of policy enablement; storing credentials does
+not enable Grok or allow network access to the bucket.
+
+`PUT /v1/network-tools/xai-video-storage` replaces the whole configuration:
+
+```json
+{
+  "bucket": "my-grok-videos",
+  "region": "us-east-1",
+  "access_key_id": "AKIA...",
+  "secret_access_key": "..."
+}
+```
+
+All four fields are required strings. Unknown fields and invalid values return
+`400` without changing the saved configuration. `bucket` accepts 3-63 lowercase
+letters, digits or hyphens, beginning and ending with a letter or digit.
+`region` must match the commercial AWS region-name format. `access_key_id`
+must be a long-term IAM key ID beginning `AKIA`; `secret_access_key` must be
+the 40-character IAM secret. Custom endpoints and temporary session credentials
+are not accepted. Validation checks formats, not AWS permissions or bucket
+existence.
+
+`GET` and successful `PUT` return:
+
+```json
+{
+  "configured": true,
+  "bucket": "my-grok-videos",
+  "region": "us-east-1"
+}
+```
+
+An absent configuration and successful `DELETE` return
+`{ "configured": false }`. These admin responses return neither the access-key
+ID nor the secret. The secret is encrypted at rest; admin can replace/delete
+it and the proxy can only read it. The agent never receives the secret access key. Video download
+URLs contain the access-key ID in `X-Amz-Credential` and a time-limited
+signature authorizing the download. Deleting configuration
+blocks new video work; existing signed URLs can remain valid in AWS until
+expiry or key revocation. Bucket contents and custom-domain rules are not
+deleted. Replacement or removal can interrupt active video jobs.
+
+The separate download allowlist, AWS permissions and privacy behavior are
+covered in the Grok integration guide and internal
+[xAI integration documentation](../architecture/xai-integration.md#video-storage-settings).
 
 ## Workspace
 

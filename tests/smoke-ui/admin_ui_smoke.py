@@ -171,6 +171,12 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 vercel_context = browser.new_context()
                 vercel_analytics_smoke(vercel_context.new_page(), url)
                 vercel_context.close()
+                runway_context = browser.new_context()
+                runway_options_smoke(runway_context.new_page(), url)
+                runway_context.close()
+                grok_context = browser.new_context()
+                grok_video_storage_smoke(grok_context.new_page(), url)
+                grok_context.close()
                 upwork_context = browser.new_context()
                 upwork_smoke(upwork_context.new_page(), url)
                 upwork_context.close()
@@ -321,6 +327,40 @@ def log_in(page, url: str) -> None:
     page.locator("#password").fill(PASSWORD)
     page.get_by_role("button", name="Log in").click()
     expect(page.locator("#app")).to_be_visible()
+
+
+def grok_video_storage_smoke(page, url: str) -> None:
+    """Operator credentials save as metadata only; reload/remove retain the UI contract."""
+    from playwright.sync_api import expect
+    log_in(page, url)
+    page.locator('[data-action="open-home-integration"][data-guide="xai"]').click()
+    expect(page.locator("#integration-detail-title")).to_have_text("Grok")
+    enable = page.locator('[data-action="enable-integration"][data-integration="xai"]')
+    was_enabled = enable.is_disabled()
+    if not was_enabled:
+        enable.click()
+    # Enabling replaces the form; type only after that response rendered.
+    expect(enable).to_be_disabled()
+    expect(page.locator('[data-action="save-xai-video-storage"]')).to_be_enabled()
+    page.locator("#xai-video-bucket").fill("my-test-videos")
+    page.locator("#xai-video-access-key").fill("AKIA" + "A" * 16)
+    page.locator("#xai-video-secret").fill("a" * 40)
+    page.locator('[data-action="save-xai-video-storage"]').click()
+    expect(page.locator("#xai-video-storage-message")).to_be_visible()
+    expect(page.locator("#xai-video-storage-message")).to_contain_text("Saved.")
+    expect(page.locator("#xai-video-secret")).to_have_value("")
+    expect(page.locator("#xai-video-access-key")).to_have_value("")
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#xai-video-bucket")).to_have_value("my-test-videos")
+    expect(page.locator("#xai-video-secret")).to_have_value("")
+    page.locator('[data-action="delete-xai-video-storage"]').click()
+    expect(page.locator("#xai-video-storage-message")).to_be_visible()
+    expect(page.locator("#xai-video-storage-message")).to_contain_text("Removed.")
+    expect(page.locator('[data-action="delete-xai-video-storage"]')).to_have_count(0)
+    if not was_enabled:
+        page.once("dialog", lambda dialog: dialog.accept())
+        page.locator('[data-action="disable-integration"][data-integration="xai"]').click()
+        expect(enable).to_be_enabled()
 
 
 def workspace_route_supersession_smoke(page, url: str) -> None:
@@ -554,6 +594,29 @@ def open_home_integration(page, guide_id: str) -> None:
         card.click()
     expect(page.locator("#panel-network")).to_be_visible()
     expect(page.locator("#integration-detail-title")).not_to_have_text("Integration")
+
+
+def runway_options_smoke(page, url: str) -> None:
+    """Longer prompt allowance is visible beside inputs and in common notes."""
+    from playwright.sync_api import expect
+
+    log_in(page, url)
+    open_home_integration(page, "tool:runway")
+    guide = page.locator("[data-guide-section='tool:runway']")
+    expect(guide.locator(".guide-technical-details")).to_contain_text("allow_longer_text")
+    expect(guide.locator(".guide-technical-details")).to_contain_text("5,120 UTF-8 bytes")
+    for action in ("generate_video", "edit_video", "generate_image"):
+        capability = guide.locator(".guide-capability").filter(
+            has=page.locator("h4 code", has_text=re.compile(f"^{action}$")))
+        capability.locator(".guide-action-contract > summary").click()
+        prompt = capability.locator("tr").filter(has=page.locator("td code", has_text=re.compile("^prompt$")))
+        expect(prompt.locator(".guide-input-protection")).to_have_text(
+            "Parameter guard applied (with allowed longer text up to 5 KB (5,120 UTF-8 bytes))")
+        expect(prompt).to_contain_text("allow_longer_text")
+    video = guide.locator(".guide-capability").filter(
+        has=page.locator("h4 code", has_text=re.compile("^generate_video$")))
+    image_url = video.locator("tr").filter(has=page.locator("td code", has_text=re.compile("^image_url$")))
+    expect(image_url.locator(".guide-input-protection")).to_have_text("Parameter guard applied")
 
 
 def vercel_analytics_smoke(page, url: str) -> None:
@@ -1209,11 +1272,14 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator(".connection-guide-entry")).to_have_count(1)
     open_home_integration(page, "xai")
     xai_guide = page.locator("[data-guide-section='xai']")
-    expect(xai_guide.locator(".guide-policy-point a[href='https://console.x.ai/']")).to_have_count(1)
-    expect(xai_guide.locator(".guide-policy-point a[href='https://grok.com/?_s=data']")).to_have_count(1)
-    expect(xai_guide.locator(".guide-policy-point a[href='https://x.com/settings/grok_settings']")).to_have_count(1)
-    expect(xai_guide).to_contain_text("coding-data opt-out active")
-    expect(xai_guide).to_contain_text("API inputs and outputs are not used for training")
+    expect(xai_guide.locator("a[href='https://console.x.ai/']")).to_have_count(1)
+    expect(xai_guide.locator("a[href='https://grok.com/?_s=data']")).to_have_count(1)
+    expect(xai_guide.locator("a[href='https://x.com/settings/grok_settings']")).to_have_count(1)
+    expect(xai_guide).to_contain_text("Help improve Grok")
+    expect(xai_guide).to_contain_text("Opt out")
+    expect(xai_guide).to_contain_text("Kern does not change it")
+    expect(xai_guide).to_contain_text("s3:PutObject")
+    expect(xai_guide).to_contain_text("s3:GetObject")
     open_home_integration(page, "github")
     github_row = page.locator(".integration-row[data-integration='github']")
     # Credentials can be staged before the integration is enabled.

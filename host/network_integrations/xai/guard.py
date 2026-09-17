@@ -10,10 +10,10 @@ media generation. Requests that would make xAI reach any other external source
 with request data (web search, remote MCP or hosted browsing) are denied
 unconditionally; the integration exposes no options.
 
-Only two hosts are opened under the owned apexes. Everything else beneath them
-is denied by the route table, which is what keeps ``api.x.ai`` — the metered
-developer API, billed against console credits rather than the operator's Grok
-subscription — closed, along with ``code.grok.com`` session sync.
+Chat, login, and Grok Build Imagine are opened under the owned apexes.
+Everything else beneath them is denied by the route table, including
+``code.grok.com`` session sync and every ``api.x.ai`` path except the observed
+Imagine creation and polling routes.
 """
 
 from __future__ import annotations
@@ -22,8 +22,10 @@ import base64
 import json
 from typing import Any
 
-from host.network_integrations.base import AccountAttestor
+from host.network_integrations.base import AccountAttestor, ResponseRewrite
 from host.network_integrations.xai.manifest import XaiIntegration
+from host.network_integrations.xai import video
+from host.runtime.core import state
 from host.runtime.core.network_policy import decode_body, normalized_path, route_allowed
 from host.runtime.core.state import (
     read_proxy_xai_account_id,
@@ -136,12 +138,23 @@ def _is_replay_item(node: Any) -> bool:
 # Deliberately absent: storage, sessions, workspaces, skills, sandbox, bundles,
 # feedback, and traces. Widen this against an observed denial, which is visible
 # in the network event log, rather than in anticipation.
+#
+# Grok Build 1.0.34 uses direct Imagine REST calls. Video output goes to the
+# operator's S3 bucket through host-signed URLs; vidgen.x.ai stays closed.
 CHAT_PROXY_INFERENCE_PATHS = (
     r"^/v1/(?:responses|chat/completions)(?:\?.*)?$",
 )
 CHAT_PROXY_READ_PATHS = (
     *CHAT_PROXY_INFERENCE_PATHS,
     r"^/v1/(?:models|settings|user|billing)(?:\?.*)?$",
+)
+_VIDEO_ID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+API_XAI_POST_PATHS = (
+    r"^/v1/images/generations(?:\?.*)?$",
+    r"^/v1/videos/generations(?:\?.*)?$",
+)
+API_XAI_GET_PATHS = (
+    rf"^/v1/videos/{_VIDEO_ID}(?:\?.*)?$",
 )
 ROUTES = {
     # The OAuth issuer: discovery, device-code, authorize, and token exchange.
@@ -153,8 +166,9 @@ ROUTES = {
     # traffic, and must never become mutable merely because the bearer lives in
     # the agent-owned auth file.
     "cli-chat-proxy.grok.com": (("GET",), CHAT_PROXY_READ_PATHS),
+    "api.x.ai": (("GET",), API_XAI_GET_PATHS),
 }
-GUARDED_HOSTS = frozenset({"cli-chat-proxy.grok.com"})
+GUARDED_HOSTS = frozenset({"cli-chat-proxy.grok.com", "api.x.ai"})
 # A trusted-but-non-active login may use only these read-only maintenance
 # routes. Inference never consults the status-probe pin, so a slow background
 # entitlement check cannot temporarily reopen model traffic after the ordinary
@@ -165,6 +179,24 @@ STATUS_PROBE_PATHS = frozenset({"/v1/models", "/v1/settings", "/v1/user", "/v1/b
 def host_allowed(config: XaiIntegration, host: str) -> bool:
     del config
     return host.lower() in ROUTES
+
+
+def prepare_request(
+    config: XaiIntegration, method: str, host: str, path: str, query: str,
+    headers: list[tuple[str, str]], body: bytes,
+) -> tuple[list[tuple[str, str]], bytes]:
+    """Prepare video storage only after this integration allowed the request."""
+    del config, query
+    return video.prepare_request(method, host, path, headers, body)
+
+
+def prepare_response(
+    config: XaiIntegration, method: str, host: str, path: str, query: str,
+    headers: list[tuple[str, str]], body: bytes,
+) -> ResponseRewrite | None:
+    """Select the video polling transform independently of request rewriting."""
+    del config, query, headers, body
+    return video.prepare_response(method, host, path)
 
 
 def request_denied(
@@ -183,15 +215,24 @@ def request_denied(
     before a request reaches here; the controls below are unconditional."""
     del account_attestor, config
     lowered_host = host.lower()
+    method = method.upper()
     route = ROUTES.get(lowered_host)
     allowed = route is not None and route_allowed(method, path, query, *route)
-    if lowered_host in GUARDED_HOSTS and not allowed:
+    if lowered_host == "cli-chat-proxy.grok.com" and not allowed:
         allowed = route_allowed(
             method,
             path,
             query,
             ("POST",),
             CHAT_PROXY_INFERENCE_PATHS,
+        )
+    if lowered_host == "api.x.ai" and not allowed:
+        allowed = route_allowed(
+            method,
+            path,
+            query,
+            ("POST",),
+            API_XAI_POST_PATHS,
         )
     if not allowed:
         return "network_policy_denied"
@@ -208,6 +249,15 @@ def request_denied(
     denial = _token_account_denial(headers, account_id)
     if denial is not None:
         return denial
+    if lowered_host == "api.x.ai":
+        if request_path.startswith("/v1/videos/") and not state.xai_video_storage_metadata().get("configured"):
+            return "xai_video_storage_required"
+        if method == "POST":
+            denial = _media_body_denial(headers, body)
+            if denial is None and request_path == "/v1/images/generations" and "output" in video.json_body(headers, body):
+                return "xai_media_input_denied"
+            return denial
+        return None
     return _server_tool_denial(headers, body)
 
 
@@ -503,3 +553,38 @@ def _iter_tool_objects(payload: Any) -> list[dict[str, Any]]:
 
     walk(payload)
     return matches
+
+
+_MEDIA_KEYS = frozenset({
+    "model", "prompt", "n", "aspect_ratio", "resolution", "response_format",
+    "image", "images", "duration", "reference_images", "reference_audios",
+    "last_frame", "keyframes", "output",
+})
+
+
+def _media_body_denial(headers: list[tuple[str, str]], body: bytes) -> str | None:
+    try:
+        payload = video.json_body(headers, body)
+    except (ValueError, UnicodeError, RecursionError):
+        return "xai_body_not_json"
+    if not isinstance(payload, dict) or payload.keys() - _MEDIA_KEYS:
+        return "xai_media_input_denied"
+
+    def external(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(external(item) for item in value.values())
+        if isinstance(value, list):
+            return any(external(item) for item in value)
+        return isinstance(value, str) and not value.startswith("data:image/")
+
+    # Prompt text is ordinary inference input. Media references may carry only
+    # inline data, never a URL that makes xAI fetch an ungoverned destination.
+    try:
+        if any(external(payload.get(k)) for k in ("image", "images", "reference_images", "last_frame", "keyframes")):
+            return "xai_media_input_denied"
+        voices = payload.get("reference_audios", [])
+        if not isinstance(voices, list) or any(not isinstance(v, dict) or set(v) != {"voice_id"} or not isinstance(v["voice_id"], str) or not v["voice_id"].isalnum() for v in voices):
+            return "xai_media_input_denied"
+    except RecursionError:
+        return "xai_body_not_json"
+    return None

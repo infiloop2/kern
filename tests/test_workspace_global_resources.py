@@ -399,8 +399,8 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             # Eligibility expires without changing any stored counters.
             clock.now.return_value = now + timedelta(hours=24)
             self.assertEqual(
-                memory.recall_pages({"thread_id": "thread-8", "message": "unknownquery"}),
-                {"pages": []},
+                memory.recall_pages({"thread_id": "thread-8", "message": "unknownquery"})["pages"],
+                [],
             )
             memory._record_memory_top_hit("old-leader")
             refreshed = memory.recall_pages({"thread_id": "thread-8", "message": "unknownquery"})
@@ -435,7 +435,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             recalled = memory.recall_pages(
                 {"thread_id": "thread-10", "message": "Browser workflow"}
             )
-        self.assertEqual(recalled, {"pages": []})
+        self.assertEqual(recalled["pages"], [])
         warning.assert_called_once()
         self.assertEqual(warning.call_args.kwargs["kind"], "memory_recall_degraded")
 

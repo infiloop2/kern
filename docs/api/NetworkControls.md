@@ -180,32 +180,46 @@ xAI after its OAuth login. The xAI integration directly enforces:
   },
   "cli-chat-proxy.grok.com": {
     "allow_http_methods": ["GET", "POST"]
+  },
+  "api.x.ai": {
+    "allow_http_methods": ["GET", "POST"]
   }
 }
 ```
 
-The managed bundle opens exactly two hosts under the reserved `x.ai` and
-`grok.com` apexes. `auth.x.ai` is the OAuth issuer — discovery, device code,
-authorize, and token exchange — and is unpinned by construction, because it is
-the endpoint that establishes which account exists and it carries no model
-traffic. `cli-chat-proxy.grok.com` is the subscription data plane: inference,
-model catalog, remote settings, billing, and trace upload all live under that
-one host.
+The managed bundle opens login, the subscription chat proxy, and Grok Build
+Imagine stills and video under the reserved `x.ai` and `grok.com` apexes.
+`auth.x.ai` is the OAuth issuer (discovery, device code, authorize, and token
+exchange) and is unpinned by construction, because it is the endpoint that
+establishes which account exists and it carries no model traffic.
+`cli-chat-proxy.grok.com` is the subscription data plane: inference, model
+catalog, remote settings, and billing.
 
-Everything else beneath those apexes is denied by the route table. Two
-denials are deliberate rather than incidental:
+Grok Build Imagine uses the same grok.com OAuth token on `api.x.ai` for
+`POST /v1/images/generations`, `POST /v1/videos/generations`, and
+`GET /v1/videos/<id>`. Images need no storage configuration. Video creation and
+polling require the separately saved S3 configuration. Kern overwrites
+`output.upload_url` with a signed PUT URL for a random `grok-videos/<uuid>.mp4`
+object, then verifies that URL in a completed response and replaces it with a
+signed GET URL for the same object. The operator must separately allow the
+bucket hostname through Custom Domain Access, as described in the Grok
+integration guide. Downloads
+authenticate to AWS with their signature, not the Grok bearer. Both URLs expire
+after 15 minutes. The ordinary custom rule controls download methods and paths;
+Grok does not claim any S3 hostname or override existing network rules. Inline image inputs and named voice references are
+allowed; external media inputs and unknown top-level fields are denied.
+Chat completions, tokenize-text, and other developer-API paths stay closed.
+`code.grok.com` stays closed; conversation state stays local because the chat
+proxy's session routes are denied.
 
-- `api.x.ai` is the metered developer API. It bills per token against a
-  console.x.ai credit balance instead of the operator's Grok subscription, so
-  opening it would let a misconfigured runtime silently spend money.
-- `code.grok.com` is a second session and workspace sync surface. Closing it is
-  not on its own what keeps conversation state local; the chat proxy's own
-  session routes are, through the path allowlist above.
-
-Every data-plane request must carry exactly one `Authorization: Bearer` token
+Every request to the chat proxy or `api.x.ai` must carry exactly one `Authorization: Bearer` token
 whose JWT claims the pinned account under `sub` (personal login) or
 `principal_id` (team login). Requests are denied until the pinned account id is
 available.
+
+Video storage setup and download allowlisting are documented in the user-facing
+Grok integration guide and the internal [xAI integration](../architecture/xai-integration.md#video-storage-settings).
+The storage endpoint contract is in [Admin API](AdminAPI.md#grok-video-storage).
 
 ### Server-side tools
 
@@ -236,10 +250,9 @@ Allowed hosted declarations:
   declare or decode it, so this is a policy allowance rather than a usable
   runtime feature today.
 - **Video generation** (`video_generation`) — reserved for an xAI-hosted
-  declaration. xAI currently documents video only through the separate
-  metered `api.x.ai` Imagine API, which stays blocked, and Grok Build 1.0.5 does
-  not emit this tool. Only the bare declaration is admitted; every option
-  fails closed until its data flow is reviewed.
+  declaration. Grok Build Imagine video uses the S3-backed REST flow on `api.x.ai`,
+  not this hosted tool. Only the bare declaration is
+  admitted on the chat proxy; every option fails closed.
 
 Denied hosted tools:
 
