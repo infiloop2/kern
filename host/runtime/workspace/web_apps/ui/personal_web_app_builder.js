@@ -2094,6 +2094,7 @@ function conversationEntries() {
         kind: "stopped",
         message: payload.message || "Context added.",
         memoryPageIds: Array.isArray(payload.memory_page_ids) ? payload.memory_page_ids : [],
+        memoryRecallDetails: typeof payload.memory_recall_details === "string" ? payload.memory_recall_details : "",
       });
     } else if (event.event_type === "thread.stopped") {
       entries.push({
@@ -2158,7 +2159,7 @@ function renderConversationHistory(forceBottom = false) {
       } else {
         message.textContent = entry.message;
       }
-      if (entry.memoryPageIds?.length) {
+      if (entry.memoryRecallDetails || entry.memoryPageIds?.length) {
         message.classList.add("memory-notice");
         const trigger = document.createElement("button");
         trigger.type = "button";
@@ -2167,7 +2168,7 @@ function renderConversationHistory(forceBottom = false) {
         pages.className = "memory-pages";
         pages.id = `app-memory-pages-${entry.seq}`;
         pages.setAttribute("role", "tooltip");
-        pages.textContent = entry.memoryPageIds.join("\n");
+        pages.textContent = entry.memoryRecallDetails || entry.memoryPageIds.join("\n");
         trigger.setAttribute("aria-describedby", pages.id);
         message.replaceChildren(trigger, pages);
       }

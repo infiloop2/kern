@@ -1124,10 +1124,12 @@ function renderThreadEntry(event, openActivities) {
   }
   if (event.event_type === "thread.context_added") {
     const pageIds = Array.isArray(payload.memory_page_ids) ? payload.memory_page_ids : [];
+    const details = typeof payload.memory_recall_details === "string" ? payload.memory_recall_details : "";
+    const tooltip = details || pageIds.join("\n");
     const message = esc(payload.message || "Context added.");
-    const notice = pageIds.length ? `<div class="memory-notice">
+    const notice = tooltip ? `<div class="memory-notice">
       <button type="button" aria-describedby="memory-pages-${entryId}">${message}</button>
-      <div class="memory-pages" id="memory-pages-${entryId}" role="tooltip">${esc(pageIds.join("\n"))}</div>
+      <div class="memory-pages" id="memory-pages-${entryId}" role="tooltip">${esc(tooltip)}</div>
     </div>` : message;
     return `<article class="thread-entry thread-stopped" data-entry-id="${entryId}">
       ${notice}

@@ -163,6 +163,7 @@ class ApiError(Exception):
 
 @dataclass
 class MockState:
+    xai_video_storage: dict[str, Any] = field(default_factory=lambda: {"configured": False})
     lock: threading.Lock = field(default_factory=threading.Lock)
     public_https_preview: bool = False
     passkey_configured: bool = False
@@ -1365,6 +1366,15 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
             return {"network_controls": STATE.policy}
         if method == "PUT":
             return replace_policy(body)
+    if path == "/v1/network-tools/xai-video-storage":
+        with STATE.lock:
+            if method == "PUT":
+                if not isinstance(body, dict) or not all(body.get(k) for k in ("bucket", "region", "access_key_id", "secret_access_key")):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "All video storage fields are required")
+                STATE.xai_video_storage = {"configured": True, "bucket": body["bucket"], "region": body["region"]}
+            elif method == "DELETE":
+                STATE.xai_video_storage = {"configured": False}
+            return dict(STATE.xai_video_storage)
     if path == "/v1/network-tools/github-credential":
         return github_credential_route(method, body)
     if method == "GET" and path == "/v1/network-tools/github-pending-pushes":

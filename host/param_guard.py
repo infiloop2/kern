@@ -28,9 +28,10 @@ from dataclasses import dataclass
 
 from host.param_guard_words import BIP39_WORDS, COMMON_WORDS
 
-# Fixed limits: host constants, never caller-supplied (see the architecture
-# doc's rejected alternatives for why there are no knobs at call sites).
+# Fixed limits: call sites can opt into the reviewed longer-text tier, but
+# cannot supply an arbitrary byte limit.
 MAX_PARAMETER_BYTES = 1024
+MAX_LONGER_TEXT_BYTES = 5 * 1024
 MAX_UNBROKEN_TOKEN_CHARS = 128
 MIN_BARE_DIGIT_RUN = 10
 MAX_BARE_DIGIT_RUN = 16
@@ -51,8 +52,10 @@ PARAM_GUARD_PROTECTION = "Parameter guard applied to marked inputs."
 PARAM_GUARD_TECHNICAL_DETAIL = (
     "Parameter guard checks request text against rules for secrets, credentials, "
     "personal and financial identifiers, and encoded or random-looking data. Each "
-    "checked string is limited to 1,024 UTF-8 bytes. A match blocks the request "
-    "before it is sent. Both exception flags default to false. "
+    "checked string is limited to 1,024 UTF-8 bytes by default. "
+    "`allow_longer_text` raises only this limit to 5 KB (5,120 UTF-8 bytes) for "
+    "marked inputs such as Runway prompts; model-specific limits still apply. "
+    "A match blocks the request before it is sent. All exception flags default to false. "
     "`allow_identifiers` permits personal identifier patterns needed by the field, "
     "such as an email address in a mailbox search. `allow_machine_tokens` permits "
     "opaque provider tokens, such as pagination cursors, that may resemble encoded "
@@ -85,6 +88,7 @@ def guard_request_parameter_string(
     *,
     allow_identifiers: bool = False,
     allow_machine_tokens: bool = False,
+    allow_longer_text: bool = False,
 ) -> str:
     """Apply the standard guard set; return ``value`` unchanged or raise.
 
@@ -96,11 +100,14 @@ def guard_request_parameter_string(
     query or provider cursor. ``allow_machine_tokens=True`` skips
     the two generic token-shape heuristics for provider-issued opaque tokens.
     Both retain the length, text, secret, and credential rules.
+    ``allow_longer_text=True`` selects the fixed 5,120-byte tier; every other
+    check still scans the complete value.
     """
     denial = find_denial(
         value,
         allow_identifiers=allow_identifiers,
         allow_machine_tokens=allow_machine_tokens,
+        allow_longer_text=allow_longer_text,
     )
     if denial is not None:
         raise ParamGuardDenied(denial)
@@ -113,6 +120,7 @@ def find_denial(
     *,
     allow_identifiers: bool = False,
     allow_machine_tokens: bool = False,
+    allow_longer_text: bool = False,
 ) -> GuardDenial | None:
     """Run the guards over one decoded value and return the first denial.
 
@@ -133,11 +141,12 @@ def find_denial(
             "The value contains invalid text (unpaired surrogate characters). "
             "Resend it as plain text.",
         )
-    if encoded_length > MAX_PARAMETER_BYTES:
+    byte_limit = MAX_LONGER_TEXT_BYTES if allow_longer_text else MAX_PARAMETER_BYTES
+    if encoded_length > byte_limit:
         return GuardDenial(
             "LENGTH",
             REASON_TOO_LARGE,
-            f"The value is longer than the {MAX_PARAMETER_BYTES}-byte limit for "
+            f"The value is longer than the {byte_limit}-byte limit for "
             "request parameters. Shorten it and retry.",
         )
     # G2 PRINTABLE - character-level rule; every later guard sees clean text.
@@ -759,9 +768,11 @@ class OutboundGuardService:
         *,
         allow_identifiers: bool = False,
         allow_machine_tokens: bool = False,
+        allow_longer_text: bool = False,
     ) -> str:
         return guard_request_parameter_string(
             value,
             allow_identifiers=allow_identifiers,
             allow_machine_tokens=allow_machine_tokens,
+            allow_longer_text=allow_longer_text,
         )

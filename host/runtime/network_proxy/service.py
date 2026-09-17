@@ -40,6 +40,7 @@ import urllib.parse
 from host.config import NetworkControls, parse_network_controls
 from host.constants import LOOPBACK, PROXY_PORT
 from host.network_integrations import runtime as integrations
+from host.network_integrations.base import ResponseRewrite
 from host.runtime.core.network_policy import load_policy
 from host.runtime.core.peer_identity import tcp_peer_thread_id
 from host.runtime.core.state import (
@@ -387,6 +388,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # injected), and on Bedrock domains it re-signs the request with
             # the operator's credential — the agent never holds either.
             headers = integrations.rewrite_request_headers(policy, method, host, path, query, headers, body)
+            headers, body = integrations.prepare_request(policy, method, host, path, query, headers, body)
+            response_rewrite = integrations.prepare_response(policy, method, host, path, query, headers, body)
             upstream_raw = connect_public(host, port, timeout=15)
             upstream_tls = ssl.create_default_context().wrap_socket(upstream_raw, server_hostname=host)
             upstream_tls.settimeout(IDLE_TIMEOUT)
@@ -399,7 +402,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 websocket=is_websocket,
             )
             if not is_websocket:
-                forward_until_close(upstream_tls, client_tls, meter)
+                if response_rewrite is not None:
+                    forward_rewritten_response(upstream_tls, client_tls, response_rewrite)
+                else:
+                    forward_until_close(upstream_tls, client_tls, meter)
                 return
             # A client header alone does not make a WebSocket. Only the
             # upstream's 101 does, and until it arrives this is still an
@@ -691,6 +697,26 @@ def read_response_head(reader: Any) -> tuple[int, list[tuple[str, str]], bytes]:
             key, value = line.decode("iso-8859-1").split(":", 1)
             headers.append((key.strip(), value.strip()))
     return int(code), headers, bytes(raw)
+
+
+def forward_rewritten_response(source: socket.socket, target: socket.socket, rewrite: ResponseRewrite) -> None:
+    """Bounded HTTP rewrite requested by an integration; ordinary streams bypass it."""
+    try:
+        response = http.client.HTTPResponse(source)
+        response.begin()
+        body = response.read(1024 * 1024 + 1)
+        if len(body) > 1024 * 1024:
+            raise OSError("response rewrite body too large")
+        headers, body = rewrite.apply(response.status, response.getheaders(), body)
+        head = f"HTTP/1.1 {response.status} {response.reason}\r\n".encode("iso-8859-1")
+        for key, value in headers:
+            if key.lower() not in {"content-length", "transfer-encoding", "connection"}:
+                head += f"{key}: {value}\r\n".encode("iso-8859-1")
+        target.sendall(head + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
+    except (OSError, ValueError, RecursionError, http.client.HTTPException):
+        body = rewrite.error_code.encode("ascii")
+        target.sendall(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: "
+                       + str(len(body)).encode() + b"\r\n\r\n" + body)
 
 
 def forward_until_close(source: socket.socket, target: socket.socket, meter: Any = None) -> None:

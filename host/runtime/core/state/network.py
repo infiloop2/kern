@@ -701,3 +701,35 @@ def page_network_events_before(
         "network_events", _NETWORK_EVENT_FIELDS, _network_event_dict, before, limit,
         extra_clause=extra[0], extra_params=extra[1],
     )
+
+
+# -- Grok video storage (admin writes; proxy reads and signs) --------------------
+
+
+def read_xai_video_storage() -> dict[str, str] | None:
+    with db.transaction() as cur:
+        cur.execute("SELECT bucket, region, access_key_id, secret_access_key_encrypted FROM xai_video_storage")
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {"bucket": row[0], "region": row[1], "access_key_id": row[2],
+            "secret_access_key": secretbox.decrypt(row[3])}
+
+
+def xai_video_storage_metadata() -> dict[str, Any]:
+    with db.transaction() as cur:
+        cur.execute("SELECT bucket, region FROM xai_video_storage")
+        row = cur.fetchone()
+    return {"configured": True, "bucket": row[0], "region": row[1]} if row else {"configured": False}
+
+
+def save_xai_video_storage(value: dict[str, str] | None) -> None:
+    with mutation() as cur:
+        cur.execute("DELETE FROM xai_video_storage")
+        if value is not None:
+            cur.execute(
+                "INSERT INTO xai_video_storage (bucket, region, access_key_id, secret_access_key_encrypted)"
+                " VALUES (%s, %s, %s, %s)",
+                (value["bucket"], value["region"], value["access_key_id"],
+                 secretbox.encrypt(value["secret_access_key"])),
+            )

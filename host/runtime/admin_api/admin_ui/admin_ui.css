@@ -3171,3 +3171,8 @@ button.workspace-reorder-handle:disabled { cursor: not-allowed; opacity: 0.35; }
 @media (max-width: 860px) {
   .workspace-nav-row.workspace-nav-reorderable { grid-template-columns: 32px minmax(0, 1fr); }
 }
+
+.xai-storage-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.xai-storage-form label { display: grid; gap: 6px; min-width: 0; }
+.xai-storage-form input { width: 100%; min-width: 0; box-sizing: border-box; }
+@media (max-width: 600px) { .xai-storage-form { grid-template-columns: 1fr; } }

@@ -381,6 +381,7 @@ function inputProtectionLabel(protection) {
   const allowed = [];
   if (protection.allow_identifiers) allowed.push(protection.identifiers_condition === "decimal" ? "identifiers for all-digit values" : "identifiers");
   if (protection.allow_machine_tokens) allowed.push("machine tokens");
+  if (protection.allow_longer_text) allowed.push("longer text up to 5 KB (5,120 UTF-8 bytes)");
   return `Parameter guard applied${allowed.length ? ` (with allowed ${allowed.join(" & ")})` : ""}`;
 }
 

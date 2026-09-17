@@ -79,17 +79,18 @@ class InputProtection:
     description: str = ""
     allow_identifiers: bool = False
     allow_machine_tokens: bool = False
+    allow_longer_text: bool = False
     identifiers_condition: Literal["decimal"] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ("validated", "parameter_guard"):
             raise ValueError("Unknown input protection kind.")
-        if type(self.allow_identifiers) is not bool or type(self.allow_machine_tokens) is not bool:
+        if any(type(flag) is not bool for flag in (self.allow_identifiers, self.allow_machine_tokens, self.allow_longer_text)):
             raise ValueError("Input protection guard flags must be booleans.")
         if self.identifiers_condition not in (None, "decimal") or (self.identifiers_condition and (self.kind != "parameter_guard" or not self.allow_identifiers)):
             raise ValueError("Identifier conditions require an enabled parameter-guard identifier exception.")
         if self.kind == "validated":
-            if not self.description.strip() or self.allow_identifiers or self.allow_machine_tokens:
+            if not self.description.strip() or self.allow_identifiers or self.allow_machine_tokens or self.allow_longer_text:
                 raise ValueError("Validated inputs need a description and cannot declare guard exceptions.")
         elif self.description:
             raise ValueError("Parameter guard inputs use the shared guide explanation.")
@@ -100,9 +101,11 @@ def validated_input(description: str) -> InputProtection:
 
 
 def guarded_input(*, allow_identifiers: bool = False, allow_machine_tokens: bool = False,
+                  allow_longer_text: bool = False,
                   identifiers_condition: Literal["decimal"] | None = None) -> InputProtection:
     return InputProtection("parameter_guard", allow_identifiers=allow_identifiers,
-                           allow_machine_tokens=allow_machine_tokens, identifiers_condition=identifiers_condition)
+                           allow_machine_tokens=allow_machine_tokens, allow_longer_text=allow_longer_text,
+                           identifiers_condition=identifiers_condition)
 
 
 @dataclass(frozen=True)

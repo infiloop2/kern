@@ -142,116 +142,64 @@ export const MANAGED_INTEGRATIONS = {
   },
   xai: {
     label: "Grok",
-    summary: "Run Grok Build chats and tasks through your Grok subscription, with X search enabled. Grok's server-side web search is not available on this host.",
+    summary: "Run Grok Build chats and tasks, generate images, and save generated videos to your private S3 bucket.",
     protections: [
-      "The linked xAI account is pinned. Traffic naming another account, or a credential that does not claim the linked one, is denied until you explicitly disconnect and log in again.",
-      "Only the subscription chat proxy is opened. xAI's metered developer API stays blocked, so inference draws on your Grok subscription's usage pool instead of billing an xAI console credit balance.",
-      "The server-side tool allowlist is fixed to shapes that stay on xAI/X infrastructure: X search with X-only filters, text-to-image generation with no external input, and a bare reserved video-generation declaration. Web search, code execution, collections search, hosted browsing, remote tool servers, unknown tools, and media declarations carrying extra inputs stay blocked. Session sync to xAI is blocked too, so conversation state stays on this host.",
-      "Web search is blocked because Grok's cannot be narrowed. It searches and opens live pages as one capability, and xAI's servers do the fetching — so an allowed search could pull a model-chosen URL, carrying arbitrary agent-chosen data in its parameters, without that request ever passing this host's network policy. Grok answers from what it already knows plus what the agent reads locally.",
+      "The linked xAI account is pinned. Requests carrying another account or an opaque API key are denied.",
+      "Video storage credentials stay encrypted in Kern and never enter Grok's config or process environment. xAI receives only a short-lived upload URL for one object.",
+      "Images need no S3 configuration. Video generation is blocked until storage is configured, including when provider ZDR is off.",
+      "Kern keeps local telemetry and trace upload disabled. It never changes your account's coding-data retention choice; keep Help improve Grok set to Opt out.",
     ],
     setupSteps: [
-      { title: "Enable Grok", description: "On Home, open Grok under Integrations and choose Enable." },
-      { title: "Start the Grok login", description: "In Account, choose Start Grok login. Open the displayed URL, sign in with the account holding the Grok subscription, and confirm the device code." },
-      { title: "Verify the linked account", description: "Return to Kern and wait for the row to show connected with the expected email or account id. That identity is now the operator-approved account anchor." },
+      { title: "Connect Grok", description: "Enable Grok on Home, open its integration, choose Connect, and complete the device login. Verify the expected account is shown." },
+      { title: "Keep coding data opted out", description: "In Grok Build, use /privacy and select Opt out under Help improve Grok. Kern shows the account's reported coding-data choice. The local video-tool flag is separate and does not opt you into retention or training." },
+      { title: "For videos, create a private S3 bucket", description: "In the AWS Console, open S3, choose Create bucket, use a general purpose bucket and a unique name containing lowercase letters, digits and hyphens, and note its region. Keep Block Public Access enabled and ACLs disabled. Use SSE-S3 encryption. Images work without this step. The supported setup is commercial AWS S3; custom endpoints and temporary session credentials are not supported.", linkUrl: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/create-bucket-overview.html", linkLabel: "AWS bucket creation guide" },
+      {
+        title: "Create a dedicated IAM access key",
+        description: "In IAM, create a policy using this JSON, replacing my-grok-videos with your bucket name. Attach it to a dedicated IAM user, then open that user's Security credentials and create an access key for an application running outside AWS. Save the access key ID and secret access key. No public bucket policy, ListBucket, CORS or second key pair is required for this setup.",
+        code: `{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["s3:PutObject", "s3:GetObject"],
+    "Resource": "arn:aws:s3:::my-grok-videos/grok-videos/*"
+  }]
+}`,
+        linkUrl: "https://docs.aws.amazon.com/IAM/latest/UserGuide/access-key-self-managed.html",
+        linkLabel: "AWS access key guide",
+      },
+      { title: "Save video storage in Kern", description: "Open Home > Grok > Video storage. Enter the bucket name, its region, access key ID and secret, then choose Save video storage. Kern uses bucket.s3.region.amazonaws.com and grok-videos/ as the object prefix. Saving storage does not allow network access to the bucket; complete the next step before generating a video. Saving checks field formats; successful generation and download verify the actual AWS permissions. Do not add S3 keys to Grok config.toml or managed_config.toml." },
+      {
+        title: "Required: allow the bucket download domain",
+        description: "Open Home > Custom Domain Access and choose Add domain rule. For Domain, enter your bucket's exact hostname: <bucket>.s3.<region>.amazonaws.com, without https:// or a path. Set HTTP methods to GET, Path guards to /grok-videos/.*, and leave WebSocket connections unchecked. For example, bucket my-grok-videos in us-east-1 uses my-grok-videos.s3.us-east-1.amazonaws.com. Add the rule before generating. No PUT rule, wildcard, DNS setup or public bucket access is needed: xAI uploads directly from its servers. If a rule already covers this host, review it through the normal custom-domain controls; Grok never overrides it.",
+        code: "Domain: my-grok-videos.s3.us-east-1.amazonaws.com\nHTTP methods: GET\nPath guards: /grok-videos/.*\nAllow WebSocket connections: off",
+      },
+      { title: "Verify a video", description: "Start a Grok task and request one short video. Confirm the MP4 appears in Files and plays, and that an object appears under grok-videos/ in S3. If S3 has the video but downloading is blocked, check Network audit: host_not_allowed means the hostname has no active rule; network_policy_denied means its method or path is blocked. Check the exact bucket hostname, GET method and path guard instead of changing privacy. Your Grok entitlement or quota applies, and AWS storage/request charges apply. A usage field is not proof of subscription billing. Configure an S3 lifecycle rule if you want objects deleted automatically; Kern does not delete them." },
+      { title: "Replace or remove storage", description: "To change storage, enter all four fields and save again. Removing storage blocks new video requests but does not disconnect Grok or affect images. When changing bucket or region, add the new bucket hostname under Custom Domain Access too. Removing storage does not remove any custom-domain rule; remove an obsolete rule there separately when it is no longer needed. Replacing keys or removing storage may interrupt active videos. Already issued URLs can remain usable until their 15-minute expiry unless the IAM key is revoked." },
     ],
     dataSummary: {
       items: [
-        {
-          title: "What leaves this host",
-          description: "Assume any host data available to Grok Build can go to xAI, including prompts, conversation history, workspace files and diffs, tool inputs, and tool results.",
-          links: [],
-        },
-        {
-          title: "Where it can go",
-          points: [
-            { label: "xAI", text: "Everything the agent sends goes to xAI's services under the linked account." },
-            { label: "X search", text: "The host sends the query and surrounding conversation only to xAI's pinned subscription chat proxy. xAI runs X search on its servers against X posts, users, threads, and X-hosted media; this host does not contact x.com or a third-party search provider." },
-            { label: "Media generation", text: "The proxy admits only text-to-image generation and the bare reserved video-generation declaration; external-input fields and unknown options fail closed. It does not open api.x.ai, imgen.x.ai, or vidgen.x.ai. Grok Build 1.0.5 does not yet expose these media tools, and xAI currently documents video generation only on its separate metered developer API, so this is a narrow policy allowance rather than a working media workflow today." },
-            { label: "Nowhere else", text: "Web search and browsing remain blocked, so xAI cannot fetch arbitrary pages through Grok's hosted tools. Remote MCP, hosted code, collections search, and unknown hosted tools remain blocked too." },
-          ],
-          links: [],
-        },
-        {
-          title: "What xAI can do with it",
-          description: "Kern uses the Grok Build coding-agent path. Its coding-data and team ZDR controls are separate from the consumer controls for Grok.com and Grok on X.",
-          points: [
-            {
-              label: "For Kern and Grok Build",
-              content: [
-                "This is the relevant account setting for Kern. Open Settings with /privacy and choose Opt out under Coding data, retention, and training. xAI says opting out prevents coding data such as prompts, traces, and metrics from being retained and used for training or product improvement. It is account-backed rather than a config.toml key; Kern displays its observed state next to the connected account when Grok reports it. On team accounts only a team admin can change it. For team settings, open the ",
-                { url: "https://console.x.ai/", label: "xAI Console" },
-                " as a team admin. Team ZDR is stronger: it prevents prompt, code, and response persistence at the inference layer when the Grok CLI login belongs to that team. While ZDR is on, the coding-data choice cannot be changed.",
-              ],
-            },
-            {
-              label: "What Kern enforces locally",
-              text: "Kern pins Grok product telemetry and trace upload off in root-owned requirements, and its network proxy blocks trace, storage, session-sync, workspace-sync, feedback, and bundle-upload routes. Those controls prevent separate client-side uploads but do not rewrite the xAI account choice, so confirm that the connected-account row says coding-data opt-out active (or use /privacy).",
-            },
-            {
-              label: "For the xAI developer API",
-              text: "This is not the path Kern opens. xAI says API inputs and outputs are not used for training without explicit permission even when ZDR is off; by default they may still be retained for up to 30 days for abuse auditing. ZDR removes that default content retention.",
-            },
-            {
-              label: "For the Grok app and Grok on X",
-              content: [
-                "These are separate consumer data paths and their toggles do not change Grok Build or team ZDR. xAI's consumer terms allow conversations to be used to train its models by default, and paid tiers are not exempt. ",
-                { url: "https://grok.com/?_s=data", label: "Grok.com data controls" },
-                " control whether content and interactions from new Grok web and mobile-app conversations are used for training. Separately, ",
-                { url: "https://x.com/settings/grok_settings", label: "X Grok settings" },
-                " control whether X can share your public X data — including public posts and profile metadata — plus your interactions, inputs, and results with Grok on X for training and fine-tuning. Turn off both settings if you use both products. Opting out applies to future data, not data already collected.",
-              ],
-            },
-          ],
-          links: [
-            { url: "https://docs.x.ai/build/modes-and-commands#core-tui-commands", label: "Grok Build /privacy documentation" },
-            { url: "https://docs.x.ai/developers/faq/security#does-xai-train-on-customers-api-requests", label: "xAI API training and retention" },
-            { url: "https://docs.x.ai/build/enterprise#privacy--data-lifecycle", label: "Grok Build privacy and ZDR" },
-            { url: "https://x.ai/legal/faq#how-do-i-select-whether-my-content-is-used-for-model-training", label: "Grok training opt-out instructions" },
-            { url: "https://x.ai/legal/privacy-policy", label: "xAI Privacy Policy" },
-            { url: "https://x.ai/legal/subprocessor-list", label: "xAI subprocessor list" },
-            { url: "https://x.ai/privacy-portal", label: "xAI privacy portal (access and deletion)" },
-          ],
-        },
-        {
-          title: "How long xAI retains it",
-          description: "xAI does not publish a specific retention period for Grok conversation data, and opting out of training changes how data is used rather than whether it is kept.",
-          points: [
-            { label: "If retention matters to you", text: "Zero Data Retention is the setting that addresses it, and it is a team-admin control rather than a per-user one. Access and deletion requests go through xAI's privacy portal." },
-          ],
-          links: [
-            { url: "https://console.x.ai/", label: "Open xAI Console team settings" },
-            { url: "https://docs.x.ai/build/enterprise#privacy--data-lifecycle", label: "Grok Build privacy and ZDR" },
-          ],
-        },
+        { title: "What leaves this host", description: "Assume any data available to Grok can be sent to xAI as prompts, conversation history, tool results or inline media references. Generated videos are uploaded by xAI directly into your configured S3 bucket. The agent downloads them using short-lived URLs.", links: [] },
+        { title: "Storage and privacy", description: "Your IAM secret is encrypted in Kern's database and readable only by trusted host services. The account's Help improve Grok setting remains your choice; Kern does not change it. In the verified Grok Build 1.0.34 test, Opt out remained selected and the video API reported x-zero-data-retention: true. This header reports the provider's setting, not an independent retention audit. Bucket objects remain until you delete them or an AWS lifecycle rule expires them. Grok.com and X have separate consumer data controls; those are not the Build coding-data switch.", links: [{ url: "https://docs.x.ai/build/settings/zdr-video-storage", label: "xAI video output storage under ZDR" }, { url: "https://console.x.ai/", label: "xAI Console" }, { url: "https://grok.com/?_s=data", label: "Grok.com data controls" }, { url: "https://x.com/settings/grok_settings", label: "X Grok settings" }] },
       ],
     },
     capabilities: [
-      { name: "Grok Build runtime", description: "Creates and resumes Grok Build sessions for Chat, Apps, and Schedules, streams messages and activity, accepts live steering, and exposes the connected subscription's usage when xAI reports it." },
-      {
-        name: "X search",
-        description: "Allows Grok's hosted x_search tool. The request goes only to the pinned xAI chat proxy; xAI executes keyword, semantic, user, and thread search against X data on its servers.",
-        linkUrl: "https://docs.x.ai/developers/tools/x-search",
-        linkLabel: "xAI X search documentation",
-      },
-      {
-        name: "xAI-hosted media declarations",
-        description: "Allows only image_generation with action generate and a bare video_generation declaration through the chat proxy; external inputs and unknown options fail closed. Grok Build 1.0.5 does not emit either declaration, and xAI currently exposes video generation through the blocked metered developer API, so media generation is not yet usable from the Grok runtime.",
-        linkUrl: "https://docs.x.ai/developers/tools/image-generation",
-        linkLabel: "xAI image generation tool documentation",
-      },
-      {
-        name: "Web search (not available)",
-        description: "Grok's server-side web search is blocked, and there is no setting that turns it on. It cannot be narrowed: searching and opening live pages are one capability, and xAI's servers do the fetching, so an allowed search could pull a model-chosen URL, carrying arbitrary agent-chosen data in its parameters, without that request ever passing this host's network policy. Grok answers from what it already knows plus what the agent reads locally, and the agent's own tools reach only your allowed domains.",
-        linkUrl: "https://docs.x.ai/developers/tools/web-search",
-        linkLabel: "xAI web search documentation",
-      },
+      { name: "Grok Build runtime", description: "Creates and resumes Grok Build sessions for Chat, Apps, and Schedules, streams messages and activity, accepts live steering, and exposes subscription usage when xAI reports it." },
+      { name: "X search", description: "xAI executes keyword, semantic, user, and thread search against X data. These are shapes that stay on xAI/X infrastructure; this host does not contact x.com or a third-party search provider." },
+      { name: "Images and videos", description: "Images pass through api.x.ai without S3 setup. Videos use the same pinned login; Kern supplies a signed S3 upload URL and replaces the completed result URL with a signed download URL. Inline image references and named voices are supported; external media URLs are blocked." },
+      { name: "Web search (not available)", description: "Grok's server-side web search is not available on this host. Web search is blocked because Grok's cannot be narrowed to search without fetching arbitrary live URLs, without that request ever passing this host's network policy. Remote MCP, code execution, collections search and unknown hosted tools also remain blocked." },
     ],
     controls: [
-      "The proxy fails closed when the account pin or request body cannot be checked.",
+      "The proxy fails closed when the account pin or media request cannot be checked.",
+      "Video URLs are fixed to the configured bucket and random objects under grok-videos/. Caller-supplied video output destinations are replaced by Kern.",
+      "S3 downloads use the separately configured custom-domain rule, not managed Grok ownership. The recommended GET and /grok-videos/.* rule limits methods and paths; it does not verify that a URL was issued by Kern. AWS validates the signed URL for the private object. Other S3 rules and integrations are unchanged.",
+      "The launcher sets GROK_DISABLE_ZDR_INCOMPATIBLE_TOOLS=false so video requests reach Kern's storage enforcement. This does not change the xAI account privacy setting.",
+      "A storage 403 means the AWS request failed. Check bucket region, IAM policy, bucket-policy explicit denies and key validity; do not turn off privacy. A failure to verify the completed upload URL fails closed.",
     ],
     networkScope: [
-      ["auth.x.ai", "GET and POST for the operator login flow"],
-      ["cli-chat-proxy.grok.com", "GET and POST; pinned-account, OAuth-token, and server-side tool guards"],
+      ["auth.x.ai", "GET and POST for device login"],
+      ["cli-chat-proxy.grok.com", "Pinned-account inference and read-only account/model/billing metadata"],
+      ["api.x.ai", "POST /v1/images/generations and /v1/videos/generations; GET /v1/videos/<id>; pinned OAuth only"],
+      ["<bucket>.s3.<region>.amazonaws.com", "Separate custom-domain rule required: GET, path guard /grok-videos/.*; AWS authenticates downloads"],
     ],
   },
   bedrock: {

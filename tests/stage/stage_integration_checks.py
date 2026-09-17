@@ -470,7 +470,8 @@ class StageIntegrationChecks(AwsSmoke):
             ("session sync", "network_policy_denied", {"headers": matching_headers, "path": "/v1/sessions/register"}),
             ("workspace sync", "network_policy_denied", {"headers": matching_headers, "path": "/v1/rest/workspaces"}),
             ("path traversal", "network_policy_denied", {"headers": matching_headers, "path": "/v1/responses/../storage/batch_upload"}),
-            ("metered developer API", "host_not_allowed", {"headers": matching_headers, "host": "api.x.ai"}),
+            ("metered chat completions", "network_policy_denied", {"headers": matching_headers, "host": "api.x.ai", "path": "/v1/chat/completions"}),
+            ("tokenize-text", "network_policy_denied", {"headers": matching_headers, "host": "api.x.ai", "path": "/v1/tokenize-text"}),
             ("cloud session host", "host_not_allowed", {"headers": matching_headers, "host": "code.grok.com"}),
             ("malformed JSON", "xai_body_not_json", {"headers": matching_headers, "body": "{not json"}),
             ("undecodable body", "xai_body_undecodable", {"headers": matching_headers + [("Content-Encoding", "gzip")], "body": "not-gzip"}),
@@ -528,7 +529,21 @@ class StageIntegrationChecks(AwsSmoke):
                 "video generation",
                 {"headers": matching_headers, "body": '{"tools":[{"type":"video_generation"}]}'},
             ),
+            (
+                "imagine image generations",
+                {
+                    "headers": bearer_only,
+                    "host": "api.x.ai",
+                    "path": "/v1/images/generations",
+                    "body": '{"prompt":"stage"}',
+                },
+            ),
+
         ]
+        # Stage has no operator S3 configuration; media requests must not fall
+        # back to provider storage even if account privacy permits retention.
+        for method, path in (("POST", "/v1/videos/generations"), ("GET", "/v1/videos/930b0d87-691b-96a6-936e-13bb4cf856d9")):
+            assert_decision("video requires S3", "denied", "xai_video_storage_required", headers=bearer_only, host="api.x.ai", method=method, path=path, body='{"prompt":"stage"}' if method == "POST" else None)
         for label, request in allowed_cases:
             assert_decision(label, "allowed", None, **request)
 

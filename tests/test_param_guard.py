@@ -12,6 +12,7 @@ import time
 import unittest
 
 from host.param_guard import (
+    MAX_LONGER_TEXT_BYTES,
     MAX_PARAMETER_BYTES,
     MAX_UNBROKEN_TOKEN_CHARS,
     ParamGuardDenied,
@@ -90,6 +91,28 @@ PROVIDER_IDENTIFIERS = [
 
 
 class FindDenialTest(unittest.TestCase):
+    def test_longer_text_tier_changes_only_the_byte_limit(self) -> None:
+        value = "a " * (MAX_LONGER_TEXT_BYTES // 2)
+        self.assertEqual(len(value.encode()), 5120)
+        self.assertEqual(find_denial(value).guard, "LENGTH")
+        self.assertEqual(guard_request_parameter_string(value, allow_longer_text=True), value)
+        self.assertEqual(find_denial(value + "a", allow_longer_text=True).guard, "LENGTH")
+        multibyte = "é " * 1706 + " a"
+        self.assertEqual(len(multibyte.encode()), 5120)
+        self.assertIsNone(find_denial(multibyte, allow_longer_text=True))
+        self.assertEqual(find_denial(multibyte + "é", allow_longer_text=True).guard, "LENGTH")
+        # Scan the tail beyond the old 1024-byte limit; longer text does not
+        # grant identifier/token exceptions or skip explicit credentials.
+        for tail in ("alice@example.com", "AKIAIOSFODNN7EXAMPLE", "A" * 200, "\x00"):
+            with self.subTest(tail=tail):
+                denial = find_denial("a " * 600 + tail, allow_longer_text=True)
+                self.assertIsNotNone(denial)
+                self.assertNotEqual(denial.guard, "LENGTH")
+        self.assertIsNone(find_denial("a " * 600 + "alice@example.com", allow_longer_text=True, allow_identifiers=True))
+        self.assertIsNone(find_denial("a " * 600 + "A" * 200, allow_longer_text=True, allow_machine_tokens=True))
+        with self.assertRaisesRegex(ParamGuardDenied, "5120-byte"):
+            guard_request_parameter_string(value + "a", allow_longer_text=True)
+
     def test_legitimate_values_pass(self) -> None:
         failures = []
         for value in LEGITIMATE_VALUES:

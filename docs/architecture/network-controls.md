@@ -225,8 +225,15 @@ The `xai` integration is the enforcement layer for the Grok Build runtime:
 registered, guarded, and tested, with no data-plane request allowed until a
 Grok login publishes an account pin. The proxy binds each Bearer token's
 account claim directly to that pin. Its route table is itself a security
-boundary, keeping the metered `api.x.ai` and the session-sync `code.grok.com`
-closed beneath owned apexes.
+boundary, keeping chat completions on `api.x.ai` and the session-sync
+`code.grok.com` closed beneath owned apexes. Imagine stills and video use
+narrow `api.x.ai` routes under the same pin. Video requests require operator
+S3 configuration. The proxy supplies signed upload URLs and rewrites verified
+completed results to signed GET URLs. The operator separately allows the exact
+`<bucket>.s3.<region>.amazonaws.com` hostname through Custom Domain Access,
+using GET and the `/grok-videos/.*` path guard. S3 downloads use the ordinary
+custom rule and authenticate to AWS with their signature, without a Grok
+bearer. No S3 hostname is dynamically owned by the xAI integration.
 
 Full detail, including the server-side tool decisions and why web search is not
 offered: [The xAI integration](xai-integration.md).

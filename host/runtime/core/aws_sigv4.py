@@ -226,3 +226,32 @@ def _canonical_query(query: str) -> str:
             )
         )
     return "&".join(f"{name}={value}" for name, value in sorted(pairs))
+
+
+def s3_presigned_url(
+    method: str, bucket: str, region: str, key: str,
+    access_key_id: str, secret_access_key: str,
+    *, now: datetime.datetime | None = None,
+) -> str:
+    """Sign one S3 object for 15 minutes; PUT requires Content-Type: video/mp4."""
+    if method not in {"PUT", "GET"}:
+        raise ValueError("unsupported S3 method")
+    when = now or datetime.datetime.now(datetime.timezone.utc)
+    amz_date = when.strftime("%Y%m%dT%H%M%SZ")
+    date = when.strftime("%Y%m%d")
+    host = f"{bucket}.s3.{region}.amazonaws.com"
+    path = urllib.parse.quote(f"/{key}", safe="/")
+    scope = f"{date}/{region}/s3/aws4_request"
+    names = "content-type;host" if method == "PUT" else "host"
+    headers = ("content-type:video/mp4\n" if method == "PUT" else "") + f"host:{host}\n"
+    query = urllib.parse.urlencode(sorted({
+        "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+        "X-Amz-Credential": f"{access_key_id}/{scope}",
+        "X-Amz-Date": amz_date,
+        "X-Amz-Expires": "900",
+        "X-Amz-SignedHeaders": names,
+    }.items()), quote_via=urllib.parse.quote)
+    canonical = "\n".join((method, path, query, headers, names, "UNSIGNED-PAYLOAD"))
+    to_sign = "\n".join(("AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(canonical.encode()).hexdigest()))
+    signature = hmac.new(_signing_key(secret_access_key, date, region, "s3"), to_sign.encode(), hashlib.sha256).hexdigest()
+    return f"https://{host}{path}?{query}&X-Amz-Signature={signature}"

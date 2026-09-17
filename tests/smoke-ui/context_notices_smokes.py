@@ -8,7 +8,8 @@ def run(page: Any, url: str, log_in: Any) -> None:
     from playwright.sync_api import expect
 
     page_ids = ["thread-1", 'memory-"quoted"<page>&']
-    tooltip = "\n".join(page_ids)
+    tooltip = "Recall: 12 ms; 1200 memory-content bytes.\nCurrent query: <img src=x onerror=alert(1)>\nSelected thread-1 r2: self memory\n" + "\n".join(page_ids)
+    tooltip += "\n" + "\n".join(f"Candidate {n}: useful-guide-{n} r2 — semantic rank {n} cosine 0.610" for n in range(1, 13))
 
     def check_memory_panel(notice: Any) -> None:
         trigger = notice.get_by_role("button", name="Self identity and 2 memories injected.", exact=True)
@@ -47,13 +48,14 @@ def run(page: Any, url: str, log_in: Any) -> None:
         }},
         {"seq": 3, "event_type": "thread.context_added", "payload": {
             "message": "Self identity and 2 memories injected.",
-            "memory_page_ids": page_ids,
+            "memory_page_ids": page_ids, "memory_recall_details": tooltip,
         }},
         {"seq": 4, "event_type": "thread.context_added", "payload": {
             "message": "Self identity and 2 memories injected.",
         }},
         {"seq": 5, "event_type": "thread.context_added", "payload": {
             "message": "Self identity and 0 memories injected.", "memory_page_ids": [],
+            "memory_recall_details": "Recall: 3 ms; 0 candidates. Current query: hello",
         }},
         {"seq": 6, "event_type": "thread.message", "payload": {"source": "agent", "message": "Ready"}},
     ]
@@ -72,7 +74,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
     expect(notices.first).to_be_visible()
     check_memory_panel(notices.first)
     expect(notices.nth(1).get_by_role("button")).to_have_count(0)
-    expect(chat.locator(".thread-stopped", has_text="Self identity and 0 memories injected.").get_by_role("button")).to_have_count(0)
+    expect(chat.locator(".thread-stopped", has_text="Self identity and 0 memories injected.").get_by_role("button")).to_have_count(1)
     expect(chat.locator(".thread-activity")).to_have_count(0)
     activity = chat.get_by_role("switch", name="Activity", exact=True)
     expect(activity).to_have_attribute("aria-checked", "false")
@@ -128,7 +130,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
         app_notices = app.locator(".chat-history-entry.stopped .chat-history-message", has_text="Self identity and 2 memories injected.")
         check_memory_panel(app_notices.first)
         expect(app_notices.nth(1).get_by_role("button")).to_have_count(0)
-        expect(app.locator(".chat-history-message", has_text="Self identity and 0 memories injected.").get_by_role("button")).to_have_count(0)
+        expect(app.locator(".chat-history-message", has_text="Self identity and 0 memories injected.").get_by_role("button")).to_have_count(1)
         context_message = app.locator(".chat-history-entry.stopped .chat-history-message").first
         assert context_message.evaluate(notice_style) == cleared_style
         expect(app.locator("#chat-history-list details")).to_have_count(0)

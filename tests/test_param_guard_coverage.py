@@ -121,8 +121,15 @@ GUARDED_FIELDS = {
     ("polymarket", "get_market", "slug"),
     ("runway", "generate_video", "prompt"),
     ("runway", "generate_video", "image_url"),
+    ("runway", "generate_video", "video_url"),
+    ("runway", "generate_video", "prompt_images"),
+    ("runway", "generate_video", "reference_images"),
+    ("runway", "generate_video", "reference_videos"),
+    ("runway", "generate_video", "reference_audio"),
+    ("runway", "generate_video", "negative_prompt"),
     ("runway", "edit_video", "prompt"),
     ("runway", "edit_video", "video_url"),
+    ("runway", "edit_video", "keyframes"),
     ("runway", "generate_image", "prompt"),
     ("runway", "generate_speech", "text"),
     ("seedance", "generate_video", "prompt"),
@@ -370,8 +377,21 @@ EXEMPT_FIELDS = {
     ("runway", "generate_video", "ratio"): TYPED,
     ("runway", "generate_video", "duration_seconds"): TYPED,
     ("runway", "generate_video", "seed"): TYPED,
+    ("runway", "generate_video", "video_asset_id"): TYPED,
+    ("runway", "generate_video", "resolution"): TYPED,
+    ("runway", "generate_video", "prompt_expansion_mode"): TYPED,
+    ("runway", "generate_video", "audio"): TYPED,
+    ("runway", "generate_video", "mode"): TYPED,
+    ("runway", "generate_video", "output_format"): TYPED,
+    ("runway", "generate_video", "prores_profile"): TYPED,
+    ("runway", "generate_video", "public_figure_threshold"): TYPED,
     ("runway", "edit_video", "video_asset_id"): TYPED,
     ("runway", "edit_video", "seed"): TYPED,
+    ("runway", "edit_video", "ratio"): TYPED,
+    ("runway", "edit_video", "target_aspect_ratio"): TYPED,
+    ("runway", "edit_video", "output_format"): TYPED,
+    ("runway", "edit_video", "prores_profile"): TYPED,
+    ("runway", "edit_video", "public_figure_threshold"): TYPED,
     ("runway", "generate_image", "model"): TYPED,
     ("runway", "generate_image", "ratio"): TYPED,
     ("runway", "generate_image", "quality"): TYPED,
@@ -685,17 +705,17 @@ class BehavioralDenialTest(unittest.TestCase):
         with self.assertRaises(ParamGuardDenied):
             runway._speech_request(FakeHostAPI(), {"text": "my password is hunter2secret"})
 
-    def test_runway_external_url_is_guarded_and_rejects_ip_literals(self) -> None:
+    def test_runway_external_url_is_guarded(self) -> None:
         from host.tools import runway
 
         api = FakeHostAPI()
         # A clean public https URL passes the guard unchanged.
         clean = "https://images.example.com/cat.jpg"
-        self.assertEqual(runway._https_url({"image_url": clean}, "image_url", api), clean)
+        self.assertEqual(runway.options.media_uri({"uri": clean}, "image", api, {}), clean)
         # A secret/identifier encoded into the URL is denied.
         with self.assertRaises(ParamGuardDenied):
-            runway._https_url(
-                {"image_url": "https://x.example.com/c?d=alice@example.com"}, "image_url", api
+            runway.options.media_uri(
+                {"uri": "https://x.example.com/c?d=alice@example.com"}, "image", api, {}
             )
 
     def test_seedance_prompt_and_reference_url_denied(self) -> None:
@@ -977,6 +997,11 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
 
     def test_network_parameter_guard_flags_match_tool_semantics(self) -> None:
         from host.network_integrations.base import request_param_denial
+
+        long_query = "q=" + "a+" * 600
+        self.assertEqual(request_param_denial("", long_query), "request_param_too_large")
+        self.assertIsNone(request_param_denial("", long_query, allow_longer_text=True))
+        self.assertEqual(request_param_denial("", long_query + "alice%40example.com", allow_longer_text=True), "request_param_pii_denied")
 
         machine = "x7Kp2mQv9zR4tYw8LbN3"
         self.assertEqual(

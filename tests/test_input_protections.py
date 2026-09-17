@@ -29,6 +29,8 @@ class InputProtectionTests(unittest.TestCase):
                        {'kind':'validated','description':'An ID.','allow_identifiers':True},
                        {'kind':'parameter_guard','description':'Custom guard essay.'},
                        {'kind':'parameter_guard','allow_machine_tokens':1},
+                       {'kind':'parameter_guard','allow_longer_text':1},
+                       {'kind':'validated','description':'An ID.','allow_longer_text':True},
                        {'kind':'parameter_guard','identifiers_condition':'decimal'},
                        {'kind':'parameter_guard','allow_identifiers':True,'identifiers_condition':'unknown'}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
@@ -47,12 +49,15 @@ class InputProtectionTests(unittest.TestCase):
             protect_inputs((approved,), {'write':{'query':validated_input('Text.')}})
 
     def test_guard_exceptions_match_real_execution_calls(self):
-        from host.tools import gmail, instagram_discovery, vercel_analytics, zoho_mail, upwork
+        from host.tools import gmail, instagram_discovery, vercel_analytics, zoho_mail, upwork, runway
         from host.tools.upwork import validation
         api=FakeHostAPI()
         class GuardReached(Exception):
             pass
         cases=[
+            (runway, 'generate_video', 'prompt', lambda: runway._generation_request(api,{'prompt':'hello'},{})),
+            (runway, 'edit_video', 'prompt', lambda: runway._edit_request(api,{'prompt':'hello','video_asset_id':'asset'},{})),
+            (runway, 'generate_image', 'prompt', lambda: runway._image_request(api,{'prompt':'hello'})),
             (gmail, 'search_messages', 'query', lambda: gmail._gmail_search_query({'query':'hello'},api)),
             (gmail, 'list_drafts', 'query', lambda: gmail._draft_list_parameters({'query':'hello'},api)),
             (gmail, 'list_drafts', 'page_token', lambda: gmail._draft_list_parameters({'page_token':'opaque'},api)),
@@ -63,6 +68,7 @@ class InputProtectionTests(unittest.TestCase):
             (zoho_mail, 'search_messages', 'search_key', lambda: zoho_mail._search_messages('access','com',{'search_key':'hello'},api)),
             (zoho_mail, 'create_folder', 'name', lambda: zoho_mail._create_folder('access','com','123',{'name':'Reports'},api)),
         ]
+        api.assets.add('asset')
         for module,action,name,invoke in cases:
             declared=module.MANIFEST.action(action).input_protections[name]
             with self.subTest(tool=module.MANIFEST.tool_id,action=action,name=name), patch.object(api.outbound,'guard_request_parameter_string',side_effect=GuardReached) as guard:
@@ -70,6 +76,7 @@ class InputProtectionTests(unittest.TestCase):
                 self.assertEqual(declared.identifiers_condition, 'decimal' if module is instagram_discovery else None)
                 self.assertEqual(guard.call_args.kwargs.get('allow_identifiers',False),declared.allow_identifiers)
                 self.assertEqual(guard.call_args.kwargs.get('allow_machine_tokens',False),declared.allow_machine_tokens)
+                self.assertEqual(guard.call_args.kwargs.get('allow_longer_text',False),declared.allow_longer_text)
         # Upwork recursively guards keys too: inspect the call for the value.
         for action in upwork.MANIFEST.actions:
             for name,declared in action.input_protections.items():

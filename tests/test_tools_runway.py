@@ -313,7 +313,7 @@ class RunwayToolTests(unittest.TestCase):
             {"model": "h3_max", "duration_seconds": "4"},
             {"model": "h3_max", "duration_seconds": "16"},
             {"model": "h3_max", "ratio": "720:1280"},
-            {"model": "h3_max", "resolution": "480p"},
+            {"model": "h3_max", "resolution": "1080p"},
             {"model": "seedance2_5", "resolution": "768p"},
             {"model": "gen4.5", "resolution": "480p"},
         )
@@ -569,7 +569,6 @@ class RunwayToolTests(unittest.TestCase):
         bad_inputs = [
             {"prompt": "edit"},
             {"video_url": "http://insecure.example.com/c.mp4", "prompt": "edit"},
-            {"video_url": "https://example.com/c.mp4"},
             {"video_url": "https://example.com/c.mp4", "video_asset_id": "asset", "prompt": "edit"},
             {"video_url": "https://example.com/c.mp4", "prompt": "edit", "unknown": 1},
         ]

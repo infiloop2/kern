@@ -8,7 +8,7 @@ This covers both the network-enforcement/provider connection and the ACP turn
 adapter used by Chat, Apps, and Schedules.
 
 Everything below about the CLI's protocol, flags, files and wire format was
-verified against `@xai-official/grok@1.0.5` running on a real host with a real
+originally verified against `@xai-official/grok@1.0.5` running on a real host with a real
 subscription login, not read off documentation.
 
 ## The harness this exists for
@@ -35,14 +35,17 @@ Two properties of the harness matter to this integration specifically:
 
 ## What is opened
 
-Two hosts, under the reserved `x.ai` and `grok.com` apexes. This is the minimum
-for a login plus inference; more should be opened against observed denials
-rather than anticipated.
+Three fixed xAI hosts under the reserved `x.ai` and `grok.com` apexes.
+Video downloads additionally need an operator-configured custom S3 domain rule. Chat uses the subscription proxy; Imagine
+uses the REST routes observed on Grok Build, with S3 injection verified on
+1.0.34. Additional routes require observed evidence.
 
 | Host | Role | Methods | Paths | Pinned |
 | --- | --- | --- | --- | --- |
 | `auth.x.ai` | OAuth issuer: discovery, device code, authorize, token exchange | GET, POST | all | No |
 | `cli-chat-proxy.grok.com` | Subscription data plane | GET on the allowlist; POST on inference only | allowlist below | Yes |
+| `api.x.ai` | Grok Build Imagine stills and video REST | POST image/video generations; GET video poll | allowlist below | Yes |
+| `<bucket>.s3.<region>.amazonaws.com` | Separately configured custom-domain access | GET recommended | `/grok-videos/.*` path guard recommended | AWS signature |
 
 `auth.x.ai` is unpinned by construction. It is the endpoint that *establishes*
 which account exists, so it cannot be gated on knowing the account already, and
@@ -99,8 +102,9 @@ denials are decisions rather than omissions:
 
 | Host | Why it stays closed |
 | --- | --- |
-| `api.x.ai` | The metered developer API. It bills per token against a console.x.ai credit balance instead of the operator's Grok subscription, so opening it would let a misconfigured runtime spend money without an operator decision. |
-| `code.grok.com` | A second session and workspace sync surface. Note that closing this host is *not* what keeps conversation state local — the chat proxy's own session routes are, and they are denied by the path allowlist above. |
+| Remaining `api.x.ai` paths | Chat completions, tokenize-text, and anything other than Imagine image/video generation and video poll. Those are the metered developer API. Opening them would let a misconfigured runtime spend console credits on inference. |
+| `imgen.x.ai` | Not used by Grok Build 1.0.5 Imagine stills (the image is in the JSON body). |
+| `code.grok.com` | A second session and workspace sync surface. Note that closing this host is *not* what keeps conversation state local. The chat proxy's own session routes are, and they are denied by the path allowlist above. |
 | `api.mixpanel.com` | Product analytics. Not under an owned apex, so it is denied by the default policy; the managed config will also disable telemetry at the harness. |
 
 Because the apexes are reserved, none of these can be reopened through a
@@ -215,13 +219,68 @@ closed.
 | --- | --- | --- |
 | `x_search` | xAI executes keyword, semantic, user, and thread search against X data. The host sends the query and surrounding inference context only to `cli-chat-proxy.grok.com`; xAI performs the X-side work. | **Usable now.** Grok Build 1.0.5 emits this declaration when `supports_backend_search = true`. |
 | `image_generation` | xAI's Responses image-generation tool runs on xAI servers and returns generated image data in the response. Kern requires `action: "generate"`; the default `auto` and `edit` shapes are denied because editing can make xAI fetch an input image URL. | **Policy-ready, not surfaced.** xAI documents the tool, but Grok Build 1.0.5 neither declares it nor decodes its result type. |
-| `video_generation` | Only the bare declaration is reserved for the corresponding xAI-hosted family. Any option is denied until its destination semantics are reviewed. | **Not usable today.** xAI does not currently document a Responses `video_generation` tool; its video generation API is the separate, metered `api.x.ai` flow, which remains blocked. |
+| `video_generation` | Only the bare declaration is reserved for the corresponding xAI-hosted family. Any option is denied until its destination semantics are reviewed. | **Not used.** Grok Build Imagine video is the S3-backed REST flow on `api.x.ai`, not this hosted tool. |
 
-This deliberately does **not** open `api.x.ai`, `imgen.x.ai`, or `vidgen.x.ai`.
-The developer image/video APIs use an API key, bill the xAI Console account,
-and can accept public input URLs; that is a different integration and data-flow
-decision from allowing a bare hosted-tool declaration through the pinned Grok
-subscription request.
+Grok Build Imagine uses pinned OAuth on `api.x.ai`: image generation, video
+creation and video polling. Images pass through without S3 configuration.
+Video requests require operator storage configured under Home > Integrations >
+Grok. The CLI carries no S3 credentials. The launcher sets
+`GROK_DISABLE_ZDR_INCOMPATIBLE_TOOLS=false`, allowing requests to reach the proxy
+while the account's **Help improve Grok** remains **Opt out**.
+
+The xAI guard independently registers two optional hooks: `prepare_request`
+returns updated request headers and body; `prepare_response` selects a response
+callback and its failure code for video polls. Both use the per-integration
+dispatch pattern and run only after the request is allowed. GitHub's existing
+header-injection hook stays unchanged. The xAI module owns endpoint selection,
+signing and JSON changes. The shared transport only performs bounded HTTP
+buffering and forwarding for selected responses; other responses retain the
+ordinary streaming path.
+
+The proxy replaces `output.upload_url` with a 15-minute SigV4 PUT URL for a
+random object under the fixed `grok-videos/` prefix. xAI uploads the rendered
+video directly to S3 using `Content-Type: video/mp4`. The completed polling
+response returns that PUT URL. Kern verifies its signature, bucket, object
+shape and expiry, then replaces only `video.url` with a 15-minute signed GET.
+No job registry or retry mechanism is needed: the returned signed URL proves
+which object Kern selected, including after a proxy restart. Pending and
+failed provider responses retain their status and body. Invalid completed
+URLs fail closed with a 502, never releasing an arbitrary download URL.
+
+Downloads use the ordinary Custom Domain Access integration. Before generating,
+the operator must add the exact `<bucket>.s3.<region>.amazonaws.com` hostname,
+GET method, and `/grok-videos/.*` path guard, with WebSockets disabled. Storage
+configuration does not grant network access. No PUT rule is needed because
+xAI uploads directly to AWS. Missing allowlisting blocks the download through
+the normal proxy boundary even when generation succeeded and S3 has the object.
+
+The xAI integration does not own S3 hosts. Existing managed ownership, custom
+exact/wildcard matching and overlap checks remain unchanged. The custom rule
+limits methods and paths; it does not restrict downloads to Kern-issued URLs.
+AWS verifies signed access to the private objects. Existing broader custom
+rules retain their ordinary meaning and are never overridden by Grok settings.
+Changing bucket or region requires a separate allowlist update; removing
+storage does not delete custom rules. Storage replacement/removal can interrupt
+active work. Issued URLs can remain usable outside Kern until expiry or IAM key
+revocation. Objects persist until operator deletion or an AWS lifecycle rule.
+
+Media inputs are inline image data and named voice references; remote input
+URLs and unknown top-level fields are denied. Caller-supplied video output is
+replaced, never forwarded. Image output destinations are denied. Chat
+completions and tokenize-text on `api.x.ai`, `imgen.x.ai`, and provider-hosted
+`vidgen.x.ai` downloads remain closed. Opaque `xai-` API keys fail the pin.
+
+The September 17, 2026 operator capture verified Grok Build **1.0.34** with
+no CLI S3 configuration: injected upload URL, completed response rewrite,
+and successful S3 MP4 download (1,167,970 bytes). All captured video API
+responses reported `x-zero-data-retention: true`; the operator retained
+Opt out and confirmed playback. This verifies the laptop injection protocol,
+not deployment of Kern's implementation or an independent retention audit.
+The bootstrap now pins 1.0.34; historical ACP observations below identify the
+older version on which they were originally measured. The storage API is
+documented in [Admin API](../api/AdminAPI.md#grok-video-storage); storage behavior
+is described under [Video storage settings](#video-storage-settings). AWS setup
+and the required download allowlist are in the in-product integration guide.
 
 ### What remains denied
 
@@ -301,7 +360,7 @@ before forwarding it.
 | --- | --- | --- | --- | --- |
 | X search | `cli-chat-proxy.grok.com` only | The ordinary inference context plus `{"type":"x_search"}` and any X handle/date/media-understanding filters | xAI says it executes the search server-side against X posts, users, threads, images, and videos. This host makes no request to `x.com` or to a third-party search provider. | X-search call metadata, citations/results used by the model, and the final model response |
 | Image generation declaration | `cli-chat-proxy.grok.com` only | The ordinary inference context plus `{"type":"image_generation","action":"generate"}` | xAI documents this as a built-in tool executed on xAI servers. Kern denies edit/auto declarations and external-input fields. The Responses shape returns generated image bytes inline. | An `image_generation_call` item containing generated image data, once Grok Build supports it |
-| Video generation declaration | `cli-chat-proxy.grok.com` only | The ordinary inference context plus `{"type":"video_generation"}` | No current upstream execution path is documented for this declaration. Kern does not translate it into, or open, the metered Imagine API. | Nothing usable with Grok Build 1.0.5 |
+| Video generation declaration | `cli-chat-proxy.grok.com` only | The ordinary inference context plus `{"type":"video_generation"}` | Grok Build 1.0.5 does not emit this tool. Imagine video uses the S3-backed REST flow. | Unused hosted declaration |
 
 The guard does not accept a destination URL as configuration and does not open
 another host for these tools. X search accepts only its documented X handle,
@@ -319,9 +378,9 @@ Web search remains a materially different path: it can open arbitrary public
 URLs selected during model execution. Remote MCP likewise names an arbitrary
 server, and hosted browsing does not stay within X. Those declarations remain
 denied. The route table separately keeps storage, session/workspace sync,
-feedback, traces, `api.x.ai`, `imgen.x.ai`, and `vidgen.x.ai` closed, so this
-change does not create a file-upload, developer-billing, or media-download
-route.
+feedback, traces, remaining `api.x.ai` paths, and `imgen.x.ai` closed, so this
+change does not create a file-upload or chat-completions billing path. Imagine
+stills and video are the four captured REST routes only.
 
 The linked account's coding-data opt-out and team ZDR state govern retention at
 xAI; Kern displays both when Grok reports them. Locally, telemetry and trace
@@ -542,11 +601,12 @@ agent-facing guidance and joinable by the agent introspection tools.
 | `proxy_provider_pins` (`provider = 'xai'`) | The account id the proxy compares per request. Published only by a refresh that commits `active`; cleared by anything else. |
 | `xai_status_probe_pin` (view) | The approved xAI anchor while the integration is enabled. Used only for guarded status routes before or while the data-plane pin is clear; it stores no second copy. |
 | `managed_integrations` (`integration = 'xai'`) | Presence means enabled. |
+| `xai_video_storage` | Optional singleton bucket, region, access key id and encrypted secret. Admin writes; proxy has SELECT only. No agent or tools-service access. |
 
 There is deliberately **no `xai_settings` table**. Claude's equivalent exists to
 hold a web-search toggle; this integration has no options, so `presence in
-managed_integrations` is the whole of its configuration and there is no second
-row to keep in step.
+managed_integrations` is the whole of its network-policy configuration. Optional
+video credentials live separately and do not create network rules.
 
 `web_search` is not among the accepted keys, which is the ordinary
 `reject_extra` behaviour every integration already has rather than anything
@@ -555,6 +615,35 @@ shipped -- so there is no old policy to stay compatible with. It matters only
 for whoever adds an option later: give it a row, because a key with nowhere to
 live survives parsing and is then dropped by the policy round-trip the proxy
 reads, which reads to the operator as an opt-in that silently does nothing.
+
+### Video storage settings
+
+The admin-only Video storage form saves the bucket, region and dedicated IAM
+access key pair in `xai_video_storage`. The corresponding GET/PUT/DELETE
+contract is documented in [Admin API](../api/AdminAPI.md#grok-video-storage).
+The proxy reads the encrypted credential to sign output URLs. No key pair is
+installed in Grok's configuration, and the secret access key is never exposed
+to the agent. Presigned URLs contain the access-key ID in `X-Amz-Credential`
+and a time-limited signature authorizing that object operation. One key pair with
+`s3:PutObject` and `s3:GetObject` on
+`arn:aws:s3:::<bucket>/grok-videos/*` is sufficient. The supported setup is a
+private commercial AWS S3 bucket with SSE-S3 encryption and a bucket name
+without dots, compatible with the bucket-specific HTTPS hostname. Custom
+endpoints and temporary session credentials are unsupported.
+
+The user-facing integration guide separately requires Custom Domain Access
+for `<bucket>.s3.<region>.amazonaws.com`, GET, and `/grok-videos/.*`, with
+WebSockets disabled. Saving storage does not create or modify this rule.
+Without it, the download receives `host_not_allowed`; a method/path mismatch
+receives `network_policy_denied`, even if xAI generated the video and uploaded
+it successfully. Changing bucket or region requires updating the allowlist
+separately; removing storage leaves custom-domain rules intact. The existing
+ownership and overlap checks apply unchanged because Grok claims no S3 domain.
+
+The guide owns the AWS Console instructions, IAM policy example, exact UI
+fields, privacy choice, verification steps and removal instructions. This
+document describes the implementation; the Admin API reference owns the
+request and response schemas.
 
 ## Admin UI
 
@@ -621,7 +710,7 @@ ring replaces the note with no further change.
 
 | Area | Coverage |
 | --- | --- |
-| Route table | Both opened hosts, inference-only POST, read-only settings/model/user/billing routes, the explicit `api.x.ai` and `code.grok.com` denials, method rejection, case-insensitive host matching |
+| Route table | Opened hosts, inference-only POST, Imagine REST paths, separately allowlisted S3 GET, read-only settings/model/user/billing routes, remaining `api.x.ai` and `code.grok.com` denials, method rejection, case-insensitive host matching |
 | Account and credential binding | Personal `sub`; team `principal_id`; unpinned; missing, foreign, and duplicated bearers; opaque key; non-Bearer scheme; a token whose only claim is unrelated |
 | Server tools | Function tools; allowed X-search/image/video declarations; web search by tool entry and by `search_parameters`, over every source shape; code execution; collections search under both spellings; unknown and untyped entries in a `tools` array; renamed `web*` variants; remote MCP by type and by `server_url`; nested declarations; replay items and their subtrees; tool names in prompt text; unparseable, over-nested, and non-JSON bodies |
 | Config | That `enabled` is the only accepted key and a `web_search` option is rejected rather than ignored, apex reservation against custom domains |
@@ -634,7 +723,7 @@ ring replaces the note with no further change.
 The version and model must move together. `grok 1.0.3` advertises only
 `grok-4.5` in its ACP `initialize` response, while this host offers
 `grok-4.6`; submitting that newer model through the older client left the
-prompt in flight without an ACP completion. The pinned `grok 1.0.5` advertises
+prompt in flight without an ACP completion. The historically tested `grok 1.0.5` advertised
 `grok-4.6` and completes the same terminal-tool and resumed-session turns.
 
 The properties below are verified against `grok 1.0.5` by running it:

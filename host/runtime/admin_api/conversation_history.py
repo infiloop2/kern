@@ -925,6 +925,11 @@ def _conversation_event(event: dict[str, Any]) -> dict[str, Any]:
             ]
             context["memory_page_ids"] = bounded_ids
             context["truncated"] = context["truncated"] or bounded_ids != page_ids
+        details = payload.get("memory_recall_details")
+        if isinstance(details, str):
+            bounded_details = _clip_json_encoded_text(details, 14000)
+            context["memory_recall_details"] = bounded_details
+            context["truncated"] = context["truncated"] or details != bounded_details
         return context
     activity = payload.get("activity")
     activity = activity if isinstance(activity, dict) else {}

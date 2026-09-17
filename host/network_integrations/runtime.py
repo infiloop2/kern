@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from host.config import NetworkControls
-from host.network_integrations.base import AccountAttestor
+from host.network_integrations.base import AccountAttestor, ResponseRewrite
 from host.network_integrations.bedrock import guard as bedrock_guard
 from host.network_integrations.claude import guard as claude_guard
 from host.network_integrations.custom import guard as custom_guard
@@ -30,6 +30,14 @@ RequestDenied = Callable[
 ]
 RewriteRequestHeaders = Callable[
     [Any, str, str, str, str, list[tuple[str, str]], bytes], list[tuple[str, str]]
+]
+PrepareRequest = Callable[
+    [Any, str, str, str, str, list[tuple[str, str]], bytes],
+    tuple[list[tuple[str, str]], bytes],
+]
+PrepareResponse = Callable[
+    [Any, str, str, str, str, list[tuple[str, str]], bytes],
+    ResponseRewrite | None,
 ]
 WebSocketAllowed = Callable[[Any, str], bool]
 WebSocketMessageDenied = Callable[[bytes], str | None]
@@ -50,12 +58,14 @@ class IntegrationGuard:
     """One integration's request-time hooks. The dispatch layer owns the
     ``config.enabled`` gate: every hook is invoked only for an enabled config
     (a disabled integration is denied here), and ``gate_response``,
-    ``rewrite_request_headers``, and the WebSocket hooks additionally run only
+    ``rewrite_request_headers``, ``prepare_request``, ``prepare_response``, and the WebSocket hooks run only
     after ``request_denied`` allowed the request."""
 
     host_allowed: HostAllowed
     request_denied: RequestDenied
     rewrite_request_headers: RewriteRequestHeaders | None = None
+    prepare_request: PrepareRequest | None = None
+    prepare_response: PrepareResponse | None = None
     gate_response: Callable[[Any, str, str, str, bytes, str | None], tuple[bytes | None, str | None]] | None = None
     websocket_allowed: WebSocketAllowed = _websocket_denied
     ws_message_denied: WebSocketMessageDenied = _websocket_message_allowed
@@ -76,6 +86,8 @@ GUARDS: dict[str, IntegrationGuard] = {
     "xai": IntegrationGuard(
         host_allowed=xai_guard.host_allowed,
         request_denied=xai_guard.request_denied,
+        prepare_request=xai_guard.prepare_request,
+        prepare_response=xai_guard.prepare_response,
     ),
     "bedrock": IntegrationGuard(
         host_allowed=bedrock_guard.host_allowed,
@@ -202,3 +214,25 @@ def websocket_allowed(controls: NetworkControls, host: str) -> bool:
     """
     guard, config = _selection(controls, host)
     return bool(config.enabled and guard.websocket_allowed(config, host))
+
+
+def prepare_request(
+    controls: NetworkControls, method: str, host: str, path: str, query: str,
+    headers: list[tuple[str, str]], body: bytes,
+) -> tuple[list[tuple[str, str]], bytes]:
+    """Run the owning integration's optional transform after request approval."""
+    guard, config = _selection(controls, host)
+    if not config.enabled or guard.prepare_request is None:
+        return headers, body
+    return guard.prepare_request(config, method, host, path, query, headers, body)
+
+
+def prepare_response(
+    controls: NetworkControls, method: str, host: str, path: str, query: str,
+    headers: list[tuple[str, str]], body: bytes,
+) -> ResponseRewrite | None:
+    """Select an optional response transform for an already allowed request."""
+    guard, config = _selection(controls, host)
+    if not config.enabled or guard.prepare_response is None:
+        return None
+    return guard.prepare_response(config, method, host, path, query, headers, body)

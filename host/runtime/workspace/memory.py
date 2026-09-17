@@ -225,6 +225,8 @@ def recall_pages(body: Any) -> dict[str, Any]:
             "message must be a string",
         )
 
+    started = time.monotonic()
+    details: list[str] = []
     pages: list[dict[str, Any]] = []
     try:
         pages.append({**load_page(thread_id), "scope": "self"})
@@ -240,6 +242,7 @@ def recall_pages(body: Any) -> dict[str, Any]:
             thread_id=thread_id, selection="popular",
         )
     except (WorkspaceError, pgclient.Error, OSError) as exc:
+        details.append("Popular search unavailable.")
         host_errors.report_warning(
             "workspace.memory_recall",
             exc,
@@ -248,17 +251,19 @@ def recall_pages(body: Any) -> dict[str, Any]:
         )
 
     if "\x00" in message:
+        details.append("Relevant search skipped: NUL in request.")
         host_errors.report_warning(
             "workspace.memory_recall",
             "relevant recall skipped for a NUL-containing query",
             context={"thread_id": thread_id, "phase": "query"},
             kind="memory_recall_degraded",
         )
-        return {"pages": pages}
+        return _recall_response(pages, details, started)
 
     query = _recall_query(message)
+    details.append(f"Current query (first {MAX_RECALL_QUERY_BYTES} UTF-8 bytes): {query or '[empty]'}")
     if not query:
-        return {"pages": pages}
+        return _recall_response(pages, details, started)
     try:
         matches = _search_pages(
             # Overfetch so popular pages do not consume relevance slots.
@@ -267,15 +272,18 @@ def recall_pages(body: Any) -> dict[str, Any]:
             record_top_hit=False,
             semantic=True,
             max_query_bytes=MAX_RECALL_QUERY_BYTES,
+            diagnostics=details,
         )
     except (WorkspaceError, pgclient.Error, OSError) as exc:
+        details.append("Relevant search unavailable.")
         host_errors.report_warning(
             "workspace.memory_recall",
             exc,
             context={"thread_id": thread_id, "phase": "swarm_search"},
             kind="memory_recall_degraded",
         )
-        return {"pages": pages}
+        return _recall_response(pages, details, started)
+    details.append(f"Search mode: {matches.get('search_mode', 'unknown')}; match mode: {matches.get('match_mode', 'strong')}.")
     # Popular pages have their own slots; weak token overlap still does not
     # qualify for the relevance slots. Recall never records popularity hits.
     summaries = [] if matches.get("match_mode") == "weak" else matches.get("pages", [])
@@ -283,7 +291,17 @@ def recall_pages(body: Any) -> dict[str, Any]:
         pages, summaries, RECALL_RELEVANT_LIMIT,
         thread_id=thread_id, selection="relevant",
     )
-    return {"pages": pages}
+    return _recall_response(pages, details, started)
+
+
+def _recall_response(pages: list[dict[str, Any]], details: list[str], started: float) -> dict[str, Any]:
+    selected = [
+        f"Selected {page['page_id']} r{page['revision']}: {page.get('selection', 'self')}"
+        for page in pages
+    ]
+    size = sum(len(page["content"].encode("utf-8")) for page in pages)
+    trace = [f"Recall: {round((time.monotonic() - started) * 1000)} ms; {size} memory-content bytes."]
+    return {"pages": pages, "diagnostics": "\n\n".join(trace + selected + details)}
 
 
 def _append_recalled_pages(
@@ -333,6 +351,7 @@ def _search_pages(
     record_top_hit: bool,
     semantic: bool,
     max_query_bytes: int = MAX_SEARCH_BYTES,
+    diagnostics: list[str] | None = None,
 ) -> dict[str, Any]:
     needle = _one(query, "q")
     try:
@@ -461,6 +480,20 @@ def _search_pages(
         semantic_rows,
         graph_rows,
     )
+    if diagnostics is not None:
+        evidence: dict[str, list[str]] = {}
+        for channel, rows in (("exact", exact_rows), ("lexical", fused_lexical),
+                              ("semantic", semantic_rows), ("graph", graph_rows)):
+            for rank, row in enumerate(rows, start=1):
+                label = f"{channel} rank {rank}"
+                if channel == "semantic":
+                    label += f" cosine {float(row[8]):.3f}"
+                evidence.setdefault(str(row[0]), []).append(label)
+        diagnostics.append(f"Ranked candidates: {len(fused)}; showing first 12 (before revision revalidation).")
+        diagnostics.extend(
+            f"Candidate {rank}: {row[0]} r{row[3]} — {', '.join(evidence[str(row[0])])}"
+            for rank, row in enumerate(fused[:12], start=1)
+        )
     # Candidates are carried as page ids from here on: the revalidation pass
     # re-reads whatever is actually returned, so the fused tuples are only
     # needed for their ranking.

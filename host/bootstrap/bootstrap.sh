@@ -11,7 +11,7 @@ CLAUDE_CODE_VERSION=2.1.258
 # Grok Build, xAI's coding agent. The npm package is a JS trampoline plus a
 # per-platform optional dependency carrying a brotli-compressed binary; see
 # docs/architecture/xai-integration.md for the upgrade review checklist.
-GROK_CLI_VERSION=1.0.5
+GROK_CLI_VERSION=1.0.34
 HERMES_AGENT_VERSION=0.18.2
 FASTEMBED_VERSION=0.8.0
 PGVECTOR_DEB_VERSION=0.8.6-1.pgdg22.04+1
@@ -1122,6 +1122,9 @@ marketplace = false
 
 [telemetry]
 trace_upload = false
+
+[tools]
+disable_zdr_incompatible_tools = false
 
 [compat.claude]
 mcps = false

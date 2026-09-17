@@ -17,6 +17,14 @@ AccountAttestor = Callable[[str], str | None]
 
 
 @dataclass(frozen=True)
+class ResponseRewrite:
+    """An integration's bounded response transform and safe failure code."""
+
+    apply: Callable[[int, list[tuple[str, str]], bytes], tuple[list[tuple[str, str]], bytes]]
+    error_code: str
+
+
+@dataclass(frozen=True)
 class DenialReason:
     """Catalog entry for one denial code — the stable snake_case string a
     guard returns, sent in the 403 body, and stored in network events. The
@@ -270,6 +278,7 @@ def request_param_denial(
     *,
     allow_identifiers: bool = False,
     allow_machine_tokens: bool = False,
+    allow_longer_text: bool = False,
 ) -> str | None:
     """Run the parameter guard over a managed-integration request's URL and
     return the first denial code.
@@ -308,6 +317,7 @@ def request_param_denial(
             candidate,
             allow_identifiers=allow_identifiers,
             allow_machine_tokens=allow_machine_tokens,
+            allow_longer_text=allow_longer_text,
         )
         if denial is not None:
             return denial.reason

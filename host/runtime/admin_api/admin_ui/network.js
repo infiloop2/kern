@@ -19,6 +19,7 @@ let activeNetworkPolicy = {"network_integrations": {}};
 let expandedGithubRepoAudits = new Set();
 let latestGithubAudits = [];
 let bedrockCredentialMetadata = { connected: false };
+let xaiVideoStorage = { configured: false };
 
 function selectedIntegrationId() {
   return $("panel-network").dataset.guide || "";
@@ -84,7 +85,11 @@ function policyMessage(integration, message, isError) {
 }
 
 export async function loadPolicy() {
-  const response = await api("GET", "/v1/network/policy");
+  const [response, storage] = await Promise.all([
+    api("GET", "/v1/network/policy"),
+    api("GET", "/v1/network-tools/xai-video-storage"),
+  ]);
+  xaiVideoStorage = storage;
   activeNetworkPolicy = normalizePolicy(response.network_controls);
   renderNetworkControls();
   loadGithubCredential().catch(() => {});
@@ -215,7 +220,7 @@ function integrationDetailsHtml(name, enabled) {
     // Claude offers a web-search toggle; xAI deliberately does not, because
     // Grok's server-side search has no shape this host can allow.
     if (name === "claude" && enabled) return `${accountCards}${webSearchCard(name)}`;
-    return accountCards;
+    return name === "xai" ? `${accountCards}${xaiVideoStorageCard(enabled)}` : accountCards;
   }
   if (name === "github") {
     return `
@@ -894,4 +899,53 @@ export async function removeDomainRule(domain) {
       delete policy.network_integrations.custom;
     }
   }, `Domain rule for ${domain} removed.`);
+}
+
+
+function xaiVideoStorageCard(enabled) {
+  const saved = xaiVideoStorage.configured;
+  return `<div class="detail-card" id="xai-video-storage-card">
+    <div class="detail-card-head"><h3>Video storage</h3>${saved ? badge("configured") : ""}</div>
+    <p class="muted">Images work without storage. Videos require a private AWS S3 bucket. Keep Help improve Grok set to Opt out.</p>
+    ${saved ? `<p class="muted">${esc(xaiVideoStorage.bucket)} · ${esc(xaiVideoStorage.region)}</p>` : ""}
+    <div class="xai-storage-form">
+      <label>Bucket<input id="xai-video-bucket" value="${esc(xaiVideoStorage.bucket || "")}" placeholder="my-grok-videos" autocomplete="off" spellcheck="false"></label>
+      <label>Region<input id="xai-video-region" value="${esc(xaiVideoStorage.region || "us-east-1")}" autocomplete="off" spellcheck="false"></label>
+      <label>Access key ID<input id="xai-video-access-key" placeholder="AKIA..." autocomplete="off" spellcheck="false"></label>
+      <label>Secret access key<input id="xai-video-secret" type="password" autocomplete="off"></label>
+    </div>
+    <p class="muted">${saved ? "Enter both keys to replace the saved configuration. " : ""}Kern encrypts the secret and keeps it out of Grok. See the integration guide for bucket permissions.</p>
+    <div class="actions">
+      <button class="primary sm" data-action="save-xai-video-storage"${enabled ? "" : " disabled"}>Save video storage</button>
+      ${saved ? `<button class="ghost sm" data-action="delete-xai-video-storage">Remove storage</button>` : ""}
+    </div>
+    <p class="inline-message" id="xai-video-storage-message" role="status" aria-live="polite"></p>
+  </div>`;
+}
+
+export async function saveXaiVideoStorage() {
+  const body = {
+    bucket: $("xai-video-bucket").value.trim(),
+    region: $("xai-video-region").value.trim(),
+    access_key_id: $("xai-video-access-key").value.trim(),
+    secret_access_key: $("xai-video-secret").value.trim(),
+  };
+  try {
+    xaiVideoStorage = await api("PUT", "/v1/network-tools/xai-video-storage", body);
+    $("xai-video-storage-card").outerHTML = xaiVideoStorageCard(true);
+    inlineMessage($("xai-video-storage-message"), "Saved. New videos will use this bucket. Permissions are verified when a video is generated.", false);
+  } catch (error) {
+    inlineMessage($("xai-video-storage-message"), error.message, true);
+  }
+}
+
+export async function deleteXaiVideoStorage() {
+  try {
+    xaiVideoStorage = await api("DELETE", "/v1/network-tools/xai-video-storage");
+    const enabled = objectValue(objectValue(activeNetworkPolicy.network_integrations).xai).enabled === true;
+    $("xai-video-storage-card").outerHTML = xaiVideoStorageCard(enabled);
+    inlineMessage($("xai-video-storage-message"), "Removed. Video requests are blocked until storage is configured again.", false);
+  } catch (error) {
+    inlineMessage($("xai-video-storage-message"), error.message, true);
+  }
 }
