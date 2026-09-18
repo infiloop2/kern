@@ -96,9 +96,7 @@ const agentSettingsSaveFailures = new Map();
 const webAppsRoot = window.KernWorkspaceRoots["web-apps"];
 const $ = id => webAppsRoot.querySelector(`#${CSS.escape(id)}`);
 
-function positionMemoryPages(event) {
-  const notice = event.target.closest?.(".memory-notice");
-  if (!notice || (event.relatedTarget && notice.contains(event.relatedTarget))) return;
+function positionMemoryPages(notice) {
   const panel = notice.querySelector(".memory-pages");
   const bounds = $("chat-history-scroll").getBoundingClientRect();
   const anchor = notice.getBoundingClientRect();
@@ -109,8 +107,48 @@ function positionMemoryPages(event) {
   notice.classList.toggle("memory-notice-below", openBelow);
   panel.style.maxHeight = `${openBelow ? below : above}px`;
 }
-webAppsRoot.addEventListener("pointerover", positionMemoryPages);
-webAppsRoot.addEventListener("focusin", positionMemoryPages);
+
+function setMemoryNoticeOpen(notice, open) {
+  notice.classList.toggle("memory-notice-open", open);
+  const trigger = notice.querySelector("button");
+  const panel = notice.querySelector(".memory-pages");
+  if (trigger) {
+    trigger.setAttribute("aria-expanded", open ? "true" : "false");
+    if (panel?.id) {
+      trigger.setAttribute("aria-controls", panel.id);
+      if (open) trigger.setAttribute("aria-describedby", panel.id);
+      else trigger.removeAttribute("aria-describedby");
+    }
+  }
+  if (open) positionMemoryPages(notice);
+}
+
+function closeOpenMemoryNotices(except = null) {
+  webAppsRoot.querySelectorAll(".memory-notice-open").forEach(notice => {
+    if (notice !== except) setMemoryNoticeOpen(notice, false);
+  });
+}
+
+function dismissMemoryNoticesOutside(event) {
+  const path = event.composedPath();
+  webAppsRoot.querySelectorAll(".memory-notice-open").forEach(notice => {
+    if (!path.includes(notice)) setMemoryNoticeOpen(notice, false);
+  });
+}
+
+webAppsRoot.addEventListener("click", event => {
+  const trigger = event.target.closest?.(".memory-notice > button");
+  if (!trigger) return;
+  const notice = trigger.closest(".memory-notice");
+  const opening = !notice.classList.contains("memory-notice-open");
+  closeOpenMemoryNotices(opening ? notice : null);
+  setMemoryNoticeOpen(notice, opening);
+});
+document.addEventListener("pointerdown", dismissMemoryNoticesOutside, true);
+document.addEventListener("click", dismissMemoryNoticesOutside, true);
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") closeOpenMemoryNotices();
+});
 
 const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => ({
@@ -2138,6 +2176,13 @@ function renderConversationHistory(forceBottom = false) {
       Array.from(list.querySelectorAll(".activity-card[open]"))
         .map(card => card.dataset.activityId),
     );
+    const openMemoryKeys = new Set(
+      Array.from(list.querySelectorAll(".memory-notice-open"))
+        .map(notice => notice.closest("[data-entry-key]")?.dataset.entryKey)
+        .filter(Boolean),
+    );
+    const focusedMemoryKey = webAppsRoot.activeElement?.closest?.(".memory-notice")
+      ?.closest("[data-entry-key]")?.dataset.entryKey || null;
     const nodes = entries.map(entry => {
       const item = document.createElement("article");
       item.className = `chat-history-entry ${entry.kind}`;
@@ -2169,13 +2214,25 @@ function renderConversationHistory(forceBottom = false) {
         pages.id = `app-memory-pages-${entry.seq}`;
         pages.setAttribute("role", "tooltip");
         pages.textContent = entry.memoryRecallDetails || entry.memoryPageIds.join("\n");
-        trigger.setAttribute("aria-describedby", pages.id);
+        trigger.setAttribute("aria-controls", pages.id);
+        const open = openMemoryKeys.has(entry.key);
+        trigger.setAttribute("aria-expanded", open ? "true" : "false");
+        if (open) {
+          message.classList.add("memory-notice-open");
+          trigger.setAttribute("aria-describedby", pages.id);
+        }
         message.replaceChildren(trigger, pages);
       }
       item.append(sender, message);
       return item;
     });
     list.replaceChildren(...nodes);
+    list.querySelectorAll(".memory-notice-open").forEach(positionMemoryPages);
+    if (focusedMemoryKey) {
+      list.querySelector(
+        `[data-entry-key="${CSS.escape(focusedMemoryKey)}"] .memory-notice > button`,
+      )?.focus({ preventScroll: true });
+    }
     historyRenderedAppId = selectedAppId;
     historyRenderedEntryKey = entryKey;
   }

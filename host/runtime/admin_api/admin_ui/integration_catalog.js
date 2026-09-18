@@ -198,7 +198,7 @@ export const MANAGED_INTEGRATIONS = {
     networkScope: [
       ["auth.x.ai", "GET and POST for device login"],
       ["cli-chat-proxy.grok.com", "Pinned-account inference and read-only account/model/billing metadata"],
-      ["api.x.ai", "POST /v1/images/generations and /v1/videos/generations; GET /v1/videos/<id>; pinned OAuth only"],
+      ["api.x.ai", "POST /v1/images/generations, /v1/images/edits, and /v1/videos/generations; GET /v1/videos/<id>; pinned OAuth only"],
       ["<bucket>.s3.<region>.amazonaws.com", "Separate custom-domain rule required: GET, path guard /grok-videos/.*; AWS authenticates downloads"],
     ],
   },

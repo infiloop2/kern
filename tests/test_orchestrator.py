@@ -2441,7 +2441,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(
                 state.read_proxy_xai_status_probe_account_id(), "acct-xai"
             )
-            return "active", None, {"account_id": "acct-xai", "zdr_enabled": True}
+            return "active", None, {"account_id": "acct-xai"}
 
         with (
             patch.object(orchestrator.grok_agent, "collect_login_completion") as collect,
@@ -2456,7 +2456,6 @@ class OrchestratorTests(unittest.TestCase):
 
         collect.assert_called_once()
         self.assertEqual(state.read_xai_account()["account_id"], "acct-xai")
-        self.assertIs(state.read_xai_account()["zdr_enabled"], True)
         self.assertEqual(state.read_proxy_xai_account_id(), "acct-xai")
         self.assertEqual(state.read_proxy_xai_status_probe_account_id(), "acct-xai")
         self.assertIsNone(state.oauth_login("grok"))

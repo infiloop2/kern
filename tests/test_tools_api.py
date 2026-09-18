@@ -294,6 +294,54 @@ class StreamMaterializationUnitTests(unittest.TestCase):
             self.assertEqual(list(Path(target).iterdir()), [])
 
 
+class ActionFilterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        for mocked in (
+            patch.dict(tools_host.BUNDLED_TOOLS, {"fake_notes": FakeTool()}),
+            patch.object(state, "enabled_tool_ids", return_value={"fake_notes"}),
+        ):
+            mocked.start()
+            self.addCleanup(mocked.stop)
+
+    def test_action_filter_preserves_complete_contracts_and_shared_metadata(self) -> None:
+        accounts = [{"connection_id": "account-1", "label": "Work"},
+                    {"connection_id": "account-2", "label": "Personal"}]
+        with patch.object(state, "tool_connections", return_value=accounts):
+            for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
+                full = tools_api.call_action(
+                    "describe_tool", {"tool_id": tool_id}, origin_thread_id=None
+                )["result"]
+                for action in full["actions"]:
+                    with self.subTest(tool_id=tool_id, action_id=action["id"]):
+                        focused = tools_api.call_action(
+                            "describe_tool", {"tool_id": tool_id, "action_ids": [action["id"]]},
+                            origin_thread_id=None,
+                        )["result"]
+                        self.assertEqual(focused, {**full, "actions": [action]})
+                if tool.manifest.connection in {"oauth", "mcp_oauth"}:
+                    self.assertEqual(full["connected_accounts"], accounts)
+                selected = full["actions"][:2]
+                filtered = tools_api.call_action(
+                    "describe_tool", {"tool_id": tool_id, "action_ids": [a["id"] for a in selected]},
+                    origin_thread_id=None,
+                )["result"]
+                self.assertEqual(filtered, {**full, "actions": selected})
+
+    def test_action_filter_rejects_invalid_or_unknown_selections(self) -> None:
+        for invalid in (None, [], "read_note", [""], [1], [{}],
+                        ["read_note", "read_note"], [str(i) for i in range(33)]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                tools_host.ToolCallError, "action_ids must be an array"
+            ):
+                tools_api.call_action("describe_tool", {
+                    "tool_id": "fake_notes", "action_ids": invalid,
+                }, origin_thread_id=None)
+        with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown action_ids: missing"):
+            tools_api.call_action("describe_tool", {
+                "tool_id": "fake_notes", "action_ids": ["read_note", "missing"],
+            }, origin_thread_id=None)
+
+
 class ToolsApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()

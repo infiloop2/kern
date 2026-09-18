@@ -1761,7 +1761,6 @@ def agent_accounts() -> dict[str, Any]:
                             "email": "grok@example.invalid",
                             "plan_type": "SuperGrok",
                             "coding_data_retention_opt_out": True,
-                            "zdr_enabled": True,
                             # Daily on purpose: the preview exercises the period
                             # label that prompted the final review fix.
                             "grok_usage": {

@@ -139,8 +139,9 @@ def _is_replay_item(node: Any) -> bool:
 # feedback, and traces. Widen this against an observed denial, which is visible
 # in the network event log, rather than in anticipation.
 #
-# Grok Build 1.0.34 uses direct Imagine REST calls. Video output goes to the
-# operator's S3 bucket through host-signed URLs; vidgen.x.ai stays closed.
+# Grok Build Imagine uses direct REST calls. Image generation and edits stay
+# on xAI servers with inline media only. Video output goes to the operator's
+# S3 bucket through host-signed URLs; vidgen.x.ai stays closed.
 CHAT_PROXY_INFERENCE_PATHS = (
     r"^/v1/(?:responses|chat/completions)(?:\?.*)?$",
 )
@@ -151,8 +152,10 @@ CHAT_PROXY_READ_PATHS = (
 _VIDEO_ID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 API_XAI_POST_PATHS = (
     r"^/v1/images/generations(?:\?.*)?$",
+    r"^/v1/images/edits(?:\?.*)?$",
     r"^/v1/videos/generations(?:\?.*)?$",
 )
+_IMAGE_POST_PATHS = frozenset({"/v1/images/generations", "/v1/images/edits"})
 API_XAI_GET_PATHS = (
     rf"^/v1/videos/{_VIDEO_ID}(?:\?.*)?$",
 )
@@ -254,7 +257,11 @@ def request_denied(
             return "xai_video_storage_required"
         if method == "POST":
             denial = _media_body_denial(headers, body)
-            if denial is None and request_path == "/v1/images/generations" and "output" in video.json_body(headers, body):
+            if (
+                denial is None
+                and request_path in _IMAGE_POST_PATHS
+                and "output" in video.json_body(headers, body)
+            ):
                 return "xai_media_input_denied"
             return denial
         return None

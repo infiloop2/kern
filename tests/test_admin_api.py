@@ -642,31 +642,29 @@ class AdminApiClientDisconnectTests(unittest.TestCase):
 
 
 class ThreadAdmissionHelpersTests(unittest.TestCase):
-    def test_recall_preserves_seven_pages_and_identifies_popular_context(self) -> None:
+    def test_recall_caps_injection_at_shared_limit_plus_self(self) -> None:
+        limit = admin_threads.RELEVANT_PAGE_LIMIT + 1
         pages = [
             {
                 "page_id": f"page-{index}", "scope": "swarm",
                 "description": "Working guidance", "content": "Keep it concise.",
-                "revision": 1, "selection": "popular" if index == 1 else "relevant",
+                "revision": 1, "selection": "relevant",
             }
-            for index in range(8)
+            for index in range(limit + 2)
         ]
-        pages[3] = {**pages[3], "page_id": "thread-7", "scope": "self"}
+        pages[1] = {**pages[1], "page_id": "thread-7", "scope": "self"}
         with patch.object(workspace_api_proxy, "recall_memory", return_value={"pages": pages}):
-            recalled, details = admin_threads._recalled_memory_pages("thread-7", "hello")
-        self.assertEqual(len(recalled), 7)
+            recalled, details = admin_threads._recalled_memory_pages("thread-7", "task")
+        self.assertEqual(len(recalled), limit)
         self.assertEqual(
             [page["page_id"] for page in recalled],
-            ["thread-7", "page-0", "page-2", "page-4", "page-5", "page-6", "page-1"],
+            ["thread-7", "page-0", *[f"page-{index}" for index in range(2, limit)]],
         )
         self.assertEqual(recalled[0]["selection"], "self")
-        self.assertEqual(recalled[-1]["selection"], "popular")
         context = admin_threads._memory_context_message("thread-7", recalled)
-        self.assertIn("may not be relevant to this task", context)
-        self.assertIn('"selection": "popular"', context)
-        self.assertNotIn('"page_id": "page-7"', context)
+        self.assertIn("This selection is not comprehensive", context)
+        self.assertNotIn(f'"page_id": "page-{limit}"', context)
         self.assertLess(context.index('"page_id": "thread-7"'), context.index('"page_id": "page-0"'))
-        self.assertLess(context.index('"page_id": "page-6"'), context.index('"page_id": "page-1"'))
 
     def test_identity_is_included_without_any_recalled_memories(self) -> None:
         context = admin_threads._memory_context_message("app-7", [])
@@ -2280,6 +2278,22 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(listed["threads"][0]["thread_id"], "thread-t1")
         self.assertEqual(listed["threads"][0]["status"], "running")
 
+    def test_followup_recall_uses_retained_user_task_without_rewriting_message(self) -> None:
+        seed_thread_session("thread-t1")
+        with state.mutation() as cur:
+            state.append_agent_event(cur, "thread.message", "thread-t1", {
+                "message": "Fix token usage analytics", "source": "user",
+            })
+        with patch.object(orchestrator, "launch_turn") as launch:
+            self.request("POST", "/v1/threads/thread-t1/messages", {"message": "?"})
+        self.mock_memory_recall.assert_called_once_with("thread-t1", "fix token usage analytics")
+        self.assertIn("--- CURRENT USER MESSAGE ---\n?\n--- END CURRENT USER MESSAGE ---",
+                      launch.call_args.args[1])
+        _, events = self.request("GET", "/v1/threads/thread-t1/events")
+        messages = [event["payload"]["message"] for event in events["events"]
+                    if event["event_type"] == "thread.message"]
+        self.assertEqual(messages, ["Fix token usage analytics", "?"])
+
     def test_message_injects_recalled_memory_without_changing_stored_text(self) -> None:
         seed_thread_session("thread-t1")
         self_page = {
@@ -2306,7 +2320,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
 
         self.mock_memory_recall.assert_called_once_with(
-            "thread-t1", "Take mobile screenshots"
+            "thread-t1", "take mobile screenshots"
         )
         launch_message = launch.call_args.args[1]
         self.assertIn("Kern host context", launch_message)
@@ -4982,7 +4996,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             },
         )
 
-    def test_agent_accounts_expose_stored_grok_zdr_status_when_available(self) -> None:
+    def test_agent_accounts_expose_stored_grok_coding_data_opt_out(self) -> None:
         set_runtime_statuses(codex="deactivated", claude_code="deactivated", grok="active")
         state.save_xai_account(
             {
@@ -5005,9 +5019,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "account_id": "acct-xai",
                 "email": "grok@example.com",
                 "coding_data_retention_opt_out": True,
-                "zdr_enabled": True,
             },
         )
+        self.assertNotIn("zdr_enabled", body["accounts"][3])
 
     def test_agent_accounts_return_partial_claude_usage_metadata(self) -> None:
         set_runtime_statuses(codex="active", claude_code="active")

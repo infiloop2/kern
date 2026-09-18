@@ -80,6 +80,8 @@ DESCRIBE_TOOL_TOOL: JSONObject = {
         "Return one bundled tool's agent usage notes and callable actions with their full "
         "JSON input schemas, "
         "and the output schema of every action that returns a JSON result. "
+        "Pass action_ids from focused list_bundled_tools discovery to load only needed "
+        "actions; omit it for all actions. Reuse schemas already in context. "
         "Call this after list_bundled_tools, for the tool you are about to use; the "
         "schemas are not in your context until you ask for them. An action with no "
         "output_schema returns no JSON result: an approval-gated one returns an approval "
@@ -91,6 +93,14 @@ DESCRIBE_TOOL_TOOL: JSONObject = {
             "tool_id": {
                 "type": "string",
                 "description": "Bundled tool id from list_bundled_tools, e.g. gmail.",
+            },
+            "action_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+                "maxItems": 32,
+                "uniqueItems": True,
+                "description": "Optional action ids to describe; omitted returns all actions.",
             },
         },
         "required": ["tool_id"],

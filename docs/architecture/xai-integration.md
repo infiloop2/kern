@@ -44,7 +44,7 @@ uses the REST routes observed on Grok Build, with S3 injection verified on
 | --- | --- | --- | --- | --- |
 | `auth.x.ai` | OAuth issuer: discovery, device code, authorize, token exchange | GET, POST | all | No |
 | `cli-chat-proxy.grok.com` | Subscription data plane | GET on the allowlist; POST on inference only | allowlist below | Yes |
-| `api.x.ai` | Grok Build Imagine stills and video REST | POST image/video generations; GET video poll | allowlist below | Yes |
+| `api.x.ai` | Grok Build Imagine stills and video REST | POST image generations and edits; POST video generations; GET video poll | allowlist below | Yes |
 | `<bucket>.s3.<region>.amazonaws.com` | Separately configured custom-domain access | GET recommended | `/grok-videos/.*` path guard recommended | AWS signature |
 
 `auth.x.ai` is unpinned by construction. It is the endpoint that *establishes*
@@ -102,7 +102,7 @@ denials are decisions rather than omissions:
 
 | Host | Why it stays closed |
 | --- | --- |
-| Remaining `api.x.ai` paths | Chat completions, tokenize-text, and anything other than Imagine image/video generation and video poll. Those are the metered developer API. Opening them would let a misconfigured runtime spend console credits on inference. |
+| Remaining `api.x.ai` paths | Chat completions, tokenize-text, and anything other than Imagine image generation, image edits, video generation, and video poll. Those are the metered developer API. Opening them would let a misconfigured runtime spend console credits on inference. |
 | `imgen.x.ai` | Not used by Grok Build 1.0.5 Imagine stills (the image is in the JSON body). |
 | `code.grok.com` | A second session and workspace sync surface. Note that closing this host is *not* what keeps conversation state local. The chat proxy's own session routes are, and they are denied by the path allowlist above. |
 | `api.mixpanel.com` | Product analytics. Not under an owned apex, so it is denied by the default policy; the managed config will also disable telemetry at the harness. |
@@ -221,8 +221,10 @@ closed.
 | `image_generation` | xAI's Responses image-generation tool runs on xAI servers and returns generated image data in the response. Kern requires `action: "generate"`; the default `auto` and `edit` shapes are denied because editing can make xAI fetch an input image URL. | **Policy-ready, not surfaced.** xAI documents the tool, but Grok Build 1.0.5 neither declares it nor decodes its result type. |
 | `video_generation` | Only the bare declaration is reserved for the corresponding xAI-hosted family. Any option is denied until its destination semantics are reviewed. | **Not used.** Grok Build Imagine video is the S3-backed REST flow on `api.x.ai`, not this hosted tool. |
 
-Grok Build Imagine uses pinned OAuth on `api.x.ai`: image generation, video
-creation and video polling. Images pass through without S3 configuration.
+Grok Build Imagine uses pinned OAuth on `api.x.ai`: image generation, image
+edits, video creation and video polling. Images pass through without S3
+configuration. Inline `data:image/` references are allowed; external media
+URLs stay denied, including on the edit route.
 Video requests require operator storage configured under Home > Integrations >
 Grok. The CLI carries no S3 credentials. The launcher sets
 `GROK_DISABLE_ZDR_INCOMPATIBLE_TOOLS=false`, allowing requests to reach the proxy
@@ -380,13 +382,14 @@ server, and hosted browsing does not stay within X. Those declarations remain
 denied. The route table separately keeps storage, session/workspace sync,
 feedback, traces, remaining `api.x.ai` paths, and `imgen.x.ai` closed, so this
 change does not create a file-upload or chat-completions billing path. Imagine
-stills and video are the four captured REST routes only.
+stills and video are the captured REST routes only.
 
 The linked account's coding-data opt-out and team ZDR state govern retention at
-xAI; Kern displays both when Grok reports them. Locally, telemetry and trace
-upload stay disabled and provider session sync stays blocked. Those controls
-do not make the inference request anonymous: xAI still receives the pinned
-account bearer and the request content needed to answer the turn.
+xAI; Kern displays the coding-data choice when Grok reports it. Locally,
+telemetry and trace upload stay disabled and provider session sync stays
+blocked. Those controls do not make the inference request anonymous: xAI still
+receives the pinned account bearer and the request content needed to answer
+the turn.
 
 Vendor facts in this audit are grounded in xAI's current documentation:
 [X Search](https://docs.x.ai/developers/tools/x-search),
@@ -676,7 +679,7 @@ renders it for this integration.
 ### The account card
 
 The integration has an account card like Codex's: it shows the linked account,
-its status, the live coding-data opt-out and ZDR values when available, and the
+its status, the live coding-data opt-out when available, and the
 device-login button. Grok is independently selectable in each task surface;
 the current pinned matrix is `grok-4.6` with
 `xhigh`/`high` reasoning effort.

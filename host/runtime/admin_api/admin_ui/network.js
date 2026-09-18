@@ -292,13 +292,10 @@ export function renderIntegrationAccounts() {
       && typeof account.coding_data_retention_opt_out === "boolean"
       ? ` &middot; coding-data opt-out ${account.coding_data_retention_opt_out ? "active" : "inactive"}`
       : "";
-    const zdrSummary = provider === XAI_INTEGRATION && typeof account.zdr_enabled === "boolean"
-      ? ` &middot; ZDR ${account.zdr_enabled ? "active" : "inactive"}`
-      : "";
     const summary = !enabled && !linked && provider !== BEDROCK_INTEGRATION
       ? ""
       : record.status === "active" && identity
-        ? `Connected account: <span class="connection-identity">${esc(identity)}</span> &middot; this account is allowed through the proxy${codingDataSummary}${zdrSummary}.`
+        ? `Connected account: <span class="connection-identity">${esc(identity)}</span> &middot; this account is allowed through the proxy${codingDataSummary}.`
         : identity
           ? `Linked account: <span class="connection-identity">${esc(identity)}</span> &middot; ${provider === BEDROCK_INTEGRATION ? "enable Bedrock to activate Hermes." : "sign in again to reconnect it."}`
           : provider === BEDROCK_INTEGRATION && bedrockCredentialMetadata.connected

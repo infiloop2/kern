@@ -3114,6 +3114,12 @@ html.iphone-standalone, html.iphone-standalone body {
 .analytics-bar-track { height: 160px; display: flex; align-items: flex-end; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
 .analytics-stack { display: flex; flex-direction: column-reverse; width: 100%; max-width: 76px; margin: 0 auto; border-radius: 5px 5px 0 0; overflow: hidden; }
 .analytics-segment { background: var(--usage-color); }
+.analytics-hourly-wrap { overflow-x: auto; overscroll-behavior-inline: contain; }
+.analytics-hourly-chart { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 6px; min-width: 680px; padding: 20px 0 4px; }
+.analytics-hour { min-width: 0; text-align: center; font-size: 10px; font-variant-numeric: tabular-nums; }
+.analytics-hour .analytics-bar-track { height: 140px; }
+.analytics-hour .analytics-stack { max-width: 28px; }
+.analytics-hour-label { min-height: 1em; }
 .analytics-legend .chats, .analytics-segment.chats { --usage-color: #60a5fa; }
 .analytics-legend .apps, .analytics-segment.apps { --usage-color: #a78bfa; }
 .analytics-legend .schedules, .analytics-segment.schedules { --usage-color: #34d399; }
@@ -3135,6 +3141,7 @@ html.iphone-standalone, html.iphone-standalone body {
 .analytics-focus { justify-content: flex-start; }
 @media (max-width: 700px) {
   .analytics-chart { gap: 7px; }
+  .analytics-hourly-chart { gap: 4px; }
   .analytics-provider { align-items: stretch; flex-direction: column; }
   .analytics-provider-counts { gap: 8px; text-align: left; }
   .analytics-bar-track { height: 120px; }

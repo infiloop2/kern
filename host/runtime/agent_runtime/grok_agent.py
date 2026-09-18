@@ -100,12 +100,6 @@ LIVE_VALIDATION_RETRY_SECONDS = 240
 SUBSCRIPTION_TIMEOUT_SECONDS = 60
 PROCESS_EXIT_TIMEOUT_SECONDS = 3
 JSONRPC_METHOD_NOT_FOUND = -32601
-# Grok Build uses these provider-returned team policy reasons for its own
-# ``is_zdr_team()`` decision. Keep the same narrow interpretation here:
-# coding-data opt-out is a separate control and must not be presented as ZDR.
-_ZDR_TEAM_BLOCKED_REASONS = frozenset(
-    {"BLOCKED_REASON_NO_LOGS", "BLOCKED_REASON_NO_LOGS_MODERATED"}
-)
 
 
 @dataclass
@@ -1328,21 +1322,10 @@ def _safe_account_metadata(value: Any) -> dict[str, Any]:
     principal_type = _pick_string(value, "principalType", "principal_type")
     if principal_type:
         metadata["principal_type"] = principal_type
-    # Newer Grok Build versions include this list in the authenticated info
-    # response. Absence means unknown (for compatibility with older clients),
-    # while a well-formed empty list is a definite inactive result.
-    reasons = value.get("teamBlockedReasons")
-    if reasons is None:
-        reasons = value.get("team_blocked_reasons")
-    if isinstance(reasons, list) and all(isinstance(reason, str) for reason in reasons):
-        metadata["zdr_enabled"] = any(
-            reason in _ZDR_TEAM_BLOCKED_REASONS for reason in reasons
-        )
-    # This account-backed choice is separate from ZDR. Grok Build exposes it
-    # through /privacy and /settings, and uses it to gate coding-data retention
-    # for product/model improvement. Preserve a missing field as unknown: old
-    # pinned CLI versions may not report it, and "unknown" must never render as
-    # an opt-out.
+    # Grok Build exposes this through /privacy and /settings, and uses it to
+    # gate coding-data retention for product/model improvement. Preserve a
+    # missing field as unknown: old pinned CLI versions may not report it, and
+    # "unknown" must never render as an opt-out.
     coding_opt_out = value.get("codingDataRetentionOptOut")
     if coding_opt_out is None:
         coding_opt_out = value.get("coding_data_retention_opt_out")
