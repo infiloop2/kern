@@ -11,28 +11,45 @@ def run(page: Any, url: str, log_in: Any) -> None:
     tooltip = "Recall: 12 ms; 1200 memory-content bytes.\nCurrent query: <img src=x onerror=alert(1)>\nSelected thread-1 r2: self memory\n" + "\n".join(page_ids)
     tooltip += "\n" + "\n".join(f"Candidate {n}: useful-guide-{n} r2 — semantic rank {n} cosine 0.610" for n in range(1, 13))
 
-    def check_memory_panel(notice: Any) -> None:
+    def check_memory_panel(notice: Any, dismiss: Any) -> None:
         trigger = notice.get_by_role("button", name="Self identity and 2 memories injected.", exact=True)
         panel = notice.locator('[role="tooltip"]')
         page.mouse.move(0, 0)
         expect(panel).to_be_hidden()
         trigger.hover()
+        expect(panel).to_be_hidden()
+        expect(trigger).to_have_attribute("aria-controls", panel.get_attribute("id"))
+        assert trigger.get_attribute("aria-describedby") is None
+        trigger.click()
         expect(panel).to_be_visible()
         expect(panel).to_have_text(tooltip)
+        expect(trigger).to_have_attribute("aria-expanded", "true")
+        expect(trigger).to_have_attribute("aria-describedby", panel.get_attribute("id"))
         panel_bounds = panel.bounding_box()
         scroll_bounds = notice.locator("xpath=ancestor::*[@id='chat-scroll' or @id='chat-history-scroll']").bounding_box()
         assert panel_bounds and scroll_bounds
         assert panel_bounds["y"] >= scroll_bounds["y"]
         assert panel_bounds["y"] + panel_bounds["height"] <= scroll_bounds["y"] + scroll_bounds["height"]
-        panel.hover()
+        panel.click(force=True)
         expect(panel).to_be_visible()
         expect(panel.locator("*")).to_have_count(0)
-        page.mouse.move(0, 0)
+        dismiss.click()
         expect(panel).to_be_hidden()
         trigger.focus()
+        expect(panel).to_be_hidden()
+        trigger.press("Enter")
         expect(panel).to_be_visible()
         expect(trigger).to_have_attribute("aria-describedby", panel.get_attribute("id"))
-        trigger.evaluate("element => element.blur()")
+        trigger.press("Escape")
+        expect(panel).to_be_hidden()
+        expect(trigger).to_have_attribute("aria-expanded", "false")
+        assert trigger.get_attribute("aria-describedby") is None
+        trigger.click()
+        expect(panel).to_be_visible()
+        page.evaluate(
+            "() => document.documentElement.dispatchEvent("
+            "new MouseEvent('click', { bubbles: true, composed: true }))"
+        )
         expect(panel).to_be_hidden()
         if page.evaluate("matchMedia('(pointer: coarse)').matches"):
             assert trigger.bounding_box()["height"] >= 44
@@ -72,7 +89,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
     notices = chat.locator(".thread-stopped", has_text="Self identity and 2 memories injected.")
     expect(notices).to_have_count(2)
     expect(notices.first).to_be_visible()
-    check_memory_panel(notices.first)
+    check_memory_panel(notices.first, chat.locator("#thread-title"))
     expect(notices.nth(1).get_by_role("button")).to_have_count(0)
     expect(chat.locator(".thread-stopped", has_text="Self identity and 0 memories injected.").get_by_role("button")).to_have_count(1)
     expect(chat.locator(".thread-activity")).to_have_count(0)
@@ -85,7 +102,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
     page.reload()
     expect(notices).to_have_count(2)
 
-    check_memory_panel(notices.first)
+    check_memory_panel(notices.first, chat.locator("#thread-title"))
 
     # A fresh notice can be the last row while the agent has not replied yet.
     original_events = events[:]
@@ -99,7 +116,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
     bottom_notice = chat.locator(".memory-notice")
     expect(bottom_notice).to_be_visible()
     before_scroll = chat.locator("#chat-scroll").evaluate("element => element.scrollTop")
-    check_memory_panel(bottom_notice)
+    check_memory_panel(bottom_notice, chat.locator("#thread-title"))
     assert chat.locator("#chat-scroll").evaluate("element => element.scrollTop") == before_scroll
     events[:] = original_events
 
@@ -128,7 +145,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
         expect(app.locator(".chat-history-entry.stopped", has_text="Historical context transferred.")).to_be_visible()
         expect(app.locator(".chat-history-entry.stopped", has_text="Self identity and 2 memories injected.")).to_have_count(2)
         app_notices = app.locator(".chat-history-entry.stopped .chat-history-message", has_text="Self identity and 2 memories injected.")
-        check_memory_panel(app_notices.first)
+        check_memory_panel(app_notices.first, app.locator("#app-title"))
         expect(app_notices.nth(1).get_by_role("button")).to_have_count(0)
         expect(app.locator(".chat-history-message", has_text="Self identity and 0 memories injected.").get_by_role("button")).to_have_count(1)
         context_message = app.locator(".chat-history-entry.stopped .chat-history-message").first
@@ -146,7 +163,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
         bottom_app_notice = app.locator(".memory-notice")
         expect(bottom_app_notice).to_be_visible()
         before_scroll = app.locator("#chat-history-scroll").evaluate("element => element.scrollTop")
-        check_memory_panel(bottom_app_notice)
+        check_memory_panel(bottom_app_notice, app.locator("#app-title"))
         assert app.locator("#chat-history-scroll").evaluate("element => element.scrollTop") == before_scroll
 
     finally:

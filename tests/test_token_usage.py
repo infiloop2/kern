@@ -177,16 +177,20 @@ class UsageStorageTests(unittest.TestCase):
                 state.start_turn_usage(cur, 'thread-1', run, 'codex', 'gpt-5.6-sol')
             state.save_turn_usage(cur, 'thread-1', 1, dict(zip(token_usage.FIELDS, [10, 20, 0, 5])))
             state.save_turn_usage(cur, 'thread-1', 1, dict(zip(token_usage.FIELDS, [30, 40, 0, 10])))
-            cur.execute("UPDATE turn_usage SET measured_at = '2026-09-12T10:00:00Z' WHERE run_number IN (1, 2)")
+            cur.execute("UPDATE turn_usage SET measured_at = '2026-09-12T10:00:00Z' WHERE run_number = 1")
+            cur.execute("UPDATE turn_usage SET measured_at = '2026-09-12T11:00:00Z' WHERE run_number = 2")
             cur.execute("UPDATE turn_usage SET measured_at = '2026-09-05T23:59:59Z' WHERE run_number = 3")
             cur.execute("UPDATE turn_usage SET measured_at = '2026-09-13T00:00:00Z' WHERE run_number = 4")
         result = state.usage_report(datetime(2026,9,12,12,tzinfo=timezone.utc))
         self.assertEqual(result['days'], [f'2026-09-{day:02}' for day in range(6,13)])
-        self.assertEqual(len(result['groups']), 1)
-        group = result['groups'][0]
-        self.assertEqual((group['name'], group['turns']), ('My chat', 2))
+        self.assertEqual(len(result['groups']), 2)
+        by_hour = {group['hour']: group for group in result['groups']}
+        group = by_hour[10]
+        self.assertEqual((group['name'], group['turns']), ('My chat', 1))
         self.assertEqual(group['tokens']['input_tokens'], 30)
         self.assertEqual(group['measured_turns']['input_tokens'], 1)
+        self.assertEqual(by_hour[11]['turns'], 1)
+        self.assertIsNone(by_hour[11]['tokens']['input_tokens'])
         with db.transaction() as cur:
             cur.execute('SELECT COUNT(*) FROM turn_usage')
             self.assertEqual(cur.fetchone()[0], 4)

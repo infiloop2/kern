@@ -594,7 +594,7 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   border: 0;
   border-radius: 3px;
   color: inherit;
-  cursor: help;
+  cursor: pointer;
   font: inherit;
   line-height: inherit;
   padding: 0;
@@ -624,8 +624,7 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   text-align: left;
   white-space: pre-wrap;
 }
-.memory-notice:hover > .memory-pages,
-.memory-notice:focus-within > .memory-pages {
+.memory-notice-open > .memory-pages {
   display: block;
 }
 

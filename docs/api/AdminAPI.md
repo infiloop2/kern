@@ -446,7 +446,6 @@ Agent account response fields:
 | `accounts[].claude_usage.fable_weekly_resets_at` | number | optional | Unix timestamp when the Fable-specific weekly window resets. |
 | `accounts[].claude_usage.last_checked_at` | string | optional | UTC timestamp of the provider read that produced this Claude usage snapshot. Active runtimes are rechecked every 300 seconds; the explicit refresh endpoint forces an immediate provider read. If no usage window parses, `claude_usage` is absent rather than stale. |
 | `accounts[].coding_data_retention_opt_out` | boolean | optional | Present only on the Grok record when xAI reports it: whether the linked account has opted out of coding-data retention. Absent when xAI does not report a value, which is not the same as `false`. |
-| `accounts[].zdr_enabled` | boolean | optional | Present only on the Grok record when xAI reports it: whether the account's team has Zero Data Retention active. Absent when unreported. |
 | `accounts[].grok_usage` | object | optional | Grok subscription usage metadata. Present only for the Grok runtime when xAI reports a usage snapshot; xAI often reports none, in which case the field is absent rather than zero. |
 | `accounts[].grok_usage.usage_percent` | number |  | Percent of the subscription credit allowance used, as xAI reports it. The snapshot is built only when this parses, so `grok_usage` is never present without it. |
 | `accounts[].grok_usage.period_type` | enum | optional, `daily`, `weekly`, `monthly` | Billing period xAI reports for the current window, normalized from its own spelling. Absent when xAI reports a period this host does not recognise. |
@@ -1740,9 +1739,10 @@ Host runtime mutation response fields:
 
 `GET /v1/analytics` is operator-only and accepts no query parameters. It returns
 `since`, `until`, seven UTC `days`, and `groups` aggregated by thread, selected
-runtime/model, and measurement day. Each group has `thread_id`, `name`, `kind`
-(`chats`, `apps`, or `schedules`), `runtime`, `model`, `day`, `turns`, `tokens`,
-`measured_turns`, and `active`. A Chat or App is active when it exists and is
+runtime/model, measurement day, and UTC hour. Each group has `thread_id`,
+`name`, `kind` (`chats`, `apps`, or `schedules`), `runtime`, `model`, `day`,
+`hour` (an integer from 0 through 23), `turns`, `tokens`, `measured_turns`, and
+`active`. A Chat or App is active when it exists and is
 not archived; a schedule is active when its definition exists and is not
 deleted. A pruned schedule remains inactive. This flag describes current
 membership, not whether an agent is running. Both counter objects use `input_tokens`,

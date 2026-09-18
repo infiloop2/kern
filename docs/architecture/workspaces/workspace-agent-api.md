@@ -42,7 +42,7 @@ Read returns chronological, byte-bounded user/assistant messages and optional
 normalized activity summaries. `include_context: true` additionally returns
 `thread.context_added` notices as `type: "context"`, with `content`, `truncated`,
 and `memory_page_ids` when recorded. Context notices may include
-`memory_recall_details`, a bounded diagnostic trace also shown on hover.
+`memory_recall_details`, a bounded diagnostic trace also shown when the notice is opened.
 The flag defaults to false and is
 independent of `include_activity`. An absent ids field means the notice did
 not record ids; an empty array records zero recalled pages. Page ids preserve

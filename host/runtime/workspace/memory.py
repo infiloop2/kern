@@ -16,6 +16,8 @@ import time
 from typing import Any
 from urllib.parse import unquote
 
+from host.memory_recall import task_query, topic_terms
+from host.memory_recall_rules import CANDIDATE_LIMIT, MAX_QUERY_BYTES, RELEVANT_PAGE_LIMIT, STOPWORDS
 from host.runtime.core import db, host_errors, pgclient
 from host.runtime.embeddings import client as embedding_client
 from host.runtime.workspace.host_api import WorkspaceError
@@ -34,10 +36,8 @@ DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 100
 MAX_REVISION_PAGE_LIMIT = 50
 MAX_SEARCH_BYTES = 200
-MAX_RECALL_QUERY_BYTES = 1000
-MAX_RECALLED_PAGES = 7
-RECALL_POPULAR_LIMIT = 1
-RECALL_RELEVANT_LIMIT = 5
+RECALL_RELEVANT_LIMIT = RELEVANT_PAGE_LIMIT
+MAX_RECALLED_PAGES = RECALL_RELEVANT_LIMIT + 1
 MAX_CURSOR_BYTES = 512
 SEMANTIC_CANDIDATES = 200
 EXACT_CANDIDATES = 50
@@ -64,15 +64,8 @@ FALLBACK_POPULAR_LIMIT = 5
 # all-token lookup misses. PostgreSQL's ``simple`` text-search configuration
 # removes no stopwords, so filter them here; otherwise an unrelated page can be
 # presented as a query match solely because both texts contain "a" or "the".
-WEAK_SEARCH_STOPWORDS = frozenset({
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "could",
-    "did", "do", "does", "for", "from", "had", "has", "have", "he", "her",
-    "his", "how", "i", "if", "in", "into", "is", "it", "its", "may", "me",
-    "might", "must", "my", "not", "of", "on", "or", "our", "ours", "shall",
-    "she", "should", "so", "that", "the", "their", "them", "then", "they",
-    "this", "to", "us", "was", "we", "were", "what", "when", "where",
-    "which", "who", "why", "will", "with", "would", "you", "your",
-})
+WEAK_SEARCH_STOPWORDS = STOPWORDS
+
 REVISION_RETAINED = 100
 DELETED_RETAIN_DAYS = 90
 MAX_BIGINT = 2**63 - 1
@@ -214,7 +207,7 @@ def search_swarm_pages(query: dict[str, list[str]]) -> dict[str, Any]:
 
 
 def recall_pages(body: Any) -> dict[str, Any]:
-    """Return self-memory, popular pages, then distinct relevant pages."""
+    """Return self-memory and direct task matches; popularity is not relevance."""
     request = _object(body, "memory recall request")
     _require_keys(request, {"thread_id", "message"}, {"thread_id", "message"})
     thread_id = individual_page_id(request["thread_id"])
@@ -234,22 +227,6 @@ def recall_pages(body: Any) -> dict[str, Any]:
         if exc.status != HTTPStatus.NOT_FOUND:
             raise
 
-    try:
-        with db.transaction() as cur:
-            popular = _popular_rows(cur, scope="swarm", limit=RECALL_POPULAR_LIMIT)
-        _append_recalled_pages(
-            pages, [_page_summary(row) for row in popular], RECALL_POPULAR_LIMIT,
-            thread_id=thread_id, selection="popular",
-        )
-    except (WorkspaceError, pgclient.Error, OSError) as exc:
-        details.append("Popular search unavailable.")
-        host_errors.report_warning(
-            "workspace.memory_recall",
-            exc,
-            context={"thread_id": thread_id, "phase": "popular_search"},
-            kind="memory_recall_degraded",
-        )
-
     if "\x00" in message:
         details.append("Relevant search skipped: NUL in request.")
         host_errors.report_warning(
@@ -261,18 +238,19 @@ def recall_pages(body: Any) -> dict[str, Any]:
         return _recall_response(pages, details, started)
 
     query = _recall_query(message)
-    details.append(f"Current query (first {MAX_RECALL_QUERY_BYTES} UTF-8 bytes): {query or '[empty]'}")
+    details.append(f"Task query: {query or '[empty]'}")
     if not query:
         return _recall_response(pages, details, started)
     try:
         matches = _search_pages(
-            # Overfetch so popular pages do not consume relevance slots.
-            {"q": [query], "limit": [str(RECALL_RELEVANT_LIMIT + RECALL_POPULAR_LIMIT)]},
+            # Rank a bounded candidate set by task words in ids/descriptions.
+            {"q": [query], "limit": [str(CANDIDATE_LIMIT)]},
             scope="swarm",
             record_top_hit=False,
             semantic=True,
-            max_query_bytes=MAX_RECALL_QUERY_BYTES,
             diagnostics=details,
+            include_graph=False,
+            max_query_bytes=MAX_QUERY_BYTES,
         )
     except (WorkspaceError, pgclient.Error, OSError) as exc:
         details.append("Relevant search unavailable.")
@@ -284,9 +262,19 @@ def recall_pages(body: Any) -> dict[str, Any]:
         )
         return _recall_response(pages, details, started)
     details.append(f"Search mode: {matches.get('search_mode', 'unknown')}; match mode: {matches.get('match_mode', 'strong')}.")
-    # Popular pages have their own slots; weak token overlap still does not
-    # qualify for the relevance slots. Recall never records popularity hits.
+    # Keep semantic matches, but prefer explicit task matches over incidental
+    # body mentions/backlinks. Explicit search retains its broader ranking.
     summaries = [] if matches.get("match_mode") == "weak" else matches.get("pages", [])
+    best_search_match = summaries[0] if summaries else None
+    terms = {term.casefold() for term in topic_terms(query)}
+    summaries = sorted(summaries, key=lambda page: -len(
+        terms & {term.casefold() for term in topic_terms(page["page_id"] + " " + page["description"])}
+    ))
+    # Keep the strongest original search result even when its wording uses
+    # synonyms rather than matching the task metadata literally.
+    if best_search_match is not None and best_search_match not in summaries[:RECALL_RELEVANT_LIMIT]:
+        summaries.remove(best_search_match)
+        summaries.insert(RECALL_RELEVANT_LIMIT - 1, best_search_match)
     _append_recalled_pages(
         pages, summaries, RECALL_RELEVANT_LIMIT,
         thread_id=thread_id, selection="relevant",
@@ -340,8 +328,7 @@ def _append_recalled_pages(
 
 
 def _recall_query(message: str) -> str:
-    encoded = message.strip().encode("utf-8", errors="ignore")
-    return encoded[:MAX_RECALL_QUERY_BYTES].decode("utf-8", errors="ignore").strip()
+    return task_query(message)
 
 
 def _search_pages(
@@ -352,6 +339,7 @@ def _search_pages(
     semantic: bool,
     max_query_bytes: int = MAX_SEARCH_BYTES,
     diagnostics: list[str] | None = None,
+    include_graph: bool = True,
 ) -> dict[str, Any]:
     needle = _one(query, "q")
     try:
@@ -473,7 +461,7 @@ def _search_pages(
         [str(row[0]) for row in initial[:GRAPH_SEEDS]],
         scope=scope,
         limit=GRAPH_SEEDS * GRAPH_NEIGHBORS_PER_SEED,
-    )
+    ) if include_graph else []
     fused = _hybrid_memory_rows(
         exact_rows,
         fused_lexical,

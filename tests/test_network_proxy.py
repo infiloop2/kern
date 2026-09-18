@@ -1663,13 +1663,15 @@ class XaiRouteTests(unittest.TestCase):
             "/v1/responses",
             "/v1/chat/completions",
             "/v1/tokenize-text",
-            "/v1/images/edits",
         ):
             self.assertEqual(self.deny("api.x.ai", path=path), "network_policy_denied", path)
 
     def test_imagine_image_and_video_generation_are_open(self) -> None:
         self.assertIsNone(
             self.deny("api.x.ai", path="/v1/images/generations"),
+        )
+        self.assertIsNone(
+            self.deny("api.x.ai", path="/v1/images/edits"),
         )
         self.assertIsNone(
             self.deny("api.x.ai", path="/v1/videos/generations"),
@@ -1685,30 +1687,33 @@ class XaiRouteTests(unittest.TestCase):
 
     def test_imagine_requires_the_pinned_bearer(self) -> None:
         with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
-            self.assertEqual(
-                xai_guard.request_denied(
-                    self.CONFIG,
-                    "POST",
-                    "api.x.ai",
-                    "/v1/images/generations",
-                    "",
-                    [],
-                    b"{}",
-                ),
-                "xai_token_account_mismatch",
-            )
-            self.assertEqual(
-                xai_guard.request_denied(
-                    self.CONFIG,
-                    "POST",
-                    "api.x.ai",
-                    "/v1/images/generations",
-                    "",
-                    [("Authorization", "Bearer xai-not-a-jwt")],
-                    b"{}",
-                ),
-                "xai_token_account_mismatch",
-            )
+            for path in ("/v1/images/generations", "/v1/images/edits"):
+                self.assertEqual(
+                    xai_guard.request_denied(
+                        self.CONFIG,
+                        "POST",
+                        "api.x.ai",
+                        path,
+                        "",
+                        [],
+                        b"{}",
+                    ),
+                    "xai_token_account_mismatch",
+                    path,
+                )
+                self.assertEqual(
+                    xai_guard.request_denied(
+                        self.CONFIG,
+                        "POST",
+                        "api.x.ai",
+                        path,
+                        "",
+                        [("Authorization", "Bearer xai-not-a-jwt")],
+                        b"{}",
+                    ),
+                    "xai_token_account_mismatch",
+                    path,
+                )
 
     def test_provider_storage_stays_closed(self) -> None:
         self.assertEqual(self.deny("vidgen.x.ai", method="GET", path="/xai-vidgen-bucket/xai-video-930b0d87-691b-96a6-936e-13bb4cf856d9.mp4"), "network_policy_denied")

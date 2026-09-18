@@ -62,7 +62,8 @@ def usage_report(now: datetime | None = None) -> dict[str, Any]:
         cur.execute(
             "SELECT u.thread_id, COALESCE(a.name, s.name, c.name, "
             "CASE WHEN c.thread_id IS NOT NULL THEN 'Untitled chat' ELSE 'Deleted thread' END), "
-            "u.agent_runtime, u.model, LEFT(u.measured_at, 10), COUNT(*), " + sums +
+            "u.agent_runtime, u.model, LEFT(u.measured_at, 10), "
+            "CAST(SUBSTRING(u.measured_at FROM 12 FOR 2) AS INTEGER), COUNT(*), " + sums +
             ", BOOL_OR((a.app_id IS NOT NULL AND NOT a.archived) OR "
             "(c.thread_id IS NOT NULL AND NOT c.archived) OR "
             "(s.thread_id IS NOT NULL AND s.deleted_at IS NULL))"
@@ -70,7 +71,8 @@ def usage_report(now: datetime | None = None) -> dict[str, Any]:
             "LEFT JOIN schedules s ON s.thread_id = u.thread_id "
             "LEFT JOIN chat_threads c ON c.thread_id = u.thread_id "
             "WHERE u.measured_at >= %s AND u.measured_at <= %s GROUP BY u.thread_id, a.name, s.name, c.thread_id, c.name, "
-            "u.agent_runtime, u.model, LEFT(u.measured_at, 10)",
+            "u.agent_runtime, u.model, LEFT(u.measured_at, 10), "
+            "CAST(SUBSTRING(u.measured_at FROM 12 FOR 2) AS INTEGER)",
             (since, until),
         )
         rows = cur.fetchall()
@@ -78,12 +80,12 @@ def usage_report(now: datetime | None = None) -> dict[str, Any]:
     for row in rows:
         item: dict[str, Any] = {
             "thread_id": row[0], "name": row[1], "runtime": row[2], "model": row[3],
-            "day": row[4], "turns": row[5],
+            "day": row[4], "hour": int(row[5]), "turns": row[6],
             "active": bool(row[-1]),
             "kind": "apps" if row[0].startswith("app-") else "schedules" if row[0].startswith("schedule-") else "chats",
         }
-        item["tokens"] = {field: int(row[6 + i * 2]) if row[6 + i * 2] is not None else None for i, field in enumerate(FIELDS)}
-        item["measured_turns"] = {field: int(row[7 + i * 2]) for i, field in enumerate(FIELDS)}
+        item["tokens"] = {field: int(row[7 + i * 2]) if row[7 + i * 2] is not None else None for i, field in enumerate(FIELDS)}
+        item["measured_turns"] = {field: int(row[8 + i * 2]) for i, field in enumerate(FIELDS)}
         groups.append(item)
     return {
         "since": since, "until": until,

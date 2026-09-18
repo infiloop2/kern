@@ -36,8 +36,7 @@ function count(value) {
 }
 
 function metric(value, known, turns) {
-  const partial = known < turns && value !== null;
-  return `<span title="${esc(value === null ? "Usage unavailable" : `${value.toLocaleString()} tokens · ${known} of ${turns} turns measured`)}">${esc(count(value))}${partial ? "*" : ""}</span>`;
+  return `<span title="${esc(value === null ? "Usage unavailable" : `${value.toLocaleString()} tokens · ${known} of ${turns} turns measured`)}">${esc(count(value))}</span>`;
 }
 
 // Storage keeps disjoint provider buckets. The UI shows full input with cache
@@ -48,7 +47,7 @@ function displayMetrics(summary) {
   const partial = input !== null && inputFields.some(key => summary.coverage[key] < summary.turns);
   const description = input === null ? "Input usage unavailable" : `${input.toLocaleString()} input tokens, including cached input and cache writes.${partial ? " Some input measurements are unavailable." : ""}`;
   return [
-    `<span title="${esc(description)}">${esc(count(input))}${partial ? "*" : ""}</span><div class="token-cache-detail">Of which cached: ${metric(summary.tokens.cached_input_tokens, summary.coverage.cached_input_tokens, summary.turns)}</div>`,
+    `<span title="${esc(description)}">${esc(count(input))}</span><div class="token-cache-detail">Of which cached: ${metric(summary.tokens.cached_input_tokens, summary.coverage.cached_input_tokens, summary.turns)}</div>`,
     metric(summary.tokens.output_tokens, summary.coverage.output_tokens, summary.turns),
   ];
 }
@@ -84,6 +83,30 @@ function render() {
     });
   });
   $("analytics-chart").setAttribute("aria-label", days.map(day => `${day.day}: ${day.total.toLocaleString()} measured tokens`).join("; "));
+
+  // Collapse all seven UTC dates into one 24-hour profile. This makes timing
+  // patterns legible without turning the daily chart into a 168-column grid.
+  const hours = Array.from({ length: 24 }, (_, hour) => {
+    const matching = rows.filter(row => row.hour === hour);
+    const byKind = Object.fromEntries(Object.keys(kinds).map(key => [key, total(aggregate(matching.filter(row => row.kind === key)).tokens)]));
+    return { hour, byKind, total: Object.values(byKind).reduce((a, b) => a + b, 0) };
+  });
+  const hourlyMax = Math.max(1, ...hours.map(hour => hour.total));
+  $("analytics-hourly-chart").innerHTML = hours.map(hour => {
+    const label = hour.hour % 3 === 0 ? String(hour.hour).padStart(2, "0") : "";
+    return `<div class="analytics-hour"><div class="analytics-bar-track"><div class="analytics-stack">${Object.entries(kinds).map(([key, kindLabel]) => `<div class="analytics-segment ${key}" title="${esc(`${String(hour.hour).padStart(2, "0")}:00–${String(hour.hour).padStart(2, "0")}:59 UTC: ${kindLabel}, ${hour.byKind[key].toLocaleString()} measured tokens`)}"></div>`).join("")}</div></div><div class="analytics-hour-label">${label}</div></div>`;
+  }).join("");
+  $("analytics-hourly-chart").querySelectorAll(".analytics-stack").forEach((stack, i) => {
+    stack.style.height = `${hours[i].total / hourlyMax * 100}%`;
+    [...stack.children].forEach((segment, j) => {
+      segment.style.flex = String(hours[i].byKind[Object.keys(kinds)[j]]);
+    });
+  });
+  $("analytics-hourly-chart").setAttribute("aria-label", hours.map(hour => `${String(hour.hour).padStart(2, "0")}:00 UTC: ${hour.total.toLocaleString()} measured tokens`).join("; "));
+  const peak = hours.reduce((best, hour) => hour.total > best.total ? hour : best, hours[0]);
+  $("analytics-hourly-summary").textContent = peak.total
+    ? `Combined across the last 7 days · Peak at ${String(peak.hour).padStart(2, "0")}:00–${String(peak.hour).padStart(2, "0")}:59 UTC · ${peak.total.toLocaleString()} measured tokens`
+    : "Combined across the last 7 days · UTC · No measured token totals";
 
   const providerKeys = [...new Set(rows.map(row => `${row.runtime}\n${row.model}`))];
   $("analytics-providers").innerHTML = providerKeys.map(key => {

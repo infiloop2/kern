@@ -110,7 +110,7 @@ class VideoTests(unittest.TestCase):
     def test_non_video_xai_requests_do_not_load_storage_or_rewrite_responses(self):
         controls = parse_network_controls({'network_integrations': {'xai': {'enabled': True}}})
         with patch.object(state, 'read_xai_video_storage', side_effect=AssertionError('storage is video-only')):
-            for host, path in [('auth.x.ai', '/oauth/token'), ('cli-chat-proxy.grok.com', '/v1/responses'), ('api.x.ai', '/v1/images/generations')]:
+            for host, path in [('auth.x.ai', '/oauth/token'), ('cli-chat-proxy.grok.com', '/v1/responses'), ('api.x.ai', '/v1/images/generations'), ('api.x.ai', '/v1/images/edits')]:
                 with self.subTest(host=host, path=path):
                     self.assertEqual(runtime.prepare_request(controls, 'POST', host, path, '', HEADERS, b'unchanged'), (HEADERS, b'unchanged'))
                     self.assertIsNone(runtime.prepare_response(controls, 'POST', host, path, '', HEADERS, b'unchanged'))
@@ -128,6 +128,7 @@ class VideoTests(unittest.TestCase):
     def test_no_storage_still_allows_images_and_blocks_video(self):
         with patch.object(state, 'xai_video_storage_metadata', return_value={'configured':False}), patch.object(state,'read_xai_video_storage',return_value=None):
             self.assertIsNone(self.denial({'prompt':'image'}, '/v1/images/generations'))
+            self.assertIsNone(self.denial({'prompt':'edit', 'image': {'url': 'data:image/jpeg;base64,YQ=='}}, '/v1/images/edits'))
             self.assertEqual(self.denial({'prompt':'video'}), 'xai_video_storage_required')
             with self.assertRaisesRegex(OSError, 'storage_required'):
                 video.prepare_request('POST','api.x.ai','/v1/videos/generations',HEADERS,b'{}')
@@ -145,6 +146,8 @@ class VideoTests(unittest.TestCase):
         for payload in ({'image':{'url':'https://attacker.invalid/a'}}, {'reference_images':[{'url':'https://attacker.invalid/a'}]}, {'reference_audios':[{'url':'https://attacker.invalid/a'}]}, {'callback_url':'https://attacker.invalid'}, {'images':[{'url':'https://attacker.invalid'}]}, {'keyframes':[{'image':{'url':'https://attacker.invalid'}}]}):
             self.assertEqual(self.denial(payload),'xai_media_input_denied',payload)
         self.assertEqual(self.denial({'output':{}},'/v1/images/generations'),'xai_media_input_denied')
+        self.assertEqual(self.denial({'output':{}},'/v1/images/edits'),'xai_media_input_denied')
+        self.assertEqual(self.denial({'image':{'url':'https://attacker.invalid/a'}}, '/v1/images/edits'),'xai_media_input_denied')
 
     def test_url_capability_rejects_tampering_expiry_wrong_method_and_credentials(self):
         url = video.signed_url(CONFIG,'GET',KEY)

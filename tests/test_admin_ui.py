@@ -713,8 +713,8 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('name === "openai" || name === "claude" || name === "xai"', network)
         self.assertIn('grok: { label: "Grok", provider: "xai"', helpers)
         self.assertIn('const XAI_INTEGRATION = "xai";', network)
-        self.assertIn('typeof account.zdr_enabled === "boolean"', network)
-        self.assertIn('` &middot; ZDR ${account.zdr_enabled ? "active" : "inactive"}`', network)
+        self.assertNotIn("zdr_enabled", network)
+        self.assertNotIn("ZDR ${account.zdr_enabled", network)
         self.assertIn(
             'typeof account.coding_data_retention_opt_out === "boolean"', network
         )

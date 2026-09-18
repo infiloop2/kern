@@ -196,8 +196,9 @@ establishes which account exists and it carries no model traffic.
 catalog, remote settings, and billing.
 
 Grok Build Imagine uses the same grok.com OAuth token on `api.x.ai` for
-`POST /v1/images/generations`, `POST /v1/videos/generations`, and
-`GET /v1/videos/<id>`. Images need no storage configuration. Video creation and
+`POST /v1/images/generations`, `POST /v1/images/edits`,
+`POST /v1/videos/generations`, and `GET /v1/videos/<id>`. Images need no
+storage configuration. Video creation and
 polling require the separately saved S3 configuration. Kern overwrites
 `output.upload_url` with a signed PUT URL for a random `grok-videos/<uuid>.mp4`
 object, then verifies that URL in a completed response and replaces it with a

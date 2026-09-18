@@ -505,7 +505,7 @@ class GrokAccountStatusTests(unittest.TestCase):
         self.assertEqual(metadata["team_id"], "team-1")
         self.assertEqual(metadata["access_token_sha256"], "a" * 64)
         self.assertIs(metadata["coding_data_retention_opt_out"], True)
-        self.assertIs(metadata["zdr_enabled"], True)
+        self.assertNotIn("zdr_enabled", metadata)
 
     def test_coding_data_opt_out_is_inactive_when_grok_reports_opted_in(self) -> None:
         metadata = grok_agent._safe_account_metadata(
@@ -522,17 +522,6 @@ class GrokAccountStatusTests(unittest.TestCase):
             grok_agent._safe_account_metadata(
                 {"codingDataRetentionOptOut": "true"}
             ),
-        )
-
-    def test_zdr_is_inactive_when_grok_reports_no_zdr_team_reason(self) -> None:
-        metadata = grok_agent._safe_account_metadata({"teamBlockedReasons": []})
-        self.assertIs(metadata["zdr_enabled"], False)
-
-    def test_zdr_is_unknown_when_the_grok_field_is_absent_or_malformed(self) -> None:
-        self.assertNotIn("zdr_enabled", grok_agent._safe_account_metadata({}))
-        self.assertNotIn(
-            "zdr_enabled",
-            grok_agent._safe_account_metadata({"teamBlockedReasons": "BLOCKED_REASON_NO_LOGS"}),
         )
 
     def test_usage_is_omitted_when_the_provider_reports_no_percentage(self) -> None:

@@ -230,14 +230,31 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
     self-contained path from an unfiltered catalog to safe tool use. A caller
     that used focused discovery may see the same short note twice."""
     tool_id = _string_field(tool_input, "tool_id")
-    if set(tool_input) - {"tool_id"}:
-        raise tools_host.ToolCallError("describe_tool accepts only tool_id.")
+    if set(tool_input) - {"tool_id", "action_ids"}:
+        raise tools_host.ToolCallError("describe_tool accepts only tool_id and action_ids.")
     tool = tools_host.BUNDLED_TOOLS.get(tool_id)
     if tool is None:
         raise tools_host.ToolCallError(
             f"Unknown tool_id: {tool_id}. Call list_bundled_tools for the catalog."
         )
     manifest = tool.manifest
+    requested = tool_input.get("action_ids")
+    if "action_ids" in tool_input:
+        if (
+            not isinstance(requested, list)
+            or not 1 <= len(requested) <= 32
+            or any(not isinstance(action_id, str) or not action_id for action_id in requested)
+            or len(set(requested)) != len(requested)
+        ):
+            raise tools_host.ToolCallError(
+                "action_ids must be an array of 1 to 32 unique non-empty strings."
+            )
+        unknown = set(requested) - {spec.id for spec in manifest.actions}
+        if unknown:
+            raise tools_host.ToolCallError(
+                f"Unknown action_ids: {', '.join(sorted(unknown))}. "
+                "Call list_bundled_tools with tool_ids to discover actions."
+            )
     return {
         "status": "executed",
         "result": {
@@ -260,6 +277,7 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
                     **({"output_schema": spec.output_schema} if spec.output_schema else {}),
                 }
                 for spec in manifest.actions
+                if requested is None or spec.id in requested
             ],
         },
     }

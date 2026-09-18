@@ -538,6 +538,15 @@ class StageIntegrationChecks(AwsSmoke):
                     "body": '{"prompt":"stage"}',
                 },
             ),
+            (
+                "imagine image edits",
+                {
+                    "headers": bearer_only,
+                    "host": "api.x.ai",
+                    "path": "/v1/images/edits",
+                    "body": '{"prompt":"stage","image":{"url":"data:image/jpeg;base64,YQ=="}}',
+                },
+            ),
 
         ]
         # Stage has no operator S3 configuration; media requests must not fall

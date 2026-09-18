@@ -315,7 +315,6 @@ import tests.stage.stage_aws
                             "account_id": account_id,
                             "grok_usage": {"usage_percent": 12},
                             "coding_data_retention_opt_out": True,
-                            "zdr_enabled": False,
                         }
                     ]
                 }
@@ -386,14 +385,14 @@ import tests.stage.stage_aws
 
         self.assertEqual((stage.passed, stage.total), (1, 1))
         self.assertEqual(policies[-1]["network_integrations"]["xai"], {"enabled": True})
-        # Every denial case in the stage matrix, and the seven allowed shapes
+        # Every denial case in the stage matrix, and the eight allowed shapes
         # plus the two refresh reads.
         self.assertEqual(sum(event["decision"] == "denied" for event in events), 27)
-        self.assertEqual(sum(event["decision"] == "allowed" for event in events), 9)
+        self.assertEqual(sum(event["decision"] == "allowed" for event in events), 10)
         # One baseline, one provider-refresh read, then one read per matrix
         # row. The old implementation added a second full-history read for
         # every row, which made the live check quadratic in retained events.
-        self.assertEqual(len(network_queries), 36)
+        self.assertEqual(len(network_queries), 37)
         self.assertLessEqual(network_queries.count(0), 2)
 
     def test_agent_catalog_parser_requires_unique_string_tool_ids(self) -> None:

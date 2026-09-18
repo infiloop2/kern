@@ -56,15 +56,12 @@ def thread_events(thread_id: str) -> list[tuple[Any, ...]]:
 
 
 class MemoryRecallQueryTests(unittest.TestCase):
-    def test_recall_keeps_later_query_text_and_truncates_on_utf8_boundaries(self) -> None:
-        for message, expected in (
-            ("  " + "a" * 999 + "b" + "discard", "a" * 999 + "b"),
-            ("a" * 998 + "💡" + "discard", "a" * 998),
-            ("a" * 996 + "💡" + "discard", "a" * 996 + "💡"),
-            ("\ud800hello", "hello"),
-        ):
-            with self.subTest(message=repr(message[-20:])):
-                self.assertEqual(memory._recall_query(message), expected)
+    def test_recall_compacts_repetition_and_keeps_later_task_words(self) -> None:
+        self.assertEqual(memory._recall_query("browser " * 120 + "screenshot"), "browser screenshot")
+        self.assertEqual(memory._recall_query("  Can you please check token usage? "), "check token usage")
+        self.assertLessEqual(len(memory._recall_query("界" * 400).encode()), 1000)
+        self.assertLessEqual(len(memory._recall_query("ΐ" * 500).encode()), 1000)
+        self.assertEqual(memory._recall_query("\ud800hello"), "")
 
     def test_ordinary_search_still_rejects_queries_over_200_bytes(self) -> None:
         for search in (memory.search_pages, memory.search_swarm_pages):
@@ -255,21 +252,21 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         self.assertTrue(all("content" in page for page in recalled["pages"]))
         self.assertEqual(
             [page["page_id"] for page in recalled["pages"]],
-            ["thread-7", *[f"browser-{index}" for index in range(6)]],
+            ["thread-7", *[f"browser-{index}" for index in range(5)]],
         )
         self.assertEqual(
             [page["selection"] for page in recalled["pages"][1:]],
-            ["popular"] + ["relevant"] * 5,
+            ["relevant"] * 5,
         )
         self.assertEqual(
             [page["page_id"] for page in without_self["pages"]],
-            [f"browser-{index}" for index in range(6)],
+            [f"browser-{index}" for index in range(5)],
         )
         with db.transaction() as cur:
             cur.execute("SELECT SUM(strong_top_hit_count) FROM memory_pages")
             self.assertEqual(int(cur.fetchone()[0]), 165)
 
-    def test_turn_recall_includes_popular_pages_without_injecting_weak_matches(self) -> None:
+    def test_turn_recall_excludes_popular_pages_and_weak_matches(self) -> None:
         memory.save_page(
             "playwright-browser",
             {
@@ -303,9 +300,8 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            [page["page_id"] for page in recalled["pages"]], ["general-guidance"]
+            [page["page_id"] for page in recalled["pages"]], []
         )
-        self.assertEqual(recalled["pages"][0]["selection"], "popular")
 
     def test_turn_recall_uses_relevant_terms_after_byte_200(self) -> None:
         for page_id, description in (
@@ -323,10 +319,29 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         ) as embed:
             message = "browser " * 120 + "screenshot"
             recalled = memory.recall_pages({"thread_id": "thread-8", "message": message})
-        embed.assert_called_once_with([message], kind="query")
+        embed.assert_called_once_with(["browser screenshot"], kind="query")
         self.assertEqual(
             [page["page_id"] for page in recalled["pages"]], ["z-browser-screenshot"]
         )
+
+    def test_turn_recall_treats_or_acronym_as_a_literal_with_embeddings_offline(self) -> None:
+        for page_id, description in (("a-noise", "Debug operator"), ("or-guide", "Debug OR operator")):
+            memory.save_page(page_id, {"description": description, "content": "Workflow", "expected_revision": 0}, actor="agent")
+        with patch.object(memory.embedding_client, "embed_texts", side_effect=memory.embedding_client.EmbeddingError("offline")):
+            recalled = memory.recall_pages({"thread_id": "thread-8", "message": "Debug OR operator"})
+        self.assertEqual([page["page_id"] for page in recalled["pages"]], ["or-guide"])
+
+    def test_turn_recall_unicode_spelling_with_embeddings_offline(self) -> None:
+        memory.save_page("routing-guide", {"description": "Fix Straße routing", "content": "Workflow", "expected_revision": 0}, actor="agent")
+        with patch.object(memory.embedding_client, "embed_texts", side_effect=memory.embedding_client.EmbeddingError("offline")):
+            recalled = memory.recall_pages({"thread_id": "thread-8", "message": "Fix Straße routing"})
+        self.assertEqual([page["page_id"] for page in recalled["pages"]], ["routing-guide"])
+
+    def test_turn_recall_all_caps_conjunction_with_embeddings_offline(self) -> None:
+        memory.save_page("billing-guide", {"description": "Login and billing fix", "content": "Workflow", "expected_revision": 0}, actor="agent")
+        with patch.object(memory.embedding_client, "embed_texts", side_effect=memory.embedding_client.EmbeddingError("offline")):
+            recalled = memory.recall_pages({"thread_id": "thread-8", "message": "FIX LOGIN OR BILLING"})
+        self.assertEqual([page["page_id"] for page in recalled["pages"]], ["billing-guide"])
 
     def test_turn_recall_keeps_self_when_swarm_search_changes(self) -> None:
         memory.save_page(
@@ -352,15 +367,13 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             recalled = memory.recall_pages(
                 {"thread_id": "thread-9", "message": "Review the repository"}
             )
-        self.assertEqual(len(recalled["pages"]), 2)
+        self.assertEqual(len(recalled["pages"]), 1)
         self.assertEqual(recalled["pages"][0]["page_id"], "thread-9")
         self.assertEqual(recalled["pages"][0]["scope"], "self")
-        self.assertEqual(recalled["pages"][1]["page_id"], "general-guidance")
-        self.assertEqual(recalled["pages"][1]["selection"], "popular")
         warning.assert_called_once()
         self.assertEqual(warning.call_args.kwargs["kind"], "memory_recall_degraded")
 
-    def test_popularity_uses_existing_counts_with_the_same_recent_filter_in_recall_and_search(self) -> None:
+    def test_popularity_stays_in_explicit_search_only(self) -> None:
         now = datetime(2026, 9, 15, 17, tzinfo=timezone.utc)
         for page_id, count, hours_ago in (
             ("old-leader", 100, 25),
@@ -390,7 +403,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             recalled = memory.recall_pages({"thread_id": "thread-8", "message": "unknownquery"})
             searched = memory.search_swarm_pages({"q": ["unknownquery"]})
             self.assertEqual(
-                [page["page_id"] for page in recalled["pages"]], ["active-leader"]
+                [page["page_id"] for page in recalled["pages"]], []
             )
             self.assertEqual(
                 [page["page_id"] for page in searched["popular_pages"]],
@@ -405,7 +418,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             memory._record_memory_top_hit("old-leader")
             refreshed = memory.recall_pages({"thread_id": "thread-8", "message": "unknownquery"})
             self.assertEqual(
-                [page["page_id"] for page in refreshed["pages"]], ["old-leader"]
+                [page["page_id"] for page in refreshed["pages"]], []
             )
         with db.transaction() as cur:
             cur.execute("SELECT strong_top_hit_count FROM memory_pages WHERE page_id = 'old-leader'")

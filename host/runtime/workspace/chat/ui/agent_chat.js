@@ -89,9 +89,7 @@ let renameThreadReturnFocus = null;
 const chatRoot = window.KernWorkspaceRoots.chat;
 const $ = id => chatRoot.querySelector(`#${CSS.escape(id)}`);
 
-function positionMemoryPages(event) {
-  const notice = event.target.closest?.(".memory-notice");
-  if (!notice || (event.relatedTarget && notice.contains(event.relatedTarget))) return;
+function positionMemoryPages(notice) {
   const panel = notice.querySelector(".memory-pages");
   const bounds = $("chat-scroll").getBoundingClientRect();
   const anchor = notice.getBoundingClientRect();
@@ -102,8 +100,48 @@ function positionMemoryPages(event) {
   notice.classList.toggle("memory-notice-below", openBelow);
   panel.style.maxHeight = `${openBelow ? below : above}px`;
 }
-chatRoot.addEventListener("pointerover", positionMemoryPages);
-chatRoot.addEventListener("focusin", positionMemoryPages);
+
+function setMemoryNoticeOpen(notice, open) {
+  notice.classList.toggle("memory-notice-open", open);
+  const trigger = notice.querySelector("button");
+  const panel = notice.querySelector(".memory-pages");
+  if (trigger) {
+    trigger.setAttribute("aria-expanded", open ? "true" : "false");
+    if (panel?.id) {
+      trigger.setAttribute("aria-controls", panel.id);
+      if (open) trigger.setAttribute("aria-describedby", panel.id);
+      else trigger.removeAttribute("aria-describedby");
+    }
+  }
+  if (open) positionMemoryPages(notice);
+}
+
+function closeOpenMemoryNotices(except = null) {
+  chatRoot.querySelectorAll(".memory-notice-open").forEach(notice => {
+    if (notice !== except) setMemoryNoticeOpen(notice, false);
+  });
+}
+
+function dismissMemoryNoticesOutside(event) {
+  const path = event.composedPath();
+  chatRoot.querySelectorAll(".memory-notice-open").forEach(notice => {
+    if (!path.includes(notice)) setMemoryNoticeOpen(notice, false);
+  });
+}
+
+chatRoot.addEventListener("click", event => {
+  const trigger = event.target.closest?.(".memory-notice > button");
+  if (!trigger) return;
+  const notice = trigger.closest(".memory-notice");
+  const opening = !notice.classList.contains("memory-notice-open");
+  closeOpenMemoryNotices(opening ? notice : null);
+  setMemoryNoticeOpen(notice, opening);
+});
+document.addEventListener("pointerdown", dismissMemoryNoticesOutside, true);
+document.addEventListener("click", dismissMemoryNoticesOutside, true);
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") closeOpenMemoryNotices();
+});
 
 const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => ({
@@ -1128,7 +1166,7 @@ function renderThreadEntry(event, openActivities) {
     const tooltip = details || pageIds.join("\n");
     const message = esc(payload.message || "Context added.");
     const notice = tooltip ? `<div class="memory-notice">
-      <button type="button" aria-describedby="memory-pages-${entryId}">${message}</button>
+      <button type="button" aria-expanded="false" aria-controls="memory-pages-${entryId}">${message}</button>
       <div class="memory-pages" id="memory-pages-${entryId}" role="tooltip">${esc(tooltip)}</div>
     </div>` : message;
     return `<article class="thread-entry thread-stopped" data-entry-id="${entryId}">

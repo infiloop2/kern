@@ -2,8 +2,9 @@
 
 Analytics appears below Memory in the operator sidebar. It shows today and
 the previous six UTC dates, with daily usage by Chats, Apps, and Schedules,
-provider/model summaries, and threads ranked by known token consumption.
-Selecting a thread filters the charts; active threads also link to their conversation. Data starts with new turns after deployment. There is no backfill,
+a 24-hour UTC profile combined across those seven dates, provider/model
+summaries, and threads ranked by known token consumption. Selecting a thread
+filters both charts; active threads also link to their conversation. Data starts with new turns after deployment. There is no backfill,
 provider-quota polling, attribution estimate, or token-to-dollar conversion.
 
 ## Accounting unit
@@ -61,7 +62,7 @@ to the extent the runtime reports it in that stream.
 ## Time and retention
 
 A turn's total is assigned to its latest measurement timestamp. A long-running
-turn can move between day buckets while it runs; this is deliberately
+turn can move between day or hour buckets while it runs; this is deliberately
 approximate. The page refreshes on entry and with Refresh. SQL aggregates the
 seven-day window without loading conversation contents. Known partial totals
 are visible alongside measured-turn counts in the response and UI tooltips.

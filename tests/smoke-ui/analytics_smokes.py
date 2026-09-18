@@ -13,9 +13,9 @@ def fixture():
         ('apps', 'app-1', 'Project dashboard', 'claude_code', 'claude-fable-5-1'),
         ('schedules', 'schedule-1', 'Daily research', 'grok', 'grok-4.6'),
     ]):
-        for day in days:
+        for day_index, day in enumerate(days):
             tokens = dict(zip(fields, [10000*(i+1), 50000*(i+1), 1000, 2000]))
-            groups.append(dict(thread_id=thread, name=name, runtime=runtime, model=model, kind=kind, day=day, turns=2, active=True,
+            groups.append(dict(thread_id=thread, name=name, runtime=runtime, model=model, kind=kind, day=day, hour=(i * 6 + day_index) % 24, turns=2, active=True,
                                tokens=tokens, measured_turns={key:2 for key in fields}))
     groups[0]['tokens']['cache_write_tokens'] = None
     groups[0]['measured_turns']['cache_write_tokens'] = 0
@@ -56,8 +56,12 @@ def run(page, url, login):
     expect(page.locator('#analytics-status')).to_be_empty()
     expect(page.locator('#analytics-chart .analytics-day')).to_have_count(7)
     assert page.locator('.analytics-segment.chats').first.bounding_box()["height"] > 0
+    expect(page.locator('#analytics-hourly-chart .analytics-hour')).to_have_count(24)
+    expect(page.locator('#analytics-hourly-summary')).to_contain_text('Peak at')
+    assert page.locator('#analytics-hourly-chart .analytics-segment.chats').nth(1).bounding_box()["height"] > 0
     expect(page.locator('#analytics-threads tr')).to_have_count(3)
-    expect(page.locator('#analytics-cards')).to_contain_text('*')
+    expect(page.locator('#analytics-cards')).not_to_contain_text('*')
+    expect(page.locator('.analytics-note')).to_contain_text('Totals may have partial coverage.')
     expect(page.locator('#analytics-threads')).to_contain_text('Research <notes>')
     for width in [1280, 390]:
         page.set_viewport_size({'width':width,'height':900})
@@ -145,7 +149,7 @@ def check_token_totals(page, response):
     # All four providers must show 100 input (60 cached) and 20 output.
     report['groups'] = [
         dict(thread_id=f'thread-provider-{i}', name=runtime, runtime=runtime, model='test-model',
-             kind='chats', day=report['days'][-1], turns=1, active=False,
+             kind='chats', day=report['days'][-1], hour=12, turns=1, active=False,
              tokens=dict(zip(fields, [30, 60, 10, 20])), measured_turns=dict.fromkeys(fields, 1))
         for i, runtime in enumerate(['codex', 'claude_code', 'grok', 'hermes'])
     ]
@@ -169,7 +173,8 @@ def check_token_totals(page, response):
     report['groups'][0]['tokens']['cache_write_tokens'] = None
     report['groups'][0]['measured_turns']['cache_write_tokens'] = 0
     page.locator('#analytics-refresh').click()
-    expect(page.locator('#analytics-cards .stat-value > span')).to_have_text(['390*', '80'])
+    expect(page.locator('#analytics-cards .stat-value > span')).to_have_text(['390', '80'])
+    expect(page.locator('#panel-analytics')).not_to_contain_text('*')
     expect(page.locator('#analytics-cards .token-cache-detail')).to_have_text('Of which cached: 240')
     # Unknown usage must not become a measured zero when buckets are combined.
     for value, expected in [(None, '—'), (0, '0')]:
