@@ -14,6 +14,17 @@ CLAUDE_CODE_VERSION=2.1.258
 GROK_CLI_VERSION=1.0.34
 HERMES_AGENT_VERSION=0.18.2
 FASTEMBED_VERSION=0.8.0
+FASTER_WHISPER_VERSION=1.2.1
+# Vendored Systran/faster-whisper-small.en revision
+# d1d751a5f8271d482d14ca55d9e2deeebbae577f; update the release tag and
+# pinned digests together when deliberately changing the model.
+TRANSCRIPTION_MODEL_TAG=model-faster-whisper-small.en-1
+TRANSCRIPTION_MODEL_DIR=/usr/local/share/kern-transcription-models/small.en
+TRANSCRIPTION_MODEL_SHA256="\
+666a9605530ac1f61fa8177f3702b4dacec9966749e42610839fcc32661d5fae  config.json
+62b2a45b05ee59acb4a5341b33ee35e041395d378d418a18acfe4c9e768ee37a  model.bin
+929c5252409436dce1b38a75d1abbcb5e132d170d8e324e4e04ed915fa2d22df  tokenizer.json
+ff77588746d3a2595d32ab5b69ffd7b95ce2441ac57533cb66fc3eb575a115cf  vocabulary.txt"
 PGVECTOR_DEB_VERSION=0.8.6-1.pgdg22.04+1
 PGVECTOR_DEB_SHA256_AMD64=a6021797a2363c134abc12282440d49d09f7f729798d56e51e8b1e92b368416f
 PGVECTOR_DEB_SHA256_ARM64=c4f0ef61a366a42e6a3663d2a84edbeea6c11a13b76c304e6fc2ae22c6ded920
@@ -205,6 +216,7 @@ ensure_group kern-agent-network "$KERN_AGENT_NETWORK_GID"
 ensure_group kern-workspace-api "$KERN_WORKSPACE_API_GID"
 ensure_group kern-workspace "$KERN_WORKSPACE_GID"
 ensure_group kern-embedding "$KERN_EMBEDDING_GID"
+ensure_group kern-transcription "$KERN_TRANSCRIPTION_GID"
 ensure_user kern-admin "$KERN_ADMIN_UID" kern-admin /mnt/kern-admin/admin-home
 ensure_user kern-proxy "$KERN_PROXY_UID" kern-proxy /mnt/kern-admin/proxy-state
 ensure_user kern-agent "$KERN_AGENT_UID" kern-agent /mnt/kern-agent/agent-home
@@ -217,6 +229,7 @@ ensure_user kern-tools "$KERN_TOOLS_UID" kern-tools /nonexistent
 ensure_user kern-agent-network "$KERN_AGENT_NETWORK_UID" kern-agent-network /nonexistent
 ensure_user kern-workspace "$KERN_WORKSPACE_UID" kern-workspace /nonexistent
 ensure_user kern-embedding "$KERN_EMBEDDING_UID" kern-embedding /nonexistent
+ensure_user kern-transcription "$KERN_TRANSCRIPTION_UID" kern-transcription /nonexistent
 ensure_group_member kern-admin kern-workspace-api
 ensure_group_member kern-workspace kern-workspace-api
 # The postgres account is created here, before the postgresql packages would
@@ -997,6 +1010,30 @@ if len(vectors) != 1 or len(vectors[0]) != 384:
     raise SystemExit("local embedding model returned an unexpected shape")
 PY
 chmod -R a+rX /usr/local/lib/kern-embedding-venv /usr/local/share/kern-embedding-models
+# Download the fixed English model during provisioning. The inference service
+# cannot download models or send audio anywhere at runtime.
+uv venv --python /usr/bin/python3 /usr/local/lib/kern-transcription-venv
+uv pip install --python /usr/local/lib/kern-transcription-venv/bin/python \
+  "faster-whisper==${FASTER_WHISPER_VERSION}"
+install -d -o root -g root -m 0755 /usr/local/share/kern-transcription-models
+install -d -o root -g root -m 0755 "$TRANSCRIPTION_MODEL_DIR"
+transcription_model_base="https://github.com/@GITHUB_REPOSITORY@/releases/download/${TRANSCRIPTION_MODEL_TAG}"
+while read -r _digest transcription_model_file; do
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+    -o "${TRANSCRIPTION_MODEL_DIR}/${transcription_model_file}" \
+    "${transcription_model_base}/${transcription_model_file}"
+done <<< "$TRANSCRIPTION_MODEL_SHA256"
+(
+  cd "$TRANSCRIPTION_MODEL_DIR"
+  printf '%s\n' "$TRANSCRIPTION_MODEL_SHA256" | sha256sum --check --status
+)
+KERN_TRANSCRIPTION_MODEL_DIR="$TRANSCRIPTION_MODEL_DIR" HF_HUB_OFFLINE=1 PYTHONPATH=/opt/kern-host \
+  /usr/local/lib/kern-transcription-venv/bin/python - <<'PYTHON'
+from host.runtime.transcription.service import load_model, transcribe
+load_model()
+transcribe(bytes(32000))
+PYTHON
+chmod -R a+rX /usr/local/lib/kern-transcription-venv /usr/local/share/kern-transcription-models
 # npm inherits the script's umask 077, which would leave the CLI root-only;
 # the agent user must be able to run it.
 chmod -R a+rX /usr/local/lib/node_modules
@@ -1560,8 +1597,8 @@ UNIT
 cat > /etc/systemd/system/kern-admin-api.service <<'UNIT'
 [Unit]
 Description=Kern Admin API
-After=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-embedding.socket
-Wants=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-embedding.socket
+After=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-embedding.socket kern-transcription.socket kern-transcription.service
+Wants=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-embedding.socket kern-transcription.socket kern-transcription.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -1584,6 +1621,55 @@ ExecStart=/usr/bin/python3 -m host.runtime.admin_api.service
 ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-admin-api
 Restart=always
 RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/systemd/system/kern-transcription.socket <<'UNIT'
+[Unit]
+Description=Kern English Dictation Socket
+
+[Socket]
+ListenStream=/run/kern-transcription.sock
+SocketUser=kern-transcription
+SocketGroup=kern-admin
+SocketMode=0660
+RemoveOnStop=yes
+Backlog=4
+
+[Install]
+WantedBy=sockets.target
+UNIT
+
+cat > /etc/systemd/system/kern-transcription.service <<'UNIT'
+[Unit]
+Description=Kern English Dictation
+Requires=kern-transcription.socket
+After=kern-transcription.socket
+
+[Service]
+User=kern-transcription
+Group=kern-transcription
+Slice=kern_workspace.slice
+Environment=PYTHONPATH=/opt/kern-host
+Environment=HF_HUB_OFFLINE=1
+Environment=OMP_NUM_THREADS=2
+ExecStart=/usr/local/lib/kern-transcription-venv/bin/python -m host.runtime.transcription.service
+Restart=on-failure
+RestartSec=5
+ExecStopPost=/usr/bin/env PYTHONPATH=/opt/kern-host /usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-transcription
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+Nice=10
+CPUQuota=200%
+CPUWeight=25
+IOWeight=25
+MemoryMax=2G
+TasksMax=64
 
 [Install]
 WantedBy=multi-user.target
@@ -1705,7 +1791,7 @@ systemctl enable --now kern-network-proxy.service
 systemctl enable --now kern-host-errors.service
 systemctl enable --now kern-tools.service
 systemctl enable --now kern-agent-network.service
-systemctl enable --now kern-embedding.socket
+systemctl enable --now kern-embedding.socket kern-transcription.socket kern-transcription.service
 systemctl enable --now kern-admin-api.service
 systemctl enable kern-workspace.service
 systemctl start kern-workspace.service

@@ -1767,8 +1767,8 @@ class DeployUnitTests(unittest.TestCase):
         )
         self.assertNotIn("SHA256SUMS", bootstrap)
 
-        # No HuggingFace on the fresh-deploy critical path. Comments may still
-        # explain why it was removed, so only executable lines are checked.
+        # Both models install from Kern releases, with no Hugging Face
+        # dependency on the fresh-deploy path.
         executable = "\n".join(
             line for line in bootstrap.splitlines() if not line.lstrip().startswith("#")
         )

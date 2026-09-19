@@ -124,6 +124,7 @@ STATIC_SHIM_TOOLS = [
     "search_conversation_history",
     "read_thread_history",
     "send_agent_message",
+    "spawn_agent",
     "workspace_api",
 ]
 
@@ -608,6 +609,7 @@ class AwsSmoke:
             self.check_admin_auth,
             self.check_workspace_backends_without_providers,
             self.check_embedding_index_resource_load,
+            self.check_dictation,
             self.check_initial_disabled_provider_deploy,
             self.check_network_policy,
             self.check_policy_validation_and_concurrency,
@@ -1614,6 +1616,59 @@ class AwsSmoke:
             "Chat options/history, Web App create/state/rename, and global "
             "Memory and Schedules create/search/list/delete paths worked without inference"
         )
+
+    def check_dictation(self) -> None:
+        """Real operator API -> isolated resident worker -> decoded speech."""
+        import base64
+        import wave
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._step("resident English dictation and operator boundary")
+        for method, path, body in (
+            ("GET", "/v1/dictation/ready", None),
+            ("POST", "/v1/dictation/transcribe", {"audio": "AAA="}),
+        ):
+            status, _ = self._api_status(method, path, body, cookie=None)
+            if status != 401:
+                raise AssertionError(f"dictation accepted an unauthenticated {method}: {status}")
+        deadline = time.monotonic() + 60
+        while True:
+            status, body = self._api_status("GET", "/v1/dictation/ready")
+            if status == 200 and body.get("ready") is True:
+                break
+            if status != 503 or time.monotonic() >= deadline:
+                raise AssertionError(f"resident dictation model did not become ready: {status} {body}")
+            time.sleep(1)
+        pid = self._ssh_code("systemctl show kern-transcription.service --property=MainPID --value").strip()
+        if not pid.isdigit() or int(pid) <= 0:
+            raise AssertionError(f"transcription service is not resident: {pid!r}")
+        for audio in ("?", base64.b64encode(bytes(16000 * 2 * 12 + 2)).decode()):
+            status, _ = self._api_status("POST", "/v1/dictation/transcribe", {"audio": audio})
+            if status != 400:
+                raise AssertionError(f"dictation accepted malformed/oversized PCM: {status}")
+        fixture = REPO_ROOT / "tests/fixtures/dictation/jfk-four-seconds.wav"
+        with wave.open(str(fixture)) as source:
+            if (source.getnchannels(), source.getsampwidth(), source.getframerate()) != (1, 2, 16000):
+                raise AssertionError("dictation fixture has the wrong PCM format")
+            audio = base64.b64encode(source.readframes(source.getnframes())).decode()
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._api_status, "POST", "/v1/dictation/transcribe", {"audio": audio})
+            # Readiness must not wait behind the CPU-bound inference request.
+            time.sleep(0.1)
+            ready_started = time.monotonic()
+            ready = self._api("GET", "/v1/dictation/ready")
+            ready_elapsed = time.monotonic() - ready_started
+            if ready.get("ready") is not True or ready_elapsed > 5:
+                raise AssertionError(f"readiness blocked during inference: {ready_elapsed:.2f}s {ready}")
+            status, result = future.result()
+        text = result.get("text", "").lower()
+        if status != 200 or "fellow" not in text or "americans" not in text:
+            raise AssertionError(f"real dictation did not recognize the fixture: {status} {result}")
+        after_pid = self._ssh_code("systemctl show kern-transcription.service --property=MainPID --value").strip()
+        if after_pid != pid:
+            raise AssertionError("dictation worker restarted during inference")
+        self._ok(f"real speech decoded in {time.monotonic() - started:.2f}s; readiness {ready_elapsed:.2f}s; model remains resident")
 
     def check_embedding_index_resource_load(self) -> None:
         """Exercise real local inference while proving the host remains responsive."""

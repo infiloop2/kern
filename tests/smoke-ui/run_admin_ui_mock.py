@@ -65,6 +65,8 @@ UI_ASSETS.update({
     "/workspace/chat.css": (WORKSPACE_DIR / "chat/ui/agent_chat.css", "text/css; charset=utf-8"),
     "/workspace/rich_text.js": (WORKSPACE_DIR / "chat/ui/rich_text.js", "application/javascript; charset=utf-8"),
     "/workspace/rich_text.css": (WORKSPACE_DIR / "chat/ui/rich_text.css", "text/css; charset=utf-8"),
+    "/workspace/dictation.js": (WORKSPACE_DIR / "ui/dictation.js", "application/javascript; charset=utf-8"),
+    "/workspace/dictation-worklet.js": (WORKSPACE_DIR / "ui/dictation-worklet.js", "application/javascript; charset=utf-8"),
     "/workspace/composer.css": (WORKSPACE_DIR / "ui/composer.css", "text/css; charset=utf-8"),
     "/workspace/web-apps.html": (WORKSPACE_DIR / "web_apps/ui/index.html", "text/html; charset=utf-8"),
     "/workspace/web-apps.js": (WORKSPACE_DIR / "web_apps/ui/personal_web_app_builder.js", "application/javascript; charset=utf-8"),

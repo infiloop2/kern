@@ -537,13 +537,13 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
     margin-right: 0.15rem;
   }
 
-  /* Keep attachment, session settings, and Send on one compact control row.
+  /* Keep attachment, session settings, microphone, and Send on one row.
      minmax(0, ...) pins native selects to the remaining width so their widest
      options cannot push either action onto a second line. */
   .composer-bar {
     display: grid;
     gap: 0.35rem;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
     min-width: 0;
   }
   .composer-options {

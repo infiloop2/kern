@@ -43,6 +43,7 @@ TOOLS_SOCKET_PATH = "/run/kern-tools/tools.sock"
 WORKSPACE_AGENT_SOCKET_PATH = "/run/kern-workspace/agent.sock"
 AGENT_NETWORK_SOCKET_PATH = "/run/kern-agent-network/agent-network.sock"
 WORKSPACE_ADMIN_SOCKET_PATH = "/run/kern-admin-api/workspace.sock"
+TRANSCRIPTION_SOCKET_PATH = "/run/kern-transcription.sock"
 EMBEDDING_SOCKET_PATH = "/run/kern-embedding.sock"
 WORKSPACE_ADMIN_GROUP = "kern-workspace-api"
 WORKSPACE_ADMIN_GROUP_GID = 47749
@@ -67,4 +68,5 @@ SERVICE_ACCOUNTS = {
     "kern-agent-network": 47748,
     "kern-workspace": 47750,
     "kern-embedding": 47751,
+    "kern-transcription": 47752,
 }

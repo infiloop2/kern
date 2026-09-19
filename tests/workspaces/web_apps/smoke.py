@@ -1368,6 +1368,9 @@ def desktop_smoke(page: Any) -> None:
 
     frame.get_by_role("button", name="App details", exact=True).click()
     expect(frame.get_by_role("dialog", name="App details")).to_be_visible()
+    # The dialog selects the name on the next animation frame. Wait for that
+    # focus before filling either field, so it cannot steal the purpose input.
+    expect(frame.locator("#rename-app-input")).to_be_focused()
     frame.locator("#rename-app-input").fill("Weekly focus")
     frame.locator("#app-purpose-input").fill("Track weekly priorities")
     frame.locator("#rename-app-form").get_by_role("button", name="Save").click()

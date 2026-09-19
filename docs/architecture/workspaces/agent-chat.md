@@ -37,6 +37,13 @@ Runtime/model/effort changes remain idle-only and create the host's visible
 session-change activity. Stop and archive are separate server-validated
 operations.
 
+Agents can create and start a new ordinary Chat through the typed `spawn_agent`
+tool. The operation requires an initial message and a complete interactive
+runtime/model/effort tuple, returns the generated `thread-N`, and applies the
+same non-operator agent-message header used for existing threads. The spawned
+agent can return its result to the authenticated sender with
+`send_agent_message`.
+
 Agents can search retained messages and read bounded pages from any host thread through
 the typed `search_conversation_history` and `read_thread_history` MCP tools.
 Those read-only calls use the peer-authenticated Workspace agent socket. Search

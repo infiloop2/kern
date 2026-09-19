@@ -19,6 +19,25 @@ from tests.stage.stage_support import (
 )
 
 
+class DictationLiveSmokeTests(unittest.TestCase):
+    def test_real_recognition_failure_cannot_pass_live_smoke(self):
+        smoke = AwsSmoke()
+        def api_status(method, path, body=None, **kwargs):
+            if kwargs.get("cookie", "present") is None:
+                return 401, {}
+            if path.endswith("ready"):
+                return 200, {"ready": True}
+            if body["audio"] == "?" or len(body["audio"]) > 512000:
+                return 400, {}
+            return 200, {"text": ""}
+        with (patch.object(smoke, "_api_status", side_effect=api_status),
+              patch.object(smoke, "_api", return_value={"ready": True}),
+              patch.object(smoke, "_ssh_code", return_value="123"),
+              patch("tests.smoke.smoke_aws.time.sleep")):
+            with self.assertRaisesRegex(AssertionError, "did not recognize"):
+                smoke.check_dictation()
+
+
 class AwsSmokeTeardownTests(unittest.TestCase):
     def test_fresh_smoke_does_not_start_dynamic_registration(self) -> None:
         smoke = AwsSmoke()

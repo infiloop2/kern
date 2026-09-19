@@ -150,6 +150,7 @@ document.addEventListener("keydown", event => {
   if (event.key === "Escape") closeOpenMemoryNotices();
 });
 
+let dictation = null;
 const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => ({
   claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", grok: "Grok", hermes: "Hermes",
@@ -185,8 +186,8 @@ function saveComposerDraft() {
   const value = $("message").value;
   delete composerDrafts[key];
   if (value) composerDrafts[key] = value;
-  while (Object.keys(composerDrafts).length > COMPOSER_DRAFT_LIMIT) {
-    delete composerDrafts[Object.keys(composerDrafts)[0]];
+  while (Object.keys(composerDrafts).filter(key => key !== "__dictationReceipts").length > COMPOSER_DRAFT_LIMIT) {
+    delete composerDrafts[Object.keys(composerDrafts).find(key => key !== "__dictationReceipts")];
   }
   persistComposerDrafts();
 }
@@ -196,6 +197,7 @@ function restoreComposerDraft() {
     ? composerDrafts[`app:${selectedAppId}`] || ""
     : "";
   autosizeComposer();
+  dictation?.sync();
 }
 
 function syncHistoryTailPin() {
@@ -2531,8 +2533,10 @@ function setSessionOptions(preferredModel = null, preferredEffort = null) {
       ? "Hermes does not support follow-ups while running"
       : "Send another message"
     : "Describe the app or ask about its data";
+  dictation?.sync();
   $("send-message").disabled = (
     !selectedAppId || messageBusyApps.has(selectedAppId)
+    || dictation?.busy()
     || activeBlock
     || attachmentBusy
     || hasOversizedAttachment
@@ -3247,6 +3251,17 @@ $("agent-settings").addEventListener("mouseenter", () => {
 });
 $("agent-settings").addEventListener("mouseleave", () => {
   $("agent-settings").classList.remove("show-lock-note");
+});
+dictation = window.KernDictation.mount({
+  composer: $("chat-composer"), textarea: $("message"), scope: "apps",
+  getKey: () => `app:${selectedAppId}`,
+  unavailable: () => !selectedAppId || $("chat-composer").hidden || $("message").disabled || messageBusyApps.has(selectedAppId),
+  changed: () => setSessionOptions($("model").value, $("effort").value),
+  append: (key, text, id) => window.KernDictation.appendDraft({
+    drafts: composerDrafts, storageKey: COMPOSER_DRAFTS_STORAGE_KEY,
+    key, currentKey: () => `app:${selectedAppId}`, textarea: $("message"),
+    updated: () => { autosizeComposer(); },
+  }, text, id),
 });
 $("send-message").addEventListener("click", () => sendMessage());
 $("attach-file").addEventListener("click", () => {

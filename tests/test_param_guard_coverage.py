@@ -433,6 +433,8 @@ EXEMPT_FIELDS = {
     ("twitterapi_io", "search_tweets", "query_type"): TYPED,
     ("twitterapi_io", "search_tweets", "max_results"): TYPED,
     ("twitterapi_io", "search_tweets", "lookback_hours"): TYPED,
+    ("twitterapi_io", "search_tweets", "since_time"): TYPED,
+    ("twitterapi_io", "search_tweets", "until_time"): TYPED,
     ("twitterapi_io", "search_tweets", "exclude_replies"): TYPED,
     ("twitterapi_io", "search_tweets", "exclude_retweets"): TYPED,
     ("zoho_mail", "search_messages", "start"): TYPED,

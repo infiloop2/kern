@@ -53,6 +53,67 @@ class AgentMessageTests(unittest.TestCase):
         self.assertTrue(body["message"].endswith("Please review the draft."))
         self.assertEqual(set(body), {"message", "agent_runtime", "model", "effort"})
 
+    def test_spawn_agent_creates_a_chat_with_delegation_and_reply_instructions(self):
+        with patch.object(
+            agent_messages.chat,
+            "send_chat_message",
+            return_value={"action": "accepted", "thread_id": "thread-12"},
+        ) as send:
+            result = agent_api.dispatch_call(
+                "POST",
+                "/agent/agents",
+                {"message": "Review the draft.", **SESSION},
+                peer_thread_id="thread-1",
+            )
+        self.assertEqual(
+            result["body"], {"status": "accepted", "thread_id": "thread-12"}
+        )
+        request = send.call_args.args[0]
+        self.assertEqual(
+            {key: request[key] for key in ("agent_runtime", "model", "effort")},
+            SESSION,
+        )
+        self.assertTrue(
+            request["input_message"].startswith(
+                agent_messages.MESSAGE_HEADER.format(sender="thread-1")
+            )
+        )
+        self.assertIn("send_agent_message", request["input_message"])
+        self.assertTrue(request["input_message"].endswith("Review the draft."))
+
+    def test_spawn_agent_rejects_bad_identity_shape_message_and_configuration(self):
+        cases = [
+            (None, {"message": "Review", **SESSION}),
+            ("thread-1", {"message": "Review", **SESSION, "thread_id": "thread-2"}),
+            ("thread-1", {"message": " ", **SESSION}),
+            ("thread-1", {"message": "x" * 10001, **SESSION}),
+            (
+                "thread-1",
+                {"message": "Review", "agent_runtime": "script", "model": "bash", "effort": "fixed"},
+            ),
+            (
+                "thread-1",
+                {"message": "Review", "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "nope"},
+            ),
+        ]
+        for sender, body in cases:
+            with self.subTest(sender=sender, body=str(body)[:100]), patch.object(
+                agent_messages.chat, "send_chat_message"
+            ) as send:
+                with self.assertRaises(WorkspaceError):
+                    agent_messages.spawn_agent(body, sender_thread_id=sender)
+                send.assert_not_called()
+
+    def test_spawn_agent_rejects_an_invalid_chat_response(self):
+        with patch.object(
+            agent_messages.chat,
+            "send_chat_message",
+            return_value={"action": "accepted", "thread_id": "app-2"},
+        ), self.assertRaisesRegex(WorkspaceError, "invalid spawned agent"):
+            agent_messages.spawn_agent(
+                {"message": "Review", **SESSION}, sender_thread_id="thread-1"
+            )
+
     def test_full_character_allowance_leaves_room_for_utf8_and_header(self):
         with patch.object(
             agent_messages, "call_admin_api", return_value={"status": "accepted"}
@@ -121,6 +182,20 @@ class AgentMessageTests(unittest.TestCase):
                     self.assertIn("archived", result["content"][0]["text"])
                 else:
                     self.assertEqual(json.loads(result["content"][0]["text"]), body)
+
+    def test_spawn_agent_mcp_uses_the_typed_workspace_route(self):
+        body = {"status": "accepted", "thread_id": "thread-9"}
+        with patch.object(
+            mcp_shim,
+            "_tools_request",
+            return_value={"status": 200, "body": body},
+        ) as request:
+            result = mcp_shim._call_tool(
+                {"name": "spawn_agent", "arguments": {"message": "Research", **SESSION}}
+            )
+        self.assertFalse(result["isError"])
+        self.assertEqual(json.loads(result["content"][0]["text"]), body)
+        self.assertEqual(request.call_args.args[2]["path"], "/agent/agents")
 
     def test_purpose_is_short_optional_single_line(self):
         self.assertEqual(validate_purpose(""), "")

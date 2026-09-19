@@ -1756,7 +1756,7 @@ class StateStorageTests(unittest.TestCase):
 
     def test_host_runtime_has_no_third_party_imports(self) -> None:
         # The host runtime is standard library only except for the isolated
-        # embedding process, whose dedicated venv contains FastEmbed. The
+        # embedding and transcription processes, each with a dedicated venv. The
         # admin-state database is spoken to by the in-repo protocol client,
         # not a driver. Walk every host/ module so another dependency cannot
         # sneak back in.
@@ -1766,7 +1766,9 @@ class StateStorageTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         allowed_roots = set(sys.stdlib_module_names) | {"host", "tools"}
         isolated_dependencies = {
-            (Path("host/runtime/embeddings/service.py"), "fastembed")
+            (Path("host/runtime/embeddings/service.py"), "fastembed"),
+            (Path("host/runtime/transcription/service.py"), "numpy"),
+            (Path("host/runtime/transcription/service.py"), "faster_whisper"),
         }
         offenders: list[str] = []
         for path in sorted((repo_root / "host").rglob("*.py")):

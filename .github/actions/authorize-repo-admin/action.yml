@@ -8,7 +8,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        ACTOR: ${{ github.actor }}
+        # github.actor remains the original initiator on reruns.
+        ACTOR: ${{ github.triggering_actor }}
       run: |
         set -euo pipefail
         ACTOR_ENCODED=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["ACTOR"], safe=""))')
@@ -19,13 +20,13 @@ runs:
           "$API_URL")
 
         if [ "$HTTP_STATUS" != "200" ]; then
-          echo "Failed to read repo permission for '${{ github.actor }}' (HTTP $HTTP_STATUS)."
+          echo "Failed to read repo permission for '${ACTOR}' (HTTP $HTTP_STATUS)."
           cat /tmp/permission.json
           exit 1
         fi
 
         PERMISSION=$(jq -r '.permission // empty' /tmp/permission.json)
         if [ "$PERMISSION" != "admin" ]; then
-          echo "Actor '${{ github.actor }}' has repo permission '$PERMISSION'; admin required to run this workflow."
+          echo "Actor '${ACTOR}' has repo permission '$PERMISSION'; admin required to run this workflow."
           exit 1
         fi
