@@ -105,6 +105,7 @@ from host.runtime.core.host_metrics import (
 )
 from host.runtime.core.root_helpers import HelperTimedOut, run_root_helper as _run_root_helper
 from host.runtime.embeddings import client as embedding_client
+from host.runtime.transcription import client as transcription_client
 from host.runtime.tools import tools_host
 from host.runtime.agent_runtime.orchestrator import agent_runtime_status
 from host.runtime.admin_api.request_params import clip_json_encoded_text as _clip_json_encoded_text
@@ -208,6 +209,8 @@ WORKSPACE_UI_ASSETS = {
     "/workspace/chat.css": (RUNTIME_DIR.parent / "workspace/chat/ui/agent_chat.css", "text/css; charset=utf-8"),
     "/workspace/rich_text.js": (RUNTIME_DIR.parent / "workspace/chat/ui/rich_text.js", "application/javascript; charset=utf-8"),
     "/workspace/rich_text.css": (RUNTIME_DIR.parent / "workspace/chat/ui/rich_text.css", "text/css; charset=utf-8"),
+    "/workspace/dictation.js": (RUNTIME_DIR.parent / "workspace/ui/dictation.js", "application/javascript; charset=utf-8"),
+    "/workspace/dictation-worklet.js": (RUNTIME_DIR.parent / "workspace/ui/dictation-worklet.js", "application/javascript; charset=utf-8"),
     "/workspace/composer.css": (RUNTIME_DIR.parent / "workspace/ui/composer.css", "text/css; charset=utf-8"),
     "/workspace/web-apps.html": (RUNTIME_DIR.parent / "workspace/web_apps/ui/index.html", "text/html; charset=utf-8"),
     "/workspace/web-apps.js": (RUNTIME_DIR.parent / "workspace/web_apps/ui/personal_web_app_builder.js", "application/javascript; charset=utf-8"),
@@ -1104,6 +1107,10 @@ _WORKSPACE_PROXY_SUBTREES = ("getting-started", "chat", "web-apps", "memory", "s
 # is a 404, and a method with no entry for an otherwise known path is a 404
 # too, never a 405.
 _ROUTES: tuple[_Route, ...] = (
+    _Route("GET", "/v1/dictation/ready", lambda request: transcription_client.readiness(),
+           operator_only=True, query_keys=frozenset(), query_label="dictation"),
+    _Route("POST", "/v1/dictation/transcribe", lambda request: transcription_client.transcribe(request.body),
+           operator_only=True, query_keys=frozenset(), query_label="dictation"),
     _Route("GET", "/v1/health", lambda request: health()),
     _Route("GET", "/v1/analytics", lambda request: state.usage_report(), operator_only=True,
            query_keys=frozenset(), query_label="analytics"),

@@ -142,6 +142,47 @@ button.attachment-clear {
   color: var(--text);
 }
 
+.dictation-mic { position: relative; }
+.dictation-mic[data-state="recording"], .dictation-mic[data-state="processing"] {
+  color: color-mix(in srgb, var(--ok) 75%, var(--text-dim));
+  background: var(--ok-soft);
+}
+.dictation-mic[data-state="processing"]:disabled { opacity: 1; }
+.dictation-indicator { display: none; position: absolute; right: 2px; top: 2px; width: 7px; height: 7px; border-radius: 50%; }
+.dictation-mic[data-state="recording"] .dictation-indicator { display: block; background: currentColor; animation: dictation-pulse 1.6s ease-in-out infinite; }
+.dictation-mic[data-state="processing"] .dictation-indicator { display: block; border: 2px solid currentColor; border-top-color: transparent; animation: dictation-spin 0.9s linear infinite; }
+.dictation-mic[data-state="warning"] { color: var(--warn); background: var(--warn-soft); }
+.dictation-mic[data-state="warning"] .dictation-indicator { display: grid; place-items: center; width: 11px; height: 11px; background: var(--warn); color: var(--bg); font-size: 9px; font-weight: 700; }
+.dictation-mic[data-state="warning"] .dictation-indicator::after { content: "!"; }
+@keyframes dictation-pulse { 50% { opacity: 0.45; } }
+@keyframes dictation-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .dictation-mic .dictation-indicator { animation: none; } }
+.dictation-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+  padding: 0.3rem 0.3rem 0.3rem 0;
+  color: var(--text-dim);
+  font-size: 0.76rem;
+}
+.dictation-panel[hidden], .dictation-panel [hidden] { display: none; }
+.dictation-status { flex: 1; min-width: 7rem; }
+.dictation-time { font-variant-numeric: tabular-nums; }
+.dictation-panel meter { width: 2.5rem; height: 0.5rem; }
+.dictation-status { color: var(--warn); }
+button.dictation-action {
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  padding: 0.35rem 0.6rem;
+}
+@media (max-width: 720px) {
+  button.dictation-action { min-height: 2.75rem; }
+}
+
 .attach-button svg,
 .send-button svg { height: 17px; width: 17px; }
 

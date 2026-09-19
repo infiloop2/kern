@@ -276,6 +276,13 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                     )
                     order_context.close()
 
+                import dictation_smokes
+                voice_context = browser.new_context(service_workers="block")
+                voice_page = voice_context.new_page()
+                report_page_errors(voice_page, "dictation recovery")
+                dictation_smokes.run(voice_page, url, log_in)
+                voice_context.close()
+
         finally:
             browser.close()
         if webkit and scope in {"all", "workspaces"}:
@@ -293,6 +300,12 @@ def run_webkit_workspace_smoke(playwright, url: str, *, headed: bool) -> None:
             "  python3 -m playwright install webkit"
         ) from exc
     try:
+        import dictation_smokes
+        voice_context = browser.new_context(service_workers="block")
+        voice_page = voice_context.new_page()
+        report_page_errors(voice_page, "WebKit dictation recovery")
+        dictation_smokes.run(voice_page, url, log_in)
+        voice_context.close()
         files_context = browser.new_context(service_workers="block")
         file_preview_smokes.run(files_context.new_page(), url, log_in)
         files_context.close()

@@ -1,3 +1,4 @@
+import "/workspace/dictation.js";
 import { refreshAnalytics } from "./analytics.js";
 // Entry module: session lifecycle (login, logout), tab switching, the
 // 5-second refresh tick, and the one delegated click dispatcher that maps

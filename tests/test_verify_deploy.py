@@ -120,6 +120,7 @@ class SocketTests(unittest.TestCase):
                 "kern-agent-network",
                 "kern-admin",
                 "kern-embedding",
+                "kern-transcription",
                 "postgres",
             },
         )
@@ -152,6 +153,17 @@ class ListenerTests(unittest.TestCase):
 
 
 class RunnerBackedCheckTests(unittest.TestCase):
+    def test_transcription_verification_checks_model_readiness_as_admin(self) -> None:
+        calls = []
+        def run(argv):
+            calls.append(argv)
+            return completed(1)
+        self.assertEqual(verify_deploy.check_transcription_ready(run), ["transcription: resident model is not ready"])
+        self.assertEqual(calls[0][:4], ["runuser", "-u", "kern-admin", "--"])
+        self.assertIn("from host.runtime.transcription.client import readiness; readiness()", calls[0])
+        self.assertEqual(verify_deploy.check_transcription_ready(lambda argv: completed(0)), [])
+        self.assertIn("kern-transcription.service", verify_deploy.CORE_UNITS)
+
     def test_services_active(self) -> None:
         self.assertEqual(
             verify_deploy.check_services_active(("a.service",), lambda argv: completed(0)), []

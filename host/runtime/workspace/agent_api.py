@@ -114,6 +114,10 @@ def dispatch_call(
         if method != "POST" or query:
             raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent messaging accepts only POST without query parameters")
         response = agent_messages.send_agent_message(body, sender_thread_id=peer_thread_id)
+    elif parsed.path == "/agent/agents":
+        if method != "POST" or query:
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent spawning accepts only POST without query parameters")
+        response = agent_messages.spawn_agent(body, sender_thread_id=peer_thread_id)
     elif parsed.path.startswith("/agent/conversation-history/"):
         response = conversation_history.route_agent(method, parsed.path, body, query)
     elif parsed.path == "/agent/memory" or parsed.path.startswith("/agent/memory/"):

@@ -997,13 +997,16 @@ def _assert_mobile_composer_ergonomics(frame: Any) -> None:
     attach_box = frame.locator("#attach-file").bounding_box()
     if not attach_box or attach_box["height"] < 43 or attach_box["width"] < 43:
         raise AssertionError(f"attach button is below thumb size on a phone: {attach_box}")
+    mic_box = frame.locator(".dictation-mic").bounding_box()
+    if not mic_box or mic_box["height"] < 43 or mic_box["width"] < 43:
+        raise AssertionError(f"microphone button is below thumb size: {mic_box}")
     options_box = frame.locator("#composer-options").bounding_box()
     bar_box = frame.locator(".composer-bar").bounding_box()
     if not options_box or not bar_box:
         raise AssertionError("composer settings row is not visible on a phone")
     centers = [
         box["y"] + box["height"] / 2
-        for box in (attach_box, options_box, send_box)
+        for box in (attach_box, options_box, mic_box, send_box)
     ]
     if max(centers) - min(centers) > 2 or bar_box["height"] > 45:
         raise AssertionError(

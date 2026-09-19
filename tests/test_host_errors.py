@@ -170,6 +170,17 @@ class HostErrorCollectorTests(unittest.TestCase):
         )
         self.assertIsNone(rejected)
 
+    def test_transcription_service_exits_reach_the_error_feed(self) -> None:
+        units = collector.allowed_units()
+        self.assertIn("_SYSTEMD_UNIT=kern-transcription.service", collector.journal_command(units))
+        _, event = collector.parse_journal_record(
+            journal_row({**self.PAYLOAD, "kind": "service_exit"}, unit="kern-transcription.service"),
+            units=units,
+        )
+        assert event is not None
+        self.assertEqual(event["service"], "kern-transcription")
+        self.assertEqual(event["kind"], "service_exit")
+
     def test_journal_command_follows_only_new_trusted_unit_records(self) -> None:
         command = collector.journal_command(self.UNITS)
         self.assertIn("KERN_HOST_DIAGNOSTIC=1", command)

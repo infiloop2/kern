@@ -55,6 +55,10 @@ stated operation; reuse guidance already available in the current context.
 - **Schedules**: recurring model agents or Bash jobs. Before schedule operations
   or diagnosis, read
   `/opt/kern-host/host/bootstrap/agent-home/references/schedules.md`.
+- **Agent delegation**: `spawn_agent` creates and starts one new Chat agent for
+  bounded work within the operator's task; `send_agent_message` contacts known
+  threads and carries results back. Before using either, read
+  `/opt/kern-host/host/bootstrap/agent-home/references/agent-messaging.md`.
 - **Conversation history**: `search_conversation_history` finds bounded
   user/assistant excerpts across retained Chat, App and schedule threads with
   hybrid search and optional `query_variants`. Limit 1–25; paginate broad

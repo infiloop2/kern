@@ -3,8 +3,8 @@
 The Workspace agent socket is the single agent-facing transport for Kern's
 Workspace service. The MCP shim exposes Web Apps, first-class self-memory,
 host-global memory, schedules, and thread identity through `workspace_api`, and provides typed
-`search_conversation_history` and `read_thread_history` tools over the same
-boundary. A compact capability map and failure-prone invariants remain in the
+`search_conversation_history`, `read_thread_history`, `send_agent_message`, and
+`spawn_agent` tools over the same boundary. A compact capability map and failure-prone invariants remain in the
 host-global instructions; complete App, memory, and schedule routes live in
 the root-owned release references those instructions point to. Tool listing
 itself is not dynamic discovery and grants no
@@ -24,6 +24,20 @@ Conversation history has two read-only routes used by the typed MCP tools:
 POST /agent/conversation-history/search
 POST /agent/conversation-history/read
 ```
+
+Cross-thread collaboration has two peer-identity-bound routes:
+
+```text
+POST /agent/messages
+POST /agent/agents
+```
+
+The first sends one host-labeled message to a known eligible App, model
+Schedule, or Chat. The second atomically presents one create-and-send operation
+to the caller: Workspace reserves the next `thread-N` Chat id and admits its
+first message with a required interactive runtime/model/effort tuple. Both use
+the same header, which identifies the authenticated sender, explicitly denies
+operator authority, and gives the `send_agent_message` reply command.
 
 Search returns bounded message excerpts, the active `search_mode`, and an opaque
 relevance/time cursor. Text queries automatically use local hybrid vector and

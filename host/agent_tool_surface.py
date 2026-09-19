@@ -228,3 +228,46 @@ SEND_AGENT_MESSAGE_TOOL: JSONObject = {
         "additionalProperties": False,
     },
 }
+
+
+SPAWN_AGENT_TOOL: JSONObject = {
+    "name": "spawn_agent",
+    "description": (
+        "Start a new Kern Chat agent and send its first message in one operation. Use this "
+        "to delegate a bounded part of the operator-authorized task. A successful call returns "
+        "the new thread-x id. The spawned agent receives your host-authenticated thread id and "
+        "instructions to send its result or blocking question back with send_agent_message. "
+        "Provide a complete supported agent_runtime, model, and effort tuple; use "
+        "GET /agent/apps/session-options with workspace_api when you need the current choices. "
+        "The new agent is an ordinary durable Chat thread visible to the operator. One creation "
+        "attempt, no queue; accepted means the work started, not that it completed. Spawning an "
+        "agent does not expand the operator's authority or task scope."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 10000,
+                "description": "The bounded task to delegate to the new agent.",
+            },
+            "agent_runtime": {
+                "type": "string",
+                "enum": ["codex", "codex-2", "claude_code", "grok", "hermes"],
+            },
+            "model": {
+                "type": "string",
+                "minLength": 1,
+                "description": "A model currently offered for agent_runtime.",
+            },
+            "effort": {
+                "type": "string",
+                "minLength": 1,
+                "description": "An effort currently offered for the selected model.",
+            },
+        },
+        "required": ["message", "agent_runtime", "model", "effort"],
+        "additionalProperties": False,
+    },
+}

@@ -9,6 +9,7 @@ runtime design and trust boundaries, start with
 | Doc | Contents |
 | --- | --- |
 | [Code layout](layout.md) | Repository layout and important runtime modules. |
+| [English dictation](dictation.md) | Recording, recovery, host transcription, and validation. |
 | [CI testing](ci-testing.md) | Static type checks, unit tests, no-network CI, and local admin UI smoke. |
 | [Fresh AWS smoke](fresh-aws-smoke.md) | Full deploy-from-scratch live AWS validation and one-time setup. |
 | [Persistent AWS stage](persistent-aws-stage.md) | Long-lived staging host, provider-login checks, and start/stop workflows. |

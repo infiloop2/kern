@@ -44,6 +44,7 @@ MAX_POSTS = 20
 DEFAULT_MAX_RESULTS = 10
 DEFAULT_LOOKBACK_HOURS = 7 * 24
 MAX_LOOKBACK_HOURS = 30 * 24
+MAX_UNIX_TIMESTAMP = 9_999_999_999
 MAX_EXCLUDED_USERNAMES = 10
 MAX_POST_TEXT_CHARS = 25_000
 QUERY_TYPES = frozenset({"Latest", "Top"})
@@ -116,11 +117,13 @@ MANIFEST = ToolManifest(
             description=(
                 "Run one bounded public-post search using X advanced-search syntax. "
                 "Accepts queries up to 512 characters, defaults to the last seven days, and "
-                "returns a caller-selected maximum of 1-20 posts from one provider page."
+                "accepts exact structured Unix-second bounds for disjoint windows. Returns a "
+                "caller-selected maximum of 1-20 posts from one provider page."
             ),
             data_policy=(
                 "Sends the guarded search query (at most 512 characters), Latest/Top selection, "
-                "structured recency and exclusion controls, and the configured API key to "
+                "structured recency, exact Unix-second time bounds and exclusion controls, and "
+                "the configured API key to "
                 "TwitterAPI.io. One read-only request can return and bill up to 20 public X posts; "
                 "max_results only bounds what Kern returns to the agent. Runs directly with no approval."
             ),
@@ -150,7 +153,25 @@ MANIFEST = ToolManifest(
                         "description": (
                             "0-720; only return posts this many hours old or newer "
                             "(default 168; 0 disables). "
-                            "Kern sends the provider-supported since_time operator."
+                            "Kern sends the provider-supported since_time operator. Do not combine "
+                            "with since_time or until_time."
+                        ),
+                    },
+                    "since_time": {
+                        "type": "string",
+                        "description": (
+                            "Optional Unix timestamp in whole seconds, from 0 to 9999999999. "
+                            "Kern appends it as the provider's since_time operator. Use with "
+                            "until_time for an exact disjoint window; do not embed the timestamp "
+                            "in query or combine it with lookback_hours."
+                        ),
+                    },
+                    "until_time": {
+                        "type": "string",
+                        "description": (
+                            "Optional exclusive Unix timestamp in whole seconds, from 0 to 9999999999. "
+                            "Kern appends it as the provider's until_time operator. When both bounds "
+                            "are present, until_time must be greater than since_time."
                         ),
                     },
                     "exclude_replies": {
@@ -178,6 +199,8 @@ MANIFEST = ToolManifest(
             "query_type": validated_input("Latest or Top."),
             "max_results": validated_input("Integer from 1 to 20."),
             "lookback_hours": validated_input("Integer from 0 to 720."),
+            "since_time": validated_input("Unix timestamp in whole seconds from 0 to 9999999999."),
+            "until_time": validated_input("Unix timestamp in whole seconds from 0 to 9999999999."),
             "exclude_replies": validated_input("JSON boolean."),
             "exclude_retweets": validated_input("JSON boolean."),
             "exclude_usernames": guarded_input(),
@@ -364,6 +387,8 @@ def _search_request(tool_input: JSONObject, api: HostAPI) -> SearchRequest:
         "query_type",
         "max_results",
         "lookback_hours",
+        "since_time",
+        "until_time",
         "exclude_replies",
         "exclude_retweets",
         "exclude_usernames",
@@ -393,14 +418,25 @@ def _search_request(tool_input: JSONObject, api: HostAPI) -> SearchRequest:
         low=1,
         high=MAX_POSTS,
     )
+    has_exact_bounds = "since_time" in tool_input or "until_time" in tool_input
+    if has_exact_bounds and "lookback_hours" in tool_input:
+        raise ToolInputValidationError(
+            "TwitterAPI.io tool_input.lookback_hours cannot be combined with since_time or until_time."
+        )
     lookback_hours = int_field(
         tool_input,
         "lookback_hours",
         provider="TwitterAPI.io",
-        default=DEFAULT_LOOKBACK_HOURS,
+        default=0 if has_exact_bounds else DEFAULT_LOOKBACK_HOURS,
         low=0,
         high=MAX_LOOKBACK_HOURS,
     )
+    since_time = _optional_unix_timestamp(tool_input, "since_time")
+    until_time = _optional_unix_timestamp(tool_input, "until_time")
+    if since_time is not None and until_time is not None and since_time >= until_time:
+        raise ToolInputValidationError(
+            "TwitterAPI.io tool_input.until_time must be greater than since_time."
+        )
     exclude_replies = _boolean_field(tool_input, "exclude_replies") or bool(
         EXCLUDE_REPLY_RE.search(query)
     )
@@ -417,6 +453,10 @@ def _search_request(tool_input: JSONObject, api: HostAPI) -> SearchRequest:
     suffixes.extend(f"-from:{username}" for username in _excluded_usernames(tool_input, api))
     if lookback_hours and not re.search(r"(?<!\S)since_time:\d+(?!\S)", query):
         suffixes.append(f"since_time:{now() - lookback_hours * 3600}")
+    if since_time is not None:
+        suffixes.append(f"since_time:{since_time}")
+    if until_time is not None:
+        suffixes.append(f"until_time:{until_time}")
     provider_query = " ".join((query, *suffixes))
     if len(provider_query) > MAX_WIRE_QUERY_CHARS:
         raise ToolInputValidationError(
@@ -431,6 +471,30 @@ def _search_request(tool_input: JSONObject, api: HostAPI) -> SearchRequest:
         exclude_replies=exclude_replies,
         exclude_retweets=exclude_retweets,
     )
+
+
+def _optional_unix_timestamp(tool_input: JSONObject, field: str) -> int | None:
+    if field not in tool_input:
+        return None
+    value = tool_input[field]
+    if isinstance(value, str):
+        digits = value.strip()
+        if not digits.isascii() or not digits.isdecimal() or len(digits) > 10:
+            raise ToolInputValidationError(
+                f"TwitterAPI.io tool_input.{field} must be a Unix timestamp in whole seconds "
+                f"from 0 to {MAX_UNIX_TIMESTAMP}."
+            )
+        value = int(digits)
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= MAX_UNIX_TIMESTAMP
+    ):
+        raise ToolInputValidationError(
+            f"TwitterAPI.io tool_input.{field} must be a Unix timestamp in whole seconds "
+            f"from 0 to {MAX_UNIX_TIMESTAMP}."
+        )
+    return value
 
 
 def _search_parameters(tool_input: JSONObject, api: HostAPI) -> dict[str, str]:

@@ -1,4 +1,4 @@
-"""One-shot messages between existing host threads.
+"""One-shot messages between host threads and new Chat agents.
 
 Workspace owns destination eligibility; Admin starts or steers the thread.
 Sender identity comes from the peer's host-created process scope, never from
@@ -10,7 +10,8 @@ import re
 from typing import Any
 
 from host.runtime.core import db
-from host.session_options import SCRIPT_RUNTIME
+from host.session_options import SCRIPT_RUNTIME, session_config_error
+from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.host_api import WorkspaceError, call_admin_api
 
 THREAD_ID_RE = re.compile(r"(?:app|thread|schedule)-[1-9][0-9]*")
@@ -25,8 +26,7 @@ MAX_MESSAGE_BYTES = 50_000
 
 
 def send_agent_message(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
-    if sender_thread_id is None or not THREAD_ID_RE.fullmatch(sender_thread_id):
-        raise WorkspaceError(HTTPStatus.CONFLICT, "agent thread identity is unavailable")
+    _require_sender_identity(sender_thread_id)
     if not isinstance(body, dict) or set(body) != {"thread_id", "message"}:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "send_agent_message requires exactly thread_id and message")
     target = body["thread_id"]
@@ -41,6 +41,50 @@ def send_agent_message(body: Any, sender_thread_id: str | None) -> dict[str, Any
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "message must be at most 10000 characters")
     content = MESSAGE_HEADER.format(sender=sender_thread_id) + message
     return deliver_message(target, {"message": content})
+
+
+def spawn_agent(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
+    """Create one Chat thread and admit its delegated first message."""
+    _require_sender_identity(sender_thread_id)
+    required = {"message", "agent_runtime", "model", "effort"}
+    if not isinstance(body, dict) or set(body) != required:
+        raise WorkspaceError(
+            HTTPStatus.BAD_REQUEST,
+            "spawn_agent requires exactly message, agent_runtime, model, and effort",
+        )
+    message = body["message"]
+    if not isinstance(message, str) or not message.strip():
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "message must be a non-empty string")
+    if len(message) > MAX_MESSAGE_CHARS:
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "message must be at most 10000 characters")
+    runtime = body["agent_runtime"]
+    model = body["model"]
+    effort = body["effort"]
+    if not isinstance(runtime, str) or not runtime.strip():
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent_runtime must be a non-empty string")
+    error = session_config_error(runtime, model, effort)
+    if error is not None:
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, error)
+    assert isinstance(model, str) and isinstance(effort, str)
+    response = chat.send_chat_message({
+        "input_message": MESSAGE_HEADER.format(sender=sender_thread_id) + message,
+        "agent_runtime": runtime,
+        "model": model,
+        "effort": effort,
+    })
+    thread_id = response.get("thread_id")
+    if (
+        response.get("action") != "accepted"
+        or not isinstance(thread_id, str)
+        or re.fullmatch(r"thread-[1-9][0-9]*", thread_id) is None
+    ):
+        raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "Workspace returned invalid spawned agent")
+    return {"status": "accepted", "thread_id": thread_id}
+
+
+def _require_sender_identity(sender_thread_id: str | None) -> None:
+    if sender_thread_id is None or not THREAD_ID_RE.fullmatch(sender_thread_id):
+        raise WorkspaceError(HTTPStatus.CONFLICT, "agent thread identity is unavailable")
 
 
 def deliver_message(thread_id: str, body: Any) -> dict[str, Any]:

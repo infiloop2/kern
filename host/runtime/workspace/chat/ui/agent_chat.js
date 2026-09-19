@@ -143,6 +143,7 @@ document.addEventListener("keydown", event => {
   if (event.key === "Escape") closeOpenMemoryNotices();
 });
 
+let dictation = null;
 const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => ({
   claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", grok: "Grok", hermes: "Hermes",
@@ -208,8 +209,8 @@ function saveComposerDraft() {
   const value = $("new-task").value;
   delete composerDrafts[key];
   if (value) composerDrafts[key] = value;
-  while (Object.keys(composerDrafts).length > COMPOSER_DRAFT_LIMIT) {
-    delete composerDrafts[Object.keys(composerDrafts)[0]];
+  while (Object.keys(composerDrafts).filter(key => key !== "__dictationReceipts").length > COMPOSER_DRAFT_LIMIT) {
+    delete composerDrafts[Object.keys(composerDrafts).find(key => key !== "__dictationReceipts")];
   }
   persistComposerDrafts();
 }
@@ -217,6 +218,7 @@ function saveComposerDraft() {
 function restoreComposerDraft() {
   $("new-task").value = composerDrafts[composerDraftKey()] || "";
   autosizeComposer();
+  dictation?.sync();
 }
 
 function clearComposerDraft(threadId, submittedDraft) {
@@ -673,11 +675,13 @@ function updateComposerActions() {
     && selectedThreadStatus === "running"
     && selectedThreadRuntime === "hermes";
   $("new-task").disabled = activeBlock;
+  dictation?.sync();
   const sendButton = $("create-task");
   const selectedSending = selectedThreadIsSending();
   sendButton.disabled = (
     activeBlock
     || sendingMessage
+    || dictation?.busy()
     || attachmentActivity !== null
     || hasOversizedAttachment
     || !hasSessionOption
@@ -1647,6 +1651,17 @@ $("sidebar-close").addEventListener("click", () => setSidebarOpen(false, true));
 $("sidebar-backdrop").addEventListener("click", () => setSidebarOpen(false, true));
 drawerMedia.addEventListener("change", () => setSidebarOpen(false));
 
+dictation = window.KernDictation.mount({
+  composer: $("composer"), textarea: $("new-task"), scope: "chat",
+  getKey: composerDraftKey,
+  unavailable: () => $("composer").hidden || $("new-task").disabled || sendingMessage,
+  changed: updateComposerActions,
+  append: (key, text, id) => window.KernDictation.appendDraft({
+    drafts: composerDrafts, storageKey: COMPOSER_DRAFTS_STORAGE_KEY,
+    key, currentKey: composerDraftKey, textarea: $("new-task"),
+    updated: () => { autosizeComposer(); updateComposerActions(); },
+  }, text, id),
+});
 setSessionOptions();
 restoreComposerDraft();
 updateComposer();

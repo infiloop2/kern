@@ -109,6 +109,48 @@ class TwitterApiIoToolTests(unittest.TestCase):
         self.assertEqual(request.max_results, 10)
         self.assertEqual(request.parameters["query"], "Kern since_time:1799395200")
 
+    def test_search_adds_exact_structured_second_bounds_after_guarded_query(self) -> None:
+        request = twitterapi_io._search_request(
+            {
+                "query": "AI agents",
+                "since_time": "1800000000",
+                "until_time": "1800000540",
+                "exclude_replies": True,
+            },
+            api(),
+        )
+
+        self.assertEqual(
+            request.parameters["query"],
+            "AI agents -filter:replies since_time:1800000000 until_time:1800000540",
+        )
+
+    def test_exact_bounds_are_strict_ordered_and_exclusive_with_lookback(self) -> None:
+        invalid_inputs = (
+            {"query": "Kern", "since_time": "-1"},
+            {"query": "Kern", "until_time": "10000000000"},
+            {"query": "Kern", "since_time": True},
+            {"query": "Kern", "until_time": "1.5"},
+            {"query": "Kern", "since_time": "1800000000", "until_time": "1800000000"},
+            {"query": "Kern", "since_time": "1800000001", "until_time": "1800000000"},
+            {"query": "Kern", "since_time": "1800000000", "lookback_hours": 0},
+        )
+        for tool_input in invalid_inputs:
+            with self.subTest(tool_input=tool_input):
+                result = twitterapi_io.BUNDLED_TOOL.execute("search_tweets", tool_input, api())
+                self.assertIsInstance(result, ActionFailed)
+
+    def test_each_exact_bound_can_be_used_independently(self) -> None:
+        since_request = twitterapi_io._search_request(
+            {"query": "Kern", "since_time": 1_800_000_000}, api()
+        )
+        until_request = twitterapi_io._search_request(
+            {"query": "Kern", "until_time": 1_800_000_540}, api()
+        )
+
+        self.assertEqual(since_request.parameters["query"], "Kern since_time:1800000000")
+        self.assertEqual(until_request.parameters["query"], "Kern until_time:1800000540")
+
     def test_search_options_are_strict(self) -> None:
         invalid_inputs = (
             {"query": "Kern", "max_results": 0},
@@ -140,6 +182,12 @@ class TwitterApiIoToolTests(unittest.TestCase):
         with self.assertRaises(ParamGuardDenied):
             twitterapi_io._search_parameters(
                 {"query": "verify AKIAIOSFODNN7EXAMPLE now"},
+                api(),
+            )
+
+        with self.assertRaises(ParamGuardDenied):
+            twitterapi_io._search_parameters(
+                {"query": "Kern since_time:1800000000"},
                 api(),
             )
 

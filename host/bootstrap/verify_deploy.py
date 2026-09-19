@@ -38,6 +38,7 @@ from typing import Any, Callable
 from host.constants import (
     ADMIN_API_PORT,
     EMBEDDING_SOCKET_PATH,
+    TRANSCRIPTION_SOCKET_PATH,
     WORKSPACE_AGENT_SOCKET_PATH,
     AGENT_NETWORK_SOCKET_PATH,
     WORKSPACE_ADMIN_SOCKET_PATH,
@@ -64,6 +65,8 @@ CORE_UNITS = (
     "kern-admin-api.service",
     "kern-workspace.service",
     "kern-embedding.socket",
+    "kern-transcription.socket",
+    "kern-transcription.service",
 )
 
 MANAGED_AGENT_FILES = (
@@ -132,6 +135,8 @@ PATH_FACTS: tuple[PathFact, ...] = (
     ("/opt/kern-host/VERSION", "root", "root", 0o644, False),
     ("/usr/local/lib/kern-host", "root", "root", 0o755, True),
     ("/usr/local/lib/kern-node", "root", "root", 0o755, True),
+    ("/usr/local/lib/kern-transcription-venv", "root", "root", 0o755, True),
+    ("/usr/local/share/kern-transcription-models", "root", "root", 0o755, True),
     ("/usr/local/lib/kern-embedding-venv", "root", "root", 0o755, True),
     ("/usr/local/share/kern-embedding-models", "root", "root", 0o755, True),
     (
@@ -167,6 +172,7 @@ SOCKET_OWNERS = {
     AGENT_NETWORK_SOCKET_PATH: "kern-agent-network",
     WORKSPACE_ADMIN_SOCKET_PATH: "kern-admin",
     EMBEDDING_SOCKET_PATH: "kern-embedding",
+    TRANSCRIPTION_SOCKET_PATH: "kern-transcription",
     POSTGRES_SOCKET: "postgres",
 }
 
@@ -307,6 +313,17 @@ def check_services_active(units: tuple[str, ...], run: Runner = _run) -> list[st
         if result.returncode != 0:
             failures.append(f"service: {unit} is not active")
     return failures
+
+
+def check_transcription_ready(run: Runner = _run) -> list[str]:
+    # Type=simple becomes active before the background model loader finishes.
+    # Probe as the real socket peer, and let deployment's bounded readiness
+    # loop reject a permanently broken model/runtime instead of finalizing it.
+    result = run([
+        "runuser", "-u", "kern-admin", "--", "env", "PYTHONPATH=/opt/kern-host",
+        "python3", "-c", "from host.runtime.transcription.client import readiness; readiness()",
+    ])
+    return [] if result.returncode == 0 else ["transcription: resident model is not ready"]
 
 
 def check_firewall_ruleset(run: Runner = _run) -> list[str]:
@@ -462,6 +479,7 @@ def run_all_checks(cloudflare_enabled: bool, run: Runner = _run) -> list[str]:
         lambda: check_unix_sockets(SOCKET_OWNERS)
         + check_tcp_listeners()
         + check_services_active(units, run)
+        + check_transcription_ready(run)
     )
     failures += check_firewall_ruleset(run)
     failures += retry_until_clean(lambda: check_reachability(enforced_probes(), run))

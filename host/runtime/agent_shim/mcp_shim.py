@@ -416,6 +416,7 @@ def _list_tools() -> list[dict[str, Any]]:
     listed.extend((STAGE_IMAGE_TOOL, STAGE_VIDEO_TOOL))
     listed.extend((SEARCH_CONVERSATION_HISTORY_TOOL, READ_THREAD_HISTORY_TOOL))
     listed.append(_mcp_declaration(agent_tool_surface.SEND_AGENT_MESSAGE_TOOL))
+    listed.append(_mcp_declaration(agent_tool_surface.SPAWN_AGENT_TOOL))
     listed.append(_workspace_api_tool())
     return listed
 
@@ -581,8 +582,12 @@ def _call_typed_workspace_tool(name: str, arguments: dict[str, Any]) -> dict[str
         SEARCH_CONVERSATION_HISTORY_TOOL_NAME: "/agent/conversation-history/search",
         READ_THREAD_HISTORY_TOOL_NAME: "/agent/conversation-history/read",
         "send_agent_message": "/agent/messages",
+        "spawn_agent": "/agent/agents",
     }[name]
-    label = "Agent message" if name == "send_agent_message" else "Conversation history"
+    label = {
+        "send_agent_message": "Agent message",
+        "spawn_agent": "Agent spawn",
+    }.get(name, "Conversation history")
     try:
         result = _tools_request(
             "POST",
@@ -610,6 +615,7 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         SEARCH_CONVERSATION_HISTORY_TOOL_NAME,
         READ_THREAD_HISTORY_TOOL_NAME,
         "send_agent_message",
+        "spawn_agent",
     }:
         return _call_typed_workspace_tool(
             str(name), arguments if isinstance(arguments, dict) else {}
