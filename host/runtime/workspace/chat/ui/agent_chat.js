@@ -56,8 +56,10 @@ let activeRuntimes = null;
 const DEFAULT_MODELS = Object.freeze({
   codex: "gpt-5.6-sol",
   "codex-2": "gpt-5.6-sol",
+  "codex-3": "gpt-5.6-sol",
   claude_code: "claude-opus-5",
   grok: "grok-4.6",
+  "grok-2": "grok-4.6",
   hermes: "moonshotai.kimi-k2.5",
 });
 // Captured on first render, before any "(not activated)" suffix is applied.
@@ -146,7 +148,7 @@ document.addEventListener("keydown", event => {
 let dictation = null;
 const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => ({
-  claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", grok: "Grok", hermes: "Hermes",
+  claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", "codex-3": "Codex 3", grok: "Grok", "grok-2": "Grok 2", hermes: "Hermes",
 })[runtime] || runtime;
 const optionLabel = value => value.split(/[-_]/).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 // Claude Code model ids carry the provider prefix ("claude-opus-5"); the
@@ -154,7 +156,7 @@ const optionLabel = value => value.split(/[-_]/).map(part => part.charAt(0).toUp
 // point release uses two numeric id segments, rendered as "Fable 5.1" rather
 // than the generic option label's "Fable 5 1".
 const modelLabel = (runtime, value) => {
-  if (runtime === "codex" || runtime === "codex-2") return value;
+  if (runtime === "codex" || runtime === "codex-2" || runtime === "codex-3") return value;
   const model = String(value).replace(/^claude-/, "").replace(/-(\d+)-(\d+)$/, "-$1.$2");
   return optionLabel(model);
 };

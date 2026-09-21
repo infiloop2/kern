@@ -60,6 +60,7 @@ for line in sys.stdin:
  if method=='turn/start':
   for turn_id in ['old-turn','new-turn','new-turn']:
    print(json.dumps({'method':'thread/tokenUsage/updated','params':{'threadId':'session','turnId':turn_id,'tokenUsage':{'total':{'totalTokens':1000000},'last':{'inputTokens':100,'cachedInputTokens':60,'outputTokens':20}}}}),flush=True)
+  print(json.dumps({'method':'item/completed','params':{'item':{'type':'agentMessage','text':'done'}}}),flush=True)
   print(json.dumps({'method':'turn/completed','params':{'turn':{'status':'completed'}}}),flush=True)
 '''
         events = []
@@ -73,14 +74,29 @@ for line in sys.stdin:
         self.assertEqual(totals, dict(zip(token_usage.FIELDS, [40, 60, 0, 20])))
         self.assertEqual(len(usage.samples), 1)
 
-    def test_grok_completed_turn_and_replay(self):
-        event = {'method':'_x.ai/session/update','params':{'sessionId':'s','update':{'sessionUpdate':'turn_completed','prompt_id':'p','usage':{'inputTokens':100,'cachedReadTokens':60,'cacheCreationTokens':0,'outputTokens':20}}}}
-        emitted = []
-        grok_agent._consume_turn_notification(event, 's', [], [], {}, emitted.append)
-        self.assertEqual(emitted[0]['usage']['input_tokens'], 40)
-        event['params']['_meta'] = {'isReplay': True}
-        grok_agent._consume_turn_notification(event, 's', [], [], {}, emitted.append)
-        self.assertEqual(len(emitted), 1)
+    def test_grok_reports_its_turn_tokens_on_the_prompt_response(self):
+        # The pinned CLI announces a turn's counts nowhere else: it sends no
+        # session update carrying them.
+        meta = {
+            'sessionId': 's', 'promptId': 'p', 'requestId': 'r', 'modelId': 'grok-4.6',
+            'inputTokens': 100, 'outputTokens': 20, 'cachedReadTokens': 60, 'totalTokens': 120,
+            'usage': {'inputTokens': 100, 'outputTokens': 20, 'cachedReadTokens': 60,
+                      'cacheCreationTokens': 10, 'reasoningTokens': 8, 'numTurns': 1},
+        }
+        measured = grok_agent._prompt_usage({'stopReason': 'end_turn', '_meta': meta})
+        self.assertEqual(measured['source_id'], 'p')
+        self.assertEqual(measured['usage'], dict(zip(token_usage.FIELDS, [30, 60, 10, 20])))
+        # Without the nested object the flat fields still measure the turn, and
+        # an unreported cache-creation count reads as zero rather than voiding
+        # the input total that is derived from it.
+        flat = dict(meta, promptId=None)
+        flat.pop('usage')
+        measured = grok_agent._prompt_usage({'stopReason': 'end_turn', '_meta': flat})
+        self.assertEqual(measured['source_id'], 'r')
+        self.assertEqual(measured['usage'], dict(zip(token_usage.FIELDS, [40, 60, 0, 20])))
+        # A response that measures nothing stays silent instead of storing zeros.
+        for result in ({'stopReason': 'end_turn'}, {'_meta': {'promptId': 'p'}}, {'_meta': 'x'}):
+            self.assertIsNone(grok_agent._prompt_usage(result))
 
     def test_hermes_hook_framing_reaches_usage_parser(self):
         from test_hermes_stdin_activity import hermes_stdin, _emitted

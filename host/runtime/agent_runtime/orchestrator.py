@@ -112,6 +112,7 @@ from host.runtime.agent_runtime.provider_account_trust import (
     replace_and_validate_bedrock_credentials,
 )
 from host.runtime.agent_runtime.harness import ProviderSessionLost, ProviderTurnFinishing
+from host.session_options import INTERACTIVE_RUNTIMES
 from host.runtime.agent_runtime.harness_registry import HARNESSES, harness_adapter
 from host.runtime.core.state import (
     read_claude_account,
@@ -337,7 +338,7 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
                 # discovered through a different path, so retain its existing
                 # active-only cleanup rule.
                 grok_login_completed = (
-                    runtime_type == "grok"
+                    runtime_type in grok_agent.GROK_RUNTIME_TYPES
                     and completed_login is not None
                     and _string_field(completed_login, "status") == "completed"
                 )
@@ -455,7 +456,7 @@ def reconcile_runtime_status_after_policy_change() -> None:
     CLI checks.
     """
     enabled: list[str] = []
-    for runtime_type in ("codex", "codex-2", "claude_code", "grok", "hermes"):
+    for runtime_type in INTERACTIVE_RUNTIMES:
         if not runtime_network_enabled(runtime_type):
             _mark_runtime_deactivated(runtime_type)
         else:
@@ -541,8 +542,8 @@ def _close_login_flow(runtime_type: str) -> None:
     try:
         if runtime_type in codex_app_server.CODEX_RUNTIME_TYPES:
             codex_app_server.close_login_server(runtime_type)
-        elif runtime_type == "grok":
-            grok_agent.close_login_server()
+        elif runtime_type in grok_agent.GROK_RUNTIME_TYPES:
+            grok_agent.close_login_server(runtime_type)
         elif runtime_type == "claude_code":
             claude_code.close_login_process()
         # Hermes has no login process to close.
@@ -617,7 +618,7 @@ def start_background_loops() -> None:
         # not even run (the database briefly unavailable during startup), so
         # the refresh loop retries quickly rather than waiting a full cycle.
         converged = False
-    for runtime_type in ("codex", "codex-2", "claude_code", "grok", "hermes"):
+    for runtime_type in INTERACTIVE_RUNTIMES:
         threading.Thread(target=runtime_status_loop, args=(runtime_type,), daemon=True).start()
     threading.Thread(target=github_credential_refresh_loop, args=(converged,), daemon=True).start()
 

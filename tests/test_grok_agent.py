@@ -11,7 +11,7 @@ from host.runtime.agent_runtime.grok_agent import GrokAcpServer, GrokAgentError
 
 # A scripted stand-in for `grok agent stdio`, speaking the ACP framing the real
 # binary speaks: JSON-RPC 2.0, newline delimited, extension methods carrying the
-# leading underscore. The shapes below are the ones grok 1.0.5 actually
+# leading underscore. The shapes below are ones the pinned grok actually
 # returned on a live subscription login.
 FAKE_SERVER = r"""
 import json, sys
@@ -107,6 +107,14 @@ for line in sys.stdin:
         send({"id": mid, "result": {"sessionId": session_id}})
     elif method == "session/prompt":
         prompt_id = mid
+        # A turn's token counts ride the prompt response, nested under
+        # _meta.usage and repeated flat beside it.
+        completion = {"stopReason": "end_turn", "_meta": {
+            "sessionId": session_id, "promptId": "prompt-1", "requestId": "prompt-1",
+            "modelId": "grok-4.6", "inputTokens": 100, "outputTokens": 20,
+            "cachedReadTokens": 60, "totalTokens": 120,
+            "usage": {"inputTokens": 100, "outputTokens": 20, "cachedReadTokens": 60,
+                      "cacheCreationTokens": 0, "modelCalls": 1, "numTurns": 1}}}
         if params.get("prompt") != [{"type": "text", "text": "hello"}]:
             send({"id": mid, "error": {"message": "bad prompt blocks"}})
             continue
@@ -123,7 +131,7 @@ for line in sys.stdin:
         if MODE != "steer":
             send({"method": "session/update", "params": {"sessionId": session_id,
                   "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " world"}}}})
-            send({"id": prompt_id, "result": {"stopReason": "end_turn"}})
+            send({"id": prompt_id, "result": completion})
     elif method == "_x.ai/interject":
         if params.get("sessionId") != session_id or params.get("text") != "also test":
             send({"id": mid, "error": {"message": "bad interjection"}})
@@ -131,7 +139,7 @@ for line in sys.stdin:
         send({"id": mid, "result": {"result": {"status": "queued"}}})
         send({"method": "session/update", "params": {"sessionId": session_id,
               "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " steered"}}}})
-        send({"id": prompt_id, "result": {"stopReason": "end_turn"}})
+        send({"id": prompt_id, "result": completion})
 """
 
 
@@ -230,7 +238,8 @@ class GrokAcpTransportTests(unittest.TestCase):
         # this module to state.
         server = GrokAcpServer()
         self.assertEqual(
-            server._command[len(grok_agent.DEFAULT_COMMAND)], "--thread-scope"
+            server._command[len(grok_agent.DEFAULT_COMMAND) :],
+            ["--runtime", "grok", "--thread-scope", server._thread_id],
         )
         self.assertFalse([arg for arg in server._command if arg.startswith("web-search")])
 
@@ -243,10 +252,35 @@ class GrokAcpTransportTests(unittest.TestCase):
             server._command,
             [
                 *grok_agent.PRODUCTION_COMMAND,
+                "--runtime",
+                "grok",
                 "--thread-scope",
                 "grok-probe-" + "a" * 16,
             ],
         )
+
+    def test_each_runtime_launches_its_own_grok_home(self) -> None:
+        # The launcher resolves GROK_HOME from --runtime, so the two runtimes
+        # never share login tokens or CLI state.
+        with patch.object(grok_agent.secrets, "token_hex", return_value="c" * 16):
+            server = GrokAcpServer(command=grok_agent.PRODUCTION_COMMAND, runtime_type="grok-2")
+
+        self.assertEqual(server.runtime_type, "grok-2")
+        self.assertEqual(server._thread_id, "grok-2-probe-" + "c" * 16)
+        self.assertEqual(
+            server._command,
+            [
+                *grok_agent.PRODUCTION_COMMAND,
+                "--runtime",
+                "grok-2",
+                "--thread-scope",
+                "grok-2-probe-" + "c" * 16,
+            ],
+        )
+
+    def test_an_unknown_grok_runtime_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            GrokAcpServer(runtime_type="grok-3")
 
     def test_close_reaps_a_non_turn_production_scope(self) -> None:
         with (
@@ -288,7 +322,30 @@ class GrokTurnTests(unittest.TestCase):
         self.assertEqual(ready, [True])
         self.assertEqual(session_ids, ["grok-session-new"])
         self.assertEqual(events[-1], "Hello world")
-        activities = [event for event in events if isinstance(event, dict)]
+        measurements = [
+            event
+            for event in events
+            if isinstance(event, dict) and event.get("type") == "token_usage"
+        ]
+        self.assertEqual(
+            measurements,
+            [{
+                "type": "token_usage",
+                "source_id": "prompt-1",
+                # Grok counts cached reads inside its input total.
+                "usage": {
+                    "input_tokens": 40,
+                    "cached_input_tokens": 60,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 20,
+                },
+            }],
+        )
+        activities = [
+            event
+            for event in events
+            if isinstance(event, dict) and event.get("type") != "token_usage"
+        ]
         self.assertEqual(
             [(event["kind"], event["phase"]) for event in activities],
             [
@@ -314,6 +371,43 @@ class GrokTurnTests(unittest.TestCase):
             [event.get("append_detail") for event in reasoning],
             [True, True, None],
         )
+
+    def test_grok_2_measures_its_turn_like_the_first_runtime(self) -> None:
+        # The runtime names the activity stream; a turn's tokens are read off
+        # the prompt response and parsed under the one Grok provider schema,
+        # so the second runtime is not silently undercounted.
+        events: list[str | dict[str, object]] = []
+        server = GrokAcpServer(command=turn_command(), runtime_type="grok-2")
+        try:
+            server.start()
+            grok_agent.run_turn(server, "hello", None, "grok-4.6", "high", events.append)
+        finally:
+            server.close()
+
+        measurements = [
+            event
+            for event in events
+            if isinstance(event, dict) and event.get("type") == "token_usage"
+        ]
+        self.assertEqual(
+            measurements,
+            [{
+                "type": "token_usage",
+                "source_id": "prompt-1",
+                "usage": {
+                    "input_tokens": 40,
+                    "cached_input_tokens": 60,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 20,
+                },
+            }],
+        )
+        activities = [
+            event
+            for event in events
+            if isinstance(event, dict) and event.get("type") != "token_usage"
+        ]
+        self.assertEqual({event["provider"] for event in activities}, {"grok-2"})
 
     def test_resume_loads_the_session_and_does_not_replay_old_history(self) -> None:
         events: list[str | dict[str, object]] = []
@@ -466,8 +560,10 @@ class GrokTurnTests(unittest.TestCase):
 
 class GrokAccountStatusTests(unittest.TestCase):
     def setUp(self) -> None:
-        grok_agent.clear_live_validation_failure()
-        self.addCleanup(grok_agent.clear_live_validation_failure)
+        # The live-validation verdict is a process-global memo; isolate tests.
+        for runtime in grok_agent.GROK_RUNTIME_TYPES:
+            grok_agent.clear_live_validation_failure(runtime)
+            self.addCleanup(grok_agent.clear_live_validation_failure, runtime)
 
     def status(self, *, authenticated=True, fail_subscription=False, account=None,
                attested=None, attest_error=None, **kwargs):
@@ -645,7 +741,7 @@ class GrokAccountStatusTests(unittest.TestCase):
 
         with patch.object(GrokAcpServer, "call", fail_once):
             self.assertEqual(self.status(account={"account_id": "acct-1"})[0], "active")
-        self.assertIsNone(grok_agent._live_validation_failure)
+        self.assertIsNone(grok_agent._live_validation_failures.get("grok"))
 
     def test_persistent_timeout_stops_after_two_attempts_and_skips_startup_until_due(self) -> None:
         original = GrokAcpServer.call
@@ -662,7 +758,7 @@ class GrokAccountStatusTests(unittest.TestCase):
         self.assertEqual((status, detail, account), ("error", "subscription timed out", None))
         self.assertEqual(len(attempted), 2)
         self.assertTrue(all(not server.alive() for server in attempted))
-        recorded = grok_agent._live_validation_failure[2]
+        recorded = grok_agent._live_validation_failures["grok"][2]
         with (
             patch.object(grok_agent.time, "monotonic", return_value=recorded + 239),
             patch.object(grok_agent, "GrokAcpServer") as factory,
@@ -673,8 +769,26 @@ class GrokAccountStatusTests(unittest.TestCase):
             self.assertEqual(self.status(account={"account_id": "acct-1"})[0], "active")
 
     def test_manual_refresh_bypasses_timeout_cooldown(self) -> None:
-        grok_agent._live_validation_failure = ("error", "subscription timed out", grok_agent.time.monotonic())
+        grok_agent._live_validation_failures["grok"] = (
+            "error", "subscription timed out", grok_agent.time.monotonic()
+        )
         self.assertEqual(self.status(account={"account_id": "acct-1"}, force_provider_probe=True)[0], "active")
+
+    def test_a_remembered_failure_does_not_cross_grok_runtimes(self) -> None:
+        # Each runtime signs in to its own account, so one runtime's refused
+        # entitlement must never suppress the other runtime's live check.
+        grok_agent._live_validation_failures["grok"] = (
+            "error", "subscription timed out", grok_agent.time.monotonic()
+        )
+        self.assertEqual(
+            self.status(account={"account_id": "acct-1"})[:2],
+            ("error", "subscription timed out"),
+        )
+        self.assertEqual(
+            self.status(account={"account_id": "acct-1"}, runtime_type="grok-2")[0], "active"
+        )
+        self.assertIsNone(grok_agent._live_validation_failures.get("grok-2"))
+        self.assertIsNotNone(grok_agent._live_validation_failures.get("grok"))
 
     def test_timeout_retry_does_not_accept_a_changed_identity(self) -> None:
         original = GrokAcpServer.call
@@ -730,9 +844,9 @@ class GrokAccountStatusTests(unittest.TestCase):
 
 class GrokAttestationTests(unittest.TestCase):
     def setUp(self) -> None:
-        grok_agent._ATTESTED_IDENTITY.clear()
+        grok_agent._ATTESTED_IDENTITIES.clear()
         grok_agent._ATTESTATION_FAILURES.clear()
-        self.addCleanup(grok_agent._ATTESTED_IDENTITY.clear)
+        self.addCleanup(grok_agent._ATTESTED_IDENTITIES.clear)
         self.addCleanup(grok_agent._ATTESTATION_FAILURES.clear)
 
     def test_identity_is_bound_to_the_observed_hash_and_memoized(self) -> None:
@@ -753,8 +867,27 @@ class GrokAttestationTests(unittest.TestCase):
             self.assertEqual(grok_agent.read_attested_identity(token_hash), expected)
             self.assertEqual(grok_agent.read_attested_identity(token_hash), expected)
         run.assert_called_once_with(
-            [*grok_agent.DEFAULT_ACCOUNT_COMMAND, "--attest"]
+            [*grok_agent.DEFAULT_ACCOUNT_COMMAND, "grok", "--attest"]
         )
+
+    def test_attestation_reads_the_named_runtimes_own_login(self) -> None:
+        token_hash = "d" * 64
+        proc = MagicMock(
+            returncode=0,
+            stdout='{"access_token_sha256":"%s","account_id":"acct-2"}' % token_hash,
+            stderr="",
+        )
+        with patch.object(grok_agent, "_run_account_helper", return_value=proc) as run:
+            self.assertEqual(
+                grok_agent.read_attested_identity(token_hash, runtime_type="grok-2"),
+                {"account_id": "acct-2"},
+            )
+        run.assert_called_once_with(
+            [*grok_agent.DEFAULT_ACCOUNT_COMMAND, "grok-2", "--attest"]
+        )
+        # The memo is per runtime, so the other runtime still asks the provider
+        # about its own token rather than reusing this identity.
+        self.assertEqual(grok_agent._ATTESTED_IDENTITIES.get("grok", {}), {})
 
     def test_identity_for_a_different_token_is_rejected(self) -> None:
         proc = MagicMock(
@@ -823,7 +956,29 @@ class GrokAttestationTests(unittest.TestCase):
 
 class GrokLoginTests(unittest.TestCase):
     def tearDown(self) -> None:
-        grok_agent.close_login_server()
+        for runtime in grok_agent.GROK_RUNTIME_TYPES:
+            grok_agent.close_login_server(runtime)
+
+    def test_each_grok_runtime_parks_and_reaps_its_own_login(self) -> None:
+        with patch.object(grok_agent, "DEFAULT_COMMAND", fake_command()):
+            first = grok_agent.start_device_login()
+            second = grok_agent.start_device_login("grok-2")
+
+        self.assertTrue(second.login_id.startswith("grok-2-"))
+        self.assertTrue(grok_agent.login_server_parked())
+        self.assertTrue(grok_agent.login_server_parked("grok-2"))
+        # A login id belongs to exactly one runtime: neither runtime can read
+        # or close the other's parked flow by naming its id.
+        self.assertIsNone(
+            grok_agent.read_completed_login_account_id(second.login_id, "grok")
+        )
+        grok_agent.close_completed_login_server(first.login_id, "grok-2")
+        self.assertTrue(grok_agent.login_server_parked("grok-2"))
+
+        grok_agent.close_login_server("grok-2")
+
+        self.assertTrue(grok_agent.login_server_parked())
+        self.assertFalse(grok_agent.login_server_parked("grok-2"))
 
     def test_a_device_login_publishes_the_code_from_the_url(self) -> None:
         # get_url returns no code field of its own; it is a query parameter.

@@ -57,10 +57,12 @@ from urllib.parse import parse_qs, urlsplit
 
 from host.runtime.agent_runtime import agent_activity, thread_scope
 from host.runtime.agent_runtime.harness import ProviderSessionLost, ProviderTurnFinishing
+from host.runtime.core.state import XAI_PROVIDER_KEYS
 
 PRODUCTION_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-grok"]
 DEFAULT_COMMAND = PRODUCTION_COMMAND
 DEFAULT_ACCOUNT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/read-grok-account"]
+GROK_RUNTIME_TYPES = tuple(XAI_PROVIDER_KEYS)
 ACCOUNT_HELPER_TIMEOUT_SECONDS = 10
 # The ACP major version this client speaks. A server that answers with a
 # different major is refused rather than driven on guessed semantics.
@@ -118,7 +120,7 @@ class _ParkedLogin:
     failure: str | None = field(default=None)
 
 
-_parked_login: _ParkedLogin | None = None
+_parked_logins: dict[str, _ParkedLogin] = {}
 _login_lock = threading.Lock()
 
 # The last live entitlement-validation failure: (status, error_message,
@@ -126,7 +128,7 @@ _login_lock = threading.Lock()
 # operator login completes or the linked account is reset; any other failure is
 # retried after LIVE_VALIDATION_RETRY_SECONDS. In-memory on purpose: a restart
 # revalidates once from scratch.
-_live_validation_failure: tuple[str, str | None, float] | None = None
+_live_validation_failures: dict[str, tuple[str, str | None, float]] = {}
 
 
 class GrokAgentError(RuntimeError):
@@ -185,7 +187,12 @@ class GrokAcpServer:
         thread_id: str | None = None,
         on_ready: Callable[[], bool] | None = None,
         on_session_id: Callable[[str], None] | None = None,
+        *,
+        runtime_type: str = "grok",
     ) -> None:
+        if runtime_type not in GROK_RUNTIME_TYPES:
+            raise ValueError(f"unsupported Grok runtime: {runtime_type}")
+        self.runtime_type = runtime_type
         self._command = command or DEFAULT_COMMAND
         self._on_ready = on_ready
         self._on_session_id = on_session_id
@@ -195,8 +202,12 @@ class GrokAcpServer:
         # id. Custom test commands keep the old no-scope behavior unless their
         # caller supplied an explicit thread id.
         production = self._command[: len(PRODUCTION_COMMAND)] == PRODUCTION_COMMAND
+        # The launcher selects the runtime's own GROK_HOME, so each runtime's
+        # login tokens and CLI state stay in a separate tree.
+        if production:
+            self._command = [*self._command, "--runtime", runtime_type]
         self._thread_id = thread_id or (
-            f"grok-probe-{secrets.token_hex(8)}" if production else None
+            f"{runtime_type}-probe-{secrets.token_hex(8)}" if production else None
         )
         if self._thread_id is not None:
             self._command = [*self._command, "--thread-scope", self._thread_id]
@@ -497,6 +508,7 @@ class GrokAcpServer:
                         reasoning_parts,
                         tool_states,
                         on_message,
+                        runtime_type=self.runtime_type,
                     )
                 # Read notifications before checking the response waiter. ACP
                 # writes the final chunks ahead of the prompt response; this
@@ -516,6 +528,7 @@ class GrokAcpServer:
                     reasoning_parts,
                     tool_states,
                     on_message,
+                    runtime_type=self.runtime_type,
                 )
         finally:
             with self._turn_lock:
@@ -528,6 +541,11 @@ class GrokAcpServer:
         result = response.get("result") if isinstance(response, dict) else None
         if not isinstance(result, dict):
             raise GrokAgentError("Grok returned an invalid prompt response")
+        # Record before the stop-reason check: an unusual stop still consumed
+        # everything it read.
+        measured = _prompt_usage(result)
+        if measured is not None:
+            on_message(measured)
         stop_reason = result.get("stopReason")
         if isinstance(stop_reason, str) and stop_reason not in {
             "end_turn",
@@ -538,7 +556,7 @@ class GrokAcpServer:
         if reasoning_parts:
             on_message(
                 agent_activity.activity(
-                    "grok",
+                    self.runtime_type,
                     "reasoning",
                     "reasoning",
                     "completed",
@@ -824,6 +842,37 @@ def _content_text(content: Any) -> str:
     return ""
 
 
+def _prompt_usage(result: dict[str, Any]) -> dict[str, Any] | None:
+    """The token usage a prompt response reports, or None when it reports none.
+
+    The pinned CLI reports a turn's counts in the prompt response's ``_meta``,
+    nested under ``usage`` and repeated flat beside it. Prefer the nested
+    object, the only one carrying the cache-creation count, and fall back to
+    the flat fields: this subsystem fails silently as zeros, and both encodings
+    would have to disappear at once for that to happen unnoticed. Both Grok
+    runtimes speak this one shape, so usage always parses with the ``grok``
+    provider schema.
+
+    The prompt id keys the measurement, which makes repeated readings of one
+    prompt idempotent and keeps several prompts inside a single Kern turn
+    (a steered turn submits more than one) additive.
+    """
+    meta = result.get("_meta")
+    if not isinstance(meta, dict):
+        return None
+    raw = meta.get("usage")
+    if not isinstance(raw, dict):
+        raw = meta
+        if "inputTokens" in meta:
+            # The flat fields carry no cache-creation count. Where there is an
+            # input total to correct, read it as zero, as the Codex schema
+            # reads its omitted cache-write count: leaving it unknown would
+            # discard the input total too, which is derived from it.
+            raw = {"cacheCreationTokens": 0, **meta}
+    source_id = meta.get("promptId") or meta.get("requestId")
+    return token_usage.record(source_id, raw, "grok")
+
+
 def _consume_turn_notification(
     message: Any,
     session_id: str,
@@ -831,6 +880,8 @@ def _consume_turn_notification(
     reasoning_parts: list[str],
     tool_states: dict[str, dict[str, Any]],
     on_message: Callable[[str | dict[str, Any]], None],
+    *,
+    runtime_type: str = "grok",
 ) -> None:
     """Map one ACP update without letting provider-owned shapes fail a turn."""
     try:
@@ -849,11 +900,6 @@ def _consume_turn_notification(
         if not isinstance(update, dict):
             return
         update_type = update.get("sessionUpdate")
-        if update_type == "turn_completed":
-            measured = token_usage.record(update.get("prompt_id"), update.get("usage"), "grok")
-            if measured is not None:
-                on_message(measured)
-            return
         if update_type == "agent_message_chunk":
             text = _content_text(update.get("content"))
             if text:
@@ -864,7 +910,7 @@ def _consume_turn_notification(
             if text:
                 reasoning_parts.append(text)
                 update = agent_activity.activity(
-                    "grok",
+                    runtime_type,
                     "reasoning",
                     "reasoning",
                     "started",
@@ -893,7 +939,7 @@ def _consume_turn_notification(
             }
             if isinstance(tool_id, str) and tool_id:
                 tool_states[tool_id] = merged
-            activity = _tool_activity(merged)
+            activity = _tool_activity(runtime_type, merged)
             if activity is not None:
                 on_message(activity)
             return
@@ -908,7 +954,7 @@ def _consume_turn_notification(
             )
             on_message(
                 agent_activity.activity(
-                    "grok",
+                    runtime_type,
                     "plan",
                     "plan",
                     "completed" if completed else "started",
@@ -930,7 +976,7 @@ def _consume_turn_notification(
             title = update.get("command") or "Background task"
             on_message(
                 agent_activity.activity(
-                    "grok",
+                    runtime_type,
                     f"task:{task_id}",
                     "command",
                     "completed" if completed else "started",
@@ -948,7 +994,7 @@ def _consume_turn_notification(
         return
 
 
-def _tool_activity(update: dict[str, Any]) -> dict[str, Any] | None:
+def _tool_activity(runtime_type: str, update: dict[str, Any]) -> dict[str, Any] | None:
     tool_id = update.get("toolCallId") or update.get("tool_call_id")
     if not isinstance(tool_id, str) or not tool_id:
         return None
@@ -973,7 +1019,7 @@ def _tool_activity(update: dict[str, Any]) -> dict[str, Any] | None:
     detail_value = update.get("rawInput") or update.get("raw_input") or update.get("locations")
     output_value = update.get("content") or update.get("rawOutput") or update.get("raw_output")
     return agent_activity.activity(
-        "grok",
+        runtime_type,
         f"tool:{tool_id}",
         kind,
         phase,
@@ -996,34 +1042,39 @@ def run_turn(
 
 
 def account_status(
-    *, force_provider_probe: bool = False
+    *, runtime_type: str = "grok", force_provider_probe: bool = False
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     """Return (status, detail, account metadata). detail is set only for "error"."""
-    global _live_validation_failure
-    login_server = _current_login_server()
+    login_server = _current_login_server(runtime_type)
     if login_server is not None:
         # Never replace the server that owns an operator's pending login.
         try:
-            return _login_server_status(login_server, force_provider_probe=force_provider_probe)
+            return _login_server_status(
+                login_server, runtime_type, force_provider_probe=force_provider_probe
+            )
         except GrokTimeout as exc:
             result = _grok_status_error(exc, login_server)
-            _live_validation_failure = (result[0], result[1], time.monotonic())
+            _live_validation_failures[runtime_type] = (result[0], result[1], time.monotonic())
             return result
 
-    failure = _cached_validation_failure(force=force_provider_probe)
+    failure = _cached_validation_failure(runtime_type, force=force_provider_probe)
     if failure is not None:
         # A cached failure needs no process, auth-file read, or provider traffic.
         return failure
 
     for attempt in range(2):
-        server = GrokAcpServer()
+        server = GrokAcpServer(runtime_type=runtime_type)
         try:
             server.start(init_timeout=45)
-            return _account_status_from_server(server, force_provider_probe=force_provider_probe)
+            return _account_status_from_server(
+                server, runtime_type, force_provider_probe=force_provider_probe
+            )
         except GrokTimeout as exc:
             if attempt == 1:
                 result = _grok_status_error(exc, server)
-                _live_validation_failure = (result[0], result[1], time.monotonic())
+                _live_validation_failures[runtime_type] = (
+                    result[0], result[1], time.monotonic()
+                )
                 return result
             # A fresh server retries the whole identity/entitlement check. Only
             # a timeout earns a retry; account rejection still fails closed.
@@ -1035,9 +1086,9 @@ def account_status(
 
 
 def _cached_validation_failure(
-    *, force: bool = False
+    runtime_type: str = "grok", *, force: bool = False
 ) -> tuple[str, str | None, dict[str, Any] | None] | None:
-    failure = _live_validation_failure
+    failure = _live_validation_failures.get(runtime_type)
     if not force and failure is not None and (
         failure[0] == "awaiting_login" or time.monotonic() - failure[2] < LIVE_VALIDATION_RETRY_SECONDS
     ):
@@ -1045,21 +1096,24 @@ def _cached_validation_failure(
     return None
 
 
-def _current_login_server() -> "GrokAcpServer | None":
+def _current_login_server(runtime_type: str = "grok") -> "GrokAcpServer | None":
     with _login_lock:
-        parked = _parked_login
+        parked = _parked_logins.get(runtime_type)
     if parked is None:
         return None
     if parked.server.alive():
         return parked.server
-    dead_server = _pop_parked(lambda p: p.server is parked.server)
+    dead_server = _pop_parked(runtime_type, lambda p: p.server is parked.server)
     if dead_server is not None:
         dead_server.close()
     return None
 
 
 def _login_server_status(
-    server: "GrokAcpServer", *, force_provider_probe: bool = False
+    server: "GrokAcpServer",
+    runtime_type: str = "grok",
+    *,
+    force_provider_probe: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     """Drive the parked login forward, then report status from its server.
 
@@ -1068,25 +1122,27 @@ def _login_server_status(
     first: a login that just completed should be visible to the capture in the
     same refresh that reports the resulting status.
     """
-    _collect_parked_login(server)
-    return _account_status_from_server(server, force_provider_probe=force_provider_probe)
+    _collect_parked_login(server, runtime_type)
+    return _account_status_from_server(
+        server, runtime_type, force_provider_probe=force_provider_probe
+    )
 
 
-def collect_login_completion() -> None:
+def collect_login_completion(runtime_type: str = "grok") -> None:
     """Collect a parked login response before the guarded provider probe.
 
     The orchestrator uses the captured account id to publish the approved pin;
     only then can this provider's subscription and billing routes pass their
     account guard.
     """
-    server = _current_login_server()
+    server = _current_login_server(runtime_type)
     if server is not None:
-        _collect_parked_login(server)
+        _collect_parked_login(server, runtime_type)
 
 
-def _collect_parked_login(server: "GrokAcpServer") -> None:
+def _collect_parked_login(server: "GrokAcpServer", runtime_type: str = "grok") -> None:
     with _login_lock:
-        parked = _parked_login
+        parked = _parked_logins.get(runtime_type)
         if parked is None or parked.server is not server or parked.completed:
             return
         authenticate_id = parked.authenticate_id
@@ -1098,18 +1154,18 @@ def _collect_parked_login(server: "GrokAcpServer") -> None:
         error = response.get("error")
         if error is not None:
             with _login_lock:
-                parked = _parked_login
+                parked = _parked_logins.get(runtime_type)
                 if parked is not None and parked.server is server:
                     parked.failure = _error_message(error)
             return
         with _login_lock:
-            parked = _parked_login
+            parked = _parked_logins.get(runtime_type)
             if parked is None or parked.server is not server:
                 return
             parked.authorization_completed = True
         # Fresh credentials were just written, so the remembered verdict about
         # the previous credential no longer applies; revalidate from scratch.
-        clear_live_validation_failure()
+        clear_live_validation_failure(runtime_type)
     # Capture the trusted account id from the exact ACP server whose
     # authenticate request just completed. The auth file is agent-writable, so
     # reading its token here would let another agent process swap in a foreign
@@ -1127,14 +1183,17 @@ def _collect_parked_login(server: "GrokAcpServer") -> None:
     if account_id is None:
         return
     with _login_lock:
-        parked = _parked_login
+        parked = _parked_logins.get(runtime_type)
         if parked is not None and parked.server is server:
             parked.completed = True
             parked.account_id = account_id
 
 
 def _account_status_from_server(
-    server: "GrokAcpServer", *, force_provider_probe: bool = False
+    server: "GrokAcpServer",
+    runtime_type: str = "grok",
+    *,
+    force_provider_probe: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     try:
         info = server.call(AUTH_INFO_METHOD, {}, timeout=15)
@@ -1145,7 +1204,7 @@ def _account_status_from_server(
     if not _is_authenticated(info):
         return "awaiting_login", None, None
     try:
-        account = read_grok_account()
+        account = read_grok_account(runtime_type=runtime_type)
     except GrokAgentError as exc:
         return "error", str(exc), None
     claimed_account_id = _string_field(account, "account_id") if account else None
@@ -1157,7 +1216,7 @@ def _account_status_from_server(
         return "error", "Grok is logged in but its account id is unavailable", None
     try:
         attested = read_attested_identity(
-            token_hash, force=force_provider_probe
+            token_hash, runtime_type=runtime_type, force=force_provider_probe
         )
     except GrokAgentError as exc:
         return "error", str(exc), None
@@ -1184,7 +1243,9 @@ def _account_status_from_server(
     if attested_email:
         metadata["email"] = attested_email
     metadata["access_token_sha256"] = token_hash
-    entitlement = _entitlement_status(server, force_provider_probe=force_provider_probe)
+    entitlement = _entitlement_status(
+        server, runtime_type, force_provider_probe=force_provider_probe
+    )
     if entitlement is not None:
         return entitlement
     usage = _read_usage(server)
@@ -1214,7 +1275,10 @@ def _authenticated_account_id(info: Any) -> str | None:
 
 
 def _entitlement_status(
-    server: "GrokAcpServer", *, force_provider_probe: bool = False
+    server: "GrokAcpServer",
+    runtime_type: str = "grok",
+    *,
+    force_provider_probe: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None] | None:
     """Re-check Build entitlement, or None when the account is entitled.
 
@@ -1232,8 +1296,7 @@ def _entitlement_status(
     bypasses that memory. Without it the five-second non-active poll would
     generate provider traffic on every cycle.
     """
-    global _live_validation_failure
-    failure = _cached_validation_failure(force=force_provider_probe)
+    failure = _cached_validation_failure(runtime_type, force=force_provider_probe)
     if failure is not None:
         return failure
     try:
@@ -1243,19 +1306,20 @@ def _entitlement_status(
         raise
     except GrokAgentError as exc:
         status, error_message, account = _grok_status_error(exc, server)
-        _live_validation_failure = (status, error_message, time.monotonic())
+        _live_validation_failures[runtime_type] = (
+            status, error_message, time.monotonic()
+        )
         return status, error_message, account
-    _live_validation_failure = None
+    _live_validation_failures.pop(runtime_type, None)
     return None
 
 
-def clear_live_validation_failure() -> None:
+def clear_live_validation_failure(runtime_type: str = "grok") -> None:
     """Forget the remembered entitlement verdict. Called when an operator login
     completes or the linked account is reset: both replace the credential the
     verdict was about."""
-    global _live_validation_failure
-    _live_validation_failure = None
-    _ATTESTATION_FAILURES.clear()
+    _live_validation_failures.pop(runtime_type, None)
+    _ATTESTATION_FAILURES.pop(runtime_type, None)
 
 
 # An entitlement refusal names a permission problem the operator fixes at
@@ -1442,7 +1506,9 @@ def _run_account_helper(argv: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def read_grok_account(command: list[str] | None = None) -> dict[str, Any] | None:
+def read_grok_account(
+    command: list[str] | None = None, *, runtime_type: str = "grok"
+) -> dict[str, Any] | None:
     """The account identity from the login tokens, through the root helper.
 
     Returns None when no login exists. The account id is the token's own signed
@@ -1450,7 +1516,8 @@ def read_grok_account(command: list[str] | None = None) -> dict[str, Any] | None
     the proxy pins on is the one xAI itself acts on.
     """
     try:
-        proc = _run_account_helper(list(command or DEFAULT_ACCOUNT_COMMAND))
+        argv = list(command) if command is not None else [*DEFAULT_ACCOUNT_COMMAND, runtime_type]
+        proc = _run_account_helper(argv)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GrokAgentError(f"could not read the Grok account: {exc}") from exc
     if proc.returncode == 2:
@@ -1467,15 +1534,14 @@ def read_grok_account(command: list[str] | None = None) -> dict[str, Any] | None
     return account
 
 
-def start_device_login() -> GrokLogin:
+def start_device_login(runtime_type: str = "grok") -> GrokLogin:
     """Begin the operator's Grok login and park its server.
 
     ``authenticate`` does not return until the operator finishes in a browser,
     so it is written without waiting; the URL to display comes from
     ``x.ai/auth/get_url``, and the status poller collects the response later.
     """
-    global _parked_login
-    server = GrokAcpServer()
+    server = GrokAcpServer(runtime_type=runtime_type)
     try:
         server.start()
         authenticate_id = server.begin_call("authenticate", {"methodId": AUTH_METHOD_ID})
@@ -1516,10 +1582,10 @@ def start_device_login() -> GrokLogin:
     # not cosmetic -- the finishing refresh closes the parked server by login
     # id, so it would reap the replacement and leave its device code with
     # nothing driving it.
-    login_id = f"grok-{secrets.token_hex(8)}"
+    login_id = f"{runtime_type}-{secrets.token_hex(8)}"
     with _login_lock:
-        old = _parked_login
-        _parked_login = _ParkedLogin(
+        old = _parked_logins.get(runtime_type)
+        _parked_logins[runtime_type] = _ParkedLogin(
             server=server, login_id=login_id, authenticate_id=authenticate_id
         )
     if old is not None:
@@ -1527,34 +1593,36 @@ def start_device_login() -> GrokLogin:
     return GrokLogin(login_id=login_id, login_url=login_url, user_code=user_code)
 
 
-def _pop_parked(match: Callable[[_ParkedLogin], bool]) -> "GrokAcpServer | None":
+def _pop_parked(
+    runtime_type: str, match: Callable[[_ParkedLogin], bool]
+) -> "GrokAcpServer | None":
     """Unpark and return the login server if the parked record matches, else
-    None. The single record plus this one unpark path keeps the parked-login
-    invariant structural: there is never more than one, and every close first
-    proves it is closing the record it meant to."""
-    global _parked_login
+    None. The per-runtime record plus this one unpark path keeps the parked-login
+    invariant structural: there is never more than one per runtime, and every
+    close first proves it is closing the record it meant to."""
     with _login_lock:
-        parked = _parked_login
+        parked = _parked_logins.get(runtime_type)
         if parked is None or not match(parked):
             return None
-        _parked_login = None
+        _parked_logins.pop(runtime_type, None)
     return parked.server
 
 
-# Attested identities, keyed by token hash. A token's identity does not change,
-# and the status poll runs every few seconds, so the provider is asked once per
-# credential rather than once per poll. In memory on purpose: a restart
-# re-attests from scratch.
-_ATTESTED_IDENTITY: dict[str, dict[str, str]] = {}
-# Failed provider attestations, keyed by token hash: (error, recorded monotonic
-# time). The status poll runs every five seconds and providers are checked
-# sequentially, so retrying the ten-second helper timeout on every poll would
-# stall every runtime after Grok. An operator refresh bypasses this memory.
-_ATTESTATION_FAILURES: dict[str, tuple[str, float]] = {}
+# Attested identities, keyed by runtime type, then by token hash. A token's
+# identity does not change, and the status poll runs every few seconds, so the
+# provider is asked once per credential rather than once per poll. In memory on
+# purpose: a restart re-attests from scratch.
+_ATTESTED_IDENTITIES: dict[str, dict[str, dict[str, str]]] = {}
+# Failed provider attestations, keyed by runtime type, then by token hash:
+# (error, recorded monotonic time). The status poll runs every five seconds and
+# providers are checked sequentially, so retrying the ten-second helper timeout
+# on every poll would stall every runtime after Grok. An operator refresh
+# bypasses this memory.
+_ATTESTATION_FAILURES: dict[str, dict[str, tuple[str, float]]] = {}
 
 
 def read_attested_identity(
-    expected_token_sha256: str, *, force: bool = False
+    expected_token_sha256: str, *, runtime_type: str = "grok", force: bool = False
 ) -> dict[str, str]:
     """Ask xAI who the agent's current token belongs to.
 
@@ -1565,10 +1633,12 @@ def read_attested_identity(
     """
     if not expected_token_sha256:
         raise GrokAgentError("the Grok token hash is unavailable")
-    memo = _ATTESTED_IDENTITY.get(expected_token_sha256)
+    identities = _ATTESTED_IDENTITIES.setdefault(runtime_type, {})
+    failures = _ATTESTATION_FAILURES.setdefault(runtime_type, {})
+    memo = identities.get(expected_token_sha256)
     if memo is not None:
         return memo
-    failure = _ATTESTATION_FAILURES.get(expected_token_sha256)
+    failure = failures.get(expected_token_sha256)
     if (
         not force
         and failure is not None
@@ -1577,13 +1647,11 @@ def read_attested_identity(
         raise GrokAgentError(failure[0])
 
     def fail(message: str) -> NoReturn:
-        _ATTESTATION_FAILURES[expected_token_sha256] = (message, time.monotonic())
+        failures[expected_token_sha256] = (message, time.monotonic())
         raise GrokAgentError(message)
 
     try:
-        proc = _run_account_helper(
-            [*DEFAULT_ACCOUNT_COMMAND, "--attest"]
-        )
+        proc = _run_account_helper([*DEFAULT_ACCOUNT_COMMAND, runtime_type, "--attest"])
     except (OSError, subprocess.TimeoutExpired) as exc:
         fail(f"could not attest the Grok account: {exc}")
     if proc.returncode != 0:
@@ -1604,12 +1672,14 @@ def read_attested_identity(
     email = _string_field(value, "email")
     if email:
         identity["email"] = email
-    _ATTESTATION_FAILURES.pop(expected_token_sha256, None)
-    _ATTESTED_IDENTITY[expected_token_sha256] = identity
+    failures.pop(expected_token_sha256, None)
+    identities[expected_token_sha256] = identity
     return identity
 
 
-def read_completed_login_account_id(login_id: str) -> str | None:
+def read_completed_login_account_id(
+    login_id: str, runtime_type: str = "grok"
+) -> str | None:
     """Return the completed operator login's account id.
 
     A stored OAuth row means the operator saw a login URL, not that the login
@@ -1619,7 +1689,7 @@ def read_completed_login_account_id(login_id: str) -> str | None:
     while its post-login identity is unavailable, capture remains pending.
     """
     with _login_lock:
-        parked = _parked_login
+        parked = _parked_logins.get(runtime_type)
         if parked is None or parked.login_id != login_id:
             return None
         if parked.failure:
@@ -1632,7 +1702,7 @@ def read_completed_login_account_id(login_id: str) -> str | None:
     return account_id
 
 
-def login_server_parked() -> bool:
+def login_server_parked(runtime_type: str = "grok") -> bool:
     """Whether a live login server is still driving the parked device flow.
 
     Grok's device flow is only advanced by the CLI process that started it: it
@@ -1641,18 +1711,18 @@ def login_server_parked() -> bool:
     through BindsTo -- the persisted login row names a code nobody is
     exchanging. Asking also reaps a parked server that has since died.
     """
-    return _current_login_server() is not None
+    return _current_login_server(runtime_type) is not None
 
 
-def close_login_server() -> None:
-    server = _pop_parked(lambda parked: True)
+def close_login_server(runtime_type: str = "grok") -> None:
+    server = _pop_parked(runtime_type, lambda parked: True)
     if server is not None:
         server.close()
 
 
-def close_completed_login_server(login_id: str) -> None:
+def close_completed_login_server(login_id: str, runtime_type: str = "grok") -> None:
     """Close the parked login server for a captured login, unless a newer login
     has replaced it under a different login id."""
-    server = _pop_parked(lambda parked: parked.login_id == login_id)
+    server = _pop_parked(runtime_type, lambda parked: parked.login_id == login_id)
     if server is not None:
         server.close()

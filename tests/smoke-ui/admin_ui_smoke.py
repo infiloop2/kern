@@ -196,6 +196,12 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 desktop_smoke(desktop_page, url)
                 desktop.close()
 
+                narrow_desktop = browser.new_context(viewport={"width": 1220, "height": 800})
+                narrow_desktop_page = narrow_desktop.new_page()
+                report_page_errors(narrow_desktop_page, "admin narrow desktop")
+                narrow_desktop_smoke(narrow_desktop_page, url)
+                narrow_desktop.close()
+
                 mobile = browser.new_context(
                     viewport=IPHONE_VIEWPORT, device_scale_factor=3, is_mobile=True,
                     has_touch=True, user_agent=IPHONE_USER_AGENT,
@@ -363,9 +369,13 @@ def grok_video_storage_smoke(page, url: str) -> None:
     expect(page.locator("#xai-video-storage-message")).to_contain_text("Saved.")
     expect(page.locator("#xai-video-secret")).to_have_value("")
     expect(page.locator("#xai-video-access-key")).to_have_value("")
+    expect(page.locator("#xai-video-secret")).to_have_attribute("placeholder", "••••••••")
+    expect(page.locator("#xai-video-access-key")).to_have_attribute("placeholder", "••••••••")
     page.reload(wait_until="domcontentloaded")
     expect(page.locator("#xai-video-bucket")).to_have_value("my-test-videos")
     expect(page.locator("#xai-video-secret")).to_have_value("")
+    expect(page.locator("#xai-video-secret")).to_have_attribute("placeholder", "••••••••")
+    expect(page.locator("#xai-video-access-key")).to_have_attribute("placeholder", "••••••••")
     page.locator('[data-action="delete-xai-video-storage"]').click()
     expect(page.locator("#xai-video-storage-message")).to_be_visible()
     expect(page.locator("#xai-video-storage-message")).to_contain_text("Removed.")
@@ -603,7 +613,10 @@ def open_home_integration(page, guide_id: str) -> None:
             page.get_by_role("button", name="Home", exact=True).click()
     card = page.locator(f"#home-integration-groups [data-guide='{guide_id}']")
     expect(card).to_be_visible()
-    with page.expect_response(lambda response: "/v1/network/policy" in response.url):
+    # Opening Integrations refreshes both resources. Do not let a caller start
+    # editing a tool row while the tool refresh can still replace that input.
+    with page.expect_response(lambda response: "/v1/network/policy" in response.url), \
+         page.expect_response(lambda response: response.url.endswith("/v1/tools")):
         card.click()
     expect(page.locator("#panel-network")).to_be_visible()
     expect(page.locator("#integration-detail-title")).not_to_have_text("Integration")
@@ -853,6 +866,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#runtime-overview")).to_contain_text("Codex")
     expect(page.locator("#runtime-overview")).to_contain_text("Claude Code")
     expect(page.locator("#runtime-overview")).to_contain_text("Grok")
+    expect(page.locator("#runtime-overview")).to_contain_text("Grok 2")
     expect(page.locator("#runtime-overview")).to_contain_text("Hermes")
     expect(page.locator("#runtime-overview")).to_contain_text("deactivated")
     expect(page.locator("#runtime-overview").get_by_label("Refresh provider status and usage")).to_be_visible()
@@ -860,16 +874,16 @@ def desktop_smoke(page, url: str) -> None:
     # The phone-only collapse pill stays out of the way on a wide viewport; the
     # boxes sit inline in the top bar.
     expect(page.locator(".runtime-overview-toggle")).to_be_hidden()
-    # Before any login there is no usage: all six rings (5h and weekly for
-    # both Codex runtimes and Claude Code) render the unavailable "--" form rather than 0%.
+    # Before any login there is no usage: all eight rings (5h and weekly for
+    # each Codex runtime and Claude Code) render the unavailable "--" form rather than 0%.
     # Bedrock billing is reconciliation metadata in the provider details, not
     # a primary toolbar value.
-    expect(page.locator("#runtime-overview .usage-ring.unavailable")).to_have_count(6)
-    # Grok has no ring at all: xAI publishes no pool figure for a subscription
-    # account, so its box carries a neutral note rather than an empty ring that
-    # would imply a number is coming.
-    expect(page.locator("#runtime-overview .usage-note")).to_have_count(1)
-    expect(page.locator("#runtime-overview .usage-note")).to_have_attribute(
+    expect(page.locator("#runtime-overview .usage-ring.unavailable")).to_have_count(8)
+    # Neither Grok runtime has a ring at all: xAI publishes no pool figure for a
+    # subscription account, so each box carries a neutral note rather than an
+    # empty ring that would imply a number is coming.
+    expect(page.locator("#runtime-overview .usage-note")).to_have_count(2)
+    expect(page.locator("#runtime-overview .usage-note").first).to_have_attribute(
         "title", "usage monitoring is not available for Grok"
     )
     expect(page.locator("#runtime-overview .runtime-summary-bedrock")).to_have_count(1)
@@ -881,6 +895,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.get_by_role("button", name="Start Codex login")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Claude login")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Grok login")).to_have_count(0)
+    expect(page.get_by_role("button", name="Start Grok 2 login")).to_have_count(0)
     page.locator("#runtime-overview .runtime-summary[data-runtime='codex']").click()
     expect(page.locator("#panel-network")).to_be_visible()
     disabled_openai_row = page.locator(".integration-row[data-integration]", has_text="OpenAI")
@@ -1335,7 +1350,10 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("[data-integration-message='bedrock']")).to_contain_text(
         "AWS credential accepted."
     )
+    expect(page.locator("#bedrock-access-key-id-bedrock")).to_have_value("")
     expect(page.locator("#bedrock-secret-access-key-bedrock")).to_have_value("")
+    expect(page.locator("#bedrock-access-key-id-bedrock")).to_have_attribute("placeholder", "••••••••")
+    expect(page.locator("#bedrock-secret-access-key-bedrock")).to_have_attribute("placeholder", "••••••••")
     expect(bedrock_row).to_contain_text("AKIAMOCKOPERATOR0001")
     bedrock_row.get_by_role("button", name="Enable", exact=True).click()
     expect(page.locator("[data-integration-message='bedrock']")).to_contain_text(
@@ -1399,6 +1417,8 @@ def desktop_smoke(page, url: str) -> None:
     expect(bedrock_row).to_contain_text("No AWS credential stored yet")
     expect(bedrock_row.locator(".provider-error")).to_have_count(0)
     expect(bedrock_row.get_by_role("button", name="Disconnect AWS", exact=True)).to_have_count(0)
+    expect(page.locator("#bedrock-access-key-id-bedrock")).to_have_attribute("placeholder", "Access key id (AKIA...)")
+    expect(page.locator("#bedrock-secret-access-key-bedrock")).to_have_attribute("placeholder", "Secret access key")
     expect(hermes_box).to_contain_text("awaiting login")
     page.locator("#bedrock-access-key-id-bedrock").fill("AKIAMOCKOPERATOR0003")
     page.locator("#bedrock-secret-access-key-bedrock").fill("S" * 40)
@@ -1561,6 +1581,9 @@ def desktop_smoke(page, url: str) -> None:
     codex_2_card = openai_row.locator(
         ".detail-card:has(.integration-account[data-runtime='codex-2'])"
     )
+    codex_3_card = openai_row.locator(
+        ".detail-card:has(.integration-account[data-runtime='codex-3'])"
+    )
     expect(codex_card.get_by_role("button", name="Start Codex login", exact=True)).to_be_visible()
     expect(codex_card.get_by_role("button", name="Start Codex login", exact=True)).to_be_enabled()
     codex_card.get_by_role("button", name="Start Codex login", exact=True).click()
@@ -1580,7 +1603,7 @@ def desktop_smoke(page, url: str) -> None:
         codex_card.get_by_role("button", name="Start Codex login", exact=True)
     ).to_have_count(0, timeout=12000)
     expect(openai_row.locator("[data-provider-status='openai']")).to_contain_text(
-        "1 of 2 connected · login required"
+        "1 of 3 connected · login required"
     )
     expect(codex_card).to_contain_text("Connected account")
     expect(codex_card).to_contain_text("akshay@infiloop.io")
@@ -1612,13 +1635,30 @@ def desktop_smoke(page, url: str) -> None:
     expect(
         codex_2_card.get_by_role("button", name="Start Codex 2 login", exact=True)
     ).to_have_count(0, timeout=12000)
-    expect(openai_row).to_contain_text("2 connected")
+    expect(openai_row).to_contain_text("2 of 3 connected")
     expect(openai_row).to_contain_text("codex_2@example.invalid")
     codex_2_summary = page.locator(
         "#runtime-overview .runtime-summary[data-runtime='codex-2']"
     )
     expect(codex_2_summary).to_contain_text("active")
     expect(codex_2_summary.locator(".usage-ring text")).to_have_text(["8", "84"])
+
+    # Codex 3 is a third independently linked account on the same integration.
+    expect(codex_3_card.get_by_role("button", name="Start Codex 3 login", exact=True)).to_be_visible()
+    codex_3_card.get_by_role("button", name="Start Codex 3 login", exact=True).click()
+    expect(codex_3_card.locator("[data-provider-oauth='codex-3']")).to_contain_text(
+        "MOCK-CODEX-3"
+    )
+    expect(
+        codex_3_card.get_by_role("button", name="Start Codex 3 login", exact=True)
+    ).to_have_count(0, timeout=12000)
+    expect(openai_row).to_contain_text("3 connected")
+    expect(openai_row).to_contain_text("codex_3@example.invalid")
+    codex_3_summary = page.locator(
+        "#runtime-overview .runtime-summary[data-runtime='codex-3']"
+    )
+    expect(codex_3_summary).to_contain_text("active")
+    expect(codex_3_summary.locator(".usage-ring text")).to_have_text(["8", "84"])
 
     page.locator("#panel-network .home-back").click()
     with page.expect_response(lambda response: "/v1/agent-processes" in response.url):
@@ -1703,7 +1743,7 @@ def assert_runtime_summaries_do_not_magnify(page) -> None:
     """Provider summaries retain their size when a desktop pointer hovers."""
     from playwright.sync_api import expect
 
-    for runtime in ("codex", "codex-2", "claude_code", "hermes"):
+    for runtime in ("codex", "codex-2", "codex-3", "claude_code", "grok", "grok-2", "hermes"):
         summary = page.locator(
             f"#runtime-overview .runtime-summary[data-runtime='{runtime}']"
         )
@@ -1809,18 +1849,67 @@ def tools_smoke(page, url: str) -> None:
     open_home_integration(page, "tool:brave_search")
     brave_row = page.locator("#tools [data-tool-row='brave_search']")
     config_input = page.locator("#tool-config-brave_search-BRAVE_SEARCH_API_KEY")
+    config_status = brave_row.locator(".config-key .status")
     config_input.fill("mock-brave-key")
     brave_row.get_by_role("button", name="Save").click()
-    expect(brave_row).to_contain_text("set")
+    expect(config_status).to_have_text("set")
+    expect(config_input).to_have_value("")
+    expect(config_input).to_have_attribute("placeholder", "••••••••")
     config_input.fill("")
     brave_row.get_by_role("button", name="Save").click()
-    expect(brave_row).to_contain_text("not set")
+    expect(config_status).to_have_text("not set")
+    expect(config_input).to_have_attribute("placeholder", "Not configured")
 
     page.locator("#panel-network .home-back").click()
     with page.expect_response(lambda response: "/v1/tools/events" in response.url):
         page.locator("#panel-home").get_by_role("button", name=re.compile(r"Tool audit")).click()
     expect(page.locator("#tool-events")).to_contain_text("brave_search")
     expect(page.locator("#tool-events")).to_contain_text("oauth_connect")
+
+
+def narrow_desktop_smoke(page, url: str) -> None:
+    """A narrow desktop collapses the runtime boxes instead of crowding the toolbar.
+
+    Seven boxes cannot shrink below their rings and labels, so inline they would
+    paint over the brand and the toolbar actions between the mobile breakpoint
+    and a wide desktop. This width must therefore use the same collapsed pill
+    and floating panel the phone uses, and the open panel must stay clear of
+    both toolbar ends.
+    """
+    from playwright.sync_api import expect
+
+    log_in(page, url)
+    toggle = page.locator(".runtime-overview-toggle")
+    expect(toggle).to_be_visible()
+    expect(page.locator("#runtime-overview .runtime-summary").first).to_be_hidden()
+    # Opening runs the hard provider refresh, so the panel carries no separate
+    # refresh button here either.
+    with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
+        toggle.click()
+    expect(toggle).to_have_attribute("aria-expanded", "true")
+    expect(page.locator("#runtime-overview .runtime-overview-panel")).to_have_css("position", "absolute")
+    expect(page.locator("#runtime-overview .runtime-refresh")).to_be_hidden()
+    expect(page.locator("#runtime-overview .runtime-summary")).to_have_count(7)
+    geometry = page.evaluate(
+        """() => {
+          const box = (selector) => document.querySelector(selector).getBoundingClientRect();
+          const cards = [...document.querySelectorAll('#runtime-overview .runtime-summary')]
+            .map(element => element.getBoundingClientRect());
+          return {
+            brandRight: box('.brand').right,
+            actionsLeft: box('.topbar-actions').left,
+            cardsLeft: Math.min(...cards.map(rect => rect.left)),
+            cardsRight: Math.max(...cards.map(rect => rect.right)),
+          };
+        }"""
+    )
+    if geometry["cardsLeft"] < geometry["brandRight"] or geometry["cardsRight"] > geometry["actionsLeft"]:
+        raise AssertionError(f"narrow-desktop runtime boxes crowd the toolbar: {geometry}")
+    assert_no_horizontal_overflow(page, "narrow desktop home")
+    # Escape dismisses the panel like a menu, as on the phone.
+    page.keyboard.press("Escape")
+    expect(toggle).to_have_attribute("aria-expanded", "false")
+    expect(page.locator("#runtime-overview .runtime-summary").first).to_be_hidden()
 
 
 def mobile_smoke(page, url: str) -> None:
@@ -1883,9 +1972,9 @@ def mobile_smoke(page, url: str) -> None:
     expect(page.locator("#runtime-overview .runtime-overview-panel")).to_have_css("position", "absolute")
     # The overlay carries no refresh button; the open gesture is the refresh.
     expect(page.locator("#runtime-overview .runtime-refresh")).to_be_hidden()
-    # Both subscription runtimes are active by now (the desktop pass logged them in);
+    # All three subscription runtimes are active by now (the desktop pass logged them in);
     # Claude Code carries the extra model-week ring.
-    for runtime, rings in (("codex", 2), ("codex-2", 2), ("claude_code", 3)):
+    for runtime, rings in (("codex", 2), ("codex-2", 2), ("codex-3", 2), ("claude_code", 3)):
         summary = page.locator(f"#runtime-overview .runtime-summary[data-runtime='{runtime}']")
         expect(summary).to_be_visible()
         expect(summary.locator(".usage-ring")).to_have_count(rings)

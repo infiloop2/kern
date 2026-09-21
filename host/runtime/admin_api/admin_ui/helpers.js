@@ -6,8 +6,10 @@ export const $ = id => document.getElementById(id);
 export const RUNTIME_PROVIDERS = {
   codex: { label: "Codex", provider: "openai", providerLabel: "OpenAI" },
   "codex-2": { label: "Codex 2", provider: "openai", providerLabel: "OpenAI" },
+  "codex-3": { label: "Codex 3", provider: "openai", providerLabel: "OpenAI" },
   claude_code: { label: "Claude Code", provider: "claude", providerLabel: "Claude" },
   grok: { label: "Grok", provider: "xai", providerLabel: "Grok" },
+  "grok-2": { label: "Grok 2", provider: "xai", providerLabel: "Grok" },
   hermes: { label: "Hermes", provider: "bedrock", providerLabel: "AWS Bedrock" },
 };
 

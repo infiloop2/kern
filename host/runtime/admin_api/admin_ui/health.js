@@ -226,8 +226,10 @@ function renderRuntimeOverview() {
   const boxes = [
     subscriptionSummary("codex"),
     subscriptionSummary("codex-2"),
+    subscriptionSummary("codex-3"),
     subscriptionSummary("claude_code"),
     grokSummary("grok"),
+    grokSummary("grok-2"),
     bedrockSummary("hermes", bedrockAccount),
   ].join("");
   // The collapsed pill carries the one live signal worth reading at a glance —
@@ -466,7 +468,9 @@ function usageRing(label, window) {
 const DEVICE_LOGINS = {
   codex: { provider: "openai", label: "Codex" },
   "codex-2": { provider: "openai", label: "Codex 2" },
+  "codex-3": { provider: "openai", label: "Codex 3" },
   grok: { provider: "xai", label: "Grok" },
+  "grok-2": { provider: "xai", label: "Grok 2" },
 };
 
 async function showOauth(start, runtime) {

@@ -36,6 +36,26 @@ The command is intentionally split by lifecycle intent:
 The target `VERSION` is the local checkout's `VERSION`; the GitHub delivery
 requires the pinned commit's `VERSION` to equal it.
 
+Bootstrap keeps a disposable, root-only download cache at
+`/mnt/kern-admin/bootstrap-cache`, preserved with the admin volume on upgrade
+and recovery. It restores `.deb` archives to apt's normal root-disk cache before
+installing packages and saves completed archives after each successful install.
+Saved archives are keyed by SHA-256 and filename and verified before restoration;
+apt may otherwise trust an existing archive based only on its size.
+`apt-get update`, package selection, authentication, timeouts, and mirror fallback
+remain unchanged. This reduces package downloads; it does not make installation
+offline or cover the GitHub loader's earlier Git installation.
+
+The speech and embedding model files are cached by their pinned SHA-256 digests.
+Every cache hit is verified before copying to the existing root-disk model path;
+missing or corrupt files are downloaded and verified before atomic publication.
+Runtime services have no access to the durable cache. Cache writes are skipped
+when they would exceed 2 GiB or leave less than 1 GiB free on the admin volume.
+After deployment verification succeeds, bootstrap removes model digests no
+longer requested and archives whose package/version/architecture is not installed.
+Failed deployments retain completed cached files; abandoned cache partials are
+removed on the next bootstrap. Removing this directory only loses download savings.
+
 Deploy and reconfigure take operator endpoint arguments
 (`--operator-ssh-public-key` and `--operator-cloudflare-hostname`, the tunnel
 token from `KERN_CLOUDFLARE_TUNNEL_TOKEN`) because those commands create

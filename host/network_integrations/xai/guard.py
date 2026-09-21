@@ -28,8 +28,8 @@ from host.network_integrations.xai import video
 from host.runtime.core import state
 from host.runtime.core.network_policy import decode_body, normalized_path, route_allowed
 from host.runtime.core.state import (
-    read_proxy_xai_account_id,
-    read_proxy_xai_status_probe_account_id,
+    read_proxy_xai_account_ids,
+    read_proxy_xai_status_probe_account_ids,
 )
 
 # Hosted tools that make xAI reach a non-X external source with request data or
@@ -244,12 +244,16 @@ def request_denied(
     request_path = normalized_path(path)
     is_get = method.upper() == "GET"
     status_probe = is_get and request_path in STATUS_PROBE_PATHS
-    account_id = read_proxy_xai_account_id()
-    if not account_id and status_probe:
-        account_id = read_proxy_xai_status_probe_account_id()
-    if not account_id:
-        return "xai_account_unavailable"
-    denial = _token_account_denial(headers, account_id)
+    account_ids = read_proxy_xai_account_ids()
+    denial = _account_denial(headers, account_ids)
+    if denial is not None and status_probe:
+        # Fall back to the operator-anchored accounts whose data-plane pin is
+        # not published: a read-only status probe is how a non-active runtime
+        # re-checks entitlement. The fallback is keyed on this request being
+        # denied rather than on there being no pin at all, because with two
+        # Grok runtimes one can be mid-capture while the other is pinned.
+        account_ids = account_ids | read_proxy_xai_status_probe_account_ids()
+        denial = _account_denial(headers, account_ids)
     if denial is not None:
         return denial
     if lowered_host == "api.x.ai":
@@ -268,11 +272,22 @@ def request_denied(
     return _server_tool_denial(headers, body)
 
 
-def _token_account_denial(headers: list[tuple[str, str]], account_id: str) -> str | None:
-    """Bind the bearer credential directly to the pinned account.
+def _account_denial(headers: list[tuple[str, str]], account_ids: set[str]) -> str | None:
+    """Why this request's credential is not an approved account, else None."""
+    if not account_ids:
+        return "xai_account_unavailable"
+    return _token_account_denial(headers, account_ids)
+
+
+def _token_account_denial(
+    headers: list[tuple[str, str]], account_ids: set[str]
+) -> str | None:
+    """Bind the bearer credential directly to an approved account.
 
     Require exactly one Authorization header carrying a Bearer token whose JWT
-    payload claims the pinned account.
+    payload claims one of the accounts a Grok login anchored on this host. The
+    Grok runtimes share this integration, so either anchor satisfies the check;
+    an account no runtime has connected does not.
 
     Which claim carries it follows xAI's own token handling: a personal login
     takes the account id from the token's ``sub``, and a team login takes it
@@ -285,7 +300,7 @@ def _token_account_denial(headers: list[tuple[str, str]], account_id: str) -> st
 
     The payload is parsed WITHOUT signature verification, which is sound here:
     a tampered claim breaks the signature xAI itself verifies, so only a genuine
-    token of the pinned account both passes this check and authenticates
+    token of an approved account both passes this check and authenticates
     upstream.
     """
     authorization = [value for key, value in headers if key.lower() == "authorization"]
@@ -294,7 +309,7 @@ def _token_account_denial(headers: list[tuple[str, str]], account_id: str) -> st
     token = _bearer_token(authorization[0])
     if token is None:
         return "xai_token_account_mismatch"
-    if account_id != _jwt_account_id(token):
+    if _jwt_account_id(token) not in account_ids:
         return "xai_token_account_mismatch"
     return None
 

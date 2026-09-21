@@ -42,15 +42,16 @@ Codex's protocol explicitly defaults omitted cache-write counts to zero.
 
 ## Provider sources
 
-- Codex (both accounts): `thread/tokenUsage/updated`, scoped to the current
+- Codex (all three accounts): `thread/tokenUsage/updated`, scoped to the current
   provider thread and turn. Use `last`, not the resumed session's lifetime
   total. The cumulative total fingerprints repeated notifications. This is
   response accounting from the protocol, not context-window occupancy.
 - Claude Code: `assistant.message.usage`, keyed by `message.id`. Repeated
   content blocks for the same response must not multiply its token usage.
-- Grok: `_x.ai/session/update` / `session/update`, `turn_completed.usage`,
-  keyed by `prompt_id`. Replay updates are ignored. A killed prompt that never
-  reports completion can remain unmeasured.
+- Grok (both runtimes): the `session/prompt` response's `_meta`, preferring the
+  nested `usage` object over the flat fields repeated beside it, keyed by
+  `promptId`. Grok announces a turn's counts in no session update, so a killed
+  prompt that never returns a response remains unmeasured.
 - Hermes: `post_api_request` hook's normalized `response.usage`, keyed by
   `api_request_id`, carried through the existing nonce-framed wrapper output.
   The host validates its numeric fields before counting them.

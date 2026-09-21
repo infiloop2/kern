@@ -18,7 +18,7 @@ subscription login, not read off documentation.
 | Product | **Grok Build** — xAI's coding agent CLI, binary `grok`. "Grok CLI" is ambiguous; at least three unrelated projects use that name. |
 | Vendor source | `github.com/xai-org/grok-build`, Rust, Apache-2.0 |
 | Distribution | npm: `@xai-official/grok`, a JS trampoline plus a per-platform optional dependency carrying the binary. Same install path as Codex and Claude Code, so no new download host is needed. |
-| Config and state | `~/.grok` (`GROK_HOME`): `auth.json`, `config.toml`, `sessions/` (SQLite), `logs/` |
+| Config and state | `~/.grok` and `~/.grok-2` (`GROK_HOME`): `auth.json`, `config.toml`, `sessions/` (SQLite), `logs/` |
 | Auth | OAuth against `auth.x.ai`; `grok login --device-auth` for headless hosts |
 | Inference | The subscription weekly pool, through `cli-chat-proxy.grok.com` |
 
@@ -117,11 +117,23 @@ Kern separates the **anchor** (the operator-approved account identity, in the
 database) from the **pin** (what the proxy checks per request). See [Agent
 provider lifecycle](agent-provider-lifecycle.md) for the general model.
 
-xAI's request guard binds the bearer token directly to the anchored account.
+Kern exposes two fixed Grok runtimes. `grok` uses `.grok`; `grok-2` uses
+`.grok-2`. They share the root-owned launcher, package, and xAI network
+integration, but keep auth, provider sessions, anchors, and pins separate: each
+runtime signs in on its own device flow and anchors its own account.
+
+xAI's request guard binds the bearer token directly to an anchored account.
 Every guarded request requires exactly one `Authorization: Bearer` whose JWT
-claims the pinned account. This is the credential xAI acts on. The admin side
+claims an approved account. This is the credential xAI acts on. The admin side
 separately attests each new token once to obtain the identity shown and pinned;
 it does not add a provider round trip to every proxied request.
+
+Both runtimes reach xAI through the same local proxy as the same Unix service
+account, so their approved account ids form one allowlist rather than two
+separately authenticated paths. Runtime selection chooses which Grok home and
+login the launcher uses during normal operation; it is not a security boundary
+between the two subscriptions, because code already running as `kern-agent` can
+read both homes.
 
 The claim read follows xAI's own token handling: a personal login's account id
 comes from the token's `sub`, and a team login's comes from `principal_id`
@@ -129,24 +141,26 @@ comes from the token's `sub`, and a team login's comes from `principal_id`
 principal id). The signed `principal_type` decides which claim is authoritative;
 the guard does not accept the other claim merely because it matches the pin.
 Everything else fails closed — missing or duplicated Authorization, a
-non-Bearer scheme, an opaque non-JWT key, and a token claiming a different
-account.
+non-Bearer scheme, an opaque non-JWT key, and a token claiming an account no
+Grok login has anchored on this host.
 
 The JWT payload is parsed **without signature verification**, which is sound for
 the same reason it is in the OpenAI guard: a tampered claim breaks the signature
-xAI itself verifies, so only a genuine token of the pinned account both passes
+xAI itself verifies, so only a genuine token of an approved account both passes
 this check and authenticates upstream.
 
 While no account is pinned, every data-plane request is denied
-(`xai_account_unavailable`). That is the correct state for a host that has not
-completed a Grok login, and it is the state this integration ships in.
+(`xai_account_unavailable`). That is the correct state for a host where neither
+Grok login has completed.
 
-Background connection checks use a separate approved-account pin that the
+Background connection checks use separate approved-account pins that the
 proxy accepts only for `GET` requests to `/v1/models`, `/v1/settings`,
 `/v1/user`, and `/v1/billing`. This lets Kern re-check entitlement and recover
-from transient provider errors while the runtime is non-active, without
-temporarily reopening `/v1/responses` or `/v1/chat/completions`. Disabling the
-integration or resetting the linked account clears both pins.
+from transient provider errors while a runtime is non-active, without
+temporarily reopening `/v1/responses` or `/v1/chat/completions`. The status
+probe accepts any anchored account, so one runtime mid-capture does not block
+the other's re-check. Disabling the integration or resetting a linked account
+clears that runtime's pins.
 
 ### The anchor marker
 
@@ -588,7 +602,7 @@ agent-facing guidance and joinable by the agent introspection tools.
 
 | Code | Meaning |
 | --- | --- |
-| `xai_account_unavailable` | No pinned account yet; the Grok login has not completed. |
+| `xai_account_unavailable` | No approved account yet; neither Grok login has completed. |
 | `xai_token_account_mismatch` | The bearer was missing, duplicated, not a Bearer JWT, or claimed another account. |
 | `xai_body_undecodable` | Content-Encoding could not be decoded for inspection. |
 | `xai_body_not_json` | The body declared JSON and did not parse, or was nested too deeply to inspect. |

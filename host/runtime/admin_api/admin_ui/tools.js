@@ -3,6 +3,7 @@ import { $, badge, esc, inlineMessage, notice, replaceIntegrationRows, setHtml }
 import { applyIntegrationDetailSelection } from "./network.js";
 
 let tools = [];
+const CONFIGURED_VALUE_PLACEHOLDER = "••••••••";
 // Selection expands exactly one tool row; the remaining rows stay hidden.
 const expandedTools = new Set();
 
@@ -167,11 +168,11 @@ function renderToolConfigRow(tool, entry) {
     <div class="tool-config-row">
       <label class="field" for="${esc(inputId)}">
         <span class="config-key mono">${esc(entry.key)} ${entry.set ? `<span class="status active">set</span>` : `<span class="status">not set</span>`}</span>
-        <span class="muted config-note">${esc(entry.description)}</span>
+        <span class="muted config-note">${esc(entry.description)}${entry.set ? " Enter a new value to replace it, or save blank to clear." : ""}</span>
       </label>
       <div class="config-input-row">
         <input id="${esc(inputId)}" type="password"
-               placeholder="${entry.set ? "configured (enter to replace, blank to clear)" : "not configured"}" spellcheck="false">
+               placeholder="${entry.set ? CONFIGURED_VALUE_PLACEHOLDER : "Not configured"}" spellcheck="false">
         <button class="sm" data-action="save-tool-config" data-tool="${esc(tool.tool_id)}" data-key="${esc(entry.key)}">Save</button>
       </div>
     </div>`;

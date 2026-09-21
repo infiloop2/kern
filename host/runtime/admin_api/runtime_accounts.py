@@ -17,6 +17,8 @@ from host.runtime.agent_runtime import (
     grok_agent,
     orchestrator,
 )
+from host import session_options
+from host.runtime.agent_runtime.harness_registry import HARNESSES
 from host.runtime.admin_api.agent_files import helper_error_message as _helper_error_message
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.admin_api.threads import _account_response_metadata
@@ -62,7 +64,7 @@ def _mint_claude_login() -> tuple[dict[str, str], dict[str, str]]:
     return response, response
 
 
-def _mint_grok_login() -> tuple[dict[str, str], dict[str, str]]:
+def _mint_grok_login(runtime_type: str) -> tuple[dict[str, str], dict[str, str]]:
     """Start the Grok device login.
 
     This is the Codex shape, not the Claude one: xAI shows the operator a code
@@ -73,21 +75,21 @@ def _mint_grok_login() -> tuple[dict[str, str], dict[str, str]]:
     returned as a field, and the adapter lifts it out.
     """
     try:
-        login = grok_agent.start_device_login()
+        login = grok_agent.start_device_login(runtime_type)
     except grok_agent.GrokLoginAlreadyAuthenticated:
         # A browser flow may have written the credential just before its
         # parked completion server was lost. Grok then has no anchor to trust,
         # but refuses to issue another URL while that credential remains.
         # Clear it through the same root helper as an operator reset and retry
         # once, so every accepted anchor still comes from a fresh browser flow.
-        account = state.read_xai_account()
+        account = state.read_xai_account(runtime_type=runtime_type)
         if account.get("operator_approval") == orchestrator.XAI_OPERATOR_APPROVAL:
             raise ApiError(
                 HTTPStatus.CONFLICT,
                 "Disconnect the linked Grok account before signing in again",
             )
-        _clear_local_agent_auth("grok")
-        login = grok_agent.start_device_login()
+        _clear_local_agent_auth(runtime_type)
+        login = grok_agent.start_device_login(runtime_type)
     response = {
         "status": "awaiting_login",
         "device_code": login.user_code or "",
@@ -140,6 +142,16 @@ _OAUTH_LOGIN_FLOWS = {
         close=lambda: codex_app_server.close_login_server("codex-2"),
         parked=lambda: codex_app_server.login_server_parked("codex-2"),
     ),
+    "codex-3": _OAuthLoginFlow(
+        runtime_type="codex-3",
+        oauth_key="codex-3",
+        display="Codex 3",
+        provider="OpenAI",
+        response_keys=("status", "device_code", "login_url", "expires_at"),
+        mint=partial(_mint_codex_login, "codex-3"),
+        close=lambda: codex_app_server.close_login_server("codex-3"),
+        parked=lambda: codex_app_server.login_server_parked("codex-3"),
+    ),
     "claude_code": _OAuthLoginFlow(
         runtime_type="claude_code",
         oauth_key="claude",
@@ -155,9 +167,19 @@ _OAUTH_LOGIN_FLOWS = {
         display="Grok",
         provider="xAI",
         response_keys=("status", "device_code", "login_url", "expires_at"),
-        mint=_mint_grok_login,
-        close=lambda: grok_agent.close_login_server(),
-        parked=lambda: grok_agent.login_server_parked(),
+        mint=partial(_mint_grok_login, "grok"),
+        close=lambda: grok_agent.close_login_server("grok"),
+        parked=lambda: grok_agent.login_server_parked("grok"),
+    ),
+    "grok-2": _OAuthLoginFlow(
+        runtime_type="grok-2",
+        oauth_key="grok-2",
+        display="Grok 2",
+        provider="xAI",
+        response_keys=("status", "device_code", "login_url", "expires_at"),
+        mint=partial(_mint_grok_login, "grok-2"),
+        close=lambda: grok_agent.close_login_server("grok-2"),
+        parked=lambda: grok_agent.login_server_parked("grok-2"),
     ),
 }
 
@@ -236,6 +258,14 @@ def current_codex_2_oauth_login() -> dict[str, str]:
     return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["codex-2"])
 
 
+def start_codex_3_oauth_login() -> dict[str, str]:
+    return _start_oauth_login(_OAUTH_LOGIN_FLOWS["codex-3"])
+
+
+def current_codex_3_oauth_login() -> dict[str, str]:
+    return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["codex-3"])
+
+
 def start_claude_oauth_login() -> dict[str, str]:
     return _start_oauth_login(_OAUTH_LOGIN_FLOWS["claude_code"])
 
@@ -250,6 +280,14 @@ def start_grok_oauth_login() -> dict[str, str]:
 
 def current_grok_oauth_login() -> dict[str, str]:
     return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["grok"])
+
+
+def start_grok_2_oauth_login() -> dict[str, str]:
+    return _start_oauth_login(_OAUTH_LOGIN_FLOWS["grok-2"])
+
+
+def current_grok_2_oauth_login() -> dict[str, str]:
+    return _current_oauth_login_response(_OAUTH_LOGIN_FLOWS["grok-2"])
 
 
 def complete_claude_oauth_login(body: Any) -> dict[str, str]:
@@ -382,13 +420,15 @@ def reset_linked_account(body: Any) -> dict[str, str]:
     return {"status": "accepted"}
 
 
-# The clear-agent-auth helper is named for the provider whose files it
-# removes, not for the runtime that uses them.
+# The name the root reset helper knows a runtime by, which is the provider
+# spelling its OAuth rows already use ("claude", not "claude_code"). Derived
+# from the same registry as OAUTH_RUNTIME_TYPES so the two cannot disagree: a
+# runtime this endpoint accepts but the helper map lacks would clear the
+# durable account and then raise, failing after half the reset had applied.
 _AGENT_AUTH_HELPER_RUNTIMES = {
-    "codex": "codex",
-    "codex-2": "codex-2",
-    "claude_code": "claude",
-    "grok": "grok",
+    runtime_type: adapter.oauth_key
+    for runtime_type, adapter in HARNESSES.items()
+    if adapter.oauth_key is not None
 }
 
 
@@ -413,19 +453,27 @@ def _clear_local_agent_auth(runtime_type: str) -> None:
         raise ApiError(HTTPStatus.CONFLICT, message)
 
 
-AGENT_RUNTIME_TYPES = ("codex", "codex-2", "claude_code", "grok", "hermes")
-OAUTH_RUNTIME_TYPES = ("codex", "codex-2", "claude_code", "grok")
+# The managed integration behind Hermes; its account is a stored IAM
+# credential rather than a login.
+BEDROCK_PROVIDER = "bedrock"
+
+AGENT_RUNTIME_TYPES = session_options.INTERACTIVE_RUNTIMES
+# The runtimes whose account is reached by a device login, from the one
+# registry that already knows which those are.
+OAUTH_RUNTIME_TYPES = orchestrator.OAUTH_RUNTIMES
 
 
 def current_agent_accounts() -> dict[str, Any]:
     statuses = orchestrator.all_runtime_status_records()
+    # One record per offered runtime, in the order the list declares them.
+    # Bedrock is reached by an IAM credential rather than a login, so it
+    # reports through its own reader.
     return {
         "accounts": [
-            _current_agent_account(statuses, "codex"),
-            _current_agent_account(statuses, "codex-2"),
-            _current_agent_account(statuses, "claude_code"),
-            _current_agent_account(statuses, "grok"),
-            _current_bedrock_account(statuses),
+            _current_bedrock_account(statuses)
+            if session_options.RUNTIMES[runtime_type].provider == BEDROCK_PROVIDER
+            else _current_agent_account(statuses, runtime_type)
+            for runtime_type in AGENT_RUNTIME_TYPES
         ]
     }
 
@@ -460,9 +508,9 @@ def _current_agent_account(statuses: dict[str, dict[str, Any]], runtime_type: st
         account = read_claude_account()
         if account.get("identity_attestation") != orchestrator.CLAUDE_IDENTITY_ATTESTATION:
             account = {}
-    elif runtime_type == "grok":
-        response = {"agent_runtime": "grok", "provider": "xai", "status": status}
-        account = read_xai_account()
+    elif runtime_type in grok_agent.GROK_RUNTIME_TYPES:
+        response = {"agent_runtime": runtime_type, "provider": "xai", "status": status}
+        account = read_xai_account(runtime_type=runtime_type)
         if account.get("operator_approval") != orchestrator.XAI_OPERATOR_APPROVAL:
             account = {}
     else:

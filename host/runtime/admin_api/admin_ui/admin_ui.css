@@ -2625,6 +2625,41 @@ a { color: var(--accent); text-decoration: none; }
 
 a:hover { text-decoration: underline; }
 
+/* ---------- Narrow desktop ---------- */
+
+/* Seven runtime boxes no longer fit inline between the brand and the toolbar
+   actions on a narrow desktop or a landscape tablet. The boxes cannot shrink
+   below their rings and labels, and the single non-wrapping row has no room to
+   grow, so they would paint over the brand and the actions. Above the mobile
+   breakpoint the toolbar therefore keeps its desktop grid but borrows the
+   phone's collapsed pill: the boxes drop into the same floating panel, three to
+   a row. The wide desktop keeps them inline and unchanged. */
+@media (min-width: 861px) and (max-width: 1240px) {
+  .runtime-overview { display: block; }
+  .runtime-overview-toggle { display: flex; }
+  .runtime-overview-panel { display: none; }
+  .runtime-overview.expanded .runtime-overview-panel {
+    backdrop-filter: blur(18px);
+    background: rgba(12, 16, 23, 0.97);
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+    display: grid;
+    gap: 0.35rem;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    left: 0;
+    padding: 0.5rem;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.4rem);
+    z-index: 90;
+  }
+  .runtime-summary { min-width: 0; width: 100%; }
+  /* Opening the panel already forces the provider re-poll the button asks for,
+     exactly as on the phone, so the panel carries no separate refresh button. */
+  .runtime-overview-panel > .runtime-refresh { display: none; }
+}
+
 /* ---------- Mobile ---------- */
 
 @media (max-width: 860px) {

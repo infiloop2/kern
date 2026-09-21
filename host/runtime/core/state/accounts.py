@@ -45,7 +45,8 @@ def set_oauth_login(cur: Any, key: str, data: dict[str, Any] | None) -> None:
 
 # -- provider account records ---------------------------------------------------------
 
-OPENAI_PROVIDER_KEYS = {"codex": "openai", "codex-2": "openai-2"}
+OPENAI_PROVIDER_KEYS = {"codex": "openai", "codex-2": "openai-2", "codex-3": "openai-3"}
+XAI_PROVIDER_KEYS = {"grok": "xai", "grok-2": "xai-2"}
 
 
 def openai_provider_key(runtime_type: str) -> str:
@@ -53,6 +54,13 @@ def openai_provider_key(runtime_type: str) -> str:
         return OPENAI_PROVIDER_KEYS[runtime_type]
     except KeyError as exc:
         raise ValueError(f"unsupported Codex runtime: {runtime_type}") from exc
+
+
+def xai_provider_key(runtime_type: str) -> str:
+    try:
+        return XAI_PROVIDER_KEYS[runtime_type]
+    except KeyError as exc:
+        raise ValueError(f"unsupported Grok runtime: {runtime_type}") from exc
 
 
 def save_openai_account(
@@ -86,12 +94,19 @@ def read_claude_account(cur: Any = None) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def save_xai_account(account: dict[str, Any] | None, cur: Any = None) -> None:
-    _save_provider_account("xai", account or {}, cur)
+def save_xai_account(
+    account: dict[str, Any] | None,
+    cur: Any = None,
+    *,
+    runtime_type: str = "grok",
+) -> None:
+    _save_provider_account(xai_provider_key(runtime_type), account or {}, cur)
 
 
-def read_xai_account(cur: Any = None) -> dict[str, Any]:
-    value = _read_provider_account("xai", cur)
+def read_xai_account(
+    cur: Any = None, *, runtime_type: str = "grok"
+) -> dict[str, Any]:
+    value = _read_provider_account(xai_provider_key(runtime_type), cur)
     return value if isinstance(value, dict) else {}
 
 

@@ -928,7 +928,11 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertIsNone(state.oauth_login("grok"))
         self.assertEqual(orchestrator.runtime_status("grok"), "deactivated")
-        close.assert_called_once_with()
+        # Disabling xAI deactivates both Grok runtimes, so each one's login
+        # flow is closed under its own runtime.
+        self.assertEqual(
+            [call.args for call in close.call_args_list], [("grok",), ("grok-2",)]
+        )
 
     def test_stop_during_server_start_closes_the_process_after_start(self) -> None:
         start_entered = threading.Event()
@@ -2439,7 +2443,7 @@ class OrchestratorTests(unittest.TestCase):
         def account_status():
             self.assertIsNone(state.read_proxy_xai_account_id())
             self.assertEqual(
-                state.read_proxy_xai_status_probe_account_id(), "acct-xai"
+                state.read_proxy_xai_status_probe_account_ids(), {"acct-xai"}
             )
             return "active", None, {"account_id": "acct-xai"}
 
@@ -2457,7 +2461,7 @@ class OrchestratorTests(unittest.TestCase):
         collect.assert_called_once()
         self.assertEqual(state.read_xai_account()["account_id"], "acct-xai")
         self.assertEqual(state.read_proxy_xai_account_id(), "acct-xai")
-        self.assertEqual(state.read_proxy_xai_status_probe_account_id(), "acct-xai")
+        self.assertEqual(state.read_proxy_xai_status_probe_account_ids(), {"acct-xai"})
         self.assertIsNone(state.oauth_login("grok"))
 
     def test_nonactive_grok_refresh_never_republishes_data_plane_pin(self) -> None:
@@ -2475,7 +2479,7 @@ class OrchestratorTests(unittest.TestCase):
         def account_status():
             self.assertIsNone(state.read_proxy_xai_account_id())
             self.assertEqual(
-                state.read_proxy_xai_status_probe_account_id(), "acct-xai"
+                state.read_proxy_xai_status_probe_account_ids(), {"acct-xai"}
             )
             return "error", "subscription unavailable", None
 
@@ -2486,14 +2490,14 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(orchestrator.refresh_runtime_status("grok"), "error")
 
         self.assertIsNone(state.read_proxy_xai_account_id())
-        self.assertEqual(state.read_proxy_xai_status_probe_account_id(), "acct-xai")
+        self.assertEqual(state.read_proxy_xai_status_probe_account_ids(), {"acct-xai"})
 
         save_policy({"network_integrations": {}}, "2026-08-17T00:00:01Z")
         self.assertEqual(orchestrator.refresh_runtime_status("grok"), "deactivated")
-        self.assertIsNone(state.read_proxy_xai_status_probe_account_id())
+        self.assertEqual(state.read_proxy_xai_status_probe_account_ids(), set())
 
         orchestrator.reset_linked_account("grok")
-        self.assertIsNone(state.read_proxy_xai_status_probe_account_id())
+        self.assertEqual(state.read_proxy_xai_status_probe_account_ids(), set())
 
     def test_reset_during_grok_probe_cannot_restore_the_account_or_pin(self) -> None:
         save_policy(
@@ -2516,7 +2520,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(orchestrator.refresh_runtime_status("grok"), "awaiting_login")
         self.assertEqual(state.read_xai_account(), {})
         self.assertIsNone(state.read_proxy_xai_account_id())
-        self.assertIsNone(state.read_proxy_xai_status_probe_account_id())
+        self.assertEqual(state.read_proxy_xai_status_probe_account_ids(), set())
 
     def test_failed_grok_login_is_retired_before_status_probe(self) -> None:
         save_policy(
@@ -2551,7 +2555,7 @@ class OrchestratorTests(unittest.TestCase):
         ):
             self.assertEqual(orchestrator.refresh_runtime_status("grok"), "awaiting_login")
 
-        close.assert_called_once_with("failed-login")
+        close.assert_called_once_with("failed-login", "grok")
 
     def test_completed_grok_login_is_retired_when_the_post_login_probe_fails(self) -> None:
         save_policy(
@@ -2590,7 +2594,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(state.read_xai_account()["account_id"], "acct-xai")
         self.assertIsNone(state.oauth_login("grok"))
-        close.assert_called_once_with("completed-login")
+        close.assert_called_once_with("completed-login", "grok")
 
     def test_completed_grok_reauth_is_retired_when_an_anchor_already_exists(self) -> None:
         save_policy(
@@ -2635,7 +2639,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(state.read_xai_account()["account_id"], "acct-xai")
         self.assertIsNone(state.oauth_login("grok"))
-        close.assert_called_once_with("completed-reauth")
+        close.assert_called_once_with("completed-reauth", "grok")
 
     def test_codex_active_reauth_closes_the_parked_login_server(self) -> None:
         # A reauth against an already-approved anchor parks a login server that
@@ -2799,7 +2803,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(orchestrator.refresh_runtime_status("grok"), "awaiting_login")
 
         self.assertIsNone(state.oauth_login("grok"))
-        close.assert_called_once_with("expired-grok-login")
+        close.assert_called_once_with("expired-grok-login", "grok")
 
     def test_expired_claude_oauth_cannot_create_first_account_anchor(self) -> None:
         orchestrator._set_runtime_status("claude_code", "awaiting_login")
@@ -3013,10 +3017,10 @@ class OrchestratorTests(unittest.TestCase):
             orchestrator.reconcile_runtime_status_after_policy_change()
 
         # The disabled runtime deactivates directly (no provider probe, no
-        # refresh serialization); only the two OpenAI-backed runtimes are
+        # refresh serialization); only the three OpenAI-backed runtimes are
         # refreshed by the one background batch.
-        self.assertEqual(calls, ["codex", "codex-2"])
-        self.assertEqual(background, [("codex", "codex-2")])
+        self.assertEqual(calls, ["codex", "codex-2", "codex-3"])
+        self.assertEqual(background, [("codex", "codex-2", "codex-3")])
         self.assertEqual(orchestrator.runtime_status("claude_code"), "deactivated")
 
     # -- Hermes (AWS Bedrock) lifecycle -----------------------------------------------
@@ -3320,7 +3324,10 @@ class StartBackgroundLoopsOrderTests(unittest.TestCase):
             call.kwargs["args"][0] for call in thread.call_args_list
             if call.kwargs["target"] is orchestrator.runtime_status_loop
         ]
-        self.assertEqual(runtimes, ["codex", "codex-2", "claude_code", "grok", "hermes"])
+        self.assertEqual(
+            runtimes,
+            ["codex", "codex-2", "codex-3", "claude_code", "grok", "grok-2", "hermes"],
+        )
         self.assertTrue(all(call.kwargs["daemon"] for call in thread.call_args_list))
         for runtime_type in orchestrator.UNMANAGED_RUNTIMES:
             self.assertNotIn(runtime_type, runtimes)

@@ -925,6 +925,13 @@ def run_turn(
     command_output_emit_count: dict[str, int] = {}
     command_output_capped: set[str] = set()
     last_message = ""
+    current_agent_phase: str | None = None
+
+    def invalidate_final_response() -> None:
+        nonlocal current_agent_phase, current_parts, last_message
+        current_agent_phase = None
+        current_parts = []
+        last_message = ""
 
     def emit_command_output(item_id: str, now: float) -> None:
         parts = command_output_parts.get(item_id) or []
@@ -986,6 +993,7 @@ def run_turn(
             if isinstance(delta, str) and delta:
                 current_parts.append(agent_activity.clean_text(delta))
         elif method == "item/commandExecution/outputDelta":
+            invalidate_final_response()
             item_id = str(params.get("itemId") or params.get("item_id") or "")
             delta = params.get("delta")
             if (
@@ -1009,6 +1017,12 @@ def run_turn(
                     emit_command_output(item_id, now)
         elif method == "item/started":
             item = params.get("item", {})
+            invalidate_final_response()
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "agentMessage":
+                phase = item.get("phase")
+                current_agent_phase = phase if isinstance(phase, str) else None
             rich_activity = _codex_item_activity(item, "started", server.runtime_type)
             if rich_activity is not None:
                 on_message(rich_activity)
@@ -1018,15 +1032,21 @@ def run_turn(
                 continue
             if item.get("type") == "agentMessage":
                 item_text = item.get("text")
-                last_message = (
+                message_text = (
                     agent_activity.clean_text(item_text)
                     if isinstance(item_text, str) and item_text
                     else "".join(current_parts)
                 )
+                phase = item.get("phase")
+                if not isinstance(phase, str):
+                    phase = current_agent_phase
+                last_message = "" if phase == "commentary" else message_text
+                current_agent_phase = None
                 current_parts = []
-                if last_message:
-                    on_message(last_message)
+                if message_text:
+                    on_message(message_text)
             else:
+                invalidate_final_response()
                 item_id = str(item.get("id") or "")
                 streamed_output = (
                     item_id in command_output_emit_count
@@ -1057,10 +1077,15 @@ def run_turn(
                 # the return value alone is not part of durable chat history.
                 pending_message = "".join(current_parts)
                 if pending_message:
-                    last_message = pending_message
                     on_message(pending_message)
+                    if current_agent_phase != "commentary":
+                        last_message = pending_message
                 server.clear_active_turn()
-                return thread_id, last_message or "Task completed."
+                if not last_message:
+                    raise CodexAppServerError(
+                        "Codex turn completed without a final response"
+                    )
+                return thread_id, last_message
             error = turn.get("error") or {}
             if not isinstance(error, dict):
                 error = {}

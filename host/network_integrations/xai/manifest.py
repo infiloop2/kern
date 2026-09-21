@@ -1,4 +1,4 @@
-"""xAI managed integration: pinned Grok inference and private S3 video output.
+"""xAI managed integration: approved-account Grok inference and private S3 video output.
 
 Storage credentials live separately in the encrypted admin database. Network
 configuration remains enablement-only; images require no storage configuration.
@@ -19,7 +19,7 @@ MANIFEST = IntegrationManifest(
     integration_id="xai",
     display_name="xAI",
     description=(
-        "Grok chat, X search and Imagine images under the pinned OAuth account. "
+        "Grok chat, X search and Imagine images under the approved OAuth accounts. "
         "Videos require operator-configured private S3 storage; Kern supplies signed "
         "upload/download URLs without exposing AWS credentials to Grok. Hosted web "
         "search, remote MCP, code execution, external media URLs, and other developer "
@@ -32,14 +32,14 @@ MANIFEST = IntegrationManifest(
         DenialReason("xai_media_input_denied", "Use the supported Imagine request fields and inline media references. External media URLs cannot be fetched through xAI."),
         DenialReason(
             "xai_account_unavailable",
-            "The pinned xAI account identity is not available yet (the Grok login has not "
-            "completed on this host), so chat proxy requests fail closed. Complete the Grok "
+            "No approved xAI account identity is available yet (neither Grok login has "
+            "completed on this host), so chat proxy requests fail closed. Complete a Grok "
             "login or ask the operator to check the agent provider status.",
         ),
         DenialReason(
             "xai_token_account_mismatch",
-            "The request did not carry exactly one Bearer token whose claims identify the "
-            "configured xAI account.",
+            "The request did not carry exactly one Bearer token whose claims identify an "
+            "xAI account approved on this host.",
         ),
         DenialReason(
             "xai_body_undecodable",

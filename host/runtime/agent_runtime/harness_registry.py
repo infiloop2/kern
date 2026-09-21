@@ -13,6 +13,7 @@ from host.runtime.agent_runtime import (
     script_runner,
 )
 from host.runtime.agent_runtime.harness import FinishTurn, HarnessAdapter, MessageHandler
+from host import session_options
 
 
 StatusProbe = Callable[[bool], tuple[str, str | None, dict[str, Any] | None]]
@@ -26,8 +27,6 @@ TurnRunner = Callable[
 @dataclass(frozen=True)
 class ModuleHarnessAdapter:
     runtime_type: str
-    label: str
-    managed_provider: str | None
     oauth_key: str | None
     steerable: bool
     refresh_before_turn: bool
@@ -38,6 +37,19 @@ class ModuleHarnessAdapter:
     _session_factory: SessionFactory
     _turn_runner: TurnRunner
     _collect_login_completion: Callable[[], None] = lambda: None
+
+    # Identity is read from the one runtime list rather than restated here.
+    # This table owns behaviour — how a runtime is probed, started and driven;
+    # what it is called and whose account it uses is the same fact the agent's
+    # delegation schema and the admin UI need, and they cannot import this
+    # module.
+    @property
+    def label(self) -> str:
+        return session_options.RUNTIMES[self.runtime_type].label
+
+    @property
+    def managed_provider(self) -> str | None:
+        return session_options.RUNTIMES[self.runtime_type].provider
 
     def account_status(
         self, *, force_provider_probe: bool = False
@@ -78,7 +90,7 @@ class ModuleHarnessAdapter:
 
 HARNESSES: dict[str, HarnessAdapter] = {
     "codex": ModuleHarnessAdapter(
-        "codex", "Codex", "openai", "codex", True, False, False,
+        "codex", "codex", True, False, False,
         (codex_app_server.CodexAppServerError,),
         codex_app_server,
         lambda force: (
@@ -94,7 +106,7 @@ HARNESSES: dict[str, HarnessAdapter] = {
         ),
     ),
     "codex-2": ModuleHarnessAdapter(
-        "codex-2", "Codex 2", "openai", "codex-2", True, False, False,
+        "codex-2", "codex-2", True, False, False,
         (codex_app_server.CodexAppServerError,),
         codex_app_server,
         lambda force: codex_app_server.account_status(
@@ -110,8 +122,25 @@ HARNESSES: dict[str, HarnessAdapter] = {
             server, message, session_id, model, effort, on_message
         ),
     ),
+    "codex-3": ModuleHarnessAdapter(
+        "codex-3", "codex-3", True, False, False,
+        (codex_app_server.CodexAppServerError,),
+        codex_app_server,
+        lambda force: codex_app_server.account_status(
+            runtime_type="codex-3", force_provider_probe=force
+        ),
+        lambda thread_id, on_ready, on_session_id: codex_app_server.CodexAppServer(
+            runtime_type="codex-3",
+            thread_id=thread_id,
+            on_ready=on_ready,
+            on_session_id=on_session_id,
+        ),
+        lambda server, message, session_id, model, effort, on_message, finish: codex_app_server.run_turn(
+            server, message, session_id, model, effort, on_message
+        ),
+    ),
     "claude_code": ModuleHarnessAdapter(
-        "claude_code", "Claude Code", "claude", "claude", True, True, False,
+        "claude_code", "claude", True, True, False,
         (claude_code.ClaudeCodeError,),
         claude_code,
         lambda force: claude_code.account_status(),
@@ -123,7 +152,7 @@ HARNESSES: dict[str, HarnessAdapter] = {
         ),
     ),
     "grok": ModuleHarnessAdapter(
-        "grok", "Grok", "xai", "grok", True, False, True,
+        "grok", "grok", True, False, True,
         (grok_agent.GrokAgentError,),
         grok_agent,
         lambda force: (
@@ -139,8 +168,26 @@ HARNESSES: dict[str, HarnessAdapter] = {
         ),
         lambda: grok_agent.collect_login_completion(),
     ),
+    "grok-2": ModuleHarnessAdapter(
+        "grok-2", "grok-2", True, False, True,
+        (grok_agent.GrokAgentError,),
+        grok_agent,
+        lambda force: grok_agent.account_status(
+            runtime_type="grok-2", force_provider_probe=force
+        ),
+        lambda thread_id, on_ready, on_session_id: grok_agent.GrokAcpServer(
+            runtime_type="grok-2",
+            thread_id=thread_id,
+            on_ready=on_ready,
+            on_session_id=on_session_id,
+        ),
+        lambda server, message, session_id, model, effort, on_message, finish: grok_agent.run_turn(
+            server, message, session_id, model, effort, on_message
+        ),
+        lambda: grok_agent.collect_login_completion("grok-2"),
+    ),
     "hermes": ModuleHarnessAdapter(
-        "hermes", "Hermes", "bedrock", None, False, False, False,
+        "hermes", None, False, False, False,
         (hermes_agent.HermesAgentError,),
         hermes_agent,
         lambda force: hermes_agent.account_status(),
@@ -152,7 +199,7 @@ HARNESSES: dict[str, HarnessAdapter] = {
         ),
     ),
     "script": ModuleHarnessAdapter(
-        "script", "Script", None, None, False, False, False,
+        "script", None, False, False, False,
         (script_runner.ScriptRunError,),
         script_runner,
         lambda force: script_runner.account_status(),

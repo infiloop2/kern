@@ -16,6 +16,7 @@ from host.runtime.agent_runtime import (
     codex_app_server,
     grok_agent,
 )
+from host import session_options
 from host.runtime.agent_runtime.harness_registry import HARNESSES
 from host.runtime.core import host_errors, state
 from host.runtime.core.state import (
@@ -86,6 +87,30 @@ def _codex_anchor(runtime_type: str) -> _TokenAnchoredProvider:
     )
 
 
+def _grok_anchor(runtime_type: str) -> _TokenAnchoredProvider:
+    return _TokenAnchoredProvider(
+        approval=XAI_OPERATOR_APPROVAL,
+        read_account=lambda cur=None: read_xai_account(cur, runtime_type=runtime_type),
+        save_account=lambda account, cur=None: save_xai_account(
+            account, cur, runtime_type=runtime_type
+        ),
+        save_proxy_account_id=lambda account_id, cur=None: state.save_proxy_xai_account_id(
+            account_id, cur, runtime_type=runtime_type
+        ),
+        usage_key="grok_usage",
+        read_completed_login_account_id=(
+            lambda login_id: grok_agent.read_completed_login_account_id(
+                login_id, runtime_type
+            )
+        ),
+        clear_live_validation=lambda: grok_agent.clear_live_validation_failure(runtime_type),
+        close_completed_login_server=(
+            lambda login_id: grok_agent.close_completed_login_server(login_id, runtime_type)
+        ),
+        error=grok_agent.GrokAgentError,
+    )
+
+
 # The adapter entries deliberately use lambdas: resolving provider modules on
 # each call preserves the test seams that replace CLI functions after import.
 _TOKEN_ANCHORED: dict[str, _TokenAnchoredProvider] = {
@@ -93,23 +118,10 @@ _TOKEN_ANCHORED: dict[str, _TokenAnchoredProvider] = {
         runtime_type: _codex_anchor(runtime_type)
         for runtime_type in codex_app_server.CODEX_RUNTIME_TYPES
     },
-    "grok": _TokenAnchoredProvider(
-        approval=XAI_OPERATOR_APPROVAL,
-        read_account=lambda cur=None: read_xai_account(cur),
-        save_account=lambda account, cur=None: save_xai_account(account, cur),
-        save_proxy_account_id=lambda account_id, cur=None: state.save_proxy_xai_account_id(
-            account_id, cur
-        ),
-        usage_key="grok_usage",
-        read_completed_login_account_id=(
-            lambda login_id: grok_agent.read_completed_login_account_id(login_id)
-        ),
-        clear_live_validation=lambda: grok_agent.clear_live_validation_failure(),
-        close_completed_login_server=(
-            lambda login_id: grok_agent.close_completed_login_server(login_id)
-        ),
-        error=grok_agent.GrokAgentError,
-    ),
+    **{
+        runtime_type: _grok_anchor(runtime_type)
+        for runtime_type in grok_agent.GROK_RUNTIME_TYPES
+    },
 }
 # Credential validation is slow and happens before the database mutation. Keep
 # connect and disconnect as ordered product actions so an older request cannot
@@ -178,7 +190,7 @@ def _capture_completed_token_login(runtime_type: str) -> None:
             anchored.close_completed_login_server(stored_login_id)
         return
     account_id: str | None = None
-    if runtime_type == "grok":
+    if runtime_type in grok_agent.GROK_RUNTIME_TYPES:
         try:
             account_id = anchored.read_completed_login_account_id(login_id)
         except anchored.error:
@@ -498,13 +510,26 @@ def _trusted_active_account(
 
 
 # The provider name shown to the operator when their linked account is the
-# problem. It names the account they would go and fix, not the runtime.
-_ACCOUNT_PROVIDER_LABELS = {"codex": "OpenAI", "codex-2": "OpenAI", "grok": "xAI"}
+# problem. It names the account they would go and fix, not the runtime, and it
+# is the company rather than the integration card ("xAI", not "Grok"), so it
+# is keyed by provider and read through the runtime's own entry.
+_ACCOUNT_PROVIDER_LABELS = {"openai": "OpenAI", "xai": "xAI"}
+
+
+def _account_provider_label(runtime_type: str) -> str:
+    """The company behind a token-anchored runtime's account.
+
+    Only runtimes in ``_TOKEN_ANCHORED`` reach this, and each of those names a
+    provider, but the runtime's own name is a usable fallback rather than a
+    reason to fail an account check.
+    """
+    provider = session_options.RUNTIMES[runtime_type].provider
+    return _ACCOUNT_PROVIDER_LABELS.get(provider or "", runtime_type)
 
 
 def _trusted_token_account(cur: Any, runtime_type: str, account: dict[str, Any]) -> dict[str, Any]:
     anchored = _TOKEN_ANCHORED[runtime_type]
-    label = _ACCOUNT_PROVIDER_LABELS[runtime_type]
+    label = _account_provider_label(runtime_type)
     account_id = _string_field(account, "account_id")
     if not account_id:
         raise ProviderAccountTrustError(f"{label} account id is not available")

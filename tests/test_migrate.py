@@ -333,6 +333,86 @@ class MigrateRunnerTests(unittest.TestCase):
             cur.execute("SELECT message FROM agent_events WHERE thread_id = 'thread-glm'")
             self.assertEqual(cur.fetchall(), [("GLM transcript",)])
 
+    def test_third_codex_migration_admits_the_runtime_and_rolls_back_without_losing_history(self) -> None:
+        self.assertEqual(migrate.up(target=62, quiet=True), list(range(1, 63)))
+        with self.assertRaises(Exception):
+            with db.transaction() as cur:
+                cur.execute(
+                    "INSERT INTO thread_sessions"
+                    " (agent_runtime, thread_id, model, effort)"
+                    " VALUES ('codex-3', 'thread-codex-3', 'gpt-5.6-sol', 'high')"
+                )
+
+        self.assertEqual(migrate.up(target=63, quiet=True), [63])
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO web_apps"
+                " (app_id, name, archived, revision, agent_runtime, agent_model, agent_effort,"
+                " created_at, updated_at) VALUES"
+                " ('app-62', 'Codex 3 App', FALSE, 0, 'codex-3', 'gpt-5.6-sol', 'high',"
+                " '2026-09-20T00:00:00Z', '2026-09-20T00:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO schedules"
+                " (id, thread_id, name, message, cadence, interval_minutes, agent_runtime,"
+                " model, effort, next_run_at, created_at, updated_at) VALUES"
+                " (62, 'schedule-62', 'Codex 3 Schedule', 'Run on Codex 3', 'interval', 60,"
+                " 'codex-3', 'gpt-5.6-sol', 'high', '2026-09-20T01:00:00Z',"
+                " '2026-09-20T00:00:00Z', '2026-09-20T00:00:00Z')"
+            )
+            cur.execute(
+                "INSERT INTO thread_sessions"
+                " (agent_runtime, thread_id, provider_session_id, model, effort) VALUES"
+                " ('codex-3', 'thread-codex-3', 'provider-chat', 'gpt-5.6-sol', 'high'),"
+                " ('codex-3', 'app-62', 'provider-app', 'gpt-5.6-sol', 'high'),"
+                " ('codex-3', 'schedule-62', 'provider-schedule', 'gpt-5.6-sol', 'high')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events"
+                " (created_at, event_type, thread_id, message, source)"
+                " VALUES ('2026-09-20T00:00:00Z', 'thread.message',"
+                " 'thread-codex-3', 'Codex 3 transcript', 'agent')"
+            )
+            cur.execute(
+                "INSERT INTO provider_accounts (provider, account_id)"
+                " VALUES ('openai-3', 'acct-3')"
+            )
+            cur.execute(
+                "INSERT INTO proxy_provider_pins (provider, account_id)"
+                " VALUES ('openai-3', 'acct-3')"
+            )
+
+        self.assertEqual(migrate.down(target=62, quiet=True), [63])
+        with db.transaction() as cur:
+            # Rolling back removes the runtime, not the conversations that used
+            # it: each canonical row stays listable under a runtime the older
+            # host still launches, with only the unresumable provider session
+            # cleared.
+            cur.execute(
+                "SELECT thread_id, agent_runtime, model, effort, provider_session_id"
+                " FROM thread_sessions ORDER BY thread_id"
+            )
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("app-62", "codex-2", "gpt-5.6-sol", "high", None),
+                    ("schedule-62", "codex-2", "gpt-5.6-sol", "high", None),
+                    ("thread-codex-3", "codex-2", "gpt-5.6-sol", "high", None),
+                ],
+            )
+            cur.execute("SELECT agent_runtime FROM web_apps WHERE app_id = 'app-62'")
+            self.assertEqual(cur.fetchone(), ("codex-2",))
+            cur.execute("SELECT agent_runtime FROM schedules WHERE id = 62")
+            self.assertEqual(cur.fetchone(), ("codex-2",))
+            cur.execute(
+                "SELECT message FROM agent_events WHERE thread_id = 'thread-codex-3'"
+            )
+            self.assertEqual(cur.fetchall(), [("Codex 3 transcript",)])
+            cur.execute("SELECT provider FROM provider_accounts WHERE provider = 'openai-3'")
+            self.assertEqual(cur.fetchall(), [])
+            cur.execute("SELECT provider FROM proxy_provider_pins WHERE provider = 'openai-3'")
+            self.assertEqual(cur.fetchall(), [])
+
     def test_persistent_schedules_create_threads_and_drop_old_runs(self) -> None:
         migrate.up(target=46, quiet=True)
         with db.transaction() as cur:

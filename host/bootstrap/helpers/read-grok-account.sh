@@ -8,13 +8,20 @@ set -euo pipefail
 # fstat regular-file check.
 #
 # Exit 0 with a JSON object on stdout, 2 when no login exists, 1 on failure.
+runtime="${1:-grok}"
+if [[ "$runtime" != "grok" && "$runtime" != "grok-2" ]]; then
+  echo "usage: read-grok-account [grok|grok-2] [--attest]" >&2
+  exit 64
+fi
+if [[ $# -gt 0 ]]; then shift; fi
 mode="read"
 if [[ $# -eq 1 && "$1" == "--attest" ]]; then
   mode="attest"
 elif [[ $# -ne 0 ]]; then
-  echo "usage: read-grok-account [--attest]" >&2
+  echo "usage: read-grok-account [grok|grok-2] [--attest]" >&2
   exit 64
 fi
+grok_home="/mnt/kern-agent/agent-home/.$runtime"
 
 if [[ "${mode}" == "attest" ]]; then
   # Attestation asks xAI who the agent's current token belongs to, so the
@@ -26,7 +33,7 @@ if [[ "${mode}" == "attest" ]]; then
   # the admin caller only ever holds its sha256 -- so root opens the file
   # itself, with the same hardening as the unprivileged read below. The token
   # never leaves this process.
-  GROK_HOME=/mnt/kern-agent/agent-home/.grok \
+  GROK_HOME="$grok_home" \
   exec /usr/bin/python3 - <<'ATTEST'
 import errno
 import hashlib
@@ -135,7 +142,7 @@ fi
 
 exec /usr/sbin/runuser -u kern-agent -- env \
   HOME=/mnt/kern-agent/agent-home \
-  GROK_HOME=/mnt/kern-agent/agent-home/.grok \
+  GROK_HOME="$grok_home" \
   /usr/bin/python3 - <<'PY'
 import base64
 import hashlib

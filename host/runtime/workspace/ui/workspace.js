@@ -8,8 +8,8 @@
   // (host/session_options.py, host/agent_scripts.py).
   const SCRIPT_RUNTIME = "script";
   const runtimeLabel = runtime => ({
-    codex: "Codex", "codex-2": "Codex 2", claude_code: "Claude Code",
-    grok: "Grok", hermes: "Hermes", script: "Script",
+    codex: "Codex", "codex-2": "Codex 2", "codex-3": "Codex 3", claude_code: "Claude Code",
+    grok: "Grok", "grok-2": "Grok 2", hermes: "Hermes", script: "Script",
   })[runtime] || runtime;
   const SCRIPT_PATH_PLACEHOLDER = "/mnt/kern-agent/agent-home/scripts/nightly-backup.sh";
   const state = {

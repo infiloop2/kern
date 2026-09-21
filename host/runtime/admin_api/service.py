@@ -52,6 +52,7 @@ from host.runtime.admin_api import xai_video_storage
 from host.network_integrations.bedrock.manifest import SUPPORTED_REGIONS as BEDROCK_REGIONS
 from host.network_integrations.github.push_gate import pending as github_pending_push
 from host.runtime.admin_api import approval_outcomes
+from host import session_options
 from host.session_options import session_config_error
 # workspace_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
@@ -119,14 +120,18 @@ from host.runtime.admin_api.runtime_accounts import (
     current_bedrock_credentials,
     current_claude_oauth_login,
     current_codex_2_oauth_login,
+    current_codex_3_oauth_login,
     current_codex_oauth_login,
+    current_grok_2_oauth_login,
     current_grok_oauth_login,
     disconnect_bedrock_credentials,
     refresh_agent_runtime_accounts,
     reset_linked_account,
     start_claude_oauth_login,
     start_codex_2_oauth_login,
+    start_codex_3_oauth_login,
     start_codex_oauth_login,
+    start_grok_2_oauth_login,
     start_grok_oauth_login,
 )
 from host.runtime.admin_api.threads import (
@@ -1130,6 +1135,8 @@ _ROUTES: tuple[_Route, ...] = (
     _Route("GET", "/v1/agent-runtime/codex-oauth-login", lambda request: current_codex_oauth_login()),
     _Route("POST", "/v1/agent-runtime/codex-2-oauth-login", lambda request: start_codex_2_oauth_login()),
     _Route("GET", "/v1/agent-runtime/codex-2-oauth-login", lambda request: current_codex_2_oauth_login()),
+    _Route("POST", "/v1/agent-runtime/codex-3-oauth-login", lambda request: start_codex_3_oauth_login()),
+    _Route("GET", "/v1/agent-runtime/codex-3-oauth-login", lambda request: current_codex_3_oauth_login()),
     _Route("POST", "/v1/agent-runtime/claude-oauth-login", lambda request: start_claude_oauth_login()),
     _Route("GET", "/v1/agent-runtime/claude-oauth-login", lambda request: current_claude_oauth_login()),
     _Route(
@@ -1139,6 +1146,8 @@ _ROUTES: tuple[_Route, ...] = (
     ),
     _Route("POST", "/v1/agent-runtime/grok-oauth-login", lambda request: start_grok_oauth_login()),
     _Route("GET", "/v1/agent-runtime/grok-oauth-login", lambda request: current_grok_oauth_login()),
+    _Route("POST", "/v1/agent-runtime/grok-2-oauth-login", lambda request: start_grok_2_oauth_login()),
+    _Route("GET", "/v1/agent-runtime/grok-2-oauth-login", lambda request: current_grok_2_oauth_login()),
     _Route("GET", "/v1/agent-runtime/bedrock-credentials", lambda request: current_bedrock_credentials()),
     _Route(
         "POST",
@@ -1414,18 +1423,21 @@ def _health_issues(
 ) -> list[dict[str, str]]:
     """Explain every predicate that makes the host health status degraded."""
     issues: list[dict[str, str]] = []
+    # The integration page the operator would open, which is named after the
+    # provider rather than the runtime: every runtime sharing a provider is an
+    # account card inside one page, so "Grok 2" would name a page that does
+    # not exist.
     integration_labels = {
-        "codex": "Codex",
-        "codex-2": "Codex 2",
-        "claude_code": "Claude Code",
-        "hermes": "AWS Bedrock",
+        "openai": "Codex", "claude": "Claude Code", "xai": "Grok", "bedrock": "AWS Bedrock",
     }
     for record in runtime["runtimes"]:
         if record.get("status") != "error":
             continue
         runtime_type = str(record.get("type", "agent runtime"))
         label = orchestrator.RUNTIME_LABELS.get(runtime_type, runtime_type)
-        integration_label = integration_labels.get(runtime_type, label)
+        identity = session_options.RUNTIMES.get(runtime_type)
+        provider = identity.provider if identity else None
+        integration_label = integration_labels.get(provider or "", label)
         detail = record.get("error_message")
         if not isinstance(detail, str) or not detail:
             detail = "The runtime reported an error without additional details."
@@ -1623,8 +1635,10 @@ def _bounded_embedding_batch(
 _RUNTIME_USAGE_KEYS = {
     "codex": "codex_usage",
     "codex-2": "codex_usage",
+    "codex-3": "codex_usage",
     "claude_code": "claude_usage",
     "grok": "grok_usage",
+    "grok-2": "grok_usage",
 }
 
 # Serialize sends for one thread from the first live-turn check through

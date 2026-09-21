@@ -2,8 +2,8 @@
 set -euo pipefail
 
 runtime="${1:-codex}"
-if [ "$runtime" != "codex" ] && [ "$runtime" != "codex-2" ]; then
-  echo "usage: read-codex-account-id [codex|codex-2]" >&2
+if [ "$runtime" != "codex" ] && [ "$runtime" != "codex-2" ] && [ "$runtime" != "codex-3" ]; then
+  echo "usage: read-codex-account-id [codex|codex-2|codex-3]" >&2
   exit 2
 fi
 

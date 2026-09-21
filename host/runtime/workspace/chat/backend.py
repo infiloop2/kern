@@ -23,6 +23,7 @@ from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtime
 from host.runtime.workspace.busy_retry import post_with_busy_retry
 from host.runtime.workspace import navigation_order, seen
 from host.session_options import (
+    INTERACTIVE_RUNTIMES,
     SCRIPT_RUNTIME,
     public_session_options,
     recorded_session_config,
@@ -31,7 +32,7 @@ from host.session_options import (
 
 
 MAX_REQUEST_BODY_BYTES = 128 * 1024
-RUNTIME_OPTIONS = {"codex", "codex-2", "claude_code", "grok", "hermes"}
+RUNTIME_OPTIONS = set(INTERACTIVE_RUNTIMES)
 THREAD_ID_RE = re.compile(r"(?:thread|schedule)-[1-9][0-9]*")
 GENERATED_THREAD_ID_RE = re.compile(r"thread-([1-9][0-9]*)")
 SCHEDULE_THREAD_ID_RE = re.compile(r"schedule-[1-9][0-9]*")

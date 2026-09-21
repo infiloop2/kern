@@ -39,8 +39,10 @@ let activeRuntimes = null;
 const DEFAULT_MODELS = Object.freeze({
   codex: "gpt-5.6-sol",
   "codex-2": "gpt-5.6-sol",
+  "codex-3": "gpt-5.6-sol",
   claude_code: "claude-opus-5",
   grok: "grok-4.6",
+  "grok-2": "grok-4.6",
   hermes: "moonshotai.kimi-k2.5",
 });
 let apps = [];
@@ -153,13 +155,13 @@ document.addEventListener("keydown", event => {
 let dictation = null;
 const composerDrafts = loadComposerDrafts();
 const runtimeLabel = runtime => ({
-  claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", grok: "Grok", hermes: "Hermes",
+  claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", "codex-3": "Codex 3", grok: "Grok", "grok-2": "Grok 2", hermes: "Hermes",
 })[runtime] || runtime;
 const optionLabel = value => String(value)
   .split(/[-_]/)
   .map(part => part.charAt(0).toUpperCase() + part.slice(1))
   .join(" ");
-const modelLabel = (runtime, value) => runtime === "codex" || runtime === "codex-2"
+const modelLabel = (runtime, value) => runtime === "codex" || runtime === "codex-2" || runtime === "codex-3"
   ? value
   : optionLabel(String(value).replace(/^claude-/, ""));
 
