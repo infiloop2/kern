@@ -103,6 +103,8 @@ from urllib.parse import quote
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from host import session_options  # noqa: E402  (needs REPO_ROOT on the path)
+
 from host.constants import ADMIN_API_PORT as ADMIN_PORT, AGENT_PREVIEW_PORT_BASE, PROXY_PORT
 from host.network_integrations.bedrock.manifest import ROUTING_ACCESS_KEY_ID
 from host.runtime.core.state import PRUNE_EVERY
@@ -148,7 +150,7 @@ TURN_TERMINAL_STATUSES = {
 THREAD_BUSY_MARKER = "agent is finishing"
 RUNTIME_INACTIVE_MARKER = "messages run only while it is active"
 SMOKE_RUNTIMES = ("codex", "claude_code", "hermes")
-OFFERED_RUNTIMES = ("codex", "codex-2", "claude_code", "grok", "hermes")
+OFFERED_RUNTIMES = session_options.INTERACTIVE_RUNTIMES
 SMOKE_OAUTH_RUNTIMES = ("codex", "claude_code")
 SMOKE_MANAGED_PROVIDERS = {"openai": True, "claude": True, "bedrock": True}
 SMOKE_BEDROCK_REGION = "us-east-1"

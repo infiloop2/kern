@@ -344,7 +344,7 @@ import tests.stage.stage_aws
                 reason = duplicate_header_denial(headers)
             if reason is None:
                 with patch.object(
-                    xai_guard, "read_proxy_xai_account_id", return_value=account_id
+                    xai_guard, "read_proxy_xai_account_ids", return_value={account_id}
                 ):
                     reason = xai_guard.request_denied(
                         integration,

@@ -2121,14 +2121,17 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap,
         )
 
-    def test_secondary_codex_runtime_shares_primary_skills_before_services_start(self) -> None:
+    def test_additional_codex_runtimes_share_primary_skills_before_services_start(self) -> None:
         bootstrap = render._render_bootstrap()
         skills_directory = '"$AGENT_HOME_PATH/.codex/skills"'
         skills_link = 'ln -s ../.codex/skills "$AGENT_HOME_PATH/.codex-2/skills"'
+        third_skills_link = 'ln -s ../.codex/skills "$AGENT_HOME_PATH/.codex-3/skills"'
 
         self.assertIn(skills_directory, bootstrap)
         self.assertIn(skills_link, bootstrap)
+        self.assertIn(third_skills_link, bootstrap)
         self.assertLess(bootstrap.index(skills_link), bootstrap.index("\n  start_services\n"))
+        self.assertLess(bootstrap.index(third_skills_link), bootstrap.index("\n  start_services\n"))
 
     def test_host_node_dependencies_are_readable_but_not_writable_by_tools(self) -> None:
         bootstrap = render._render_bootstrap()
@@ -2191,6 +2194,73 @@ class DeployUnitTests(unittest.TestCase):
             "grok --disable-web-search agent --always-approve --no-leader stdio",
             launcher,
         )
+
+    def test_grok_launcher_selects_the_named_runtimes_own_home(self) -> None:
+        # --runtime is the only thing that picks GROK_HOME, so a second Grok
+        # runtime cannot reach the first runtime's login tokens through the
+        # launcher, and an unknown runtime is refused rather than defaulted.
+        # The agent home does not exist off a real host, and the launcher never
+        # reaches its exec here: replace the cd and the exec so the rendered
+        # environment is observable from any checkout.
+        launcher = (
+            Path("host/bootstrap/helpers/run-grok.sh")
+            .read_text()
+            .replace("@PROXY_PORT@", "8443")
+            .replace("cd /mnt/kern-agent/agent-home", ":")
+            .replace("exec systemd-run", "echo systemd-run")
+        )
+        for runtime, home in (
+            ("grok", "/mnt/kern-agent/agent-home/.grok"),
+            ("grok-2", "/mnt/kern-agent/agent-home/.grok-2"),
+        ):
+            with self.subTest(runtime=runtime):
+                result = subprocess.run(
+                    ["bash", "-c", launcher, "run-grok", "--runtime", runtime],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"GROK_HOME={home} ", f"{result.stdout} ")
+
+        rejected = subprocess.run(
+            ["bash", "-c", launcher, "run-grok", "--runtime", "grok-3"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(rejected.returncode, 64, rejected.stderr)
+        self.assertIn("invalid Grok runtime", rejected.stderr)
+
+    def test_read_grok_account_selects_the_named_runtimes_own_home(self) -> None:
+        helper = Path("host/bootstrap/helpers/read-grok-account.sh").read_text()
+        self.assertIn('grok_home="/mnt/kern-agent/agent-home/.$runtime"', helper)
+        rejected = subprocess.run(
+            ["bash", "-c", helper, "read-grok-account", "grok-3"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(rejected.returncode, 64)
+        self.assertIn("usage: read-grok-account", rejected.stderr)
+
+    def test_each_grok_runtime_gets_its_own_provisioned_home(self) -> None:
+        bootstrap = render._render_bootstrap()
+        for home in ('"$AGENT_HOME_PATH/.grok"', '"$AGENT_HOME_PATH/.grok-2"'):
+            self.assertIn(f"    {home} \\\n", bootstrap)
+            self.assertIn(f'GROK_HOME={home} \\', bootstrap)
+
+    def test_grok_homes_are_sanitized_before_root_takes_ownership(self) -> None:
+        # Both are agent-writable names on a preserved volume. Without the
+        # early sanitizing pass, a planted symlink would have its target
+        # chowned to the agent by the later root-owned install -d.
+        bootstrap = render._render_bootstrap()
+        for sanitized, owned in (
+            ('agent_home / ".grok",', '"$AGENT_HOME_PATH/.grok" \\'),
+            ('agent_home / ".grok-2",', '"$AGENT_HOME_PATH/.grok-2" \\'),
+        ):
+            self.assertIn(sanitized, bootstrap)
+            self.assertLess(bootstrap.index(sanitized), bootstrap.index(owned))
 
     def test_read_grok_account_selects_identity_by_signed_principal_type(self) -> None:
         helper = Path("host/bootstrap/helpers/read-grok-account.sh").read_text()

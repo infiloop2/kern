@@ -10,9 +10,9 @@ can break when a harness package is upgraded.
 
 | Harness | Package | Pinned version | Runtime id | Adapter |
 | --- | --- | --- | --- | --- |
-| Codex | `@openai/codex` | `0.153.3` | `codex`, `codex-2` | `host/runtime/agent_runtime/codex_app_server.py` |
+| Codex | `@openai/codex` | `0.153.3` | `codex`, `codex-2`, `codex-3` | `host/runtime/agent_runtime/codex_app_server.py` |
 | Claude Code | `@anthropic-ai/claude-code` | `2.1.258` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
-| Grok Build | `@xai-official/grok` | `1.0.34` | `grok` | `host/runtime/agent_runtime/grok_agent.py` |
+| Grok Build | `@xai-official/grok` | `1.0.34` | `grok`, `grok-2` | `host/runtime/agent_runtime/grok_agent.py` |
 | Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/agent_runtime/hermes_agent.py` |
 
 The `script` runtime (`host/runtime/agent_runtime/script_runner.py`) is on that
@@ -54,8 +54,8 @@ network guards, or privilege boundary can fail.
 
 ## Codex harness expectations
 
-Kern exposes two fixed Codex runtimes. `codex` uses `.codex`; `codex-2` uses
-`.codex-2`. They share the root-owned config, skills, package, launcher, and
+Kern exposes three fixed Codex runtimes. `codex` uses `.codex`; `codex-2` uses
+`.codex-2`; and `codex-3` uses `.codex-3`. They share the root-owned config, skills, package, launcher, and
 OpenAI network integration, but keep auth and provider sessions separate.
 
 ### Process interface
@@ -126,12 +126,13 @@ legacy/unapproved state and never publish a proxy pin.
 
 `account/read` is not assumed to expose the ChatGPT account id. Kern reads
 the account id through `read-codex-account-id`, which parses a small part of
-Codex auth state at `.codex/auth.json` for `codex` and `.codex-2/auth.json` for
-`codex-2`:
+Codex auth state at `.codex/auth.json` for `codex`, `.codex-2/auth.json` for
+`codex-2`, and `.codex-3/auth.json` for `codex-3`:
 
 ```text
 ~/.codex/auth.json
 ~/.codex-2/auth.json
+~/.codex-3/auth.json
 ```
 
 Supported account-id sources, in order:

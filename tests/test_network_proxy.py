@@ -1568,7 +1568,7 @@ class XaiRouteTests(unittest.TestCase):
 
     def deny(self, host: str, *, method: str = "POST", path: str = "/v1/responses") -> str | None:
         headers = [("Authorization", xai_bearer(self.ACCOUNT))]
-        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+        with patch.object(xai_guard, "read_proxy_xai_account_ids", return_value={self.ACCOUNT}):
             return xai_guard.request_denied(
                 self.CONFIG, method, host, path, "", headers, b"{}" if method == "POST" else b""
             )
@@ -1576,7 +1576,7 @@ class XaiRouteTests(unittest.TestCase):
     def test_auth_host_is_open_and_unpinned(self) -> None:
         # The issuer establishes which account exists, so it cannot be pinned to
         # one; it carries no model traffic. Mirrors auth.openai.com.
-        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=None):
+        with patch.object(xai_guard, "read_proxy_xai_account_ids", return_value=set()):
             self.assertIsNone(
                 xai_guard.request_denied(
                     self.CONFIG, "POST", "auth.x.ai", "/oauth2/device/code", "", [], b""
@@ -1643,7 +1643,7 @@ class XaiRouteTests(unittest.TestCase):
         # The live reads carry queries: /user?include=subscription drives the
         # entitlement check and /billing?format=credits the usage snapshot.
         headers = [("Authorization", xai_bearer(self.ACCOUNT))]
-        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+        with patch.object(xai_guard, "read_proxy_xai_account_ids", return_value={self.ACCOUNT}):
             for path, query in (("/v1/user", "include=subscription"), ("/v1/billing", "format=credits")):
                 self.assertIsNone(
                     xai_guard.request_denied(
@@ -1686,7 +1686,7 @@ class XaiRouteTests(unittest.TestCase):
         )
 
     def test_imagine_requires_the_pinned_bearer(self) -> None:
-        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+        with patch.object(xai_guard, "read_proxy_xai_account_ids", return_value={self.ACCOUNT}):
             for path in ("/v1/images/generations", "/v1/images/edits"):
                 self.assertEqual(
                     xai_guard.request_denied(
@@ -1748,7 +1748,12 @@ class XaiAccountBindingTests(unittest.TestCase):
     HOST = "cli-chat-proxy.grok.com"
 
     def deny(self, headers, *, pinned: str | None = ACCOUNT, body: bytes = b"") -> str | None:
-        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=pinned):
+        return self.deny_any(headers, pinned={pinned} if pinned else set(), body=body)
+
+    def deny_any(self, headers, *, pinned: set[str], body: bytes = b"") -> str | None:
+        with patch.object(
+            xai_guard, "read_proxy_xai_account_ids", return_value=set(pinned)
+        ):
             return xai_guard.request_denied(
                 self.CONFIG, "POST", self.HOST, "/v1/responses", "", headers, body
             )
@@ -1762,11 +1767,15 @@ class XaiAccountBindingTests(unittest.TestCase):
         status_pinned: str | None = None,
     ) -> str | None:
         with (
-            patch.object(xai_guard, "read_proxy_xai_account_id", return_value=pinned),
             patch.object(
                 xai_guard,
-                "read_proxy_xai_status_probe_account_id",
-                return_value=status_pinned,
+                "read_proxy_xai_account_ids",
+                return_value={pinned} if pinned else set(),
+            ),
+            patch.object(
+                xai_guard,
+                "read_proxy_xai_status_probe_account_ids",
+                return_value={status_pinned} if status_pinned else set(),
             ),
         ):
             query = "include=subscription" if path == "/v1/user" else ""
@@ -1777,6 +1786,26 @@ class XaiAccountBindingTests(unittest.TestCase):
     def test_matching_sub_claim_passes(self) -> None:
         self.assertIsNone(
             self.deny([("Authorization", xai_bearer(self.ACCOUNT))])
+        )
+
+    def test_either_approved_grok_account_passes(self) -> None:
+        # The two Grok runtimes share this integration and anchor separate
+        # accounts, so a token for either approved account is allowed.
+        second = "user-second"
+        for account in (self.ACCOUNT, second):
+            with self.subTest(account=account):
+                self.assertIsNone(
+                    self.deny_any(
+                        [("Authorization", xai_bearer(account))],
+                        pinned={self.ACCOUNT, second},
+                    )
+                )
+        self.assertEqual(
+            self.deny_any(
+                [("Authorization", xai_bearer("user-attacker"))],
+                pinned={self.ACCOUNT, second},
+            ),
+            "xai_token_account_mismatch",
         )
 
     def test_team_principal_id_claim_also_passes(self) -> None:
@@ -1889,7 +1918,7 @@ class XaiServerToolTests(unittest.TestCase):
             ("Authorization", xai_bearer(self.ACCOUNT)),
             ("Content-Type", "application/json"),
         ]
-        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+        with patch.object(xai_guard, "read_proxy_xai_account_ids", return_value={self.ACCOUNT}):
             return xai_guard.request_denied(
                 config, "POST", self.HOST, "/v1/responses", "", headers, json.dumps(payload).encode()
             )
@@ -2175,7 +2204,7 @@ class XaiServerToolTests(unittest.TestCase):
             ("Authorization", xai_bearer(self.ACCOUNT)),
             ("Content-Type", "application/json"),
         ]
-        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+        with patch.object(xai_guard, "read_proxy_xai_account_ids", return_value={self.ACCOUNT}):
             reason = xai_guard.request_denied(
                 config, "POST", self.HOST, "/v1/responses", "", headers, b"{not json"
             )
@@ -2187,7 +2216,7 @@ class XaiServerToolTests(unittest.TestCase):
             ("Authorization", xai_bearer(self.ACCOUNT)),
             ("Content-Type", "application/json"),
         ]
-        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+        with patch.object(xai_guard, "read_proxy_xai_account_ids", return_value={self.ACCOUNT}):
             return xai_guard.request_denied(
                 config, "POST", self.HOST, "/v1/responses", "", headers, body
             )
@@ -2222,7 +2251,7 @@ class XaiServerToolTests(unittest.TestCase):
             ("Authorization", xai_bearer(self.ACCOUNT)),
             ("Content-Type", "text/plain"),
         ]
-        with patch.object(xai_guard, "read_proxy_xai_account_id", return_value=self.ACCOUNT):
+        with patch.object(xai_guard, "read_proxy_xai_account_ids", return_value={self.ACCOUNT}):
             self.assertIsNone(
                 xai_guard.request_denied(
                     config, "POST", self.HOST, "/v1/responses", "", headers, b"x_search"

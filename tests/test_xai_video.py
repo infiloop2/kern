@@ -29,7 +29,7 @@ class VideoTests(unittest.TestCase):
             p = patch.object(state, name, return_value=value)
             p.start()
             self.addCleanup(p.stop)
-        p = patch.object(guard, 'read_proxy_xai_account_id', return_value='pinned')
+        p = patch.object(guard, 'read_proxy_xai_account_ids', return_value={'pinned'})
         p.start()
         self.addCleanup(p.stop)
 

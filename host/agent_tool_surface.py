@@ -20,12 +20,16 @@ one action. Those schemas arrive as tool *results*, which append to the
 context instead of rewriting its prefix.
 
 This module is imported by the tools service, the agent-network service, and
-the agent-side MCP shim, so it must stay dependency-free and stdlib-only.
+the agent-side MCP shim, so it depends on nothing that reads host state: the
+stdlib, and ``host.session_options`` for the runtime list, which is plain data
+for the same reason.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from host import session_options
 
 JSONObject = dict[str, Any]
 
@@ -254,7 +258,7 @@ SPAWN_AGENT_TOOL: JSONObject = {
             },
             "agent_runtime": {
                 "type": "string",
-                "enum": ["codex", "codex-2", "claude_code", "grok", "hermes"],
+                "enum": list(session_options.INTERACTIVE_RUNTIMES),
             },
             "model": {
                 "type": "string",

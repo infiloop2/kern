@@ -59,12 +59,21 @@ class AgentChatBackendTests(unittest.TestCase):
                         "gpt-5.6-luna": ["high", "max"],
                         "gpt-6-astra": ["high", "max", "ultra"],
                     },
+                    "codex-3": {
+                        "gpt-5.6-terra": ["high", "max", "ultra"],
+                        "gpt-5.6-sol": ["high", "max", "ultra"],
+                        "gpt-5.6-luna": ["high", "max"],
+                        "gpt-6-astra": ["high", "max", "ultra"],
+                    },
                     "claude_code": {
                         "claude-opus-5": ["high", "max", "ultracode"],
                         "claude-fable-5-1": ["high", "max", "ultracode"],
                         "claude-sonnet-5": ["high", "max", "ultracode"],
                     },
                     "grok": {
+                        "grok-4.6": ["xhigh", "high"],
+                    },
+                    "grok-2": {
                         "grok-4.6": ["xhigh", "high"],
                     },
                     "hermes": {

@@ -32,12 +32,15 @@ from host.runtime.core.state import (
     read_proxy_openai_account_id,
     read_proxy_openai_account_ids,
     read_proxy_xai_account_id,
+    read_proxy_xai_account_ids,
+    read_xai_account,
     save_config,
     save_claude_account,
     save_openai_account,
     save_proxy_claude_account_id,
     save_proxy_openai_account_id,
     save_proxy_xai_account_id,
+    save_xai_account,
 )
 
 
@@ -1725,26 +1728,62 @@ class StateStorageTests(unittest.TestCase):
 
         self.assertEqual(read_openai_account(), {})
 
-    def test_second_codex_account_and_proxy_pin_are_independent(self) -> None:
+    def test_codex_accounts_and_proxy_pins_are_independent(self) -> None:
         save_openai_account({"account_id": "acct-1", "planType": "pro"})
         save_openai_account(
             {"account_id": "acct-2", "planType": "plus"},
             runtime_type="codex-2",
         )
+        save_openai_account(
+            {"account_id": "acct-3", "planType": "team"},
+            runtime_type="codex-3",
+        )
         save_proxy_openai_account_id("acct-1")
         save_proxy_openai_account_id("acct-2", runtime_type="codex-2")
+        save_proxy_openai_account_id("acct-3", runtime_type="codex-3")
 
         self.assertEqual(read_openai_account()["account_id"], "acct-1")
         self.assertEqual(
             read_openai_account(runtime_type="codex-2")["account_id"],
             "acct-2",
         )
+        self.assertEqual(
+            read_openai_account(runtime_type="codex-3")["account_id"],
+            "acct-3",
+        )
         self.assertEqual(read_proxy_openai_account_id(), "acct-1")
         self.assertEqual(
             read_proxy_openai_account_id(runtime_type="codex-2"),
             "acct-2",
         )
-        self.assertEqual(read_proxy_openai_account_ids(), {"acct-1", "acct-2"})
+        self.assertEqual(
+            read_proxy_openai_account_id(runtime_type="codex-3"),
+            "acct-3",
+        )
+        self.assertEqual(read_proxy_openai_account_ids(), {"acct-1", "acct-2", "acct-3"})
+
+    def test_second_grok_account_and_proxy_pin_are_independent(self) -> None:
+        save_xai_account({"account_id": "xai-1", "operator_approval": "grok_device_login"})
+        save_xai_account(
+            {"account_id": "xai-2", "operator_approval": "grok_device_login"},
+            runtime_type="grok-2",
+        )
+        save_proxy_xai_account_id("xai-1")
+        save_proxy_xai_account_id("xai-2", runtime_type="grok-2")
+
+        self.assertEqual(read_xai_account()["account_id"], "xai-1")
+        self.assertEqual(
+            read_xai_account(runtime_type="grok-2")["account_id"],
+            "xai-2",
+        )
+        self.assertEqual(read_proxy_xai_account_id(), "xai-1")
+        self.assertEqual(
+            read_proxy_xai_account_id(runtime_type="grok-2"),
+            "xai-2",
+        )
+        # The guard reads the union: the runtimes share one xAI integration, so
+        # either approved account authenticates through the proxy.
+        self.assertEqual(read_proxy_xai_account_ids(), {"xai-1", "xai-2"})
 
     def test_config_replaces_wholesale(self) -> None:
         hash_1 = "1" * 64

@@ -54,8 +54,10 @@ THREAD_DISPLAY_EVENT_TYPES = frozenset({
 _RUNTIME_USAGE_KEYS = {
     "codex": "codex_usage",
     "codex-2": "codex_usage",
+    "codex-3": "codex_usage",
     "claude_code": "claude_usage",
     "grok": "grok_usage",
+    "grok-2": "grok_usage",
     "hermes": "bedrock_usage",
 }
 _THREAD_SEND_LOCKS = tuple(threading.Lock() for _ in range(64))
@@ -197,7 +199,7 @@ def _account_response_metadata(account: dict[str, Any], runtime_type: str) -> di
         value = account.get(key)
         if isinstance(value, str) and value:
             response[key] = value
-    if runtime_type == "grok":
+    if runtime_type in ("grok", "grok-2"):
         opt_out = account.get("coding_data_retention_opt_out")
         if isinstance(opt_out, bool):
             response["coding_data_retention_opt_out"] = opt_out

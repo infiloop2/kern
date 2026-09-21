@@ -12,7 +12,7 @@ export const MANAGED_INTEGRATIONS = {
     ],
     setupSteps: [
       { title: "Enable OpenAI", description: "On Home, open OpenAI under Integrations and choose Enable." },
-      { title: "Connect each Codex runtime", description: "Start Codex login and Codex 2 login separately. Use the subscription you want for each runtime and enter its displayed device code." },
+      { title: "Connect each Codex runtime", description: "Start Codex, Codex 2, and Codex 3 login separately. Use the subscription you want for each runtime and enter its displayed device code." },
       { title: "Verify the linked account", description: "Return to Kern and wait for the row to show connected with the expected email or account id. That identity is now the operator-approved account anchor." },
     ],
     dataSummary: {
@@ -57,7 +57,7 @@ export const MANAGED_INTEGRATIONS = {
       ],
     },
     capabilities: [
-      { name: "Codex model access", description: "Runs Codex and Codex 2 tasks through the models and usage limits available to their linked OpenAI subscriptions." },
+      { name: "Codex model access", description: "Runs Codex, Codex 2, and Codex 3 tasks through the models and usage limits available to their linked OpenAI subscriptions." },
       { name: "Cached web search", description: "Lets Codex search OpenAI's existing index or cache. Kern denies request forms that would let OpenAI fetch live external pages for the request." },
     ],
     controls: [
@@ -144,13 +144,13 @@ export const MANAGED_INTEGRATIONS = {
     label: "Grok",
     summary: "Run Grok Build chats and tasks, generate images, and save generated videos to your private S3 bucket.",
     protections: [
-      "The linked xAI account is pinned. Requests carrying another account or an opaque API key are denied.",
+      "Each Grok login adds that xAI account to the host's approved set. Requests carrying any other account or an opaque API key are denied until you explicitly connect it to a Grok runtime.",
       "Video storage credentials stay encrypted in Kern and never enter Grok's config or process environment. xAI receives only a short-lived upload URL for one object.",
       "Images need no S3 configuration. Video generation is blocked until storage is configured, including when provider ZDR is off.",
       "Kern keeps local telemetry and trace upload disabled. It never changes your account's coding-data retention choice; keep Help improve Grok set to Opt out.",
     ],
     setupSteps: [
-      { title: "Connect Grok", description: "Enable Grok on Home, open its integration, choose Connect, and complete the device login. Verify the expected account is shown." },
+      { title: "Connect each Grok runtime", description: "Enable Grok on Home and open its integration. Start the Grok login and the Grok 2 login separately, completing each device login with the subscription you want for that runtime. Verify the expected account is shown on each row." },
       { title: "Keep coding data opted out", description: "In Grok Build, use /privacy and select Opt out under Help improve Grok. Kern shows the account's reported coding-data choice. The local video-tool flag is separate and does not opt you into retention or training." },
       { title: "For videos, create a private S3 bucket", description: "In the AWS Console, open S3, choose Create bucket, use a general purpose bucket and a unique name containing lowercase letters, digits and hyphens, and note its region. Keep Block Public Access enabled and ACLs disabled. Use SSE-S3 encryption. Images work without this step. The supported setup is commercial AWS S3; custom endpoints and temporary session credentials are not supported.", linkUrl: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/create-bucket-overview.html", linkLabel: "AWS bucket creation guide" },
       {

@@ -17,7 +17,12 @@ from host.runtime.core.state._base import (
     utc_now,
 )
 from host.runtime.core.state.events import _page_before, _prune_events
-from host.runtime.core.state.accounts import OPENAI_PROVIDER_KEYS, openai_provider_key
+from host.runtime.core.state.accounts import (
+    OPENAI_PROVIDER_KEYS,
+    XAI_PROVIDER_KEYS,
+    openai_provider_key,
+    xai_provider_key,
+)
 
 # -- network policy and proxy account pins (admin writes, proxy reads) ---------------
 
@@ -283,20 +288,33 @@ def read_proxy_claude_account_id() -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def save_proxy_xai_account_id(account_id: str | None, cur: Any = None) -> None:
-    _save_proxy_account_id("xai", account_id, cur)
+def save_proxy_xai_account_id(
+    account_id: str | None, cur: Any = None, *, runtime_type: str = "grok"
+) -> None:
+    _save_proxy_account_id(xai_provider_key(runtime_type), account_id, cur)
 
 
-def read_proxy_xai_account_id() -> str | None:
-    value = _read_proxy_pin("xai").get("account_id")
+def read_proxy_xai_account_id(*, runtime_type: str = "grok") -> str | None:
+    value = _read_proxy_pin(xai_provider_key(runtime_type)).get("account_id")
     return value if isinstance(value, str) and value else None
 
 
-def read_proxy_xai_status_probe_account_id() -> str | None:
+def read_proxy_xai_account_ids() -> set[str]:
+    provider_keys = tuple(XAI_PROVIDER_KEYS.values())
+    placeholders = ", ".join("%s" for _ in provider_keys)
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT account_id FROM proxy_provider_pins"
+            f" WHERE provider IN ({placeholders}) AND account_id IS NOT NULL",
+            provider_keys,
+        )
+        return {str(row[0]) for row in cur.fetchall() if row[0]}
+
+
+def read_proxy_xai_status_probe_account_ids() -> set[str]:
     with db.transaction() as cur:
         cur.execute("SELECT account_id FROM xai_status_probe_pin")
-        row = cur.fetchone()
-    return str(row[0]) if row and row[0] else None
+        return {str(row[0]) for row in cur.fetchall() if row[0]}
 
 
 _bedrock_proxy_credential_cache: tuple[str, str, str, str] | None = None

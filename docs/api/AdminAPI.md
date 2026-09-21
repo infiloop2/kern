@@ -213,7 +213,7 @@ Response fields:
 | `issues[].next_step` | string |  | Recommended operator action. |
 | `agent_name` | string |  | Host name from the input config. |
 | `agent_runtime.runtimes` | array |  | Status records for every supported runtime. |
-| `agent_runtime.runtimes[].type` | enum | `codex`, `codex-2`, `claude_code`, `grok`, `hermes` | Agent runtime type. |
+| `agent_runtime.runtimes[].type` | enum | `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, `hermes` | Agent runtime type. |
 | `agent_runtime.runtimes[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current agent runtime supervisor state. |
 | `agent_runtime.runtimes[].active_thread_ids` | string array |  | Threads with a live turn on this runtime. |
 | `network_controls.status` | enum | `active`, `error` | Derived network policy enforcement state. |
@@ -260,11 +260,15 @@ POST /v1/agent-runtime/codex-oauth-login
 GET  /v1/agent-runtime/codex-oauth-login
 POST /v1/agent-runtime/codex-2-oauth-login
 GET  /v1/agent-runtime/codex-2-oauth-login
+POST /v1/agent-runtime/codex-3-oauth-login
+GET  /v1/agent-runtime/codex-3-oauth-login
 POST /v1/agent-runtime/claude-oauth-login
 GET  /v1/agent-runtime/claude-oauth-login
 POST /v1/agent-runtime/claude-oauth-login/complete
 POST /v1/agent-runtime/grok-oauth-login
 GET  /v1/agent-runtime/grok-oauth-login
+POST /v1/agent-runtime/grok-2-oauth-login
+GET  /v1/agent-runtime/grok-2-oauth-login
 GET  /v1/agent-runtime/bedrock-credentials
 POST /v1/agent-runtime/bedrock-credentials
 DELETE /v1/agent-runtime/bedrock-credentials
@@ -282,23 +286,27 @@ Agent runtime endpoints:
 | `GET` | `/v1/agent-runtime/codex-oauth-login` | none | Codex OAuth login response | Returns the current Codex OAuth device code and login link. |
 | `POST` | `/v1/agent-runtime/codex-2-oauth-login` | none | Codex OAuth login response | Starts a Codex 2 OAuth login flow and returns the device code and login link. |
 | `GET` | `/v1/agent-runtime/codex-2-oauth-login` | none | Codex OAuth login response | Returns the current Codex 2 OAuth device code and login link. |
+| `POST` | `/v1/agent-runtime/codex-3-oauth-login` | none | Codex OAuth login response | Starts a Codex 3 OAuth login flow and returns the device code and login link. |
+| `GET` | `/v1/agent-runtime/codex-3-oauth-login` | none | Codex OAuth login response | Returns the current Codex 3 OAuth device code and login link. |
 | `POST` | `/v1/agent-runtime/claude-oauth-login` | none | Claude OAuth login response | Starts a Claude Code OAuth login process and returns the login link. |
 | `GET` | `/v1/agent-runtime/claude-oauth-login` | none | Claude OAuth login response | Returns the current Claude Code OAuth login link. |
 | `POST` | `/v1/agent-runtime/claude-oauth-login/complete` | `{"code": "..."}` | status response | Submits the browser login code back to the waiting Claude Code OAuth process. |
 | `POST` | `/v1/agent-runtime/grok-oauth-login` | none | Grok OAuth login response | Starts a Grok device-code login against xAI and returns the user code and login link. There is no completion endpoint: xAI polls its own approval and resolves the waiting login. |
 | `GET` | `/v1/agent-runtime/grok-oauth-login` | none | Grok OAuth login response | Returns the current Grok device code and login link. |
+| `POST` | `/v1/agent-runtime/grok-2-oauth-login` | none | Grok OAuth login response | Starts a Grok 2 device-code login against xAI and returns the user code and login link. There is no completion endpoint: xAI polls its own approval and resolves the waiting login. |
+| `GET` | `/v1/agent-runtime/grok-2-oauth-login` | none | Grok OAuth login response | Returns the current Grok 2 device code and login link. |
 | `GET` | `/v1/agent-runtime/bedrock-credentials` | none | `{"connected": false}` or `{"connected": true, "access_key_id": "AKIA...", "region": "us-east-1"}` | Returns whether the Bedrock connection is stored plus its non-secret access key id and region. The secret is never returned. |
 | `POST` | `/v1/agent-runtime/bedrock-credentials` | `{"access_key_id": "AKIA...", "secret_access_key": "...", "region": "us-east-1"}` | `{"status": "accepted"}` | Synchronously validates the Bedrock long-term IAM access key pair with STS, then stores the credential, region, and account metadata atomically. Validation runs even while Bedrock is disabled; a rejected candidate returns `400`, is not retained, and leaves any previous validated connection unchanged. AWS checks model-specific invocation permission and model access on the first real turn, avoiding a paid setup invocation. Later AWS failures are reported by the turn that encounters them; they do not create a stored credential-health state. The request accepts exactly these three fields; the secret is never returned. |
 | `DELETE` | `/v1/agent-runtime/bedrock-credentials` | none | status response | Disconnects the AWS account, clears its credential, region, and account metadata, then fails running Hermes turns. The live usage counters are retained: they record work already done. |
-| `POST` | `/v1/agent-runtime/reset-linked-account` | `{"agent_runtime": "codex"\|"codex-2"\|"claude_code"\|"grok"}` | status response | Clears the selected OAuth runtime's linked account state. Bedrock uses the credential endpoint above because it uses an IAM credential instead of OAuth. |
+| `POST` | `/v1/agent-runtime/reset-linked-account` | `{"agent_runtime": "codex"\|"codex-2"\|"codex-3"\|"claude_code"\|"grok"\|"grok-2"}` | status response | Clears the selected OAuth runtime's linked account state. Bedrock uses the credential endpoint above because it uses an IAM credential instead of OAuth. |
 
 The runtime-specific OAuth login endpoints work while that runtime's status is
 `awaiting_login` or `error` — an errored runtime (changed account, malformed
 local credentials) is recovered by simply logging in again. They return `409`
 in any other state, including `deactivated`.
 `POST /v1/agent-runtime/reset-linked-account` takes `{"agent_runtime": "codex"}`,
-`{"agent_runtime": "codex-2"}`, `{"agent_runtime": "claude_code"}`, or
-`{"agent_runtime": "grok"}` and deletes
+`{"agent_runtime": "codex-2"}`, `{"agent_runtime": "codex-3"}`, `{"agent_runtime": "claude_code"}`, or
+`{"agent_runtime": "grok"}`, or `{"agent_runtime": "grok-2"}` and deletes
 that runtime's linked-account guard: the operator-approved anchor, its proxy pin, and any pending OAuth
 approval. Use it to unlink the account, for example to switch a runtime to a
 different provider account. It may be called in any
@@ -309,7 +317,7 @@ ready for a fresh operator login that links an account again.
 `GET /v1/agent-runtime/account` does not accept query parameters; it always returns
 one account-status entry per runtime.
 `POST /v1/agent-runtime/refresh` accepts `{}` to refresh all runtimes, or
-`{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, or `{"agent_runtime": "hermes"}` to refresh one.
+`{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "codex-3"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, `{"agent_runtime": "grok-2"}`, or `{"agent_runtime": "hermes"}` to refresh one.
 It forces a provider check instead of reusing a remembered live-validation
 verdict. It returns the same response shape as
 `GET /v1/agent-runtime/account`.
@@ -337,7 +345,7 @@ Agent runtime status response fields:
 
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
-| `runtimes[].type` | enum | `codex`, `codex-2`, `claude_code`, `grok`, `hermes` | Agent runtime type. |
+| `runtimes[].type` | enum | `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, `hermes` | Agent runtime type. |
 | `runtimes[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current runtime state. Codex uses its rate-limit request and, if that fails, one Codex-owned forced refresh. Claude Code uses a `/usage` probe for the pinned token, or provider profile attestation for a new or rotated token. Grok uses live auth, entitlement, and billing probes through the managed xAI proxy. Bedrock is `active` when the integration is enabled and its synchronously validated credential/account row is present. AWS checks model-specific invocation permission and current credential validity on the first real turn; later provider failures are turn failures. |
 | `runtimes[].active_thread_ids` | string array |  | Threads with a live turn on that runtime, sorted by thread id. Empty when no turn is running. |
 | `runtimes[].error_message` | string | optional | Present only while `status` is `error`: the underlying runtime failure message. |
@@ -417,7 +425,7 @@ Agent account response fields:
 
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
-| `accounts[].agent_runtime` | enum | `codex`, `codex-2`, `claude_code`, `grok` | Runtime for an OAuth provider record. Absent on the Bedrock record. |
+| `accounts[].agent_runtime` | enum | `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2` | Runtime for an OAuth provider record. Absent on the Bedrock record. |
 | `accounts[].agent_runtimes` | string array | `["hermes"]` | Runtime that uses the Bedrock provider. Present only on the Bedrock record. |
 | `accounts[].provider` | enum | `openai`, `claude`, `xai`, `bedrock` | Managed AI provider. |
 | `accounts[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current provider account status. OAuth runtimes use `awaiting_login` when operator login is required. Bedrock has no OAuth flow: its status is `awaiting_login` until a synchronously validated credential is connected, then `active`. Later inference failures are reported on their turns, not persisted as provider status. |
@@ -623,7 +631,7 @@ Send message request fields:
 | Field | Required | Type | Meaning |
 | --- | --- | --- | --- |
 | `message` | Yes | string | Message for the agent runtime. Must be 1 to 50,000 characters. The host handles idle and running threads; callers use the same operation for both. |
-| `agent_runtime` | New thread or configuration change | enum | Runtime for the thread: `codex`, `codex-2`, `claude_code`, `grok`, or `hermes`. Supply it together with `model` and `effort`. On an existing thread, a matching triple resumes or steers the current provider session; a different triple starts a fresh provider session only while the thread is idle. |
+| `agent_runtime` | New thread or configuration change | enum | Runtime for the thread: `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, or `hermes`. Supply it together with `model` and `effort`. On an existing thread, a matching triple resumes or steers the current provider session; a different triple starts a fresh provider session only while the thread is idle. |
 | `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-5.6-terra`, `gpt-5.6-sol`, `gpt-5.6-luna`, or `gpt-6-astra`; Claude Code accepts `claude-opus-5`, `claude-fable-5-1`, or `claude-sonnet-5`; Grok accepts `grok-4.6`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, `moonshotai.kimi-k2.5`, or `zai.glm-5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
 | `effort` | New thread or configuration change | enum | Effort for this session. Codex accepts `high`, `max`, or `ultra`, except Luna accepts only `high` or `max`. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Grok accepts `xhigh` or `high`. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
 
@@ -752,7 +760,7 @@ Thread list response fields:
 | `threads` | thread array | Recent known threads sorted by `last_used_at` descending. |
 | `next_before` | string | Optional opaque cursor for the next older page. Absent when this is the last page. |
 | `threads[].thread_id` | string | Client-generated conversation id. |
-| `threads[].agent_runtime` | enum | Runtime for this thread: `codex`, `codex-2`, `claude_code`, `grok`, or `hermes`. |
+| `threads[].agent_runtime` | enum | Runtime for this thread: `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, or `hermes`. |
 | `threads[].model` | enum | Model for the thread's current provider session. |
 | `threads[].effort` | enum | Effort for the thread's current provider session. |
 | `threads[].last_used_at` | string | Latest message or successful-settlement timestamp known for this thread. |
@@ -933,19 +941,19 @@ provider acknowledgement or provider-managed context/compaction.
 work.
 
 `agent_runtime.active` uses `thread_id: null` and payload
-`{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, or `{"agent_runtime": "hermes"}`.
+`{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "codex-3"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, `{"agent_runtime": "grok-2"}`, or `{"agent_runtime": "hermes"}`.
 
 `agent_runtime.login_completed` uses `thread_id: null` and payload
-`{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "claude_code"}`, or `{"agent_runtime": "grok"}`. Hermes has
+`{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "codex-3"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, or `{"agent_runtime": "grok-2"}`. Hermes has
 no login flow.
 
 `agent_runtime.linked_account_reset` uses `thread_id: null` and payload
-`{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, or `{"agent_runtime": "hermes"}` when an
+`{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "codex-3"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, `{"agent_runtime": "grok-2"}`, or `{"agent_runtime": "hermes"}` when an
 operator reset cleared that runtime's linked account (the audit record of the
 reset-linked-account endpoint).
 
 `agent_runtime.deactivated` uses `thread_id: null` and payload
-`{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, or `{"agent_runtime": "hermes"}` when a
+`{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "codex-3"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, `{"agent_runtime": "grok-2"}`, or `{"agent_runtime": "hermes"}` when a
 runtime is disabled because its managed provider integration is disabled.
 
 ## Agent Files

@@ -58,7 +58,10 @@ def save_approved_openai_account(account_id: str, **extra: Any) -> None:
 DEFAULT_SESSION_OPTIONS = {
     "codex": ("gpt-5.6-terra", "high"),
     "codex-2": ("gpt-5.6-terra", "high"),
+    "codex-3": ("gpt-5.6-terra", "high"),
     "claude_code": ("claude-opus-5", "high"),
+    "grok": ("grok-4.6", "high"),
+    "grok-2": ("grok-4.6", "high"),
     "hermes": ("deepseek.v3.2", "high"),
     "script": ("bash", "fixed"),
 }
@@ -3770,6 +3773,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('leftLabel.localeCompare(rightLabel', ui)
         self.assertIn("Integration guide", ui)
         self.assertIn("Authenticated traffic for any other account is denied", ui)
+        self.assertIn("Requests carrying any other account or an opaque API key are denied", ui)
         self.assertIn("writes work only for the repositories you configure", ui)
         self.assertNotIn("iconTile", ui)
         self.assertNotIn('class="icon-tile"', html)
@@ -4793,6 +4797,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         "email": "codex@example.com",
                     },
                     {"agent_runtime": "codex-2", "provider": "openai", "status": "loading"},
+                    {"agent_runtime": "codex-3", "provider": "openai", "status": "loading"},
                     {
                         "agent_runtime": "claude_code",
                         "provider": "claude",
@@ -4801,6 +4806,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         "email": "claude@example.com",
                     },
                     {"agent_runtime": "grok", "provider": "xai", "status": "loading"},
+                    {"agent_runtime": "grok-2", "provider": "xai", "status": "loading"},
                     {
                         "provider": "bedrock",
                         "agent_runtimes": ["hermes"],
@@ -4828,7 +4834,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, body = self.request("GET", "/v1/agent-runtime/account")
 
         self.assertEqual(
-            body["accounts"][2], {"agent_runtime": "claude_code", "provider": "claude", "status": "awaiting_login"}
+            body["accounts"][3], {"agent_runtime": "claude_code", "provider": "claude", "status": "awaiting_login"}
         )
 
     def test_agent_accounts_return_provider_records(self) -> None:
@@ -4879,8 +4885,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         },
                     },
                     {"agent_runtime": "codex-2", "provider": "openai", "status": "loading"},
+                    {"agent_runtime": "codex-3", "provider": "openai", "status": "loading"},
                     {"agent_runtime": "claude_code", "provider": "claude", "status": "awaiting_login"},
                     {"agent_runtime": "grok", "provider": "xai", "status": "loading"},
+                    {"agent_runtime": "grok-2", "provider": "xai", "status": "loading"},
                     {
                         "provider": "bedrock",
                         "agent_runtimes": ["hermes"],
@@ -4970,6 +4978,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "accounts": [
                     {"agent_runtime": "codex", "provider": "openai", "status": "deactivated"},
                     {"agent_runtime": "codex-2", "provider": "openai", "status": "loading"},
+                    {"agent_runtime": "codex-3", "provider": "openai", "status": "loading"},
                     {
                         "agent_runtime": "claude_code",
                         "provider": "claude",
@@ -4986,6 +4995,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         },
                     },
                     {"agent_runtime": "grok", "provider": "xai", "status": "loading"},
+                    {"agent_runtime": "grok-2", "provider": "xai", "status": "loading"},
                     {
                         "provider": "bedrock",
                         "agent_runtimes": ["hermes"],
@@ -5011,7 +5021,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, body = self.request("GET", "/v1/agent-runtime/account")
 
         self.assertEqual(
-            body["accounts"][3],
+            body["accounts"][4],
             {
                 "agent_runtime": "grok",
                 "provider": "xai",
@@ -5021,7 +5031,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "coding_data_retention_opt_out": True,
             },
         )
-        self.assertNotIn("zdr_enabled", body["accounts"][3])
+        self.assertNotIn("zdr_enabled", body["accounts"][4])
 
     def test_agent_accounts_return_partial_claude_usage_metadata(self) -> None:
         set_runtime_statuses(codex="active", claude_code="active")
@@ -5038,7 +5048,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, body = self.request("GET", "/v1/agent-runtime/account")
 
         self.assertEqual(
-            body["accounts"][2]["claude_usage"],
+            body["accounts"][3]["claude_usage"],
             {
                 "current_session_used_percent": 0,
                 "weekly_used_percent": 0,
@@ -5057,7 +5067,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         refresh.assert_called_once_with("claude_code", force_provider_probe=True)
         self.assertEqual(
             [account["provider"] for account in body["accounts"]],
-            ["openai", "openai", "claude", "xai", "bedrock"],
+            ["openai", "openai", "openai", "claude", "xai", "xai", "bedrock"],
         )
 
     def test_agent_runtime_refresh_endpoint_forces_requested_bedrock_runtime(self) -> None:
@@ -5090,8 +5100,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
             [
                 ("codex", {"force_provider_probe": True}),
                 ("codex-2", {"force_provider_probe": True}),
+                ("codex-3", {"force_provider_probe": True}),
                 ("claude_code", {"force_provider_probe": True}),
                 ("grok", {"force_provider_probe": True}),
+                ("grok-2", {"force_provider_probe": True}),
                 ("hermes", {"force_provider_probe": True}),
             ],
         )
@@ -5109,8 +5121,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
             [
                 ("codex", {"force_provider_probe": True}),
                 ("codex-2", {"force_provider_probe": True}),
+                ("codex-3", {"force_provider_probe": True}),
                 ("claude_code", {"force_provider_probe": True}),
                 ("grok", {"force_provider_probe": True}),
+                ("grok-2", {"force_provider_probe": True}),
                 ("hermes", {"force_provider_probe": False}),
             ],
         )
@@ -5739,6 +5753,24 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(absent.exception.status, HTTPStatus.NOT_FOUND)
         self.assertEqual(state.oauth_login("codex-2")["login_id"], "login-2")
 
+    def test_codex_3_oauth_start_uses_its_own_login_row(self) -> None:
+        set_runtime_statuses(**{"codex-3": "awaiting_login"})
+        login = admin_api.codex_app_server.CodexLogin(
+            login_id="login-3",
+            verification_url="https://example.com/device",
+            user_code="CODE-3",
+        )
+
+        with patch(
+            "host.runtime.admin_api.service.codex_app_server.start_device_login",
+            return_value=login,
+        ) as start:
+            response = admin_api.start_codex_3_oauth_login()
+
+        self.assertEqual(response["device_code"], "CODE-3")
+        start.assert_called_once_with("codex-3")
+        self.assertEqual(state.oauth_login("codex-3")["login_id"], "login-3")
+
     def test_claude_oauth_start_reuses_existing_login(self) -> None:
         save_policy(
             {"network_integrations": {"claude": {"enabled": True}}},
@@ -5786,6 +5818,79 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertNotIn("login_id", first)
         self.assertEqual(start.call_count, 1)
         self.assertEqual(state.oauth_login("grok")["login_id"], "grok-login-1")
+
+    def test_grok_2_oauth_login_is_separate_from_the_first_grok_runtime(self) -> None:
+        # Its own OAuth row, device flow, and parked server: starting Grok 2's
+        # login must neither reuse nor disturb Grok's.
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:01Z",
+        )
+        set_runtime_statuses(grok="awaiting_login", **{"grok-2": "awaiting_login"})
+        logins = {
+            "grok": admin_api.grok_agent.GrokLogin(
+                login_id="grok-login-1",
+                login_url="https://accounts.x.ai/device?user_code=GROK-CODE",
+                user_code="GROK-CODE",
+            ),
+            "grok-2": admin_api.grok_agent.GrokLogin(
+                login_id="grok-2-login-1",
+                login_url="https://accounts.x.ai/device?user_code=GROK-2-CODE",
+                user_code="GROK-2-CODE",
+            ),
+        }
+
+        with (
+            patch(
+                "host.runtime.admin_api.service.grok_agent.start_device_login",
+                side_effect=lambda runtime_type: logins[runtime_type],
+            ) as start,
+            patch(
+                "host.runtime.admin_api.service.grok_agent.login_server_parked",
+                return_value=True,
+            ),
+        ):
+            first = admin_api.start_grok_oauth_login()
+            second = admin_api.start_grok_2_oauth_login()
+            # Reading each login back needs the parked server, so both reads
+            # stay inside the patch that keeps one parked.
+            self.assertEqual(
+                admin_api.current_grok_oauth_login()["device_code"], "GROK-CODE"
+            )
+            self.assertEqual(
+                admin_api.current_grok_2_oauth_login()["device_code"], "GROK-2-CODE"
+            )
+
+        self.assertEqual(first["device_code"], "GROK-CODE")
+        self.assertEqual(second["device_code"], "GROK-2-CODE")
+        self.assertEqual(
+            [call.args[0] for call in start.call_args_list], ["grok", "grok-2"]
+        )
+        self.assertEqual(state.oauth_login("grok")["login_id"], "grok-login-1")
+        self.assertEqual(state.oauth_login("grok-2")["login_id"], "grok-2-login-1")
+
+    def test_grok_2_reset_leaves_the_first_grok_anchor_and_pin_intact(self) -> None:
+        save_policy(
+            {"network_integrations": {"xai": {"enabled": True}}},
+            "2026-08-17T00:00:01Z",
+        )
+        for runtime_type, account_id in (("grok", "xai-1"), ("grok-2", "xai-2")):
+            state.save_xai_account(
+                {
+                    "account_id": account_id,
+                    "operator_approval": orchestrator.XAI_OPERATOR_APPROVAL,
+                },
+                runtime_type=runtime_type,
+            )
+            state.save_proxy_xai_account_id(account_id, runtime_type=runtime_type)
+
+        orchestrator.reset_linked_account("grok-2")
+
+        self.assertEqual(state.read_xai_account()["account_id"], "xai-1")
+        self.assertEqual(state.read_proxy_xai_account_id(), "xai-1")
+        self.assertEqual(state.read_xai_account(runtime_type="grok-2"), {})
+        self.assertIsNone(state.read_proxy_xai_account_id(runtime_type="grok-2"))
+        self.assertEqual(state.read_proxy_xai_account_ids(), {"xai-1"})
 
     def test_grok_oauth_start_retries_after_clearing_an_unanchored_credential(self) -> None:
         save_policy(

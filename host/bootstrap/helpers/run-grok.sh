@@ -29,15 +29,34 @@ cd /mnt/kern-agent/agent-home
 # the CLI) names the scope kern-agent-thread-<thread_id>.scope. The name comes
 # from this root helper and is validated as a host thread id. Web App API
 # targeting is explicit and independent of this process scope.
+runtime=grok
 unit_args=()
-if [ "${1:-}" = "--thread-scope" ]; then
-  if ! [[ "${2:-}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
-    echo "invalid --thread-scope thread id: ${2:-<missing>}" >&2
-    exit 64
-  fi
-  unit_args=(--unit "kern-agent-thread-$2")
-  shift 2
-fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --runtime)
+      if [ "${2:-}" != "grok" ] && [ "${2:-}" != "grok-2" ]; then
+        echo "invalid Grok runtime: ${2:-<missing>}" >&2
+        exit 64
+      fi
+      runtime="$2"
+      shift 2
+      ;;
+    --thread-scope)
+      if ! [[ "${2:-}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+        echo "invalid --thread-scope thread id: ${2:-<missing>}" >&2
+        exit 64
+      fi
+      unit_args=(--unit "kern-agent-thread-$2")
+      shift 2
+      ;;
+    *)
+      echo "usage: run-grok [--runtime grok|grok-2] [--thread-scope thread-id]" >&2
+      exit 64
+      ;;
+  esac
+done
+
+grok_home="/mnt/kern-agent/agent-home/.$runtime"
 
 # GROK_EXTRA_CA_BUNDLE is not an optimization: Grok's HTTP client is built
 # against rustls with bundled webpki roots and does not consult the system CA
@@ -68,7 +87,7 @@ exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   /usr/sbin/runuser -u kern-agent -- env \
   HOME=/mnt/kern-agent/agent-home \
   TMPDIR=/mnt/kern-agent/agent-home/.tmp \
-  GROK_HOME=/mnt/kern-agent/agent-home/.grok \
+  GROK_HOME="$grok_home" \
   HTTP_PROXY=http://127.0.0.1:@PROXY_PORT@ \
   HTTPS_PROXY=http://127.0.0.1:@PROXY_PORT@ \
   ALL_PROXY=http://127.0.0.1:@PROXY_PORT@ \

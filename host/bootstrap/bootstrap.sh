@@ -317,7 +317,13 @@ for directory in (
     agent_home / ".codex",
     agent_home / ".codex" / "skills",
     agent_home / ".codex-2",
+    agent_home / ".codex-3",
     agent_home / ".claude",
+    # Both Grok homes are sanitized here, before the later root-owned
+    # install -d: they are agent-writable names on a preserved volume, so a
+    # planted symlink would otherwise have its target chowned to the agent.
+    agent_home / ".grok",
+    agent_home / ".grok-2",
     agent_home / ".hermes",
 ):
     ensure_directory(directory)
@@ -336,6 +342,7 @@ for path in (
     agent_home / "CLAUDE.md",
     agent_home / ".codex" / "config.toml",
     agent_home / ".codex-2" / "config.toml",
+    agent_home / ".codex-3" / "config.toml",
     agent_home / ".claude" / "settings.json",
     agent_home / ".hermes" / "config.yaml",
     agent_home / ".hermes" / ".env",
@@ -466,6 +473,7 @@ apt_get_once() {
   timeout --signal=TERM --kill-after=30s "$command_timeout" \
     apt-get -q \
       -o DPkg::Lock::Timeout=300 \
+      -o APT::Keep-Downloaded-Packages=true \
       -o Acquire::Retries="$acquire_retries" \
       -o Acquire::http::Timeout="$acquire_timeout" \
       -o Acquire::https::Timeout="$acquire_timeout" \
@@ -584,6 +592,10 @@ install -o root -g root -m 0644 "${pgvector_sql[@]}" \
 rm -rf "$pgvector_extract"
 }
 
+bootstrap_cache() {
+  PYTHONPATH=/opt/kern-host python3 -m host.bootstrap.cache "$@"
+}
+
 # Base OS packages.
 install_system_packages() {
 echo "== installing system packages =="
@@ -599,15 +611,19 @@ systemctl stop apt-daily.service apt-daily-upgrade.service
 
 # Node.js (and npm) come from the official tarball below, not apt: the Ubuntu
 # npm package pulls in hundreds of node-* dependencies.
+bootstrap_cache restore-debs
 apt_get update
 apt_get install -y ca-certificates curl gh git iproute2 jq nftables openssl python3 python3-venv sudo unattended-upgrades xz-utils
+bootstrap_cache save-debs
 
 # PostgreSQL for admin state. postgresql-common is installed first so its
 # default-cluster creation can be disabled: the data directory must live on
 # the durable admin volume (set up below), not on this replaceable root volume.
 apt_get install -y postgresql-common
+bootstrap_cache save-debs
 sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf
 apt_get install -y "postgresql-${PG_MAJOR}"
+bootstrap_cache save-debs
 # pgvector keeps semantic-search vectors in the existing durable Postgres
 # database. Install the pinned, repository-signed binary without retaining a
 # third-party apt source on the deployed host.
@@ -979,9 +995,9 @@ install -d -o root -g root -m 0755 /usr/local/share/kern-embedding-models
 install -d -o root -g root -m 0755 "$EMBEDDING_MODEL_DIR"
 embedding_model_base="https://github.com/@GITHUB_REPOSITORY@/releases/download/${EMBEDDING_MODEL_TAG}"
 while read -r _digest embedding_model_file; do
-  curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
-    -o "${EMBEDDING_MODEL_DIR}/${embedding_model_file}" \
-    "${embedding_model_base}/${embedding_model_file}"
+  bootstrap_cache model "$_digest" \
+    "${embedding_model_base}/${embedding_model_file}" \
+    "${EMBEDDING_MODEL_DIR}/${embedding_model_file}"
 done <<< "$EMBEDDING_MODEL_SHA256"
 # Verify against the digests pinned in this script, never against a checksum
 # file served alongside the assets: anything able to replace an asset could
@@ -1019,9 +1035,9 @@ install -d -o root -g root -m 0755 /usr/local/share/kern-transcription-models
 install -d -o root -g root -m 0755 "$TRANSCRIPTION_MODEL_DIR"
 transcription_model_base="https://github.com/@GITHUB_REPOSITORY@/releases/download/${TRANSCRIPTION_MODEL_TAG}"
 while read -r _digest transcription_model_file; do
-  curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
-    -o "${TRANSCRIPTION_MODEL_DIR}/${transcription_model_file}" \
-    "${transcription_model_base}/${transcription_model_file}"
+  bootstrap_cache model "$_digest" \
+    "${transcription_model_base}/${transcription_model_file}" \
+    "${TRANSCRIPTION_MODEL_DIR}/${transcription_model_file}"
 done <<< "$TRANSCRIPTION_MODEL_SHA256"
 (
   cd "$TRANSCRIPTION_MODEL_DIR"
@@ -1300,8 +1316,10 @@ apply_durable_ownership() {
     "$AGENT_HOME_PATH/.codex" \
     "$AGENT_HOME_PATH/.codex/skills" \
     "$AGENT_HOME_PATH/.codex-2" \
+    "$AGENT_HOME_PATH/.codex-3" \
     "$AGENT_HOME_PATH/.claude" \
     "$AGENT_HOME_PATH/.grok" \
+    "$AGENT_HOME_PATH/.grok-2" \
     "$AGENT_HOME_PATH/.hermes"
   # Agent processes normally remove their own temporary trees. Cover abrupt
   # kills and host crashes as well: the standard daily tmpfiles timer removes
@@ -1327,6 +1345,7 @@ for managed_agent_file in \
   "$AGENT_HOME_PATH/CLAUDE.md" \
   "$AGENT_HOME_PATH/.codex/config.toml" \
   "$AGENT_HOME_PATH/.codex-2/config.toml" \
+  "$AGENT_HOME_PATH/.codex-3/config.toml" \
   "$AGENT_HOME_PATH/.claude/settings.json" \
   "$AGENT_HOME_PATH/.hermes/config.yaml" \
   "$AGENT_HOME_PATH/.hermes/.env"; do
@@ -1336,6 +1355,7 @@ install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/agents_claude.md" "$AGEN
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/agents_claude.md" "$AGENT_HOME_PATH/CLAUDE.md"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.codex/config.toml" "$AGENT_HOME_PATH/.codex/config.toml"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.codex/config.toml" "$AGENT_HOME_PATH/.codex-2/config.toml"
+install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.codex/config.toml" "$AGENT_HOME_PATH/.codex-3/config.toml"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.claude/settings.json" "$AGENT_HOME_PATH/.claude/settings.json"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.hermes/config.yaml" "$AGENT_HOME_PATH/.hermes/config.yaml"
 install -m 0644 -o root -g root "$AGENT_HOME_SOURCE_DIR/.hermes/.env" "$AGENT_HOME_PATH/.hermes/.env"
@@ -1343,11 +1363,16 @@ if [ ! -e "$AGENT_HOME_PATH/.codex-2/skills" ] && [ ! -L "$AGENT_HOME_PATH/.code
   ln -s ../.codex/skills "$AGENT_HOME_PATH/.codex-2/skills"
   chown -h kern-agent:kern-agent "$AGENT_HOME_PATH/.codex-2/skills"
 fi
+if [ ! -e "$AGENT_HOME_PATH/.codex-3/skills" ] && [ ! -L "$AGENT_HOME_PATH/.codex-3/skills" ]; then
+  ln -s ../.codex/skills "$AGENT_HOME_PATH/.codex-3/skills"
+  chown -h kern-agent:kern-agent "$AGENT_HOME_PATH/.codex-3/skills"
+fi
 chattr +i \
   "$AGENT_HOME_PATH/AGENTS.md" \
   "$AGENT_HOME_PATH/CLAUDE.md" \
   "$AGENT_HOME_PATH/.codex/config.toml" \
   "$AGENT_HOME_PATH/.codex-2/config.toml" \
+  "$AGENT_HOME_PATH/.codex-3/config.toml" \
   "$AGENT_HOME_PATH/.claude/settings.json" \
   "$AGENT_HOME_PATH/.hermes/config.yaml" \
   "$AGENT_HOME_PATH/.hermes/.env"
@@ -1388,6 +1413,10 @@ test "$(stat -c '%U:%a' /usr/local/bin/grok)" = "root:755"
 runuser -u kern-agent -- env \
   HOME="$AGENT_HOME_PATH" \
   GROK_HOME="$AGENT_HOME_PATH/.grok" \
+  /usr/local/bin/grok --version | grep -qF "$GROK_CLI_VERSION"
+runuser -u kern-agent -- env \
+  HOME="$AGENT_HOME_PATH" \
+  GROK_HOME="$AGENT_HOME_PATH/.grok-2" \
   /usr/local/bin/grok --version | grep -qF "$GROK_CLI_VERSION"
 }
 
@@ -1920,6 +1949,8 @@ main() {
   install_service_units
   start_services
   verify_deployment
+  # Only a verified deployment may discard obsolete cached downloads.
+  bootstrap_cache prune $(printf '%s\n%s\n' "$EMBEDDING_MODEL_SHA256" "$TRANSCRIPTION_MODEL_SHA256" | awk '{print $1}')
   finalize_deploy
 }
 

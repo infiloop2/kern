@@ -18,7 +18,7 @@ unit_args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --runtime)
-      if [ "${2:-}" != "codex" ] && [ "${2:-}" != "codex-2" ]; then
+      if [ "${2:-}" != "codex" ] && [ "${2:-}" != "codex-2" ] && [ "${2:-}" != "codex-3" ]; then
         echo "invalid Codex runtime: ${2:-<missing>}" >&2
         exit 64
       fi
@@ -34,7 +34,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     *)
-      echo "usage: run-codex-app-server [--runtime codex|codex-2] [--thread-scope thread-id]" >&2
+      echo "usage: run-codex-app-server [--runtime codex|codex-2|codex-3] [--thread-scope thread-id]" >&2
       exit 64
       ;;
   esac

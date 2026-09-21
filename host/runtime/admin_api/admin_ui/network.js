@@ -12,6 +12,7 @@ const GITHUB_REPO_INPUT_RE = /^([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)\/([a-z0-9.
 const INFERENCE_INTEGRATIONS = ["openai", "claude", "xai", "bedrock"];
 const BEDROCK_INTEGRATION = "bedrock";
 const XAI_INTEGRATION = "xai";
+const CONFIGURED_VALUE_PLACEHOLDER = "••••••••";
 // Must match SUPPORTED_REGIONS in host/network_integrations/bedrock/manifest.py.
 const BEDROCK_REGIONS = ["us-east-1", "us-east-2", "us-west-2"];
 
@@ -77,6 +78,16 @@ document.addEventListener("kern-home-integration-cards-rendered", renderHomeMana
 
 export function setBedrockCredentialMetadata(value) {
   bedrockCredentialMetadata = value && typeof value === "object" ? value : { connected: false };
+  const accessKeyInput = $(`bedrock-access-key-id-${BEDROCK_INTEGRATION}`);
+  const secretKeyInput = $(`bedrock-secret-access-key-${BEDROCK_INTEGRATION}`);
+  if (accessKeyInput) {
+    accessKeyInput.placeholder = bedrockCredentialMetadata.connected
+      ? CONFIGURED_VALUE_PLACEHOLDER : "Access key id (AKIA...)";
+  }
+  if (secretKeyInput) {
+    secretKeyInput.placeholder = bedrockCredentialMetadata.connected
+      ? CONFIGURED_VALUE_PLACEHOLDER : "Secret access key";
+  }
 }
 
 function policyMessage(integration, message, isError) {
@@ -196,8 +207,8 @@ function integrationDetailsHtml(name, enabled) {
         <div class="detail-card-head"><h3>AWS Bedrock connection</h3></div>
         <div class="integration-account" data-provider="${esc(name)}"></div>
         <div class="bedrock-credential-form">
-          <input id="bedrock-access-key-id-${esc(name)}" type="text" placeholder="Access key id (AKIA...)" autocomplete="off" spellcheck="false">
-          <input id="bedrock-secret-access-key-${esc(name)}" type="password" placeholder="Secret access key" autocomplete="off">
+          <input id="bedrock-access-key-id-${esc(name)}" type="text" placeholder="${bedrockCredentialMetadata.connected ? CONFIGURED_VALUE_PLACEHOLDER : "Access key id (AKIA...)"}" autocomplete="off" spellcheck="false">
+          <input id="bedrock-secret-access-key-${esc(name)}" type="password" placeholder="${bedrockCredentialMetadata.connected ? CONFIGURED_VALUE_PLACEHOLDER : "Secret access key"}" autocomplete="off">
           <label class="bedrock-region-field" for="bedrock-region-${esc(name)}">
             <span>Region</span>
             <select id="bedrock-region-${esc(name)}">
@@ -212,7 +223,7 @@ function integrationDetailsHtml(name, enabled) {
   if (name === "openai" || name === "claude" || name === "xai") {
     const accountCard = runtime => `
       <div class="detail-card">
-        <div class="detail-card-head"><h3>${name === "openai" ? esc(runtimeLabel(runtime)) : "Account"}</h3></div>
+        <div class="detail-card-head"><h3>${name === "claude" ? "Account" : esc(runtimeLabel(runtime))}</h3></div>
         <div class="integration-account" data-provider="${esc(name)}" data-runtime="${esc(runtime)}"></div>
         <div class="provider-oauth" data-provider-oauth="${esc(runtime)}"></div>
       </div>`;
@@ -498,7 +509,9 @@ export async function connectBedrockCredentials(name) {
       "secret_access_key": secretAccessKey,
       "region": region,
     });
+    const accessInput = $(`bedrock-access-key-id-${name}`);
     const secretInput = $(`bedrock-secret-access-key-${name}`);
+    if (accessInput) accessInput.value = "";
     if (secretInput) secretInput.value = "";
     policyMessage(name, "AWS credential accepted.", false);
     await refreshProviderAccounts();
@@ -908,8 +921,8 @@ function xaiVideoStorageCard(enabled) {
     <div class="xai-storage-form">
       <label>Bucket<input id="xai-video-bucket" value="${esc(xaiVideoStorage.bucket || "")}" placeholder="my-grok-videos" autocomplete="off" spellcheck="false"></label>
       <label>Region<input id="xai-video-region" value="${esc(xaiVideoStorage.region || "us-east-1")}" autocomplete="off" spellcheck="false"></label>
-      <label>Access key ID<input id="xai-video-access-key" placeholder="AKIA..." autocomplete="off" spellcheck="false"></label>
-      <label>Secret access key<input id="xai-video-secret" type="password" autocomplete="off"></label>
+      <label>Access key ID<input id="xai-video-access-key" placeholder="${saved ? CONFIGURED_VALUE_PLACEHOLDER : "AKIA..."}" autocomplete="off" spellcheck="false"></label>
+      <label>Secret access key<input id="xai-video-secret" type="password" placeholder="${saved ? CONFIGURED_VALUE_PLACEHOLDER : ""}" autocomplete="off"></label>
     </div>
     <p class="muted">${saved ? "Enter both keys to replace the saved configuration. " : ""}Kern encrypts the secret and keeps it out of Grok. See the integration guide for bucket permissions.</p>
     <div class="actions">

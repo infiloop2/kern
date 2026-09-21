@@ -2,15 +2,15 @@
 set -euo pipefail
 
 if [[ "$#" -ne 1 ]]; then
-  echo "usage: clear-agent-auth <codex|codex-2|claude|grok>" >&2
+  echo "usage: clear-agent-auth <codex|codex-2|codex-3|claude|grok|grok-2>" >&2
   exit 2
 fi
 
 runtime="$1"
 case "${runtime}" in
-  codex|codex-2|claude|grok) ;;
+  codex|codex-2|codex-3|claude|grok|grok-2) ;;
   *)
-    echo "usage: clear-agent-auth <codex|codex-2|claude|grok>" >&2
+    echo "usage: clear-agent-auth <codex|codex-2|codex-3|claude|grok|grok-2>" >&2
     exit 2
     ;;
 esac
@@ -26,15 +26,15 @@ home = Path.home()
 claude_config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(home / ".claude")))
 grok_home = Path(os.environ.get("GROK_HOME", str(home / ".grok")))
 
-if runtime in ("codex", "codex-2"):
+if runtime in ("codex", "codex-2", "codex-3"):
     paths = [home / f".{runtime}" / "auth.json"]
-elif runtime == "grok":
+elif runtime in ("grok", "grok-2"):
     # mcp_credentials.json holds OAuth tokens Grok obtained for MCP servers on
     # the agent's behalf. They are not the provider login, but they are agent
     # credentials minted under it, so an operator reset clears them too.
     paths = [
-        grok_home / "auth.json",
-        grok_home / "mcp_credentials.json",
+        home / f".{runtime}" / "auth.json",
+        home / f".{runtime}" / "mcp_credentials.json",
     ]
 else:
     paths = [

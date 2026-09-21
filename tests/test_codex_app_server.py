@@ -91,6 +91,86 @@ for line in sys.stdin:
 """
 
 
+FAKE_MESSAGELESS_SERVER = r"""
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg["id"], "result": {}})
+    elif method == "thread/start":
+        send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
+    elif method == "turn/start":
+        send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
+        send({"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "text": "I'll run the tests."
+        }}})
+        send({"method": "item/started", "params": {"item": {
+            "id": "command_1", "type": "commandExecution", "command": "pytest"
+        }}})
+        send({"method": "item/completed", "params": {"item": {
+            "id": "command_1", "type": "commandExecution", "command": "pytest",
+            "aggregatedOutput": "1 passed", "exitCode": 0
+        }}})
+        send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+"""
+
+
+FAKE_TEXTLESS_FINAL_SERVER = r"""
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg["id"], "result": {}})
+    elif method == "thread/start":
+        send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
+    elif method == "turn/start":
+        send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
+        send({"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "text": "The task is almost done."
+        }}})
+        send({"method": "item/started", "params": {"item": {
+            "id": "message_2", "type": "agentMessage", "phase": "final_answer"
+        }}})
+        send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+"""
+
+
+FAKE_COMMENTARY_ONLY_SERVER = r"""
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg["id"], "result": {}})
+    elif method == "thread/start":
+        send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
+    elif method == "turn/start":
+        send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
+        send({"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "phase": "commentary",
+            "text": "I'll run the tests."
+        }}})
+        send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+"""
+
+
 FAKE_ACTIVITY_SERVER = r"""
 import json, sys
 
@@ -456,12 +536,12 @@ class CodexAppServerTests(unittest.TestCase):
 
     def setUp(self) -> None:
         # The live-validation verdict is a process-global memo; isolate tests.
-        for runtime in ("codex", "codex-2"):
+        for runtime in ("codex", "codex-2", "codex-3"):
             codex_app_server_module.clear_live_validation_failure(runtime)
             self.addCleanup(codex_app_server_module.clear_live_validation_failure, runtime)
 
     def tearDown(self) -> None:
-        for runtime in ("codex", "codex-2"):
+        for runtime in ("codex", "codex-2", "codex-3"):
             codex_app_server_module.close_login_server(runtime)
 
     def account_status_with_result(
@@ -504,20 +584,22 @@ class CodexAppServerTests(unittest.TestCase):
             codex_app_server_module.CodexAppServer(command=["/bin/echo"])._command, ["/bin/echo"]
         )
 
-    def test_second_runtime_selects_its_separate_codex_home(self) -> None:
-        server = codex_app_server_module.CodexAppServer(
-            runtime_type="codex-2", thread_id="thread-2"
-        )
-        self.assertEqual(
-            server._command,
-            [
-                *codex_app_server_module.DEFAULT_COMMAND,
-                "--runtime",
-                "codex-2",
-                "--thread-scope",
-                "thread-2",
-            ],
-        )
+    def test_additional_runtimes_select_their_separate_codex_homes(self) -> None:
+        for runtime, thread_id in (("codex-2", "thread-2"), ("codex-3", "thread-3")):
+            with self.subTest(runtime=runtime):
+                server = codex_app_server_module.CodexAppServer(
+                    runtime_type=runtime, thread_id=thread_id
+                )
+                self.assertEqual(
+                    server._command,
+                    [
+                        *codex_app_server_module.DEFAULT_COMMAND,
+                        "--runtime",
+                        runtime,
+                        "--thread-scope",
+                        thread_id,
+                    ],
+                )
 
     def test_close_stops_the_thread_scope_under_the_production_launcher(self) -> None:
         # A killed turn's scope keeps the thread name until its whole cgroup is
@@ -1103,6 +1185,68 @@ class CodexAppServerTests(unittest.TestCase):
         self.assertEqual(thread_id, "thread_1")
         self.assertEqual(messages, ["Hello", "Final answer"])
         self.assertEqual(output, "Final answer")
+
+    def test_run_turn_rejects_completion_after_only_an_intermediate_message(self) -> None:
+        messages: list[str | dict[str, object]] = []
+        with CodexAppServer(
+            [sys.executable, "-u", "-c", FAKE_MESSAGELESS_SERVER]
+        ) as server:
+            with self.assertRaisesRegex(
+                CodexAppServerError,
+                "completed without a final response",
+            ):
+                run_turn(
+                    server,
+                    "do the task",
+                    None,
+                    "gpt-5.6-sol",
+                    "high",
+                    messages.append,
+                )
+
+        self.assertEqual(messages[0], "I'll run the tests.")
+        self.assertEqual(len(messages), 3)
+        self.assertTrue(all(isinstance(message, dict) for message in messages[1:]))
+
+    def test_run_turn_rejects_textless_final_message_item(self) -> None:
+        messages: list[str | dict[str, object]] = []
+        with CodexAppServer(
+            [sys.executable, "-u", "-c", FAKE_TEXTLESS_FINAL_SERVER]
+        ) as server:
+            with self.assertRaisesRegex(
+                CodexAppServerError,
+                "completed without a final response",
+            ):
+                run_turn(
+                    server,
+                    "do the task",
+                    None,
+                    "gpt-5.6-sol",
+                    "high",
+                    messages.append,
+                )
+
+        self.assertEqual(messages, ["The task is almost done."])
+
+    def test_run_turn_rejects_explicit_commentary_as_final_response(self) -> None:
+        messages: list[str | dict[str, object]] = []
+        with CodexAppServer(
+            [sys.executable, "-u", "-c", FAKE_COMMENTARY_ONLY_SERVER]
+        ) as server:
+            with self.assertRaisesRegex(
+                CodexAppServerError,
+                "completed without a final response",
+            ):
+                run_turn(
+                    server,
+                    "do the task",
+                    None,
+                    "gpt-5.6-sol",
+                    "high",
+                    messages.append,
+                )
+
+        self.assertEqual(messages, ["I'll run the tests."])
 
     def test_killed_turn_still_exposes_the_last_known_thread_id(self) -> None:
         # Regression test: run_turn's local thread_id is known immediately

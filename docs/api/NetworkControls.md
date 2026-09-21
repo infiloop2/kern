@@ -107,7 +107,7 @@ Manual rules also cannot set provider-specific guard configuration.
 
 ## OpenAI Integration
 
-When `network_integrations.openai.enabled` is `true`, Codex and Codex 2 turns
+When `network_integrations.openai.enabled` is `true`, Codex, Codex 2, and Codex 3 turns
 can run after their separate OAuth logins. The OpenAI integration directly enforces:
 
 ```json
@@ -131,14 +131,15 @@ from its Codex runtime's login status instead of accepting it in config. OpenAI
 data-plane requests are denied unless their header and OAuth token identify one
 of those approved accounts;
 `auth.openai.com` stays available for login. Disabling the integration
-deactivates both Codex runtimes, clears both account pins, closes live runtime
-processes, and fails running Codex turns.
+deactivates all three Codex runtimes, clears each of their account pins, closes
+live runtime processes, and fails running Codex turns.
 
-Both Codex runtimes use the same local network proxy and Unix service account,
-so the approved account ids form one OpenAI allowlist. Runtime selection chooses
-which Codex home and OAuth login the launcher uses during normal operation; it
-is not a security boundary between the two subscriptions. Code already running
-as `kern-agent` can read both Codex homes. Enforcing hostile separation between
+All three Codex runtimes use the same local network proxy and Unix service
+account, so the approved account ids form one OpenAI allowlist. Runtime
+selection chooses which Codex home and OAuth login the launcher uses during
+normal operation; it is not a security boundary between the three
+subscriptions. Code already running as `kern-agent` can read every Codex home.
+Enforcing hostile separation between
 the accounts would require separate OS identities and independently authenticated
 proxy paths rather than this shared-proxy design.
 
@@ -170,8 +171,9 @@ remains available for Claude Code startup.
 
 ## xAI Integration
 
-When `network_integrations.xai.enabled` is `true`, the Grok Build CLI can reach
-xAI after its OAuth login. The xAI integration directly enforces:
+When `network_integrations.xai.enabled` is `true`, the Grok and Grok 2 runtimes
+can reach xAI after their separate OAuth logins. The xAI integration directly
+enforces:
 
 ```json
 {
@@ -214,9 +216,19 @@ Chat completions, tokenize-text, and other developer-API paths stay closed.
 proxy's session routes are denied.
 
 Every request to the chat proxy or `api.x.ai` must carry exactly one `Authorization: Bearer` token
-whose JWT claims the pinned account under `sub` (personal login) or
-`principal_id` (team login). Requests are denied until the pinned account id is
-available.
+whose JWT claims an approved account under `sub` (personal login) or
+`principal_id` (team login). The host infers each approved xAI account id from
+its Grok runtime's login status instead of accepting it in config. Requests are
+denied until at least one approved account id is available, and a token for any
+other account is denied.
+
+Both Grok runtimes use the same local network proxy and Unix service account,
+so the approved account ids form one xAI allowlist. Runtime selection chooses
+which Grok home and OAuth login the launcher uses during normal operation; it is
+not a security boundary between the two subscriptions. Code already running as
+`kern-agent` can read both Grok homes. Enforcing hostile separation between the
+accounts would require separate OS identities and independently authenticated
+proxy paths rather than this shared-proxy design.
 
 Video storage setup and download allowlisting are documented in the user-facing
 Grok integration guide and the internal [xAI integration](../architecture/xai-integration.md#video-storage-settings).

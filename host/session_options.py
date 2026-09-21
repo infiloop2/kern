@@ -16,12 +16,46 @@ than making every reader special-case a runtime with no model.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 
 SCRIPT_RUNTIME = "script"
 SCRIPT_MODEL = "bash"
 SCRIPT_EFFORT = "fixed"
+
+
+class RuntimeIdentity(NamedTuple):
+    label: str
+    # The managed integration holding this runtime's account, or None when the
+    # runtime reaches no provider of its own. Two runtimes naming one provider
+    # share that integration: separate logins, one allowlist.
+    provider: str | None
+
+
+# Every runtime the host can run, in offer order, with the two facts that are
+# the same everywhere: what it is called and whose integration it uses. The
+# harness registry reads its label and provider from here; the agent's
+# delegation schema and the AWS smoke read the key list. The copies that
+# cannot import Python — the admin UI's RUNTIME_PROVIDERS and the root
+# launchers' allowlists — are held equal to this by tests, because adding a
+# runtime here and forgetting one of them is the failure that has already
+# shipped twice.
+RUNTIMES: dict[str, RuntimeIdentity] = {
+    "codex": RuntimeIdentity("Codex", "openai"),
+    "codex-2": RuntimeIdentity("Codex 2", "openai"),
+    "codex-3": RuntimeIdentity("Codex 3", "openai"),
+    "claude_code": RuntimeIdentity("Claude Code", "claude"),
+    "grok": RuntimeIdentity("Grok", "xai"),
+    "grok-2": RuntimeIdentity("Grok 2", "xai"),
+    "hermes": RuntimeIdentity("Hermes", "bedrock"),
+    SCRIPT_RUNTIME: RuntimeIdentity("Script", None),
+}
+
+# The runtimes a conversation may choose. The script runtime runs a bash job
+# on a schedule and is offered only there.
+INTERACTIVE_RUNTIMES: tuple[str, ...] = tuple(
+    runtime for runtime in RUNTIMES if runtime != SCRIPT_RUNTIME
+)
 
 _CODEX_SESSION_OPTIONS = {
     "gpt-5.6-terra": ("high", "max", "ultra"),
@@ -33,6 +67,7 @@ _CODEX_SESSION_OPTIONS = {
 INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     "codex": _CODEX_SESSION_OPTIONS,
     "codex-2": _CODEX_SESSION_OPTIONS,
+    "codex-3": _CODEX_SESSION_OPTIONS,
     # Claude Code also accepts the unversioned aliases (opus, fable, sonnet),
     # but an alias re-points to a new model generation whenever the pinned CLI
     # is upgraded, silently moving existing threads across generations. The
@@ -49,6 +84,9 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     "grok": {
         "grok-4.6": ("xhigh", "high"),
     },
+    "grok-2": {
+        "grok-4.6": ("xhigh", "high"),
+    },
     # Hermes's headless CLI has no effort flag.
     "hermes": {
         "deepseek.v3.2": ("high",),
@@ -63,8 +101,10 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
 DEFAULT_INTERACTIVE_MODELS: dict[str, str] = {
     "codex": "gpt-5.6-sol",
     "codex-2": "gpt-5.6-sol",
+    "codex-3": "gpt-5.6-sol",
     "claude_code": "claude-opus-5",
     "grok": "grok-4.6",
+    "grok-2": "grok-4.6",
     "hermes": "moonshotai.kimi-k2.5",
 }
 
