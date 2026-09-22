@@ -239,7 +239,7 @@ Grok Build Imagine uses pinned OAuth on `api.x.ai`: image generation, image
 edits, video creation and video polling. Images pass through without S3
 configuration. Inline `data:image/` references are allowed; external media
 URLs stay denied, including on the edit route.
-Video requests require operator storage configured under Home > Integrations >
+Video requests require operator storage configured under Home > Agent runtimes >
 Grok. The CLI carries no S3 credentials. The launcher sets
 `GROK_DISABLE_ZDR_INCOMPATIBLE_TOOLS=false`, allowing requests to reach the proxy
 while the account's **Help improve Grok** remains **Opt out**.

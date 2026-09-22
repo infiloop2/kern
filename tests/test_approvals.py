@@ -78,3 +78,29 @@ class ApprovalStorageTests(unittest.TestCase):
             state.transition_tool_approval(approval_id, "pending", "denied", 1800000000)
         history = state.page_approvals("history", 1)
         self.assertEqual([item["id"] for item in history["items"]], list(reversed(ids))[:10])
+
+    def test_risk_annotation_is_saved_only_while_pending_and_joins_the_list(self):
+        approval_id = state.insert_tool_approval(
+            "fake_notes", "write_note", "Write note", {"text": "hello"},
+            1700000000, pending_limit=1000, origin_thread_id=None,
+        )["approval_id"]
+        self.assertTrue(state.save_tool_approval_risk_assessment(
+            approval_id,
+            model="jev-1.13.0",
+            assessed_at=1700000001,
+            scores={
+                "commits_money_or_obligation": 0.1,
+                "sensitive_data": 0.9,
+                "summary_mismatch": 0.05,
+            },
+        ))
+        item = state.page_approvals("pending", 1)["items"][0]
+        self.assertEqual(item["risk_scores"]["sensitive_data"], 0.9)
+        self.assertNotIn("risk_level", item)
+        state.transition_tool_approval(approval_id, "pending", "denied", 1700000002)
+        self.assertFalse(state.save_tool_approval_risk_assessment(
+            approval_id,
+            model="jev-1.13.0",
+            assessed_at=1700000003,
+            scores={},
+        ))

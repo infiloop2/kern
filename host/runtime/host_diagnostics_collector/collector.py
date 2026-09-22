@@ -39,6 +39,7 @@ def allowed_units() -> frozenset[str]:
         "kern-postgres.service",
         "kern-network-proxy.service",
         "kern-tools.service",
+        "kern-host-inference.service",
         "kern-agent-network.service",
         "kern-admin-api.service",
         "kern-workspace.service",

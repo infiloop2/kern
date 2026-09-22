@@ -9,6 +9,7 @@ socket.
 - ``agent_runtime`` kern-admin: socketless turn, trust, and harness subsystem
 - ``network_proxy`` kern-proxy: agent egress proxy (PROXY_PORT)
 - ``tools``         kern-tools: agent-facing tools socket
+- ``host_inference`` kern-host-inference: admin/Workspace-only provider socket
 - ``agent_network`` kern-agent-network: read-only introspection socket
 - ``workspace``     kern-workspace: Chat, Web Apps, and the agent Workspace API
 - ``embeddings``    kern-embedding: isolated local ONNX inference + admin client

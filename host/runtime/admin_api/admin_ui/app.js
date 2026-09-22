@@ -11,7 +11,7 @@ import {
 import { $, notice, runtimeLabel } from "./helpers.js";
 import {
   collapseRuntimeOverview, completeClaudeLogin, refreshHealth, refreshProviderAccounts,
-  refreshProviderUsage, rebootHost, runtimeRecords, startLogin, toggleRuntimeOverview,
+  rebootHost, runtimeRecords, startLogin, toggleRuntimeOverview,
 } from "./health.js";
 import {
   dismissGettingStarted, refreshGettingStarted, STARTER_PROMPTS,
@@ -29,7 +29,9 @@ import {
   removeGithubRepo, resetLinkedAccount, connectBedrockCredentials, setProviderWebSearch, setGithubBlockMainPushes,
   setGithubCredential, setGithubRequireApproval,
   setIntegrationEnabled, toggleGithubCredentialMode,
-  selectIntegrationDetail, toggleGithubRepoAudit,
+  selectIntegrationDetail, toggleGithubRepoAudit, saveHostInferenceProvider,
+  enableHostInferenceProvider,
+  disableHostInferenceProvider, clearHostInferenceProvider,
 } from "./network.js";
 import {
   completeToolConnect, connectLinkedDevice, connectTool,
@@ -1287,8 +1289,7 @@ document.addEventListener("click", event => {
     "start-login": () => startLogin(runtime),
     "reset-linked-account": () => resetLinkedAccount(button.dataset.runtime),
     "complete-claude-login": () => completeClaudeLogin(),
-    "refresh-provider-usage": () => refreshProviderUsage(),
-    "toggle-runtime-overview": () => toggleRuntimeOverview(),
+    "toggle-runtime-overview": () => toggleRuntimeOverview(button.dataset.overviewGroup),
     "reboot-host": () => rebootHost(),
     "file-up": () => loadParentDirectory(),
     "file-go": () => goToFilePath(),
@@ -1298,6 +1299,10 @@ document.addEventListener("click", event => {
     "toggle-github-repo-audit": () => toggleGithubRepoAudit(button.dataset.repoKey),
     "enable-integration": () => setIntegrationEnabled(button.dataset.integration, true),
     "disable-integration": () => setIntegrationEnabled(button.dataset.integration, false),
+    "save-host-inference-provider": () => saveHostInferenceProvider(button.dataset.provider),
+    "enable-host-inference-provider": () => enableHostInferenceProvider(button.dataset.provider),
+    "disable-host-inference-provider": () => disableHostInferenceProvider(button.dataset.provider),
+    "clear-host-inference-provider": () => clearHostInferenceProvider(button.dataset.provider),
     "add-github-repo": () => addGithubRepo(),
     "remove-github-repo": () => removeGithubRepo(button.dataset.owner, button.dataset.repo),
     "enable-github-block-main-pushes": () => setGithubBlockMainPushes(true),

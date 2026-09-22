@@ -38,6 +38,14 @@ syntax compilation and their live workflows.
 For a focused run, pass ordinary unittest module or test names, for example
 `./tests/scripts/test test_personal_web_app_builder`.
 
+The launcher requires Python 3.11 or newer and the `playwright` package. Set
+`KERN_TEST_PYTHON` to an executable interpreter or launcher to override
+`python3`. The launcher checks the Python version, required `unittest` API, and
+Playwright import before starting discovery, so an unsupported environment
+fails with a short override example instead of producing a full suite of import
+errors. Environment-specific interpreter paths belong in local development
+guidance rather than this repository script.
+
 They need `openssl` (proxy certificate tests), `bash` (rendered-script
 checks), and PostgreSQL server binaries (admin-state tests), but **no network
 and no credentials**: the Codex protocol is exercised against a scripted fake

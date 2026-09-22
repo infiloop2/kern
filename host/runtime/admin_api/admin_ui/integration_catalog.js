@@ -11,7 +11,7 @@ export const MANAGED_INTEGRATIONS = {
       "Live browsing and remote tool servers are blocked. Codex can use only OpenAI's cached web search.",
     ],
     setupSteps: [
-      { title: "Enable OpenAI", description: "On Home, open OpenAI under Integrations and choose Enable." },
+      { title: "Enable OpenAI", description: "On Home, open OpenAI under Agent runtimes and choose Enable." },
       { title: "Connect each Codex runtime", description: "Start Codex, Codex 2, and Codex 3 login separately. Use the subscription you want for each runtime and enter its displayed device code." },
       { title: "Verify the linked account", description: "Return to Kern and wait for the row to show connected with the expected email or account id. That identity is now the operator-approved account anchor." },
     ],
@@ -77,7 +77,7 @@ export const MANAGED_INTEGRATIONS = {
       "Web search is off by default. When you enable it, the query and surrounding context reach Anthropic's server-side search, which may use search partners and retrieve source pages outside Kern's boundary. Server-side web fetch, code execution, and remote tool servers stay blocked at the proxy regardless; the agent's own web fetch runs on this host and can reach only Kern's allowed domains.",
     ],
     setupSteps: [
-      { title: "Enable Claude", description: "On Home, open Claude under Integrations and choose Enable." },
+      { title: "Enable Claude", description: "On Home, open Claude under Agent runtimes and choose Enable." },
       { title: "Start the Claude Code login", description: "In Account, choose Start Claude Code login. Follow the displayed Anthropic OAuth flow and paste the authorization result when prompted." },
       { title: "Verify the linked account", description: "Wait for the row to show connected with the expected Anthropic identity. Kern validates the token live before reporting the runtime active." },
     ],
@@ -476,6 +476,124 @@ export const MANAGED_INTEGRATIONS = {
     networkScope: [
       ["registry.npmjs.org", "GET and HEAD only"],
       ["nodejs.org", "GET and HEAD only under /dist"],
+    ],
+  },
+};
+
+export const HOST_INFERENCE_INTEGRATIONS = {
+  host_openai: {
+    hostInference: true,
+    provider: "openai",
+    apiKeyLabel: "OpenAI API key",
+    apiKeyPlaceholder: "sk-...",
+    featureSettings: [],
+    label: "OpenAI API",
+    summary: "Connect OpenAI for Kern host features that use its API.",
+    protections: [
+      "The key stays encrypted in host state and is used only by the dedicated kern-host-inference service. Agents and agent-facing tools cannot read it or call this provider.",
+      "Kern chooses the OpenAI model separately for each host feature. There is no operator-wide model setting that can silently change every feature at once.",
+    ],
+    setupSteps: [
+      { title: "Create an API key", description: "Create a project API key at platform.openai.com. This is separate from the ChatGPT account used by Codex." },
+      { title: "Save the API key", description: "On Home, open OpenAI API under Host AI inference, enter the key, and choose Save API key. Saving the key does not enable the connection." },
+      { title: "Enable when ready", description: "Choose Enable separately when you are ready to let supported Kern Host AI features use this connection." },
+    ],
+    capabilities: [],
+    dataSummary: {
+      items: [
+        {
+          title: "What leaves this host",
+          description: "All data in Kern can leave this host for OpenAI when Host AI features use this connection.",
+          links: [
+            { label: "OpenAI API data controls", url: "https://platform.openai.com/docs/guides/your-data" },
+          ],
+        },
+        {
+          title: "Where it can go",
+          points: [
+            { label: "Exact API destination", text: "api.openai.com, POST /v1/chat/completions." },
+          ],
+          links: [
+            { label: "OpenAI project settings", url: "https://platform.openai.com/settings/organization/data-controls" },
+          ],
+        },
+        {
+          title: "OpenAI privacy settings still apply",
+          description: "OpenAI says API data is not used to train its models unless your organization explicitly opts in. By default, abuse-monitoring logs may retain some customer content for up to 30 days. Eligible organizations can request Modified Abuse Monitoring or Zero Data Retention; Kern cannot enable those controls for you. Review the project and organization data-control settings for the API key you save. API keys and billing are separate from the ChatGPT subscription used by Codex.",
+          links: [
+            { label: "How OpenAI uses API data", url: "https://platform.openai.com/docs/guides/your-data" },
+          ],
+        },
+      ],
+    },
+    controls: [
+      "Each feature declares the exact JSON fields, value types, and limits it accepts. Kern checks OpenAI's response locally before using it. A timeout, provider error, oversized response, or invalid result is recorded in Host diagnostics, and the feature receives an error with no usable result.",
+      "The provider is not part of the agent network policy and no agent-facing route exposes it.",
+    ],
+    networkScope: [
+      ["api.openai.com", "POST /v1/chat/completions only, from the host inference service"],
+    ],
+  },
+  host_typesafe: {
+    hostInference: true,
+    provider: "typesafe",
+    apiKeyLabel: "TypeSafe API key",
+    apiKeyPlaceholder: "TypeSafe API key",
+    featureSettings: [],
+    label: "TypeSafe Jev",
+    summary: "Connect TypeSafe Jev for Kern host features that need typed judgments.",
+    protections: [
+      "The key stays encrypted in host state and is used only by the dedicated kern-host-inference service. Agents cannot read it or call Jev directly, and calling host services never receive the key.",
+      "Jev returns typed probabilities rather than generated prose; each feature owns the questions and bounded context it sends.",
+    ],
+    setupSteps: [
+      { title: "Create an API key", description: "Create an API key with TypeSafe." },
+      { title: "Save the API key", description: "On Home, open TypeSafe Jev under Host AI inference, enter the key, and choose Save API key. Saving the key does not enable the connection." },
+      { title: "Enable when ready", description: "Choose Enable separately when you are ready to let supported Kern Host AI features use this connection." },
+    ],
+    capabilities: [
+      { name: "Approval risk annotations", description: "Scores likely financial commitments, sensitive data, and summary mismatches on new tool approval requests. The operator still makes every decision." },
+      { name: "Memory recall reranking", description: "Ranks candidate memory page descriptions before recall when TypeSafe Jev is enabled." },
+    ],
+    dataSummary: {
+      items: [
+        {
+          title: "What leaves this host",
+          description: "All data in Kern can leave this host for TypeSafe Jev when Host AI features use this connection.",
+          links: [],
+        },
+        {
+          title: "Memory recall reranking data",
+          description: "When TypeSafe Jev is enabled, Kern sends the task query and up to 20 candidate page ids and descriptions. Page contents are not sent.",
+          links: [],
+        },
+        {
+          title: "Approval risk annotation data",
+          description: "For a new tool approval, Kern sends the tool and action names, their description and data policy, the operator-visible summary, the complete proposed payload, and the connected account label. It sends no stored credentials, prior approvals, recipient history, conversation history, or App and schedule purposes.",
+          links: [],
+        },
+        {
+          title: "Where it can go",
+          points: [
+            { label: "Exact API destination", text: "api.typesafe.ai, POST /v1/systemone." },
+          ],
+          links: [],
+        },
+        {
+          title: "TypeSafe handling",
+          description: "TypeSafe says it does not train on request input. Standard retention is not defined, and Zero Data Retention is available only under enterprise terms. Review the terms applicable to your account before enabling a feature.",
+          links: [],
+        },
+      ],
+    },
+    controls: [
+      "Approval risk annotations are informational only. They never approve, deny, delay, or execute an action.",
+      "Kern makes one best-effort Jev call when a tool approval is created. It does not retry. If the request is too large, unavailable, or invalid, the approval remains unannotated and the failure appears in Host diagnostics.",
+      "Each call limits input size, response size, simultaneous work, and network inactivity time, and it is not retried. A timeout, provider error, oversized response, or invalid typed result is recorded in Host diagnostics, and the feature receives an error with no usable result.",
+      "The provider is not part of the agent network policy and no agent-facing route exposes it.",
+    ],
+    networkScope: [
+      ["api.typesafe.ai", "POST /v1/systemone only, from the host inference service"],
     ],
   },
 };

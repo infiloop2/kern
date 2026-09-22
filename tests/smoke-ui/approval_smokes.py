@@ -19,6 +19,13 @@ def approval_smoke(browser, url):
              "created_at": now - index, "updated_at": now - index,
              "ref_updates": [{"ref": "refs/heads/change"}], "changed_paths": [".github/workflows/test.yml"]}
             for index in range(13)]
+    rows[2].update({
+        "risk_scores": {
+            "commits_money_or_obligation": 0.92,
+            "sensitive_data": 0.51,
+            "summary_mismatch": 0.2,
+        },
+    })
     held = []
     seen = []
     submitted_keys = []
@@ -62,6 +69,22 @@ def approval_smoke(browser, url):
     page.locator('[data-action="login"]').click()
     expect(page.locator(".approval-card")).to_have_count(10)
     expect(page.locator("#approval-nav-count")).to_have_text("13")
+    assessed = page.locator('[data-approval-key="tool:2"]')
+    scores = assessed.locator(".approval-risk-scores")
+    expect(scores).to_have_attribute("aria-label", "TypeSafe Jev risk scores")
+    expect(scores.locator(".approval-risk-score")).to_have_count(3)
+    expect(scores.locator(".approval-risk-score").nth(0)).to_have_attribute(
+        "aria-label", "Commits money or obligation risk 92%"
+    )
+    expect(scores.locator(".approval-risk-score").nth(1)).to_have_attribute(
+        "aria-label", "Sensitive data risk 51%"
+    )
+    expect(scores.locator(".approval-risk-score").nth(2)).to_have_attribute(
+        "aria-label", "Summary mismatch risk 20%"
+    )
+    expect(scores).to_contain_text("92%")
+    expect(scores).to_contain_text("51%")
+    expect(scores).to_contain_text("20%")
     page.locator('[data-action="approval-page"][data-page="2"]').click()
     expect(page.locator(".approval-card")).to_have_count(3)
     page.locator('[data-action="approval-page"][data-page="1"]').click()

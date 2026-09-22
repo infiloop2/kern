@@ -141,6 +141,15 @@ approval decisions stay in Postgres, reachable by the scoped `kern-tools`
 role and the admin role but not the agent, and approval-gated actions still
 require the operator's decision in the admin UI.
 
+Host-owned AI uses a separate crossing:
+`/run/kern-host-inference/host-inference.sock` is owned by the dedicated
+`kern-host-inference` service and authenticates callers through `SO_PEERCRED`.
+`kern-admin`, `kern-workspace`, and `kern-tools` may call its fixed provider
+routes. It exposes concrete provider calls, not MCP tools or generic provider
+slots. The service alone receives the read-only provider credential grants and
+direct DNS+HTTPS egress. `kern-agent` cannot call the socket, and neither
+`kern-agent` nor `kern-tools` can read provider credentials.
+
 For local-video handoff, the MCP shim opens a regular file under the agent uid
 and streams only its bytes and bounded metadata through the same socket. The
 tools service never receives or opens the agent pathname. Its private runtime

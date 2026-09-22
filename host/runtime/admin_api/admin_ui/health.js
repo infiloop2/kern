@@ -9,6 +9,7 @@ import { renderIntegrationAccounts, setBedrockCredentialMetadata } from "./netwo
 
 let latestRuntimes = [];
 let latestAccounts = [];
+let latestHostInferenceProviders = [];
 
 export function providerAccounts() {
   return latestAccounts;
@@ -160,11 +161,13 @@ function renderHomeUpgrade(upgrade) {
 }
 
 export async function refreshProviderAccounts() {
-  const [response, bedrockCredentials] = await Promise.all([
+  const [response, bedrockCredentials, hostInference] = await Promise.all([
     api("GET", "/v1/agent-runtime/account"),
     api("GET", "/v1/agent-runtime/bedrock-credentials"),
+    api("GET", "/v1/host-inference/providers").catch(() => null),
   ]);
   setBedrockCredentialMetadata(bedrockCredentials);
+  if (Array.isArray(hostInference?.providers)) latestHostInferenceProviders = hostInference.providers;
   renderProviderAccounts(response);
 }
 
@@ -175,40 +178,43 @@ function renderProviderAccounts(response) {
 }
 
 export async function refreshProviderUsage() {
-  const response = await api("POST", "/v1/agent-runtime/refresh", {});
+  const [response, hostInference] = await Promise.all([
+    api("POST", "/v1/agent-runtime/refresh", {}),
+    api("GET", "/v1/host-inference/providers").catch(() => null),
+  ]);
+  if (Array.isArray(hostInference?.providers)) latestHostInferenceProviders = hostInference.providers;
   renderProviderAccounts(response);
   await refreshHealth();
 }
 
-// On a phone the three usage boxes take a quarter of the screen, so they collapse
-// behind a single top-bar pill and apps get the full viewport. The pill toggles
-// this; desktop ignores the state (CSS keeps the panel inline at all times). The
-// choice is held here so it survives the 5-second re-render.
-let overviewExpanded = false;
+// The top bar exposes the two provider families as separate compact menus. One
+// shared value makes them mutually exclusive and survives the 5-second render.
+let expandedOverviewGroup = null;
 
-export function toggleRuntimeOverview() {
-  overviewExpanded = !overviewExpanded;
+export function toggleRuntimeOverview(group) {
+  if (group !== "runtimes" && group !== "host-ai") return;
+  expandedOverviewGroup = expandedOverviewGroup === group ? null : group;
   applyOverviewExpanded();
-  // Opening runs the same hard refresh as the desktop button: a POST that forces
-  // the backend to re-poll every provider for live usage (distinct from the
-  // 5-second tick, which only re-reads current state). The phone reaches that
-  // action through the open gesture instead of a separate button; reopening
-  // pulls again.
-  if (overviewExpanded) refreshProviderUsage().catch(() => {});
+  // Opening runs the existing hard provider refresh. There is no second refresh
+  // control inside the menu, so desktop and phone use the same interaction.
+  if (expandedOverviewGroup) refreshProviderUsage().catch(() => {});
 }
 
 export function collapseRuntimeOverview() {
-  if (!overviewExpanded) return;
-  overviewExpanded = false;
+  if (!expandedOverviewGroup) return;
+  expandedOverviewGroup = null;
   applyOverviewExpanded();
 }
 
 function applyOverviewExpanded() {
   const container = $("runtime-overview");
   if (!container) return;
-  container.classList.toggle("expanded", overviewExpanded);
-  const toggle = container.querySelector(".runtime-overview-toggle");
-  if (toggle) toggle.setAttribute("aria-expanded", String(overviewExpanded));
+  for (const group of container.querySelectorAll(".runtime-overview-group")) {
+    const expanded = group.dataset.overviewGroup === expandedOverviewGroup;
+    group.classList.toggle("expanded", expanded);
+    const toggle = group.querySelector(".runtime-overview-toggle");
+    if (toggle) toggle.setAttribute("aria-expanded", String(expanded));
+  }
 }
 
 function runtimeRunningCount() {
@@ -222,8 +228,7 @@ function renderRuntimeOverview() {
   const container = $("runtime-overview");
   if (!container) return;
   const bedrockAccount = latestAccounts.find(entry => entry.provider === "bedrock") || {};
-  // The top toolbar has one box per agent runtime.
-  const boxes = [
+  const runtimeBoxes = [
     subscriptionSummary("codex"),
     subscriptionSummary("codex-2"),
     subscriptionSummary("codex-3"),
@@ -232,27 +237,36 @@ function renderRuntimeOverview() {
     grokSummary("grok-2"),
     bedrockSummary("hermes", bedrockAccount),
   ].join("");
-  // The collapsed pill carries the one live signal worth reading at a glance —
-  // whether any agent is working — while the per-runtime usage waits behind the
-  // tap. The panel is always fresh (the 5-second poll re-renders it), so opening
-  // it is enough to read current usage; the refresh button forces a re-poll.
+  const hostAiBoxes = [
+    hostInferenceSummary("openai", "OpenAI host", "host_openai"),
+    hostInferenceSummary("typesafe", "TypeSafe", "host_typesafe"),
+  ].join("");
   const running = runtimeRunningCount();
   const summaryText = running ? `${running} running` : "All idle";
   const summaryLabel = running
     ? `${running} agent turn${running === 1 ? "" : "s"} running`
     : "All agent runtimes idle";
+  const hostAi = hostInferenceGroupSummary();
   setHtml(container, `
-    <button class="runtime-overview-toggle" data-action="toggle-runtime-overview" aria-expanded="${overviewExpanded}" aria-controls="runtime-overview-panel" aria-label="Agent usage: ${esc(summaryLabel)}. Show per-runtime status and usage">
-      <span class="rot-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 20 20"><path d="M3.5 14.5a6.5 6.5 0 1 1 13 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10 14.5 13 8.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
-      <span class="rot-label">Agent usage</span>
-      <span class="rot-summary${running ? " busy" : ""}">${esc(summaryText)}</span>
-      <span class="rot-chevron" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 20 20"><path d="m5.5 8 4.5 4.5L14.5 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-    </button>
-    <div class="runtime-overview-panel" id="runtime-overview-panel">
-      ${boxes}
-      <button class="ghost sm icon-button runtime-refresh" data-action="refresh-provider-usage" title="Refresh provider status and usage" aria-label="Refresh provider status and usage">
-        <svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true"><path d="M16.2 6.5A6.8 6.8 0 1 0 17 10M16.2 3.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <div class="runtime-overview-group" data-overview-group="runtimes">
+      <button class="runtime-overview-toggle" data-action="toggle-runtime-overview" data-overview-group="runtimes" aria-expanded="${expandedOverviewGroup === "runtimes"}" aria-controls="runtime-overview-runtimes-panel" aria-label="Agent runtimes: ${esc(summaryLabel)}. Show provider status and usage">
+        <span class="rot-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 20 20"><path d="M3.5 14.5a6.5 6.5 0 1 1 13 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10 14.5 13 8.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+        <span class="rot-copy"><span class="rot-label">Agent runtimes</span><span class="rot-summary${running ? " busy" : ""}">${esc(summaryText)}</span></span>
+        <span class="rot-chevron" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 20 20"><path d="m5.5 8 4.5 4.5L14.5 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       </button>
+      <div class="runtime-overview-panel" id="runtime-overview-runtimes-panel">
+        ${runtimeBoxes}
+      </div>
+    </div>
+    <div class="runtime-overview-group" data-overview-group="host-ai">
+      <button class="runtime-overview-toggle" data-action="toggle-runtime-overview" data-overview-group="host-ai" aria-expanded="${expandedOverviewGroup === "host-ai"}" aria-controls="runtime-overview-host-ai-panel" aria-label="Host AI: ${esc(hostAi.label)}. Show provider status and usage">
+        <span class="rot-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 20 20"><path d="M10 2.8v2.4M10 14.8v2.4M2.8 10h2.4M14.8 10h2.4M5 5l1.7 1.7M13.3 13.3 15 15M15 5l-1.7 1.7M6.7 13.3 5 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="10" cy="10" r="2.7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></span>
+        <span class="rot-copy"><span class="rot-label">Host AI</span><span class="rot-summary">${esc(hostAi.text)}</span></span>
+        <span class="rot-chevron" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 20 20"><path d="m5.5 8 4.5 4.5L14.5 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      </button>
+      <div class="runtime-overview-panel" id="runtime-overview-host-ai-panel">
+        ${hostAiBoxes}
+      </div>
     </div>`);
   applyOverviewExpanded();
 }
@@ -272,6 +286,9 @@ function runtimeSummaryCard(runtime, usageHtml, usageSummaryText, extraClass) {
   // status ("awaiting login") never truncates it away.
   const runningBadge = running
     ? `<span class="runtime-running-badge" aria-hidden="true">${running} running</span>` : "";
+  const usage = usageHtml
+    ? `<span class="runtime-usage">${usageHtml}</span>`
+    : "";
   const inner = `
         <span class="runtime-summary-name">
           <span class="runtime-status-dot ${esc(record.status)}" aria-hidden="true"></span>
@@ -280,8 +297,7 @@ function runtimeSummaryCard(runtime, usageHtml, usageSummaryText, extraClass) {
             <span class="runtime-state">${esc(statusText)}</span>
           </span>
         </span>
-        <span class="runtime-usage">${usageHtml}
-        </span>
+        ${usage}
         ${runningBadge}`;
   const cls = `runtime-summary${extraClass ? ` ${extraClass}` : ""}`;
   // Every box links to its focused Home integration page, in
@@ -299,19 +315,19 @@ function subscriptionSummary(runtime) {
   const windows = usageWindows(account);
   const modelSummary = windows.fableWeekly
     ? `; ${usageSummary(`${windows.fableWeekly.label} weekly`, windows.fableWeekly)}` : "";
-  const usageHtml = `
-        ${usageRing("5h", windows.fiveHour)}
-        ${usageRing("wk", windows.weekly)}
-        ${windows.fableWeekly ? usageRing(windows.fableWeekly.label, windows.fableWeekly) : ""}`;
+  const usageHtml = [
+    usageRing("5h", windows.fiveHour),
+    usageRing("wk", windows.weekly),
+    windows.fableWeekly ? usageRing(windows.fableWeekly.label, windows.fableWeekly) : "",
+  ].join("");
   const usageSummaryText = `${usageSummary("5 hour", windows.fiveHour)}; ${usageSummary("weekly", windows.weekly)}${modelSummary}`;
   return runtimeSummaryCard(runtime, usageHtml, usageSummaryText);
 }
 
 // Grok draws one ring, not two: its subscription has a single billing period
 // rather than a rolling short window plus a weekly one. The percentage is
-// frequently absent — xAI omits it on a unified-billing subscription — and the
-// ring already renders an absent value as "--" / unavailable, which is the
-// honest reading. It is never substituted with zero.
+// frequently absent because xAI omits it on a unified-billing subscription;
+// in that case the runtime status stands alone rather than showing a placeholder.
 function grokSummary(runtime) {
   const account = latestAccounts.find(entry => entry.agent_runtime === runtime) || {};
   const usage = account.grok_usage || {};
@@ -323,29 +339,12 @@ function grokSummary(runtime) {
   const period = periods[usage.period_type] || periods.weekly;
   const window = { usedPercent: usage.usage_percent, resetsAt: usage.resets_at };
   if (window.usedPercent === undefined || window.usedPercent === null) {
-    // Not "unknown this poll" — xAI publishes no pool figure at all on a
-    // subscription account, so an empty ring would imply a number is coming.
-    // A neutral note says so once instead, and is deliberately not styled as a
-    // warning: nothing is wrong.
-    return runtimeSummaryCard(runtime, usageUnavailableNote(), UNAVAILABLE_USAGE_TEXT);
+    return runtimeSummaryCard(runtime, "", UNAVAILABLE_USAGE_TEXT);
   }
   return runtimeSummaryCard(runtime, usageRing(period.label, window), usageSummary(period.summary, window));
 }
 
 const UNAVAILABLE_USAGE_TEXT = "usage monitoring is not available for Grok";
-
-// A muted glyph rather than a ring. Same footprint as a ring so the toolbar
-// height and alignment are unchanged.
-function usageUnavailableNote() {
-  return `
-    <span class="usage-note" role="img" tabindex="0" aria-label="${esc(UNAVAILABLE_USAGE_TEXT)}" title="${esc(UNAVAILABLE_USAGE_TEXT)}">
-      <svg viewBox="0 0 20 20" aria-hidden="true">
-        <circle cx="10" cy="10" r="8.5"></circle>
-        <text x="10" y="10">i</text>
-      </svg>
-      <span class="usage-window">n/a</span>
-    </span>`;
-}
 
 // Hermes usage is pay-per-token, so the readout is a
 // month-to-date cost estimate with token totals, not a quota ring. The numbers
@@ -365,21 +364,93 @@ function bedrockSummary(runtime, account) {
   return runtimeSummaryCard(runtime, usageHtml, usageSummaryText, "runtime-summary-bedrock");
 }
 
+function hostInferenceUsageReadout(usage) {
+  const value = usage ? usage.cost : "--";
+  return `<span class="runtime-stat runtime-stat-cost">
+      <span class="runtime-stat-value">${esc(value)}</span>
+      <span class="runtime-stat-label">MTD est.</span>
+    </span>`;
+}
+
 // The right-hand readout for a Bedrock box: three stacked figures — input
 // tokens, output tokens, and the cost — mirroring the subscription boxes' row
 // of usage rings so all three boxes read at the same visual weight. The cost is
 // labelled "MTD est." to flag that it is a metered estimate, not the AWS bill.
-// Placeholder dashes keep the box populated before any usage has been metered.
+// Before any usage has been metered, the runtime status stands alone rather
+// than showing placeholder values.
 function bedrockUsageReadout(usage) {
   const stat = (value, label, extraClass = "") =>
     `<span class="runtime-stat${extraClass ? ` ${extraClass}` : ""}">
           <span class="runtime-stat-value">${esc(value)}</span>
           <span class="runtime-stat-label">${esc(label)}</span>
         </span>`;
-  if (!usage) {
-    return `${stat("--", "in")}${stat("--", "out")}${stat("--", "MTD est.", "runtime-stat-cost")}`;
-  }
+  if (!usage) return "";
   return `${stat(formatTokenCount(usage.inputTokens), "in")}${stat(formatTokenCount(usage.outputTokens), "out")}${stat(usage.cost, "MTD est.", "runtime-stat-cost")}`;
+}
+
+function hostInferenceUsage(provider) {
+  const raw = provider?.usage;
+  const amount = raw && typeof raw === "object" ? Number(raw.month_to_date) : NaN;
+  if (!Number.isFinite(amount)) return null;
+  const currency = !raw.currency || raw.currency === "USD" ? "$" : `${raw.currency} `;
+  const cost = formatHostInferenceCost(amount, currency);
+  return {
+    cost,
+    inputTokens: Number(raw.input_tokens) || 0,
+    outputTokens: Number(raw.output_tokens) || 0,
+    cachedInputTokens: Number(raw.cached_input_tokens) || 0,
+    requests: Number(raw.requests) || 0,
+    measuredRequests: Number(raw.measured_requests) || 0,
+    pricedRequests: Number(raw.priced_requests) || 0,
+  };
+}
+
+function formatHostInferenceCost(amount, currency = "$") {
+  let decimals = 2;
+  if (amount > 0 && amount < 0.0001) decimals = 8;
+  else if (amount > 0 && amount < 0.01) decimals = 6;
+  const formatted = amount === 0
+    ? amount.toFixed(2)
+    : amount.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "");
+  return `${currency}${formatted}`;
+}
+
+function hostInferenceGroupSummary() {
+  const amounts = latestHostInferenceProviders
+    .map(provider => Number(provider?.usage?.month_to_date))
+    .filter(Number.isFinite);
+  if (!amounts.length) return { text: "No usage", label: "No metered usage yet" };
+  const total = amounts.reduce((sum, amount) => sum + amount, 0);
+  const text = `${formatHostInferenceCost(total)} MTD`;
+  return { text, label: `Estimated month-to-date ${text}` };
+}
+
+function hostInferenceSummary(providerName, label, guideId) {
+  const provider = latestHostInferenceProviders.find(entry => entry.provider === providerName) || {};
+  const status = provider.enabled ? "active" : provider.configured ? "configured" : "disabled";
+  const usage = hostInferenceUsage(provider);
+  const usageHtml = hostInferenceUsageReadout(usage);
+  let usageSummaryText = "no metered usage yet";
+  if (usage) {
+    const cached = usage.cachedInputTokens
+      ? `, including ${formatTokenCount(usage.cachedInputTokens)} cached` : "";
+    const measured = usage.requests > usage.measuredRequests
+      ? `; ${usage.measuredRequests} of ${usage.requests} responses measured` : "";
+    const priced = usage.requests > usage.pricedRequests
+      ? `; ${usage.pricedRequests} of ${usage.requests} responses priced` : "";
+    usageSummaryText = `estimated month-to-date ${usage.cost} (${formatTokenCount(usage.inputTokens)} input tokens${cached} / ${formatTokenCount(usage.outputTokens)} output tokens)${measured}${priced}`;
+  }
+  const inner = `
+        <span class="runtime-summary-name">
+          <span class="runtime-status-dot ${esc(status)}" aria-hidden="true"></span>
+          <span class="runtime-summary-copy">
+            <span>${esc(label)}</span>
+            <span class="runtime-state">${esc(status)}</span>
+          </span>
+        </span>
+        <span class="runtime-usage">${usageHtml}</span>`;
+  return `
+      <button class="runtime-summary runtime-summary-metered runtime-summary-host-inference" data-action="open-provider" data-provider="${esc(guideId)}" aria-label="${esc(`${label}: ${status}; ${usageSummaryText}. Open provider settings`)}">${inner}</button>`;
 }
 
 function usageWindows(account) {
@@ -443,16 +514,17 @@ function usageSummary(label, window) {
 function usageRing(label, window) {
   const value = window.usedPercent;
   const available = value !== undefined && value !== null && Number.isFinite(Number(value));
-  const percent = available ? Number(clampPercent(value)) : 0;
-  const display = available ? `${Math.round(percent)}` : "--";
+  if (!available) return "";
+  const percent = Number(clampPercent(value));
+  const display = `${Math.round(percent)}`;
   const countdown = resetCountdown(window.resetsAt);
   const resetDescription = countdown === "due" ? "; reset due" : countdown ? `; resets in ${countdown}` : "";
-  const title = available ? `${label}: ${percent}% used${resetDescription}` : `${label}: usage unavailable`;
+  const title = `${label}: ${percent}% used${resetDescription}`;
   const thresholdClass = percent > 90 ? " usage-critical" : percent > 80 ? " usage-warning" : "";
   // One label line whether or not a countdown is known, so the ring block
   // (and with it the top bar) keeps a constant height.
   return `
-    <span class="usage-ring${available ? thresholdClass : " unavailable"}">
+    <span class="usage-ring${thresholdClass}">
       <svg viewBox="0 0 20 20" role="img" aria-label="${esc(title)}">
         <circle class="usage-ring-track" cx="10" cy="10" r="8.5" pathLength="100"></circle>
         <circle class="usage-ring-value" cx="10" cy="10" r="8.5" pathLength="100" stroke-dasharray="${percent} 100"></circle>

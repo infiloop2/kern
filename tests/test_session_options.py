@@ -73,11 +73,11 @@ class RuntimeListTests(unittest.TestCase):
                 self.assertEqual(adapter.managed_provider, RUNTIMES[runtime].provider)
 
     def test_every_browser_copy_of_the_labels_agrees(self) -> None:
-        # Six bundles across three served apps name the runtimes, because the
+        # Five bundles across three served apps name the runtimes, because the
         # admin UI, Chat and the Web App builder ship separately and share no
         # module. None can import Python, so each is compared here. A file may
-        # list a subset (Analytics shows no script runtime; the device-login
-        # table only covers OAuth runtimes) but may not rename one.
+        # list a subset (the device-login table only covers OAuth runtimes) but
+        # may not rename one.
         for path, (anchor, expected) in self._runtime_label_sources().items():
             source = (REPO_ROOT / path).read_text()
             # Read the declaration itself, not whichever quoted string happens
@@ -129,8 +129,6 @@ class RuntimeListTests(unittest.TestCase):
                 ("export const RUNTIME_PROVIDERS = {", INTERACTIVE_RUNTIMES),
             "host/runtime/admin_api/admin_ui/health.js":
                 ("const DEVICE_LOGINS = {", device_logins),
-            "host/runtime/admin_api/admin_ui/analytics.js":
-                ("const runtimes = {", INTERACTIVE_RUNTIMES),
             "host/runtime/workspace/ui/workspace.js":
                 ("const runtimeLabel = runtime => ({", tuple(RUNTIMES)),
             "host/runtime/workspace/chat/ui/agent_chat.js":
@@ -172,10 +170,10 @@ class SessionOptionsTests(unittest.TestCase):
         self.assertEqual(
             DEFAULT_INTERACTIVE_MODELS,
             {
-                "codex": "gpt-5.6-sol",
-                "codex-2": "gpt-5.6-sol",
-                "codex-3": "gpt-5.6-sol",
-                "claude_code": "claude-opus-5",
+                "codex": "gpt-6-sol",
+                "codex-2": "gpt-6-sol",
+                "codex-3": "gpt-6-sol",
+                "claude_code": "claude-opus-5-5",
                 "grok": "grok-4.6",
                 "grok-2": "grok-4.6",
                 "hermes": "moonshotai.kimi-k2.5",
@@ -191,25 +189,22 @@ class SessionOptionsTests(unittest.TestCase):
             INTERACTIVE_SESSION_OPTIONS,
             {
                 "codex": {
-                    "gpt-5.6-terra": ("high", "max", "ultra"),
-                    "gpt-5.6-sol": ("high", "max", "ultra"),
-                    "gpt-5.6-luna": ("high", "max"),
+                    "gpt-6-sol": ("high", "max", "ultra"),
+                    "gpt-6-luna": ("high", "max"),
                     "gpt-6-astra": ("high", "max", "ultra"),
                 },
                 "codex-2": {
-                    "gpt-5.6-terra": ("high", "max", "ultra"),
-                    "gpt-5.6-sol": ("high", "max", "ultra"),
-                    "gpt-5.6-luna": ("high", "max"),
+                    "gpt-6-sol": ("high", "max", "ultra"),
+                    "gpt-6-luna": ("high", "max"),
                     "gpt-6-astra": ("high", "max", "ultra"),
                 },
                 "codex-3": {
-                    "gpt-5.6-terra": ("high", "max", "ultra"),
-                    "gpt-5.6-sol": ("high", "max", "ultra"),
-                    "gpt-5.6-luna": ("high", "max"),
+                    "gpt-6-sol": ("high", "max", "ultra"),
+                    "gpt-6-luna": ("high", "max"),
                     "gpt-6-astra": ("high", "max", "ultra"),
                 },
                 "claude_code": {
-                    "claude-opus-5": ("high", "max", "ultracode"),
+                    "claude-opus-5-5": ("high", "max", "ultracode"),
                     "claude-fable-5-1": ("high", "max", "ultracode"),
                     "claude-sonnet-5": ("high", "max", "ultracode"),
                 },
@@ -252,10 +247,10 @@ class SessionOptionsTests(unittest.TestCase):
                 )
         # ...and it leaves the model runtimes exactly as they were.
         self.assertIsNone(
-            session_config_error("codex", "gpt-5.6-sol", "ultra", allow_script=True)
+            session_config_error("codex", "gpt-6-sol", "ultra", allow_script=True)
         )
         self.assertIsNotNone(
-            session_config_error("codex", "gpt-5.6-luna", "ultra", allow_script=True)
+            session_config_error("codex", "gpt-6-luna", "ultra", allow_script=True)
         )
 
     def test_only_schedules_offer_the_script_runtime(self) -> None:
@@ -266,10 +261,10 @@ class SessionOptionsTests(unittest.TestCase):
         )
 
     def test_rejects_cross_runtime_and_luna_ultra_combinations(self) -> None:
-        self.assertIsNone(session_config_error("codex", "gpt-5.6-sol", "ultra"))
+        self.assertIsNone(session_config_error("codex", "gpt-6-sol", "ultra"))
         self.assertIsNone(session_config_error("claude_code", "claude-fable-5-1", "ultracode"))
-        self.assertIsNotNone(session_config_error("codex", "gpt-5.6-luna", "ultra"))
-        self.assertIsNotNone(session_config_error("codex", "claude-opus-5", "high"))
+        self.assertIsNotNone(session_config_error("codex", "gpt-6-luna", "ultra"))
+        self.assertIsNotNone(session_config_error("codex", "claude-opus-5-5", "high"))
         self.assertIsNotNone(session_config_error("claude_code", "claude-fable-5-1", "ultra"))
         self.assertIsNotNone(session_config_error("unsupported", "deepseek.v3.2", "max"))
         self.assertIsNone(session_config_error("hermes", "deepseek.v3.2", "high"))
@@ -280,7 +275,7 @@ class SessionOptionsTests(unittest.TestCase):
     def test_rejects_the_superseded_claude_code_models(self) -> None:
         # Aliases and earlier exact ids remain readable from recorded sessions,
         # but cannot start a thread or run new work on one.
-        for model in ("opus", "fable", "sonnet", "claude-fable-5"):
+        for model in ("opus", "fable", "sonnet", "claude-fable-5", "claude-opus-5"):
             self.assertIsNotNone(session_config_error("claude_code", model, "high"))
 
     def test_recorded_config_accepts_any_model_and_checks_only_the_shape(self) -> None:
@@ -298,25 +293,38 @@ class SessionOptionsTests(unittest.TestCase):
         )
         for payload in (
             {},
-            {"agent_runtime": "claude_code", "model": "claude-opus-5"},
+            {"agent_runtime": "claude_code", "model": "claude-opus-5-5"},
             {"agent_runtime": "claude_code", "model": "", "effort": "high"},
             {"agent_runtime": "claude_code", "model": 5, "effort": "high"},
         ):
             with self.subTest(payload=payload):
                 self.assertIsNone(recorded_session_config(payload))
 
+    def test_retired_codex_models_are_readable_but_cannot_run_new_work(self) -> None:
+        for runtime in ("codex", "codex-2", "codex-3"):
+            for model in ("gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-terra"):
+                with self.subTest(runtime=runtime, model=model):
+                    self.assertIsNotNone(session_config_error(runtime, model, "high"))
+                    self.assertIsNotNone(
+                        session_config_error(runtime, model, "high", allow_script=True)
+                    )
+                    self.assertEqual(
+                        recorded_session_config({"agent_runtime": runtime, "model": model, "effort": "high"}),
+                        (runtime, model, "high"),
+                    )
+
     def test_public_options_are_json_facing_copies(self) -> None:
         options = public_session_options()
-        self.assertEqual(options["codex"]["gpt-5.6-luna"], ["high", "max"])
+        self.assertEqual(options["codex"]["gpt-6-luna"], ["high", "max"])
         self.assertEqual(options["codex"]["gpt-6-astra"], ["high", "max", "ultra"])
         self.assertEqual(
             options["claude_code"]["claude-fable-5-1"],
             ["high", "max", "ultracode"],
         )
         self.assertEqual(options["grok"]["grok-4.6"], ["xhigh", "high"])
-        options["codex"]["gpt-5.6-luna"].append("invalid")
+        options["codex"]["gpt-6-luna"].append("invalid")
         schedule_session_options()["script"]["bash"].append("invalid")
-        self.assertEqual(SESSION_OPTIONS["codex"]["gpt-5.6-luna"], ("high", "max"))
+        self.assertEqual(SESSION_OPTIONS["codex"]["gpt-6-luna"], ("high", "max"))
         self.assertEqual(
             SESSION_OPTIONS["codex"]["gpt-6-astra"], ("high", "max", "ultra")
         )

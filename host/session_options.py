@@ -58,9 +58,8 @@ INTERACTIVE_RUNTIMES: tuple[str, ...] = tuple(
 )
 
 _CODEX_SESSION_OPTIONS = {
-    "gpt-5.6-terra": ("high", "max", "ultra"),
-    "gpt-5.6-sol": ("high", "max", "ultra"),
-    "gpt-5.6-luna": ("high", "max"),
+    "gpt-6-sol": ("high", "max", "ultra"),
+    "gpt-6-luna": ("high", "max"),
     "gpt-6-astra": ("high", "max", "ultra"),
 }
 
@@ -75,7 +74,7 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     # model a thread runs. Threads created under the aliases stay readable but
     # run no further tasks; their rows are preserved, not migrated.
     "claude_code": {
-        "claude-opus-5": ("high", "max", "ultracode"),
+        "claude-opus-5-5": ("high", "max", "ultracode"),
         "claude-fable-5-1": ("high", "max", "ultracode"),
         "claude-sonnet-5": ("high", "max", "ultracode"),
     },
@@ -99,10 +98,10 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
 # Defaults are named deliberately rather than inferred from catalog order.
 # Model ordering is presentation, not a capability ranking.
 DEFAULT_INTERACTIVE_MODELS: dict[str, str] = {
-    "codex": "gpt-5.6-sol",
-    "codex-2": "gpt-5.6-sol",
-    "codex-3": "gpt-5.6-sol",
-    "claude_code": "claude-opus-5",
+    "codex": "gpt-6-sol",
+    "codex-2": "gpt-6-sol",
+    "codex-3": "gpt-6-sol",
+    "claude_code": "claude-opus-5-5",
     "grok": "grok-4.6",
     "grok-2": "grok-4.6",
     "hermes": "moonshotai.kimi-k2.5",

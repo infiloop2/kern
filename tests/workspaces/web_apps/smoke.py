@@ -36,7 +36,7 @@ MOCK_LOCK = threading.RLock()
 TURN_DEADLINES: dict[str, float] = {}
 DEFAULT_SESSION = {
     "agent_runtime": "codex",
-    "model": "gpt-5.6-sol",
+    "model": "gpt-6-sol",
     "effort": "high",
 }
 RUNTIME_LABELS = {
@@ -93,6 +93,9 @@ def _app_markup(count: int, title: str = "Weekly focus") -> str:
           <div class="dashboard-actions">
             <a href="/mnt/kern-agent/agent-home/workspace/video with spaces.mp4" id="file-video-link">Video</a>
             <button data-action="increment">Add priority</button>
+            <button data-action="ordered-writes">Save together</button>
+            <button data-action="spin-while-waiting">Spin while waiting</button>
+            <button data-action="sequential-reads">Sequential reads</button>
             <button data-action="refresh-analysis">Refresh analysis</button>
           </div>
           <label>Instruction <input id="enter-action" data-field="instruction" data-enter-action="submit-instruction"></label>
@@ -178,10 +181,32 @@ def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
         renderDashboard({{ count, analysis }});
       }}, {{ data: 'targeted' }});
       app.on('increment', async () => {{
-        const count = await app.read(['count']);
-        const analysis = await app.read(['analysis']);
+        const [count, analysis] = await Promise.all([
+          app.read(['count']), app.read(['analysis']),
+        ]);
         const next = await app.set(['count'], count + 1);
         renderDashboard({{ count: next, analysis }});
+      }});
+      app.on('ordered-writes', async () => {{
+        const [count, analysis] = await Promise.all([
+          app.set(['count'], 6), app.set(['analysis'], 'Saved together'),
+        ]);
+        renderDashboard({{ count, analysis }});
+      }});
+      app.on('spin-while-waiting', async () => {{
+        // Compute for six seconds while a read is outstanding: the wait must
+        // not become a free pass around the execution budget.
+        const pending = app.read(['count']);
+        const started = Date.now();
+        while (Date.now() - started < 6000) {{ /* busy */ }}
+        await pending;
+        app.notify('Spin finished', 'success');
+      }});
+      app.on('sequential-reads', async () => {{
+        await app.read(['count']);
+        await app.read(['analysis']);
+        await app.read(['count']);
+        app.notify('Sequential reads finished', 'success');
       }});
       app.on('toggle-review', event => app.notify(event.checked ? 'Review marked complete' : 'Review reopened', 'success'));
       app.on('move-priority', event => app.notify(
@@ -1049,6 +1074,207 @@ def worker_startup_smoke(page: Any) -> None:
     file_links_smoke(page)
 
 
+def turn_budget_smoke(page: Any) -> None:
+    """Concurrent reads finish within a total deadline; slow waits and CPU work time out."""
+    from playwright.sync_api import expect
+
+    _start_host_app(page)
+    frame = page.locator("#panel-workspace-web-apps")
+    frame.get_by_role("button", name="Show Chat", exact=True).click()
+    frame.locator("#message").fill("Build a small weekly focus dashboard.")
+    frame.get_by_role("button", name="Send", exact=True).click()
+    frame.get_by_role("button", name="Show app", exact=True).click()
+    expect(frame.locator(".dashboard")).to_be_visible(timeout=20_000)
+    count = frame.locator(".metric strong")
+    expect(count).to_have_text("2")
+    # Two independent reads overlap, then one dependent write: 1.8 s per
+    # request fits in five seconds only when the reads actually run concurrently.
+    page.evaluate("""() => {
+      const nativeApi = window.KernHost.api;
+      window.__kernRuntimeDelayMs = 1800;
+      window.__kernRuntimeFailReads = 0;
+      window.__kernLateWrites = 0;
+      window.__kernLateWritePending = false;
+      window.__kernReadsDuringLateWrite = 0;
+      window.__kernFailWrites = 0;
+      window.__kernExternalWrite = false;
+      window.__kernFullHydration = false;
+      window.__kernHydrationDelayMs = 0;
+      window.__kernHydrationStarted = false;
+      window.__kernWriteAttempts = 0;
+      window.__kernReconciling = false;
+      window.__kernReadsDuringReconciliation = 0;
+      window.__kernRuntimeDelayFor = () => window.__kernRuntimeDelayMs;
+      window.KernHost.api = (method, path, body) => {
+        if (path.endsWith("/state/ui")) {
+          return new Promise(resolve => setTimeout(resolve, window.__kernReconciling ? 1800 : 0))
+            .then(() => nativeApi(method, path, body))
+            .then(response => {
+              if (window.__kernFullHydration) {
+                response.app.javascript = response.app.javascript
+                  .replace("data: 'targeted'", "")
+                  .replace("renderDashboard({ count: next, analysis });", "renderDashboard(next);");
+              }
+              return response;
+            })
+            .finally(() => { window.__kernReconciling = false; });
+        }
+        if (path.endsWith("/state/data") && window.__kernHydrationDelayMs) {
+          const delay = window.__kernHydrationDelayMs;
+          window.__kernHydrationDelayMs = 0;
+          window.__kernHydrationStarted = true;
+          return new Promise(resolve => setTimeout(resolve, delay))
+            .then(() => nativeApi(method, path, body));
+        }
+        if (path.endsWith("/runtime/actions")) window.__kernWriteAttempts += 1;
+        if (path.endsWith("/runtime/actions") && window.__kernFailWrites > 0) {
+          window.__kernFailWrites -= 1;
+          window.__kernReconciling = true;
+          if (window.__kernExternalWrite) {
+            return nativeApi(method, path, { ...body, path: ['analysis'], value: 'External update' })
+              .then(() => nativeApi(method, path, body));
+          }
+          return Promise.reject(new Error("simulated write conflict"));
+        }
+        if (path.endsWith("/runtime/data/read") && window.__kernReconciling) {
+          window.__kernReadsDuringReconciliation += 1;
+        }
+        if (!/\\/runtime\\/(data\\/read|actions|collections\\/)/.test(path)) return nativeApi(method, path, body);
+        if (path.endsWith("/runtime/actions") && window.__kernLateWrites > 0) {
+          window.__kernLateWrites -= 1;
+          window.__kernLateWritePending = true;
+          return new Promise(resolve => setTimeout(resolve, 6500))
+            .then(() => nativeApi(method, path, body))
+            .finally(() => { window.__kernLateWritePending = false; });
+        }
+        if (path.endsWith("/runtime/data/read") && window.__kernLateWritePending) {
+          window.__kernReadsDuringLateWrite += 1;
+        }
+        if (path.endsWith("/runtime/data/read") && window.__kernRuntimeFailReads > 0) {
+          window.__kernRuntimeFailReads -= 1;
+          return Promise.reject(new Error("simulated read failure"));
+        }
+        return new Promise(resolve => setTimeout(resolve, window.__kernRuntimeDelayFor(path, body)))
+          .then(() => nativeApi(method, path, body));
+      };
+    }""")
+    add = frame.get_by_role("button", name="Add priority", exact=True)
+    add.click()
+    expect(count).to_have_text("3", timeout=15_000)
+    expect(frame.locator("#runtime-status")).not_to_contain_text("took too long")
+    # A click that lands while the previous turn waits on the host is queued
+    # and runs when that turn completes, instead of being dropped.
+    add.click()
+    add.click()
+    expect(frame.locator("#runtime-status")).to_contain_text("Finishing the previous app action")
+    expect(count).to_have_text("4", timeout=15_000)
+    expect(count).to_have_text("5", timeout=15_000)
+    # Concurrent writes remain ordered against their advancing revisions.
+    frame.get_by_role("button", name="Save together", exact=True).click()
+    expect(count).to_have_text("6", timeout=10_000)
+    expect(frame.locator(".analysis")).to_have_text("Saved together")
+    # Computing while a request is outstanding is still generated execution:
+    # the handler spins for six seconds behind one slow read and is stopped
+    # by the five-second total deadline instead of finishing.
+    # The status element keeps its last text while hidden; clear it so the
+    # assertion below can only be satisfied by this turn's own outcome.
+    frame.locator("#runtime-status").evaluate("element => { element.textContent = ''; }")
+    started = time.monotonic()
+    frame.get_by_role("button", name="Spin while waiting", exact=True).click()
+    expect(frame.locator("#runtime-status")).to_contain_text(
+        "took too long and was stopped", timeout=6_000
+    )
+    if time.monotonic() - started > 6.5:
+        raise AssertionError("a spinning handler outlived its execution budget")
+    expect(frame.locator("#runtime-status")).not_to_contain_text("Spin finished")
+    # Waiting alone also consumes the deadline. Three sequential 1.8 s
+    # reads must time out, even though there is almost no generated CPU work.
+    frame.locator("#runtime-status").evaluate("element => { element.textContent = ''; }")
+    started = time.monotonic()
+    frame.get_by_role("button", name="Sequential reads", exact=True).click()
+    expect(frame.locator("#runtime-status")).to_contain_text(
+        "took too long and was stopped", timeout=6_500
+    )
+    elapsed = time.monotonic() - started
+    if not 4.5 <= elapsed <= 6.5:
+        raise AssertionError(f"expected five-second total deadline, got {elapsed:.2f}s")
+    expect(frame.locator("#runtime-status")).not_to_contain_text("Sequential reads finished")
+    # A host write can commit after the worker's deadline. A queued click
+    # must wait and read that acknowledged revision, rather than racing it.
+    page.evaluate("window.__kernRuntimeDelayMs = 0; window.__kernLateWrites = 1;")
+    frame.locator("#runtime-status").evaluate("element => { element.textContent = ''; }")
+    add.click()
+    page.wait_for_function("() => window.__kernLateWritePending")
+    add.click()
+    expect(frame.locator("#runtime-status")).to_contain_text("took too long", timeout=6_500)
+    expect(count).to_have_text("8", timeout=10_000)
+    if page.evaluate("window.__kernReadsDuringLateWrite") != 0:
+        raise AssertionError("queued action read stale state before the timed-out write settled")
+    # A failed save must also finish refreshing state before the queued action
+    # can issue reads. Delay that refresh to expose an early worker rejection.
+    page.evaluate("window.__kernFailWrites = 1;")
+    add.click()
+    page.wait_for_function("() => window.__kernReconciling")
+    add.click()
+    expect(count).to_have_text("9", timeout=10_000)
+    if page.evaluate("window.__kernReadsDuringReconciliation") != 0:
+        raise AssertionError("queued action ran before failed-write reconciliation")
+    # A failing turn leaves a runtime report that rides along with the
+    # operator's next message so the agent learns the actual cause.
+    page.evaluate("window.__kernRuntimeDelayMs = 0; window.__kernRuntimeFailReads = 1;")
+    frame.locator("#runtime-status").evaluate("element => { element.textContent = ''; }")
+    add.click()
+    expect(frame.locator("#runtime-status")).to_contain_text("This app action failed", timeout=15_000)
+    expect(count).to_have_text("9")
+    frame.get_by_role("button", name="Show Chat", exact=True).click()
+    frame.locator("#message").fill("Why did that fail?")
+    frame.get_by_role("button", name="Send", exact=True).click()
+    user_message = frame.locator(".chat-history-entry.user .chat-history-message").last
+    expect(user_message).to_contain_text("Why did that fail?")
+    expect(user_message).to_contain_text(
+        '[App runtime report: action "increment" failed inside its action handler; revision'
+    )
+    # The report is sent once.
+    expect(frame.locator("#composer-running")).to_be_hidden(timeout=20_000)
+    frame.locator("#message").fill("Thanks.")
+    frame.get_by_role("button", name="Send", exact=True).click()
+    user_message = frame.locator(".chat-history-entry.user .chat-history-message").last
+    expect(user_message).to_have_text("Thanks.")
+    expect(frame.locator("#composer-running")).to_be_hidden(timeout=20_000)
+    frame.get_by_role("button", name="Show app", exact=True).click()
+    # A real one-revision conflict must surface the background version, not
+    # mistake it for our failed write and replay a stale queued click.
+    page.evaluate("""() => {
+      window.__kernFailWrites = 1;
+      window.__kernExternalWrite = true;
+      window.__kernWriteAttempts = 0;
+      window.__kernFullHydration = true;
+    }""")
+    add.click()
+    page.wait_for_function("() => window.__kernReconciling")
+    add.click()
+    expect(frame.locator("#app-update-veil")).to_be_visible(timeout=10_000)
+    if page.evaluate("window.__kernWriteAttempts") != 1:
+        raise AssertionError("queued click replayed against a conflicting revision")
+    expect(count).to_have_text("9")
+    # The sandbox is ready, but full-data hydration misses the deadline.
+    # Its queued click should get a fresh turn and its report must count the
+    # hydration request rather than blame renderer startup.
+    page.evaluate("window.__kernHydrationDelayMs = 6500;")
+    frame.get_by_role("button", name="Update app", exact=True).click()
+    page.wait_for_function("() => window.__kernHydrationStarted")
+    add.click()
+    expect(count).to_have_text("10", timeout=10_000)
+    expect(frame.locator(".analysis")).to_have_text("External update")
+    frame.get_by_role("button", name="Show Chat", exact=True).click()
+    frame.locator("#message").fill("What slowed the load?")
+    frame.get_by_role("button", name="Send", exact=True).click()
+    user_message = frame.locator(".chat-history-entry.user .chat-history-message").last
+    expect(user_message).to_contain_text("startup was stopped while loading data")
+    expect(user_message).to_contain_text("1 host request waited")
+    expect(user_message).not_to_contain_text("could not start its renderer")
+
+
 def file_links_smoke(page: Any) -> None:
     """End this browser journey in Files so no later action races an App reload."""
     from playwright.sync_api import expect
@@ -1109,7 +1335,7 @@ def desktop_smoke(page: Any) -> None:
     expect(page).to_have_url(re.compile(rf"#apps/{re.escape(first_app)}$"))
     expect(page.locator(
         f"#web-apps-nav-items .workspace-nav-item[data-item-id='{first_app}'] .workspace-nav-meta"
-    )).to_have_text("Codex · gpt-5.6-sol · high")
+    )).to_have_text("Codex · gpt-6-sol · high")
     page.reload(wait_until="domcontentloaded")
     expect(page.locator("#panel-workspace-web-apps")).to_be_visible()
     expect(frame.locator("#app-title")).to_have_text(first_app)
@@ -1150,7 +1376,7 @@ def desktop_smoke(page: Any) -> None:
     frame.locator("#settings-open").click()
     expect(frame.locator("#settings-popover")).to_be_visible()
     expect(frame.locator("#runtime")).to_have_value("codex")
-    expect(frame.locator("#model")).to_have_value("gpt-5.6-sol")
+    expect(frame.locator("#model")).to_have_value("gpt-6-sol")
     expect(frame.locator("#effort")).to_have_value("high")
     frame.locator("#runtime").select_option("grok")
     expect(frame.locator("#model")).to_have_value("grok-4.6")
@@ -1161,7 +1387,7 @@ def desktop_smoke(page: Any) -> None:
     expect(app_sidebar_meta).to_have_text("Grok · grok-4.6 · high")
     frame.locator("#runtime").select_option("codex")
     expect(frame.locator("#app-subtitle")).to_have_text(
-        "Codex · gpt-5.6-terra · High"
+        "Codex · gpt-6-sol · High"
     )
     expect(frame.locator("#agent-command-surface")).to_be_hidden()
     expect(frame.locator("#chat-history")).to_be_hidden()
@@ -1291,7 +1517,7 @@ def desktop_smoke(page: Any) -> None:
     # while it is still opening and leave it open.
     expect(frame.locator("#settings-popover")).to_be_visible()
     expect(frame.locator("#runtime")).to_have_value("codex")
-    expect(frame.locator("#model")).to_have_value("gpt-5.6-sol")
+    expect(frame.locator("#model")).to_have_value("gpt-6-sol")
     expect(frame.locator("#effort")).to_have_value("high")
     frame.locator("#settings-open").click()
     expect(frame.locator("#settings-popover")).to_be_hidden()

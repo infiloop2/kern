@@ -114,7 +114,7 @@ class UsageStorageTests(unittest.TestCase):
         from host.runtime.workspace import schedules
         schedule = schedules.create_schedule({
             "name": "Daily research", "message": "Research", "cadence": "daily",
-            "daily_time": "12:00", "agent_runtime": "codex", "model": "gpt-5.6-sol", "effort": "high",
+            "daily_time": "12:00", "agent_runtime": "codex", "model": "gpt-6-sol", "effort": "high",
         }, actor="user")
         with state.mutation() as cur:
             cur.execute("INSERT INTO chat_threads (thread_id, name) VALUES ('thread-1', 'My chat')")

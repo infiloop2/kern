@@ -65,6 +65,8 @@ The categories are:
 | `schedules` | quota | At most 100 active schedules. Deleted definitions remain restorable for 90 days, then are removed independently of their stable `schedule-N` host thread. |
 | `schedule_revisions` | retention | Newest 100 revisions per retained schedule; cascades with its schedule. |
 | `web_app_revisions` | retention | Newest 5 exact revisions, then one recovery point per four-hour interval during the first day and one per day from day two through day seven, capped at 17 revisions; cascades with its quota-bounded App. |
+| `web_app_ui_versions`, `web_app_document_versions` | reachability | Immutable components shared by App checkpoints; removed when no retained checkpoint references them. Cascade with the App. |
+| `web_app_collection_versions` | reachability | Current row intervals plus closed intervals needed by at least one of the App's retained checkpoints; cleanup uses the App lock. Cascade with the App. |
 
 When adding or renaming a table, update this inventory in the same change.
 

@@ -13,6 +13,7 @@ on:
           - apify
           - apify_developer
           - brave_search
+          - cloudwatch_logs
           - elevenlabs
           - gmail
           - google_calendar
@@ -239,6 +240,10 @@ jobs:
           # See docs/development/persistent-aws-stage.md.
           KERN_STAGE_APIFY_API_TOKEN: ${{ secrets.KERN_STAGE_APIFY_API_TOKEN }}
           KERN_STAGE_BRAVE_SEARCH_API_KEY: ${{ secrets.KERN_STAGE_BRAVE_SEARCH_API_KEY }}
+          KERN_STAGE_CLOUDWATCH_LOGS_AWS_ACCESS_KEY_ID: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_AWS_ACCESS_KEY_ID }}
+          KERN_STAGE_CLOUDWATCH_LOGS_AWS_SECRET_ACCESS_KEY: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_AWS_SECRET_ACCESS_KEY }}
+          KERN_STAGE_CLOUDWATCH_LOGS_AWS_REGION: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_AWS_REGION }}
+          KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP }}
           KERN_STAGE_H3MAX_FAL_KEY: ${{ secrets.KERN_STAGE_H3MAX_FAL_KEY }}
           KERN_STAGE_IBKR_OAUTH_CONSUMER_KEY: ${{ secrets.KERN_STAGE_IBKR_OAUTH_CONSUMER_KEY }}
           KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN }}

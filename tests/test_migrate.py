@@ -117,6 +117,67 @@ class MigrateRunnerTests(unittest.TestCase):
         with self.assertRaises(migrate.MigrationError):
             migrate.load_migrations(self.migrations)
 
+    def test_shared_app_recovery_migration_starts_from_live_state(self) -> None:
+        import json
+        from host.runtime.workspace.web_apps import backend
+
+        migrate.up(quiet=True)
+        for _ in range(3):
+            backend.create_web_app()
+        migrate.down(target=64, quiet=True)
+        live_rows = {"leads": {"a": {"v": 2}, "b": {"v": 9}}}
+        with db.transaction() as cur:
+            # Both an existing checkpoint and a live state newer than its last
+            # checkpoint become one fresh, accurate baseline. app-3 stays empty.
+            for app_id in ["app-1", "app-2"]:
+                cur.execute(
+                    "UPDATE web_apps SET revision = 10, html = '<main>live</main>',"
+                    " data_json = %s WHERE app_id = %s",
+                    (json.dumps({"count": 10}), app_id),
+                )
+                backend._restore_collection_snapshot(cur, app_id, json.dumps(live_rows), "now")
+            cur.execute(
+                "INSERT INTO web_app_revisions (app_id, revision, actor, kind, html,"
+                " css, javascript, data_json, collections_json, created_at)"
+                " VALUES ('app-1', 10, 'agent', 'collection', '<main>live</main>',"
+                " '', '', %s, %s, '2026-09-21T00:00:00Z')",
+                (json.dumps({"count": 10}), json.dumps(live_rows)),
+            )
+        before = {app_id: backend.load_app_state(app_id) for app_id in ["app-1", "app-2", "app-3"]}
+        migrate.up(quiet=True)
+        for app_id, state in before.items():
+            self.assertEqual(backend.load_app_state(app_id), state)
+            points = backend.list_revisions(app_id, {})["revisions"]
+            self.assertEqual([(r["revision"], r["kind"]) for r in points], [(state["revision"], "migration")])
+            with db.transaction() as cur:
+                expected_rows = {} if app_id == "app-3" else live_rows
+                self.assertEqual(json.loads(backend.recovery.collection_snapshot(cur, app_id, state["revision"])), expected_rows)
+            if app_id != "app-3":
+                # First post-upgrade collection write must retain the live UI
+                # and document, even when old history had a checkpoint gap.
+                backend.apply_collection_actions(app_id, "leads", {
+                    "expected_revision": 10, "operations": [
+                        {"action": "delete", "id": "a"},
+                    ],
+                })
+                restored = backend.restore_revision(app_id, 10)["app"]
+                self.assertEqual(restored["html"], state["html"])
+                self.assertEqual(restored["data"], state["data"])
+                self.assertEqual(backend.query_collection(app_id, "leads", {})["rows"],
+                                 [{"id": key, "value": value} for key, value in live_rows["leads"].items()])
+        # Rollback preserves the new baseline and subsequent recovery points;
+        # deliberately discarded pre-upgrade points do not reappear.
+        migrate.down(target=64, quiet=True)
+        with db.transaction() as cur:
+            cur.execute("SELECT revision, collections_json FROM web_app_revisions WHERE app_id = 'app-1' ORDER BY revision")
+            rows = cur.fetchall()
+            self.assertEqual([row[0] for row in rows], [10, 11, 12])
+            self.assertEqual(json.loads(rows[0][1]), live_rows)
+            self.assertEqual(json.loads(rows[1][1]), {"leads": {"b": {"v": 9}}})
+            self.assertEqual(json.loads(rows[2][1]), live_rows)
+        migrate.up(quiet=True)
+        self.assertEqual([p["revision"] for p in backend.list_revisions("app-1", {})["revisions"]], [12])
+
     def test_repo_migrations_apply_and_roll_back_cleanly(self) -> None:
         # The real migration history must always migrate a fresh database up
         # and back down; this is the guardrail for every future migration.
@@ -253,6 +314,70 @@ class MigrateRunnerTests(unittest.TestCase):
             self.assertEqual(cur.fetchone(), ("gpt-6-astra", "ultra"))
             cur.execute("SELECT message FROM agent_events WHERE thread_id = 'thread-astra'")
             self.assertEqual(cur.fetchall(), [("Astra transcript",)])
+
+    def test_gpt_6_sol_luna_migration_preserves_retired_rows_and_account_bindings(self) -> None:
+        migrate.up(target=68, quiet=True)
+        runtimes = ("codex", "codex-2", "codex-3")
+        with db.transaction() as cur:
+            for runtime in runtimes:
+                for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+                    cur.execute(
+                        "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                        " VALUES (%s, %s, %s, 'high')",
+                        (runtime, f"old-{runtime}-{model}", model),
+                    )
+            cur.execute(
+                "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                " VALUES ('claude_code', 'thread-opus', 'claude-opus-5-5', 'max')"
+            )
+        self.assertEqual(migrate.up(target=69, quiet=True), [69])
+        expected = []
+        with db.transaction() as cur:
+            for index, runtime in enumerate(runtimes, 1):
+                for model, effort in (("gpt-6-sol", "ultra"), ("gpt-6-luna", "max")):
+                    thread = f"new-{runtime}-{model}"
+                    cur.execute(
+                        "INSERT INTO thread_sessions"
+                        " (agent_runtime, thread_id, provider_session_id, model, effort)"
+                        " VALUES (%s, %s, 'provider-session', %s, %s)",
+                        (runtime, thread, model, effort),
+                    )
+                    expected.append((runtime, thread, model.replace("gpt-6-", "gpt-5.6-"), effort, None))
+                cur.execute(
+                    "INSERT INTO web_apps (app_id, name, revision, agent_runtime, agent_model,"
+                    " agent_effort, created_at, updated_at)"
+                    " VALUES (%s, 'Sol app', 0, %s, 'gpt-6-sol', 'ultra', 'now', 'now')",
+                    (f"app-{index}", runtime),
+                )
+                cur.execute(
+                    "INSERT INTO schedules (id, thread_id, name, message, cadence, interval_minutes,"
+                    " agent_runtime, model, effort, next_run_at, created_at, updated_at)"
+                    " VALUES (%s, %s, 'Luna job', 'hello', 'interval', 60, %s,"
+                    " 'gpt-6-luna', 'max', 'now', 'now', 'now')",
+                    (index, f"schedule-{index}", runtime),
+                )
+        for runtime in runtimes:
+            with self.subTest(runtime=runtime), self.assertRaises(Exception):
+                with db.transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                        " VALUES (%s, 'invalid-luna', 'gpt-6-luna', 'ultra')", (runtime,),
+                    )
+        self.assertEqual(migrate.down(target=68, quiet=True), [69])
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT agent_runtime, thread_id, model, effort, provider_session_id"
+                " FROM thread_sessions WHERE thread_id LIKE 'new-%'"
+            )
+            self.assertCountEqual(cur.fetchall(), expected)
+            cur.execute("SELECT count(*) FROM thread_sessions WHERE thread_id LIKE 'old-%'")
+            self.assertEqual(cur.fetchone(), (9,))
+            cur.execute("SELECT model, effort FROM thread_sessions WHERE thread_id = 'thread-opus'")
+            self.assertEqual(cur.fetchone(), ("claude-opus-5-5", "max"))
+            cur.execute("SELECT agent_runtime, agent_model, agent_effort FROM web_apps")
+            self.assertCountEqual(cur.fetchall(), [(r, "gpt-5.6-sol", "ultra") for r in runtimes])
+            cur.execute("SELECT agent_runtime, model, effort FROM schedules")
+            self.assertCountEqual(cur.fetchall(), [(r, "gpt-5.6-luna", "max") for r in runtimes])
 
     def test_glm_model_migration_allows_sessions_and_rolls_back_active_settings(self) -> None:
         self.assertEqual(migrate.up(target=58, quiet=True), list(range(1, 59)))
@@ -412,6 +537,136 @@ class MigrateRunnerTests(unittest.TestCase):
             self.assertEqual(cur.fetchall(), [])
             cur.execute("SELECT provider FROM proxy_provider_pins WHERE provider = 'openai-3'")
             self.assertEqual(cur.fetchall(), [])
+
+    def test_opus_5_5_rollback_preserves_chat_access_with_supported_model(self) -> None:
+        self.assertEqual(migrate.up(target=67, quiet=True), list(range(1, 68)))
+        with self.assertRaises(Exception):
+            with db.transaction() as cur:
+                cur.execute("INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort) "
+                            "VALUES ('claude_code', 'thread-new', 'claude-opus-5-5', 'high')")
+        old_rows = [
+            ("claude_code", "thread-old-opus", "claude-opus-5", "high"),
+            ("claude_code", "thread-fable", "claude-fable-5-1", "ultracode"),
+            ("claude_code", "thread-sonnet", "claude-sonnet-5", "max"),
+            ("claude_code", "thread-alias", "opus", "high"),
+            ("codex-3", "thread-codex", "gpt-6-astra", "ultra"),
+            ("grok-2", "thread-grok", "grok-4.6", "xhigh"),
+            ("hermes", "thread-hermes", "zai.glm-5", "high"),
+            ("script", "thread-script", "bash", "fixed"),
+        ]
+        with db.transaction() as cur:
+            for row in old_rows:
+                cur.execute("INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort, provider_session_id) "
+                            "VALUES (%s, %s, %s, %s, 'old-provider')", row)
+        self.assertEqual(migrate.up(target=68, quiet=True), [68])
+        with db.transaction() as cur:
+            for effort in ("high", "max", "ultracode"):
+                cur.execute("INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort, provider_session_id) "
+                            "VALUES ('claude_code', %s, 'claude-opus-5-5', %s, 'new-provider')",
+                            (f"thread-new-{effort}", effort))
+                cur.execute("INSERT INTO agent_events (created_at, event_type, thread_id, message, source) "
+                            "VALUES ('2026-09-22T00:00:00Z', 'thread.message', %s, 'preserved transcript', 'agent')",
+                            (f"thread-new-{effort}",))
+        for runtime, model, effort in (("claude_code", "claude-opus-5-5", "ultra"),
+                                       ("codex", "claude-opus-5-5", "high"),
+                                       ("codex", "gpt-5.6-luna", "ultra")):
+            with self.subTest(runtime=runtime, model=model, effort=effort), self.assertRaises(Exception):
+                with db.transaction() as cur:
+                    cur.execute("INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort) "
+                                "VALUES (%s, 'thread-invalid', %s, %s)", (runtime, model, effort))
+        # Record non-default lifecycle/context metadata too: retaining only
+        # model/effort would not preserve the canonical conversation state.
+        with db.transaction() as cur:
+            cur.execute("UPDATE thread_sessions SET run_number = 4, context_cleared_seq = 1, "
+                        "last_used_at = '2026-09-22T01:00:00Z' WHERE thread_id LIKE 'thread-new-%'")
+            cur.execute("SELECT thread_id, to_jsonb(thread_sessions) - 'provider_session_id' "
+                        "FROM thread_sessions ORDER BY thread_id")
+            before = cur.fetchall()
+            for thread_id, fields in before:
+                if thread_id.startswith("thread-new-"):
+                    fields["model"] = "claude-opus-5"
+        self.assertEqual(migrate.down(target=67, quiet=True), [68])
+
+        from host.runtime.admin_api import threads
+        from host.runtime.workspace.chat import backend
+        metadata = {
+            f"thread-new-{effort}": {"name": f"Opus conversation {effort}",
+                "schedule_id": None, "next_run_at": None}
+            for effort in ("high", "max", "ultracode")
+        }
+        def assert_accessible():
+            with db.transaction() as cur:
+                cur.execute("SELECT thread_id, to_jsonb(thread_sessions) - 'provider_session_id' "
+                            "FROM thread_sessions ORDER BY thread_id")
+                self.assertEqual(cur.fetchall(), before)
+                cur.execute("SELECT thread_id, provider_session_id FROM thread_sessions")
+                self.assertEqual(dict(cur.fetchall()), {
+                    **{row[1]: "old-provider" for row in old_rows},
+                    **{thread_id: None for thread_id in metadata},
+                })
+                cur.execute("SELECT message FROM agent_events WHERE thread_id LIKE 'thread-new-%'")
+                self.assertEqual(cur.fetchall(), [("preserved transcript",)] * 3)
+            # Only bridge the Workspace HTTP transport and its separate index;
+            # actual Admin API readers query the migrated canonical rows.
+            with (patch.object(backend, "_recorded_threads", return_value=metadata),
+                  patch.object(backend, "call_admin_api", side_effect=lambda *args:
+                               threads.list_threads({"prefix": ["thread-new-"]})),
+                  patch.object(backend.seen, "add_to_items")):
+                listed = backend.list_chat_threads()["threads"]
+            self.assertEqual({item["thread_id"] for item in listed}, set(metadata))
+            for item in listed:
+                self.assertEqual(item["name"], metadata[item["thread_id"]]["name"])
+                self.assertTrue(item["has_session"])
+                detail = threads.get_thread(item["thread_id"])
+                self.assertEqual(detail["model"], "claude-opus-5")
+                self.assertEqual(detail["last_used_at"], "2026-09-22T01:00:00Z")
+                self.assertGreater(detail["latest_message_seq"], 0)
+        assert_accessible()
+        self.assertEqual(migrate.up(target=68, quiet=True), [68])
+        assert_accessible()
+
+    def test_opus_rollback_crosses_older_constraints_and_updates_active_settings(self) -> None:
+        migrate.up(target=68, quiet=True)
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO web_apps (app_id, name, archived, revision, agent_runtime, "
+                "agent_model, agent_effort, created_at, updated_at) VALUES "
+                "('app-67', 'Opus App', FALSE, 0, 'claude_code', 'claude-opus-5-5', 'max', "
+                "'2026-09-22T00:00:00Z', '2026-09-22T00:00:00Z')")
+            cur.execute(
+                "INSERT INTO schedules (id, thread_id, name, message, cadence, interval_minutes, "
+                "agent_runtime, model, effort, next_run_at, created_at, updated_at) VALUES "
+                "(67, 'schedule-67', 'Opus Schedule', 'Work', 'interval', 60, 'claude_code', "
+                "'claude-opus-5-5', 'ultracode', '2026-09-22T01:00:00Z', "
+                "'2026-09-22T00:00:00Z', '2026-09-22T00:00:00Z')")
+            cur.execute(
+                "INSERT INTO schedule_revisions (schedule_id, revision, name, message, cadence, "
+                "interval_minutes, agent_runtime, model, effort, deleted, actor, created_at) VALUES "
+                "(67, 1, 'Opus Schedule', 'Work', 'interval', 60, 'claude_code', 'claude-opus-5-5', "
+                "'ultracode', FALSE, 'user', '2026-09-22T00:00:00Z')")
+            for thread_id, effort in (("thread-67", "high"), ("app-67", "max"), ("schedule-67", "ultracode")):
+                cur.execute(
+                    "INSERT INTO thread_sessions (thread_id, agent_runtime, model, effort, provider_session_id) "
+                    "VALUES (%s, 'claude_code', 'claude-opus-5-5', %s, 'new-provider')", (thread_id, effort))
+        # Migration 63 rewrites the options constraint again; storage-only
+        # Opus 5.5 rows would make this multi-version downgrade fail.
+        self.assertEqual(migrate.down(target=62, quiet=True), [68, 67, 66, 65, 64, 63])
+        for target in (62, 68):
+            if target == 68:
+                self.assertEqual(migrate.up(target=68, quiet=True), [63, 64, 65, 66, 67, 68])
+            with self.subTest(target=target), db.transaction() as cur:
+                cur.execute("SELECT thread_id, model, effort, provider_session_id FROM thread_sessions ORDER BY thread_id")
+                self.assertEqual(cur.fetchall(), [
+                    ("app-67", "claude-opus-5", "max", None),
+                    ("schedule-67", "claude-opus-5", "ultracode", None),
+                    ("thread-67", "claude-opus-5", "high", None),
+                ])
+                cur.execute("SELECT agent_model, agent_effort FROM web_apps WHERE app_id = 'app-67'")
+                self.assertEqual(cur.fetchone(), ("claude-opus-5", "max"))
+                cur.execute("SELECT model, effort FROM schedules WHERE id = 67")
+                self.assertEqual(cur.fetchone(), ("claude-opus-5", "ultracode"))
+                cur.execute("SELECT model, effort FROM schedule_revisions WHERE schedule_id = 67")
+                self.assertEqual(cur.fetchone(), ("claude-opus-5-5", "ultracode"))
 
     def test_persistent_schedules_create_threads_and_drop_old_runs(self) -> None:
         migrate.up(target=46, quiet=True)

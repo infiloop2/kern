@@ -400,8 +400,17 @@ class ClaudeCodeSession:
                     # its later success result is the host turn's completion.
                     continue
                 if message.get("subtype") != "success" or message.get("is_error"):
+                    # Headless failures (including --resume of a deleted
+                    # session) can have only an errors array, with no result.
+                    # Preserve its explanation so lost-session recovery sees
+                    # the provider's error rather than error_during_execution.
+                    errors = message.get("errors")
+                    error_details = "\n".join(
+                        item for item in errors if isinstance(item, str) and item.strip()
+                    ) if isinstance(errors, list) else ""
                     error = agent_activity.clean_text(
                         message.get("result")
+                        or error_details
                         or message.get("subtype")
                         or "Claude turn failed"
                     )

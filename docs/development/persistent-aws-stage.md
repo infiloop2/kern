@@ -106,7 +106,7 @@ ten-turn cap for Codex, Claude Code, Grok, and Hermes without adding paid provid
 turns merely to repeat the admission invariant.
 
 All agent turns use the least expensive exposed options: Codex uses
-`gpt-5.6-luna` with `high` effort, Claude Code uses `sonnet` with `high`
+`gpt-6-luna` with `high` effort, Claude Code uses `sonnet` with `high`
 effort, Grok uses `grok-4.6` with `high` effort, and Hermes uses
 `qwen.qwen3-coder-next` with `high` effort.
 This includes concurrency,
@@ -187,6 +187,7 @@ id needed by the next action.
 | Integration | Live calls in one run | Side effect | Expected metered usage |
 | --- | --- | --- | --- |
 | Brave Search | `search_web` once | None | One Brave Search request. |
+| AWS CloudWatch Logs | `filter_log_events` once against `KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP` over the preceding five minutes, limit 1 | None | One `FilterLogEvents` read; no retries, writes, unmasking, or log-group discovery. |
 | Gmail | `search_messages`, `list_labels`, and `list_drafts`; conditional `read_message` and `read_thread`; denied send, message-change, and label proposals; approved draft create and delete | One temporary draft, deleted in the same check | Three to five reads and two writes against the connected account; denied proposals make no write. |
 | Google Calendar | `read_events`; approved event create; local approval-status check; approved event delete | One temporary event, deleted in the same check | One read and two writes against the connected account. |
 | Google Search Console | `list_properties`, one-row `query_search_analytics`, `list_sitemaps`, and `inspect_url`; denied `submit_sitemap` proposal | None | Four bounded reads against the connected account; the denied proposal does not submit a sitemap. |

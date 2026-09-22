@@ -689,7 +689,7 @@ def admit_turn(
         if not runtime_network_enabled(runtime_type):
             raise ApiError(
                 HTTPStatus.CONFLICT,
-                f"{label} runtime is deactivated; enable its provider under Home > Integrations",
+                f"{label} runtime is deactivated; enable its provider under Home > Agent runtimes",
             )
         status = runtime_status(runtime_type)
         if status != "active":

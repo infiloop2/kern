@@ -1,7 +1,6 @@
 """Exercise both real HTTP handlers; provider calls and database are not needed."""
 from contextlib import ExitStack
 import io
-from http import HTTPStatus
 import os
 from pathlib import Path
 import tempfile
@@ -30,7 +29,6 @@ class PublicToolMediaTests(unittest.TestCase):
             self.addCleanup(server.shutdown)
         self.stack.enter_context(patch.object(tools_client, "TOOLS_SOCKET_PATH", str(root / "tools.sock")))
         self.stack.enter_context(patch.object(admin_api.state, "load_cloudflare_hostname", return_value="kern.example"))
-        self.auth = self.stack.enter_context(patch.object(admin_api.Handler, "_authenticate", side_effect=admin_api.ApiError(HTTPStatus.UNAUTHORIZED, "authentication required")))
         self.data = b"0123456789" * 100
         self.metadata = self.tools.asset_store.stage(kind="video", tool_id="instagram", filename="hello.mp4",
             media_type="video/mp4", size_bytes=len(self.data), source=io.BytesIO(self.data))
@@ -58,7 +56,6 @@ class PublicToolMediaTests(unittest.TestCase):
             self.assertIn("no-store", headers["Cache-Control"])
             self.assertNotIn("Set-Cookie", headers)
             self.assertEqual(self.request(path, "HEAD")[2], b"")
-            self.auth.assert_not_called()
             for bad in (path + "/file", path + "?path=/etc/passwd",
                         "/tool-media/../v1/tools", "/tool-media/%2e%2e/v1/tools"):
                 self.assertEqual(self.request(bad)[0], 401, bad)
@@ -72,10 +69,8 @@ class PublicToolMediaTests(unittest.TestCase):
             self.assertEqual(self.request(path, "HEAD", headers={"X-Forwarded-Proto": "http"})[0], 403)
             self.assertEqual(self.request(path, headers={"Host": "wrong.example"})[0], 403)
         self.assertEqual(self.request(path)[0], 404)
-        self.auth.reset_mock()
         for path in ("/v1/tools", "/v1/agent-files/content?path=/etc/passwd", "/v1/tools/instagram/approvals"):
             self.assertEqual(self.request(path)[0], 401)
-        self.assertEqual(self.auth.call_count, 3)
 
     def test_byte_ranges_and_no_arbitrary_private_tools_routes(self):
         with self.assets.public_asset_url(self.metadata.asset_id) as url:

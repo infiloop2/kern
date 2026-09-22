@@ -6,7 +6,6 @@ const fields = ["input_tokens", "cached_input_tokens", "cache_write_tokens", "ou
 const inputFields = fields.slice(0, 3);
 const labels = ["Input tokens", "Output tokens"];
 const kinds = { chats: "Chats", apps: "Apps", schedules: "Schedules" };
-const runtimes = { codex: "Codex", "codex-2": "Codex 2", "codex-3": "Codex 3", claude_code: "Claude Code", grok: "Grok", "grok-2": "Grok 2", hermes: "Hermes" };
 let report = null;
 let kind = "all";
 let thread = "";
@@ -108,12 +107,11 @@ function render() {
     ? `Combined across the last 7 days · Peak at ${String(peak.hour).padStart(2, "0")}:00–${String(peak.hour).padStart(2, "0")}:59 UTC · ${peak.total.toLocaleString()} measured tokens`
     : "Combined across the last 7 days · UTC · No measured token totals";
 
-  const providerKeys = [...new Set(rows.map(row => `${row.runtime}\n${row.model}`))];
-  $("analytics-providers").innerHTML = providerKeys.map(key => {
-    const [runtime, model] = key.split("\n");
-    const summary = aggregate(rows.filter(row => row.runtime === runtime && row.model === model));
-    return { runtime, model, summary };
-  }).sort((a, b) => total(b.summary.tokens) - total(a.summary.tokens)).map(({ runtime, model, summary }) => `<div class="analytics-provider"><div><strong>${esc(runtimes[runtime] || runtime)}</strong><span class="muted">${esc(model)}</span></div><div class="analytics-provider-counts">${displayMetrics(summary).map((value, i) => `<div><small>${labels[i]}</small>${value}</div>`).join("")}</div></div>`).join("");
+  const models = [...new Set(rows.map(row => row.model))];
+  $("analytics-providers").innerHTML = models.map(model => ({
+    model,
+    summary: aggregate(rows.filter(row => row.model === model)),
+  })).sort((a, b) => total(b.summary.tokens) - total(a.summary.tokens)).map(({ model, summary }) => `<div class="analytics-provider"><div><strong>${esc(model)}</strong></div><div class="analytics-provider-counts">${displayMetrics(summary).map((value, i) => `<div><small>${labels[i]}</small>${value}</div>`).join("")}</div></div>`).join("");
 
   const byThread = new Map();
   for (const row of rows) {

@@ -39,6 +39,71 @@ class DictationLiveSmokeTests(unittest.TestCase):
 
 
 class AwsSmokeTeardownTests(unittest.TestCase):
+    def test_embedding_load_waits_for_hybrid_readiness_before_writes(self) -> None:
+        smoke = AwsSmoke()
+
+        def search_response(mode: str) -> str:
+            return json.dumps(
+                {
+                    "result": {
+                        "content": [
+                            {
+                                "text": json.dumps(
+                                    {
+                                        "status": 200,
+                                        "body": {"pages": [], "search_mode": mode},
+                                    }
+                                )
+                            }
+                        ]
+                    }
+                }
+            )
+
+        with (
+            patch.object(
+                smoke,
+                "_ssh_code",
+                side_effect=[
+                    search_response("lexical_fallback"),
+                    search_response("hybrid"),
+                ],
+            ) as ssh,
+            patch.object(
+                smoke,
+                "_api",
+                side_effect=AssertionError("page write reached"),
+            ) as api,
+            patch("tests.smoke.smoke_aws.time.sleep"),
+            self.assertRaisesRegex(AssertionError, "page write reached"),
+        ):
+            smoke.check_embedding_index_resource_load()
+
+        self.assertEqual(ssh.call_count, 2)
+        self.assertEqual(api.call_args.args[:2], (
+            "PUT", "/v1/workspace/memory/pages/embedding-load-00"
+        ))
+
+    def test_admin_api_timeout_names_the_request_without_retrying(self) -> None:
+        smoke = AwsSmoke()
+        with (
+            patch.object(smoke, "_auth_headers", return_value={}),
+            patch(
+                "tests.smoke.smoke_aws.urllib.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ) as request,
+            self.assertRaisesRegex(
+                AssertionError,
+                "PUT /v1/workspace/memory/pages/load-01 timed out after 30 seconds",
+            ),
+        ):
+            smoke._api(
+                "PUT",
+                "/v1/workspace/memory/pages/load-01",
+                {"expected_revision": 0},
+            )
+        self.assertEqual(request.call_count, 1)
+
     def test_fresh_smoke_does_not_start_dynamic_registration(self) -> None:
         smoke = AwsSmoke()
         entries = [
@@ -472,7 +537,7 @@ class ThreadTurnHelperTests(unittest.TestCase):
             {
                 "message": "hello",
                 "agent_runtime": "claude_code",
-                "model": "claude-opus-5",
+                "model": "claude-opus-5-5",
                 "effort": "high",
             },
         )

@@ -32,12 +32,16 @@ class MemoryRecallDiagnosticsTests(unittest.TestCase):
             embed.reset_mock()
             details = []
             actual = memory._search_pages({'q': ['guide']}, scope='swarm', record_top_hit=False, semantic=True, diagnostics=details)
-        self.assertEqual(actual, baseline)
+        self.assertEqual(
+            [page["page_id"] for page in actual["pages"]],
+            [page["page_id"] for page in baseline["pages"]],
+        )
+        self.assertEqual(actual["search_mode"], baseline["search_mode"])
         embed.assert_called_once()
         counters.assert_not_called()
         trace = '\n'.join(details)
-        self.assertIn('direct-guide r1 — exact rank 1, lexical rank 1, semantic rank 1 cosine 0.800', trace)
-        self.assertIn('linked-guide r1 — graph rank 1', trace)
+        self.assertIn('direct-guide r1; memory relevance 0.114754 — exact rank 1, lexical rank 1, semantic rank 1 cosine 0.800', trace)
+        self.assertIn('linked-guide r1; memory relevance 0.008197 — graph rank 1', trace)
 
     def test_admission_keeps_diagnostics_out_of_search_and_model_input(self):
         with patch.object(threads.workspace_proxy, 'recall_memory', return_value={'pages': [], 'diagnostics': 'Current query: test'}) as recall:
@@ -69,6 +73,11 @@ class MemoryRecallDiagnosticsTests(unittest.TestCase):
 
 
 class TaskRecallTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.judge_patch = patch.object(memory, "judge", return_value=None)
+        self.judge_patch.start()
+        self.addCleanup(self.judge_patch.stop)
+
     def test_vague_followup_uses_user_task_but_thanks_does_not_search(self):
         history = [
             {"event_type": "thread.message", "payload": {"source": "user", "message": "Fix token usage analytics"}},
@@ -300,6 +309,124 @@ class TaskRecallTests(unittest.TestCase):
         query = memory._recall_query("Deploy İstanbul")
         self.assertEqual(query, "deploy İstanbul")
         self.assertEqual(memory._recall_query(query), query)
+
+    def test_jev_adds_a_complete_score_set_for_all_candidates(self):
+        candidates = [
+            {
+                "page_id": f"guide-{index}",
+                "description": f"Guide {index}",
+                "revision": 1,
+                "content": f"private content {index}",
+                "memory_relevance_score": 0.01 * (index + 1),
+            }
+            for index in range(6)
+        ]
+        probabilities = {
+            "guide-0": 0.01,
+            "guide-1": 0.20,
+            "guide-2": 0.30,
+            "guide-3": 0.40,
+            "guide-4": 0.50,
+            "guide-5": 0.60,
+        }
+        captured = {}
+
+        def judge(state, questions, *, timeout_seconds):
+            captured.update(
+                state=state,
+                questions=questions,
+                timeout_seconds=timeout_seconds,
+            )
+            return {
+                "model": "jev-latest",
+                "answers": {
+                    page_id: {"type": "noul", "noul": score}
+                    for page_id, score in probabilities.items()
+                },
+            }
+
+        details = []
+        with patch.object(memory, "judge", side_effect=judge):
+            memory._add_jev_relevance_scores(
+                candidates,
+                query="repair authentication",
+                details=details,
+            )
+
+        self.assertEqual(
+            [page["jev_score"] for page in candidates],
+            [0.01, 0.20, 0.30, 0.40, 0.50, 0.60],
+        )
+        self.assertEqual(captured["timeout_seconds"], 1.2)
+        self.assertEqual(
+            set(captured["state"]),
+            {"task_query", "candidates"},
+        )
+        self.assertNotIn("private content", json.dumps(captured["state"]))
+        self.assertEqual(len(details), 7)
+        self.assertEqual(details[0], "Jev response model: jev-latest.")
+        self.assertIn("memory relevance 0.010000; Jev score 0.010", details[1])
+        self.assertIn("memory relevance 0.060000; Jev score 0.600", details[-1])
+
+    def test_jev_scores_select_top_five_and_invalid_results_use_local_order(self):
+        candidates = [
+            {
+                "page_id": f"guide-{index}",
+                "description": f"Guide {index}",
+                "revision": 1,
+                "memory_relevance_score": 0.01 * (6 - index),
+            }
+            for index in range(6)
+        ]
+
+        def load(page_id):
+            if page_id == "thread-1":
+                return {
+                    "page_id": page_id,
+                    "description": "Self",
+                    "content": "Notes",
+                    "revision": 1,
+                }
+            return {
+                **next(page for page in candidates if page["page_id"] == page_id),
+                "content": "Guidance",
+            }
+
+        answers = {
+            f"guide-{index}": {"type": "noul", "noul": index / 10}
+            for index in range(6)
+        }
+        with (
+            patch.object(memory, "load_page", side_effect=load),
+            patch.object(memory, "_search_pages", return_value={"pages": candidates}),
+            patch.object(
+                memory,
+                "judge",
+                return_value={"model": "jev-latest", "answers": answers},
+            ),
+        ):
+            result = memory.recall_pages(
+                {"thread_id": "thread-1", "message": "read guides"}
+            )
+        self.assertEqual(
+            [page["page_id"] for page in result["pages"]],
+            ["thread-1", "guide-5", "guide-4", "guide-3", "guide-2", "guide-1"],
+        )
+        self.assertIn("Jev selection: guide-5, guide-4, guide-3, guide-2, guide-1.", result["diagnostics"])
+
+        fallback_candidates = [dict(page) for page in candidates]
+        details = []
+        with patch.object(memory, "judge", return_value={"answers": {}}):
+            memory._add_jev_relevance_scores(
+                fallback_candidates,
+                query="read guides",
+                details=details,
+            )
+        self.assertTrue(all("jev_score" not in page for page in fallback_candidates))
+        self.assertEqual(
+            details,
+            ["Jev scores unavailable; existing recall order used."],
+        )
 
     def test_metadata_reranking_retains_best_search_match_at_cutoff(self):
         candidates = [{"page_id": "login-guide", "description": "Login troubleshooting", "revision": 1}]

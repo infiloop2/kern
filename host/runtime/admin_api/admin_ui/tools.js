@@ -24,7 +24,6 @@ export async function refreshTools() {
 }
 
 function renderTools() {
-  $("tools-cross-access-notice").hidden = tools.filter(tool => tool.enabled).length < 2;
   $("tools-empty").hidden = tools.length > 0;
   if (!tools.length) {
     replaceIntegrationRows($("tools"), "[data-tool-row]", "");

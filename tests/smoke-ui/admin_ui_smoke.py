@@ -43,6 +43,10 @@ _MANAGED_CATALOG_BLOCK = _CATALOG_SOURCE.split("export const MANAGED_INTEGRATION
 MANAGED_INTEGRATION_IDS = frozenset(
     re.findall(r"^  ([a-z][a-z0-9_]*): \{$", _MANAGED_CATALOG_BLOCK, re.MULTILINE)
 )
+_HOST_INFERENCE_CATALOG_BLOCK = _CATALOG_SOURCE.split("export const HOST_INFERENCE_INTEGRATIONS = {", 1)[1].split("\n};", 1)[0]
+HOST_INFERENCE_INTEGRATION_IDS = frozenset(
+    re.findall(r"^  ([a-z][a-z0-9_]*): \{$", _HOST_INFERENCE_CATALOG_BLOCK, re.MULTILINE)
+)
 # A silent parse failure would weaken the count into a tautology, so fail loudly
 # on the shape instead.
 assert {"openai", "claude", "bedrock"} <= MANAGED_INTEGRATION_IDS, (
@@ -50,7 +54,7 @@ assert {"openai", "claude", "bedrock"} <= MANAGED_INTEGRATION_IDS, (
 )
 # `custom_domain` is the Home card for operator-defined domains; it comes from
 # CUSTOM_DOMAIN_GUIDE rather than the managed catalog.
-STATIC_HOME_INTEGRATION_IDS = MANAGED_INTEGRATION_IDS | {"custom_domain"}
+STATIC_HOME_INTEGRATION_IDS = MANAGED_INTEGRATION_IDS | HOST_INFERENCE_INTEGRATION_IDS | {"custom_domain"}
 BUNDLED_TOOL_IDS = frozenset(
     path.parent.name
     for path in (REPO_ROOT / "host/tools").glob("*/__init__.py")
@@ -223,6 +227,27 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 iphone_pwa_swipe_smoke(iphone_pwa_page, url)
                 iphone_pwa.close()
 
+                # The mobile journey deliberately exercises the hard-refresh
+                # gesture, which advances the mock's provider-usage fixture.
+                # Run it after the shared desktop/mobile journey has asserted
+                # the fixture transition so this independent journey cannot
+                # consume that transition first.
+                import host_inference_usage_smokes
+                for mobile in (False, True):
+                    usage_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    usage_page = usage_context.new_page()
+                    report_page_errors(
+                        usage_page,
+                        f"host inference usage {'mobile' if mobile else 'desktop'}",
+                    )
+                    host_inference_usage_smokes.run(
+                        usage_page, url, log_in, mobile=mobile,
+                    )
+                    usage_context.close()
+
             if scope in {"all", "workspaces"}:
                 fallback_workspaces = browser.new_context()
                 fallback_page = fallback_workspaces.new_page()
@@ -247,6 +272,13 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 log_in(workspace_mobile_page, url)
                 workspace_smokes.mobile_smoke(workspace_mobile_page)
                 mobile_workspaces.close()
+
+                budget_workspaces = browser.new_context()
+                budget_page = budget_workspaces.new_page()
+                report_page_errors(budget_page, "workspaces turn budget")
+                log_in(budget_page, url)
+                workspace_smokes.web_app_turn_budget_smoke(budget_page)
+                budget_workspaces.close()
 
                 # Existing workspace journeys use the initial App ids. Run the
                 # independent notice fixture after those journeys have finished.
@@ -321,6 +353,12 @@ def run_webkit_workspace_smoke(playwright, url: str, *, headed: bool) -> None:
         log_in(workspace_page, url)
         workspace_smokes.web_app_worker_startup_smoke(workspace_page)
         workspace.close()
+        budget_workspace = browser.new_context()
+        budget_page = budget_workspace.new_page()
+        report_page_errors(budget_page, "WebKit generated Web App turn budget")
+        log_in(budget_page, url)
+        workspace_smokes.web_app_turn_budget_smoke(budget_page)
+        budget_workspace.close()
         import app_chat_review_smokes
         for short_transcript in (False, True):
             app_chat_context = browser.new_context(viewport=IPHONE_VIEWPORT, service_workers="block")
@@ -611,7 +649,7 @@ def open_home_integration(page, guide_id: str) -> None:
             back.click()
         else:
             page.get_by_role("button", name="Home", exact=True).click()
-    card = page.locator(f"#home-integration-groups [data-guide='{guide_id}']")
+    card = page.locator(f"#panel-home .home-integration-card[data-guide='{guide_id}']")
     expect(card).to_be_visible()
     # Opening Integrations refreshes both resources. Do not let a caller start
     # editing a tool row while the tool refresh can still replace that input.
@@ -620,6 +658,39 @@ def open_home_integration(page, guide_id: str) -> None:
         card.click()
     expect(page.locator("#panel-network")).to_be_visible()
     expect(page.locator("#integration-detail-title")).not_to_have_text("Integration")
+
+
+def focused_detail_scroll_smoke(page) -> None:
+    """Opening another Home detail resets a deliberately scrolled document."""
+    from playwright.sync_api import expect
+
+    tools_responses = 0
+
+    def guide_refresh_response(response):
+        nonlocal tools_responses
+        if response.url.endswith("/v1/tools"):
+            tools_responses += 1
+        # Network entry refreshes tool rows, then refreshes the guide separately.
+        return response.url.endswith("/v1/tools") and tools_responses == 2
+
+    # Test the panel's reset, not an unfinished setup animation or Playwright
+    # scrolling the target into view. Other journeys exercise physical clicks.
+    with page.expect_response(guide_refresh_response) as guide_response:
+        page.locator("#runtime-overview .runtime-summary[data-runtime='codex']").evaluate(
+            """button => {
+              window.scrollTo({top: document.body.scrollHeight, behavior: "instant"});
+              if (window.scrollY <= 24) throw new Error("integration guide is not scrollable");
+              // Keep setup and navigation in one task: a prior panel refresh
+              // must not reset the starting offset between the two operations.
+              button.click();
+            }"""
+        )
+    guide_response.value.body()
+    expect(page.locator("#integration-detail-title")).to_have_text("OpenAI")
+    # Let the completed refresh and resulting layout run before checking position.
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    # Never repair the scroll in the test or relax the position contract.
+    page.wait_for_function("() => window.scrollY <= 24", timeout=5000)
 
 
 def runway_options_smoke(page, url: str) -> None:
@@ -863,42 +934,62 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#panel-home")).to_be_hidden()
     page.get_by_role("button", name="Home", exact=True).click()
     expect(page.locator("#panel-home")).to_be_visible()
+    runtime_toggle = page.locator('[data-overview-group="runtimes"] .runtime-overview-toggle')
+    host_ai_toggle = page.locator('[data-overview-group="host-ai"] .runtime-overview-toggle')
+    expect(page.locator(".runtime-overview-toggle")).to_have_count(2)
+    expect(runtime_toggle).to_be_visible()
+    expect(host_ai_toggle).to_be_visible()
+    expect(runtime_toggle).to_contain_text("Agent runtimes")
+    expect(host_ai_toggle).to_contain_text("Host AI")
+    expect(runtime_toggle).to_have_attribute("aria-expanded", "false")
+    expect(host_ai_toggle).to_have_attribute("aria-expanded", "false")
+    expect(page.locator("#runtime-overview .runtime-summary").first).to_be_hidden()
     expect(page.locator("#runtime-overview")).to_contain_text("Codex")
     expect(page.locator("#runtime-overview")).to_contain_text("Claude Code")
     expect(page.locator("#runtime-overview")).to_contain_text("Grok")
     expect(page.locator("#runtime-overview")).to_contain_text("Grok 2")
     expect(page.locator("#runtime-overview")).to_contain_text("Hermes")
+    expect(page.locator("#runtime-overview")).to_contain_text("OpenAI host")
+    expect(page.locator("#runtime-overview")).to_contain_text("TypeSafe")
     expect(page.locator("#runtime-overview")).to_contain_text("deactivated")
-    expect(page.locator("#runtime-overview").get_by_label("Refresh provider status and usage")).to_be_visible()
-    expect(page.locator(".topbar-actions").get_by_label("Refresh provider status and usage")).to_have_count(0)
-    # The phone-only collapse pill stays out of the way on a wide viewport; the
-    # boxes sit inline in the top bar.
-    expect(page.locator(".runtime-overview-toggle")).to_be_hidden()
-    # Before any login there is no usage: all eight rings (5h and weekly for
-    # each Codex runtime and Claude Code) render the unavailable "--" form rather than 0%.
-    # Bedrock billing is reconciliation metadata in the provider details, not
-    # a primary toolbar value.
-    expect(page.locator("#runtime-overview .usage-ring.unavailable")).to_have_count(8)
-    # Neither Grok runtime has a ring at all: xAI publishes no pool figure for a
-    # subscription account, so each box carries a neutral note rather than an
-    # empty ring that would imply a number is coming.
-    expect(page.locator("#runtime-overview .usage-note")).to_have_count(2)
-    expect(page.locator("#runtime-overview .usage-note").first).to_have_attribute(
-        "title", "usage monitoring is not available for Grok"
+    with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
+        runtime_toggle.click()
+    expect(runtime_toggle).to_have_attribute("aria-expanded", "true")
+    expect(page.locator('[data-overview-group="runtimes"] .runtime-summary').first).to_be_visible()
+    expect(page.locator('[data-overview-group="host-ai"] .runtime-summary').first).to_be_hidden()
+    # Before any subscription login there is no quota usage, so those runtime
+    # statuses stand alone. Hermes retains its real metered usage, but there
+    # are no empty quota rings, unavailable notes, or stat placeholders.
+    expect(page.locator("#runtime-overview .usage-ring")).to_have_count(0)
+    expect(page.locator("#runtime-overview .runtime-usage")).to_have_count(3)
+    expect(page.locator("#runtime-overview .runtime-summary-bedrock .runtime-usage")).to_have_count(1)
+    expect(page.locator("#runtime-overview")).not_to_contain_text("--")
+    expect(page.locator("#runtime-overview .runtime-summary-host-inference")).to_have_count(2)
+    expect(page.locator("#runtime-overview .runtime-summary-host-inference").nth(0)).to_contain_text(
+        "$0.001234"
     )
-    expect(page.locator("#runtime-overview .runtime-summary-bedrock")).to_have_count(1)
-    expect(page.locator("#runtime-overview")).to_contain_text("--")
-    assert_runtime_usage_type(page, minimum_number_px=8)
+    expect(page.locator("#runtime-overview .runtime-summary-host-inference").nth(1)).to_contain_text(
+        "$0.000084"
+    )
+    expect(page.locator('[data-overview-group="runtimes"] .runtime-stat-cost')).to_have_count(1)
     assert_runtime_summaries_do_not_magnify(page)
-    expect(page.locator("#panel-home").get_by_text("Agent runtimes")).to_have_count(0)
+    with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
+        host_ai_toggle.click()
+    expect(runtime_toggle).to_have_attribute("aria-expanded", "false")
+    expect(host_ai_toggle).to_have_attribute("aria-expanded", "true")
+    expect(page.locator('[data-overview-group="runtimes"] .runtime-summary').first).to_be_hidden()
+    expect(page.locator('[data-overview-group="host-ai"] .runtime-summary').first).to_be_visible()
+    expect(host_ai_toggle).to_contain_text("$0.001318 MTD")
+    expect(page.locator("#panel-home").get_by_role("heading", name="Agent runtimes")).to_have_count(1)
     expect(page.locator("#panel-home").get_by_text("Provider usage")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Codex login")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Claude login")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Grok login")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Grok 2 login")).to_have_count(0)
+    runtime_toggle.click()
     page.locator("#runtime-overview .runtime-summary[data-runtime='codex']").click()
     expect(page.locator("#panel-network")).to_be_visible()
-    disabled_openai_row = page.locator(".integration-row[data-integration]", has_text="OpenAI")
+    disabled_openai_row = page.locator('.integration-row[data-integration="openai"]')
     expect(disabled_openai_row.locator(".integration-details")).to_be_visible()
     # Navigation can move the row between two separate bounding-box reads.
     # Check both boxes in one layout snapshot and wait for the route to settle.
@@ -915,10 +1006,12 @@ def desktop_smoke(page, url: str) -> None:
 
     # Workspace actions that return to Home must also update the route. A
     # reload must not resurrect the integration that was open before the chat.
+    runtime_toggle.click()
     page.locator("#runtime-overview .runtime-summary[data-runtime='codex']").click()
     page.locator("#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']").click()
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
     expect(page).to_have_url(re.compile(r"#chat/thread-1$"))
+    runtime_toggle.click()
     page.locator("#runtime-overview .runtime-summary[data-runtime='codex']").click()
     expect(page.locator("#integration-detail-title")).to_have_text("OpenAI")
     page.go_back()
@@ -1026,19 +1119,25 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#net-events")).not_to_contain_text("api.openai.com")
 
     # Home is the only static administration destination in the sidebar. Its
-    # grouped cards expose every integration and diagnostic view.
+    # grouped cards expose every runtime, integration, and diagnostic view.
     page.locator("#panel-net-log .home-back").click()
     expect(page.locator("#panel-home")).to_be_visible()
     expect(page.locator("#sidebar .active-tab")).to_have_text("Home")
     expect(page.locator("#sidebar-configuration, #sidebar-audit")).to_have_count(0)
+    expect(page.locator("#home-runtimes-title")).to_have_text("Agent runtimes")
+    expect(page.locator("#home-integrations-title")).to_have_text("Integrations")
     expect(page.locator("#home-integration-groups .home-integration-group h3")).to_have_text(
-        ["AI inference", "Tools", "Manual"]
+        ["Host AI inference", "Tools", "Manual"]
     )
-    combined_access_notice = page.locator("#tools-cross-access-notice")
-    expect(combined_access_notice).to_be_visible()
-    expect(page.locator("#panel-home").locator("#tools-cross-access-notice")).to_have_count(1)
-    expect(page.locator("#panel-network").locator("#tools-cross-access-notice")).to_have_count(0)
-    integration_cards = page.locator("#home-integration-groups .home-integration-card")
+    expect(page.locator("#tools-cross-access-notice")).to_have_count(0)
+    expect(page.get_by_text("Review combined tool access")).to_have_count(0)
+    for guide_id in ("openai", "claude", "xai", "bedrock"):
+        expect(page.locator(f"#home-runtime-groups [data-guide='{guide_id}']")).to_be_visible()
+        expect(page.locator(f"#home-integration-groups [data-guide='{guide_id}']")).to_have_count(0)
+    expect(page.locator("#home-integration-groups [data-guide='github']")).to_be_visible()
+    integration_cards = page.locator(
+        "#home-runtime-groups .home-integration-card, #home-integration-groups .home-integration-card"
+    )
     integration_count = len(EXPECTED_HOME_INTEGRATION_IDS)
     expect(integration_cards).to_have_count(integration_count)
     rendered_integration_ids = set(
@@ -1056,7 +1155,9 @@ def desktop_smoke(page, url: str) -> None:
     )
     if integration_cards.locator(".integration-logo:not([aria-hidden='true'])").count():
         raise AssertionError("integration logos must remain decorative inside their labelled card buttons")
-    grouped_ordering = page.locator("#home-integration-groups .home-integration-group").evaluate_all("""groups =>
+    grouped_ordering = page.locator(
+        "#home-runtime-groups, #home-integration-groups .home-integration-group"
+    ).evaluate_all("""groups =>
       groups.map(group => [...group.querySelectorAll('.home-integration-card')].map(card => ({
         enabled: card.querySelector('[data-home-integration-status]').classList.contains('active'),
         label: card.querySelector('.home-card-copy strong').textContent,
@@ -1066,10 +1167,47 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#panel-home").get_by_role("button", name=re.compile(r"Agent processes"))).to_be_visible()
     expect(page.locator("#panel-home").get_by_role("button", name=re.compile(r"Host diagnostics"))).to_be_visible()
 
+    open_home_integration(page, "openai")
+    expect(page.locator("#integration-detail-title")).to_have_text("OpenAI")
+    expect(page.locator("#integration-detail-nav-section")).to_have_text("Agent runtimes")
+    page.locator("#panel-network .home-back").click()
+    expect(page.locator("#panel-home")).to_be_visible()
+
+    open_home_integration(page, "host_openai")
+    expect(page.locator("#integration-detail-title")).to_have_text("OpenAI API")
+    expect(page.locator(".integration-row[data-integration='host_openai']")).to_be_visible()
+    expect(page.locator("#host-inference-model-openai")).to_have_count(0)
+    page.locator("#host-inference-key-openai").fill("sk-mock-host-key")
+    page.get_by_role("button", name="Save API key").click()
+    expect(page.locator('[data-integration-message="host_openai"]')).to_contain_text("saved")
+    page.get_by_role("button", name="Enable", exact=True).click()
+    expect(page.locator('[data-integration-message="host_openai"]')).to_contain_text("enabled")
+    expect(page.locator("[data-guide-section='host_openai']")).not_to_contain_text("Structured host text")
+    expect(page.locator("[data-guide-section='host_openai']")).to_contain_text("OpenAI privacy settings still apply")
+    page.locator("#panel-network .home-back").click()
+    expect(page.locator("#panel-home")).to_be_visible()
+    page.evaluate(
+        "() => import('/admin_ui/connection_guide.js').then(module => module.refreshConnectionGuide())"
+    )
+    expect(page.locator('[data-home-integration-status="host_openai"]')).to_have_text("enabled")
+
+    open_home_integration(page, "host_typesafe")
+    expect(page.locator("#integration-detail-title")).to_have_text("TypeSafe Jev")
+    expect(page.locator("#host-inference-model-typesafe")).to_have_count(0)
+    expect(page.locator("[data-guide-section='host_typesafe']")).to_contain_text("POST /v1/systemone")
+    expect(page.locator("[data-guide-section='host_typesafe']")).to_contain_text(
+        "Memory recall reranking"
+    )
+    expect(page.locator("[data-guide-section='host_typesafe']")).to_contain_text(
+        "up to 20 candidate page ids and descriptions"
+    )
+    page.locator("#panel-network .home-back").click()
+
     open_home_integration(page, "github")
     expect(page.locator("#panel-network")).to_be_visible()
     expect(page.locator("#tab-home")).to_have_class(re.compile(r"active-tab"))
     expect(page.locator("#integration-detail-title")).to_have_text("GitHub")
+    expect(page.locator("#integration-detail-nav-section")).to_have_text("Integrations")
     expect(page.locator("#integration-detail-logo [data-integration-logo='github']")).to_be_visible()
     expect(page.locator("#panel-network .integration-row:visible")).to_have_count(1)
     github_row = page.locator(".integration-row[data-integration='github']")
@@ -1236,28 +1374,7 @@ def desktop_smoke(page, url: str) -> None:
     # Moving straight from one focused detail to another must not change what
     # the explicit Home controls mean. They always open Home; only the browser
     # Back button follows the detail-to-detail history.
-    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    if page.evaluate("window.scrollY") <= 0:
-        raise AssertionError("integration guide did not provide a scrollable detail page")
-    # `html` scrolls smoothly, and the click below targets an element at the
-    # top of a page just sent to the bottom, so the driver scrolls it back into
-    # view first. Both are animations. Clicking mid-flight leaves one still
-    # running across the panel's own reset, which is what makes the offset this
-    # asserts on arbitrary. Settle first so the assertion measures the panel
-    # rather than the tail of a scroll.
-    page.wait_for_function(
-        "() => {"
-        "  const y = window.scrollY;"
-        "  if (window.__kernLastScrollY === y) return true;"
-        "  window.__kernLastScrollY = y;"
-        "  return false;"
-        "}"
-    )
-    page.locator("#runtime-overview .runtime-summary[data-runtime='codex']").click()
-    expect(page.locator("#integration-detail-title")).to_have_text("OpenAI")
-    detail_scroll_y = page.evaluate("window.scrollY")
-    if detail_scroll_y > 24:
-        raise AssertionError(f"focused Home detail retained scroll offset {detail_scroll_y}")
+    focused_detail_scroll_smoke(page)
     page.locator("#panel-network .home-back").click()
     expect(page.locator("#panel-home")).to_be_visible()
     expect(page).to_have_url(re.compile(r"#home$"))
@@ -1658,7 +1775,10 @@ def desktop_smoke(page, url: str) -> None:
         "#runtime-overview .runtime-summary[data-runtime='codex-3']"
     )
     expect(codex_3_summary).to_contain_text("active")
-    expect(codex_3_summary.locator(".usage-ring text")).to_have_text(["8", "84"])
+    # Codex can omit a rate-limit window. Only its available weekly balance is
+    # shown; the absent 5h balance does not become an empty ring.
+    expect(codex_3_summary.locator(".usage-ring text")).to_have_text(["84"])
+    expect(codex_3_summary.locator(".usage-window")).to_have_text(["wk · 6d"])
 
     page.locator("#panel-network .home-back").click()
     with page.expect_response(lambda response: "/v1/agent-processes" in response.url):
@@ -1702,18 +1822,15 @@ def desktop_smoke(page, url: str) -> None:
     expect(claude_row.get_by_role("button", name="Disconnect")).to_be_visible()
     claude_summary = page.locator("#runtime-overview .runtime-summary", has_text="Claude Code")
     # The Fable weekly window rides along as a third ring labeled "fable".
-    expect(claude_summary.locator(".usage-ring text")).to_have_text(["97", "46", "88"])
-    # Critical (session), healthy (weekly), and warning (Fable week) side by
-    # side: all three ring thresholds in one chip.
-    expect(claude_summary.locator(".usage-ring").nth(0)).to_have_class(re.compile(r"usage-critical"))
+    expect(claude_summary.locator(".usage-ring text")).to_have_text(["63", "46", "88"])
+    # Healthy session/weekly windows and a warning Fable week remain distinct
+    # after the menu's open gesture has hard-refreshed provider usage.
+    expect(claude_summary.locator(".usage-ring").nth(0)).not_to_have_class(re.compile(r"usage-(warning|critical)"))
     expect(claude_summary.locator(".usage-ring").nth(1)).not_to_have_class(re.compile(r"usage-(warning|critical)"))
     expect(claude_summary.locator(".usage-ring").nth(2)).to_have_class(re.compile(r"usage-warning"))
     expect(claude_summary.locator(".usage-window")).to_have_text(["5h · 2h", "wk · 5d", "fable · 5d"])
     expect(claude_summary).to_have_attribute("data-action", "open-provider")
     expect(claude_summary).to_have_attribute("data-provider", "claude")
-    with page.expect_response(lambda response: "/v1/agent-runtime/refresh" in response.url):
-        page.locator("#runtime-overview").get_by_label("Refresh provider status and usage").click()
-    expect(claude_summary.locator(".usage-ring text")).to_have_text(["63", "46", "88"])
 
 
 def assert_runtime_usage_type(page, minimum_number_px: float) -> None:
@@ -1782,6 +1899,12 @@ def tools_smoke(page, url: str) -> None:
         expect(guide).to_be_visible()
         expect(guide.get_by_role("heading", name="What happens to your data", exact=True)).to_have_count(1)
         expect(guide.locator(".guide-data-summary article")).to_have_count(4)
+        if tool_id == "cloudwatch_logs":
+            policy_blocks = guide.locator(".guide-step-code")
+            expect(policy_blocks).to_have_count(1)
+            expect(policy_blocks.nth(0)).to_contain_text('"Action": "logs:FilterLogEvents"')
+            expect(policy_blocks.nth(0)).to_contain_text('"Resource": "*"')
+            expect(guide).not_to_contain_text("kms:Decrypt")
         if tool_id == "instagram":
             # A field the provider may withhold is declared as a union, and the
             # operator must read it as one rather than as "unspecified".
@@ -1868,47 +1991,47 @@ def tools_smoke(page, url: str) -> None:
 
 
 def narrow_desktop_smoke(page, url: str) -> None:
-    """A narrow desktop collapses the runtime boxes instead of crowding the toolbar.
-
-    Seven boxes cannot shrink below their rings and labels, so inline they would
-    paint over the brand and the toolbar actions between the mobile breakpoint
-    and a wide desktop. This width must therefore use the same collapsed pill
-    and floating panel the phone uses, and the open panel must stay clear of
-    both toolbar ends.
-    """
+    """A narrow desktop uses the same two compact provider menus as a phone."""
     from playwright.sync_api import expect
 
     log_in(page, url)
-    toggle = page.locator(".runtime-overview-toggle")
-    expect(toggle).to_be_visible()
+    runtime_toggle = page.locator('[data-overview-group="runtimes"] .runtime-overview-toggle')
+    host_ai_toggle = page.locator('[data-overview-group="host-ai"] .runtime-overview-toggle')
+    expect(page.locator(".runtime-overview-toggle")).to_have_count(2)
+    expect(runtime_toggle).to_be_visible()
+    expect(host_ai_toggle).to_be_visible()
     expect(page.locator("#runtime-overview .runtime-summary").first).to_be_hidden()
-    # Opening runs the hard provider refresh, so the panel carries no separate
-    # refresh button here either.
     with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
-        toggle.click()
-    expect(toggle).to_have_attribute("aria-expanded", "true")
-    expect(page.locator("#runtime-overview .runtime-overview-panel")).to_have_css("position", "absolute")
-    expect(page.locator("#runtime-overview .runtime-refresh")).to_be_hidden()
-    expect(page.locator("#runtime-overview .runtime-summary")).to_have_count(7)
+        runtime_toggle.click()
+    expect(runtime_toggle).to_have_attribute("aria-expanded", "true")
+    expect(host_ai_toggle).to_have_attribute("aria-expanded", "false")
+    runtime_panel = page.locator("#runtime-overview-runtimes-panel")
+    expect(runtime_panel).to_have_css("position", "absolute")
+    expect(runtime_panel.locator(".runtime-summary")).to_have_count(7)
+    expect(runtime_panel.locator(".runtime-summary").first).to_be_visible()
+    expect(page.locator("#runtime-overview-host-ai-panel .runtime-summary").first).to_be_hidden()
     geometry = page.evaluate(
         """() => {
-          const box = (selector) => document.querySelector(selector).getBoundingClientRect();
-          const cards = [...document.querySelectorAll('#runtime-overview .runtime-summary')]
+          const cards = [...document.querySelectorAll('#runtime-overview-runtimes-panel .runtime-summary')]
             .map(element => element.getBoundingClientRect());
           return {
-            brandRight: box('.brand').right,
-            actionsLeft: box('.topbar-actions').left,
             cardsLeft: Math.min(...cards.map(rect => rect.left)),
             cardsRight: Math.max(...cards.map(rect => rect.right)),
+            viewportWidth: window.innerWidth,
           };
         }"""
     )
-    if geometry["cardsLeft"] < geometry["brandRight"] or geometry["cardsRight"] > geometry["actionsLeft"]:
-        raise AssertionError(f"narrow-desktop runtime boxes crowd the toolbar: {geometry}")
+    if geometry["cardsLeft"] < 0 or geometry["cardsRight"] > geometry["viewportWidth"]:
+        raise AssertionError(f"narrow-desktop runtime menu leaves the viewport: {geometry}")
+    with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
+        host_ai_toggle.click()
+    expect(runtime_toggle).to_have_attribute("aria-expanded", "false")
+    expect(host_ai_toggle).to_have_attribute("aria-expanded", "true")
+    expect(runtime_panel.locator(".runtime-summary").first).to_be_hidden()
+    expect(page.locator("#runtime-overview-host-ai-panel .runtime-summary").first).to_be_visible()
     assert_no_horizontal_overflow(page, "narrow desktop home")
-    # Escape dismisses the panel like a menu, as on the phone.
     page.keyboard.press("Escape")
-    expect(toggle).to_have_attribute("aria-expanded", "false")
+    expect(host_ai_toggle).to_have_attribute("aria-expanded", "false")
     expect(page.locator("#runtime-overview .runtime-summary").first).to_be_hidden()
 
 
@@ -1957,24 +2080,29 @@ def mobile_smoke(page, url: str) -> None:
     expect(install_dialog).to_be_visible()
     install_dialog.get_by_role("button", name="Got it").click()
     expect(install_coach).to_be_hidden()
-    # On a phone the three usage boxes collapse behind a single pill so an open
-    # app keeps the full screen; the boxes stay hidden until the pill is tapped.
-    overview_toggle = page.locator(".runtime-overview-toggle")
-    expect(overview_toggle).to_be_visible()
-    expect(overview_toggle).to_contain_text("Agent usage")
-    expect(overview_toggle).to_have_attribute("aria-expanded", "false")
+    # Phone and desktop share two compact provider menus. Their cards remain a
+    # floating layer, so opening either does not resize the workspace below.
+    runtime_toggle = page.locator('[data-overview-group="runtimes"] .runtime-overview-toggle')
+    host_ai_toggle = page.locator('[data-overview-group="host-ai"] .runtime-overview-toggle')
+    expect(page.locator(".runtime-overview-toggle")).to_have_count(2)
+    expect(runtime_toggle).to_be_visible()
+    expect(host_ai_toggle).to_be_visible()
+    expect(runtime_toggle).to_contain_text("Agent runtimes")
+    expect(host_ai_toggle).to_contain_text("Host AI")
+    expect(runtime_toggle).to_have_attribute("aria-expanded", "false")
+    expect(host_ai_toggle).to_have_attribute("aria-expanded", "false")
     expect(page.locator("#runtime-overview .runtime-summary").first).to_be_hidden()
-    # Opening runs the hard provider refresh (the phone's replacement for a
-    # separate refresh button) and drops the panel as a floating overlay.
     with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
-        overview_toggle.click()
-    expect(overview_toggle).to_have_attribute("aria-expanded", "true")
-    expect(page.locator("#runtime-overview .runtime-overview-panel")).to_have_css("position", "absolute")
-    # The overlay carries no refresh button; the open gesture is the refresh.
-    expect(page.locator("#runtime-overview .runtime-refresh")).to_be_hidden()
+        runtime_toggle.click()
+    expect(runtime_toggle).to_have_attribute("aria-expanded", "true")
+    expect(host_ai_toggle).to_have_attribute("aria-expanded", "false")
+    runtime_panel = page.locator("#runtime-overview-runtimes-panel")
+    expect(runtime_panel).to_have_css("position", "absolute")
     # All three subscription runtimes are active by now (the desktop pass logged them in);
     # Claude Code carries the extra model-week ring.
-    for runtime, rings in (("codex", 2), ("codex-2", 2), ("codex-3", 2), ("claude_code", 3)):
+    for runtime, rings in (
+        ("codex", 2), ("codex-2", 2), ("codex-3", 1), ("claude_code", 3)
+    ):
         summary = page.locator(f"#runtime-overview .runtime-summary[data-runtime='{runtime}']")
         expect(summary).to_be_visible()
         expect(summary.locator(".usage-ring")).to_have_count(rings)
@@ -1983,9 +2111,9 @@ def mobile_smoke(page, url: str) -> None:
     hermes_box = page.locator("#runtime-overview .runtime-summary", has_text="Hermes")
     expect(hermes_box).to_be_visible()
     expect(page.locator("#runtime-overview .runtime-summary-bedrock")).to_have_count(1)
-    expect(page.locator("#runtime-overview .runtime-stat-cost")).to_have_count(1)
+    expect(page.locator("#runtime-overview .runtime-summary-host-inference")).to_have_count(2)
+    expect(page.locator("#runtime-overview .runtime-stat-cost")).to_have_count(3)
     assert_runtime_usage_type(page, minimum_number_px=10)
-    runtime_panel = page.locator("#runtime-overview .runtime-overview-panel")
     panel_widths = runtime_panel.evaluate(
         "element => ({client: element.clientWidth, scroll: element.scrollWidth})"
     )
@@ -1996,14 +2124,20 @@ def mobile_smoke(page, url: str) -> None:
     )
     if any(height > 41 for height in summary_heights):
         raise AssertionError(f"mobile runtime rows grew beyond the 40px design: {summary_heights}")
-    # Escape dismisses the overlay like a menu; the boxes hide again.
+    with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
+        host_ai_toggle.click()
+    expect(runtime_toggle).to_have_attribute("aria-expanded", "false")
+    expect(host_ai_toggle).to_have_attribute("aria-expanded", "true")
+    expect(runtime_panel.locator(".runtime-summary").first).to_be_hidden()
+    expect(page.locator("#runtime-overview-host-ai-panel .runtime-summary").first).to_be_visible()
+    expect(host_ai_toggle).to_contain_text("$0.001318 MTD")
     page.keyboard.press("Escape")
-    expect(overview_toggle).to_have_attribute("aria-expanded", "false")
+    expect(host_ai_toggle).to_have_attribute("aria-expanded", "false")
     expect(page.locator("#runtime-overview .runtime-summary").first).to_be_hidden()
     # Chat and Apps remain in the navigation drawer; Home has no duplicate
     # hero action on mobile.
     expect(page.locator("#home-hero")).to_have_count(0)
-    expect(page.locator("#home-integration-groups .home-integration-card .integration-logo")).to_have_count(
+    expect(page.locator("#panel-home .home-integration-card .integration-logo")).to_have_count(
         len(EXPECTED_HOME_INTEGRATION_IDS)
     )
     assert_no_horizontal_overflow(page, "home")

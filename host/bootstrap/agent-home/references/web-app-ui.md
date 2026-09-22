@@ -37,6 +37,30 @@ The frozen `app` global provides `app.onLoad(handler, options)`,
 `app.notify(message, level)`. Always register `app.onLoad`. Use `app.data()` in
 compatibility mode or `app.read(path)` in targeted mode. In targeted mode
 `set` and `append` resolve to the submitted value and `delete` resolves to
-`null`; read again when the resulting stored branch is needed. A worker turn
-is terminated after three seconds; durable state belongs in App data or a
-collection, never worker memory.
+`null`; read again when the resulting stored branch is needed. Writes apply in
+the order issued. Durable state belongs in App data or a collection, never
+worker memory.
+
+## Responsiveness
+
+A turn (onLoad or one action) has a five-second total deadline, including
+worker startup and all host requests. Each `app.read`, `app.query`, `app.set`,
+`app.delete` or `app.append` is a browser round trip. Reduce round trips and
+run independent reads concurrently to finish comfortably within the deadline.
+
+- Render first from data already in hand; fetch a tab's rows only when it is
+  selected, and never issue collection queries before the first render.
+- Use `Promise.all` for independent `app.read` and `app.query` calls: their
+  waits overlap. Await reads before any dependent write; do not run reads
+  concurrently with writes, which change the shared revision.
+- Concurrent writes serialize in issue order; `Promise.all` does not make
+  them faster. Combine related changes into one supported write when possible.
+- A handler does at most one write, renders from the resolved value, and does
+  not re-read or re-query to refresh the view.
+- Keep the document small (under about 100 KB); move repeated rows into
+  collections and page them 10 to 25 at a time.
+- Publish the last rendered HTML as the saved bundle, never a placeholder, so
+  the operator sees content while the worker starts.
+- A click during a running turn is queued and runs next; do not add manual
+  busy states for that. Timeouts append `[App runtime report: ...]` to the
+  operator's next message: fix the named action's request count.

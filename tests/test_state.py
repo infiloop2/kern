@@ -51,7 +51,7 @@ def seed_thread(
     runtime: str = "codex",
     provider_session_id: str | None = None,
     last_used_at: str | None = "2026-06-08T00:00:00Z",
-    model: str = "gpt-5.6-terra",
+    model: str = "gpt-6-astra",
     effort: str = "high",
 ) -> None:
     state.save_thread_session(
@@ -242,7 +242,7 @@ class StateStorageTests(unittest.TestCase):
             {
                 "thread_id": "thread-t1",
                 "agent_runtime": "codex",
-                "model": "gpt-5.6-terra",
+                "model": "gpt-6-astra",
                 "effort": "high",
                 "last_used_at": "2026-06-08T00:00:01Z",
                 "status": "idle",
@@ -319,7 +319,7 @@ class StateStorageTests(unittest.TestCase):
                 "fixed-thread",
                 None,
                 "2026-06-08T00:00:00Z",
-                "gpt-5.6-terra",
+                "gpt-6-astra",
                 "high",
             )
 
@@ -330,7 +330,7 @@ class StateStorageTests(unittest.TestCase):
                 "fixed-thread",
                 None,
                 "2026-06-08T00:00:01Z",
-                "gpt-5.6-sol",
+                "gpt-6-sol",
                 "high",
             )
 
@@ -339,7 +339,7 @@ class StateStorageTests(unittest.TestCase):
         with state.mutation() as cur:
             config = state.thread_session_config("fixed-thread", cur)
         assert config is not None
-        self.assertEqual((config["model"], config["effort"]), ("gpt-5.6-terra", "high"))
+        self.assertEqual((config["model"], config["effort"]), ("gpt-6-astra", "high"))
         self.assertEqual(state.thread_session_config("fixed-thread"), config)
 
     def test_idle_thread_session_can_rotate_and_running_thread_cannot(self) -> None:
@@ -349,7 +349,7 @@ class StateStorageTests(unittest.TestCase):
                 cur,
                 "chat",
                 "claude_code",
-                "claude-opus-5",
+                "claude-opus-5-5",
                 "max",
                 "2026-06-08T00:00:09Z",
             )
@@ -357,7 +357,7 @@ class StateStorageTests(unittest.TestCase):
         config = state.thread_session_config("chat")
         assert config is not None
         self.assertEqual(config["agent_runtime"], "claude_code")
-        self.assertEqual(config["model"], "claude-opus-5")
+        self.assertEqual(config["model"], "claude-opus-5-5")
         self.assertEqual(config["effort"], "max")
         self.assertIsNone(config["provider_session_id"])
         self.assertEqual(config["last_used_at"], "2026-06-08T00:00:09Z")
@@ -369,7 +369,7 @@ class StateStorageTests(unittest.TestCase):
                 cur,
                 "chat",
                 "codex",
-                "gpt-5.6-terra",
+                "gpt-6-astra",
                 "high",
                 "2026-06-08T00:00:10Z",
             )
@@ -1890,6 +1890,42 @@ class BedrockUsageCounterTests(unittest.TestCase):
         self.assertEqual(row["input_tokens"], 100)
         self.assertEqual(len(state.read_bedrock_usage("1970-01-01")), 1)
         self.assertEqual(state.read_bedrock_usage("1970-01-01")[0]["requests"], 8)
+
+
+class HostInferenceUsageCounterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        pg_harness.reset_database()
+
+    def test_measured_and_priced_gaps_remain_visible(self) -> None:
+        usage = {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 4}
+        state.record_host_inference_usage("openai", "gpt-5.6-luna", usage, 0.00002)
+        state.record_host_inference_usage("openai", "gpt-5.6-luna", usage, None)
+        state.record_host_inference_usage("openai", "gpt-5.6-luna", None, None)
+        total = state.host_inference_usage("openai", "1970-01-01")
+        self.assertEqual(total["requests"], 3)
+        self.assertEqual(total["measured_requests"], 2)
+        self.assertEqual(total["priced_requests"], 1)
+        self.assertEqual(total["input_tokens"], 200)
+        self.assertEqual(total["cached_input_tokens"], 40)
+        self.assertEqual(total["output_tokens"], 8)
+        self.assertAlmostEqual(total["month_to_date"], 0.00002)
+
+    def test_provider_totals_and_retention_are_separate(self) -> None:
+        state.record_host_inference_usage(
+            "typesafe", "jev",
+            {"input_tokens": 1_000, "cached_input_tokens": 0, "output_tokens": 3},
+            0.000042,
+        )
+        with state.mutation() as cur:
+            cur.execute(
+                "INSERT INTO host_inference_usage (provider, model, day, requests) "
+                "VALUES ('typesafe', 'jev', '2001-01-31', 7)"
+            )
+            state.prune_host_inference_usage(cur, "2001-02-01")
+        total = state.host_inference_usage("typesafe", "1970-01-01")
+        self.assertEqual(total["requests"], 1)
+        self.assertEqual(total["input_tokens"], 1_000)
+        self.assertEqual(state.host_inference_usage("openai", "1970-01-01")["requests"], 0)
 
 
 class HostErrorStorageTests(unittest.TestCase):

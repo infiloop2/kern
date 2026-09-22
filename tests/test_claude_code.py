@@ -228,7 +228,7 @@ class ClaudeCodeTests(unittest.TestCase):
                 "type": "system",
                 "subtype": "init",
                 "uuid": "init-1",
-                "model": "claude-opus-5",
+                "model": "claude-opus-5-5",
                 "cwd": "/workspace",
                 "tools": ["Bash"],
                 "permissionMode": "bypassPermissions",
@@ -989,12 +989,36 @@ print(json.dumps({
                         server,
                         "continue",
                         "deleted-session",
-                        "claude-opus-5",
+                        "claude-opus-5-5",
                         "high",
                         lambda _message: None,
                     )
         finally:
             claude_code.AGENT_CWD = original_cwd
+
+    def test_headless_error_arrays_preserve_diagnostics_and_classify_only_missing_sessions(self) -> None:
+        cases = (
+            (["No conversation found with session ID: deleted-session"], "deleted-session",
+             claude_code.ClaudeSessionNotFoundError, "deleted-session"),
+            (["Provider overloaded"], "existing-session", claude_code.ClaudeCodeError, "Provider overloaded"),
+            ([None, {}, ""], "existing-session", claude_code.ClaudeCodeError, "error_during_execution"),
+            (["No conversation found with session ID: deleted-session"], None,
+             claude_code.ClaudeCodeError, "deleted-session"),
+            (["Provider overloaded", "No conversation found with session ID: deleted-session"], "existing-session",
+             claude_code.ClaudeCodeError, "Provider overloaded"),
+        )
+        for errors, session, exception, detail in cases:
+            with self.subTest(errors=errors, session=session), tempfile.TemporaryDirectory() as directory:
+                frame = {"type": "result", "subtype": "error_during_execution", "is_error": True, "errors": errors}
+                script = "import sys\nsys.stdin.readline()\nprint(" + repr(json.dumps(frame)) + ", flush=True)\n"
+                with patch.object(claude_code, "AGENT_CWD", directory):
+                    server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script], on_ready=lambda: True)
+                    try:
+                        with self.assertRaisesRegex(exception, detail) as caught:
+                            server.run("continue", session, "claude-opus-5-5", "high", lambda event: None)
+                        self.assertIs(type(caught.exception), exception)
+                    finally:
+                        server.close()
 
     def test_stream_reports_response_usage_even_before_failure(self) -> None:
         script = r"""
@@ -1009,7 +1033,7 @@ print(json.dumps({"type":"result","session_id":"session-1","subtype":"error_duri
             server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script], on_ready=lambda: True)
             try:
                 with self.assertRaises(claude_code.ClaudeCodeError):
-                    claude_code.run_turn(server, "go", None, "claude-opus-5", "high", emitted.append)
+                    claude_code.run_turn(server, "go", None, "claude-opus-5-5", "high", emitted.append)
             finally:
                 server.close()
         usage = [event for event in emitted if isinstance(event, dict) and event.get("type") == "token_usage"]
@@ -1104,7 +1128,7 @@ sys.stdin.readline()  # stay alive like the real CLI until stdin EOF
                             server,
                             "initial",
                             None,
-                            "claude-opus-5",
+                            "claude-opus-5-5",
                             "high",
                             lambda _message: first_message.set(),
                         )
@@ -1186,7 +1210,7 @@ sys.stdin.readline()  # stay alive until the test closes stdin
                     server,
                     "initial",
                     None,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     "high",
                     hold_run_driver,
                 ))
@@ -1286,7 +1310,7 @@ sys.stdin.readline()  # stay alive until the test closes stdin
                     server,
                     "initial",
                     None,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     "high",
                     lambda _message: ready.set(),
                 ))
@@ -1358,7 +1382,7 @@ sys.stdin.readline()  # stay alive until the test closes stdin
                     server,
                     "initial",
                     None,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     "high",
                     lambda _message: None,
                 ))
@@ -1445,7 +1469,7 @@ print(json.dumps({
                     server,
                     "initial",
                     None,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     "high",
                     lambda _message: None,
                 )
@@ -1563,7 +1587,7 @@ print(json.dumps({
                     server,
                     "initial",
                     None,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     "high",
                     on_message,
                 )
@@ -1654,7 +1678,7 @@ print(json.dumps({
                     server,
                     "initial",
                     None,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     "high",
                     lambda _message: None,
                     finish_turn,
@@ -1724,7 +1748,7 @@ sys.stdin.readline()  # stay alive like the real CLI until stdin EOF
                             server,
                             "initial",
                             None,
-                            "claude-opus-5",
+                            "claude-opus-5-5",
                             "high",
                             lambda _message: ready.set(),
                         )
@@ -1771,7 +1795,7 @@ print(json.dumps({
                         server,
                         "initial",
                         None,
-                        "claude-opus-5",
+                        "claude-opus-5-5",
                         "high",
                         lambda _message: None,
                     )
@@ -1829,7 +1853,7 @@ print(json.dumps({
                             server,
                             "initial",
                             None,
-                            "claude-opus-5",
+                            "claude-opus-5-5",
                             "high",
                             lambda _message: ready.set(),
                         )
@@ -1894,7 +1918,7 @@ sys.stdin.readline()  # idle until Kern closes stdin
                         server,
                         "initial",
                         None,
-                        "claude-opus-5",
+                        "claude-opus-5-5",
                         "high",
                         lambda _message: ready.set(),
                     ))
@@ -1937,7 +1961,7 @@ print(json.dumps({
                     server,
                     "initial",
                     None,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     "high",
                     lambda _message: None,
                 )
@@ -1986,7 +2010,7 @@ time.sleep(30)
                             server,
                             "initial",
                             None,
-                            "claude-opus-5",
+                            "claude-opus-5-5",
                             "high",
                             lambda _message: received.set(),
                         )
@@ -2042,7 +2066,7 @@ print(json.dumps({
                     server,
                     "initial",
                     None,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     "high",
                     lambda _message: None,
                 )
@@ -2078,7 +2102,7 @@ print(json.dumps({
                     server,
                     "initial",
                     None,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     "high",
                     lambda _message: None,
                 )
@@ -2168,7 +2192,7 @@ print(json.dumps({
                     self.addCleanup(session.close)
                     with patch("host.runtime.core.state.read_claude_web_search", return_value=web_search):
                         claude_code.run_turn(
-                            session, "initial", None, "claude-opus-5", "high",
+                            session, "initial", None, "claude-opus-5-5", "high",
                             lambda _message: None,
                         )
                     argv = json.loads(argv_path.read_text())
@@ -2220,7 +2244,7 @@ print(json.dumps({
                     server,
                     "initial",
                     None,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     "high",
                     lambda _message: None,
                 )

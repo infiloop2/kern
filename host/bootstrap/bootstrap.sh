@@ -6,8 +6,8 @@ umask 077
 # cwd so runuser children do not inherit an unreadable directory.
 cd /
 NODE_VERSION=22.12.0
-CODEX_CLI_VERSION=0.153.3
-CLAUDE_CODE_VERSION=2.1.258
+CODEX_CLI_VERSION=0.155.1
+CLAUDE_CODE_VERSION=2.1.280
 # Grok Build, xAI's coding agent. The npm package is a JS trampoline plus a
 # per-platform optional dependency carrying a brotli-compressed binary; see
 # docs/architecture/xai-integration.md for the upgrade review checklist.
@@ -217,6 +217,7 @@ ensure_group kern-workspace-api "$KERN_WORKSPACE_API_GID"
 ensure_group kern-workspace "$KERN_WORKSPACE_GID"
 ensure_group kern-embedding "$KERN_EMBEDDING_GID"
 ensure_group kern-transcription "$KERN_TRANSCRIPTION_GID"
+ensure_group kern-host-inference "$KERN_HOST_INFERENCE_GID"
 ensure_user kern-admin "$KERN_ADMIN_UID" kern-admin /mnt/kern-admin/admin-home
 ensure_user kern-proxy "$KERN_PROXY_UID" kern-proxy /mnt/kern-admin/proxy-state
 ensure_user kern-agent "$KERN_AGENT_UID" kern-agent /mnt/kern-agent/agent-home
@@ -230,6 +231,7 @@ ensure_user kern-agent-network "$KERN_AGENT_NETWORK_UID" kern-agent-network /non
 ensure_user kern-workspace "$KERN_WORKSPACE_UID" kern-workspace /nonexistent
 ensure_user kern-embedding "$KERN_EMBEDDING_UID" kern-embedding /nonexistent
 ensure_user kern-transcription "$KERN_TRANSCRIPTION_UID" kern-transcription /nonexistent
+ensure_user kern-host-inference "$KERN_HOST_INFERENCE_UID" kern-host-inference /nonexistent
 ensure_group_member kern-admin kern-workspace-api
 ensure_group_member kern-workspace kern-workspace-api
 # The postgres account is created here, before the postgresql packages would
@@ -712,6 +714,7 @@ cat > "$PGDATA_DIR/pg_hba.conf" <<'PGHBA'
 local  kern_admin  kern-admin  peer
 local  kern_admin  kern-proxy  peer
 local  kern_admin  kern-tools  peer
+local  kern_admin  kern-host-inference  peer
 local  kern_admin  kern-agent-network  peer
 local  kern_admin  kern-workspace  peer
 local  all               postgres          peer
@@ -769,6 +772,9 @@ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-tools') THEN
     CREATE ROLE "kern-tools" LOGIN;
   END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-host-inference') THEN
+    CREATE ROLE "kern-host-inference" LOGIN;
+  END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-agent-network') THEN
     CREATE ROLE "kern-agent-network" LOGIN;
   END IF;
@@ -793,6 +799,7 @@ runuser -u postgres -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet \
   -c "GRANT CREATE ON SCHEMA public TO \"kern-admin\";" \
   -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-proxy\";" \
   -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-tools\";" \
+  -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-host-inference\";" \
   -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-agent-network\";" \
   -c 'GRANT CONNECT ON DATABASE kern_admin TO "kern-workspace";'
 # The PUBLIC revoke also stripped the proxy, tools, and agent-network roles'
@@ -1424,9 +1431,9 @@ runuser -u kern-agent -- env \
 # connector can reach their narrow external dependencies; the agent can only
 # reach the loopback proxy. DNS is denied for every other non-root user because
 # DNS lookups are an exfiltration channel; the proxy may resolve and connect
-# only after policy allows a host. The kern-tools service gets DNS and
-# HTTPS because the bundled tool packages run inside it and call their
-# third-party APIs directly; the admin service holds no internet egress at all,
+# only after policy allows a host. The deterministic kern-tools and
+# kern-host-inference services get direct DNS and HTTPS for their reviewed
+# provider adapters; the admin service holds no internet egress at all,
 # so a compromised tool package cannot exfiltrate admin state, and the agent's
 # fail-closed proxy path is unaffected. The kern-agent-network service communicates only over
 # Unix sockets; its explicit loopback drop prevents the local policy proxy
@@ -1467,6 +1474,9 @@ $(cat /tmp/kern_cloudflare_rules)
     meta skuid "kern-tools" udp dport 53 accept
     meta skuid "kern-tools" tcp dport 53 accept
     meta skuid "kern-tools" tcp dport 443 accept
+    meta skuid "kern-host-inference" udp dport 53 accept
+    meta skuid "kern-host-inference" tcp dport 53 accept
+    meta skuid "kern-host-inference" tcp dport 443 accept
     udp dport 53 meta skuid != 0 drop
     tcp dport 53 meta skuid != 0 drop
     # The admin listener is loopback-only, but loopback alone is not an
@@ -1598,6 +1608,33 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 
+# Host-owned AI credentials and provider egress are isolated from the
+# agent-facing tools service. The world-connectable socket authenticates every
+# caller with SO_PEERCRED; kern-tools is limited to the TypeSafe judgment route.
+cat > /etc/systemd/system/kern-host-inference.service <<'UNIT'
+[Unit]
+Description=Kern Host Inference Service
+After=network-online.target kern-postgres.service
+Wants=network-online.target kern-postgres.service
+StartLimitIntervalSec=0
+
+[Service]
+User=kern-host-inference
+UMask=0077
+RuntimeDirectory=kern-host-inference
+RuntimeDirectoryMode=0755
+Environment=PYTHONPATH=/opt/kern-host
+ExecStart=/usr/bin/python3 -m host.runtime.host_inference.service
+ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-host-inference
+KillMode=mixed
+TimeoutStopSec=30s
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 # Read-only agent network introspection is isolated from both the egress-capable
 # tools service and the privileged proxy. Its database role can read only the
 # policy and network-event tables; nftables grants this uid no egress.
@@ -1626,8 +1663,8 @@ UNIT
 cat > /etc/systemd/system/kern-admin-api.service <<'UNIT'
 [Unit]
 Description=Kern Admin API
-After=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-embedding.socket kern-transcription.socket kern-transcription.service
-Wants=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-agent-network.service kern-embedding.socket kern-transcription.socket kern-transcription.service
+After=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-host-inference.service kern-agent-network.service kern-embedding.socket kern-transcription.socket kern-transcription.service
+Wants=network-online.target kern-network-proxy.service kern-postgres.service kern-tools.service kern-host-inference.service kern-agent-network.service kern-embedding.socket kern-transcription.socket kern-transcription.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -1772,8 +1809,8 @@ UNIT
 cat > /etc/systemd/system/kern-workspace.service <<'UNIT'
 [Unit]
 Description=Kern Workspace
-After=network-online.target kern-admin-api.service kern-postgres.service kern-embedding.socket
-Wants=network-online.target kern-admin-api.service kern-postgres.service kern-embedding.socket
+After=network-online.target kern-admin-api.service kern-host-inference.service kern-postgres.service kern-embedding.socket
+Wants=network-online.target kern-admin-api.service kern-host-inference.service kern-postgres.service kern-embedding.socket
 StartLimitIntervalSec=0
 
 [Service]
@@ -1819,6 +1856,7 @@ systemctl daemon-reload
 systemctl enable --now kern-network-proxy.service
 systemctl enable --now kern-host-errors.service
 systemctl enable --now kern-tools.service
+systemctl enable --now kern-host-inference.service
 systemctl enable --now kern-agent-network.service
 systemctl enable --now kern-embedding.socket kern-transcription.socket kern-transcription.service
 systemctl enable --now kern-admin-api.service

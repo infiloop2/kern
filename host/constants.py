@@ -40,6 +40,7 @@ AGENT_PREVIEW_PORT_COUNT = 16
 # server, its clients, and the deploy verifier cannot drift apart. Servers and
 # clients honor the matching KERN_*_SOCKET environment override in tests.
 TOOLS_SOCKET_PATH = "/run/kern-tools/tools.sock"
+HOST_INFERENCE_SOCKET_PATH = "/run/kern-host-inference/host-inference.sock"
 WORKSPACE_AGENT_SOCKET_PATH = "/run/kern-workspace/agent.sock"
 AGENT_NETWORK_SOCKET_PATH = "/run/kern-agent-network/agent-network.sock"
 WORKSPACE_ADMIN_SOCKET_PATH = "/run/kern-admin-api/workspace.sock"
@@ -69,4 +70,5 @@ SERVICE_ACCOUNTS = {
     "kern-workspace": 47750,
     "kern-embedding": 47751,
     "kern-transcription": 47752,
+    "kern-host-inference": 47753,
 }

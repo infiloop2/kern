@@ -36,14 +36,14 @@ class AgenticWebAppContractTests(unittest.TestCase):
                 False,
                 False,
                 "codex",
-                "gpt-5.6-terra",
+                "gpt-6-astra",
                 "high",
                 "",
             ),
             {
                 "status": "idle",
                 "agent_runtime": "codex",
-                "model": "gpt-5.6-terra",
+                "model": "gpt-6-astra",
                 "effort": "high",
                 "last_used_at": "2026-08-18T10:02:00Z",
                 "latest_event_seq": 42,
@@ -55,7 +55,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertEqual(summary["latest_message_seq"], 40)
         self.assertEqual(
             summary["agent_settings"],
-            {"agent_runtime": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+            {"agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high"},
         )
 
     def test_agent_settings_migration_backfills_and_requires_complete_values(self) -> None:
@@ -75,7 +75,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
 
     def test_app_default_prefers_an_active_runtime_and_named_model(self) -> None:
         expected_models = {
-            "claude_code": "claude-opus-5",
+            "claude_code": "claude-opus-5-5",
             "grok": "grok-4.6",
             "hermes": "moonshotai.kimi-k2.5",
         }
@@ -96,7 +96,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
                 backend.default_app_agent_settings(),
                 {
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-sol",
+                    "model": "gpt-6-sol",
                     "effort": "high",
                 },
             )
@@ -188,8 +188,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("selectedAgentSettings = app.agent_settings;", source)
         self.assertIn("selectedAgentSettings = response.app.agent_settings;", source)
         self.assertIn("runtimeRunnable(savedSettings.agent_runtime)", source)
-        self.assertIn('codex: "gpt-5.6-sol"', source)
-        self.assertIn('claude_code: "claude-opus-5"', source)
+        self.assertIn('codex: "gpt-6-sol"', source)
+        self.assertIn('claude_code: "claude-opus-5-5"', source)
         self.assertIn('hermes: "moonshotai.kimi-k2.5"', source)
         self.assertIn("await agentSettingsSaveQueue", source)
         send_message = source.split("async function sendMessage", 1)[1].split(
@@ -333,8 +333,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
     def test_worker_turns_use_one_revision_and_deny_timers(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
         self.assertIn("const WORKER_START_TIMEOUT_MS = 15 * 1000", source)
-        self.assertIn("const WORKER_TURN_TIMEOUT_MS = 3000", source)
-        self.assertIn("expected_revision: run.revision", source)
+        self.assertIn("const WORKER_TURN_TIMEOUT_MS = 5000", source)
+        self.assertIn("body.expected_revision = run.revision;", source)
         self.assertIn('"setTimeout", "setInterval", "clearTimeout", "clearInterval", "setImmediate"', source)
         self.assertIn('"MessageChannel", "MessagePort"', source)
         # The armed worker only promotes when nothing moved underneath it.
@@ -342,7 +342,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("if (this.finished) return;", source)
         self.assertIn("const current = workerRun === this;", source)
         self.assertIn('if (current && reason === "timeout")', source)
-        self.assertIn("This app action took too long and was stopped.", source)
+        self.assertIn("This app action took too long and was stopped (${describeTurn(this)}).", source)
         self.assertIn('else if (current && reason === "error")', source)
         self.assertIn("This app action failed.", source)
         self.assertNotIn("Generated behavior stopped safely", source)
@@ -360,14 +360,46 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("clearTimeout(armed.timer);", source)
         self.assertIn("armed.run = run;", source)
         self.assertIn("armed.timer = setTimeout(discard, WORKER_START_TIMEOUT_MS)", source)
-        self.assertGreaterEqual(
-            source.count(
-                'run.timer = setTimeout(() => run.finish("timeout", "execution"), '
-                "WORKER_TURN_TIMEOUT_MS)"
-            ),
-            2,
-        )
         self.assertIn("let pendingApp = null", source)
+
+    def test_worker_deadline_includes_host_waits_and_explains_failures(self) -> None:
+        source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
+        self.assertIn("const WORKER_TURN_TIMEOUT_MS = 5000", source)
+        self.assertIn('run.timer = setTimeout(() => run.finish("timeout"), WORKER_TURN_TIMEOUT_MS)', source)
+        self.assertNotIn("pauseTurnClock", source)
+        self.assertNotIn("LIVENESS_PROBE", source)
+        # Concurrent writes serialize against the advancing revision instead of
+        # failing the turn.
+        self.assertIn("run.mutationChain = run.mutationChain.then(", source)
+        self.assertNotIn("run.state !== \"event\" || run.mutationPending", source)
+        # An interaction during a running turn is kept, not dropped, and it
+        # still runs after an action-level failure.
+        self.assertIn("function queueGeneratedEvent(pendingEvent)", source)
+        self.assertIn('const startupFailure = stage === "starting" || stage === "worker-create";', source)
+        self.assertIn("if (queued && queued.appId === selectedAppId && !startupFailure)", source)
+        self.assertEqual(source.count("queueGeneratedEvent({"), 3)
+        self.assertNotIn("if (workerRun) {\n    showRuntimeStatus(\"Finishing the previous app action\");", source)
+        self.assertIn('showRuntimeStatus("Finishing the previous app action…");', source)
+        stop = source.split("function stopCapabilityWorker()", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("queuedGeneratedEvent = null;", stop)
+        # The operator's next message carries what actually failed.
+        self.assertIn("function recordRuntimeReport(run, reason, stage)", source)
+        self.assertIn("[App runtime report: ", source)
+        send_message = source.split("async function sendMessage", 1)[1].split(
+            "\nasync function stopRunningTurn", 1
+        )[0]
+        self.assertIn("runtimeReports.get(appId)", send_message)
+        self.assertIn("runtimeReports.delete(appId)", send_message)
+        # A report never turns an acceptable draft into a rejected one.
+        self.assertIn("const MAX_COMPOSER_MESSAGE_BYTES = 50_000", source)
+        self.assertIn(
+            "textEncoder.encode(content).length > MAX_COMPOSER_MESSAGE_BYTES", send_message
+        )
+        self.assertEqual(backend.MAX_CHAT_MESSAGE_BYTES, 50_000)
+        self.assertLess(
+            send_message.index("const body = { content };"),
+            send_message.index("runtimeReports.delete(appId)"),
+        )
         self.assertIn("function applyPendingAppVersion()", source)
         self.assertIn("pendingApp = next.app", source)
         self.assertIn("pendingApp = null", source)
@@ -768,7 +800,7 @@ class BrowserRoutingTests(unittest.TestCase):
     def test_browser_app_creation_rejects_agent_configuration(self) -> None:
         settings = {
             "agent_runtime": "codex",
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "effort": "high",
         }
         with self.assertRaises(backend.WorkspaceError) as error:
@@ -780,7 +812,7 @@ class BrowserRoutingTests(unittest.TestCase):
             "app_id": "app-2",
             "agent_settings": {
                 "agent_runtime": "codex",
-                "model": "gpt-5.6-terra",
+                "model": "gpt-6-astra",
                 "effort": "high",
             },
         }
@@ -1013,7 +1045,7 @@ class BrowserRoutingTests(unittest.TestCase):
         apply.assert_not_called()
 
     def test_agent_can_read_app_session_options(self) -> None:
-        options = {"codex": {"gpt-5.6-sol": ["high"]}}
+        options = {"codex": {"gpt-6-sol": ["high"]}}
         with (
             patch.object(backend, "public_session_options", return_value=options),
             patch.object(backend, "active_agent_runtimes", return_value=["codex"]),
@@ -1032,7 +1064,7 @@ class BrowserRoutingTests(unittest.TestCase):
         for resource, function, body in (
             ("name", "rename_web_app", {"name": "Marketing HQ"}),
             ("agent-settings", "set_app_agent_settings", {
-                "agent_runtime": "codex", "model": "gpt-5.6-sol", "effort": "high",
+                "agent_runtime": "codex", "model": "gpt-6-sol", "effort": "high",
             }),
         ):
             with (
@@ -1057,7 +1089,7 @@ class BrowserRoutingTests(unittest.TestCase):
 
     def test_agent_metadata_routes_validate_before_writing(self) -> None:
         settings = {
-            "agent_runtime": "codex", "model": "gpt-5.6-sol", "effort": "high",
+            "agent_runtime": "codex", "model": "gpt-6-sol", "effort": "high",
         }
         with (
             patch.object(backend, "_require_web_app"),
@@ -1104,7 +1136,7 @@ class BrowserRoutingTests(unittest.TestCase):
             (
                 {
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-sol",
+                    "model": "gpt-6-sol",
                     "effort": "high",
                 },
                 None,
@@ -1619,7 +1651,7 @@ class BrowserRoutingTests(unittest.TestCase):
 class ConversationTests(unittest.TestCase):
     SESSION = {
         "agent_runtime": "codex",
-        "model": "gpt-5.6-terra",
+        "model": "gpt-6-astra",
         "effort": "high",
     }
 
@@ -2454,13 +2486,13 @@ class AgenticWebAppDbTests(unittest.TestCase):
             created["agent_settings"],
             {
                 "agent_runtime": "codex",
-                "model": "gpt-5.6-sol",
+                "model": "gpt-6-sol",
                 "effort": "high",
             },
         )
         settings = {
             "agent_runtime": "codex",
-            "model": "gpt-5.6-terra",
+            "model": "gpt-6-astra",
             "effort": "high",
         }
         with patch.object(
@@ -2511,12 +2543,10 @@ class AgenticWebAppDbTests(unittest.TestCase):
         backend.create_web_app()
         with db.transaction() as cur:
             for revision in range(1, 26):
-                cur.execute(
-                    "INSERT INTO web_app_revisions"
-                    " (app_id, revision, actor, kind, restored_from, html, css,"
-                    " javascript, data_json, created_at)"
-                    " VALUES ('app-1', %s, 'user', 'data', NULL, '', '', '', '{}', %s)",
-                    (revision, "2025-01-01T00:00:00Z"),
+                backend._insert_revision(
+                    cur, "app-1", revision=revision, actor="user", kind="data",
+                    restored_from=None, html="", css="", javascript="",
+                    data_json="{}", now="2025-01-01T00:00:00Z",
                 )
 
         backend.prune_revisions(datetime(2027, 8, 1, tzinfo=timezone.utc))
@@ -2556,12 +2586,10 @@ class AgenticWebAppDbTests(unittest.TestCase):
         ]
         with db.transaction() as cur:
             for revision, age in enumerate(ages, start=1):
-                cur.execute(
-                    "INSERT INTO web_app_revisions"
-                    " (app_id, revision, actor, kind, restored_from, html, css,"
-                    " javascript, data_json, created_at)"
-                    " VALUES ('app-1', %s, 'user', 'data', NULL, '', '', '', '{}', %s)",
-                    (revision, (retained_at - age).strftime(backend.TIME_FORMAT)),
+                backend._insert_revision(
+                    cur, "app-1", revision=revision, actor="user", kind="data",
+                    restored_from=None, html="", css="", javascript="",
+                    data_json="{}", now=(retained_at - age).strftime(backend.TIME_FORMAT),
                 )
 
         backend.prune_revisions(retained_at)
@@ -2593,6 +2621,98 @@ class AgenticWebAppDbTests(unittest.TestCase):
         self.assertEqual(backend.load_app_state("app-1")["data"], {"items": ["one"]})
         revisions = backend.list_revisions("app-1", {})["revisions"]
         self.assertEqual([item["revision"] for item in revisions], [1, 0])
+
+    def test_recovery_shares_components_and_preserves_rows_across_pruning(self) -> None:
+        backend.create_web_app()
+        backend.apply_collection_actions("app-1", "leads", {
+            "expected_revision": 0, "operations": [
+                {"action": "upsert", "id": "a", "value": {"status": "new"}},
+                {"action": "upsert", "id": "b", "value": {"status": "unchanged"}},
+            ],
+        })
+        for revision in range(1, 26):
+            backend.apply_agent_action({
+                "action": "set", "expected_revision": revision,
+                "path": ["count"], "value": revision,
+            }, "app-1")
+        points = backend.list_revisions("app-1", {})
+        self.assertIsNone(points["next_before"])
+        self.assertLessEqual(len(points["revisions"]), 17)
+        with db.transaction() as cur:
+            cur.execute("SELECT count(*) FROM web_app_ui_versions WHERE app_id = 'app-1'")
+            self.assertEqual(cur.fetchone()[0], 1)
+            cur.execute("SELECT count(*) FROM web_app_collection_versions WHERE app_id = 'app-1'")
+            self.assertEqual(cur.fetchone()[0], 2)
+        oldest = points["revisions"][-1]["revision"]
+        backend.restore_revision("app-1", oldest)
+        self.assertEqual(len(backend.query_collection("app-1", "leads", {})["rows"]), 2)
+        # Current interval providers need no extra visible recovery points.
+        with db.transaction() as cur:
+            cur.execute("SELECT count(*) FROM web_app_collection_versions WHERE app_id = 'app-1'")
+            self.assertEqual(cur.fetchone()[0], 2)
+
+    def test_collection_edits_version_only_changed_rows(self) -> None:
+        backend.create_web_app()
+        backend.apply_collection_actions("app-1", "leads", {
+            "expected_revision": 0, "operations": [
+                {"action": "upsert", "id": str(i), "value": {"v": 0}}
+                for i in range(100)
+            ],
+        })
+        for revision in [1, 2]:
+            backend.apply_collection_actions("app-1", "leads", {
+                "expected_revision": revision, "operations": [
+                    {"action": "upsert", "id": "5", "value": {"v": 1}},
+                ],
+            })
+        with db.transaction() as cur:
+            cur.execute("SELECT count(*) FROM web_app_collection_versions WHERE app_id = 'app-1'")
+            self.assertEqual(cur.fetchone()[0], 101)
+            cur.execute("SELECT count(*) FROM web_app_document_versions WHERE app_id = 'app-1'")
+            self.assertEqual(cur.fetchone()[0], 1)
+            cur.execute("SELECT count(*) FROM web_app_ui_versions WHERE app_id = 'app-1'")
+            self.assertEqual(cur.fetchone()[0], 1)
+            first = json.loads(backend.recovery.collection_snapshot(cur, "app-1", 1))
+            last = json.loads(backend.recovery.collection_snapshot(cur, "app-1", 3))
+        self.assertEqual(first["leads"]["5"], {"v": 0})
+        self.assertEqual(last["leads"]["5"], {"v": 1})
+        self.assertEqual(last["leads"]["6"], {"v": 0})
+
+    def test_recovery_handles_delete_reinsert_and_atomic_failure(self) -> None:
+        backend.create_web_app()
+        for revision, operation in enumerate([
+            {"action": "upsert", "id": "a", "value": {"v": 1}},
+            {"action": "delete", "id": "a"},
+            {"action": "upsert", "id": "a", "value": {"v": 2}},
+        ]):
+            backend.apply_collection_actions("app-1", "leads", {
+                "expected_revision": revision, "operations": [operation],
+            })
+        with patch.object(backend.recovery, "component_versions", side_effect=RuntimeError("failed")):
+            with self.assertRaises(RuntimeError):
+                backend.apply_collection_actions("app-1", "leads", {
+                    "expected_revision": 3, "operations": [
+                        {"action": "upsert", "id": "a", "value": {"v": 999}},
+                    ],
+                })
+        self.assertEqual(backend.load_app_state("app-1")["revision"], 3)
+        expected = {0: [], 1: [{"id": "a", "value": {"v": 1}}],
+                    2: [], 3: [{"id": "a", "value": {"v": 2}}]}
+        # Keep the four source checkpoints while testing repeated forward restores.
+        with patch.object(backend, "_prune_revisions"):
+            for revision in [2, 1, 3, 0, 1]:
+                backend.restore_revision("app-1", revision)
+                self.assertEqual(backend.query_collection("app-1", "leads", {})["rows"], expected[revision])
+        backend.prune_revisions(datetime(2099, 1, 1, tzinfo=timezone.utc))
+        points = backend.list_revisions("app-1", {})["revisions"]
+        self.assertEqual(len(points), 5)
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT count(*) FROM web_app_collection_versions h WHERE valid_until IS NOT NULL"
+                " AND NOT EXISTS (SELECT 1 FROM web_app_revisions r WHERE r.app_id = h.app_id"
+                " AND r.revision >= h.valid_from AND r.revision < h.valid_until)"
+            )
+            self.assertEqual(cur.fetchone()[0], 0)
 
     def test_restore_recovers_interface_data_and_collections_as_a_forward_revision(self) -> None:
         backend.create_web_app()
@@ -2637,16 +2757,8 @@ class AgenticWebAppDbTests(unittest.TestCase):
             "app-1",
         )
         with db.transaction() as cur:
-            cur.execute(
-                "SELECT collections_json FROM web_app_revisions"
-                " WHERE app_id = 'app-1' AND revision = 3"
-            )
-            snapshot_row = cur.fetchone()
-        assert snapshot_row is not None
-        self.assertEqual(
-            json.loads(snapshot_row[0]),
-            {"leads": {"lead-1": {"status": "saved"}}},
-        )
+            snapshot_json = backend.recovery.collection_snapshot(cur, "app-1", 3)
+        self.assertEqual(json.loads(snapshot_json), {"leads": {"lead-1": {"status": "saved"}}})
         backend.apply_collection_actions(
             "app-1",
             "leads",

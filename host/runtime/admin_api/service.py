@@ -1188,6 +1188,30 @@ _ROUTES: tuple[_Route, ...] = (
     _Route("PUT", "/v1/network/policy", lambda request: replace_network_policy(request.body)),
     _Route(
         "GET",
+        "/v1/host-inference/providers",
+        lambda request: {"providers": state.host_inference_providers()},
+        operator_only=True,
+        query_keys=frozenset(),
+        query_label="host inference provider",
+    ),
+    _Route(
+        "PUT",
+        re.compile(r"/v1/host-inference/providers/([a-z0-9_-]{1,64})"),
+        lambda request: replace_host_inference_provider(request.capture(1), request.body),
+        operator_only=True,
+        query_keys=frozenset(),
+        query_label="host inference provider",
+    ),
+    _Route(
+        "DELETE",
+        re.compile(r"/v1/host-inference/providers/([a-z0-9_-]{1,64})"),
+        lambda request: delete_host_inference_provider(request.capture(1)),
+        operator_only=True,
+        query_keys=frozenset(),
+        query_label="host inference provider",
+    ),
+    _Route(
+        "GET",
         "/v1/tools/events",
         _tool_events_route,
         query_keys=frozenset({"before", "limit"}),
@@ -1298,6 +1322,61 @@ def replace_xai_video_storage(body: Any) -> dict[str, Any]:
         return xai_video_storage.replace(body)
     except ValueError as exc:
         raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+
+
+def replace_host_inference_provider(provider: str, body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "host inference provider request must be an object")
+    try:
+        current = state.host_inference_provider_metadata(provider)
+    except (ValueError, RuntimeError):
+        raise ApiError(HTTPStatus.NOT_FOUND, "host inference provider not found") from None
+    extra = sorted(set(body) - {"enabled", "api_key", "features"})
+    if extra:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            f"host inference provider request has unsupported fields: {', '.join(extra)}",
+        )
+    if not body:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "host inference provider request is empty")
+    enabled = body.get("enabled")
+    api_key = body.get("api_key")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "enabled must be a boolean")
+    if api_key is not None and (
+        not isinstance(api_key, str)
+        or not api_key
+        or len(api_key.encode("utf-8")) > 512
+        or any(character.isspace() for character in api_key)
+    ):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "api_key must be a non-empty API key without whitespace")
+    features = body.get("features")
+    if features is not None and (
+        not isinstance(features, dict)
+        or set(features) != set(current["features"])
+        or any(not isinstance(key, str) or not isinstance(value, bool) for key, value in features.items())
+    ):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "features must contain exactly the provider's boolean feature settings")
+    if enabled is True and api_key is None and not current["configured"]:
+        raise ApiError(HTTPStatus.CONFLICT, "Save an API key before enabling this provider")
+    try:
+        configured = state.configure_host_inference_provider(
+            provider,
+            enabled=enabled,
+            api_key=api_key,
+            features=features,
+        )
+    except state.HostInferenceCredentialRequiredError as exc:
+        raise ApiError(HTTPStatus.CONFLICT, str(exc)) from None
+    return {"provider": configured}
+
+
+def delete_host_inference_provider(provider: str) -> dict[str, Any]:
+    try:
+        state.host_inference_provider_metadata(provider)
+    except (ValueError, RuntimeError):
+        raise ApiError(HTTPStatus.NOT_FOUND, "host inference provider not found")
+    return {"provider": state.clear_host_inference_provider(provider)}
 
 
 def replace_github_credential(body: Any) -> dict[str, Any]:
@@ -1447,7 +1526,7 @@ def _health_issues(
                 "summary": f"{label} is unavailable",
                 "detail": detail,
                 "next_step": (
-                    f"Open Home > Integrations > {integration_label}, refresh its status, "
+                    f"Open Home > Agent runtimes > {integration_label}, refresh its status, "
                     "and reconnect or revalidate the account if the error continues."
                 ),
             }

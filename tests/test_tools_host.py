@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import pg_harness
 
@@ -582,9 +582,15 @@ class HostApprovalsTests(ToolsHostTestCase):
 
     def test_request_returns_the_pending_record(self) -> None:
         approvals = tools_host.HostApprovals(FAKE_MANIFEST, _connection(), origin_thread_id=None)
-        record = approvals.request(action_id="write_note", summary="Write.", payload={"text": "hi"})
+        with patch.object(tools_host.approval_assessment, "schedule") as schedule:
+            record = approvals.request(action_id="write_note", summary="Write.", payload={"text": "hi"})
         self.assertEqual(record.status, "pending")
         self.assertEqual(record.payload, {"text": "hi"})
+        schedule.assert_called_once_with(
+            ANY,
+            action_description="Replace the stored note.",
+            data_policy="Writes the note. Approval-gated by the tool.",
+        )
 
 
 class ToolInputNormalizationTests(unittest.TestCase):

@@ -5,10 +5,10 @@
 import { api } from "./api.js";
 import { $, badge, bedrockUsage, claudeUsage, codexUsage, esc, formatTokenCount, formatUnixTime, inlineMessage, objectValue, providerRuntime, providerRuntimes, replaceIntegrationRows, runtimeLabel, RUNTIME_PROVIDERS, setHtml } from "./helpers.js";
 import { providerAccounts, refreshHealth, refreshProviderAccounts, runtimeRecords } from "./health.js";
-import { MANAGED_INTEGRATIONS } from "./integration_catalog.js";
+import { HOST_INFERENCE_INTEGRATIONS, MANAGED_INTEGRATIONS } from "./integration_catalog.js";
 
 const GITHUB_REPO_INPUT_RE = /^([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)\/([a-z0-9._-]{1,100})$/;
-// The AI Inference group in render order.
+// The Agent runtimes group in render order.
 const INFERENCE_INTEGRATIONS = ["openai", "claude", "xai", "bedrock"];
 const BEDROCK_INTEGRATION = "bedrock";
 const XAI_INTEGRATION = "xai";
@@ -21,6 +21,7 @@ let expandedGithubRepoAudits = new Set();
 let latestGithubAudits = [];
 let bedrockCredentialMetadata = { connected: false };
 let xaiVideoStorage = { configured: false };
+let hostInferenceProviders = new Map();
 
 function selectedIntegrationId() {
   return $("panel-network").dataset.guide || "";
@@ -56,7 +57,7 @@ export function applyIntegrationDetailSelection() {
   }
 }
 
-function renderHomeManagedStatuses() {
+export function renderHomeManagedStatuses() {
   const integrations = objectValue(activeNetworkPolicy.network_integrations);
   for (const [name] of Object.entries(MANAGED_INTEGRATIONS)) {
     const status = document.querySelector(`[data-home-integration-status="${name}"]`);
@@ -71,10 +72,16 @@ function renderHomeManagedStatuses() {
     custom.className = `status ${count ? "active" : "disabled"}`;
     custom.textContent = count ? `${count} enabled` : "none enabled";
   }
+  for (const [guideId, guide] of Object.entries(HOST_INFERENCE_INTEGRATIONS)) {
+    const status = document.querySelector(`[data-home-integration-status="${guideId}"]`);
+    if (!status) continue;
+    const provider = hostInferenceProviders.get(guide.provider);
+    const enabled = provider?.enabled === true;
+    status.className = `status ${enabled ? "active" : "disabled"}`;
+    status.textContent = enabled ? "enabled" : "disabled";
+  }
   document.dispatchEvent(new CustomEvent("kern-home-integration-statuses-updated"));
 }
-
-document.addEventListener("kern-home-integration-cards-rendered", renderHomeManagedStatuses);
 
 export function setBedrockCredentialMetadata(value) {
   bedrockCredentialMetadata = value && typeof value === "object" ? value : { connected: false };
@@ -96,11 +103,13 @@ function policyMessage(integration, message, isError) {
 }
 
 export async function loadPolicy() {
-  const [response, storage] = await Promise.all([
+  const [response, storage, hostInference] = await Promise.all([
     api("GET", "/v1/network/policy"),
     api("GET", "/v1/network-tools/xai-video-storage"),
+    api("GET", "/v1/host-inference/providers"),
   ]);
   xaiVideoStorage = storage;
+  hostInferenceProviders = new Map((hostInference.providers || []).map(provider => [provider.provider, provider]));
   activeNetworkPolicy = normalizePolicy(response.network_controls);
   renderNetworkControls();
   loadGithubCredential().catch(() => {});
@@ -121,6 +130,7 @@ function clonePolicy(policy) {
 
 function renderNetworkControls() {
   renderManagedIntegrations();
+  renderHostInferenceIntegrations();
   renderGithubRepos();
   renderDomainRules();
   renderHomeManagedStatuses();
@@ -187,7 +197,7 @@ function renderManagedIntegrations() {
   const byName = new Map(integrations);
   const inference = INFERENCE_INTEGRATIONS.map(name => [name, byName.get(name)]);
   const managedTools = integrations.filter(([name]) => !INFERENCE_INTEGRATIONS.includes(name));
-  setHtml($("ai-inference-integrations"), renderRows(inference));
+  setHtml($("agent-runtime-integrations"), renderRows(inference));
   replaceIntegrationRows(toolContainer, "[data-integration]", renderRows(managedTools));
   renderIntegrationAccounts();
   // The write-repository list and audits render in the GitHub details area:
@@ -197,6 +207,142 @@ function renderManagedIntegrations() {
   if (githubDetails) githubDetails.append(expansion);
   expansion.hidden = selectedIntegrationId() !== "github" || objectValue(managed.github).enabled !== true;
   applyIntegrationDetailSelection();
+}
+
+function renderHostInferenceIntegrations() {
+  const rows = Object.entries(HOST_INFERENCE_INTEGRATIONS).map(([guideId, guide]) => {
+    const provider = hostInferenceProviders.get(guide.provider) || {
+      provider: guide.provider,
+      enabled: false,
+      configured: false,
+      features: {},
+    };
+    const featureSettings = (guide.featureSettings || []).map(feature => `
+      <label class="field checkbox-row">
+        <input type="checkbox" data-host-inference-feature="${esc(feature.key)}" data-provider="${esc(provider.provider)}"${provider.features?.[feature.key] === true ? " checked" : ""}>
+        <span><strong>${esc(feature.label)}</strong>${feature.description ? `<span class="muted">${esc(feature.description)}</span>` : ""}</span>
+      </label>`).join("");
+    const capabilities = (guide.capabilities || []).map(capability => `
+      <p><strong>${esc(capability.name)}</strong>${capability.description ? `: ${esc(capability.description)}` : ""}</p>`).join("");
+    const featureCard = capabilities || featureSettings ? `
+          <div class="detail-card">
+            <div class="detail-card-head"><h3>Features</h3></div>
+            ${capabilities}
+            ${featureSettings}
+          </div>` : "";
+    const expanded = selectedIntegrationId() === guideId;
+    return `
+      <section class="integration-row" data-integration="${esc(guideId)}">
+        <div class="integration-summary">
+          <div class="integration-title">
+            <h2>${esc(guide.label)}</h2>
+            <div class="integration-subtitle">${esc(guide.summary)}</div>
+          </div>
+          <span class="status-chips">${badge(provider.enabled ? "enabled" : provider.configured ? "configured" : "disabled")}</span>
+          <span class="integration-actions">
+            <span class="seg">
+              <button data-action="enable-host-inference-provider" data-provider="${esc(provider.provider)}"${provider.enabled || !provider.configured ? " disabled" : ""}>Enable</button>
+              <button data-action="disable-host-inference-provider" data-provider="${esc(provider.provider)}"${provider.enabled ? "" : " disabled"}>Disable</button>
+            </span>
+          </span>
+        </div>
+        <p class="inline-message integration-row-message" data-integration-message="${esc(guideId)}" role="status" aria-live="polite"></p>
+        <div class="integration-details"${expanded ? "" : " hidden"}>
+          <div class="detail-card">
+            <div class="detail-card-head">
+              <h3>Host connection</h3>
+              <span class="actions">
+                ${provider.configured ? `<button class="danger ghost sm" data-action="clear-host-inference-provider" data-provider="${esc(provider.provider)}">Remove API key</button>` : ""}
+              </span>
+            </div>
+            <p class="muted">The API key is encrypted in host state. Agents cannot read it or use this connection.</p>
+            <div class="field">
+              <label class="field-label" for="host-inference-key-${esc(provider.provider)}">${esc(guide.apiKeyLabel || "API key")}</label>
+              <input id="host-inference-key-${esc(provider.provider)}" type="password" autocomplete="off" placeholder="${esc(provider.configured ? "Leave blank to keep the saved key" : guide.apiKeyPlaceholder || "API key")}">
+            </div>
+            <div class="actions">
+              <button class="primary sm" data-action="save-host-inference-provider" data-provider="${esc(provider.provider)}">Save API key</button>
+            </div>
+          </div>
+          ${featureCard}
+        </div>
+      </section>`;
+  }).join("");
+  setHtml($("host-ai-inference-integrations"), rows);
+  applyIntegrationDetailSelection();
+}
+
+export async function saveHostInferenceProvider(provider) {
+  const entry = Object.entries(HOST_INFERENCE_INTEGRATIONS).find(([, guide]) => guide.provider === provider);
+  if (!entry) return;
+  const [guideId, guide] = entry;
+  const keyInput = $(`host-inference-key-${provider}`);
+  const apiKey = (keyInput?.value || "").trim();
+  if (!apiKey) {
+    policyMessage(guideId, `Enter a ${guide.apiKeyLabel || "API key"} to save.`, true);
+    return;
+  }
+  const body = { api_key: apiKey };
+  if ((guide.featureSettings || []).length) {
+    body.features = Object.fromEntries((guide.featureSettings || []).map(feature => {
+      const input = document.querySelector(`[data-host-inference-feature="${feature.key}"][data-provider="${provider}"]`);
+      return [feature.key, input?.checked === true];
+    }));
+  }
+  try {
+    const response = await api("PUT", `/v1/host-inference/providers/${provider}`, body);
+    hostInferenceProviders.set(provider, response.provider);
+    if (keyInput) keyInput.value = "";
+    renderNetworkControls();
+    policyMessage(guideId, `${guide.apiKeyLabel || "API key"} saved.`);
+  } catch (error) {
+    policyMessage(guideId, error.message, true);
+  }
+}
+
+export async function setHostInferenceProviderEnabled(provider, enabled) {
+  const current = hostInferenceProviders.get(provider);
+  if (!current) return;
+  const entry = Object.entries(HOST_INFERENCE_INTEGRATIONS).find(([, guide]) => guide.provider === provider);
+  if (!entry) return;
+  const [guideId, guide] = entry;
+  const body = { enabled };
+  if ((guide.featureSettings || []).length) {
+    body.features = Object.fromEntries(
+      guide.featureSettings.map(feature => [feature.key, current.features?.[feature.key] === true]),
+    );
+  }
+  try {
+    const response = await api("PUT", `/v1/host-inference/providers/${provider}`, body);
+    hostInferenceProviders.set(provider, response.provider);
+    renderNetworkControls();
+    policyMessage(guideId, `${guide.label} ${enabled ? "enabled" : "disabled"}.`);
+  } catch (error) {
+    policyMessage(guideId, error.message, true);
+  }
+}
+
+export async function enableHostInferenceProvider(provider) {
+  return setHostInferenceProviderEnabled(provider, true);
+}
+
+export async function disableHostInferenceProvider(provider) {
+  return setHostInferenceProviderEnabled(provider, false);
+}
+
+export async function clearHostInferenceProvider(provider) {
+  const entry = Object.entries(HOST_INFERENCE_INTEGRATIONS).find(([, guide]) => guide.provider === provider);
+  if (!entry) return;
+  const [guideId, guide] = entry;
+  if (!confirm(`Remove the ${guide.apiKeyLabel || "API key"}? Host features will stop using this provider.`)) return;
+  try {
+    const response = await api("DELETE", `/v1/host-inference/providers/${provider}`);
+    hostInferenceProviders.set(provider, response.provider);
+    renderNetworkControls();
+    policyMessage(guideId, `${guide.apiKeyLabel || "API key"} removed.`);
+  } catch (error) {
+    policyMessage(guideId, error.message, true);
+  }
 }
 
 function integrationDetailsHtml(name, enabled) {

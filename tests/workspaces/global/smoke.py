@@ -457,7 +457,7 @@ def _seed_demo() -> None:
         {
             "id": 1, "name": "Morning release review", "message": "Summarize open release work and identify blockers.",
             "cadence": "daily", "interval_minutes": None, "daily_time": "09:00",
-            "agent_runtime": "codex", "model": "gpt-5.6-terra", "effort": "high",
+            "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high",
             "revision": 2, "deleted": False,
             "thread_id": "schedule-1",
             "last_run_at": schedule_backend._format_ts(daily_last),

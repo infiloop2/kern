@@ -30,6 +30,7 @@ from host.runtime.workspace import navigation_order, seen
 from host.runtime.workspace.purpose import validate_purpose
 from host.runtime.workspace.busy_retry import post_with_busy_retry
 from host.runtime.workspace.web_apps import collections as collection_store
+from host.runtime.workspace.web_apps import recovery
 from host.runtime.workspace.web_apps.collections import (
     COLLECTION_NAME_RE,
     COLLECTION_ROW_ID_RE,
@@ -576,7 +577,7 @@ def create_web_app(*, actor: str = "user") -> dict[str, Any]:
                     HTTPStatus.CONFLICT,
                     f"Workspace already retains {MAX_WEB_APPS} Web Apps",
                 )
-            cur.execute("SELECT app_id FROM web_apps")
+            cur.execute("SELECT app_id FROM web_apps ORDER BY app_id")
             rows = cur.fetchall()
             numbers = [
                 int(match.group(1))
@@ -1308,16 +1309,16 @@ def _insert_revision(
     data_json: str,
     now: str,
 ) -> None:
-    collections_json = _collection_snapshot_json(cur, app_id)
+    ui_version, document_version = recovery.component_versions(
+        cur, app_id, html, css, javascript, data_json, kind, restored_from,
+    )
     cur.execute(
         "INSERT INTO web_app_revisions"
-        " (app_id, revision, actor, kind, restored_from, html, css, javascript,"
-        " data_json, collections_json, created_at)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        (
-            app_id, revision, actor, kind, restored_from, html, css,
-            javascript, data_json, collections_json, now,
-        ),
+        " (app_id, revision, actor, kind, restored_from, ui_version,"
+        " document_version, created_at)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (app_id, revision, actor, kind, restored_from,
+         ui_version, document_version, now),
     )
 
 
@@ -1419,14 +1420,22 @@ def _prune_revisions(cur: Any, app_id: str, now: datetime) -> None:
             (app_id, *stale),
         )
 
+        recovery.prune_components(cur, app_id)
+
 
 def prune_revisions(now: datetime | None = None) -> None:
     """Apply age buckets to idle Apps as well as Apps receiving writes."""
     retained_at = now or datetime.now(timezone.utc)
     with db.transaction() as cur:
-        cur.execute("SELECT app_id FROM web_apps")
-        for (app_id,) in cur.fetchall():
-            _prune_revisions(cur, str(app_id), retained_at)
+        cur.execute("SELECT app_id FROM web_apps ORDER BY app_id")
+        app_ids = [str(row[0]) for row in cur.fetchall()]
+    for app_id in app_ids:
+        # Release each App's lock before moving to the next, so maintenance
+        # never holds up earlier Apps while it cleans a larger one.
+        with db.transaction() as cur:
+            cur.execute("SELECT app_id FROM web_apps WHERE app_id = %s FOR UPDATE", (app_id,))
+            if cur.fetchone() is not None:
+                _prune_revisions(cur, app_id, retained_at)
 
 
 def list_revisions(app_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -1489,9 +1498,11 @@ def restore_revision(app_id: str, revision: int) -> dict[str, Any]:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
         current = _state_row(current_row)
         cur.execute(
-            "SELECT html, css, javascript, data_json, collections_json"
-            " FROM web_app_revisions"
-            " WHERE app_id = %s AND revision = %s",
+            "SELECT u.html, u.css, u.javascript, d.data_json"
+            " FROM web_app_revisions r"
+            " JOIN web_app_ui_versions u ON u.app_id = r.app_id AND u.version = r.ui_version"
+            " JOIN web_app_document_versions d ON d.app_id = r.app_id AND d.version = r.document_version"
+            " WHERE r.app_id = %s AND r.revision = %s",
             (app_id, revision),
         )
         source = cur.fetchone()
@@ -1521,7 +1532,9 @@ def restore_revision(app_id: str, revision: int) -> dict[str, Any]:
         changed_row = cur.fetchone()
         assert changed_row is not None
         changed = _state_row(changed_row)
-        _restore_collection_snapshot(cur, app_id, source[4], now)
+        collections_json = recovery.collection_snapshot(cur, app_id, revision)
+        _restore_collection_snapshot(cur, app_id, collections_json, now)
+        recovery.record_restored_collections(cur, app_id, next_revision)
         _record_state_revision(
             cur, app_id, changed, "user", "restore", revision
         )

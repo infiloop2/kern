@@ -54,10 +54,10 @@ let activityToggleSequence = 0;
 let sessionOptions = {};
 let activeRuntimes = null;
 const DEFAULT_MODELS = Object.freeze({
-  codex: "gpt-5.6-sol",
-  "codex-2": "gpt-5.6-sol",
-  "codex-3": "gpt-5.6-sol",
-  claude_code: "claude-opus-5",
+  codex: "gpt-6-sol",
+  "codex-2": "gpt-6-sol",
+  "codex-3": "gpt-6-sol",
+  claude_code: "claude-opus-5-5",
   grok: "grok-4.6",
   "grok-2": "grok-4.6",
   hermes: "moonshotai.kimi-k2.5",
@@ -151,10 +151,10 @@ const runtimeLabel = runtime => ({
   claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", "codex-3": "Codex 3", grok: "Grok", "grok-2": "Grok 2", hermes: "Hermes",
 })[runtime] || runtime;
 const optionLabel = value => value.split(/[-_]/).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
-// Claude Code model ids carry the provider prefix ("claude-opus-5"); the
-// runtime name already says Claude Code, so the pill reads "Opus 5". A model
-// point release uses two numeric id segments, rendered as "Fable 5.1" rather
-// than the generic option label's "Fable 5 1".
+// Claude Code model ids carry the provider prefix ("claude-sonnet-5"); the
+// runtime name already says Claude Code, so the pill reads "Sonnet 5". A model
+// point release uses two numeric id segments, rendered as "Opus 5.5" rather
+// than the generic option label's "Opus 5 5".
 const modelLabel = (runtime, value) => {
   if (runtime === "codex" || runtime === "codex-2" || runtime === "codex-3") return value;
   const model = String(value).replace(/^claude-/, "").replace(/-(\d+)-(\d+)$/, "-$1.$2");

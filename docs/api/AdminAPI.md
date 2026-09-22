@@ -34,6 +34,53 @@ HTTPS hostname; it returns only whether a passkey is enrolled. Every other API
 route, including every workspace proxy request, requires
 an authenticated caller.
 
+## Host AI inference providers
+
+```text
+GET    /v1/host-inference/providers
+PUT    /v1/host-inference/providers/{provider}
+DELETE /v1/host-inference/providers/{provider}
+```
+
+These operator-only routes manage host-owned inference connections. Provider
+metadata never includes the stored API key. Records from the GET list include
+enabled/configured state, feature toggles, and a `usage` object with
+current-calendar-month UTC totals. PUT and DELETE return the changed connection
+metadata without querying the independent usage counter:
+
+```json
+{
+  "provider": "openai",
+  "enabled": true,
+  "configured": true,
+  "features": {},
+  "updated_at": "2026-09-20T00:00:00Z",
+  "usage": {
+    "month_to_date": 0.001234,
+    "currency": "USD",
+    "requests": 12,
+    "measured_requests": 12,
+    "priced_requests": 12,
+    "input_tokens": 4200,
+    "cached_input_tokens": 1000,
+    "output_tokens": 300
+  }
+}
+```
+
+`requests` counts provider responses admitted to the bounded metering writer.
+`measured_requests` counts responses with a valid provider usage object, and
+`priced_requests` counts responses whose fixed model had a reviewed price at
+request time. A gap is preserved so the estimate never silently treats
+unknown usage or an unknown model price as zero. Cost is stored when the
+response arrives and is not recomputed after a later price change. If the
+writer itself is saturated or unavailable, Kern records a Host diagnostic.
+
+`PUT` accepts the closed object `enabled`, optional write-only `api_key`, and
+the provider's exact `features` object. `DELETE` disables the provider and
+removes its key; retained usage remains visible for the current month. These
+routes do not expose an agent-facing inference action.
+
 ## Errors
 
 Every non-2xx response returns this JSON envelope:
@@ -620,7 +667,7 @@ Send message request:
 ```json
 {
   "agent_runtime": "codex",
-  "model": "gpt-5.6-terra",
+  "model": "gpt-6-sol",
   "effort": "high",
   "message": "Implement this change and report the result."
 }
@@ -632,7 +679,7 @@ Send message request fields:
 | --- | --- | --- | --- |
 | `message` | Yes | string | Message for the agent runtime. Must be 1 to 50,000 characters. The host handles idle and running threads; callers use the same operation for both. |
 | `agent_runtime` | New thread or configuration change | enum | Runtime for the thread: `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, or `hermes`. Supply it together with `model` and `effort`. On an existing thread, a matching triple resumes or steers the current provider session; a different triple starts a fresh provider session only while the thread is idle. |
-| `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-5.6-terra`, `gpt-5.6-sol`, `gpt-5.6-luna`, or `gpt-6-astra`; Claude Code accepts `claude-opus-5`, `claude-fable-5-1`, or `claude-sonnet-5`; Grok accepts `grok-4.6`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, `moonshotai.kimi-k2.5`, or `zai.glm-5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
+| `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-6-sol`, `gpt-6-luna`, or `gpt-6-astra`; Claude Code accepts `claude-opus-5-5`, `claude-fable-5-1`, or `claude-sonnet-5`; Grok accepts `grok-4.6`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, `moonshotai.kimi-k2.5`, or `zai.glm-5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
 | `effort` | New thread or configuration change | enum | Effort for this session. Codex accepts `high`, `max`, or `ultra`, except Luna accepts only `high` or `max`. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Grok accepts `xhigh` or `high`. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
 
 The path's `thread_id` must be a lowercase slug of at most 64 characters
@@ -675,7 +722,7 @@ Send message response:
   "thread": {
     "thread_id": "feature-chat-1",
     "agent_runtime": "codex",
-    "model": "gpt-5.6-terra",
+    "model": "gpt-6-sol",
     "effort": "high",
     "last_used_at": "2026-06-08T00:00:00Z",
     "status": "running"
@@ -717,7 +764,7 @@ caller retries):
 | Status | Condition | `error.message` |
 | --- | --- | --- |
 | `409` | The thread's runtime is not `active` (its status is `loading`, `awaiting_login`, or `error`). | `<Runtime> runtime is <status>; messages run only while it is active` |
-| `409` | The thread's runtime is disabled in the network policy. | `<Runtime> runtime is deactivated; enable its provider under Home > Integrations` |
+| `409` | The thread's runtime is disabled in the network policy. | `<Runtime> runtime is deactivated; enable its provider under Home > Agent runtimes` |
 | `409` | The admitted process has not yet accepted its initial message. This private startup phase is normally brief; retry the same request. | `the agent is starting; retry shortly` |
 | `409` | The previous work is durably final but its runtime process is still shutting down. The live fence remains so a new message never races the dying process; retry the same request. | `the agent is finishing; retry shortly` |
 | `409` | Hermes has no mid-run input channel. | `Hermes cannot accept another message while running; wait for it to finish` |
@@ -734,7 +781,7 @@ Thread list response:
     {
       "thread_id": "feature-chat-1",
       "agent_runtime": "codex",
-      "model": "gpt-5.6-terra",
+      "model": "gpt-6-sol",
       "effort": "high",
       "last_used_at": "2026-06-08T00:05:00Z",
       "status": "running"

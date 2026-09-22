@@ -8,10 +8,24 @@ if [ "${GITHUB_ACTIONS:-}" != true ] && [ "$(id -un)" = kern-agent ] && [ -d /op
     echo "Live Kern host: PostgreSQL integration tests are skipped; GitHub Actions runs them. Do not override this on a production host." >&2
 fi
 
-# The unit suite intentionally needs no Python packages. Keeping this wrapper
-# on the system interpreter avoids every agent creating and populating its own
-# throwaway environment. Arguments are ordinary unittest module/test names.
+test_python=${KERN_TEST_PYTHON:-python3}
+
+if ! command -v "$test_python" >/dev/null 2>&1; then
+    echo "Test Python launcher is not executable: $test_python" >&2
+    exit 2
+fi
+
+# The discovered suite imports Playwright and uses unittest APIs added in
+# Python 3.11. Fail before discovery rather than emitting hundreds of
+# interpreter-only import errors.
+if ! "$test_python" -c 'import sys, unittest; import playwright.sync_api; raise SystemExit(0 if sys.version_info >= (3, 11) and hasattr(unittest.TestCase, "enterContext") else 1)' >/dev/null 2>&1; then
+    echo "Tests require Python 3.11+ with playwright installed. Set KERN_TEST_PYTHON to a compatible interpreter or launcher." >&2
+    echo "Example: KERN_TEST_PYTHON=/path/to/python ./tests/scripts/test" >&2
+    exit 2
+fi
+
+# Arguments are ordinary unittest module/test names.
 if [ "$#" -eq 0 ]; then
     set -- discover -s tests
 fi
-exec env PYTHONPATH="$repository_dir/tests" python3 -m unittest "$@"
+exec env PYTHONPATH="$repository_dir/tests" "$test_python" -m unittest "$@"

@@ -33,7 +33,10 @@ async function checkReady() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2000);
   try {
-    const response = await fetch("/v1/dictation/ready", { credentials: "same-origin", signal: controller.signal });
+    const response = await fetch("/v1/dictation/ready", {
+      credentials: "same-origin", signal: controller.signal,
+      headers: { "X-Kern-Csrf": "1", "X-Kern-Session-Activity": "1" },
+    });
     if (response.status === 401) throw new Error("Your session expired. Sign in again, then retry.");
     const body = await response.json();
     if (!response.ok || body.ready !== true) throw new Error(body.error?.message || "Transcription model isn't loaded yet. Click the mic to retry.");

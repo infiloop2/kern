@@ -319,6 +319,7 @@ def ensure_database() -> None:
         "kern-tools",
         "kern-agent-network",
         "kern-workspace",
+        "kern-host-inference",
     ):
         run_setup([str(pg_bin / "createuser"), "-h", str(socket_dir), "-U", "postgres", role])
     run_setup(
@@ -390,6 +391,14 @@ def reset_database() -> None:
             " ('token_usage_cached_input_tokens', 0),"
             " ('token_usage_cache_write_tokens', 0),"
             " ('token_usage_output_tokens', 0)"
+        )
+        # Migration 0064 seeds the two fixed provider rows. Configuration APIs
+        # require them to exist, so restore them after the blanket test reset.
+        cur.execute(
+            "INSERT INTO host_inference_providers"
+            " (provider, enabled, features, api_key_encrypted, updated_at) VALUES"
+            " ('openai', FALSE, '{}'::jsonb, NULL, '1970-01-01T00:00:00Z'),"
+            " ('typesafe', FALSE, '{}'::jsonb, NULL, '1970-01-01T00:00:00Z')"
         )
 
 
